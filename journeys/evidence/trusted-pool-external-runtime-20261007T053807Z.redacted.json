@@ -1,0 +1,452 @@
+{
+  "schema_version": "macprovider.trusted-pool-external-runtime-evidence.v1",
+  "journey_id": "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME",
+  "run_id": "trusted-pool-external-runtime-20261007T053807Z",
+  "requirement_ids": [
+    "SPEC-022-R012",
+    "SPEC-042-R013",
+    "SPEC-042-R014"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "2fa09b09a7bb96c521197222f7de3eaebb998184"
+  },
+  "captured_at": "2026-10-07T05:38:07Z",
+  "expires_at": "2026-10-14",
+  "operator": {
+    "role": "pearl-actor",
+    "identity_fingerprint": "ce20c8f530b7a66e5e6262902087366ed0b09c52ac06024428c3505d53fb30a8"
+  },
+  "environment": {
+    "class": "production-operator-internal-pool",
+    "hardware_profile": "mac-studio-m3-ultra",
+    "candidate": "Augustas11/macprovider:v1.8.222@7e68120b8ac0b92e8291a990c88b40f55bafcf5a"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with provider_reported ledger usage and debit equal to finality and ledger"
+  },
+  "steps": [
+    {
+      "id": "step-01-preconditions",
+      "status": "pass",
+      "assertion": "P1-P8 and payout-disabled pass on the deployed build",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-02-pool-policy",
+      "status": "pass",
+      "assertion": "pool active and routeable, candidate, one undelegated member, buyer authorized, manifest digest bound",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-03-nonstream-request",
+      "status": "pass",
+      "assertion": "non-streaming 200 served by llamacpp_loopback on the pool member",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-04-stream-request",
+      "status": "pass",
+      "assertion": "streaming 200 served by llamacpp_loopback, finish_reason and [DONE]",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-05-route-snapshots",
+      "status": "pass",
+      "assertion": "route snapshots carry pool, manifest, runtime_source, enforce mode and the GGUF identity",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-06-receipts-and-attempts",
+      "status": "pass",
+      "assertion": "pool_operator_attested attempt output and a closed verified v4 receipt verdict",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-07-ledger-and-finality",
+      "status": "pass",
+      "assertion": "one payable enforce provider_reported ledger credit to the member and closed verified finality",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-08-gateway-debit",
+      "status": "pass",
+      "assertion": "settled reservation with no hold; debit equals finality equals ledger tokens",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-09-negative-controls",
+      "status": "pass",
+      "assertion": "four controls fail closed with zero route snapshots and zero ledger rows",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-10-gateway-holds",
+      "status": "pass",
+      "assertion": "zero run-scoped held reservations and missing-trailer logs; global backlog unchanged as context",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    },
+    {
+      "id": "step-11-redaction",
+      "status": "pass",
+      "assertion": "prompts, completions, keys and raw account ids absent; secret scan passes",
+      "artifacts": [
+        "redacted-trusted-pool-external-runtime"
+      ]
+    }
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  },
+  "observations": {
+    "settlement_mode": "enforce",
+    "enforce_activated": true,
+    "enforce_scope": "pool",
+    "production_coordinator": true,
+    "launch_environment": "candidate",
+    "payout_ready_mutated": false,
+    "raw_prompt_output_redacted": true,
+    "bearer_tokens_redacted": true,
+    "buyer_visible_usage_equals_debit": false
+  },
+  "candidate_identity": {
+    "coordinator_version": "v1.8.221",
+    "accepted_id": "Augustas11/macprovider:v1.8.222@7e68120b8ac0b92e8291a990c88b40f55bafcf5a",
+    "member_cli_sha256": "fc3e54691585a0b0fa9509225fcac51ae89b6dba10f172a2f098f271b94bedcc",
+    "llama_server_build": "b11149",
+    "gguf_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+    "gguf_artifact_id": "gguf-q4-k-m",
+    "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    "pool_id": "G2Nr74KPQN_FxLrrrAhtXQ",
+    "buyer_account_fingerprint": "7d690d4ff0a1e559d71d56037a33a592a59511fe8a7c643a88d0a4206c7025ef",
+    "manifest_version": 1,
+    "manifest_core_digest": "c9e7b76a4cf7f2cfdef6a8ed45fe3971591e604d2bb294aac2e4d82b2dd27859",
+    "runtime_source": "llamacpp_loopback",
+    "fingerprint_salt": "9b3a9cb6a3dff0539986ea334e2248cb58d19dc3fb9eeb6c16eec8296f4025e7"
+  },
+  "preconditions": {
+    "P1": {
+      "status": "pass",
+      "observed": {
+        "coord_ver": "v1.8.221",
+        "gateway_ver": "v1.8.221",
+        "has_747557cc": true,
+        "has_ca809589": true,
+        "tag_commit": "2fa09b09a7bb96c52",
+        "units_active": true
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "P2": {
+      "status": "pass",
+      "observed": {
+        "gateway_schema": 18,
+        "pool_source_enum": 1
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "P3": {
+      "status": "pass",
+      "observed": {
+        "artifact_feed": "bound",
+        "feed_generated": "2026-10-01T04:20Z",
+        "gate_rc": 0,
+        "gate_tag": "v1.8.207",
+        "health_ver": "v1.8.221",
+        "policy": "autotune-policy-v1",
+        "recommended_ver": "1.8.207"
+      },
+      "checked_at": "2026-10-07T05:10:00Z"
+    },
+    "P4": {
+      "status": "pass",
+      "observed": {
+        "active_holds": 1,
+        "gateway_started_after": true,
+        "missing_last_hour": 0,
+        "restart_delta_ms": 78,
+        "trailers_required": true
+      },
+      "checked_at": "2026-10-07T05:10:00Z"
+    },
+    "P5": {
+      "status": "pass",
+      "observed": {
+        "bytes_checked_parent": true,
+        "cli_accepted": true,
+        "cli_commit": "7e68120b8ac0b92e",
+        "cli_ver": "v1.8.222",
+        "has_747557cc": true,
+        "has_feed_release": true
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "P6": {
+      "status": "pass",
+      "observed": {
+        "coord_decides": true,
+        "coord_pools_on": true,
+        "event_count": 109,
+        "gateway_pools_on": true,
+        "table_count": 14
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "P7": {
+      "status": "pass",
+      "observed": {
+        "artifact": "gguf-q4-k-m",
+        "feed_served": true,
+        "hash_prefix": "6c1a2b4116103267",
+        "repo": "bartowski",
+        "runtime": "llamacpp_loopback"
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "P8": {
+      "status": "pass",
+      "observed": {
+        "coord_port": 8443,
+        "direct_hop": true,
+        "gateway_port": 9443
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    },
+    "payout-disabled": {
+      "status": "pass",
+      "observed": {
+        "payout_off": true
+      },
+      "checked_at": "2026-10-07T05:03:44Z"
+    }
+  },
+  "pool": {
+    "pool_id": "G2Nr74KPQN_FxLrrrAhtXQ",
+    "lifecycle": "active",
+    "routeable": true,
+    "launch_environment": "candidate",
+    "manifest_version": 1,
+    "manifest_core_digest": "c9e7b76a4cf7f2cfdef6a8ed45fe3971591e604d2bb294aac2e4d82b2dd27859",
+    "creator_account_fingerprint": "8a51aa981aad531cc132db7c64fdbba19f8517b5dde0cd63a754a3726d3169e6",
+    "member_fingerprints": [
+      "7a3c9b4f1f95a334e78df7e61c2a0c57f7ca9d946e56a9f8a5aa874e924fe030"
+    ],
+    "buyer_authorized": true,
+    "event_counts": {
+      "buyer_authorized": 1,
+      "lifecycle_changed": 25,
+      "manifest_accepted": 1,
+      "member_admitted": 1,
+      "pool_created": 1,
+      "root_issuer_registered": 1
+    }
+  },
+  "requests": {
+    "nonstream": {
+      "response": {
+        "status": 200,
+        "engine": "llamacpp_loopback",
+        "request_id": "e39c65c5-f095-4a5e-a62d-d53c2d93c620",
+        "provider_fingerprint": "7a3c9b4f1f95a334e78df7e61c2a0c57f7ca9d946e56a9f8a5aa874e924fe030",
+        "finish_reason": "length",
+        "buyer_visible_usage": {
+          "prompt_tokens": 73,
+          "completion_tokens": 16
+        },
+        "content_sha256": "61648e52a775f91b95c6afef086ad45fb7564a2c9ddbc305710ba67400a67eee",
+        "body_sha256": "8a8a6a22079dc8ae8b0790df5f0589340bb9a4588d7bcfaf7cca3259bec1c3b3"
+      },
+      "settlement": {
+        "coordinator_request_ids": [
+          "b3f440d2-c1f9-4a31-93df-5166a6304554"
+        ],
+        "route_snapshot_count": 1,
+        "runtime_source": "llamacpp_loopback",
+        "route_snapshot_mode": "enforce",
+        "pool_generation": 146,
+        "settled_attempt_n": 0,
+        "usage_source": "pool_operator_attested",
+        "receipt_verdict": {
+          "receipt_version": 4,
+          "receipt_result": "valid",
+          "settlement_outcome": "verified",
+          "reason": "verified_settlement",
+          "pool_label_status": "verified",
+          "closed": true
+        },
+        "ledger": {
+          "payable_rows": 1,
+          "provider_fingerprint": "7a3c9b4f1f95a334e78df7e61c2a0c57f7ca9d946e56a9f8a5aa874e924fe030",
+          "provider_credits": 1,
+          "settlement_policy_mode": "enforce",
+          "usage_source": "provider_reported"
+        },
+        "finality": {
+          "closed": true,
+          "outcome": "verified",
+          "token_source": "pool_operator_attested"
+        },
+        "gateway": {
+          "reservation_status": "settled",
+          "settlement_hold": 0,
+          "token_source": "pool_operator_attested"
+        },
+        "debited_tokens": {
+          "prompt_tokens": 51,
+          "completion_tokens": 16
+        }
+      }
+    },
+    "stream": {
+      "response": {
+        "status": 200,
+        "engine": "llamacpp_loopback",
+        "request_id": "100148d1-ce7d-4afe-8191-50406afaf6c5",
+        "provider_fingerprint": "7a3c9b4f1f95a334e78df7e61c2a0c57f7ca9d946e56a9f8a5aa874e924fe030",
+        "finish_reason": "length",
+        "buyer_visible_usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 16
+        },
+        "content_sha256": "06cc036ad560a827a56d33311ca2d0c6bfb7349b9a6aa0c335208e1cc1758880",
+        "body_sha256": "b2629b14f8dd6a0dc27b06f204e50e4426d5cb7b7499a36217180a337cb13e55",
+        "stream_done": true
+      },
+      "settlement": {
+        "coordinator_request_ids": [
+          "e24ab6a5-6e05-40a3-ba6c-ebe6687f99d3"
+        ],
+        "route_snapshot_count": 1,
+        "runtime_source": "llamacpp_loopback",
+        "route_snapshot_mode": "enforce",
+        "pool_generation": 146,
+        "settled_attempt_n": 0,
+        "usage_source": "pool_operator_attested",
+        "receipt_verdict": {
+          "receipt_version": 4,
+          "receipt_result": "valid",
+          "settlement_outcome": "verified",
+          "reason": "verified_settlement",
+          "pool_label_status": "verified",
+          "closed": true
+        },
+        "ledger": {
+          "payable_rows": 1,
+          "provider_fingerprint": "7a3c9b4f1f95a334e78df7e61c2a0c57f7ca9d946e56a9f8a5aa874e924fe030",
+          "provider_credits": 1,
+          "settlement_policy_mode": "enforce",
+          "usage_source": "provider_reported"
+        },
+        "finality": {
+          "closed": true,
+          "outcome": "verified",
+          "token_source": "pool_operator_attested"
+        },
+        "gateway": {
+          "reservation_status": "settled",
+          "settlement_hold": 0,
+          "token_source": "pool_operator_attested"
+        },
+        "debited_tokens": {
+          "prompt_tokens": 51,
+          "completion_tokens": 16
+        }
+      }
+    }
+  },
+  "negative_controls": {
+    "no-pool-selector": {
+      "status": 503,
+      "error_code": "engine_unavailable",
+      "request_id": "74fc3aad-b8f6-4fd3-89f2-45de0c3421e6",
+      "route_snapshots": 0,
+      "ledger_rows": 0
+    },
+    "pool-native-selector": {
+      "status": 503,
+      "error_code": "engine_unavailable",
+      "request_id": "14d97825-6d76-41a2-93cf-028ce6b5e909",
+      "route_snapshots": 0,
+      "ledger_rows": 0
+    },
+    "pool-ollama-selector": {
+      "status": 503,
+      "error_code": "engine_unavailable",
+      "request_id": "e912be13-b99a-41e2-b45f-0a64ebe6ecea",
+      "route_snapshots": 0,
+      "ledger_rows": 0
+    },
+    "uppercase-selector": {
+      "status": 400,
+      "error_code": "invalid_engine_selection",
+      "request_id": "915b53c9-2680-44f0-97b2-7e7246b1f343",
+      "route_snapshots": 0,
+      "ledger_rows": 0
+    }
+  },
+  "gateway_holds": {
+    "schema_version": "macprovider.trusted-pool-external-runtime-gateway-holds.v2",
+    "scope": {
+      "run_id": "trusted-pool-external-runtime-20261007T053807Z",
+      "pool_id": "G2Nr74KPQN_FxLrrrAhtXQ",
+      "buyer_account_fingerprint": "7d690d4ff0a1e559d71d56037a33a592a59511fe8a7c643a88d0a4206c7025ef",
+      "request_ids": [
+        "100148d1-ce7d-4afe-8191-50406afaf6c5",
+        "14d97825-6d76-41a2-93cf-028ce6b5e909",
+        "74fc3aad-b8f6-4fd3-89f2-45de0c3421e6",
+        "915b53c9-2680-44f0-97b2-7e7246b1f343",
+        "e39c65c5-f095-4a5e-a62d-d53c2d93c620",
+        "e912be13-b99a-41e2-b45f-0a64ebe6ecea"
+      ],
+      "window_started_at": "2026-10-07T05:38:07Z",
+      "window_ended_at": "2026-10-07T05:38:31Z"
+    },
+    "campaign": {
+      "held_reservations": 0,
+      "missing_trailer_log_count": 0,
+      "window_buyer_request_ids": [
+        "100148d1-ce7d-4afe-8191-50406afaf6c5",
+        "14d97825-6d76-41a2-93cf-028ce6b5e909",
+        "e39c65c5-f095-4a5e-a62d-d53c2d93c620",
+        "e912be13-b99a-41e2-b45f-0a64ebe6ecea"
+      ]
+    },
+    "global_backlog": {
+      "baseline": {
+        "held_reservations": 1,
+        "missing_trailer_log_count": 0,
+        "held_rows_sha256": "ef04d8a070a127b2a35a2b1398b821740f797e63e7a605c05ef8bef81e82a658"
+      },
+      "after": {
+        "held_reservations": 1,
+        "missing_trailer_log_count": 0,
+        "held_rows_sha256": "ef04d8a070a127b2a35a2b1398b821740f797e63e7a605c05ef8bef81e82a658"
+      },
+      "unchanged": true
+    },
+    "global_health_claim": false
+  }
+}

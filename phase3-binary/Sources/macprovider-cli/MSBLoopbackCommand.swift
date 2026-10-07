@@ -4,12 +4,13 @@ import Foundation
 
 /// #1690 benchmark: an external llama.cpp `llama-server` on loopback, driven
 /// with the `msb-throughput` workload so both JSON reports compare on one
-/// catalog key. Same prompt corpus (`MSBThroughputCommand.buildPromptText`,
-/// row index = prompt index), same prompt length (the server's own tokenizer,
-/// truncated), forced decode length (`ignore_eos`), temperature 0, and no
-/// prompt cache. The aggregate is `msbAggregateThroughput` over per-request
-/// decode windows (first streamed token to last), the definition native
-/// batched rows use, and the first token is excluded as in native runs.
+/// catalog key. Same prompt construction contract
+/// (`MSBThroughputCommand.buildPromptTokens`: deterministic head plus bounded
+/// tail), same prompt length (the server's own tokenizer), forced decode length
+/// (`ignore_eos`), temperature 0, and no prompt cache. The aggregate is
+/// `msbAggregateThroughput` over per-request decode windows (first streamed
+/// token to last), the definition native batched rows use, and the first token
+/// is excluded as in native runs.
 ///
 /// Measurement only: loopback endpoints only, never joins a coordinator, and
 /// never touches a serving provider.
@@ -100,18 +101,7 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
 
         var prompts: [[Int]] = []
         for index in 0..<maxConcurrency {
-            let text = MSBThroughputCommand.buildPromptText(index: index, targetTokens: promptTokens)
-            var tokens = try await client.tokenize(text, addSpecial: true)
-            // Same deterministic extension as native `buildDistinctPrompts`, so
-            // both sides score an identical token sequence.
-            var salt = 0
-            while tokens.count < promptTokens, salt < 10_000 {
-                let corpus = MSBThroughputCommand.corpus
-                tokens += try await client.tokenize(
-                    " \(index)-\(salt) " + corpus[(index + salt) % corpus.count], addSpecial: false
-                )
-                salt += 1
-            }
+            let tokens = try await buildLoopbackPromptTokens(client: client, index: index, targetTokens: promptTokens)
             guard tokens.count >= promptTokens else {
                 FileHandle.standardError.write(Data(
                     "msb-loopback: prompt \(index) tokenized to \(tokens.count) < \(promptTokens) tokens\n".utf8
@@ -143,7 +133,8 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
                 perRowTPSp50: decodeBenchPercentileTPS(perRowRuns, p: 0.5),
                 ttftSecondsP50: decodeBenchPercentileTPS(ttfts, p: 0.5),
                 ttftSecondsP95: decodeBenchPercentileTPS(ttfts, p: 0.95),
-                ttftSamples: ttfts.count
+                ttftSamples: ttfts.count,
+                promptTokenSHA256: rowPrompts.map(msbPromptTokenSHA256)
             )
             levels.append(level)
             FileHandle.standardError.write(Data((
@@ -168,7 +159,8 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
             runs: runs,
             levels: levels,
             serverPeakPhysFootprintMB: serverPID.flatMap { msbLifetimePeakPhysFootprintMB(pid: $0) },
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256)
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -197,6 +189,16 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
         }
         try json.write(to: fileURL, options: [.atomic])
         FileHandle.standardError.write(Data("msb-loopback: wrote \(fileURL.path)\n".utf8))
+    }
+
+    private func buildLoopbackPromptTokens(
+        client: MSBLoopbackClient,
+        index: Int,
+        targetTokens: Int
+    ) async throws -> [Int] {
+        try await MSBThroughputCommand.msbBuildPromptTokens(index: index, targetTokens: targetTokens) { text, addSpecial in
+            try await client.tokenize(text, addSpecial: addSpecial)
+        }
     }
 
     private func runRound(client: MSBLoopbackClient, prompts: [[Int]]) async throws -> [MSBLoopbackRequestSample] {
@@ -494,6 +496,9 @@ struct MSBLoopbackLevelReport: Codable, Sendable, Equatable {
     let ttftSecondsP50: Double
     let ttftSecondsP95: Double
     let ttftSamples: Int
+    /// Per-row SHA-256 of the actual prompt token-id arrays used at this level.
+    /// Nil for historical artifacts that predate this additive field.
+    var promptTokenSHA256: [String]? = nil
 }
 
 struct MSBLoopbackReport: Codable, Sendable {
@@ -510,4 +515,7 @@ struct MSBLoopbackReport: Codable, Sendable {
     let levels: [MSBLoopbackLevelReport]
     let serverPeakPhysFootprintMB: Int?
     let timestamp: String
+    /// Per-row SHA-256 for every prompt generated up to max requested concurrency.
+    /// Nil for historical artifacts that predate this additive field.
+    var promptTokenSHA256: [String]? = nil
 }

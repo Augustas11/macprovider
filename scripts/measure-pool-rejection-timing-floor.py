@@ -28,6 +28,8 @@ Class order is shuffled every round.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -49,6 +51,9 @@ PRODUCTION_HOSTS = {
 }
 
 REQUIRED_CLASSES = ("unknown", "unauthorized", "disabled")
+CLASS_PRECONDITIONS_SCHEMA = "macprovider.r007-class-preconditions.v1"
+CLASS_PRECONDITIONS_MAX_AGE_SECONDS = 5 * 60
+UNAUTHORIZED_ALLOWED_LIFECYCLES = {"created", "active", "paused", "draining", "retired"}
 MIN_SAMPLES = 8
 MIN_FLOOR_MS = 50
 MAX_P95_DELTA_MS = 15.0
@@ -216,6 +221,44 @@ def key_from_env(name: str, flag: str) -> str:
     return value
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def fingerprint_value(salt: str, value: str) -> str:
+    return hashlib.sha256(("r007-v1\0pool-id\0" + salt + "\0" + value).encode("utf-8")).hexdigest()
+
+
+def fingerprint_credential(salt: str, credential: dict[str, str]) -> str:
+    return hashlib.sha256(
+        ("r007-v1\0credential\0" + salt + "\0" + canonical_json(credential)).encode("utf-8")
+    ).hexdigest()
+
+
+def current_tool_sha256() -> str:
+    with open(__file__, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def require_distinct_class_plan(
+    *,
+    unknown_pool_id: str,
+    pool_id: str,
+    unauthorized_pool_id: str,
+    authorized: dict[str, str],
+    unauthorized: dict[str, str] | None,
+) -> None:
+    if unknown_pool_id == pool_id:
+        raise SystemExit("unknown pool id must differ from disabled pool id")
+    if unauthorized_pool_id:
+        if unauthorized_pool_id == pool_id:
+            raise SystemExit("unauthorized pool id must differ from disabled pool id")
+        if unauthorized_pool_id == unknown_pool_id:
+            raise SystemExit("unknown pool id must differ from unauthorized pool id")
+    if unauthorized is not None and unauthorized == authorized:
+        raise SystemExit("unauthorized credential headers must differ from authorized credential headers")
+
+
 def class_plan(
     *,
     unknown_pool_id: str,
@@ -225,6 +268,13 @@ def class_plan(
     unauthorized: dict[str, str] | None,
 ) -> dict[str, tuple[dict[str, str], str]]:
     """Map each R007 class to (credential headers, selected pool id)."""
+    require_distinct_class_plan(
+        unknown_pool_id=unknown_pool_id,
+        pool_id=pool_id,
+        unauthorized_pool_id=unauthorized_pool_id,
+        authorized=authorized,
+        unauthorized=unauthorized,
+    )
     if unauthorized_pool_id:
         unauthorized_case = (authorized, unauthorized_pool_id)
     elif unauthorized is not None:
@@ -238,6 +288,278 @@ def class_plan(
     }
 
 
+def parse_utc_timestamp(value: Any, name: str) -> dt.datetime:
+    if not isinstance(value, str):
+        raise SystemExit(f"class preconditions {name} must be an RFC3339 UTC string")
+    text = value
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise SystemExit(f"class preconditions {name} must be an RFC3339 UTC string") from exc
+    if parsed.tzinfo is None:
+        raise SystemExit(f"class preconditions {name} must include UTC timezone")
+    parsed = parsed.astimezone(dt.timezone.utc)
+    if parsed.isoformat().replace("+00:00", "Z") != value:
+        raise SystemExit(f"class preconditions {name} must be normalized UTC with Z suffix")
+    return parsed
+
+
+def require_valid_capture_window(
+    captured_at: dt.datetime,
+    expires_at: dt.datetime,
+    *,
+    now: dt.datetime | None = None,
+) -> None:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        raise SystemExit("internal: current time must be timezone-aware")
+    now = now.astimezone(dt.timezone.utc)
+    if captured_at > now:
+        raise SystemExit("class preconditions captured_at must not be in the future")
+    if expires_at < now:
+        raise SystemExit("class preconditions expires_at is stale")
+    max_expires_at = captured_at + dt.timedelta(seconds=CLASS_PRECONDITIONS_MAX_AGE_SECONDS)
+    if expires_at > max_expires_at:
+        raise SystemExit("class preconditions expires_at must be within 5 minutes of captured_at")
+
+
+def require_class_preconditions_not_expired(class_preconditions: dict[str, Any] | None) -> None:
+    if class_preconditions is None:
+        return
+    expires_at = parse_utc_timestamp(class_preconditions.get("expires_at"), "expires_at")
+    now = dt.datetime.now(dt.timezone.utc)
+    if expires_at < now:
+        raise SystemExit("class preconditions expired before timing measurement completed")
+
+
+def require_hex64(value: Any, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 64:
+        raise SystemExit(f"class preconditions {name} must be 64 lowercase hex characters")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise SystemExit(f"class preconditions {name} must be 64 lowercase hex characters") from exc
+    if value.lower() != value:
+        raise SystemExit(f"class preconditions {name} must be 64 lowercase hex characters")
+    return value
+
+
+def require_hex32(value: Any, name: str) -> str:
+    if not isinstance(value, str) or len(value) != 32:
+        raise SystemExit(f"class preconditions {name} must be 32 lowercase hex characters")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise SystemExit(f"class preconditions {name} must be 32 lowercase hex characters") from exc
+    if value.lower() != value:
+        raise SystemExit(f"class preconditions {name} must be 32 lowercase hex characters")
+    return value
+
+
+def expected_class_fields(name: str) -> set[str]:
+    if name == "unknown":
+        return {"pool_fingerprint", "credential_fingerprint", "pool_exists"}
+    if name == "unauthorized":
+        return {
+            "pool_fingerprint",
+            "credential_fingerprint",
+            "pool_exists",
+            "buyer_authorized",
+            "lifecycle",
+            "routeable",
+        }
+    if name == "disabled":
+        return {
+            "pool_fingerprint",
+            "credential_fingerprint",
+            "pool_exists",
+            "buyer_authorized",
+            "lifecycle",
+            "routeable",
+        }
+    raise SystemExit(f"internal: unexpected class {name}")
+
+
+def validate_class_assertions(name: str, proof: dict[str, Any]) -> dict[str, Any]:
+    if name == "unknown":
+        if proof.get("pool_exists") is not False:
+            raise SystemExit("class preconditions unknown.pool_exists must be false")
+        return {"pool_exists": False}
+    if name == "unauthorized":
+        if proof.get("pool_exists") is not True:
+            raise SystemExit("class preconditions unauthorized.pool_exists must be true")
+        if proof.get("buyer_authorized") is not False:
+            raise SystemExit("class preconditions unauthorized.buyer_authorized must be false")
+        lifecycle = proof.get("lifecycle")
+        if lifecycle not in UNAUTHORIZED_ALLOWED_LIFECYCLES:
+            raise SystemExit(
+                "class preconditions unauthorized.lifecycle must be one of "
+                + ", ".join(sorted(UNAUTHORIZED_ALLOWED_LIFECYCLES))
+            )
+        routeable = proof.get("routeable")
+        if not isinstance(routeable, bool):
+            raise SystemExit("class preconditions unauthorized.routeable must be boolean")
+        return {"pool_exists": True, "buyer_authorized": False, "lifecycle": lifecycle, "routeable": routeable}
+    if name == "disabled":
+        if proof.get("pool_exists") is not True:
+            raise SystemExit("class preconditions disabled.pool_exists must be true")
+        if proof.get("buyer_authorized") is not True:
+            raise SystemExit("class preconditions disabled.buyer_authorized must be true")
+        if proof.get("lifecycle") != "paused":
+            raise SystemExit("class preconditions disabled.lifecycle must be paused")
+        if proof.get("routeable") is not False:
+            raise SystemExit("class preconditions disabled.routeable must be false")
+        return {"pool_exists": True, "buyer_authorized": True, "lifecycle": "paused", "routeable": False}
+    raise SystemExit(f"internal: unexpected class {name}")
+
+
+def validate_class_preconditions_payload(
+    payload: Any,
+    *,
+    plan: dict[str, tuple[dict[str, str], str]],
+    base_url: str,
+    samples: int,
+    file_sha256: str,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise SystemExit("class preconditions JSON must be an object")
+    expected_top_keys = {
+        "schema",
+        "proof_authority",
+        "operator_capture_boundary",
+        "state_hold",
+        "captured_at",
+        "expires_at",
+        "fingerprint_salt",
+        "run_nonce",
+        "tool_sha256",
+        "base_url",
+        "samples_per_class",
+        "classes",
+    }
+    if set(payload) != expected_top_keys:
+        raise SystemExit("class preconditions JSON has unexpected top-level fields")
+    if payload.get("schema") != CLASS_PRECONDITIONS_SCHEMA:
+        raise SystemExit(f"class preconditions schema must be {CLASS_PRECONDITIONS_SCHEMA}")
+    if payload.get("proof_authority") != "trusted_operator_capture_not_server_signed":
+        raise SystemExit("class preconditions proof_authority must be trusted_operator_capture_not_server_signed")
+    if payload.get("operator_capture_boundary") is not True:
+        raise SystemExit("class preconditions operator_capture_boundary must be true")
+    if payload.get("state_hold") is not True:
+        raise SystemExit("class preconditions state_hold must be true")
+    if payload.get("base_url") != base_url:
+        raise SystemExit("class preconditions base_url must match the requested base URL")
+    if payload.get("samples_per_class") != samples:
+        raise SystemExit("class preconditions samples_per_class must match --samples")
+    if payload.get("tool_sha256") != current_tool_sha256():
+        raise SystemExit("class preconditions tool_sha256 must match this tool file")
+    captured_at = parse_utc_timestamp(payload.get("captured_at"), "captured_at")
+    expires_at = parse_utc_timestamp(payload.get("expires_at"), "expires_at")
+    require_valid_capture_window(captured_at, expires_at, now=now)
+    salt = require_hex64(payload.get("fingerprint_salt"), "fingerprint_salt")
+    run_nonce = require_hex32(payload.get("run_nonce"), "run_nonce")
+    classes = payload.get("classes")
+    if not isinstance(classes, dict) or set(classes) != set(REQUIRED_CLASSES):
+        raise SystemExit("class preconditions classes must exactly cover unknown, unauthorized, disabled")
+
+    validated_classes: dict[str, dict[str, Any]] = {}
+    for name in REQUIRED_CLASSES:
+        proof = classes.get(name)
+        if not isinstance(proof, dict):
+            raise SystemExit(f"class preconditions {name} must be an object")
+        if set(proof) != expected_class_fields(name):
+            raise SystemExit(f"class preconditions {name} has unexpected fields")
+        expected_pool = fingerprint_value(salt, plan[name][1])
+        expected_credential = fingerprint_credential(salt, plan[name][0])
+        pool_fingerprint = require_hex64(proof.get("pool_fingerprint"), f"{name}.pool_fingerprint")
+        credential_fingerprint = require_hex64(
+            proof.get("credential_fingerprint"),
+            f"{name}.credential_fingerprint",
+        )
+        if pool_fingerprint != expected_pool:
+            raise SystemExit(f"class preconditions {name}.pool_fingerprint does not match selected pool")
+        if credential_fingerprint != expected_credential:
+            raise SystemExit(f"class preconditions {name}.credential_fingerprint does not match credential headers")
+        validated_classes[name] = {
+            "pool_fingerprint": pool_fingerprint,
+            "credential_fingerprint": credential_fingerprint,
+            **validate_class_assertions(name, proof),
+        }
+
+    return {
+        "schema": CLASS_PRECONDITIONS_SCHEMA,
+        "captured_at": payload["captured_at"],
+        "expires_at": payload["expires_at"],
+        "proof_authority": "trusted_operator_capture_not_server_signed",
+        "operator_capture_boundary": True,
+        "state_hold": True,
+        "fingerprint_salt": salt,
+        "run_nonce": run_nonce,
+        "tool_sha256": payload["tool_sha256"],
+        "base_url": base_url,
+        "samples_per_class": samples,
+        "file_sha256": file_sha256,
+        "classes": validated_classes,
+    }
+
+
+def load_class_preconditions_json(
+    path: str,
+    *,
+    plan: dict[str, tuple[dict[str, str], str]],
+    base_url: str,
+    samples: int,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    file_sha256 = hashlib.sha256(raw).hexdigest()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("class preconditions JSON must be valid UTF-8 JSON") from exc
+    return validate_class_preconditions_payload(
+        payload,
+        plan=plan,
+        base_url=base_url,
+        samples=samples,
+        file_sha256=file_sha256,
+        now=now,
+    )
+
+
+def require_pool_unavailable_rejection(status: int, payload: bytes) -> None:
+    text = payload.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"unexpected rejection status={status} body={text[:300]}") from exc
+    code = None
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+    if status != 503 or code != "pool_unavailable":
+        raise SystemExit(f"unexpected rejection status={status} error.code={code!r} body={text[:300]}")
+
+
+class NoRedirectHTTPRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Fail closed on redirects so credentials never leave the requested origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - urllib hook signature
+        return None
+
+
+def build_url_opener(ctx: ssl.SSLContext) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        NoRedirectHTTPRedirectHandler,
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+
+
 def measure_http(
     base_url: str,
     *,
@@ -249,6 +571,8 @@ def measure_http(
     import time
 
     rng = rng or random.SystemRandom()
+    ctx = ssl.create_default_context()
+    opener = build_url_opener(ctx)
 
     def one(credential: dict[str, str], select_pool: str) -> float:
         body = json.dumps(
@@ -267,19 +591,19 @@ def measure_http(
                 "X-MacProvider-Pool-Select": select_pool,
             },
         )
-        ctx = ssl.create_default_context()
         start = time.perf_counter()
         try:
-            with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
+            with opener.open(req, timeout=timeout_s) as resp:
                 payload = resp.read()
                 status = resp.status
         except urllib.error.HTTPError as exc:
-            payload = exc.read()
-            status = exc.code
+            try:
+                payload = exc.read()
+                status = exc.code
+            finally:
+                exc.close()
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        text = payload.decode("utf-8", errors="replace")
-        if status not in (404, 503) or "pool_unavailable" not in text:
-            raise SystemExit(f"unexpected rejection status={status} body={text[:300]}")
+        require_pool_unavailable_rejection(status, payload)
         return elapsed_ms
 
     measured: dict[str, list[float]] = {name: [] for name in REQUIRED_CLASSES}
@@ -300,15 +624,17 @@ def build_result(
     source: str,
     production_host: bool,
     allow_production: bool,
+    class_preconditions: dict[str, Any] | None = None,
+    authority: str | None = None,
 ) -> dict[str, Any]:
-    production_remeasure_complete = bool(
+    production_remeasure_complete = authority != "measurement_pending_postconditions" and bool(
         environment == "production"
         and allow_production
         and production_host
         and source == "http"
         and timing.get("within_r007_bounds") is True
     )
-    return {
+    result = {
         "environment": environment,
         "source": source,
         "production_host": production_host,
@@ -321,8 +647,15 @@ def build_result(
             "A production remeasure is complete only when environment=production, "
             "--allow-production is set, HTTP samples were taken from a production host, "
             "and R007 bounds pass.",
+            "The unauthorized class means an existing pool for which the credential is not authorized; "
+            "its lifecycle/routeability may add a second rejection predicate.",
         ],
     }
+    if class_preconditions is not None:
+        result["class_preconditions"] = class_preconditions
+    if authority is not None:
+        result["authority"] = authority
+    return result
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -345,6 +678,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--unauthorized-key-env", default="", help="NAME of the env var holding an unauthorized buyer API key (Bearer)")
     parser.add_argument("--authorized-account", default="", help="lab mode: X-MacProvider-Account of the authorized buyer")
     parser.add_argument("--unauthorized-account", default="", help="lab mode: X-MacProvider-Account of an unauthorized buyer")
+    parser.add_argument(
+        "--class-preconditions-json",
+        default="",
+        help="trusted operator class-state proof required before production HTTP measurement",
+    )
     parser.add_argument("--timeout-s", type=float, default=10.0)
     return parser.parse_args(argv)
 
@@ -396,9 +734,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.samples_json:
         if args.base_url:
             raise SystemExit("pass either --samples-json or --base-url, not both")
+        if args.class_preconditions_json:
+            raise SystemExit("--class-preconditions-json applies only to HTTP measurement")
         source = "samples-json"
         samples = load_samples_json(args.samples_json)
         method = "offline_samples_json"
+        class_preconditions = None
     elif args.base_url:
         production_host = is_production_host(args.base_url)
         if production_host and (args.environment != "production" or not args.allow_production):
@@ -408,12 +749,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.environment == "production" and not args.allow_production:
             raise SystemExit("production environment requires --allow-production")
         source = "http"
+        production_measurement = production_host or args.environment == "production"
+        if production_measurement and not args.unauthorized_pool_id:
+            raise SystemExit(
+                "production HTTP measurement requires --unauthorized-pool-id; "
+                "credential-only unauthorized class cannot prove a distinct existing unauthorized pool vs the paused disabled pool"
+            )
+        plan = plan_from_args(args)
+        class_preconditions = None
+        if production_measurement:
+            if not args.class_preconditions_json:
+                raise SystemExit("--class-preconditions-json is required before production HTTP measurement")
+        if args.class_preconditions_json:
+            class_preconditions = load_class_preconditions_json(
+                args.class_preconditions_json,
+                plan=plan,
+                base_url=args.base_url,
+                samples=args.samples,
+            )
         samples = measure_http(
             args.base_url,
-            plan=plan_from_args(args),
+            plan=plan,
             samples=args.samples,
             timeout_s=args.timeout_s,
         )
+        require_class_preconditions_not_expired(class_preconditions)
         method = args.method
     else:
         raise SystemExit("provide --samples-json (offline) or --base-url (HTTP)")
@@ -425,6 +785,10 @@ def main(argv: list[str] | None = None) -> int:
         source=source,
         production_host=production_host,
         allow_production=args.allow_production,
+        class_preconditions=class_preconditions,
+        authority="measurement_pending_postconditions"
+        if source == "http" and (production_host or args.environment == "production")
+        else None,
     )
     json.dump(result, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

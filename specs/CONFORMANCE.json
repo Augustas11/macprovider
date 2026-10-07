@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.30",
+      "version": "1.9.31",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.8",
+      "version": "1.6.9",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -9513,7 +9513,7 @@
     {
       "requirement_id": "SPEC-046-R001",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsDiscoverCommand",
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsEvaluateCommand",
@@ -9546,7 +9546,12 @@
           "expires_at": "2026-11-06"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "The SPEC-001/SPEC-002 startup-throughput count-authority fix changes the mapped BYOMContractLockTests version selector after the fresh 2026-10-07 signed BYOM discovery capture at eedd1c1456242afab775072bef622a68c3b634a0. Retain that signed evidence unchanged; it does not pin the changed selector. Restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion for the merged fix."
+      }
     },
     {
       "requirement_id": "SPEC-046-R002",
@@ -9768,7 +9773,7 @@
     {
       "requirement_id": "SPEC-046-R008",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryRunner",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationRunner",
@@ -9800,7 +9805,12 @@
           "expires_at": "2026-11-06"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "The SPEC-001/SPEC-002 startup-throughput count-authority fix changes the mapped BYOMContractLockTests version selector after the fresh 2026-10-07 signed BYOM discovery capture at eedd1c1456242afab775072bef622a68c3b634a0. Retain that signed evidence unchanged; it does not pin the changed selector. Restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion for the merged fix."
+      }
     },
     {
       "requirement_id": "SPEC-046-R009",
