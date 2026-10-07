@@ -4110,7 +4110,7 @@ func validateEvent(e DurableEvent) error {
 		if !validLifecycle(e.Lifecycle) {
 			return fmt.Errorf("invalid lifecycle %q", e.Lifecycle)
 		}
-		if err := ValidatePromiseClaimsText(e.Reason, e.SignedControl, e.ControlSignatures); err != nil {
+		if err := ValidatePromiseClaimsText(e.Reason); err != nil {
 			return err
 		}
 	case EventMemberAdmitted, EventMemberRevoked:
