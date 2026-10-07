@@ -235,9 +235,15 @@ Two coordinator facts the journey reflects rather than requires otherwise:
     activation; the GGUF model afterwards is refused (404/503, a no-member
     code) with no snapshot. For SPEC-042-R016: a GGUF request dispatched before
     the attestation removal's `not_before` and settled after it is
-    zero-billed (verdict `quarantined` with
-    `pool_route_fence_not_settlement_eligible`, its ledger row zeroed and
-    quarantined, no payable credit, no buyer-final debit).
+    zero-billed: either a `quarantined` receipt verdict with
+    `pool_route_fence_not_settlement_eligible`, or a single ledger-only
+    attempt with `pool_manifest_route_not_settlement_eligible`,
+    `byte_estimated` usage, and empty attempt-output, receipt-verdict, and
+    usage-event captures. Both paths require zero gross and provider
+    credits, a quarantined non-payable ledger row, no buyer-final debit,
+    and a refunded or zero-settled reservation without a hold. The
+    ledger-only path uses its captured ledger creation time to prove
+    settlement after the removal boundary; it cannot omit that timestamp.
 14. `step-14-pause-resume-rollback` - while paused a pool request answers 503
     `pool_unavailable` and refunds; after resume a pool request is paid; the
     history has at least two `lifecycle_changed`; `pool-rollback-preflight
