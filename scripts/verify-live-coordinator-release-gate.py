@@ -1,4 +1,25 @@
 #!/usr/bin/env python3
+"""Verify the live coordinator serves a feed set a CLI release can join.
+
+catalog_mode=exact: every served feed is byte-equal to the catalog the release
+baked (pearl-release.json catalog.files).
+
+catalog_mode=descendant: only with --descendant-catalog-dir (reviewed main-tree
+release-ledger.json + trusted-keys.json) and --baked-catalog-dir (the release's
+own catalog assets). The live release must be a signed, ledger-recorded strict
+descendant of the baked one that the baked CLI can still decode: same feed set
+(native-MTP excepted, see below), same top-level shape, schema_version,
+policy_version and source per feed, same signer, same policy_version.
+
+A keyring change blocks descendant mode: the reviewed trusted-keys.json must be
+byte-equal to the release's, so a key rotation always needs a full CLI release
+whose baked catalog is exactly what is live.
+
+Native-MTP feeds (native-mtp-admission.json, its manifest and challenge bank)
+are bound by the baked release (exact) or the live ledger row (descendant). A
+descendant may add them only when the baked CLI ignores them (no admission
+decoder at the candidate commit) or decodes the served admission schema.
+"""
 import argparse
 import base64
 import datetime
@@ -48,6 +69,21 @@ ARTIFACT_FEEDS = {
     ARTIFACT_FEED: "/v1/catalog-artifacts",
     ARTIFACT_FEED + ".sig": "/v1/catalog-artifacts.sig",
 }
+# SPEC-023 §12.5: the admission sidecar is ledger-bound; it binds the projection
+# manifest and the signed challenge bank by digest in every entry.
+NATIVE_MTP_FEED = "native-mtp-admission.json"
+NATIVE_MTP_MANIFEST = "native-mtp-artifact-manifest.json"
+NATIVE_MTP_BANK = "native-mtp-selftest-bank.json"
+NATIVE_MTP_FEEDS = {
+    NATIVE_MTP_FEED: "/v1/native-mtp-admission",
+    NATIVE_MTP_FEED + ".sig": "/v1/native-mtp-admission.sig",
+    NATIVE_MTP_MANIFEST: "/v1/native-mtp-artifact-manifest",
+    NATIVE_MTP_BANK: "/v1/native-mtp-selftest-bank",
+    NATIVE_MTP_BANK + ".sig": "/v1/native-mtp-selftest-bank.sig",
+}
+NATIVE_MTP_BODIES = (NATIVE_MTP_FEED, NATIVE_MTP_MANIFEST, NATIVE_MTP_BANK)
+# Top-level fields whose value the CLI decodes as a schema/policy selector.
+SHAPE_FIELDS = ("schema_version", "policy_version", "source")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_COMPONENT = r"(0|[1-9][0-9]*)"
 TAG_RE = re.compile(rf"^v{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$")
@@ -344,6 +380,14 @@ def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], di
         if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             fail(f"pearl-release.json catalog hash is missing or invalid for {name}")
         expected[name] = digest
+    bound_native_names = [name for name in NATIVE_MTP_FEEDS if name in files]
+    if bound_native_names and len(bound_native_names) != len(NATIVE_MTP_FEEDS):
+        fail("pearl-release.json binds only part of the native-MTP admission set")
+    for name in bound_native_names:
+        digest = files.get(name)
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            fail(f"pearl-release.json catalog hash is missing or invalid for {name}")
+        expected[name] = digest
     trusted_keys_digest = sha256(pathlib.Path(args.trusted_keys).read_bytes())
     if trusted_keys_digest != expected["trusted-keys.json"]:
         fail(
@@ -362,6 +406,118 @@ def ledger_order_key(release_id: str, record: dict) -> tuple[datetime.datetime, 
     return parse_rfc3339(generated_at, f"release ledger row {release_id!r}"), release_id
 
 
+def load_feeds(
+    args: argparse.Namespace,
+    endpoints: dict[str, str],
+    bodies: dict[str, bytes],
+    parsed: dict[str, object],
+) -> None:
+    for name, endpoint in endpoints.items():
+        body = load_endpoint(args, endpoint)
+        if len(body) > args.max_bytes:
+            fail(f"{endpoint} response exceeds {args.max_bytes} bytes")
+        bodies[name] = body
+        parsed[name] = parse_json_bytes(body, name)
+
+
+def require_not_served(args: argparse.Namespace, endpoints: dict[str, str], what: str) -> None:
+    for endpoint in endpoints.values():
+        if endpoint_is_served(args, endpoint):
+            fail(
+                f"live coordinator serves {endpoint} but the release binds no {what}; "
+                "the served feed set must equal the release's feed set"
+            )
+
+
+def verify_signed_by(
+    args: argparse.Namespace,
+    trusted: dict[str, bytes],
+    parsed: dict[str, object],
+    bodies: dict[str, bytes],
+    name: str,
+    signer: str,
+) -> None:
+    key_id, signature = parse_signature_sidecar(parsed[name + ".sig"], name + ".sig")
+    if key_id != signer:
+        fail(f"{name}.sig signer {key_id!r} is not the autotune-candidates.json signer {signer!r}")
+    if key_id not in trusted:
+        fail(f"{name}.sig key_id {key_id!r} is not in the release trusted keyring")
+    verify_ed25519(args.openssl, trusted[key_id], bodies[name], signature, name + ".sig")
+
+
+def verify_native_mtp(
+    args: argparse.Namespace,
+    trusted: dict[str, bytes],
+    parsed: dict[str, object],
+    bodies: dict[str, bytes],
+    signer: str,
+    release_id: str,
+) -> None:
+    """The served admission set is internally bound: signed by the candidate
+    signer, issued for the served release, and its entries bind the served
+    manifest and challenge bank by digest."""
+    verify_signed_by(args, trusted, parsed, bodies, NATIVE_MTP_FEED, signer)
+    verify_signed_by(args, trusted, parsed, bodies, NATIVE_MTP_BANK, signer)
+    admission = parsed[NATIVE_MTP_FEED]
+    bank = parsed[NATIVE_MTP_BANK]
+    if not isinstance(admission, dict) or not isinstance(bank, dict):
+        fail("native-MTP admission and challenge bank must be JSON objects")
+    if admission.get("release_id") != release_id:
+        fail(
+            f"{NATIVE_MTP_FEED} release_id {admission.get('release_id')!r} does not match "
+            f"the served release {release_id!r}"
+        )
+    if bank.get("release_id") != release_id:
+        fail(
+            f"{NATIVE_MTP_BANK} release_id {bank.get('release_id')!r} does not match "
+            f"the served release {release_id!r}"
+        )
+    for field in ("signer_key_id", "challenge_bank_signer_key_id"):
+        if admission.get(field) != signer:
+            fail(f"{NATIVE_MTP_FEED} {field} {admission.get(field)!r} is not the candidate signer {signer!r}")
+    entries = admission.get("entries")
+    if not isinstance(entries, list) or not entries:
+        fail(f"{NATIVE_MTP_FEED} has no entries")
+    manifest_digest = sha256(bodies[NATIVE_MTP_MANIFEST])
+    bank_digest = sha256(bodies[NATIVE_MTP_BANK])
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            fail(f"{NATIVE_MTP_FEED} entries[{index}] is not an object")
+        if entry.get("artifact_manifest_sha256") != manifest_digest:
+            fail(
+                f"{NATIVE_MTP_FEED} entries[{index}] artifact_manifest_sha256 does not match "
+                f"the served {NATIVE_MTP_MANIFEST} {manifest_digest}"
+            )
+        if entry.get("challenge_bank_sha256") != bank_digest:
+            fail(
+                f"{NATIVE_MTP_FEED} entries[{index}] challenge_bank_sha256 does not match "
+                f"the served {NATIVE_MTP_BANK} {bank_digest}"
+            )
+
+
+def require_same_shape(name: str, baked: object, live: object) -> None:
+    if not isinstance(baked, dict) or not isinstance(live, dict):
+        fail(f"{name} baked and live bodies must both be JSON objects")
+    if set(baked) != set(live):
+        fail(
+            f"live {name} top-level fields {sorted(set(live) ^ set(baked))} differ from the "
+            "baked catalog; the baked CLI may not decode it"
+        )
+    for field in SHAPE_FIELDS:
+        if baked.get(field) != live.get(field):
+            fail(
+                f"live {name} {field} {live.get(field)!r} differs from the baked "
+                f"{baked.get(field)!r}; the baked CLI may not decode it"
+            )
+
+
+def ledger_policy(release_id: str, record: dict) -> str:
+    policy = record.get("policy_version")
+    if not isinstance(policy, str) or not policy:
+        fail(f"release ledger row {release_id!r} has no policy_version")
+    return policy
+
+
 def verify_descendant_catalog(
     args: argparse.Namespace,
     catalog: dict,
@@ -370,16 +526,24 @@ def verify_descendant_catalog(
     parsed: dict[str, object],
     trusted: dict[str, bytes],
     bound_feeds: tuple[str, ...],
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Accept a live catalog that is a strict, signed, ledger-recorded
-    descendant of the catalog the CLI release baked.
+    descendant of the catalog the CLI release baked, and that the baked CLI
+    can still decode.
 
     A CLI joins a NEWER signed release (SPEC-023 §3.5 rejects only data older
     than its baked snapshot), and an identity-bound catalog can only be cut
     after the CLI identity exists, so byte equality alone would forbid ever
     publishing a CLI after its own catalog activates. The authority for "newer"
-    is the reviewed release ledger, never the coordinator's claim.
+    is the reviewed release ledger, never the coordinator's claim. The CLI
+    decodes schema before freshness, so the live feeds must keep the baked
+    feeds' top-level shape and schema/policy selectors.
+
+    Returns (live release id, baked release id, live row binds native-MTP).
     """
+    if not args.baked_catalog_dir:
+        fail("descendant mode requires --baked-catalog-dir with the release's catalog assets")
+    baked_dir = pathlib.Path(args.baked_catalog_dir)
     catalog_dir = pathlib.Path(args.descendant_catalog_dir)
     try:
         reviewed_keys = (catalog_dir / "trusted-keys.json").read_bytes()
@@ -413,14 +577,37 @@ def verify_descendant_catalog(
     live_row = releases.get(live_id)
     if not isinstance(live_row, dict) or not isinstance(live_row.get("feeds"), dict):
         fail(f"live release {live_id!r} is not in the release ledger")
-    if ledger_order_key(live_id, live_row) <= ledger_order_key(baked_id, baked_row):
+    live_key = ledger_order_key(live_id, live_row)
+    if live_key <= ledger_order_key(baked_id, baked_row):
         fail(f"live release {live_id!r} is not after baked release {baked_id!r} in the release ledger")
-    if live_row.get("policy_version") != baked_row.get("policy_version") or candidate.get("policy_version") != baked_policy:
+    served_generated_at = candidate.get("generated_at")
+    if (
+        not isinstance(served_generated_at, str)
+        or parse_rfc3339(served_generated_at, "autotune-candidates.json") != live_key[0]
+    ):
+        fail(
+            f"live autotune-candidates.json generated_at {served_generated_at!r} does not match "
+            f"release ledger row {live_id!r} generated_at {live_row.get('generated_at')!r}"
+        )
+    if (
+        ledger_policy(live_id, live_row) != ledger_policy(baked_id, baked_row)
+        or candidate.get("policy_version") != baked_policy
+    ):
         fail(f"live release {live_id!r} changes policy_version from baked release {baked_id!r}")
+    live_set = set(live_row["feeds"]) - {NATIVE_MTP_FEED}
+    baked_set = set(baked_row["feeds"]) - {NATIVE_MTP_FEED}
+    if live_set != baked_set:
+        fail(
+            f"live release {live_id!r} feed set differs from baked release {baked_id!r}: "
+            f"{sorted(live_set ^ baked_set)}"
+        )
     if (ARTIFACT_FEED in live_row["feeds"]) != (ARTIFACT_FEED in bound_feeds):
         fail(f"live release {live_id!r} changes whether the catalog is artifact-bound")
 
-    baked_signer = None
+    baked_candidate = baked_row["feeds"].get("autotune-candidates.json")
+    baked_signer = baked_candidate.get("signer_key_id") if isinstance(baked_candidate, dict) else None
+    if not isinstance(baked_signer, str) or baked_signer not in trusted:
+        fail(f"baked release {baked_id!r} candidate signer is not in the release trusted keyring")
     for name in bound_feeds:
         baked_feed = baked_row["feeds"].get(name)
         live_feed = live_row["feeds"].get(name)
@@ -434,18 +621,67 @@ def verify_descendant_catalog(
                 f"live coordinator {name} sha256 {digest} does not match release ledger "
                 f"row {live_id!r} {live_feed.get('sha256')!r}"
             )
-        if baked_signer is None:
-            baked_signer = baked_row["feeds"]["autotune-candidates.json"].get("signer_key_id")
-            if not isinstance(baked_signer, str) or baked_signer not in trusted:
-                fail(f"baked release {baked_id!r} candidate signer is not in the release trusted keyring")
-        key_id, signature = parse_signature_sidecar(parsed[name + ".sig"], name + ".sig")
-        if key_id != baked_signer or live_feed.get("signer_key_id") != baked_signer:
+        if live_feed.get("signer_key_id") != baked_signer:
             fail(
-                f"{name}.sig signer {key_id!r} (ledger {live_feed.get('signer_key_id')!r}) is not the "
-                f"baked release candidate signer {baked_signer!r}"
+                f"release ledger row {live_id!r} {name} signer {live_feed.get('signer_key_id')!r} "
+                f"is not the baked release candidate signer {baked_signer!r}"
             )
-        verify_ed25519(args.openssl, trusted[key_id], bodies[name], signature, name + ".sig")
-    return live_id, baked_id
+        key_id, _ = parse_signature_sidecar(parsed[name + ".sig"], name + ".sig")
+        if key_id != baked_signer:
+            fail(f"{name}.sig signer {key_id!r} is not the baked release candidate signer {baked_signer!r}")
+        verify_signed_by(args, trusted, parsed, bodies, name, baked_signer)
+
+    baked_names = list(bound_feeds)
+    if NATIVE_MTP_FEED in expected_hashes:
+        baked_names += list(NATIVE_MTP_BODIES)
+    baked: dict[str, object] = {}
+    for name in baked_names:
+        try:
+            body = (baked_dir / name).read_bytes()
+        except OSError as exc:
+            fail(f"baked catalog asset {name} is unreadable: {exc}")
+        if sha256(body) != expected_hashes[name]:
+            fail(f"baked catalog asset {name} does not match the release metadata digest")
+        baked[name] = parse_json_bytes(body, f"baked {name}")
+    for name in bound_feeds:
+        require_same_shape(name, baked[name], parsed[name])
+
+    live_native = NATIVE_MTP_FEED in live_row["feeds"]
+    if live_native:
+        native_feed = live_row["feeds"][NATIVE_MTP_FEED]
+        load_feeds(args, {k: v for k, v in NATIVE_MTP_FEEDS.items() if k not in bodies}, bodies, parsed)
+        digest = sha256(bodies[NATIVE_MTP_FEED])
+        if not isinstance(native_feed, dict) or native_feed.get("sha256") != digest:
+            fail(
+                f"live coordinator {NATIVE_MTP_FEED} sha256 {digest} does not match release ledger "
+                f"row {live_id!r}"
+            )
+        if native_feed.get("signer_key_id") != baked_signer:
+            fail(f"release ledger row {live_id!r} {NATIVE_MTP_FEED} signer is not the baked candidate signer")
+        if NATIVE_MTP_FEED in baked:
+            for name in NATIVE_MTP_BODIES:
+                for field in SHAPE_FIELDS:
+                    live_value = parsed[name].get(field) if isinstance(parsed[name], dict) else None
+                    baked_value = baked[name].get(field) if isinstance(baked[name], dict) else None
+                    if live_value != baked_value:
+                        fail(
+                            f"live {name} {field} {live_value!r} differs from the baked "
+                            f"{baked_value!r}; the baked CLI may not decode it"
+                        )
+        else:
+            decoder = args.baked_cli_native_mtp_admission_schema
+            if decoder is None:
+                fail(
+                    "live release binds native-MTP admission the baked catalog does not; "
+                    "--baked-cli-native-mtp-admission-schema is required"
+                )
+            served_schema = parsed[NATIVE_MTP_FEED].get("schema_version") if isinstance(parsed[NATIVE_MTP_FEED], dict) else None
+            if decoder != "none" and served_schema != decoder:
+                fail(
+                    f"live {NATIVE_MTP_FEED} schema_version {served_schema!r} is not the baked CLI's "
+                    f"decoder {decoder!r}"
+                )
+    return live_id, baked_id, live_native
 
 
 def main() -> int:
@@ -498,6 +734,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--baked-catalog-dir",
+        help=(
+            "directory holding the release's own catalog assets (verified against "
+            "pearl-release.json digests); required for descendant mode"
+        ),
+    )
+    parser.add_argument(
+        "--baked-cli-native-mtp-admission-schema",
+        help=(
+            "native-MTP admission schema_version the released CLI source decodes, or "
+            "'none' when the CLI at the candidate commit has no admission decoder"
+        ),
+    )
+    parser.add_argument(
         "--now",
         help=argparse.SUPPRESS,
     )
@@ -507,9 +757,15 @@ def main() -> int:
         expected_version, expected_hashes, catalog = validate_metadata(args)
         trusted = active_keyring(pathlib.Path(args.trusted_keys))
         artifact_bound = ARTIFACT_FEED in expected_hashes
+        native_bound = NATIVE_MTP_FEED in expected_hashes
         served = dict(FEEDS)
         if artifact_bound:
             served.update(ARTIFACT_FEEDS)
+        # A descendant may drop a baked native-MTP set, so its absence is an
+        # exact-mode mismatch here, not an immediate failure.
+        native_missing = native_bound and not endpoint_is_served(args, NATIVE_MTP_FEEDS[NATIVE_MTP_FEED])
+        if native_bound and not native_missing:
+            served.update(NATIVE_MTP_FEEDS)
 
         bodies: dict[str, bytes] = {}
         parsed: dict[str, object] = {}
@@ -526,13 +782,18 @@ def main() -> int:
                 )
             bodies[name] = body
             parsed[name] = parse_json_bytes(body, name)
+        if native_missing and exact_mismatch is None:
+            exact_mismatch = (
+                f"live coordinator does not serve {NATIVE_MTP_FEEDS[NATIVE_MTP_FEED]} "
+                "bound by the release metadata"
+            )
         catalog_mode = "exact"
         if exact_mismatch is not None:
             if not args.descendant_catalog_dir:
                 fail(exact_mismatch)
             bound_feeds = PRIMARY_FEEDS + ((ARTIFACT_FEED,) if artifact_bound else ())
             try:
-                live_id, baked_id = verify_descendant_catalog(
+                live_id, baked_id, native_bound = verify_descendant_catalog(
                     args, catalog, expected_hashes, bodies, parsed, trusted, bound_feeds
                 )
             except GateError as exc:
@@ -651,6 +912,18 @@ def main() -> int:
                         "the served feed set must equal the release's feed set"
                     )
 
+        if native_bound:
+            verify_native_mtp(
+                args, trusted, parsed, bodies, candidate_key_id,
+                parsed["autotune-candidates.json"].get("version"),
+            )
+        else:
+            require_not_served(
+                args,
+                {name: NATIVE_MTP_FEEDS[name] for name in (NATIVE_MTP_FEED, NATIVE_MTP_FEED + ".sig")},
+                "native-MTP admission",
+            )
+
         healthz = parse_json_bytes(load_endpoint(args, "/healthz"), "healthz")
         if not isinstance(healthz, dict):
             fail("/healthz response is not a JSON object")
@@ -708,6 +981,7 @@ def main() -> int:
             f"recommended_binary_version={recommended_value} "
             f"publication_phase={args.publication_phase} "
             f"artifact_feed={'bound' if artifact_bound else 'absent'} "
+            f"native_mtp={'bound' if native_bound else 'absent'} "
             f"catalog_mode={catalog_mode}"
         )
         return 0

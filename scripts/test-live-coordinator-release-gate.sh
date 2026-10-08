@@ -17,6 +17,72 @@ fail() {
 bash -n "$0"
 python3 -m py_compile "$guard"
 
+native_writer="$work/write_native_mtp.py"
+cat >"$native_writer" <<'PY'
+import base64
+import hashlib
+import json
+import subprocess
+
+
+def dump(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def sign(key_path, path, signer):
+    signature = subprocess.check_output(
+        ["openssl", "pkeyutl", "-sign", "-inkey", str(key_path), "-rawin", "-in", str(path)],
+    )
+    dump(path.with_name(path.name + ".sig"), {
+        "alg": "ed25519",
+        "key_id": signer,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    })
+
+
+def write_native(live, key_path, signer, release_id, schema="macprovider.native-mtp-admission.v1"):
+    """Serve a SPEC-023 §12.5 admission set: admission + sig, projection
+    manifest, signed challenge bank; entries bind manifest and bank by digest."""
+    dump(live / "v1_native-mtp-artifact-manifest", {
+        "schema_version": "macprovider.native-mtp-artifact-projection.v1",
+        "artifacts": {},
+    })
+    dump(live / "v1_native-mtp-selftest-bank", {
+        "schema_version": "macprovider.native-mtp-selftest-bank.v1",
+        "release_id": release_id,
+        "issued_at": "2026-07-30T12:00:00Z",
+        "expires_at": "2026-12-31T00:00:00Z",
+        "signer_key_id": signer,
+        "entries": [],
+    })
+    sign(key_path, live / "v1_native-mtp-selftest-bank", signer)
+    digest = lambda name: hashlib.sha256((live / name).read_bytes()).hexdigest()
+    dump(live / "v1_native-mtp-admission", {
+        "schema_version": schema,
+        "release_id": release_id,
+        "issued_at": "2026-07-30T12:00:00Z",
+        "expires_at": "2026-12-31T00:00:00Z",
+        "signer_key_id": signer,
+        "challenge_bank_signer_key_id": signer,
+        "revocation_signer_key_id": signer,
+        "entries": [{
+            "model_key": "fixture/model",
+            "artifact_manifest_sha256": digest("v1_native-mtp-artifact-manifest"),
+            "challenge_bank_sha256": digest("v1_native-mtp-selftest-bank"),
+        }],
+    })
+    sign(key_path, live / "v1_native-mtp-admission", signer)
+
+
+NATIVE_ENDPOINTS = {
+    "native-mtp-admission.json": "v1_native-mtp-admission",
+    "native-mtp-admission.json.sig": "v1_native-mtp-admission.sig",
+    "native-mtp-artifact-manifest.json": "v1_native-mtp-artifact-manifest",
+    "native-mtp-selftest-bank.json": "v1_native-mtp-selftest-bank",
+    "native-mtp-selftest-bank.json.sig": "v1_native-mtp-selftest-bank.sig",
+}
+PY
+
 make_fixture() {
   local directory="$1"
   local tag="${2:-v1.8.68}"
@@ -27,7 +93,7 @@ make_fixture() {
   local recommended_version="${7:-${tag#v}}"
   rm -rf "$directory"
   mkdir -p "$directory/live"
-  python3 - "$directory" "$tag" "$live_version" "$generated_at" "$demand_generated_at" "$signer" "$recommended_version" <<'PY'
+  PYTHONPATH="$work" python3 - "$directory" "$tag" "$live_version" "$generated_at" "$demand_generated_at" "$signer" "$recommended_version" <<'PY'
 import hashlib
 import json
 import base64
@@ -152,6 +218,12 @@ if artifact_mode:
         "key_id": signer,
         "signature": base64.b64encode(signature).decode("ascii"),
     })
+# FIXTURE_NATIVE_MTP: "" = none; "bound" = served and bound by the release;
+# "served-unbound" = served but not bound.
+native_mode = os.environ.get("FIXTURE_NATIVE_MTP", "")
+if native_mode:
+    from write_native_mtp import write_native
+    write_native(live, key_path, signer, "fixture-release")
 healthz = {"status": "ok", "version": live_version}
 if recommended_version != "__absent__":
     healthz["recommended_binary_version"] = recommended_version
@@ -182,10 +254,17 @@ endpoint_to_asset = {
 if artifact_mode == "bound":
     endpoint_to_asset["autotune-artifacts.json"] = "v1_catalog-artifacts"
     endpoint_to_asset["autotune-artifacts.json.sig"] = "v1_catalog-artifacts.sig"
+if native_mode == "bound":
+    from write_native_mtp import NATIVE_ENDPOINTS
+    endpoint_to_asset.update(NATIVE_ENDPOINTS)
 files = {
     asset: hashlib.sha256((live / endpoint).read_bytes()).hexdigest()
     for asset, endpoint in endpoint_to_asset.items()
 }
+# The release's own catalog assets, as the promotion workflow holds them.
+(directory / "baked").mkdir()
+for asset, endpoint in endpoint_to_asset.items():
+    (directory / "baked" / asset).write_bytes((live / endpoint).read_bytes())
 files["trusted-keys.json"] = hashlib.sha256((directory / "trusted-keys.json").read_bytes()).hexdigest()
 metadata = {
     "schema_version": 1,
@@ -230,7 +309,10 @@ run_guard_phase() {
     set -- "$@" --expected-previous-recommendation "$previous"
   fi
   if [[ -n "${DESCENDANT_CATALOG_DIR:-}" ]]; then
-    set -- "$@" --descendant-catalog-dir "$DESCENDANT_CATALOG_DIR"
+    set -- "$@" --descendant-catalog-dir "$DESCENDANT_CATALOG_DIR" --baked-catalog-dir "$directory/baked"
+  fi
+  if [[ -n "${NATIVE_SCHEMA:-}" ]]; then
+    set -- "$@" --baked-cli-native-mtp-admission-schema "$NATIVE_SCHEMA"
   fi
   "$@"
 }
@@ -832,6 +914,31 @@ if captured_headers.get("User-agent") not in ("", None):
     raise SystemExit(f"expected no gate-specific user-agent, got: {captured_headers}")
 PY
 
+# Native-MTP admission set, exact mode: bound feeds must be byte-equal and
+# internally bound; an unbound release must not be served one.
+FIXTURE_NATIVE_MTP=bound make_fixture "$work/native-exact"
+run_guard "$work/native-exact" | grep -q 'native_mtp=bound catalog_mode=exact$'
+FIXTURE_NATIVE_MTP=served-unbound make_fixture "$work/native-served-unbound"
+if run_guard "$work/native-served-unbound" >"$work/native-served-unbound.out" 2>&1; then
+  fail "accepted a served native-MTP admission the release does not bind"
+fi
+grep -q 'serves /v1/native-mtp-admission but the release binds no native-MTP admission' "$work/native-served-unbound.out"
+FIXTURE_NATIVE_MTP=bound make_fixture "$work/native-exact-manifest-drift"
+printf ' ' >>"$work/native-exact-manifest-drift/live/v1_native-mtp-artifact-manifest"
+if run_guard "$work/native-exact-manifest-drift" >"$work/native-exact-manifest-drift.out" 2>&1; then
+  fail "accepted a native-MTP manifest that is not the release-bound bytes"
+fi
+grep -q 'live coordinator /v1/native-mtp-artifact-manifest sha256 .* does not match release metadata' \
+  "$work/native-exact-manifest-drift.out"
+
+FIXTURE_NATIVE_MTP=bound make_fixture "$work/native-exact-missing"
+rm "$work/native-exact-missing/live/v1_native-mtp-admission"
+if run_guard "$work/native-exact-missing" >"$work/native-exact-missing.out" 2>&1; then
+  fail "accepted a release-bound native-MTP admission the coordinator does not serve"
+fi
+grep -q 'live coordinator does not serve /v1/native-mtp-admission bound by the release metadata' \
+  "$work/native-exact-missing.out"
+
 # Descendant catalog: the live coordinator serves a NEWER signed release that the
 # reviewed release ledger records after the release's baked catalog. The baked
 # pearl-release.json stays bound to "fixture-release"; the live feeds become
@@ -839,8 +946,10 @@ PY
 make_descendant() {
   local directory="$1"
   local mode="${2:-ok}"
-  FIXTURE_ARTIFACT_FEED=bound make_fixture "$directory"
-  python3 - "$directory" "$mode" <<'PY'
+  local baked_native=""
+  [[ "$mode" == baked-native-* ]] && baked_native=bound
+  FIXTURE_ARTIFACT_FEED=bound FIXTURE_NATIVE_MTP="$baked_native" make_fixture "$directory"
+  PYTHONPATH="$work" python3 - "$directory" "$mode" <<'PY'
 import base64
 import hashlib
 import json
@@ -849,6 +958,8 @@ import shutil
 import subprocess
 import sys
 
+from write_native_mtp import NATIVE_ENDPOINTS, dump, sign, write_native
+
 directory = pathlib.Path(sys.argv[1])
 mode = sys.argv[2]
 live = directory / "live"
@@ -856,9 +967,7 @@ catalog = directory / "catalog"
 catalog.mkdir()
 signer = "streamvc-autotune-static-v4"
 key_path = directory / "autotune-test-ed25519.pem"
-
-def dump(path, value):
-    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+baked_native = mode.startswith("baked-native-")
 
 def digest(endpoint):
     return hashlib.sha256((live / endpoint).read_bytes()).hexdigest()
@@ -871,7 +980,10 @@ endpoints = {
     "autotune-artifacts.json": "v1_catalog-artifacts",
 }
 
-def row(release_id, generated_at, key_id):
+def row(release_id, generated_at, key_id, native):
+    names = dict(endpoints)
+    if native:
+        names["native-mtp-admission.json"] = "v1_native-mtp-admission"
     return {
         "generated_at": generated_at,
         "policy_version": "autotune-policy-v1",
@@ -882,11 +994,24 @@ def row(release_id, generated_at, key_id):
                 "signer_key_id": key_id,
                 "version": release_id,
             }
-            for name, endpoint in endpoints.items()
+            for name, endpoint in names.items()
         },
     }
 
-baked_row = row("fixture-release", "2026-07-30T12:00:00Z", signer)
+baked_row = row("fixture-release", "2026-07-30T12:00:00Z", signer, baked_native)
+
+if mode == "sig-only":
+    # Same bodies, re-encoded sidecar bytes: not exact, and the same release id.
+    sidecar = json.loads((live / "v1_demand-rank.sig").read_text(encoding="utf-8"))
+    (live / "v1_demand-rank.sig").write_text(json.dumps(sidecar, indent=1) + "\n", encoding="utf-8")
+    releases = {"fixture-release": baked_row}
+    dump(catalog / "release-ledger.json", {
+        "schema_version": "macprovider.autotune-release-ledger.v4",
+        "releases": releases,
+        "tombstones": {},
+    })
+    shutil.copyfile(directory / "trusted-keys.json", catalog / "trusted-keys.json")
+    raise SystemExit(0)
 
 if mode == "wrong-signer":
     # A second, concurrently trusted key signs the descendant. The release
@@ -905,15 +1030,20 @@ if mode == "wrong-signer":
         (directory / "trusted-keys.json").read_bytes()
     ).hexdigest()
     dump(directory / "pearl-release.json", metadata)
+    shutil.copyfile(directory / "trusted-keys.json", directory / "baked" / "trusted-keys.json")
     signer = "streamvc-autotune-static-v5"
 
-new_id = "fixture-release-2"
+new_id = "fixture-release" if mode == "same-id" else "fixture-release-2"
 new_generated_at = "2026-07-30T12:01:00Z"
 for endpoint in ("v1_autotune-candidates", "v1_demand-rank", "v1_rate-card"):
     value = json.loads((live / endpoint).read_text(encoding="utf-8"))
     value["generated_at"] = new_generated_at
     if endpoint != "v1_rate-card":
         value["version"] = new_id
+    if endpoint == "v1_demand-rank" and mode == "schema-drift":
+        value["schema_version"] = "macprovider.demand-rank.v2"
+    if endpoint == "v1_demand-rank" and mode == "field-drift":
+        value["new_top_level_field"] = 1
     dump(live / endpoint, value)
 candidate_sha = digest("v1_autotune-candidates")
 for endpoint in ("v1_continuous-batching-policy", "v1_catalog-artifacts"):
@@ -927,27 +1057,51 @@ for endpoint in ("v1_continuous-batching-policy", "v1_catalog-artifacts"):
         value["signer_key_id"] = signer
     dump(live / endpoint, value)
 for endpoint in endpoints.values():
-    signature = subprocess.check_output(
-        ["openssl", "pkeyutl", "-sign", "-inkey", str(key_path), "-rawin", "-in", str(live / endpoint)],
-    )
-    dump(live / (endpoint + ".sig"), {
-        "alg": "ed25519",
-        "key_id": signer,
-        "signature": base64.b64encode(signature).decode("ascii"),
-    })
+    sign(key_path, live / endpoint, signer)
 
-live_row = row(new_id, new_generated_at, signer)
+live_native = mode.startswith("native-") or mode in ("baked-native-ok",)
+if live_native:
+    schema = "macprovider.native-mtp-admission.v2" if mode == "native-v2-schema" else "macprovider.native-mtp-admission.v1"
+    write_native(live, key_path, signer, new_id, schema)
+    if mode == "native-release-id":
+        admission = json.loads((live / "v1_native-mtp-admission").read_text(encoding="utf-8"))
+        admission["release_id"] = "fixture-release"
+        dump(live / "v1_native-mtp-admission", admission)
+        sign(key_path, live / "v1_native-mtp-admission", signer)
+    if mode == "native-manifest":
+        (live / "v1_native-mtp-artifact-manifest").write_text('{"artifacts":{},"schema_version":"x"}\n', encoding="utf-8")
+elif mode == "baked-native-dropped-served":
+    write_native(live, key_path, signer, new_id)
+elif baked_native:
+    for endpoint in NATIVE_ENDPOINTS.values():
+        (live / endpoint).unlink()
+if mode == "native-unbound-served":
+    pass
+
+live_row = row(new_id, new_generated_at, signer, live_native and mode != "native-unbound-served")
 if mode == "older-row":
     live_row["generated_at"] = "2026-07-30T11:00:00Z"
+elif mode == "generated-at-drift":
+    live_row["generated_at"] = "2026-07-30T12:02:00Z"
 elif mode == "sha-mismatch":
     live_row["feeds"]["demand-rank.json"]["sha256"] = "0" * 64
+elif mode == "policy-change":
+    live_row["policy_version"] = "autotune-policy-v2"
+elif mode == "empty-policy":
+    live_row["policy_version"] = ""
+    baked_row["policy_version"] = ""
+elif mode == "artifact-flip":
+    del live_row["feeds"]["autotune-artifacts.json"]
 releases = {"fixture-release": baked_row}
-if mode != "not-in-ledger":
+tombstones = {}
+if mode == "tombstoned":
+    tombstones[new_id] = {"status": "permanently_rejected"}
+elif mode != "not-in-ledger" and mode != "same-id":
     releases[new_id] = live_row
 dump(catalog / "release-ledger.json", {
-    "schema_version": "macprovider.autotune-release-ledger.v3",
+    "schema_version": "macprovider.autotune-release-ledger.v4",
     "releases": releases,
-    "tombstones": {},
+    "tombstones": tombstones,
 })
 shutil.copyfile(directory / "trusted-keys.json", catalog / "trusted-keys.json")
 if mode == "keyring-changed":
@@ -965,19 +1119,17 @@ printf '{"schema_version":"macprovider.autotune-release-ledger.v3","releases":{}
   > "$work/exact-with-ledger/catalog/release-ledger.json"
 DESCENDANT_CATALOG_DIR="$work/exact-with-ledger/catalog" run_guard "$work/exact-with-ledger" \
   | grep -q 'catalog_mode=exact$'
-run_guard "$work/ok" | grep -q 'catalog_mode=exact$'
+run_guard "$work/ok" | grep -q 'native_mtp=absent catalog_mode=exact$'
 
-make_descendant "$work/descendant-ok"
-DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard "$work/descendant-ok" \
-  | grep -q 'catalog_mode=descendant fixture-release-2 of fixture-release$'
-DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard_phase "$work/descendant-ok" pre-publication 1.8.68 \
-  | grep -q 'publication_phase=pre-publication artifact_feed=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
-# Without the reviewed ledger the gate stays exact-only.
-if run_guard "$work/descendant-ok" >"$work/descendant-no-ledger.out" 2>&1; then
-  fail "accepted a non-identical live catalog without a reviewed release ledger"
-fi
-grep -q 'live coordinator /v1/autotune-candidates sha256 .* does not match release metadata' "$work/descendant-no-ledger.out"
-
+expect_descendant_pass() {
+  local mode="$1"
+  local pattern="$2"
+  make_descendant "$work/descendant-$mode" "$mode"
+  DESCENDANT_CATALOG_DIR="$work/descendant-$mode/catalog" run_guard "$work/descendant-$mode" \
+    >"$work/descendant-$mode.out" 2>&1 || fail "rejected descendant $mode: $(cat "$work/descendant-$mode.out")"
+  grep -q -- "$pattern" "$work/descendant-$mode.out" \
+    || fail "descendant $mode passed with unexpected output: $(cat "$work/descendant-$mode.out")"
+}
 expect_descendant_failure() {
   local mode="$1"
   local pattern="$2"
@@ -986,16 +1138,61 @@ expect_descendant_failure() {
     >"$work/descendant-$mode.out" 2>&1; then
     fail "accepted descendant mutation $mode"
   fi
-  grep -q 'not a verified descendant' "$work/descendant-$mode.out" \
-    || fail "descendant mutation $mode failed for the wrong reason: $(cat "$work/descendant-$mode.out")"
   grep -q -- "$pattern" "$work/descendant-$mode.out" \
     || fail "descendant mutation $mode failed for the wrong reason: $(cat "$work/descendant-$mode.out")"
 }
+
+expect_descendant_pass ok 'native_mtp=absent catalog_mode=descendant fixture-release-2 of fixture-release$'
+DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard_phase "$work/descendant-ok" pre-publication 1.8.68 \
+  | grep -q 'publication_phase=pre-publication artifact_feed=bound native_mtp=absent catalog_mode=descendant fixture-release-2 of fixture-release$'
+# Without the reviewed ledger the gate stays exact-only.
+if run_guard "$work/descendant-ok" >"$work/descendant-no-ledger.out" 2>&1; then
+  fail "accepted a non-identical live catalog without a reviewed release ledger"
+fi
+grep -q 'live coordinator /v1/autotune-candidates sha256 .* does not match release metadata' "$work/descendant-no-ledger.out"
+# Descendant mode needs the baked catalog assets to compare decodable shape.
+if python3 "$guard" --tag v1.8.68 --pearl-release-json "$work/descendant-ok/pearl-release.json" \
+  --trusted-keys "$work/descendant-ok/trusted-keys.json" --coordinator-url https://coordinator.fixture.invalid \
+  --coordinator-dir "$work/descendant-ok/live" --now 2026-07-30T12:05:00Z \
+  --descendant-catalog-dir "$work/descendant-ok/catalog" >"$work/descendant-no-baked.out" 2>&1; then
+  fail "accepted a descendant without the baked catalog assets"
+fi
+grep -q 'descendant mode requires --baked-catalog-dir' "$work/descendant-no-baked.out"
+cp "$work/descendant-ok/live/v1_demand-rank" "$work/descendant-ok/baked/demand-rank.json"
+if DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard "$work/descendant-ok" >"$work/descendant-baked-tamper.out" 2>&1; then
+  fail "accepted baked catalog assets that are not the release-bound bytes"
+fi
+grep -q 'baked catalog asset demand-rank.json does not match the release metadata digest' "$work/descendant-baked-tamper.out"
+
 expect_descendant_failure not-in-ledger "live release 'fixture-release-2' is not in the release ledger"
+expect_descendant_failure tombstoned "live release 'fixture-release-2' is tombstoned in the release ledger"
 expect_descendant_failure older-row "live release 'fixture-release-2' is not after baked release 'fixture-release'"
+expect_descendant_failure generated-at-drift "generated_at '2026-07-30T12:01:00Z' does not match release ledger row 'fixture-release-2'"
 expect_descendant_failure sha-mismatch "demand-rank.json sha256 .* does not match release ledger row 'fixture-release-2'"
 expect_descendant_failure wrong-signer "is not the baked release candidate signer 'streamvc-autotune-static-v4'"
 expect_descendant_failure keyring-changed "reviewed trusted-keys.json differs from the release trusted-keys.json"
+expect_descendant_failure policy-change "changes policy_version from baked release 'fixture-release'"
+expect_descendant_failure empty-policy "release ledger row .* has no policy_version"
+expect_descendant_failure artifact-flip "feed set differs from baked release 'fixture-release': \['autotune-artifacts.json'\]"
+expect_descendant_failure same-id "live release 'fixture-release' has the baked release_id but different bytes"
+expect_descendant_failure sig-only "live release 'fixture-release' has the baked release_id but different bytes"
+expect_descendant_failure schema-drift "live demand-rank.json top-level fields \['schema_version'\] differ from the baked catalog"
+expect_descendant_failure field-drift "live demand-rank.json top-level fields \['new_top_level_field'\] differ from the baked catalog"
+
+# Native-MTP in descendant mode: bound by the LIVE ledger row.
+expect_descendant_failure native-added "native-MTP admission the baked catalog does not; --baked-cli-native-mtp-admission-schema is required"
+NATIVE_SCHEMA=none expect_descendant_pass native-added 'native_mtp=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
+NATIVE_SCHEMA=macprovider.native-mtp-admission.v1 expect_descendant_pass native-added 'native_mtp=bound catalog_mode=descendant'
+NATIVE_SCHEMA=macprovider.native-mtp-admission.v1 expect_descendant_failure native-v2-schema \
+  "native-mtp-admission.json schema_version 'macprovider.native-mtp-admission.v2' is not the baked CLI's decoder"
+NATIVE_SCHEMA=none expect_descendant_failure native-release-id \
+  "native-mtp-admission.json release_id 'fixture-release' does not match the served release 'fixture-release-2'"
+NATIVE_SCHEMA=none expect_descendant_failure native-manifest \
+  "artifact_manifest_sha256 does not match the served native-mtp-artifact-manifest.json"
+expect_descendant_failure native-unbound-served "serves /v1/native-mtp-admission but the release binds no native-MTP admission"
+expect_descendant_pass baked-native-ok 'native_mtp=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
+expect_descendant_pass baked-native-dropped 'native_mtp=absent catalog_mode=descendant'
+expect_descendant_failure baked-native-dropped-served "serves /v1/native-mtp-admission but the release binds no native-MTP admission"
 
 python3 - "$workflow" "$promotion_workflow" "$rollout_workflow" <<'PY'
 import pathlib
@@ -1168,11 +1365,17 @@ require_rollout(sys.argv[3])
 
 # The descendant authority is the release ledger at the pinned reviewed main
 # commit, never a working-tree or coordinator-supplied copy.
-for path, pinned, calls in (
-    (sys.argv[2], 'git show "$BOUND_EXCEPTION_SHA:phase3-binary/catalog/autotune/$name"', 1),
-    (sys.argv[3], 'git show "$GITHUB_SHA:phase3-binary/catalog/autotune/$name"', 2),
+for path, pinned, calls, baked, source_sha in (
+    (sys.argv[2], 'git show "$BOUND_EXCEPTION_SHA:phase3-binary/catalog/autotune/$name"', 1, '"$accepted"', "$CANDIDATE_SHA"),
+    (sys.argv[3], 'git show "$GITHUB_SHA:phase3-binary/catalog/autotune/$name"', 2, '"$assets"', "$target_commit"),
 ):
     text = pathlib.Path(path).read_text(encoding="utf-8")
+    if text.count(f"--baked-catalog-dir {baked}") != calls:
+        raise SystemExit(f"{path} must pass the release's own catalog assets to every live gate call")
+    if text.count('--baked-cli-native-mtp-admission-schema "$baked_native_schema"') != calls:
+        raise SystemExit(f"{path} must pass the released CLI's native-MTP decoder to every live gate call")
+    if f'git show "{source_sha}:$native_source"' not in text:
+        raise SystemExit(f"{path} must read the native-MTP decoder from the released commit")
     if pinned not in text:
         raise SystemExit(f"{path} must read the reviewed catalog from the pinned main commit")
     if text.count('--descendant-catalog-dir "$reviewed_catalog"') != calls:

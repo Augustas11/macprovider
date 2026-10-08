@@ -477,6 +477,18 @@ jobs:
           for name in release-ledger.json trusted-keys.json; do
             git show "$BOUND_EXCEPTION_SHA:phase3-binary/catalog/autotune/$name" > "$reviewed_catalog/$name"
           done
+          # The released CLI decodes native-MTP admission only if its source
+          # at the accepted commit carries the decoder; "none" = it ignores it.
+          native_source="phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift"
+          git cat-file -e "$CANDIDATE_SHA^{commit}"
+          if git cat-file -e "$CANDIDATE_SHA:$native_source" 2>/dev/null; then
+            baked_native_schema="$(git show "$CANDIDATE_SHA:$native_source" \
+              | sed -n 's/.*static let schemaVersion = "\(macprovider\.native-mtp-admission\.v[0-9]*\)".*/\1/p' \
+              | sort -u)"
+            [[ "$baked_native_schema" =~ ^macprovider\.native-mtp-admission\.v[0-9]+$ ]]
+          else
+            baked_native_schema=none
+          fi
           policy_file="$RUNNER_TEMP/release-staged-policy.env"
           bash scripts/release-staged-version-policy.sh "$TAG" > "$policy_file"
           source "$policy_file"
@@ -492,6 +504,8 @@ jobs:
             --openssl "$OPENSSL_BIN" \
             "${prepublication_recommendation_args[@]}" \
             --descendant-catalog-dir "$reviewed_catalog" \
+            --baked-catalog-dir "$accepted" \
+            --baked-cli-native-mtp-admission-schema "$baked_native_schema" \
             --publication-phase pre-publication
           echo "::endgroup::"
           # Repository rules and the production-release environment serialize

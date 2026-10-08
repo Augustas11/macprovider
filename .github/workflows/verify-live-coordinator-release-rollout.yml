@@ -125,6 +125,11 @@ jobs:
             --pattern compatibility-artifact-index.json \
             --pattern macprovider-release-discovery.json \
             --pattern macprovider-release-discovery.json.sig \
+            --pattern 'autotune-*.json*' \
+            --pattern 'demand-rank.json*' \
+            --pattern 'rate-card.json*' \
+            --pattern 'continuous-batching-policy.json*' \
+            --pattern 'native-mtp-*' \
             --dir "$assets" \
             --clobber
           test -s "$assets/pearl-release.json"
@@ -139,6 +144,18 @@ jobs:
           for name in release-ledger.json trusted-keys.json; do
             git show "$GITHUB_SHA:phase3-binary/catalog/autotune/$name" > "$reviewed_catalog/$name"
           done
+          # The released CLI decodes native-MTP admission only if its source
+          # at the release commit carries the decoder; "none" = it ignores it.
+          native_source="phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift"
+          git cat-file -e "$target_commit^{commit}"
+          if git cat-file -e "$target_commit:$native_source" 2>/dev/null; then
+            baked_native_schema="$(git show "$target_commit:$native_source" \
+              | sed -n 's/.*static let schemaVersion = "\(macprovider\.native-mtp-admission\.v[0-9]*\)".*/\1/p' \
+              | sort -u)"
+            [[ "$baked_native_schema" =~ ^macprovider\.native-mtp-admission\.v[0-9]+$ ]]
+          else
+            baked_native_schema=none
+          fi
           # Pearl recommendation deployment is the serialized external step;
           # this exact post-publication gate proves it is now live before the
           # release becomes discoverable through the append-only transport.
@@ -150,6 +167,8 @@ jobs:
             --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             --descendant-catalog-dir "$reviewed_catalog" \
+            --baked-catalog-dir "$assets" \
+            --baked-cli-native-mtp-admission-schema "$baked_native_schema" \
             --publication-phase post-publication
           transport_tag="$(python3 - "$assets/macprovider-release-discovery.json" <<'PY'
           import json
@@ -222,6 +241,8 @@ jobs:
             --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             --descendant-catalog-dir "$reviewed_catalog" \
+            --baked-catalog-dir "$assets" \
+            --baked-cli-native-mtp-admission-schema "$baked_native_schema" \
             --publication-phase post-publication
           transport_release_json="$RUNNER_TEMP/discovery-immutable.json"
           if [ "$transport_exists" = false ]; then
