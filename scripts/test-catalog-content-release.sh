@@ -983,14 +983,21 @@ def ident(rel_dir):
     r = json.load(open(os.path.join(rel_dir, "release.json")))
     return r["release_id"], r["feeds"]["autotune-candidates.json"]["sha256"].lower()
 admitted = [dict(zip(("release_id", "candidates_sha256"), ident(d)), source="current")]
+previous_loaded = [dict(zip(("release_id", "candidates_sha256"), ident(os.path.join(sroot, p)))) for p in prev]
 for p in prev:
     rid, sha = ident(os.path.join(sroot, p))
     if all(a["candidates_sha256"] != sha for a in admitted):
         admitted.append({"release_id": rid, "candidates_sha256": sha, "source": "retained"})
+if os.path.exists(os.path.join(ctl, "dryload-omit-retained")):
+    previous_loaded = previous_loaded[:-1]
+if os.path.exists(os.path.join(ctl, "dryload-extra-restamp")):
+    restamp = {"release_id": previous_loaded[0]["release_id"], "candidates_sha256": "f" * 64}
+    previous_loaded.append(restamp)
+    admitted.append(dict(restamp, source="restamp"))
 print(json.dumps({"ok": not bad, "release_id": m["release_id"], "candidates_sha256": m["feeds"]["autotune-candidates.json"]["sha256"],
                   "tier2_catalog_id": json.loads(t2)["catalog_id"], "tier2_sha256": hashlib.sha256(t2).hexdigest(),
                   "config_sha256": config_sha, "overlay_sha256": overlay_sha,
-                  "previous_loaded": [{"release_id": p} for p in prev], "admitted": [] if bad else admitted,
+                  "previous_loaded": previous_loaded, "admitted": [] if bad else admitted,
                   "rate_table_sha256": stubparity.rate_table_sha(cand_rows), "signed_rate_card_sha256": hashlib.sha256(open(os.path.join(d, "rate-card.json"), "rb").read()).hexdigest(),
                   "model_resolutions": resolutions,
                   "errors": (errors or ["tier2: stub reject"]) if bad else [], "notes": []}))
@@ -1076,6 +1083,12 @@ setup_env; printf 'pricing\n' >"$CCR_TEST_CTL/lane"; expect_no_go "wrong lane" c
 setup_env; touch "$CCR_TEST_CTL/closure-fail"; expect_no_go "closure miss" content_gate
 grep -q 'serving closure' "$T/out" || fail "a closure miss must be reported by content_gate: $(cat "$T/out")"
 setup_env; touch "$CCR_TEST_CTL/dryload-fail"; expect_no_go "dry-load failure" coordinator_dry_load
+setup_env; touch "$CCR_TEST_CTL/dryload-extra-restamp"
+run preflight
+[ "$RC" -eq 0 ] && [ "$(verdict_check coordinator_dry_load)" = true ] ||
+  fail "an authenticated compatible restamp after the retained window must be accepted (rc=$RC): $(cat "$T/out")"
+note "ok: dry-load accepts an authenticated compatible suffix after the retained window"
+setup_env; touch "$CCR_TEST_CTL/dryload-omit-retained"; expect_no_go "dry-load missing retained entry" coordinator_dry_load
 setup_env
 printf '[{"provider_id":"p9","catalog_release_id":"ghost-release","catalog_candidate_sha256":"%s","hash_status":"hash_verified"}]\n' \
   "$(printf 'ee%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
