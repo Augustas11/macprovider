@@ -29,6 +29,38 @@ import (
 
 // newEnrollmentFixture is the SPEC-049-R025 fixture: no operator pins, so
 // the provider can only be verified through its claim and then enrollment.
+func TestPrivacyEligibilityReasonPreservesTheFailClosedGate(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		mutate       func(*testing.T, *privacyFixture)
+	}{
+		{"eligible", "", func(t *testing.T, f *privacyFixture) {}},
+		{"stale", "posture_expired", func(t *testing.T, f *privacyFixture) { f.now = f.now.Add(time.Duration(f.auth.maxAge+1) * time.Second) }},
+		{"disabled", "kill_switch_disabled", func(t *testing.T, f *privacyFixture) {
+			if err := f.store.SetPrivacyDisabled(context.Background(), true, "test", f.now); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing digest", "key_not_in_posture", func(t *testing.T, f *privacyFixture) { f.record.KeyRecord.KeyRecordDigest = "not-listed" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEnrollmentFixture(t, nil)
+			if err := f.acceptClaim(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.posture(0); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(t, f)
+			at, reason := f.auth.EligibilityReason(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now)
+			legacyAt, eligible := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now)
+			if reason != tc.reason || eligible != (reason == "") || !at.Equal(legacyAt) {
+				t.Fatalf("reason=%q eligible=%t expected reason=%q", reason, eligible, tc.reason)
+			}
+		})
+	}
+}
+
 func newEnrollmentFixture(t *testing.T, mutate func(*config.PrivacyClassConfig)) *privacyFixture {
 	t.Helper()
 	var captured config.PrivacyClassConfig
