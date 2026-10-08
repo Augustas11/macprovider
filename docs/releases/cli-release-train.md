@@ -59,16 +59,19 @@ train.
 ## Next CLI candidate — net changes vs 1.8.207
 
 Privacy automatic enrollment [#1871](https://github.com/Augustas11/macprovider/pull/1871)
-remains an open draft as of 2026-10-07, at source commit
-`28b917af6c10ebd7a945174808e43c51b71730aa`. Exact-head
-[CI](https://github.com/Augustas11/macprovider/actions/runs/37587669957) and
-[spec-index](https://github.com/Augustas11/macprovider/actions/runs/37587670019)
-passed, and the source-built CLI release build passed on the designated Studio.
+remains an open draft as of 2026-10-08, at integrated source commit
+`60d97dacf51047e10100622eeba1a093d76b63da`, based on current CLI-223-era
+`main` commit `3afca62b45fc5df6443f352e34358d1352111640`. Exact-head
+[CI](https://github.com/Augustas11/macprovider/actions/runs/37711353541) is still
+running; [spec-index](https://github.com/Augustas11/macprovider/actions/runs/37711353502)
+passed. The source-built CLI release build and isolated coordinator, operator
+CLI, gateway, and relay-blind client builds passed on the designated Studio.
 Positive privacy E2E acceptance and the final full-product freeze audit remain
 pending; these build/check results are not signed-package or fleet acceptance.
 The PR is not merged, is not included in a candidate cut from `main`, and is not
 ready for a candidate cut or fleet activation. No candidate identity is reserved
-by this entry.
+by this entry. Published CLI 1.8.223 does not contain this unmerged enrollment
+change; updating to 223 alone does not activate network-wide privacy.
 
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
