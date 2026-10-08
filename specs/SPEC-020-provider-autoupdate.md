@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.20
+Version: v0.1.21
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -8,6 +8,13 @@ autoupdate to CLI 1.8.21. Trust-table drift remains resolved as documented in
 v0.1.5. v0.1.6 added the complete-payload, shared-mutation-ownership, and
 then-required coordinator-authoritative buyer-serving commit gates from Entry
 133; v0.1.8 supersedes only that commit-authority choice.
+v0.1.21 corrects the credential-custody/topology conflation: a valid install
+manifest positively declaring `consumer_user` and the GUI launchd domain may
+retain `protected_file` custody and use the existing consumer updater, only
+after every managed system-domain artifact/service is proven absent. Missing,
+invalid or ambiguous manifest/topology with protected-file custody still fails
+closed to the headless handoff. No system-domain updater, credential migration,
+rollback authority or recovery-safety relaxation is added.
 v0.1.7 (runbook item 23) closes the tokenless race-loser residual: the
 coordinator propagates its `auth_state` admission verdict on the accept ack so
 the bearerless-duplicate notify-only row is client-enforceable.
@@ -110,7 +117,8 @@ selected `consumer_user` profile owner. A provider installed as
 `headless_fleet` MUST NOT be updated by the v0.1.12 consumer LaunchAgent
 autoupdate path, because that path cannot safely prove or recover a system-domain
 service. When the consumer autoupdate path recognizes such a provider (v0.1.16:
-`protected_file` credential custody, an install manifest declaring the
+`protected_file` credential custody without a positively validated
+`consumer_user` / GUI install manifest, an install manifest declaring the
 `headless_fleet` profile or `system` launchd domain, or a managed system-domain
 provider LaunchDaemon present on disk / loaded / in an indeterminate launchd
 state — full parity with the mutating-update gate), it MUST report the
@@ -118,7 +126,10 @@ actionable, terminal skip `reason:"headless_operator_update_required"` with
 `outcome:"skipped"`, directing the operator to the separately specified signed
 installer acceptance flow. This skip is NOT a forward-progress failure for
 SPEC-020-R005 accounting (see R-4.13).
-A proven consumer-user topology continues on the normal path; an invalid or
+A proven consumer-user topology continues on the normal path, including
+protected-file custody when the manifest explicitly declares `consumer_user`
+and the GUI domain and all managed system artifacts/services are absent.
+Credential custody alone does not authorize consumer mutation. An invalid or
 indeterminate topology fails closed to the headless handoff (R-4.13), while a
 topology that is unrecognized and non-headless MUST still fail closed as
 `unsupported_install_topology`. A user-domain helper MUST NOT bootout,
@@ -950,7 +961,8 @@ forward-progress failure, and R005 accepted-session re-observation MUST NOT coun
 such a provider as stuck (it never accrues toward the recovery threshold).
 Recognition MUST use the same authorities as the mutating-update gate
 (`MacProviderCLI.validateHeadlessUpdateMode`): `protected_file` credential
-custody; an install manifest declaring the `headless_fleet` profile or `system`
+custody without a valid manifest positively declaring `consumer_user` and the
+GUI launchd domain; an install manifest declaring the `headless_fleet` profile or `system`
 launchd domain; or a managed system-domain provider LaunchDaemon that is present
 on disk, loaded in launchd, or in an indeterminate launchd state. An invalid or
 indeterminate topology MUST fail closed to the headless handoff rather than the

@@ -132,6 +132,62 @@ final class SelfUpdateTests: XCTestCase {
         ))
     }
 
+    func testProtectedFileConsumerGuiManifestRequiresSystemAbsenceProof() throws {
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.credentialStore = .protectedFile
+        let guiDomain = "gui/\(getuid())"
+        let consumerManifest = updateTestManifest(
+            installProfile: "consumer_user",
+            launchdDomain: guiDomain
+        )
+
+        XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(consumerManifest) },
+            fileExists: { _ in false },
+            runLaunchctl: { _ in 113 }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(consumerManifest) },
+            fileExists: { $0.hasSuffix("live.malibu.provider.plist") },
+            runLaunchctl: { _ in 113 }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(updateTestManifest(installProfile: "consumer_user", launchdDomain: "gui")) },
+            fileExists: { _ in false },
+            runLaunchctl: { _ in 113 }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(updateTestManifest(installProfile: "consumer_user", launchdDomain: "gui/\(getuid() + 1)")) },
+            fileExists: { _ in false },
+            runLaunchctl: { _ in 113 }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .missing },
+            fileExists: { _ in false },
+            runLaunchctl: { _ in 113 }
+        ))
+    }
+
     func testReleaseAPIURLRejectsUntrustedExplicitOverrideBeforeFetching() async throws {
         let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: "http://attacker.invalid/releases")
 
