@@ -286,7 +286,8 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     static func loadOrCreate(
         accessGroup: String? = nil,
         label: String? = nil,
-        quiet: Bool = false
+        quiet: Bool = false,
+        fileBackedURL: URL? = nil
     ) throws -> SecureEnclaveIdentity {
         guard isAvailable else {
             throw SecureEnclaveIdentityError.secureEnclaveUnavailable
@@ -310,17 +311,17 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
                 return created
             }
         } catch SecureEnclaveIdentityError.missingEntitlement where group == nil {
-            let fileBacked = try loadOrCreateFileBacked()
+            let fileBacked = try loadOrCreateFileBacked(url: fileBackedURL)
             announce(fileBacked)
             return fileBacked
         }
     }
 
-    internal static func loadOrCreateFileBacked() throws -> SecureEnclaveIdentity {
+    internal static func loadOrCreateFileBacked(url scopedURL: URL? = nil) throws -> SecureEnclaveIdentity {
         guard isAvailable else {
             throw SecureEnclaveIdentityError.secureEnclaveUnavailable
         }
-        let url = SEAttestationFileStore.resolvedURL
+        let url = scopedURL ?? SEAttestationFileStore.resolvedURL
         if FileManager.default.fileExists(atPath: url.path) {
             return try loadFileBacked(url: url)
         }

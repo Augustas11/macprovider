@@ -34,6 +34,7 @@ import ipaddress
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,16 @@ from check_spec_governance import (
     DuplicateJSONKeyError,
     JOURNEY_RESULT_PAYLOAD_SCHEMA,
     _unique_json_object,
+    verify_pinned_public_ecdsa_sha256,
 )
 
 
 JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA"
 JOURNEY_PATH = "journeys/JOURNEY-PRIVACY-CLASS-BETA.md"
+JOURNEY_ID_V2 = "JOURNEY-PRIVACY-CLASS-BETA-V2"
+JOURNEY_PATH_V2 = "journeys/JOURNEY-PRIVACY-CLASS-BETA-V2.md"
 EVIDENCE_SCHEMA = "macprovider.privacy-class-beta-evidence.v1"
+EVIDENCE_SCHEMA_V2 = "macprovider.privacy-class-beta-evidence.v2"
 EXECUTION_MODE = "provider-privacy-class-beta"
 EVIDENCE_PREFIX = "journeys/evidence/privacy-class-beta-"
 EVIDENCE_SUFFIX = ".redacted.json"
@@ -97,6 +102,15 @@ STEP_ID_ORDER = (
     "step-16-redaction-review",
 )
 
+STEP_ID_ORDER_V2 = (
+    *STEP_ID_ORDER,
+    "step-17-auto-mode-eligibility",
+    "step-18-auto-enrollment-distinct-identities",
+    "step-19-key-change-quarantine-reenroll",
+    "step-20-release-derived-approval",
+    "step-21-operator-signed-directory",
+)
+
 # The run kit records each contract step in a directory of the same name. Its
 # extra preflight directories hold inputs of a contract step: 00b/00c/01b are
 # the signed-candidate verification, install, and isolated-stack binding that
@@ -111,6 +125,16 @@ KIT_STEP_IDS = (
     *STEP_ID_ORDER[1:15],
     "step-99-live-provider-untouched",
     "step-16-redaction-review",
+)
+
+KIT_STEP_IDS_V2 = (
+    *KIT_STEP_IDS[:-1],
+    "step-17-auto-mode-eligibility",
+    "step-18-auto-enrollment-distinct-identities",
+    "step-19-key-change-quarantine-reenroll",
+    "step-20-release-derived-approval",
+    "step-21-operator-signed-directory",
+    KIT_STEP_IDS[-1],
 )
 
 # The one bundle file each step's `artifact_sha256` names.
@@ -131,6 +155,11 @@ STEP_PRIMARY_ARTIFACTS = {
     "step-14-no-capability-provider-excluded": "step-14-no-capability-provider-excluded/excluded.json",
     "step-15-tampered-receipt-quarantined": "step-15-tampered-receipt-quarantined/quarantined.json",
     "step-16-redaction-review": "step-16-redaction-review/evidence-sweep.json",
+    "step-17-auto-mode-eligibility": "primary/v2/auto-mode.json",
+    "step-18-auto-enrollment-distinct-identities": "primary/v2/enrollment.json",
+    "step-19-key-change-quarantine-reenroll": "primary/v2/reenroll.json",
+    "step-20-release-derived-approval": "primary/v2/release-derived-approval.json",
+    "step-21-operator-signed-directory": "primary/v2/directory.json",
 }
 
 STEP_ASSERTIONS = {
@@ -150,6 +179,11 @@ STEP_ASSERTIONS = {
     "step-14-no-capability-provider-excluded": "provider without relay_blind_settlement_receipt_v1 never reserved; typed unavailable before quota",
     "step-15-tampered-receipt-quarantined": "withheld, tampered, and v0.4 receipts closed quarantined with zero payable credit and buyer refund",
     "step-16-redaction-review": "redacted bundle reviewed; automated secret sweep clean; no private path remains",
+    "step-17-auto-mode-eligibility": "automatic mode enters privacy only on an eligible signed host, falls back safely, and honors explicit opt-out",
+    "step-18-auto-enrollment-distinct-identities": "first verified posture enrolls one provider identity and rejects cross-provider key reuse",
+    "step-19-key-change-quarantine-reenroll": "key changes quarantine without replacing enrollment; operator reenroll revokes old state and admits new keys",
+    "step-20-release-derived-approval": "signed release metadata approves the tested code identity and withdrawal or denial removes eligibility",
+    "step-21-operator-signed-directory": "operator-signed identity directory verifies signatures, expiry, revocation, and v0.2 residual disclosures",
 }
 
 TRUE_OBSERVATIONS = (
@@ -192,6 +226,75 @@ FALSE_OBSERVATIONS = (
     "secret_or_canary_persisted",
 )
 
+TRUE_OBSERVATIONS_V2_EXTENSION = (
+    "auto_mode_eligible_host_enters_privacy_verified",
+    "auto_mode_ineligible_host_falls_back_without_privacy_records_verified",
+    "explicit_optout_disables_privacy_class_verified",
+    "auto_enrollment_binds_distinct_provider_identities_verified",
+    "cross_provider_key_reuse_refused_verified",
+    "enrollment_key_change_quarantines_and_revokes_records_verified",
+    "operator_reenroll_revokes_old_enrollment_and_admits_new_keys_verified",
+    "release_metadata_approves_tested_code_identity_verified",
+    "release_identity_withdrawal_or_denial_removes_eligibility_verified",
+    "identity_directory_signature_expiry_and_revocation_verified",
+    "expanded_v2_residual_disclosures_exact_verified",
+)
+FALSE_OBSERVATIONS_V2_EXTENSION = (
+    "automatic_mode_advertised_privacy_records_when_ineligible",
+    "enrollment_replaced_by_key_change_without_operator_reenroll",
+    "denied_release_identity_remained_eligible",
+    "unsigned_expired_or_revoked_directory_accepted",
+    "v2_residual_disclosure_omitted",
+)
+
+
+@dataclass(frozen=True)
+class EvidenceProfile:
+    schema: str
+    journey_id: str
+    journey_path: str
+    step_ids: tuple[str, ...]
+    kit_step_ids: tuple[str, ...]
+    true_observations: tuple[str, ...]
+    false_observations: tuple[str, ...]
+    excluded_requirement_ids: frozenset[str]
+    artifact_id: str
+    manifest_artifact_id: str
+    operator_fingerprint_domain: str
+    summary: str
+
+
+PROFILE_V1 = EvidenceProfile(
+    schema=EVIDENCE_SCHEMA,
+    journey_id=JOURNEY_ID,
+    journey_path=JOURNEY_PATH,
+    step_ids=STEP_ID_ORDER,
+    kit_step_ids=KIT_STEP_IDS,
+    true_observations=TRUE_OBSERVATIONS,
+    false_observations=FALSE_OBSERVATIONS,
+    excluded_requirement_ids=EXCLUDED_REQUIREMENT_IDS,
+    artifact_id=ARTIFACT_ID,
+    manifest_artifact_id=MANIFEST_ARTIFACT_ID,
+    operator_fingerprint_domain="macprovider.privacy-class-beta.operator.v1",
+    summary="signed notarized release passed every JOURNEY-PRIVACY-CLASS-BETA step on Apple Silicon",
+)
+PROFILE_V2 = EvidenceProfile(
+    schema=EVIDENCE_SCHEMA_V2,
+    journey_id=JOURNEY_ID_V2,
+    journey_path=JOURNEY_PATH_V2,
+    step_ids=STEP_ID_ORDER_V2,
+    kit_step_ids=KIT_STEP_IDS_V2,
+    true_observations=(*TRUE_OBSERVATIONS, *TRUE_OBSERVATIONS_V2_EXTENSION),
+    false_observations=(*FALSE_OBSERVATIONS, *FALSE_OBSERVATIONS_V2_EXTENSION),
+    excluded_requirement_ids=frozenset({"SPEC-049-R023"}),
+    artifact_id="redacted-privacy-class-beta-v2",
+    manifest_artifact_id="privacy-class-beta-v2-redaction-manifest",
+    operator_fingerprint_domain="macprovider.privacy-class-beta.operator.v2",
+    summary="signed notarized v0.2 release passed the full privacy-class beta v2 journey on Apple Silicon",
+)
+PROFILES_BY_SCHEMA = {profile.schema: profile for profile in (PROFILE_V1, PROFILE_V2)}
+PROFILES_BY_JOURNEY = {profile.journey_id: profile for profile in (PROFILE_V1, PROFILE_V2)}
+
 # SPEC-049-R020 exact strings.
 PRIVACY_CLASS = "operator_constrained_beta_v1"
 PRIVACY_ASSURANCE = "device_bound_self_attested_beta"
@@ -212,6 +315,11 @@ PRIVACY_RESIDUAL_RISKS = (
     "secure_boot_level_not_evaluated",
     "immutable_prompt_strings_not_zeroized",
     "relays_observe_sizes_timing_and_token_counts",
+)
+PRIVACY_RESIDUAL_RISKS_V2 = (
+    *PRIVACY_RESIDUAL_RISKS,
+    "provider_identity_enrolled_on_first_attested_session",
+    "coordinator_operator_signs_provider_identity_directory",
 )
 SETTLEMENT_DISCLOSURE = (
     "verified_model_settlement: unavailable_for_relay_blind_request\n"
@@ -464,11 +572,22 @@ def load_bundle(root: Path, relative_dir: str) -> Bundle:
 
 
 def assert_bundle_redacted(bundle: Bundle) -> None:
+    public_binary_signatures = {
+        "primary/v2/sources/release_signature.sig",
+        "primary/v2/sources/release_invalid_signature.sig",
+    }
     for path, data in sorted(bundle.files.items()):
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            fail(f"reviewed bundle file {path} is not UTF-8")
+            if path in public_binary_signatures and 1 <= len(data) <= 512:
+                # Exact ECDSA signature bytes are public cryptographic evidence,
+                # not operator material. Still run the textual secret/path
+                # patterns over replacement-decoded bytes; every other reviewed
+                # artifact remains strictly UTF-8.
+                text = data.decode("utf-8", errors="replace")
+            else:
+                fail(f"reviewed bundle file {path} is not UTF-8")
         for label, pattern in BUNDLE_FORBIDDEN_PATTERNS:
             if pattern.search(text):
                 fail(f"reviewed bundle file {path} contains {label}")
@@ -503,14 +622,21 @@ def expect(condition: bool, errors: list[str], message: str) -> None:
         errors.append(message)
 
 
-def privacy_disclosure(fingerprint: str) -> str:
+def step06_loopback_listener(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    match = re.fullmatch(r"(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})", value)
+    return match is not None and 1 <= int(match.group(1)) <= 65535 and int(match.group(1)) != 8080
+
+
+def privacy_disclosure(fingerprint: str, residual_risks: tuple[str, ...] = PRIVACY_RESIDUAL_RISKS) -> str:
     block = (
         f"privacy class satisfied; identity fingerprint={fingerprint}\n"
         f"privacy_class: {PRIVACY_CLASS}\n"
         f"assurance: {PRIVACY_ASSURANCE}\n"
         f"scope: {PRIVACY_SCOPE}\n"
     )
-    block += "".join(f"residual_risks: {risk}\n" for risk in PRIVACY_RESIDUAL_RISKS)
+    block += "".join(f"residual_risks: {risk}\n" for risk in residual_risks)
     return block + SETTLEMENT_DISCLOSURE
 
 
@@ -518,6 +644,87 @@ def privacy_disclosure(fingerprint: str) -> str:
 # ---------------------------------------------------------------- primary helpers
 
 PRIMARY_SCHEMA = "macprovider.privacy-class-beta-primary.v1"
+V2_SOURCE_PROFILE = "macprovider.privacy-class-beta-v2-source.v1"
+# SHA-256 of ops/pearl-updater/release-signing-public.pem. A coherent metadata,
+# signature, and attacker-supplied public key tuple is not release approval.
+TRUSTED_RELEASE_SIGNING_PUBLIC_KEY_SHA256 = "fb5b6af6026e74bcf278acbc4f2d2204d9ebf8909d800c420def6b57ec8a06ee"
+V2_SOURCE_CONTRACT = {
+    "auto-mode.json": {
+        "auto_launch": "evidence/v2-raw/auto-mode/launch.json",
+        "auto_config": "evidence/v2-raw/auto-mode/config.json",
+        "auto_sessions": "evidence/v2-raw/auto-mode/sessions.json",
+        "auto_logs": "evidence/v2-raw/auto-mode/logs.json",
+        "auto_db_before": "evidence/v2-raw/auto-mode/db-before.json",
+        "auto_db_after": "evidence/v2-raw/auto-mode/db-after.json",
+    },
+    "enrollment.json": {
+        "enrollment_before": "evidence/v2-raw/enrollment/before.json",
+        "enrollment_after_first": "evidence/v2-raw/enrollment/after-first.json",
+        "enrollment_after_second": "evidence/v2-raw/enrollment/after-second.json",
+        "enrollment_after_reuse": "evidence/v2-raw/enrollment/after-reuse.json",
+        "enrollment_after_failed_posture": "evidence/v2-raw/enrollment/after-failed-posture.json",
+        "enrollment_clients": "evidence/v2-raw/enrollment/clients.json",
+    },
+    "reenroll.json": {
+        "reenroll_initial": "evidence/v2-raw/reenroll/initial.json",
+        "reenroll_key_change": "evidence/v2-raw/reenroll/key-change.json",
+        "reenroll_expiry_retry": "evidence/v2-raw/reenroll/expiry-retry.json",
+        "reenroll_operator_clear": "evidence/v2-raw/reenroll/operator-clear.json",
+        "reenroll_after": "evidence/v2-raw/reenroll/after.json",
+        "reenroll_clients": "evidence/v2-raw/reenroll/clients.json",
+    },
+    "release-derived-approval.json": {
+        "release_metadata": "evidence/v2-raw/release/pearl-release.json",
+        "release_signature": "evidence/v2-raw/release/pearl-release.json.sig",
+        "release_invalid_metadata": "evidence/v2-raw/release/invalid-pearl-release.json",
+        "release_invalid_signature": "evidence/v2-raw/release/invalid-pearl-release.json.sig",
+        "release_public_key": "evidence/v2-raw/release/release-signing-public.pem",
+        "release_file_stats": "evidence/v2-raw/release/file-stats.json",
+        "release_eligibility": "evidence/v2-raw/release/eligibility.json",
+        "release_approved_db": "evidence/v2-raw/release/approved-db.json",
+        "release_denied_db": "evidence/v2-raw/release/denied-db.json",
+        "release_withdrawn_db": "evidence/v2-raw/release/withdrawn-db.json",
+    },
+    "directory.json": {
+        "directory_envelope": "evidence/v2-raw/directory/envelope.json",
+        "directory_public_key": "evidence/v2-raw/directory/public-key.json",
+        "directory_gateway_body": "evidence/v2-raw/directory/gateway-body.json",
+        "directory_gateway_headers": "evidence/v2-raw/directory/gateway-headers.json",
+        "directory_clients": "evidence/v2-raw/directory/clients.json",
+        "directory_store": "evidence/v2-raw/directory/store.json",
+        "directory_disclosure": "evidence/v2-raw/directory/disclosure.json",
+    },
+}
+V2_DB_TABLES = (
+    "privacy_class_enrollment",
+    "relay_blind_key_records",
+    "privacy_class_quarantine",
+    "relay_blind_reservations",
+    "privacy_class_operator_clear",
+)
+V2_DB_COLUMNS = {
+    "privacy_class_enrollment": (
+        "provider_id", "identity_fingerprint", "se_fingerprint", "team_id",
+        "signing_identifier", "code_cdhash", "binary_version",
+        "enrolled_at_unix", "revoked_at_unix", "revoked_reason",
+    ),
+    "relay_blind_key_records": (
+        "provider_id", "kid", "assigned_session", "key_record_digest",
+        "not_before_unix", "expires_at_unix", "accepted_at_unix",
+        "revoked_at_unix", "revocation_retained_until_unix", "key_class",
+    ),
+    "privacy_class_quarantine": (
+        "provider_id", "reason", "quarantined_at_unix", "expires_at_unix",
+    ),
+    "relay_blind_reservations": (
+        "provider_id", "assigned_session", "key_record_digest", "kid", "model",
+        "expires_at_unix", "state", "created_at_unix", "privacy_class",
+        "terminal_code", "terminal_at_unix",
+    ),
+    "privacy_class_operator_clear": (
+        "provider_id", "cleared_at_unix", "clear_generation",
+    ),
+}
 # Facts the 1.8.215 run never recorded. Their observations rest on the
 # indirect evidence named in the predicates; DYLD_* inertness is
 # procedure-attested (the run-version kit line plus the recorded outputs).
@@ -718,11 +925,484 @@ def ed25519_sign(seed: bytes, message: bytes) -> tuple[bytes, bytes]:
     return public, big_r + int.to_bytes(s, 32, "little")
 
 
+class V2RawSourceView:
+    """Verifier-owned v0.2 source-fact projection helpers.
+
+    The capture composer uses this same view to derive primary/v2 manifests
+    from finalized raw captures. `Checks` uses it to recompute and compare
+    those manifests, so the source-to-summary rules live in one place.
+    """
+
+    def __init__(
+        self,
+        source_bytes,
+        binding,
+        trusted_release_public_key_sha256: str = TRUSTED_RELEASE_SIGNING_PUBLIC_KEY_SHA256,
+    ) -> None:
+        self._source_bytes = source_bytes
+        self._binding_loader = binding if callable(binding) else None
+        self._binding = None if callable(binding) else binding
+        self.trusted_release_public_key_sha256 = trusted_release_public_key_sha256
+
+    def source_bytes(self, manifest: str, kind: str) -> bytes:
+        return self._source_bytes(manifest, kind)
+
+    def binding(self) -> dict[str, str]:
+        if self._binding is None:
+            self._binding = self._binding_loader()
+        return self._binding
+
+    def source_json(self, manifest: str, kind: str) -> Any:
+        path = V2_SOURCE_CONTRACT[manifest][kind]
+        try:
+            text = self.source_bytes(manifest, kind).decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{path} must be UTF-8 JSON")
+        return parse_json(text, path)
+
+    def snapshot(self, manifest: str, kind: str) -> tuple[int, dict[str, list[dict[str, Any]]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "tables"}:
+            fail(f"{label} must carry exactly captured_at_unix and tables")
+        captured = doc.get("captured_at_unix")
+        tables = doc.get("tables")
+        if not isinstance(captured, int) or isinstance(captured, bool) or captured <= 0:
+            fail(f"{label}.captured_at_unix must be a positive integer")
+        if not isinstance(tables, dict) or set(tables) != set(V2_DB_TABLES):
+            fail(f"{label}.tables must be the closed v2 table set")
+        result: dict[str, list[dict[str, Any]]] = {}
+        for name in V2_DB_TABLES:
+            export = tables[name]
+            if not isinstance(export, dict) or set(export) != {"table", "columns", "dropped_columns", "row_count", "truncated", "rows"}:
+                fail(f"{label}.{name} must be a complete primary row export")
+            columns, rows = export.get("columns"), export.get("rows")
+            if export.get("table") != name or export.get("truncated") is not False or not isinstance(columns, list) or not all(isinstance(item, str) for item in columns):
+                fail(f"{label}.{name} must identify a complete untruncated table")
+            if tuple(columns) != V2_DB_COLUMNS[name]:
+                fail(f"{label}.{name} columns must be the closed public-state projection {list(V2_DB_COLUMNS[name])}")
+            if not isinstance(export.get("dropped_columns"), list) or not isinstance(rows, list) or export.get("row_count") != len(rows):
+                fail(f"{label}.{name} row metadata is invalid")
+            if not all(isinstance(row, dict) and set(row) == set(columns) for row in rows):
+                fail(f"{label}.{name} rows must exactly match columns")
+            result[name] = rows
+        return captured, result
+
+    def clients(self, manifest: str, kind: str) -> tuple[int, dict[str, dict[str, Any]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "attempts"}:
+            fail(f"{label} must carry exactly captured_at_unix and attempts")
+        captured, attempts = doc.get("captured_at_unix"), doc.get("attempts")
+        if not isinstance(captured, int) or isinstance(captured, bool) or not isinstance(attempts, list):
+            fail(f"{label} has invalid capture types")
+        by_case: dict[str, dict[str, Any]] = {}
+        required = {"case", "status", "provider_id", "response_excerpt"}
+        for attempt in attempts:
+            if not isinstance(attempt, dict) or set(attempt) != required:
+                fail(f"{label} attempt must carry exactly {sorted(required)}")
+            name = attempt.get("case")
+            if not isinstance(name, str) or not name or name in by_case:
+                fail(f"{label} attempt cases must be non-empty and unique")
+            status = attempt.get("status")
+            excerpt = attempt.get("response_excerpt")
+            if not isinstance(status, int) or isinstance(status, bool) or not isinstance(excerpt, dict):
+                fail(f"{label} attempt status/response types are invalid")
+            if attempt.get("provider_id") is not None and not isinstance(attempt.get("provider_id"), str):
+                fail(f"{label} attempt provider_id must be string or null")
+            posture = error_code = None
+            if set(excerpt) == {"usage_macprovider_privacy"}:
+                usage = excerpt["usage_macprovider_privacy"]
+                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int) or isinstance(usage["posture_verified_at_unix"], bool):
+                    fail(f"{label} successful response excerpt must carry the observed posture time")
+                posture = usage["posture_verified_at_unix"]
+            elif set(excerpt) == {"error"}:
+                error = excerpt["error"]
+                if not isinstance(error, dict) or set(error) != {"code"} or not isinstance(error["code"], str):
+                    fail(f"{label} error response excerpt must carry the actual code")
+                error_code = error["code"]
+            else:
+                fail(f"{label} response excerpt must be the closed usage or error shape")
+            if (status == 200) is not (posture is not None):
+                fail(f"{label} HTTP status must agree with the captured response excerpt")
+            by_case[name] = {**attempt, "error_code": error_code, "privacy_posture_verified_at_unix": posture}
+        return captured, by_case
+
+    @staticmethod
+    def active_enrollments(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["privacy_class_enrollment"] if row.get("revoked_at_unix") in (None, 0)]
+
+    @staticmethod
+    def privacy_keys(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["relay_blind_key_records"] if row.get("key_class") == "privacy"]
+
+    @staticmethod
+    def row_identity(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> set[tuple[Any, ...]]:
+        return {tuple(row.get(key) for key in keys) for row in rows}
+
+    def auto_mode(self, errors: list[str]) -> dict[str, Any]:
+        launch = self.source_json("auto-mode.json", "auto_launch")
+        config = self.source_json("auto-mode.json", "auto_config")
+        sessions = self.source_json("auto-mode.json", "auto_sessions")
+        logs = self.source_json("auto-mode.json", "auto_logs")
+        before_at, before = self.snapshot("auto-mode.json", "auto_db_before")
+        after_at, after = self.snapshot("auto-mode.json", "auto_db_after")
+        for value, label, keys in ((launch, "launch", {"cases"}), (config, "config", {"cases"}), (sessions, "sessions", {"cases"}), (logs, "logs", {"lines"})):
+            if not isinstance(value, dict) or set(value) != keys or not isinstance(next(iter(value.values())), list):
+                fail(f"auto-mode {label} capture has an invalid closed shape")
+        required = {"automatic-eligible", "automatic-ineligible", "automatic-hardening-fallback", "explicit-optout", "explicit-relay-blind"}
+
+        def indexed(rows: list[Any], keys: set[str], label: str) -> dict[str, dict[str, Any]]:
+            out = {}
+            for row in rows:
+                if not isinstance(row, dict) or set(row) != keys or not isinstance(row.get("name"), str) or row["name"] in out:
+                    fail(f"auto-mode {label} rows must have a closed shape and unique names")
+                out[row["name"]] = row
+            if set(out) != required:
+                fail(f"auto-mode {label} cases must be exactly {sorted(required)}")
+            return out
+
+        launches = indexed(launch["cases"], {"name", "executable_sha256", "arguments", "started_at_unix"}, "launch")
+        configs = indexed(config["cases"], {"name", "privacy_class_requested", "relay_blind_requested"}, "config")
+        captured_sessions = indexed(sessions["cases"], {"name", "provider_id", "accepted_at_unix", "claims", "effective_mode"}, "session")
+        log_rows = logs["lines"]
+        if not all(isinstance(row, dict) and set(row) == {"name", "stream", "line"} and row.get("name") in required and row.get("stream") in ("stdout", "stderr") and isinstance(row.get("line"), str) for row in log_rows):
+            fail("auto-mode logs must be closed captured output lines")
+        before_keys = self.privacy_keys(before)
+        after_keys = self.privacy_keys(after)
+        expected_modes = {
+            "automatic-eligible": (None, None, "privacy", 1, True),
+            "automatic-ineligible": (None, None, "ordinary", 0, False),
+            "automatic-hardening-fallback": (None, None, "ordinary", 0, False),
+            "explicit-optout": (False, None, "ordinary", 0, False),
+            "explicit-relay-blind": (None, True, "plain_relay_blind", 0, False),
+        }
+        recomputed = []
+        for name in required:
+            cli, cfg, session = launches[name], configs[name], captured_sessions[name]
+            arguments = cli.get("arguments")
+            expect(isinstance(arguments, dict) and set(arguments) == {"privacy_class_beta", "relay_blind_enabled"}, errors, f"{name} launch must capture only the two non-secret mode arguments")
+            expect(cli.get("executable_sha256") == self.binding()["binary_sha256"], errors, f"{name} launch must bind the tested executable bytes")
+            expect(all(isinstance(cli[key], int) and not isinstance(cli[key], bool) for key in ("started_at_unix",)), errors, f"{name} launch time must be integral")
+            requested, relay_requested, outcome, delta, claimed = expected_modes[name]
+            expect(cfg["privacy_class_requested"] is requested and cfg["relay_blind_requested"] is relay_requested, errors, f"{name} config must select the expected mode")
+            expect(arguments == {"privacy_class_beta": requested, "relay_blind_enabled": relay_requested}, errors, f"{name} launch arguments and loaded config must agree")
+            expect(session["effective_mode"] == outcome and isinstance(session["claims"], list), errors, f"{name} session must capture the expected effective mode")
+            provider = session.get("provider_id")
+            before_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in before_keys)
+            after_count = sum(row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0) for row in after_keys)
+            expect(after_count - before_count == delta, errors, f"{name} privacy key advertisement delta must be {delta}")
+            expect(("privacy_class" in session["claims"]) is claimed, errors, f"{name} privacy claim must match recomputed mode")
+            expect(before_at <= cli["started_at_unix"] <= session["accepted_at_unix"] <= after_at, errors, f"{name} capture ordering is invalid")
+            reasons: list[str] = []
+            for row in log_rows:
+                if row["name"] != name:
+                    continue
+                match = re.fullmatch(r"privacy_class auto_(?:ineligible|hardening_failed) reasons=([a-z0-9_,]+)", row["line"].rstrip("\n"))
+                if match:
+                    reasons.extend(match.group(1).split(","))
+            if name == "automatic-ineligible":
+                expect(bool(reasons), errors, "automatic-ineligible must carry the actual bounded fallback log")
+            if name == "automatic-hardening-fallback":
+                expect("configuration_changed" in reasons, errors, "automatic hardening fallback must capture configuration_changed")
+            recomputed.append({
+                "name": name, "mode": "off" if requested is False or relay_requested is not None else "automatic",
+                "source": "launch/config/session/log/db", "outcome": outcome, "bounded_reasons": sorted(set(reasons)),
+                "privacy_key_record_count": delta, "claims": session["claims"],
+                "mode_decision_unix": cli["started_at_unix"], "credentials_resolution_unix": session["accepted_at_unix"],
+            })
+        return {"cases": sorted(recomputed, key=lambda item: item["name"])}
+
+    def enrollment(self, errors: list[str]) -> dict[str, Any]:
+        before_at, before = self.snapshot("enrollment.json", "enrollment_before")
+        first_at, first = self.snapshot("enrollment.json", "enrollment_after_first")
+        second_at, second = self.snapshot("enrollment.json", "enrollment_after_second")
+        reuse_at, reuse = self.snapshot("enrollment.json", "enrollment_after_reuse")
+        failed_at, failed = self.snapshot("enrollment.json", "enrollment_after_failed_posture")
+        clients_at, clients = self.clients("enrollment.json", "enrollment_clients")
+        expect(before_at < first_at < second_at < reuse_at < failed_at <= clients_at, errors, "enrollment phase snapshots must be strictly ordered")
+        before_rows, first_rows, second_rows = map(self.active_enrollments, (before, first, second))
+        new_first = [row for row in first_rows if row not in before_rows]
+        new_second = [row for row in second_rows if row not in first_rows]
+        expect(len(new_first) == 1 and len(new_second) == 1, errors, "the two admissions must each add exactly one active enrollment")
+        recomputed = []
+        for case, row, phase in (("first-admission", new_first[0] if new_first else {}, first), ("second-admission", new_second[0] if new_second else {}, second)):
+            attempt = clients.get(case) or {}
+            enrolled = row.get("enrolled_at_unix")
+            posture = attempt.get("privacy_posture_verified_at_unix")
+            expect(attempt.get("status") == 200 and attempt.get("error_code") is None and attempt.get("provider_id") == row.get("provider_id"), errors, f"{case} must be an actual successful client capture")
+            expect(isinstance(enrolled, int) and isinstance(posture, int) and enrolled <= posture <= clients_at, errors, f"{case} must prove enrollment commit before successful posture admission")
+            expect(sum(item.get("provider_id") == row.get("provider_id") for item in second_rows) == 1, errors, f"{case} provider must have one active enrollment")
+            keys = [item for item in self.privacy_keys(phase) if item.get("provider_id") == row.get("provider_id") and item.get("revoked_at_unix") in (None, 0)]
+            expect(bool(keys) and all(isinstance(item.get("accepted_at_unix"), int) and item["accepted_at_unix"] <= enrolled and isinstance(item.get("expires_at_unix"), int) and item["expires_at_unix"] > posture for item in keys), errors, f"{case} enrollment must be backed by fresh accepted privacy key rows")
+            recomputed.append({"provider_id": row.get("provider_id"), "identity_fingerprint": row.get("identity_fingerprint"), "se_fingerprint": row.get("se_fingerprint"), "enrollment_committed_unix": enrolled, "posture_verified_unix": posture, "active_rows_for_provider": 1})
+        pairs = {(row.get("identity_fingerprint"), row.get("se_fingerprint")) for row in second_rows}
+        expect(all(isinstance(identity, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", identity) and isinstance(se, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", se) for identity, se in pairs), errors, "enrollment fingerprints must be canonical base64url SHA-256 values")
+        expect(len({row.get("provider_id") for row in second_rows}) == len(second_rows) and len(pairs) == len(second_rows), errors, "active providers must have genuinely distinct identity and Secure Enclave key pairs")
+        expect(self.row_identity(self.active_enrollments(reuse), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "cross-provider reuse must create no enrollment")
+        expect(self.row_identity(self.active_enrollments(failed), ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")) == self.row_identity(second_rows, ("provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix")), errors, "failed posture must create no enrollment")
+        reuse_attempt, failed_attempt = clients.get("cross-provider-reuse") or {}, clients.get("failed-posture") or {}
+        expect(reuse_attempt.get("status") != 200 and reuse_attempt.get("error_code") == "privacy_enrollment_key_in_use", errors, "cross-provider key reuse must return the runtime privacy_enrollment_key_in_use code")
+        expect(failed_attempt.get("status") != 200 and isinstance(failed_attempt.get("error_code"), str) and failed_attempt["error_code"].startswith("privacy_"), errors, "failed posture must carry an actual privacy error")
+        return {
+            "enrollments": recomputed,
+            "cross_provider_reuse": {"result_code": reuse_attempt.get("error_code"), "quarantine_rows_created": len(reuse["privacy_class_quarantine"]) - len(second["privacy_class_quarantine"]), "enrollment_rows_created": len(reuse["privacy_class_enrollment"]) - len(second["privacy_class_enrollment"])},
+            "failed_posture": {"result_code": failed_attempt.get("error_code"), "enrollment_rows_created": len(failed["privacy_class_enrollment"]) - len(reuse["privacy_class_enrollment"])},
+        }
+
+    def key_change_reenroll(self, errors: list[str]) -> dict[str, Any]:
+        initial_at, initial = self.snapshot("reenroll.json", "reenroll_initial")
+        changed_at, changed = self.snapshot("reenroll.json", "reenroll_key_change")
+        retry_at, retry = self.snapshot("reenroll.json", "reenroll_expiry_retry")
+        clear_at, clear = self.snapshot("reenroll.json", "reenroll_operator_clear")
+        after_at, after = self.snapshot("reenroll.json", "reenroll_after")
+        clients_at, clients = self.clients("reenroll.json", "reenroll_clients")
+        expect(initial_at < changed_at < retry_at < clear_at < after_at <= clients_at, errors, "reenroll phase snapshots must be strictly ordered")
+        active_initial = self.active_enrollments(initial)
+        expect(len(active_initial) == 1, errors, "reenroll initial snapshot must have one active enrollment")
+        provider = active_initial[0].get("provider_id") if active_initial else None
+        old_fingerprint = active_initial[0].get("identity_fingerprint") if active_initial else None
+        changed_quarantine = [row for row in changed["privacy_class_quarantine"] if row.get("provider_id") == provider]
+        retry_quarantine = [row for row in retry["privacy_class_quarantine"] if row.get("provider_id") == provider]
+        expect(len(changed_quarantine) == 1 and changed_quarantine[0].get("reason") == "privacy_enrollment_key_changed", errors, "key-change snapshot must hold the runtime quarantine reason")
+        expect(len(retry_quarantine) == 1 and retry_quarantine[0].get("reason") == "privacy_enrollment_key_changed" and retry_quarantine[0].get("quarantined_at_unix", 0) > changed_quarantine[0].get("expires_at_unix", 0), errors, "post-expiry retry must create a later privacy_enrollment_key_changed quarantine")
+        initial_keys = [row for row in self.privacy_keys(initial) if row.get("provider_id") == provider and row.get("revoked_at_unix") in (None, 0)]
+        revoked_keys = [row for row in self.privacy_keys(changed) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
+        expect(bool(initial_keys) and len(revoked_keys) >= len(initial_keys), errors, "key change must revoke the provider's active privacy keys")
+        expect(self.row_identity(self.active_enrollments(changed), ("provider_id", "identity_fingerprint", "enrolled_at_unix")) == self.row_identity(active_initial, ("provider_id", "identity_fingerprint", "enrolled_at_unix")), errors, "key change must not replace the enrollment")
+        clear_active = self.active_enrollments(clear)
+        revoked_old = [row for row in clear["privacy_class_enrollment"] if row.get("provider_id") == provider and row.get("identity_fingerprint") == old_fingerprint and row.get("revoked_at_unix") not in (None, 0)]
+        operator_rows = [row for row in clear["privacy_class_operator_clear"] if row.get("provider_id") == provider]
+        rejected = [row for row in clear["relay_blind_reservations"] if row.get("provider_id") == provider and row.get("privacy_class") == 1 and row.get("state") == "rejected" and row.get("terminal_code") == "relay_blind_key_expired"]
+        expect(bool(revoked_old) and not any(row.get("provider_id") == provider for row in clear_active), errors, "operator reenroll must revoke the old active enrollment")
+        expect(len(operator_rows) == 1 and isinstance(operator_rows[0].get("clear_generation"), int) and operator_rows[0]["clear_generation"] > 0, errors, "operator reenroll must durably advance operator-clear generation")
+        expect(not any(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"]) and bool(rejected), errors, "operator reenroll must clear quarantine and reject held reservations")
+        new_active = [row for row in self.active_enrollments(after) if row.get("provider_id") == provider]
+        admission = clients.get("post-reenroll-admission") or {}
+        expect(len(new_active) == 1 and new_active[0].get("identity_fingerprint") != old_fingerprint, errors, "post-reenroll admission must create one new identity")
+        expect(admission.get("status") == 200 and admission.get("provider_id") == provider and isinstance(admission.get("privacy_posture_verified_at_unix"), int) and new_active and new_active[0].get("enrolled_at_unix", 0) <= admission["privacy_posture_verified_at_unix"], errors, "new enrollment must commit before the successful post-reenroll posture")
+        return {
+            "initial": {"active_enrollment_rows": len(active_initial), "identity_fingerprint": old_fingerprint},
+            "key_change": {"quarantine_reason": changed_quarantine[0].get("reason") if changed_quarantine else None, "privacy_key_records_revoked_count": len(revoked_keys), "active_enrollment_replacements": len(self.active_enrollments(changed)) - len(active_initial)},
+            "post_expiry_retry": {"quarantine_reason": retry_quarantine[0].get("reason") if retry_quarantine else None},
+            "operator_reenroll": {"revoked_old_enrollment_count": len(revoked_old), "held_privacy_reservations_rejected_count": len(rejected), "quarantine_rows_remaining": sum(row.get("provider_id") == provider for row in clear["privacy_class_quarantine"])},
+            "after_reenroll": {"new_active_enrollment_rows": len(new_active), "identity_fingerprint": new_active[0].get("identity_fingerprint") if new_active else None},
+        }
+
+    def release_approval(self, errors: list[str]) -> dict[str, Any]:
+        identity = self.binding()
+        payload = self.source_bytes("release-derived-approval.json", "release_metadata")
+        signature = self.source_bytes("release-derived-approval.json", "release_signature")
+        invalid_payload = self.source_bytes("release-derived-approval.json", "release_invalid_metadata")
+        invalid_signature = self.source_bytes("release-derived-approval.json", "release_invalid_signature")
+        public_key = self.source_bytes("release-derived-approval.json", "release_public_key")
+        expect(hashlib.sha256(public_key).hexdigest() == self.trusted_release_public_key_sha256, errors, "release metadata public key must equal the repository-trusted release signing key")
+        metadata_doc = parse_json(payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_metadata"])
+        provider_identity = metadata_doc.get("provider_code_identity") if isinstance(metadata_doc, dict) else None
+        if not isinstance(provider_identity, dict) or set(provider_identity) != {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}:
+            fail("signed release metadata must carry one closed provider_code_identity")
+        slices = provider_identity.get("slices")
+        if not isinstance(slices, list) or len(slices) != 1 or not isinstance(slices[0], dict) or set(slices[0]) != {"arch", "code_cdhash"}:
+            fail("signed release metadata must carry one closed arm64 slice")
+        approved = {"team_id": provider_identity.get("team_id"), "signing_identifier": provider_identity.get("signing_identifier"), "code_cdhash": slices[0].get("code_cdhash"), "binary_version": provider_identity.get("binary_version")}
+        expect(provider_identity.get("member") == "macprovider-cli" and slices[0].get("arch") == "arm64", errors, "release metadata must name the arm64 macprovider-cli")
+        expect(provider_identity.get("binary_sha256") == identity["binary_sha256"] and provider_identity.get("asset") == f"macprovider-cli-v{identity['binary_version']}-darwin-arm64.tar.gz", errors, "release metadata must bind the tested binary bytes")
+        for key in approved:
+            expect(approved[key] == identity[key], errors, f"cryptographically verified release identity {key} must equal step-01")
+        verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, payload, signature)
+        invalid_verified = verify_pinned_public_ecdsa_sha256(public_key, self.trusted_release_public_key_sha256, invalid_payload, invalid_signature)
+        expect(verified, errors, "release metadata signature must cryptographically verify over exact bytes")
+        invalid_doc = parse_json(invalid_payload.decode("utf-8"), V2_SOURCE_CONTRACT["release-derived-approval.json"]["release_invalid_metadata"])
+        invalid_identity = invalid_doc.get("provider_code_identity") if isinstance(invalid_doc, dict) else None
+        invalid_schema = isinstance(invalid_identity, dict) and set(invalid_identity) == {"asset", "member", "binary_version", "binary_sha256", "team_id", "signing_identifier", "slices"}
+        expect(invalid_verified and not invalid_schema, errors, "invalid metadata fixture must be trusted-key-signed exact bytes that fail the provider identity schema")
+        stats = self.source_json("release-derived-approval.json", "release_file_stats")
+        if not isinstance(stats, dict) or set(stats) != {"metadata", "signature", "public_key"}:
+            fail("release file stats must be a closed lstat capture")
+        stat_keys = {"regular", "symlink", "bytes"}
+        if not all(isinstance(value, dict) and set(value) == stat_keys and isinstance(value.get("regular"), bool) and isinstance(value.get("symlink"), bool) and isinstance(value.get("bytes"), int) for value in stats.values()):
+            fail("release file stats entries must carry regular, symlink, and bytes")
+        expect(stats["metadata"] == {"regular": True, "symlink": False, "bytes": len(payload)} and stats["signature"] == {"regular": True, "symlink": False, "bytes": len(signature)} and stats["public_key"] == {"regular": True, "symlink": False, "bytes": len(public_key)}, errors, "release lstat capture must match the exact exported file bytes")
+        captures = self.source_json("release-derived-approval.json", "release_eligibility")
+        if not isinstance(captures, dict) or set(captures) != {"approved", "denied", "withdrawn", "invalid_metadata"}:
+            fail("release eligibility capture must have approved, denied, withdrawn, and invalid_metadata phases")
+        phase_keys = {"approved_code_identities", "denied_cdhashes", "metadata_directory_present", "provider_id", "client_status", "client_response_excerpt"}
+        for phase, value in captures.items():
+            if not isinstance(value, dict) or set(value) != phase_keys or not isinstance(value.get("approved_code_identities"), list) or not isinstance(value.get("denied_cdhashes"), list):
+                fail(f"release eligibility {phase} capture has an invalid closed shape")
+            if not isinstance(value.get("provider_id"), str) or not isinstance(value.get("client_status"), int) or not isinstance(value.get("client_response_excerpt"), dict):
+                fail(f"release eligibility {phase} client capture types are invalid")
+
+        def release_error(phase: str) -> str | None:
+            excerpt = captures[phase]["client_response_excerpt"]
+            if set(excerpt) == {"usage_macprovider_privacy"}:
+                usage = excerpt["usage_macprovider_privacy"]
+                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int):
+                    fail(f"release eligibility {phase} success excerpt is invalid")
+                return None
+            if set(excerpt) == {"error"} and isinstance(excerpt["error"], dict) and set(excerpt["error"]) == {"code"} and isinstance(excerpt["error"]["code"], str):
+                return excerpt["error"]["code"]
+            fail(f"release eligibility {phase} response excerpt is invalid")
+            raise AssertionError("unreachable")
+
+        approved_at, _approved_db = self.snapshot("release-derived-approval.json", "release_approved_db")
+        denied_at, denied_db = self.snapshot("release-derived-approval.json", "release_denied_db")
+        withdrawn_at, _withdrawn_db = self.snapshot("release-derived-approval.json", "release_withdrawn_db")
+        expect(approved_at < denied_at < withdrawn_at, errors, "release eligibility DB captures must be ordered")
+        expect(approved in captures["approved"]["approved_code_identities"] and captures["approved"]["client_status"] == 200 and release_error("approved") is None, errors, "verified release identity must be loaded before eligible admission")
+        provider = captures["denied"]["provider_id"]
+        denied_quarantine = [row for row in denied_db["privacy_class_quarantine"] if row.get("provider_id") == provider and row.get("reason") == "posture_denied_code_identity"]
+        denied_revoked = [row for row in self.privacy_keys(denied_db) if row.get("provider_id") == provider and row.get("revoked_at_unix") not in (None, 0)]
+        expect(identity["code_cdhash"] in captures["denied"]["denied_cdhashes"] and release_error("denied") == "posture_denied_code_identity" and bool(denied_quarantine) and bool(denied_revoked), errors, "denied cdhash must produce the actual quarantine and key revocation state")
+        expect(captures["withdrawn"]["metadata_directory_present"] is False and approved not in captures["withdrawn"]["approved_code_identities"] and captures["withdrawn"]["client_status"] != 200 and release_error("withdrawn") is not None, errors, "withdrawal capture must remove release-derived eligibility")
+        expect(captures["invalid_metadata"]["approved_code_identities"] == [] and captures["invalid_metadata"]["client_status"] != 200 and release_error("invalid_metadata") is not None, errors, "trusted-key-signed invalid metadata must contribute no identity and no eligible admission")
+        return {
+            "approved_identity": approved,
+            "metadata": {"signature_result": "verified" if verified else "rejected", "regular_file": stats["metadata"]["regular"] and not stats["metadata"]["symlink"], "signature_regular_file": stats["signature"]["regular"] and not stats["signature"]["symlink"], "failed_metadata_identity_count": len(captures["invalid_metadata"]["approved_code_identities"])},
+            "eligibility": {"before_withdrawal": "eligible" if captures["approved"]["client_status"] == 200 else "ineligible", "after_denied_cdhash": "quarantined" if denied_quarantine else "ineligible", "after_withdrawal_or_expiry": "ineligible" if captures["withdrawn"]["client_status"] != 200 else "eligible"},
+        }
+
+    def directory(self, errors: list[str]) -> dict[str, Any]:
+        envelope_raw = self.source_bytes("directory.json", "directory_envelope")
+        gateway_raw = self.source_bytes("directory.json", "directory_gateway_body")
+        envelope = parse_json(envelope_raw.decode("utf-8"), "directory envelope")
+        public_doc = self.source_json("directory.json", "directory_public_key")
+        headers = self.source_json("directory.json", "directory_gateway_headers")
+        clients = self.source_json("directory.json", "directory_clients")
+        store = self.source_json("directory.json", "directory_store")
+        disclosure = self.source_json("directory.json", "directory_disclosure")
+        if not isinstance(envelope, dict) or set(envelope) != {"version", "key_id", "payload", "signature"}:
+            fail("directory envelope must be a closed object")
+        if not isinstance(public_doc, dict) or set(public_doc) != {"algorithm", "public_key"} or public_doc.get("algorithm") != "ed25519":
+            fail("directory public key capture must be a closed Ed25519 pin")
+        public = b64url_bytes(public_doc.get("public_key"))
+        payload = b64url_bytes(envelope.get("payload"))
+        signature = b64url_bytes(envelope.get("signature"))
+        if public is None or len(public) != 32 or payload is None or signature is None or len(signature) != 64:
+            fail("directory key, payload, and signature must be canonical base64url bytes")
+        canonical = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        expect(public_doc.get("public_key") == canonical(public) and envelope.get("payload") == canonical(payload) and envelope.get("signature") == canonical(signature), errors, "directory key, payload, and signature encodings must be canonical base64url")
+        key_id = base64.urlsafe_b64encode(hashlib.sha256(public).digest()).decode().rstrip("=")
+        signed = _frame(b"macprovider/spec049/identity-directory/v1") + _frame(payload)
+        signature_ok = ed25519_verify(public, signed, signature)
+        expect(envelope.get("version") == "privacy-identity-directory-envelope-v1" and envelope.get("key_id") == key_id and signature_ok, errors, "directory signature must verify over exact payload bytes under the pinned key")
+        payload_doc = parse_json(payload.decode("utf-8"), "directory payload")
+        if not isinstance(payload_doc, dict) or set(payload_doc) != {"version", "privacy_class", "issued_at_unix", "expires_at_unix", "entries"}:
+            fail("directory payload must be a closed object")
+        entries = payload_doc.get("entries")
+        if not isinstance(entries, list):
+            fail("directory entries must be a list")
+        def canonical_b64url32(value: Any) -> bytes | None:
+            raw = b64url_bytes(value)
+            if raw is None or len(raw) != 32 or value != canonical(raw):
+                return None
+            return raw
+
+        fingerprints: list[str] = []
+        enrolled_entries: set[tuple[str, str, int, bool]] = set()
+        operator_pin_entries = 0
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"identity_public_key", "fingerprint", "se_public_key_fingerprint", "source", "enrolled_at_unix", "revoked"}:
+                fail("directory entries must be closed objects")
+            identity_key = b64url_bytes(entry.get("identity_public_key"))
+            expect(identity_key is not None and len(identity_key) == 32 and entry.get("identity_public_key") == canonical(identity_key) and canonical(hashlib.sha256(identity_key).digest()) == entry.get("fingerprint"), errors, "directory entry fingerprint must derive from its canonical public key")
+            se_fingerprint = canonical_b64url32(entry.get("se_public_key_fingerprint"))
+            enrolled_at = entry.get("enrolled_at_unix")
+            source = entry.get("source")
+            revoked = entry.get("revoked")
+            expect(se_fingerprint is not None and isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and enrolled_at >= 0 and source in ("enrolled", "operator_pin") and isinstance(revoked, bool), errors, "directory entries must have typed source/revocation/enrollment fields and canonical 32-byte SE fingerprints")
+            if source == "enrolled" and isinstance(entry.get("fingerprint"), str) and se_fingerprint is not None and isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and isinstance(revoked, bool):
+                enrolled_entries.add((entry["fingerprint"], entry["se_public_key_fingerprint"], enrolled_at, revoked))
+            elif source == "operator_pin":
+                operator_pin_entries += 1
+            fingerprints.append(entry.get("fingerprint"))
+        expect(all(isinstance(item, str) for item in fingerprints) and fingerprints == sorted(fingerprints) and len(fingerprints) == len(set(fingerprints)), errors, "directory entries must be uniquely sorted by fingerprint")
+        issued, expires = payload_doc.get("issued_at_unix"), payload_doc.get("expires_at_unix")
+        expect(payload_doc.get("version") == "privacy-identity-directory-v1" and payload_doc.get("privacy_class") == PRIVACY_CLASS, errors, "directory payload version and privacy class must be exact")
+        expect(isinstance(issued, int) and not isinstance(issued, bool) and issued >= 0 and isinstance(expires, int) and not isinstance(expires, bool) and expires >= 0 and 60 <= expires - issued <= 3600, errors, "directory validity window must be bounded")
+        if not isinstance(headers, dict) or set(headers) != {"status", "cache_control", "content_type", "captured_at_unix", "store_error_code"}:
+            fail("directory gateway headers must be a closed capture")
+        expect(gateway_raw == envelope_raw, errors, "gateway directory response body must be byte-identical to the signed envelope")
+        expect(headers.get("status") == 200 and headers.get("cache_control") == "no-store" and headers.get("content_type") == "application/json" and isinstance(headers.get("captured_at_unix"), int) and not isinstance(headers.get("captured_at_unix"), bool) and headers.get("captured_at_unix") >= 0 and issued <= headers["captured_at_unix"] < expires, errors, "gateway capture must be fresh, JSON, and no-store")
+        expect(headers.get("store_error_code") == "privacy_class_unavailable", errors, "directory store error capture must fail closed")
+        if not isinstance(store, dict) or set(store) != {"enrollments", "quarantined_provider_ids"} or not isinstance(store.get("enrollments"), list) or not isinstance(store.get("quarantined_provider_ids"), list):
+            fail("directory store capture must be closed enrollment/quarantine rows")
+        quarantined_provider_ids = store["quarantined_provider_ids"]
+        expect(all(isinstance(item, str) and item for item in quarantined_provider_ids) and len(quarantined_provider_ids) == len(set(quarantined_provider_ids)), errors, "directory quarantined provider ids must be non-empty unique strings")
+        quarantined = set(quarantined_provider_ids) if all(isinstance(item, str) for item in quarantined_provider_ids) else set()
+        store_entries: set[tuple[str, str, int, bool]] = set()
+        seen_store_rows: set[tuple[str, str, str, int]] = set()
+        for row in store["enrollments"]:
+            if not isinstance(row, dict) or set(row) != {"provider_id", "identity_fingerprint", "se_fingerprint", "enrolled_at_unix", "revoked_at_unix"}:
+                fail("directory enrollment store rows must be closed provider/identity/SE/enrollment/revocation facts")
+            provider_id = row.get("provider_id")
+            identity_fingerprint = row.get("identity_fingerprint")
+            se_fingerprint = row.get("se_fingerprint")
+            enrolled_at = row.get("enrolled_at_unix")
+            revoked_at = row.get("revoked_at_unix")
+            valid_row = (
+                isinstance(provider_id, str) and bool(provider_id) and
+                canonical_b64url32(identity_fingerprint) is not None and
+                canonical_b64url32(se_fingerprint) is not None and
+                isinstance(enrolled_at, int) and not isinstance(enrolled_at, bool) and enrolled_at >= 0 and
+                (revoked_at is None or (isinstance(revoked_at, int) and not isinstance(revoked_at, bool) and revoked_at >= 0))
+            )
+            expect(valid_row, errors, "directory enrollment store rows must carry typed canonical fingerprints and timestamps")
+            if valid_row:
+                store_key = (provider_id, identity_fingerprint, se_fingerprint, enrolled_at)
+                expect(store_key not in seen_store_rows, errors, "directory enrollment store rows must not contain duplicates")
+                seen_store_rows.add(store_key)
+                store_entries.add((identity_fingerprint, se_fingerprint, enrolled_at, revoked_at not in (None, 0) or provider_id in quarantined))
+        active_entries = {row for row in enrolled_entries if row[3] is False}
+        revoked_entries = {row for row in enrolled_entries if row[3] is True}
+        expect(operator_pin_entries == 0, errors, "directory operator_pin entries require raw configured operator pin facts")
+        expect(store_entries == enrolled_entries and bool(active_entries) and bool(revoked_entries), errors, "directory enrolled entries must exactly match store identity/SE/enrollment/revocation facts")
+        if not isinstance(clients, dict) or set(clients) != {"captured_at_unix", "attempts"} or not isinstance(clients.get("attempts"), list):
+            fail("directory client negatives must be a closed capture")
+        attempts = {row.get("case"): row for row in clients["attempts"] if isinstance(row, dict) and set(row) == {"case", "accepted", "error_code"}}
+        expect(set(attempts) == {"tampered", "expired", "revoked", "wrong_key"} and all(row.get("accepted") is False and isinstance(row.get("error_code"), str) for row in attempts.values()), errors, "directory client must reject every closed negative case")
+        tampered = bytes([payload[0] ^ 1]) + payload[1:]
+        expect(not ed25519_verify(public, _frame(b"macprovider/spec049/identity-directory/v1") + _frame(tampered), signature), errors, "tampered directory payload must fail signature verification")
+        wrong_public = hashlib.sha256(public).digest()
+        expect(not ed25519_verify(wrong_public, signed, signature), errors, "wrong pinned directory key must fail verification")
+        expect(isinstance(clients.get("captured_at_unix"), int) and not isinstance(clients.get("captured_at_unix"), bool) and clients["captured_at_unix"] >= 0 and clients["captured_at_unix"] >= expires, errors, "expired negative capture must be at or after expiry")
+        if not isinstance(disclosure, dict) or set(disclosure) != {"residual_risks"} or not isinstance(disclosure.get("residual_risks"), list):
+            fail("directory disclosure must be a closed residual-risk capture")
+        expect(disclosure["residual_risks"] == list(PRIVACY_RESIDUAL_RISKS_V2), errors, "directory disclosure must contain the exact v2 residual-risk list")
+        return {
+            "directory": {"signature_result": "verified" if signature_ok else "rejected", "public_key_pin": public_doc["public_key"], "key_id": key_id, "entry_count": len(entries), "revoked_entry_count": sum(row.get("revoked") is True for row in entries), "ttl_seconds": expires - issued, "body_sha256": hashlib.sha256(envelope_raw).hexdigest()},
+            "client_rejections": {name: "rejected" for name in sorted(attempts)},
+            "gateway": {"body_sha256": hashlib.sha256(gateway_raw).hexdigest(), "cache_control": headers.get("cache_control"), "store_error_code": headers.get("store_error_code")},
+            "disclosure": disclosure,
+        }
+
+    def manifest(self, manifest: str, errors: list[str]) -> dict[str, Any]:
+        if manifest == "auto-mode.json":
+            return self.auto_mode(errors)
+        if manifest == "enrollment.json":
+            return self.enrollment(errors)
+        if manifest == "reenroll.json":
+            return self.key_change_reenroll(errors)
+        if manifest == "release-derived-approval.json":
+            return self.release_approval(errors)
+        if manifest == "directory.json":
+            return self.directory(errors)
+        fail(f"unknown v2 source manifest: {manifest}")
+
+
 class Checks:
     """Bundle predicates. Each returns a list of failures; empty means it holds."""
 
-    def __init__(self, bundle: Bundle) -> None:
+    def __init__(
+        self,
+        bundle: Bundle,
+        profile: EvidenceProfile = PROFILE_V1,
+        *,
+        trusted_release_public_key_sha256: str = TRUSTED_RELEASE_SIGNING_PUBLIC_KEY_SHA256,
+    ) -> None:
         self.b = bundle
+        self.profile = profile
+        self.trusted_release_public_key_sha256 = trusted_release_public_key_sha256
         self._cache: dict[str, list[str]] = {}
 
     def run(self, name: str) -> list[str]:
@@ -780,6 +1460,10 @@ class Checks:
                     fail(f"binding.txt repeats {key}")
                 values[key] = value
         return values
+
+    def disclosure(self) -> str:
+        risks = PRIVACY_RESIDUAL_RISKS_V2 if self.profile is PROFILE_V2 else PRIVACY_RESIDUAL_RISKS
+        return privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"], risks)
 
     def disclosure_json(self, path: str, minimum_posture: int = 1) -> list[str]:
         errors: list[str] = []
@@ -940,7 +1624,7 @@ class Checks:
         start, ready = int(timing["provider_start_unix"]), int(timing["privacy_records_ready_unix"])
         expect(start <= ready, errors, "privacy records must be ready after provider start")
         expect(self.b.text("step-02-privacy-mode-start/posture-rejections.txt") == "0\n", errors, "posture must never be rejected")
-        errors.extend(self.client_ok("step-02-privacy-mode-start/posture-probe", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok("step-02-privacy-mode-start/posture-probe", self.disclosure()))
 
     def p_posture_verified(self, errors: list[str]) -> None:
         timing = self.b.fields("step-02-privacy-mode-start/timing.txt")
@@ -976,7 +1660,7 @@ class Checks:
         expect("failed to grab pid" in self.b.text(f"{directory}/dtrace-root.txt"), errors, "dtrace pid attach must be refused")
         control = self.b.text(f"{directory}/lldb-root-control.txt")
         expect("control_attach=ok exit=0" in control and re.search(r"Process [0-9]+ stopped", control) is not None, errors, "root lldb must attach to the unhardened control")
-        errors.extend(self.client_ok(f"{directory}/eligible-after", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok(f"{directory}/eligible-after", self.disclosure()))
 
     # -- step-04
 
@@ -1048,11 +1732,121 @@ class Checks:
         host = re.search(r"^hw\.model: (\S+)$", self.b.text(f"{base}/host.txt"), re.M)
         expect(host is not None, errors, "lab host model must be recorded")
         if host is not None:
-            expect(host.group(1) != self.binding()["hardware_model"], errors, "SIP-off lab host must be a different Mac")
+            same_hardware = host.group(1) == self.binding()["hardware_model"]
+            if self.profile is PROFILE_V2:
+                expect(same_hardware, errors, "v2 SIP-off host must be the designated Studio hardware")
+                if same_hardware:
+                    self.v2_same_studio_sip_off(base, host.group(1), errors)
+            else:
+                expect(not same_hardware, errors, "SIP-off lab host must be a different Mac")
         expect(self.b.fields(f"{base}/result.txt") == {"exit": "78", "conns_bytes": "0"}, errors, "SIP-off run must exit 78 with zero connection bytes")
         expect(self.b.text(f"{base}/conns.txt") == "", errors, "SIP-off run must make no connection")
         stderr = re.fullmatch(r"FATAL privacy_class_hardening_failed reasons=([a-z0-9_,]+)\n", self.b.text(f"{base}/stderr.txt"))
         expect(stderr is not None and "sip_disabled" in stderr.group(1).split(","), errors, "SIP-off run must be refused with sip_disabled")
+
+    def v2_same_studio_sip_off(self, base: str, hardware_model: str, errors: list[str]) -> None:
+        restored = self.b.json_object(f"{base}/restored-validation.json")
+        expected_restored_keys = {
+            "schema",
+            "step_id",
+            "physical_pass_claimed",
+            "manual_step06_ready_for_import",
+            "packet_sha256",
+            "offline_packet_public_projection",
+            "raw_artifact_sha256",
+            "restored_host",
+            "known_network_observation_limit",
+        }
+        expect(set(restored) == expected_restored_keys, errors, "v2 same-Studio SIP proof must be the closed restored-validation schema")
+        expect(restored.get("schema") == "macprovider.privacy-lab-v2.step06-restored-validation.v1", errors, "v2 same-Studio SIP proof must be the Step06 restored-validation schema")
+        expect(restored.get("step_id") == "step-06-sip-off-refused", errors, "v2 same-Studio SIP proof must bind step-06")
+        expect(restored.get("physical_pass_claimed") is False, errors, "v2 same-Studio restored proof must not claim physical PASS")
+        expect(restored.get("manual_step06_ready_for_import") is True, errors, "v2 same-Studio restored proof must be ready for import")
+        expect(isinstance(restored.get("packet_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", restored["packet_sha256"]) is not None, errors, "v2 same-Studio restored proof must bind the offline packet digest")
+        projection = restored.get("offline_packet_public_projection")
+        self.v2_same_studio_public_projection(projection, errors)
+
+        raw_hashes = restored.get("raw_artifact_sha256")
+        expected_raw = {"sip.txt", "host.txt", "stderr.txt", "conns.txt", "connection-observation.json", "result.txt"}
+        expect(isinstance(raw_hashes, dict) and set(raw_hashes) == expected_raw, errors, "v2 same-Studio restored proof must bind every Step06 raw artifact hash")
+        if isinstance(raw_hashes, dict):
+            for name in sorted(expected_raw):
+                digest = raw_hashes.get(name)
+                expect(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None, errors, f"v2 same-Studio restored proof hash for {name} must be SHA-256")
+                if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                    expect(digest == self.b.sha256(f"{base}/{name}"), errors, f"v2 same-Studio restored proof hash for {name} must match the reviewed artifact")
+
+        restored_host = restored.get("restored_host")
+        expect(isinstance(restored_host, dict) and set(restored_host) == {"local_hostname", "hardware_model", "sip_status"}, errors, "v2 same-Studio restored host must be closed")
+        if isinstance(restored_host, dict):
+            expect(restored_host.get("hardware_model") == hardware_model, errors, "v2 same-Studio restored host must match the SIP-disabled host hardware")
+            expect(restored_host.get("sip_status") == "System Integrity Protection status: enabled.", errors, "v2 same-Studio restored host must show SIP restored before import")
+            expect(isinstance(restored_host.get("local_hostname"), str) and bool(restored_host["local_hostname"]), errors, "v2 same-Studio restored host must name the prepared Studio host")
+            host_text = self.b.text(f"{base}/host.txt")
+            expect(f"LocalHostName: {restored_host.get('local_hostname')}\n" in host_text, errors, "v2 same-Studio SIP-disabled host must match the restored host name")
+            if isinstance(projection, dict):
+                prepared_host = projection.get("prepared_host")
+                if isinstance(prepared_host, dict):
+                    expect(prepared_host.get("local_hostname") == restored_host.get("local_hostname"), errors, "v2 same-Studio prepared host must match the restored host name")
+                    expect(prepared_host.get("hardware_model") == restored_host.get("hardware_model"), errors, "v2 same-Studio prepared host must match the restored hardware")
+
+        observation = self.b.json_object(f"{base}/connection-observation.json")
+        expected_observation_keys = {
+            "schema",
+            "listener",
+            "accepted_connections",
+            "received_bytes",
+            "window_started_unix",
+            "window_ended_unix",
+            "known_limit",
+        }
+        expect(set(observation) == expected_observation_keys, errors, "v2 same-Studio connection observation must be closed")
+        expect(observation.get("schema") == "macprovider.privacy-lab-v2.step06-connection-observation.v1", errors, "v2 same-Studio connection observation schema must match the helper")
+        expect(step06_loopback_listener(observation.get("listener")), errors, "v2 same-Studio connection observation must bind a non-live loopback listener")
+        expect(all(type(observation.get(key)) is int and observation[key] == 0 for key in ("accepted_connections", "received_bytes")), errors, "v2 same-Studio helper-owned listener must accept zero connections and zero bytes as integer counts")
+        started = observation.get("window_started_unix")
+        ended = observation.get("window_ended_unix")
+        expect(isinstance(started, int) and not isinstance(started, bool) and isinstance(ended, int) and not isinstance(ended, bool) and started > 0 and ended >= started, errors, "v2 same-Studio connection observation must bind a valid run window")
+        expect(observation.get("known_limit") == "helper-owned exact loopback listener during provider run window; not a global packet capture", errors, "v2 same-Studio connection observation must disclose its helper-owned listener limit")
+        if isinstance(projection, dict):
+            expect(projection.get("coordinator_listener") == observation.get("listener"), errors, "v2 same-Studio projected listener must match the observed listener")
+        limit = restored.get("known_network_observation_limit")
+        expect(isinstance(limit, str) and "helper-owned loopback listener accepted zero connections" in limit and "not a global packet capture" in limit, errors, "v2 same-Studio restored proof must disclose the network observation limit")
+
+    def v2_same_studio_public_projection(self, projection: Any, errors: list[str]) -> None:
+        values = self.binding()
+        if not isinstance(projection, dict) or set(projection) != {
+            "schema",
+            "step_id",
+            "candidate",
+            "provider_config_sha256",
+            "binding_file_sha256",
+            "prepared_host",
+            "coordinator_listener",
+        }:
+            errors.append("v2 same-Studio restored proof must include the closed public offline-packet projection")
+            return
+        expect(projection.get("schema") == "macprovider.privacy-lab-v2.step06-offline-packet-public-projection.v1", errors, "v2 same-Studio public projection schema must match")
+        expect(projection.get("step_id") == "step-06-sip-off-refused", errors, "v2 same-Studio public projection must bind step-06")
+        candidate = projection.get("candidate")
+        if not isinstance(candidate, dict) or set(candidate) != {"binary_sha256", "team_id", "signing_identifier", "cdhash"}:
+            errors.append("v2 same-Studio public projection candidate binding must be closed")
+        else:
+            expect(candidate.get("binary_sha256") == values["binary_sha256"], errors, "v2 same-Studio public projection must bind the tested candidate bytes")
+            expect(candidate.get("team_id") == values["team_id"], errors, "v2 same-Studio public projection must bind the tested team id")
+            expect(candidate.get("signing_identifier") == values["signing_identifier"], errors, "v2 same-Studio public projection must bind the tested signing identifier")
+            expect(candidate.get("cdhash") == values["code_cdhash"], errors, "v2 same-Studio public projection must bind the tested cdhash")
+        expect(projection.get("provider_config_sha256") == values["provider_config_sha256"], errors, "v2 same-Studio public projection must bind the tested provider config")
+        expect(projection.get("binding_file_sha256") == self.b.sha256("step-01-bind-signed-release/binding.txt"), errors, "v2 same-Studio public projection must bind the reviewed release binding file")
+        prepared_host = projection.get("prepared_host")
+        if not isinstance(prepared_host, dict) or set(prepared_host) != {"local_hostname", "hardware_model", "sip_status"}:
+            errors.append("v2 same-Studio public projection prepared host must be closed")
+        else:
+            expect(prepared_host.get("hardware_model") == values["hardware_model"], errors, "v2 same-Studio public projection must bind the designated Studio hardware")
+            expect(prepared_host.get("sip_status") == "System Integrity Protection status: enabled.", errors, "v2 same-Studio public projection must be prepared with SIP enabled")
+            expect(isinstance(prepared_host.get("local_hostname"), str) and bool(prepared_host["local_hostname"]), errors, "v2 same-Studio public projection must bind the prepared host name")
+        listener = projection.get("coordinator_listener")
+        expect(step06_loopback_listener(listener), errors, "v2 same-Studio public projection must bind a non-live loopback listener")
 
     # -- step-07 / step-08
 
@@ -1063,14 +1857,14 @@ class Checks:
         errors.extend(self.canary("step-08-canary-nonstream", "nonstream"))
 
     def canary(self, step: str, mode: str) -> list[str]:
-        errors = self.client_ok(f"{step}/canary-{mode}", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"]))
+        errors = self.client_ok(f"{step}/canary-{mode}", self.disclosure())
         meta = self.b.fields(f"{step}/canary-{mode}.meta")
         expect(meta.get("completion_canary_in_decrypted_output") in ("yes", "no"), errors, f"{step} must record the decrypted-output canary check")
         errors.extend(self.disclosure_json(f"{step}/disclosure.json"))
         return errors
 
     def p_disclosure_exact(self, errors: list[str]) -> None:
-        block = privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])
+        block = self.disclosure()
         for prefix in (
             "step-02-privacy-mode-start/posture-probe",
             "step-03-debugger-attach-refused/eligible-after",
@@ -1152,7 +1946,7 @@ class Checks:
         errors.extend(self.client_refused(f"{base}/inject-header"))
         errors.extend(self.proxy_code(f"{base}/replay.code.json", chat, "relay_blind_replay"))
         expect(self.b.text(f"{base}/replay.status") == "409\n", errors, "replay must be HTTP 409")
-        errors.extend(self.client_ok(f"{base}/replay-first", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok(f"{base}/replay-first", self.disclosure()))
         objects, fields = self.code_record(f"{base}/wrong-key-record.code.json")
         expect(objects == [] and fields == {"dispatches_since": "0"}, errors, "wrong key record must send nothing")
         errors.extend(self.client_refused(f"{base}/wrong-key-record", stderr_contains="identity fingerprint mismatch"))
@@ -1196,7 +1990,7 @@ class Checks:
             errors.extend(at_reservation)
         errors.extend(self.client_refused(f"{base}/stale"))
         expect(self.status(f"{base}/status-after-stale.txt").get("quarantine_count") == "0", errors, "stale posture must not quarantine")
-        errors.extend(self.client_ok(f"{base}/recovered-after-stale", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok(f"{base}/recovered-after-stale", self.disclosure()))
 
     def p_quarantine_durable(self, errors: list[str]) -> None:
         base = "step-11-stale-posture-and-quarantine"
@@ -1217,7 +2011,7 @@ class Checks:
         errors.extend(self.proxy_code(f"{base}/quarantined.code.json", "/v1/relay-blind/route-reservations", "privacy_class_unavailable", dispatches=None))
         errors.extend(self.client_refused(f"{base}/quarantined"))
         expect(self.status(f"{base}/unquarantine.txt").get("quarantine_count") == "0", errors, "operator unquarantine must clear the quarantine")
-        errors.extend(self.client_ok(f"{base}/recovered-after-restart", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok(f"{base}/recovered-after-restart", self.disclosure()))
 
     # -- step-12
 
@@ -1234,7 +2028,7 @@ class Checks:
         enabled = self.status(f"{base}/enable.txt")
         expect(enabled.get("disabled") == "0", errors, "re-enable must clear the kill switch")
         expect(int(enabled.get("updated_at_unix", "0")) > int(disabled.get("updated_at_unix", "0")), errors, "re-enable must follow disable")
-        errors.extend(self.client_ok(f"{base}/recovered", privacy_disclosure(self.identity("privacy")["relay_blind_fingerprint"])))
+        errors.extend(self.client_ok(f"{base}/recovered", self.disclosure()))
 
     def p_unaffected(self, errors: list[str]) -> None:
         base = "step-12-kill-switch"
@@ -1866,6 +2660,185 @@ class Checks:
         mtime = utc_unix(script.get("mtime_utc"))
         expect(mtime is not None and mtime <= captured, errors, "the kit script must predate the run")
 
+    # -- v0.2 evidence extension
+
+    def primary_v2(self, relative: str) -> dict[str, Any]:
+        doc = self.primary(f"v2/{relative}")
+        if doc.get("profile") != V2_SOURCE_PROFILE:
+            fail(f"primary/v2/{relative} must be a v2 source-fact export")
+        provenance = doc.get("provenance")
+        if not isinstance(provenance, dict) or set(provenance) != {"raw_sources"} or not isinstance(provenance.get("raw_sources"), list):
+            fail(f"primary/v2/{relative} must carry provenance.raw_sources")
+        expected = V2_SOURCE_CONTRACT.get(relative)
+        if expected is None:
+            fail(f"primary/v2/{relative} has no source contract")
+        found: dict[str, dict[str, str]] = {}
+        for item in provenance["raw_sources"]:
+            if not isinstance(item, dict) or set(item) != {"kind", "path", "sha256"}:
+                fail(f"primary/v2/{relative} provenance rows must carry exactly kind, path, and sha256")
+            kind = item.get("kind")
+            if not isinstance(kind, str) or kind in found or kind not in expected:
+                fail(f"primary/v2/{relative} provenance kinds must be closed and unique")
+            if item.get("path") != expected[kind]:
+                fail(f"primary/v2/{relative} provenance path for {kind} is not the closed raw path")
+            if not isinstance(item.get("sha256"), str) or not SHA256_RE.fullmatch(item["sha256"]):
+                fail(f"primary/v2/{relative} provenance sha256 must be lowercase sha256")
+            suffix = Path(expected[kind]).suffix
+            exported = f"primary/v2/sources/{kind}{suffix}"
+            if exported not in self.b.files or self.b.sha256(exported) != item["sha256"]:
+                fail(f"primary/v2/{relative} source {kind} is absent or its digest is not provenance-bound")
+            found[kind] = item
+        if set(found) != set(expected):
+            fail(f"primary/v2/{relative} provenance kinds must be exactly {sorted(expected)}")
+        if not isinstance(doc.get("raw_source_sha256"), str) or not SHA256_RE.fullmatch(doc["raw_source_sha256"]):
+            fail(f"primary/v2/{relative} must carry raw_source_sha256")
+        return doc
+
+    def require_keys(self, doc: dict[str, Any], keys: set[str], label: str, errors: list[str]) -> None:
+        expect(set(doc) == keys, errors, f"{label} must carry exactly {sorted(keys)}")
+
+    def v2_source_bytes(self, manifest: str, kind: str) -> bytes:
+        doc = self.primary_v2(manifest)
+        source = V2_SOURCE_CONTRACT[manifest].get(kind)
+        if source is None:
+            fail(f"primary/v2/{manifest} does not declare source kind {kind}")
+        item = next(row for row in doc["provenance"]["raw_sources"] if row["kind"] == kind)
+        path = f"primary/v2/sources/{kind}{Path(source).suffix}"
+        raw = self.b.raw(path)
+        if hashlib.sha256(raw).hexdigest() != item["sha256"]:
+            fail(f"{path} does not match its raw provenance digest")
+        return raw
+
+    def v2_source_json(self, manifest: str, kind: str) -> Any:
+        path = V2_SOURCE_CONTRACT[manifest][kind]
+        try:
+            text = self.v2_source_bytes(manifest, kind).decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{path} must be UTF-8 JSON")
+        return parse_json(text, path)
+
+    def v2_snapshot(self, manifest: str, kind: str) -> tuple[int, dict[str, list[dict[str, Any]]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.v2_source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "tables"}:
+            fail(f"{label} must carry exactly captured_at_unix and tables")
+        captured = doc.get("captured_at_unix")
+        tables = doc.get("tables")
+        if not isinstance(captured, int) or isinstance(captured, bool) or captured <= 0:
+            fail(f"{label}.captured_at_unix must be a positive integer")
+        if not isinstance(tables, dict) or set(tables) != set(V2_DB_TABLES):
+            fail(f"{label}.tables must be the closed v2 table set")
+        result: dict[str, list[dict[str, Any]]] = {}
+        for name in V2_DB_TABLES:
+            export = tables[name]
+            if not isinstance(export, dict) or set(export) != {"table", "columns", "dropped_columns", "row_count", "truncated", "rows"}:
+                fail(f"{label}.{name} must be a complete primary row export")
+            columns, rows = export.get("columns"), export.get("rows")
+            if export.get("table") != name or export.get("truncated") is not False or not isinstance(columns, list) or not all(isinstance(item, str) for item in columns):
+                fail(f"{label}.{name} must identify a complete untruncated table")
+            if tuple(columns) != V2_DB_COLUMNS[name]:
+                fail(f"{label}.{name} columns must be the closed public-state projection {list(V2_DB_COLUMNS[name])}")
+            if not isinstance(export.get("dropped_columns"), list) or not isinstance(rows, list) or export.get("row_count") != len(rows):
+                fail(f"{label}.{name} row metadata is invalid")
+            if not all(isinstance(row, dict) and set(row) == set(columns) for row in rows):
+                fail(f"{label}.{name} rows must exactly match columns")
+            result[name] = rows
+        return captured, result
+
+    def v2_clients(self, manifest: str, kind: str) -> tuple[int, dict[str, dict[str, Any]]]:
+        label = V2_SOURCE_CONTRACT[manifest][kind]
+        doc = self.v2_source_json(manifest, kind)
+        if not isinstance(doc, dict) or set(doc) != {"captured_at_unix", "attempts"}:
+            fail(f"{label} must carry exactly captured_at_unix and attempts")
+        captured, attempts = doc.get("captured_at_unix"), doc.get("attempts")
+        if not isinstance(captured, int) or isinstance(captured, bool) or not isinstance(attempts, list):
+            fail(f"{label} has invalid capture types")
+        by_case: dict[str, dict[str, Any]] = {}
+        required = {"case", "status", "provider_id", "response_excerpt"}
+        for attempt in attempts:
+            if not isinstance(attempt, dict) or set(attempt) != required:
+                fail(f"{label} attempt must carry exactly {sorted(required)}")
+            name = attempt.get("case")
+            if not isinstance(name, str) or not name or name in by_case:
+                fail(f"{label} attempt cases must be non-empty and unique")
+            status = attempt.get("status")
+            excerpt = attempt.get("response_excerpt")
+            if not isinstance(status, int) or isinstance(status, bool) or not isinstance(excerpt, dict):
+                fail(f"{label} attempt status/response types are invalid")
+            if attempt.get("provider_id") is not None and not isinstance(attempt.get("provider_id"), str):
+                fail(f"{label} attempt provider_id must be string or null")
+            posture = error_code = None
+            if set(excerpt) == {"usage_macprovider_privacy"}:
+                usage = excerpt["usage_macprovider_privacy"]
+                if not isinstance(usage, dict) or set(usage) != {"posture_verified_at_unix"} or not isinstance(usage["posture_verified_at_unix"], int) or isinstance(usage["posture_verified_at_unix"], bool):
+                    fail(f"{label} successful response excerpt must carry the observed posture time")
+                posture = usage["posture_verified_at_unix"]
+            elif set(excerpt) == {"error"}:
+                error = excerpt["error"]
+                if not isinstance(error, dict) or set(error) != {"code"} or not isinstance(error["code"], str):
+                    fail(f"{label} error response excerpt must carry the actual code")
+                error_code = error["code"]
+            else:
+                fail(f"{label} response excerpt must be the closed usage or error shape")
+            if (status == 200) is not (posture is not None):
+                fail(f"{label} HTTP status must agree with the captured response excerpt")
+            by_case[name] = {**attempt, "error_code": error_code, "privacy_posture_verified_at_unix": posture}
+        return captured, by_case
+
+    def v2_view(self) -> V2RawSourceView:
+        return V2RawSourceView(
+            lambda manifest, kind: self.v2_source_bytes(manifest, kind),
+            self.binding,
+            self.trusted_release_public_key_sha256,
+        )
+
+    @staticmethod
+    def active_enrollments(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["privacy_class_enrollment"] if row.get("revoked_at_unix") in (None, 0)]
+
+    @staticmethod
+    def privacy_keys(tables: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        return [row for row in tables["relay_blind_key_records"] if row.get("key_class") == "privacy"]
+
+    @staticmethod
+    def row_identity(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> set[tuple[Any, ...]]:
+        return {tuple(row.get(key) for key in keys) for row in rows}
+
+    def p_v2_auto_mode(self, errors: list[str]) -> None:
+        doc = self.primary_v2("auto-mode.json")
+        self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "cases"}, "primary/v2/auto-mode.json", errors)
+        recomputed = self.v2_view().auto_mode(errors)
+        cases = {item.get("name"): item for item in doc.get("cases", []) if isinstance(item, dict)}
+        required = {"automatic-eligible", "automatic-ineligible", "automatic-hardening-fallback", "explicit-optout", "explicit-relay-blind"}
+        expect(set(cases) == required and len(doc.get("cases", [])) == len(required), errors, "auto-mode summary cases must cover the closed v2 set exactly once")
+        expect(doc.get("cases") == recomputed["cases"], errors, "auto-mode summary must equal independent raw-source recomputation")
+
+    def p_v2_enrollment(self, errors: list[str]) -> None:
+        doc = self.primary_v2("enrollment.json")
+        self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "enrollments", "cross_provider_reuse", "failed_posture"}, "primary/v2/enrollment.json", errors)
+        recomputed = self.v2_view().enrollment(errors)
+        expect(doc.get("enrollments") == recomputed["enrollments"], errors, "enrollment summary must equal independent snapshot/client recomputation")
+        expect(doc.get("cross_provider_reuse") == recomputed["cross_provider_reuse"], errors, "reuse summary must equal source deltas")
+        expect(doc.get("failed_posture") == recomputed["failed_posture"], errors, "failed-posture summary must equal source deltas")
+
+    def p_v2_key_change_reenroll(self, errors: list[str]) -> None:
+        doc = self.primary_v2("reenroll.json")
+        self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "initial", "key_change", "post_expiry_retry", "operator_reenroll", "after_reenroll"}, "primary/v2/reenroll.json", errors)
+        recomputed = self.v2_view().key_change_reenroll(errors)
+        expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "reenroll summary must equal independent phase-snapshot/client recomputation")
+
+    def p_v2_release_approval(self, errors: list[str]) -> None:
+        doc = self.primary_v2("release-derived-approval.json")
+        self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "approved_identity", "metadata", "eligibility"}, "primary/v2/release-derived-approval.json", errors)
+        recomputed = self.v2_view().release_approval(errors)
+        expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "release summary must equal signature, identity, configuration, and client recomputation")
+
+    def p_v2_directory(self, errors: list[str]) -> None:
+        doc = self.primary_v2("directory.json")
+        self.require_keys(doc, {"schema_version", "profile", "provenance", "raw_source_sha256", "directory", "client_rejections", "gateway", "disclosure"}, "primary/v2/directory.json", errors)
+        recomputed = self.v2_view().directory(errors)
+        expect(all(doc.get(key) == value for key, value in recomputed.items()), errors, "directory summary must equal signature, store, gateway, client, and disclosure recomputation")
+
 
 STEP_PREDICATES: dict[str, tuple[str, ...]] = {
     "step-01-bind-signed-release": ("bind_release",),
@@ -1884,6 +2857,11 @@ STEP_PREDICATES: dict[str, tuple[str, ...]] = {
     "step-14-no-capability-provider-excluded": ("no_capability",),
     "step-15-tampered-receipt-quarantined": ("receipt_quarantine", "isolated_fault_build", "primary_receipt_quarantine", "primary_fault_isolation"),
     "step-16-redaction-review": ("review", "primary_integrity", "primary_canary_recheck"),
+    "step-17-auto-mode-eligibility": ("v2_auto_mode",),
+    "step-18-auto-enrollment-distinct-identities": ("v2_enrollment",),
+    "step-19-key-change-quarantine-reenroll": ("v2_key_change_reenroll",),
+    "step-20-release-derived-approval": ("v2_release_approval",),
+    "step-21-operator-signed-directory": ("v2_directory",),
 }
 
 # A true observation holds when all its predicates hold. A must-be-false
@@ -1926,13 +2904,29 @@ OBSERVATION_PREDICATES: dict[str, tuple[str, ...]] = {
     "privacy_key_written_to_disk": ("key_memory_only",),
     "unreleased_local_binary_connected_to_live_coordinator": ("live_untouched", "isolated_fault_build", "unsigned", "sip_off", "primary_fault_isolation"),
     "secret_or_canary_persisted": ("sweeps_clean", "review", "primary_integrity", "primary_canary_recheck"),
+    "auto_mode_eligible_host_enters_privacy_verified": ("v2_auto_mode",),
+    "auto_mode_ineligible_host_falls_back_without_privacy_records_verified": ("v2_auto_mode",),
+    "explicit_optout_disables_privacy_class_verified": ("v2_auto_mode",),
+    "auto_enrollment_binds_distinct_provider_identities_verified": ("v2_enrollment",),
+    "cross_provider_key_reuse_refused_verified": ("v2_enrollment",),
+    "enrollment_key_change_quarantines_and_revokes_records_verified": ("v2_key_change_reenroll",),
+    "operator_reenroll_revokes_old_enrollment_and_admits_new_keys_verified": ("v2_key_change_reenroll",),
+    "release_metadata_approves_tested_code_identity_verified": ("v2_release_approval",),
+    "release_identity_withdrawal_or_denial_removes_eligibility_verified": ("v2_release_approval",),
+    "identity_directory_signature_expiry_and_revocation_verified": ("v2_directory",),
+    "expanded_v2_residual_disclosures_exact_verified": ("v2_directory",),
+    "automatic_mode_advertised_privacy_records_when_ineligible": ("v2_auto_mode",),
+    "enrollment_replaced_by_key_change_without_operator_reenroll": ("v2_key_change_reenroll",),
+    "denied_release_identity_remained_eligible": ("v2_release_approval",),
+    "unsigned_expired_or_revoked_directory_accepted": ("v2_directory",),
+    "v2_residual_disclosure_omitted": ("v2_directory",),
 }
 
 
 # ---------------------------------------------------------------- recompute
 
 
-def parse_results(bundle: Bundle) -> tuple[str, dict[str, str]]:
+def parse_results(bundle: Bundle, profile: EvidenceProfile = PROFILE_V1) -> tuple[str, dict[str, str]]:
     rows: dict[str, str] = {}
     first: str | None = None
     previous = ""
@@ -1947,9 +2941,9 @@ def parse_results(bundle: Bundle) -> tuple[str, dict[str, str]]:
         rows[parts[1]] = parts[2]
         first = first or parts[0]
         previous = parts[0]
-    if set(rows) != set(KIT_STEP_IDS):
-        fail(f"results.tsv must hold exactly the kit steps {list(KIT_STEP_IDS)}")
-    if list(rows)[0] != KIT_STEP_IDS[0]:
+    if set(rows) != set(profile.kit_step_ids):
+        fail(f"results.tsv must hold exactly the kit steps {list(profile.kit_step_ids)}")
+    if list(rows)[0] != profile.kit_step_ids[0]:
         fail("results.tsv must start with the isolation preflight")
     for step, status in rows.items():
         allowed = {"PASS", "MANUAL"} if step == "step-16-redaction-review" else {"PASS"}
@@ -1962,30 +2956,31 @@ def parse_results(bundle: Bundle) -> tuple[str, dict[str, str]]:
 _RECOMPUTE_CACHE: dict[str, tuple[dict[str, list[str]], dict[str, bool]]] = {}
 
 
-def recompute(bundle: Bundle) -> tuple[dict[str, list[str]], dict[str, bool]]:
+def recompute(bundle: Bundle, profile: EvidenceProfile = PROFILE_V1) -> tuple[dict[str, list[str]], dict[str, bool]]:
     """Return step failures and recomputed observations for a bundle.
 
     MANIFEST.sha256 binds every bundle file, so its digest keys a per-process
     cache; the salted canary recheck is the slow part.
     """
-    cached = _RECOMPUTE_CACHE.get(bundle.manifest_sha256)
+    cache_key = f"{profile.schema}:{bundle.manifest_sha256}"
+    cached = _RECOMPUTE_CACHE.get(cache_key)
     if cached is not None:
         return {step: list(errors) for step, errors in cached[0].items()}, dict(cached[1])
-    result = _recompute(bundle)
-    _RECOMPUTE_CACHE[bundle.manifest_sha256] = result
+    result = _recompute(bundle, profile)
+    _RECOMPUTE_CACHE[cache_key] = result
     return {step: list(errors) for step, errors in result[0].items()}, dict(result[1])
 
 
-def _recompute(bundle: Bundle) -> tuple[dict[str, list[str]], dict[str, bool]]:
-    checks = Checks(bundle)
+def _recompute(bundle: Bundle, profile: EvidenceProfile) -> tuple[dict[str, list[str]], dict[str, bool]]:
+    checks = Checks(bundle, profile)
     step_errors = {
         step: [error for name in STEP_PREDICATES[step] for error in checks.run(name)]
-        for step in STEP_ID_ORDER
+        for step in profile.step_ids
     }
     observations: dict[str, bool] = {}
-    for name in TRUE_OBSERVATIONS:
+    for name in profile.true_observations:
         observations[name] = all(not checks.run(predicate) for predicate in OBSERVATION_PREDICATES[name])
-    for name in FALSE_OBSERVATIONS:
+    for name in profile.false_observations:
         observations[name] = not all(not checks.run(predicate) for predicate in OBSERVATION_PREDICATES[name])
     return step_errors, observations
 
@@ -2003,7 +2998,22 @@ def release_identity(bundle: Bundle) -> dict[str, str]:
     }
 
 
-def journey_requirement_ids(root: Path) -> list[str]:
+def profile_for_schema(schema: Any) -> EvidenceProfile:
+    if not isinstance(schema, str) or schema not in PROFILES_BY_SCHEMA:
+        fail(f"schema_version must be one of {sorted(PROFILES_BY_SCHEMA)}")
+    return PROFILES_BY_SCHEMA[schema]
+
+
+def profile_for_name(name: str) -> EvidenceProfile:
+    if name == "v1":
+        return PROFILE_V1
+    if name == "v2":
+        return PROFILE_V2
+    fail("profile must be 'v1' or 'v2'")
+    raise AssertionError("unreachable")
+
+
+def journey_requirement_ids(root: Path, profile: EvidenceProfile = PROFILE_V1) -> list[str]:
     """Requirements mapped to the journey, minus the Completion exclusions.
 
     The mapping comes from `specs/CONFORMANCE.json` and must equal the journey
@@ -2011,23 +3021,23 @@ def journey_requirement_ids(root: Path) -> list[str]:
     """
     try:
         conformance = json.loads((root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
-        journey_text = (root / JOURNEY_PATH).read_text(encoding="utf-8")
+        journey_text = (root / profile.journey_path).read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError, DuplicateJSONKeyError) as exc:
         fail(f"cannot read the journey requirement mapping: {exc}")
     mapped = {
         row["requirement_id"]
         for row in conformance.get("requirements", [])
-        if isinstance(row, dict) and isinstance(row.get("requirement_id"), str) and JOURNEY_ID in (row.get("journeys") or [])
+        if isinstance(row, dict) and isinstance(row.get("requirement_id"), str) and profile.journey_id in (row.get("journeys") or [])
     }
     header = re.search(r"^Requirements:(.*?)^Authority domains:", journey_text, re.M | re.S)
     if header is None:
-        fail(f"{JOURNEY_PATH} must carry a Requirements: header")
+        fail(f"{profile.journey_path} must carry a Requirements: header")
     declared = set(re.findall(r"SPEC-[0-9]{3}-R[0-9]{3}", header.group(1)))
     if mapped != declared:
-        fail(f"CONFORMANCE.json and {JOURNEY_PATH} disagree on the journey requirements")
-    if not EXCLUDED_REQUIREMENT_IDS <= mapped:
+        fail(f"CONFORMANCE.json and {profile.journey_path} disagree on the journey requirements")
+    if not profile.excluded_requirement_ids <= mapped:
         fail("every Completion exclusion must be mapped to the journey")
-    return sorted(mapped - EXCLUDED_REQUIREMENT_IDS)
+    return sorted(mapped - profile.excluded_requirement_ids)
 
 
 def parse_datetime(value: Any, label: str) -> datetime:
@@ -2040,24 +3050,28 @@ def format_datetime(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def compose_evidence(root: Path, bundle_dir: str, *, expires_at: str | None = None) -> dict[str, Any]:
+def compose_evidence(root: Path, bundle_dir: str, *, expires_at: str | None = None, profile: EvidenceProfile | str = PROFILE_V1) -> dict[str, Any]:
     """Compose the closed evidence object from a reviewed bundle."""
     bundle = load_bundle(root, bundle_dir)
-    captured_at, _ = parse_results(bundle)
-    step_errors, observations = recompute(bundle)
+    if isinstance(profile, str):
+        profile = profile_for_name(profile)
+    if profile not in (PROFILE_V1, PROFILE_V2):
+        fail("compose_evidence profile must be PROFILE_V1 or PROFILE_V2")
+    captured_at, _ = parse_results(bundle, profile)
+    step_errors, observations = recompute(bundle, profile)
     failures = [error for errors in step_errors.values() for error in errors]
     if failures:
         fail("reviewed bundle does not prove every step: " + "; ".join(failures))
     for name, value in observations.items():
-        if value is not (name in TRUE_OBSERVATIONS):
-            fail(f"observation {name} recomputes to {value} from the bundle; the contract requires {name in TRUE_OBSERVATIONS}")
+        if value is not (name in profile.true_observations):
+            fail(f"observation {name} recomputes to {value} from the bundle; the contract requires {name in profile.true_observations}")
     captured = parse_datetime(captured_at, "captured_at")
     expiry = parse_datetime(expires_at, "expires_at") if expires_at else captured + MAX_EVIDENCE_LIFETIME
     identity = release_identity(bundle)
     evidence = {
-        "schema_version": EVIDENCE_SCHEMA,
-        "journey_id": JOURNEY_ID,
-        "requirement_ids": journey_requirement_ids(root),
+        "schema_version": profile.schema,
+        "journey_id": profile.journey_id,
+        "requirement_ids": journey_requirement_ids(root, profile),
         "captured_at": captured_at,
         "expires_at": format_datetime(expiry),
         "release_tag": identity["release_tag"],
@@ -2067,9 +3081,9 @@ def compose_evidence(root: Path, bundle_dir: str, *, expires_at: str | None = No
         "signing_identifier": identity["signing_identifier"],
         "steps": [
             {"step_id": step, "status": "pass", "artifact_sha256": bundle.sha256(STEP_PRIMARY_ARTIFACTS[step])}
-            for step in STEP_ID_ORDER
+            for step in profile.step_ids
         ],
-        "observations": {name: observations[name] for name in (*TRUE_OBSERVATIONS, *FALSE_OBSERVATIONS)},
+        "observations": {name: observations[name] for name in (*profile.true_observations, *profile.false_observations)},
         "redaction_manifest_sha256": bundle.manifest_sha256,
     }
     return evidence
@@ -2079,30 +3093,35 @@ def validate_evidence(root: Path, source: str, evidence: dict[str, Any], *, now:
     """Validate the closed evidence object against its bundle; return the bundle."""
     if set(evidence) != set(EVIDENCE_KEYS):
         fail(f"evidence must carry exactly {list(EVIDENCE_KEYS)} (extra={sorted(set(evidence) - set(EVIDENCE_KEYS))}, missing={sorted(set(EVIDENCE_KEYS) - set(evidence))})")
-    if evidence.get("schema_version") != EVIDENCE_SCHEMA:
-        fail(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
-    if evidence.get("journey_id") != JOURNEY_ID:
-        fail(f"journey_id must equal {JOURNEY_ID!r}")
+    profile = profile_for_schema(evidence.get("schema_version"))
+    if evidence.get("journey_id") != profile.journey_id:
+        fail(f"journey_id must equal {profile.journey_id!r}")
     requirement_ids = evidence.get("requirement_ids")
     if not isinstance(requirement_ids, list) or not all(isinstance(item, str) and REQUIREMENT_RE.fullmatch(item) for item in requirement_ids):
         fail("requirement_ids must be an array of requirement IDs")
     if requirement_ids != sorted(set(requirement_ids)):
         fail("requirement_ids must be sorted and unique")
-    if requirement_ids != journey_requirement_ids(root):
-        fail("requirement_ids must be every requirement mapped to the journey except SPEC-049-R023, SPEC-022-R014, SPEC-015-R007, and SPEC-001-R005")
+    if requirement_ids != journey_requirement_ids(root, profile):
+        fail(f"requirement_ids must be every requirement mapped to {profile.journey_id} except {sorted(profile.excluded_requirement_ids)}")
     captured = parse_datetime(evidence.get("captured_at"), "captured_at")
     expires = parse_datetime(evidence.get("expires_at"), "expires_at")
     if not captured < expires <= captured + MAX_EVIDENCE_LIFETIME:
         fail("expires_at must be after captured_at and no more than 90 days later")
     if now is not None and expires <= now:
         fail("evidence has expired")
+    names = (*profile.true_observations, *profile.false_observations)
+    observations = evidence.get("observations")
+    if not isinstance(observations, dict) or set(observations) != set(names):
+        fail(f"observations must contain exactly the {len(names)} contract booleans")
+    if not all(isinstance(value, bool) for value in observations.values()):
+        fail("observations must be booleans")
     bundle_dir = bundle_dir_for_source(source)
     if bundle_dir[len(EVIDENCE_PREFIX) :] != captured.strftime("%Y%m%dT%H%M%SZ"):
         fail("evidence file name must carry the compact captured_at")
     bundle = load_bundle(root, bundle_dir)
     if evidence.get("redaction_manifest_sha256") != bundle.manifest_sha256:
         fail("redaction_manifest_sha256 must equal the SHA-256 of the bundle MANIFEST.sha256")
-    run_start, _ = parse_results(bundle)
+    run_start, _ = parse_results(bundle, profile)
     if evidence["captured_at"] != run_start:
         fail("captured_at must equal the journey start recorded in results.tsv")
     identity = release_identity(bundle)
@@ -2113,10 +3132,10 @@ def validate_evidence(root: Path, source: str, evidence: dict[str, Any], *, now:
         if value != identity[key]:
             fail(f"{key} must equal the bound release identity recorded by step-01")
     steps = evidence.get("steps")
-    if not isinstance(steps, list) or len(steps) != len(STEP_ID_ORDER):
-        fail(f"steps must contain each of the {len(STEP_ID_ORDER)} journey steps exactly once")
+    if not isinstance(steps, list) or len(steps) != len(profile.step_ids):
+        fail(f"steps must contain each of the {len(profile.step_ids)} journey steps exactly once")
     bundle_digests = {hashlib.sha256(data).hexdigest() for data in bundle.files.values()}
-    for index, (step, expected_id) in enumerate(zip(steps, STEP_ID_ORDER)):
+    for index, (step, expected_id) in enumerate(zip(steps, profile.step_ids)):
         if not isinstance(step, dict) or list(step) != ["step_id", "status", "artifact_sha256"]:
             fail(f"steps[{index}] must be exactly {{step_id, status, artifact_sha256}}")
         if step["step_id"] != expected_id:
@@ -2128,18 +3147,12 @@ def validate_evidence(root: Path, source: str, evidence: dict[str, Any], *, now:
             fail(f"{expected_id}.artifact_sha256 must resolve to a file in the reviewed bundle")
         if digest != bundle.sha256(STEP_PRIMARY_ARTIFACTS[expected_id]):
             fail(f"{expected_id}.artifact_sha256 must be the digest of {STEP_PRIMARY_ARTIFACTS[expected_id]}")
-    observations = evidence.get("observations")
-    names = (*TRUE_OBSERVATIONS, *FALSE_OBSERVATIONS)
-    if not isinstance(observations, dict) or set(observations) != set(names):
-        fail(f"observations must contain exactly the {len(names)} contract booleans")
-    if not all(isinstance(value, bool) for value in observations.values()):
-        fail("observations must be booleans")
-    step_errors, recomputed = recompute(bundle)
+    step_errors, recomputed = recompute(bundle, profile)
     failures = [error for errors in step_errors.values() for error in errors]
     if failures:
         fail("reviewed bundle does not prove every step: " + "; ".join(failures))
     for name in names:
-        required = name in TRUE_OBSERVATIONS
+        required = name in profile.true_observations
         if recomputed[name] is not required:
             fail(f"observation {name} recomputes to {recomputed[name]} from the bundle; the contract requires {required}")
         if observations[name] is not recomputed[name]:
@@ -2150,10 +3163,10 @@ def validate_evidence(root: Path, source: str, evidence: dict[str, Any], *, now:
 # ---------------------------------------------------------------- payload
 
 
-def operator_fingerprint(manifest_sha256: str) -> str:
+def operator_fingerprint(manifest_sha256: str, profile: EvidenceProfile = PROFILE_V1) -> str:
     # The closed evidence object carries no operator identity; the signed
     # payload binds a non-identifying digest of the reviewed bundle instead.
-    return hashlib.sha256(f"macprovider.privacy-class-beta.operator.v1\n{manifest_sha256}".encode()).hexdigest()
+    return hashlib.sha256(f"{profile.operator_fingerprint_domain}\n{manifest_sha256}".encode()).hexdigest()
 
 
 def signed_expiry_date(expires_at: str) -> str:
@@ -2164,17 +3177,18 @@ def signed_expiry_date(expires_at: str) -> str:
 
 
 def project_payload(evidence: dict[str, Any], source: str, evidence_sha256: str, bundle: Bundle, *, source_sha: str, evidence_sha: str) -> dict[str, Any]:
+    profile = profile_for_schema(evidence.get("schema_version"))
     identity = release_identity(bundle)
     run_id = Path(source).name[: -len(EVIDENCE_SUFFIX)]
     return {
         "schema_version": JOURNEY_RESULT_PAYLOAD_SCHEMA,
-        "journey_id": JOURNEY_ID,
+        "journey_id": profile.journey_id,
         "requirement_ids": list(evidence["requirement_ids"]),
         "repository": {"name": REPOSITORY, "commit": source_sha},
         "evidence_repository": {"name": REPOSITORY, "commit": evidence_sha},
         "captured_at": evidence["captured_at"],
         "expires_at": signed_expiry_date(evidence["expires_at"]),
-        "operator": {"role": "acceptance-operator", "identity_fingerprint": operator_fingerprint(bundle.manifest_sha256)},
+        "operator": {"role": "acceptance-operator", "identity_fingerprint": operator_fingerprint(bundle.manifest_sha256, profile)},
         "environment": {
             "class": EXECUTION_MODE,
             "hardware_profile": f"apple-silicon-{identity['hardware_model'].lower().replace(',', '-')}",
@@ -2188,13 +3202,13 @@ def project_payload(evidence: dict[str, Any], source: str, evidence_sha256: str,
             "signing_identifier": evidence["signing_identifier"],
         },
         "artifacts": [
-            {"id": ARTIFACT_ID, "sha256": evidence_sha256, "source": source},
-            {"id": MANIFEST_ARTIFACT_ID, "sha256": bundle.manifest_sha256, "source": bundle.manifest_source},
+            {"id": profile.artifact_id, "sha256": evidence_sha256, "source": source},
+            {"id": profile.manifest_artifact_id, "sha256": bundle.manifest_sha256, "source": bundle.manifest_source},
         ],
-        "result": {"status": "pass", "summary": "signed notarized release passed every JOURNEY-PRIVACY-CLASS-BETA step on Apple Silicon"},
+        "result": {"status": "pass", "summary": profile.summary},
         "steps": [
-            {"id": step, "status": "pass", "assertion": STEP_ASSERTIONS[step], "artifacts": [ARTIFACT_ID, MANIFEST_ARTIFACT_ID]}
-            for step in STEP_ID_ORDER
+            {"id": step, "status": "pass", "assertion": STEP_ASSERTIONS[step], "artifacts": [profile.artifact_id, profile.manifest_artifact_id]}
+            for step in profile.step_ids
         ],
         "redaction": {"secrets_redacted": True, "operator_identity_redacted": True, "local_account_names_redacted": True},
         "run_id": run_id,
@@ -2253,14 +3267,18 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
 def validate_signed_payload(root: Path, signed: dict[str, Any], requirement_id: str, journeys: list[str]) -> list[str]:
     """Governance re-validation of a signed payload against its committed source."""
     errors: list[str] = []
-    if JOURNEY_ID not in journeys:
-        errors.append(f"privacy-class beta requirement journeys must include {JOURNEY_ID!r}")
+    journey_id = signed.get("journey_id")
+    profile = PROFILES_BY_JOURNEY.get(journey_id) if isinstance(journey_id, str) else None
+    if profile is None:
+        return [f"signed.journey_id must be one of {sorted(PROFILES_BY_JOURNEY)}"]
+    if profile.journey_id not in journeys:
+        errors.append(f"privacy-class beta requirement journeys must include {profile.journey_id!r}")
     artifacts = signed.get("artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 2 or not all(isinstance(item, dict) for item in artifacts):
         return errors + ["signed.artifacts must be exactly the redacted evidence and its bundle manifest"]
     source = artifacts[0].get("source")
-    if artifacts[0].get("id") != ARTIFACT_ID or not isinstance(source, str):
-        return errors + [f"signed.artifacts[0] must be {ARTIFACT_ID}"]
+    if artifacts[0].get("id") != profile.artifact_id or not isinstance(source, str):
+        return errors + [f"signed.artifacts[0] must be {profile.artifact_id}"]
     repository = signed.get("repository")
     evidence_repository = signed.get("evidence_repository")
     if not isinstance(repository, dict) or not isinstance(evidence_repository, dict):

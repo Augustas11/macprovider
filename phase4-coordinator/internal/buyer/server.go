@@ -959,6 +959,7 @@ func (s *Server) Handler() http.Handler {
 	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/route-reservations", s.handleRelayBlindReservation)
 	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/consume", s.handleRelayBlindConsume)
 	r.With(s.gatewayContextMiddleware).Post("/v1/relay-blind/status", s.handleRelayBlindStatus)
+	r.With(s.gatewayContextMiddleware).Get("/v1/privacy-class/directory", s.handlePrivacyDirectory)
 	r.With(s.gatewayServiceMiddleware).Get("/v1/relay-blind/capabilities", s.handleRelayBlindCapabilities)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)

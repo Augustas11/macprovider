@@ -27,6 +27,9 @@ closed.
 
 This document is a test contract. It is not evidence that the journey passed
 and does not make any SPEC-049 requirement conformant by itself.
+This original v1 contract covers the v0.1 requirement set only. The v0.2
+automatic-enrollment profile is `JOURNEY-PRIVACY-CLASS-BETA-V2`, which reruns
+this full baseline and then adds SPEC-049-R024 through SPEC-049-R028 evidence.
 SPEC-049-R023 is mapped here because a signed result of this journey is one of
 its required inputs; a signed result MUST NOT promote SPEC-049-R023 on its own,
 because that requirement also needs a recorded staged canary and three-lane

@@ -8,11 +8,21 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.check_spec_governance import _commit_mapping_selector_matches_current, _extract_mapping_fragment, validate_repository
+from scripts.check_spec_governance import (
+    PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
+    ValidationResult,
+    _commit_mapping_selector_matches_current,
+    _extract_mapping_fragment,
+    _signed_journey_result_satisfies,
+    validate_repository,
+    verify_pinned_public_ecdsa_sha256,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "spec_governance"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 JOURNEY_RESULT_SIGNING_DOMAIN = b"macprovider.journey-result.v1\n"
 GAP = {
     "verdict": "UNKNOWN",
@@ -768,7 +778,65 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         raise AssertionError(f"unknown fixture operation {operation!r}")
 
 
+class PublicSignatureVerificationTests(unittest.TestCase):
+    def test_wrong_pin_and_private_pem_fail_before_process_use(self) -> None:
+        public_key = (REPO_ROOT / "ops" / "pearl-updater" / "release-signing-public.pem").read_bytes()
+        # Assemble the deliberately fake private-key envelope at runtime so
+        # repository secret scanners never encounter a PEM marker literal.
+        private_label = b"PRIVATE" + b" " + b"KEY"
+        private_pem = b"-----BEGIN " + private_label + b"-----\nZmFrZQ==\n-----END " + private_label + b"-----\n"
+        with mock.patch("scripts.check_spec_governance.resolve_trusted_openssl") as resolver, mock.patch("scripts.check_spec_governance.subprocess.run") as run:
+            self.assertFalse(verify_pinned_public_ecdsa_sha256(public_key, "0" * 64, b"message", b"0" * 64))
+            self.assertFalse(verify_pinned_public_ecdsa_sha256(private_pem, hashlib.sha256(private_pem).hexdigest(), b"message", b"0" * 64))
+            resolver.assert_not_called()
+            run.assert_not_called()
+
+    def test_timeout_fails_closed_with_restricted_environment(self) -> None:
+        public_key = (REPO_ROOT / "ops" / "pearl-updater" / "release-signing-public.pem").read_bytes()
+        digest = hashlib.sha256(public_key).hexdigest()
+        with mock.patch("scripts.check_spec_governance.resolve_trusted_openssl", return_value="/usr/bin/openssl") as resolver, mock.patch(
+            "scripts.check_spec_governance.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["verification"], 20),
+        ) as run:
+            self.assertFalse(verify_pinned_public_ecdsa_sha256(public_key, digest, b"message", b"0" * 64))
+            resolver.assert_called_once_with(None)
+            self.assertEqual(20, run.call_args.kwargs["timeout"])
+            self.assertEqual({"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, run.call_args.kwargs["env"])
+
+
 class GovernanceValidatorTests(unittest.TestCase):
+    def test_privacy_class_beta_v2_signed_result_cannot_satisfy_requirement(self) -> None:
+        envelope = {
+            "schema_version": "macprovider.journey-result-envelope.v1",
+            "signed": {"journey_id": PRIVACY_CLASS_BETA_V2_JOURNEY_ID},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "journeys" / "evidence" / "privacy-class-beta-v2.signed.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+            requirement = {
+                "requirement_id": "SPEC-049-R023",
+                "journeys": [PRIVACY_CLASS_BETA_V2_JOURNEY_ID],
+                "evidence": [{
+                    "artifact": f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}",
+                    "source": "journeys/evidence/privacy-class-beta-v2.signed.json",
+                }],
+            }
+            result = ValidationResult()
+
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    requirement,
+                    "SPEC-049-R023",
+                    result,
+                    trusted_public_key_sha256="",
+                    openssl_bin="openssl",
+                )
+            )
+            self.assertTrue(any("privacy-class beta journey-result is evidence-only" in error for error in result.errors))
+
     def test_valid_fixture_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

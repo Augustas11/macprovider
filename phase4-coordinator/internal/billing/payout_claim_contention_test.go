@@ -2,43 +2,23 @@ package billing
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/augstar/macprovider-coordinator/internal/requestlog"
-	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 // #1690 review LOW (F-4 class): ClaimPayoutReady reads the payout row and
 // its source credits and then writes the claim and its audit row. As a
-// deferred transaction, a commit on another handle to the same file
-// (routeSnapshotDB) between the read and the write failed the upgrade with
-// SQLITE_BUSY without honouring busy_timeout. Concurrent writers must not
-// fail a claim.
+// deferred transaction, a commit from the best-effort primary route-snapshot
+// mirror to the same file between the read and the write failed the upgrade
+// with SQLITE_BUSY without honouring busy_timeout. Production records the
+// authoritative route snapshot in the dedicated journal first; concurrent
+// primary-mirror pressure must not fail a claim or drop journal evidence.
 func TestClaimPayoutReadySurvivesConcurrentRouteSnapshotWriter(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
-	reqStore, err := requestlog.OpenStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reqStore.Close() })
-	store, err := NewStore(reqStore.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	routeSnapshotDB.SetMaxOpenConns(4)
-	routeSnapshotDB.SetMaxIdleConns(4)
-	t.Cleanup(func() { _ = routeSnapshotDB.Close() })
-	store.SetRouteSnapshotDB(routeSnapshotDB)
-	store.SetRouteSnapshotBusyTimeout(500 * time.Millisecond)
+	store, routeSnapshotJournalDB := newContentionStoreWithRouteSnapshotJournal(t, dbPath)
 
 	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	insertCreditWithOperator(t, store.db, "claim-contention-1", "provider-a", start.Add(time.Hour), 500)
@@ -96,5 +76,12 @@ func TestClaimPayoutReadySurvivesConcurrentRouteSnapshotWriter(t *testing.T) {
 	}
 	if claims != 1 {
 		t.Fatalf("successful claims=%d, want exactly 1", claims)
+	}
+	var journalRows int
+	if err := routeSnapshotJournalDB.QueryRow(`SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id LIKE 'req-claim-route-%'`).Scan(&journalRows); err != nil {
+		t.Fatal(err)
+	}
+	if journalRows != workers*perWorker {
+		t.Fatalf("route snapshot journal rows=%d, want %d", journalRows, workers*perWorker)
 	}
 }

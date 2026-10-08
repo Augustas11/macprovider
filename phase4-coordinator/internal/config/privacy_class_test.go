@@ -115,9 +115,22 @@ func TestPrivacyClassValidation(t *testing.T) {
 		{name: "quarantine", want: "quarantine_seconds", mutate: func(cfg *Config) { cfg.PrivacyClass.QuarantineSeconds = 0 }},
 		{name: "empty backends", want: "allowed_se_key_backends", enabled: true, mutate: func(cfg *Config) { cfg.PrivacyClass.AllowedSEKeyBackends = nil }},
 		{name: "duplicate backends", want: "duplicate backend", mutate: func(cfg *Config) { cfg.PrivacyClass.AllowedSEKeyBackends = []string{"file", "file"} }},
-		{name: "no se pin", want: "provider_se_public_keys", enabled: true, mutate: func(cfg *Config) { cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{} }},
+		{name: "se pin without identity pin", want: "requires relay_blind.identity_public_keys", mutate: func(cfg *Config) {
+			cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{"provider-b": testPrivacySEPin(t)}
+		}},
 		{name: "expired identity", want: "unexpired", enabled: true, mutate: func(cfg *Config) {
 			cfg.PrivacyClass.ApprovedCodeIdentities[0].ExpiresAt = time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+		}},
+		{name: "directory key required", want: "directory.signing_key_path", enabled: true, mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.SigningKeyPath = "" }},
+		{name: "directory key relative", want: "directory.signing_key_path", mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.SigningKeyPath = "relative.key" }},
+		{name: "directory ttl low", want: "directory.ttl_seconds", mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.TTLSeconds = 59 }},
+		{name: "directory ttl high", want: "directory.ttl_seconds", mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.TTLSeconds = 3601 }},
+		{name: "denied cdhash format", want: "denied_code_cdhashes", mutate: func(cfg *Config) { cfg.PrivacyClass.DeniedCodeCDHashes = []string{"ABC"} }},
+		{name: "denied cdhash duplicate", want: "duplicate", mutate: func(cfg *Config) {
+			cfg.PrivacyClass.DeniedCodeCDHashes = []string{strings.Repeat("a", 40), strings.Repeat("a", 40)}
+		}},
+		{name: "release half configured", want: "release_code_identities", mutate: func(cfg *Config) {
+			cfg.PrivacyClass.ReleaseCodeIdentities.MetadataDir = "/opt/macprovider/privacy-release-identities"
 		}},
 		{name: "team id", want: "team_id", mutate: func(cfg *Config) { cfg.PrivacyClass.ApprovedCodeIdentities[0].TeamID = "ab12cd34ef" }},
 		{name: "cdhash", want: "code_cdhash", mutate: func(cfg *Config) {
@@ -182,7 +195,38 @@ func privacyReadyConfig(t *testing.T) Config {
 	cfg.RelayBlind.IdentityPublicKeys = map[string]string{"provider-a": base64.RawURLEncoding.EncodeToString(public)}
 	cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{"provider-a": testPrivacySEPin(t)}
 	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity(time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC))}
+	cfg.PrivacyClass.Directory.SigningKeyPath = "/etc/macprovider/privacy-directory.key"
 	return cfg
+}
+
+// SPEC-049-R025/R027: automatic enrollment needs no operator pins, and
+// signed release metadata alone can supply approved identities.
+func TestPrivacyClassAutomaticEnrollmentConfig(t *testing.T) {
+	cfg := privacyReadyConfig(t)
+	cfg.PrivacyClass.Enabled = true
+	cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{}
+	cfg.RelayBlind.IdentityPublicKeys = map[string]string{}
+	cfg.PrivacyClass.ApprovedCodeIdentities = nil
+	cfg.PrivacyClass.ReleaseCodeIdentities = PrivacyReleaseCodeIdentitiesConfig{
+		MetadataDir:   "/opt/macprovider/privacy-release-identities",
+		PublicKeyPath: "/opt/macprovider/release-signing-public.pem",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("pinless release-derived config rejected: %v", err)
+	}
+	cfg.PrivacyClass.ReleaseCodeIdentities = PrivacyReleaseCodeIdentitiesConfig{}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "release_code_identities or an unexpired") {
+		t.Fatalf("no approval source = %v", err)
+	}
+	relayOnly := privacyReadyConfig(t)
+	relayOnly.PrivacyClass.ProviderSEPublicKeys = map[string]string{}
+	relayOnly.RelayBlind.IdentityPublicKeys = map[string]string{}
+	if err := relayOnly.Validate(); err == nil || !strings.Contains(err.Error(), "identity_public_keys") {
+		t.Fatalf("relay-blind without privacy class still requires pins: %v", err)
+	}
+	if Default().PrivacyClass.Directory.TTLSeconds != 300 {
+		t.Fatal("directory ttl default is not 300")
+	}
 }
 
 func testApprovedIdentity(expiry time.Time) ApprovedCodeIdentity {

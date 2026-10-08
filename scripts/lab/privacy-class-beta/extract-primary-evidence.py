@@ -46,10 +46,67 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 SCHEMA = "macprovider.privacy-class-beta-primary.v1"
+V2_SOURCE_PROFILE = "macprovider.privacy-class-beta-v2-source.v1"
 MAX_ROWS = 20000
 MAX_TEXT = 4096
 MAX_FREE_TEXT = 200
 MAX_LOG_EVENTS = 50000
+V2_SOURCE_FILES = {
+    "auto-mode.json",
+    "enrollment.json",
+    "reenroll.json",
+    "release-derived-approval.json",
+    "directory.json",
+}
+V2_SOURCE_MAX_BYTES = 1 << 20
+V2_RAW_PREFIX = "evidence/v2-raw/"
+V2_SOURCE_CONTRACT = {
+    "auto-mode.json": {
+        "auto_launch": "evidence/v2-raw/auto-mode/launch.json",
+        "auto_config": "evidence/v2-raw/auto-mode/config.json",
+        "auto_sessions": "evidence/v2-raw/auto-mode/sessions.json",
+        "auto_logs": "evidence/v2-raw/auto-mode/logs.json",
+        "auto_db_before": "evidence/v2-raw/auto-mode/db-before.json",
+        "auto_db_after": "evidence/v2-raw/auto-mode/db-after.json",
+    },
+    "enrollment.json": {
+        "enrollment_before": "evidence/v2-raw/enrollment/before.json",
+        "enrollment_after_first": "evidence/v2-raw/enrollment/after-first.json",
+        "enrollment_after_second": "evidence/v2-raw/enrollment/after-second.json",
+        "enrollment_after_reuse": "evidence/v2-raw/enrollment/after-reuse.json",
+        "enrollment_after_failed_posture": "evidence/v2-raw/enrollment/after-failed-posture.json",
+        "enrollment_clients": "evidence/v2-raw/enrollment/clients.json",
+    },
+    "reenroll.json": {
+        "reenroll_initial": "evidence/v2-raw/reenroll/initial.json",
+        "reenroll_key_change": "evidence/v2-raw/reenroll/key-change.json",
+        "reenroll_expiry_retry": "evidence/v2-raw/reenroll/expiry-retry.json",
+        "reenroll_operator_clear": "evidence/v2-raw/reenroll/operator-clear.json",
+        "reenroll_after": "evidence/v2-raw/reenroll/after.json",
+        "reenroll_clients": "evidence/v2-raw/reenroll/clients.json",
+    },
+    "release-derived-approval.json": {
+        "release_metadata": "evidence/v2-raw/release/pearl-release.json",
+        "release_signature": "evidence/v2-raw/release/pearl-release.json.sig",
+        "release_invalid_metadata": "evidence/v2-raw/release/invalid-pearl-release.json",
+        "release_invalid_signature": "evidence/v2-raw/release/invalid-pearl-release.json.sig",
+        "release_public_key": "evidence/v2-raw/release/release-signing-public.pem",
+        "release_file_stats": "evidence/v2-raw/release/file-stats.json",
+        "release_eligibility": "evidence/v2-raw/release/eligibility.json",
+        "release_approved_db": "evidence/v2-raw/release/approved-db.json",
+        "release_denied_db": "evidence/v2-raw/release/denied-db.json",
+        "release_withdrawn_db": "evidence/v2-raw/release/withdrawn-db.json",
+    },
+    "directory.json": {
+        "directory_envelope": "evidence/v2-raw/directory/envelope.json",
+        "directory_public_key": "evidence/v2-raw/directory/public-key.json",
+        "directory_gateway_body": "evidence/v2-raw/directory/gateway-body.json",
+        "directory_gateway_headers": "evidence/v2-raw/directory/gateway-headers.json",
+        "directory_clients": "evidence/v2-raw/directory/clients.json",
+        "directory_store": "evidence/v2-raw/directory/store.json",
+        "directory_disclosure": "evidence/v2-raw/directory/disclosure.json",
+    },
+}
 
 # Tables exported row by row (when present). Everything else is counted only.
 ROW_TABLES = {
@@ -58,6 +115,8 @@ ROW_TABLES = {
         "relay_blind_key_records",
         "privacy_class_quarantine",
         "privacy_class_control",
+        "privacy_class_enrollment",
+        "privacy_class_operator_clear",
     ),
     "coordinator.db": (
         "settlement_route_snapshots",
@@ -79,6 +138,30 @@ ROW_TABLES = {
     "gateway.db": ("quota_reservations", "usage_events"),
     "provider_connection_events.db": ("provider_connection_events", "provider_last_known"),
 }
+
+
+class DuplicateJSONKey(ValueError):
+    pass
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateJSONKey(key)
+        result[key] = value
+    return result
+
+
+def parse_json_bytes(data: bytes, label: str):
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=unique_json_object)
+    except UnicodeDecodeError as exc:
+        die(f"{label} must be UTF-8 ({exc.__class__.__name__})")
+    except DuplicateJSONKey as exc:
+        die(f"{label} repeats JSON key {exc.args[0]!r}")
+    except ValueError as exc:
+        die(f"{label} must be JSON ({exc.__class__.__name__})")
 # Verified-work reward, emission, unlock and referral tables in any DB.
 REWARD_TABLE_RE = re.compile(r"(reward|emission|unlock|verified_work|referral_serving|referral_social_grants)", re.I)
 # Column names that can carry a credential: dropped, never exported.
@@ -506,6 +589,100 @@ def export_sweep(raw: pathlib.Path, out: pathlib.Path, needles: list[tuple[str, 
     write_json(out / "sweep" / "raw-files.json", {"schema_version": SCHEMA, "files": files, "total_needle_matches": sum(item["needle_matches"] for item in files)})
 
 
+def export_v2_sources(raw: pathlib.Path, out: pathlib.Path, redactor: Redactor, warnings: list[str]) -> None:
+    """Export closed v0.2 source-fact captures.
+
+    The runner owns the summary manifests under evidence/v2-source/ and exact
+    observations under evidence/v2-raw/. The extractor validates the closed
+    inventories and provenance envelope, copies source bytes without mutation,
+    and records SHA-256 so the contract can bind primary/v2 facts back to the
+    reviewed bundle without trusting step summary booleans. The final scanner
+    rejects the whole output if those exact bytes contain secrets or host paths.
+    """
+    source_dir = raw / "evidence" / "v2-source"
+    if not source_dir.exists() and not source_dir.is_symlink():
+        # Historical v1 runs have no v2 source tree. Absence selects the v1
+        # extraction path; once the directory exists, the closed v2 inventory
+        # below is mandatory and validated fail closed.
+        return
+    if source_dir.is_symlink() or not source_dir.is_dir():
+        die("evidence/v2-source must be a real directory")
+    seen = {path.name for path in source_dir.iterdir() if path.is_file()}
+    if seen != V2_SOURCE_FILES:
+        die(f"evidence/v2-source must contain exactly {sorted(V2_SOURCE_FILES)}")
+    expected_raw_paths = {path for sources in V2_SOURCE_CONTRACT.values() for path in sources.values()}
+    raw_root = raw / "evidence" / "v2-raw"
+    if raw_root.is_symlink() or not raw_root.is_dir():
+        die("evidence/v2-raw must be a real directory when v2 source manifests are present")
+    actual_raw_paths = {
+        path.relative_to(raw).as_posix()
+        for path in raw_root.rglob("*")
+        if path.is_file()
+    }
+    if actual_raw_paths != expected_raw_paths:
+        die("evidence/v2-raw must contain exactly the closed v2 raw-source inventory")
+    copied: set[str] = set()
+    for name in sorted(V2_SOURCE_FILES):
+        path = source_dir / name
+        if not contained(path):
+            die(f"evidence/v2-source/{name} must be a contained regular file")
+        data = path.read_bytes()
+        if len(data) > V2_SOURCE_MAX_BYTES:
+            die(f"evidence/v2-source/{name} is too large")
+        doc = parse_json_bytes(data, f"evidence/v2-source/{name}")
+        if not isinstance(doc, dict):
+            die(f"evidence/v2-source/{name} must be a JSON object")
+        if doc.get("profile") != V2_SOURCE_PROFILE:
+            die(f"evidence/v2-source/{name} profile must be {V2_SOURCE_PROFILE}")
+        provenance = doc.get("provenance")
+        if not isinstance(provenance, dict) or set(provenance) != {"raw_sources"} or not isinstance(provenance.get("raw_sources"), list) or not provenance["raw_sources"]:
+            die(f"evidence/v2-source/{name} must carry provenance.raw_sources")
+        expected_sources = V2_SOURCE_CONTRACT[name]
+        seen_sources: set[str] = set()
+        seen_kinds: set[str] = set()
+        for index, item in enumerate(provenance["raw_sources"]):
+            if not isinstance(item, dict) or set(item) != {"kind", "path", "sha256"}:
+                die(f"evidence/v2-source/{name} provenance.raw_sources[{index}] must carry exactly kind, path, and sha256")
+            kind = item.get("kind")
+            source = item.get("path")
+            digest = item.get("sha256")
+            if not isinstance(kind, str) or kind not in expected_sources:
+                die(f"evidence/v2-source/{name} provenance.raw_sources[{index}].kind is not in the closed contract")
+            if source != expected_sources.get(kind):
+                die(f"evidence/v2-source/{name} provenance.raw_sources[{index}].path must be {expected_sources.get(kind)!r}")
+            if source in seen_sources:
+                die(f"evidence/v2-source/{name} provenance repeats {source}")
+            if kind in seen_kinds:
+                die(f"evidence/v2-source/{name} provenance repeats kind {kind}")
+            seen_sources.add(source)
+            seen_kinds.add(kind)
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                die(f"evidence/v2-source/{name} provenance.raw_sources[{index}].sha256 must be lowercase sha256")
+            source_path = raw / source
+            if not contained(source_path):
+                die(f"evidence/v2-source/{name} provenance source is absent or not contained: {source}")
+            source_data = source_path.read_bytes()
+            if len(source_data) == 0 or len(source_data) > V2_SOURCE_MAX_BYTES:
+                die(f"evidence/v2-source/{name} provenance source is empty or too large: {source}")
+            if hashlib.sha256(source_data).hexdigest() != digest:
+                die(f"evidence/v2-source/{name} provenance source hash mismatch: {source}")
+            if source_path.suffix == ".json":
+                parse_json_bytes(source_data, source)
+            export_relative = f"v2/sources/{kind}{source_path.suffix}"
+            if export_relative in copied:
+                die(f"v2 source export collision: {export_relative}")
+            copied.add(export_relative)
+            target = out / export_relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source_data)
+        if seen_kinds != set(expected_sources):
+            die(f"evidence/v2-source/{name} provenance kinds must be exactly {sorted(expected_sources)}")
+        exported = redactor.value(doc)
+        exported["schema_version"] = SCHEMA
+        exported["raw_source_sha256"] = hashlib.sha256(data).hexdigest()
+        write_json(out / "v2" / name, exported)
+
+
 def write_json(path: pathlib.Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -563,6 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         crossref(raw, out, privacy_ids, warnings)
         export_logs(raw, out, offset, redactor, warnings)
         export_dyld_procedure(pathlib.Path(args.kit_script) if args.kit_script else None, out, redactor, warnings)
+        export_v2_sources(raw, out, redactor, warnings)
         export_sweep(raw, out, needles, redactor)
         write_json(out / "summary.json", {
             "schema_version": SCHEMA,

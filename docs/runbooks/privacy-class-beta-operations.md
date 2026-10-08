@@ -1,75 +1,112 @@
 # Privacy class beta operations
 
-SPEC-049 `operator_constrained_beta_v1` is default-off. Turn it on only for a provider whose Secure Enclave key and signed release identity are pinned, and only while the gateway and the buyer client are on as well. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
+SPEC-049 `operator_constrained_beta_v1`, v0.2.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
 
 These commands print public material only. Do not print, log, or copy private key bytes.
 
-## Pin the provider
+Production activation. The v0.1.4 staged canary (SPEC-049 §8.1, Entry 249) covers 0.1.x code with one pinned provider only. Do not run v0.2.0 code with `privacy_class.enabled: true` in production under that exception; automatic enrollment needs its own dated exception or SPEC-049-R023 promotion first (SPEC-049 §8.2).
 
-On the provider Mac, print the Secure Enclave public key and the relay-blind identity:
+## What enrollment trusts
 
-```bash
-macprovider-cli privacy-class identity --state-dir /absolute/relay-blind-state --model <model-id>
+The coordinator enrolls a provider ID's Secure Enclave key and relay-blind identity from the first posture that verifies for that provider's live, authenticated session under an approved signed code identity. That record is the pin from then on. A later different key quarantines the provider and is never enrolled on its own.
+
+Enrollment trusts whoever completes that first attested session. Posture is device-bound, not code-bound, so a modified binary or a holder of the provider credential that connects first is enrolled like the real device. The coordinator host also holds the directory signing key, so a compromised coordinator can vouch for an identity of its choice. Buyers who must keep the coordinator out of identity trust use `--identity-pin`. Operators who must pin one device use the configuration pins below.
+
+## Providers
+
+Nothing to do. On `macprovider-cli serve`, with `privacy_class_beta` unset, the provider runs a read-only check: code signature and hardened-runtime flags, team and signing identifier, no debug entitlements, SIP on, not traced, no diagnostic environment variables, native in-process runtime, KV disk tier off, Secure Enclave identity, and the state directory. If every check passes it turns on relay-blind and privacy mode, uses `~/.config/macprovider/relay-blind` unless `relay_blind_state_directory` is set, runs the SPEC-049-R007 hardening, and advertises its privacy keys and enrollment claim.
+
+If a check fails the provider serves ordinary traffic and logs one line:
+
+```text
+privacy_class auto_ineligible reasons=<codes>
 ```
 
-`--config` can replace `--state-dir` and `--model` when the config already names them. Stdout is one JSON object with these keys:
+If the hardening itself fails it also serves ordinary traffic and logs `privacy_class auto_hardening_failed reasons=<codes>`. Dev, unsigned, ad-hoc-signed, SIP-off, loopback-runtime, and KV-disk-tier hosts land here. Autotune candidates and `--no-join` runs never try.
 
-- `se_public_key` (standard base64 of the raw 64-byte P-256 X||Y point)
-- `se_key_backend` (`file` or `keychain`)
-- `relay_blind_identity_public_key`
-- `relay_blind_fingerprint`
-- `code_cdhash`
-- `team_id`
-- `binary_version`
+Opt out with any one of these:
 
-Put `se_public_key` in the coordinator pin for that provider id. Put `relay_blind_identity_public_key` in `relay_blind.identity_public_keys` for the same provider id. The buyer identity pin uses `relay_blind_identity_public_key` and `relay_blind_fingerprint`.
+- flag `--no-privacy-class-beta`
+- config `privacy_class_beta: false`
+- environment `MACPROVIDER_PRIVACY_CLASS_BETA=false`
+- any explicit `relay_blind_enabled` value (flag, environment, or config). `false` turns relay-blind off; `true` keeps plain SPEC-041 relay-blind with its pinned identity instead of the privacy class
 
-Derive `approved_code_identities` from the signed release binary, not from an unsigned local build:
+Force it on with `--privacy-class-beta`, `privacy_class_beta: true`, or `MACPROVIDER_PRIVACY_CLASS_BETA=true`. Forced mode turns relay-blind on unless it is explicitly off, which is a configuration error, and it exits non-zero with `FATAL privacy_class_hardening_failed` when the hardening fails.
+
+To see what a provider will present, on the provider Mac:
 
 ```bash
-scripts/privacy-class-code-identity.sh /path/to/signed/macprovider-cli
+macprovider-cli privacy-class identity --state-dir ~/.config/macprovider/relay-blind --model <model-id>
 ```
 
-The script prints one `cdhash=` line per architecture, then `TeamIdentifier=` and `Identifier=`. Those three values are `code_cdhash`, `team_id`, and `signing_identifier`. Set `expires_at` to a future RFC3339 timestamp. Leave `binary_version` empty to accept any binary version of that exact team, identifier, and cdhash, or set it to the release version to pin one build.
+It prints `se_public_key`, `se_key_backend`, `relay_blind_identity_public_key`, `relay_blind_fingerprint`, `code_cdhash`, `team_id`, and `binary_version`.
 
-The `code_cdhash` from `privacy-class identity` is the binary you just ran. Use the script on the signed release when that is the binary you intend to approve.
+## Coordinator
 
-## Enable each component
+Create the directory signing key once, on the coordinator host, as the coordinator user:
 
-All four have to be on. Each one stays off when its flag is absent.
+```bash
+coordinator-cli privacy-class directory-keygen --out /etc/macprovider/privacy-directory.key
+```
 
-Provider. Requires relay-blind. Any one of these turns the class on:
+It refuses to overwrite a file, writes the 32-byte seed as base64url with mode 0600, and prints `directory_public_key=` and `directory_key_id=`. The coordinator refuses a key file that is a symlink, not mode 0600 or 0400, or not owned by the coordinator user or root. This key is online by design: the directory changes whenever a provider enrolls. Do not reuse the release signing key or any SPEC-023 static-feed key (`streamvc-autotune-static-v4` and the like) here, and never put those offline keys on the coordinator host.
 
-- flag `--privacy-class-beta`
-- config `privacy_class_beta: true`
-- environment `MACPROVIDER_PRIVACY_CLASS_BETA=true`
-
-The flag overrides the environment variable and the config key.
-
-Coordinator. Requires `coordinator.require_gateway_context: true`, `relay_blind.enabled: true` with a `sqlite_path`, at least one `provider_se_public_keys` entry, and one unexpired approved identity. Under `settlement.verified_model_settlement_mode: enforce`, relay-blind also requires the SPEC-022 R-14 profile:
+Enable the class. It requires `coordinator.require_gateway_context: true` and `relay_blind.enabled: true` with a `sqlite_path`. Under `settlement.verified_model_settlement_mode: enforce`, relay-blind also requires the SPEC-022 R-14 profile:
 
 ```yaml
+coordinator:
+  require_gateway_context: true
 relay_blind:
   enabled: true
   sqlite_path: /var/lib/macprovider/relay-blind.db
-  identity_public_keys:
-    <provider_id>: <relay_blind_identity_public_key>
   enforce_settlement_profile: relay-blind-settlement-v1
 privacy_class:
   enabled: true
-  provider_se_public_keys:
-    <provider_id>: <se_public_key>
-  approved_code_identities:
-    - team_id: <TeamIdentifier>
-      signing_identifier: <Identifier>
-      code_cdhash: <cdhash>
-      expires_at: "2026-12-31T00:00:00Z"
+  release_code_identities:
+    metadata_dir: /opt/macprovider/privacy-release-identities
+    public_key_path: /opt/macprovider/release-signing-public.pem
+  directory:
+    signing_key_path: /etc/macprovider/privacy-directory.key
+    ttl_seconds: 300
   allowed_se_key_backends: [file, keychain]
 ```
 
-Omitted timing keeps the defaults: challenge interval 60s, response timeout 10s, max age 150s, quarantine 86400s. The provider must be a WebSocket session. Privacy keys are advertised only as `privacy_key_records` and are a separate class from relay-blind keys.
+`relay_blind.identity_public_keys` and `privacy_class.provider_se_public_keys` may stay empty. `public_key_path` is the PEM P-256 release signing key, the same bytes as `ops/pearl-updater/release-signing-public.pem`. Omitted timing keeps the defaults: challenge interval 60s, response timeout 10s, max age 150s, quarantine 86400s.
 
-Gateway. Requires `features.relay_blind_requests.enabled: true`:
+### Approved code identities
+
+Every signed CLI release is approved without a config edit. The Pearl updater, when it installs a verified release whose `pearl-release.json` carries `provider_code_identity`, writes that file and its signature to `metadata_dir` as `<tag>.json` and `<tag>.json.sig`. The coordinator re-verifies each pair against `public_key_path` at startup and on every challenge interval, and approves `(team_id, signing_identifier, code_cdhash, binary_version)` from each one. Files that fail are skipped and logged by name. An unreadable directory approves nothing until it reads again.
+
+Overrides, in this order:
+
+1. `denied_code_cdhashes: [<40 hex>]` refuses that cdhash from any source and quarantines a provider that presents it.
+2. An `approved_code_identities` entry for the same team, signing identifier, and cdhash takes over from the release. Set its `expires_at` in the past to withdraw a release.
+3. An `approved_code_identities` entry can also approve a build that has no release metadata, as in v0.1.
+
+An identity that is only unapproved (for example a release whose metadata has not reached `metadata_dir` yet) is refused by routing and not quarantined. To fill an entry by hand from a signed release:
+
+```bash
+scripts/provider-code-identity.py --emit-approved-identity --pearl-release-json pearl-release.json --signature pearl-release.json.sig
+```
+
+### Operator pins (optional)
+
+To pin one device instead of trusting its first attested session, set both keys for its provider ID. Configured pins override enrollment, and that provider is never enrolled:
+
+```yaml
+relay_blind:
+  identity_public_keys:
+    <provider_id>: <relay_blind_identity_public_key>
+privacy_class:
+  provider_se_public_keys:
+    <provider_id>: <se_public_key>
+```
+
+A Secure Enclave pin without an identity pin for the same provider ID fails validation.
+
+## Gateway
+
+Requires `features.relay_blind_requests.enabled: true`:
 
 ```yaml
 features:
@@ -77,13 +114,20 @@ features:
     enabled: true
 ```
 
-Buyer client:
+The gateway serves `GET /v1/privacy-class/directory` to API-key buyers and forwards the coordinator's signed body unchanged. It does not verify or cache it. Wallet-session callers get `privacy_class_unavailable` on that route and use `--identity-pin`.
+
+## Buyer client
+
+Give buyers the `directory_public_key` once, through a channel that does not pass through the gateway or coordinator. Then:
 
 ```bash
-relay-blind-client --privacy-class --base-url https://gateway.example --identity-pin /absolute/pin.json --model <model-id> --max-output-tokens 256 --input-token-upper-bound 1024 --input request.json
+export MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY=<directory_public_key>
+relay-blind-client --privacy-class --base-url https://gateway.example --model <model-id> --max-output-tokens 256 --input-token-upper-bound 1024 --input request.json
 ```
 
-A satisfied run prints `privacy class satisfied` on stderr, then the class, assurance, scope, and each residual risk below. Decrypted text goes to stdout.
+`--directory-public-key <key>` works instead of the environment variable. The client fetches the directory, checks the signature against that key, refuses it when expired or issued more than 60 seconds in the future, and after the reservation pins the provider whose fingerprint matches the key record. A missing or revoked entry fails before anything is encrypted. A satisfied run prints `privacy class satisfied`, the class, assurance, scope, each residual risk below, and `identity_pin_source: signed_directory directory_key_id=<id>` on stderr. Decrypted text goes to stdout.
+
+`--identity-pin /absolute/pin.json` overrides the directory and is required with a wallet session.
 
 ## Incident and revocation
 
@@ -104,17 +148,22 @@ coordinator-cli privacy-class disable --config /path/to/coordinator.yaml --confi
 coordinator-cli privacy-class enable --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml
 coordinator-cli privacy-class quarantine --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars" --seconds 3600
 coordinator-cli privacy-class unquarantine --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id>
+coordinator-cli privacy-class reenroll --config /path/to/coordinator.yaml --config-overlay /path/to/overlay.yaml --provider <provider_id> --reason "visible ASCII, 1-128 chars"
 ```
 
-`--seconds` is 1 through 2592000 (30 days).
+`--seconds` is 1 through 2592000 (30 days). `status` also lists active and recently revoked enrollments by fingerprint and cdhash, never key bytes.
 
-Kill switch. `disable` blocks privacy-class reservation, consume, and dispatch from the next request, and rejects held predispatch privacy reservations. Buyers see `privacy_class_disabled`. Plain SPEC-041 relay-blind and plaintext traffic keep working. `enable` clears the switch.
+Kill switch. `disable` blocks privacy-class reservation, consume, dispatch, and the directory route from the next request, and rejects held predispatch privacy reservations. Buyers see `privacy_class_disabled`. Plain SPEC-041 relay-blind and plaintext traffic keep working. `enable` clears the switch.
 
-Quarantine. `quarantine` makes that provider ineligible for the privacy class until the timer expires or `unquarantine` runs. Buyers see `privacy_class_unavailable`. The CLI quarantine command does not itself delete key records.
+Quarantine. `quarantine` makes that provider ineligible until the timer expires or `unquarantine` runs, and its directory entry is published as revoked meanwhile. Buyers see `privacy_class_unavailable`. The CLI quarantine command does not itself delete key records.
 
-Key revocation. A failed posture check (unapproved code identity, a mismatched cdhash, a bad Secure Enclave signature, and the other posture failures that quarantine) both quarantines the provider and revokes its outstanding privacy key records. After that, the provider stays ineligible until the quarantine ends and a new posture verifies.
+Posture failures. A bad Secure Enclave or identity signature, a denied cdhash, a missing required posture value, a sequence regression, a cdhash change within a session, an attestation cdhash mismatch, or a SPEC-008 key mismatch quarantines the provider and revokes its privacy key records. After that it stays ineligible until the quarantine ends and a new posture verifies.
 
-Rotation by restart. The privacy X25519 agreement key is kept in process memory and lives at most 3600 seconds. It is not written to disk. Restart the provider process to mint a new agreement key. The Secure Enclave P-256 key and the Ed25519 relay-blind identity persist across that restart. The provider is ineligible until the next posture challenge verifies. Do not copy private key files to rotate.
+Key change. A provider whose claim or posture uses a different identity or Secure Enclave key than its enrollment is quarantined with reason `privacy_enrollment_key_changed`. The enrollment is not replaced, and the same new key quarantines again after the timer. Confirm the device change with the provider out of band, then run `reenroll`: it revokes the enrollment, revokes its privacy key records, rejects held predispatch reservations, and clears the quarantine. The next verified posture enrolls the current keys. The old identity stays in the directory as revoked for 30 days.
+
+Rotation by restart. The privacy X25519 agreement key lives in process memory for at most 3600 seconds. Restart the provider process to mint a new one. The Secure Enclave key and the Ed25519 relay-blind identity persist across restarts and upgrades, so enrollment is unaffected. Do not copy private key files to rotate.
+
+Directory key rotation or compromise. Generate a new key with `directory-keygen` at a new path, point `privacy_class.directory.signing_key_path` at it, restart the coordinator, and send buyers the new `directory_public_key`. Tell buyers to drop the old key; directories signed by it stop verifying for clients that switched, and old ones expire within `ttl_seconds`.
 
 ## Residual risks
 
@@ -168,3 +217,5 @@ request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintex
 9. `secure_boot_level_not_evaluated`
 10. `immutable_prompt_strings_not_zeroized`
 11. `relays_observe_sizes_timing_and_token_counts`
+12. `provider_identity_enrolled_on_first_attested_session`
+13. `coordinator_operator_signs_provider_identity_directory`

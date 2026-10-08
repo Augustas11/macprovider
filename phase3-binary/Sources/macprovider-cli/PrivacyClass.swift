@@ -11,6 +11,7 @@ enum PrivacyClassConstants {
     static let postureVersion = "privacy-posture-v1"
     static let postureDomain = "macprovider/spec049/posture/v1"
     static let keyAttestationVersion = "privacy-key-attestation-v1"
+    static let enrollmentVersion = "privacy-enrollment-v1"
     static let keyAttestationDomain = "macprovider/spec049/key-attestation/v1"
     static let responseKeyLabel = "macprovider/spec049/response/aead/v1"
     static let responseNoncePrefixLabel = "macprovider/spec049/response/nonce-prefix/v1"

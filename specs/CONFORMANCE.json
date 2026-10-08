@@ -1204,7 +1204,7 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1520,7 +1520,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.1.5",
+      "version": "0.2.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1535,6 +1535,7 @@
         "SPEC-008",
         "SPEC-015",
         "SPEC-022",
+        "SPEC-025",
         "SPEC-041",
         "SPEC-042"
       ],
@@ -1548,7 +1549,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 defines the default-off Beta operator-constrained privacy class. It is implemented, default-off in every component, with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json) and a one-time staged-canary activation exception is recorded (SPEC-049 \u00a78.1, Entry 249); the canary outcome and promotion remain pending; every requirement stays pending. No conformance or production promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The canary outcome, a signed journey on a v0.2 release, a new activation exception or promotion, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance or production promotion is made."
       }
     }
   ],
@@ -7282,11 +7283,14 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/authority.go:AcceptProviderKeys",
-        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open"
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:open",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:AcceptPrivacyKeysWithClaim",
+        "phase5-gateway/internal/relayblind/directory.go:PinForRecord"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/store_test.go:TestAuthenticatedEmptyAdvertisementRevokesOutstandingReservation",
-        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution"
+        "phase5-gateway/internal/relayblind/crypto_test.go:TestKeyRecordRenewalAndSubstitution",
+        "phase5-gateway/internal/relayblind/directory_test.go:TestIdentityDirectoryPinForRecord"
       ],
       "journeys": [],
       "evidence": [],
@@ -10650,22 +10654,25 @@
         "phase4-coordinator/internal/config/config.go:validatePrivacyClass",
         "phase5-gateway/internal/config/config.go:PrivacyClassConfig",
         "phase5-gateway/internal/config/config.go:validatePrivacyClassConfig",
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacyClassBeta"
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:privacyClassBeta",
+        "phase3-binary/Sources/macprovider-cli/PrivacyAutoEnrollment.swift:mode"
       ],
       "tests": [
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassDefaultOff",
         "phase5-gateway/internal/config/config_test.go:TestPrivacyClassDefaultOff",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testDefaultsOff"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testDefaultsOff",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testModeResolutionAndOptOuts"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10684,14 +10691,15 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10708,14 +10716,15 @@
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureProbeRoundTrip"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10725,21 +10734,25 @@
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:verifySEPosture",
-        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifyIdentityPosture"
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:verifyIdentityPosture",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:resolveKeys"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyKeyAttestationBindsDigest",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testKeyAttestationMatchesGo",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestOperatorPinsOverrideEnrollment",
+        "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassAutomaticEnrollmentConfig"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10760,14 +10773,15 @@
         "phase4-coordinator/internal/ws/privacy_posture_test.go:TestPrivacyPostureSweepChallengesUnchangedKeys"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10776,23 +10790,26 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/relayblind/privacy_authority.go:identityMatches",
-        "phase4-coordinator/internal/relayblind/privacy_authority.go:codeApproved",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:approve",
         "phase4-coordinator/internal/relayblind/privacy_authority.go:requiredPosture"
       ],
       "tests": [
         "phase4-coordinator/internal/config/privacy_class_test.go:TestPrivacyClassValidation",
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testEachRequiredFlagFalseFailsWithReason",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testUnsignedBuildFailsCodeIdentity"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testUnsignedBuildFailsCodeIdentity",
+        "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestPostureUnapprovedIdentityIneligibleWithoutQuarantine",
+        "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestPostureDeniedCDHashQuarantinesAndRevokes"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10808,14 +10825,15 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testLoopbackAndDiskTierRefused"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10834,14 +10852,15 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testMemoryOnlyKeyManagerWritesNoAgreementKey"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10856,14 +10875,15 @@
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayPrivacyTests.swift:testPrivacyNonStreamResponseShape"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10879,14 +10899,15 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): exactly one content-free relay-blind-settlement-v1 receipt per attempt when relay_blind_settlement metadata is present; not yet implemented (tracked as SPEC-015-R007)."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10903,14 +10924,15 @@
         "phase3-binary/Tests/macprovider-cliTests/PrivacyClassCryptoTests.swift:testSealerSequenceAndFinal"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10929,14 +10951,15 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10954,14 +10977,15 @@
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderNonstreamEndToEnd"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -10979,14 +11003,15 @@
         "phase5-gateway/internal/relayblind/privacy_test.go:TestPrivacyFrameTamperSeqReorderTruncate"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11000,14 +11025,15 @@
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyFramesPassThroughVerbatimStreamAndNonStream"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11016,22 +11042,25 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/cmd/relay-blind-client/main.go:copyPrivacyResponse",
-        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation"
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation",
+        "phase5-gateway/cmd/relay-blind-client/main.go:fetchPrivacyDirectory"
       ],
       "tests": [
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsTruncatedMissingFinal",
-        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsSeqGapReorderTamperAfterFinal"
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsSeqGapReorderTamperAfterFinal",
+        "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientAutoPinsFromSignedDirectory"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11045,17 +11074,19 @@
       ],
       "tests": [
         "phase4-coordinator/cmd/coordinator-cli/privacy_class_test.go:TestPrivacyClassCLI",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentKeyChangeQuarantinesWithoutReplacing"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11069,17 +11100,19 @@
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestKillSwitchBlocksAllPhases",
         "phase4-coordinator/internal/relayblind/privacy_authority_test.go:TestKillSwitchStoreErrorFailsClosed",
-        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial"
+        "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
+        "phase4-coordinator/cmd/coordinator-cli/privacy_enrollment_test.go:TestPrivacyClassCLIReenrollAndDirectoryKeygen"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11095,14 +11128,15 @@
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyErrorCodesMatchCoordinatorInventory"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11119,14 +11153,15 @@
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits"
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11140,17 +11175,21 @@
       "tests": [
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassRedactionNoCanaryInAnyArtifact",
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassAdversarial",
-        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts"
+        "test/integration/relay_blind_settlement_integration_test.go:TestPrivacyClassEnforceSettlesSwiftReceipts",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassAutoEnrolledSwiftProviderEndToEnd",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassEnrollmentKeyChangeQuarantines",
+        "test/integration/privacy_enrollment_integration_test.go:TestPrivacyClassDirectorySignedByAnotherKeyRejected"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the redaction suite covers the relay-blind-settlement-v1 receipt rows: TestPrivacyClassEnforceSettlesSwiftReceipts scans the verdict, route-snapshot, journal, and credit rows for the canaries and the SHA-256 of the canary prompt, completion, and decrypted request."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11167,14 +11206,15 @@
         "test/integration/relay_blind_integration_test.go:TestRelayBlindReservationRejectsPoolSelectionBeforeQuota"
       ],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "implemented locally default-off; awaiting signed JOURNEY-PRIVACY-CLASS-BETA hardware evidence and audits #1851 (SPEC-049 0.1.3): the observe-only limit is replaced by SPEC-022 R-14 coverage under enforce; not yet implemented (tracked as SPEC-022-R014)."
+        "rationale": "Implemented and tested. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, signed acceptance candidate 1.8.215) and a one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). The canary outcome, the carried journey residuals, and SPEC-049-R023 promotion remain pending; the requirement stays pending."
       }
     },
     {
@@ -11184,14 +11224,150 @@
       "implementation": [],
       "tests": [],
       "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA"
+        "JOURNEY-PRIVACY-CLASS-BETA",
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
       ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.1.0 (SPEC-049-R023): draft/not-deployed promotion gate is specified for the default-off Beta privacy class but not implemented, tested, or evidenced; it remains pending until implementation, automated tests, and a signed JOURNEY-PRIVACY-CLASS-BETA hardware result exist. The journey result is one input; staged canary and three-lane audits are also required."
+        "rationale": "SPEC-049-R023 promotion gate: the signed JOURNEY-PRIVACY-CLASS-BETA hardware result is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json, 1.8.215) and the one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249; superseded for v0.2.0 code by §8.2). Promotion still needs the canary outcome, a signed result with the carried residuals closed, a signed journey on a v0.2 release for R024..R028, and 0/0/0 three-lane audits; the requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R024",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/PrivacyAutoEnrollment.swift:automaticEligibilityFailures",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:resolveServeConfig",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:enrollmentClaim"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testEligibleHostEntersPrivacyModeBeforeCredentials",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testIneligibleHostServesOrdinarilyWithoutHardening",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testHardeningFailureInAutomaticModeServesOrdinarily",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyAutoEnrollmentTests.swift:testAutomaticEligibilityIsReadOnlyAndNamesEveryFailure",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testEnrollmentClaimIsPublicAndStopsWhenLatched"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R025",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPosture",
+        "phase4-coordinator/internal/relayblind/store_enrollment.go:EnrollPrivacyIdentity",
+        "phase4-coordinator/internal/relayblind/directory.go:ParsePrivacyEnrollmentClaim",
+        "phase4-coordinator/internal/ws/messages.go:parsePrivacyEnrollment"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentOnFirstVerifiedPosture",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentIsDurableAndBecomesThePin",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentNotCreatedWhenPostureFails",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentRejectsKeyActiveForAnotherProvider",
+        "phase4-coordinator/internal/ws/privacy_enrollment_parse_test.go:TestPrivacyEnrollmentClaimParses"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R026",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/store_enrollment.go:ReenrollPrivacyProvider",
+        "phase4-coordinator/cmd/coordinator-cli/privacy_class.go:runPrivacyClass"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentKeyChangeQuarantinesWithoutReplacing",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestEnrollmentPostureKeyChangeQuarantines",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReenrollAllowsNewKeys"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R027",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/release_identities.go:LoadReleaseCodeIdentities",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:RefreshReleaseIdentities",
+        "ops/pearl-updater/macprovider-pearl-update:install_privacy_release_identity"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestLoadReleaseCodeIdentities",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestReleaseDerivedApprovalAndOverrides",
+        "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R028",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/directory.go:SignIdentityDirectory",
+        "phase4-coordinator/internal/relayblind/directory_service.go:BuildIdentityDirectory",
+        "phase4-coordinator/internal/relayblind/directory_service.go:LoadIdentityDirectorySigningKey",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyDirectory",
+        "phase5-gateway/internal/router/privacy_directory.go:handlePrivacyDirectory",
+        "phase5-gateway/internal/relayblind/directory.go:VerifyIdentityDirectory"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/directory_test.go:TestIdentityDirectoryRejectsWrongKeyTamperAndStaleness",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectoryBuildPublishesEnrollmentAndRevocation",
+        "phase4-coordinator/internal/relayblind/privacy_enrollment_test.go:TestIdentityDirectorySigningKeyCustody",
+        "phase4-coordinator/internal/buyer/privacy_directory_test.go:TestPrivacyDirectoryRoute",
+        "phase5-gateway/internal/router/privacy_directory_test.go:TestPrivacyDirectoryPassthrough",
+        "phase5-gateway/cmd/relay-blind-client/directory_test.go:TestPrivacyClientDirectoryRejections"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1749",
+        "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
       }
     },
     {

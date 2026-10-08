@@ -1,6 +1,6 @@
 # SPEC-041 - Relay-Blind Request Encryption
 
-**Version:** 0.4.0
+**Version:** 0.5.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/928
@@ -10,7 +10,7 @@ Audit history: v0.2.0 reconciles the default-off pilot contract before full impl
 {
   "spec_id": "SPEC-041",
   "title": "Relay-Blind Request Encryption",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "path": "specs/SPEC-041-relay-blind-request-encryption.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -59,7 +59,7 @@ SPEC-041 owns relay-blind provider key records, buyer pins, encryption envelopes
 - SPEC-040 owns wallet authentication and request signatures. Wallet signatures bind the exact relay-blind transaction.
 - SPEC-042 owns pool selection. Its current R009 requires rejection of every pool-scoped relay-blind request.
 
-SPEC-049 privacy-class extension: R002/R004/R005 closed schemas admit exactly the SPEC-049 additions (`privacy_key_records`, `privacy-class-reservation-v1`, `privacy_class` dispatch key, and the R005 bound-rejection `error_code` values `privacy_class_downgrade_rejected` and `privacy_class_posture_stale`) only when privacy class is requested; SPEC-049 owns them.
+SPEC-049 privacy-class extension: R002/R004/R005 closed schemas admit exactly the SPEC-049 additions (`privacy_key_records`, the `privacy_enrollment` claim, `privacy-class-reservation-v1`, `privacy_class` dispatch key, and the R005 bound-rejection `error_code` values `privacy_class_downgrade_rejected` and `privacy_class_posture_stale`) only when privacy class is requested; SPEC-049 owns them. For privacy-class key records only, SPEC-049-R025 enrollment is an identity binding equivalent to the operator configuration pin of R002, and the SPEC-049-R028 operator-signed identity directory is the one permitted network discovery channel for buyer pins (R002).
 
 ## 3. Canonical primitives
 
@@ -84,7 +84,7 @@ Capability is model-scoped. A signed record that does not include the requested 
 
 ### SPEC-041-R002 - Dedicated provider identities, keys, and pins
 
-Each participating provider has a durable Ed25519 relay-blind identity signing key and a rotatable X25519 request-encryption key. The Ed25519 identity MUST be distinct from provider admission credentials, SPEC-015 receipt keys, SPEC-008 ECDH keys, and all X25519 encryption keys. The coordinator accepts its public key only when operator configuration independently pins it to the authenticated provider ID and current assigned session. Provider self-assertion, admission identity reuse, receipt-key reuse, or a relay-supplied record alone is insufficient. The fingerprint is `base64url(SHA256(raw 32-byte Ed25519 public key))`.
+Each participating provider has a durable Ed25519 relay-blind identity signing key and a rotatable X25519 request-encryption key. The Ed25519 identity MUST be distinct from provider admission credentials, SPEC-015 receipt keys, SPEC-008 ECDH keys, and all X25519 encryption keys. The coordinator accepts its public key only when operator configuration independently pins it to the authenticated provider ID and current assigned session, or, for SPEC-049 privacy-class key records only, when a SPEC-049-R025 durable enrollment binds it to that provider ID. Provider self-assertion, admission identity reuse, receipt-key reuse, or a relay-supplied record alone is insufficient; a SPEC-049 enrollment claim is only an enrollment candidate until a fully verified posture enrolls it. The fingerprint is `base64url(SHA256(raw 32-byte Ed25519 public key))`.
 
 The immutable key-record framing encodes exactly, in order: `alg` (`x25519-hkdf-sha256-a256gcm-v1`), raw 32-byte X25519 public key, raw 32-byte relay-blind identity fingerprint, canonical model IDs array, `max_encrypted_request_bytes`, endpoint families array, and `signature_algorithm` (`ed25519`). Model scope contains 1..16 unique canonical IDs, each 1..128 printable ASCII bytes; the endpoint list is exactly one `chat_completions` element. `max_encrypted_request_bytes` is 1..1048576. Signed times are nonnegative signed-64 values with `not_before_unix < expires_at_unix`, lifetime at most 24 hours, and accepted future skew at most 60 seconds. `kid = base64url(first16(SHA256(immutable_framing)))`.
 
@@ -94,7 +94,7 @@ Registration or heartbeat advertises complete signed records only on an authenti
 
 Revocation is authenticated, durable, and retained through at least the maximum accepted signed expiry plus replay retention. Unknown revocation freshness makes the key unavailable. Every reservation and dispatch rechecks the authenticated live provider session, operator identity pin, signed record, expiry, and revocation.
 
-The buyer MUST receive a public-only pin by an authenticated operator channel outside the gateway/coordinator path and invoke the reference CLI with `--identity-pin /absolute/local/file.json`. Network URL pins, discovery-derived defaults, TOFU, and automatic old/new acceptance are forbidden. The closed pin schema is:
+The buyer MUST receive a public-only pin by an authenticated operator channel outside the gateway/coordinator path and invoke the reference CLI with `--identity-pin /absolute/local/file.json`, except that for a SPEC-049 privacy-class request the pin MAY instead come from the SPEC-049-R028 identity directory. Network discovery is permitted only through that operator-signed directory, verified against a directory public key the buyer pinned once out of band; the directory entry yields an in-memory pin with this schema and the same checks. Unsigned network URL pins, other discovery-derived defaults, buyer TOFU, and automatic old/new acceptance are forbidden. The closed pin schema is:
 
 ```json
 {
@@ -239,6 +239,7 @@ Local implementation and verification evidence is recorded in [the pilot audit](
 
 ## 7. Changelog and history
 
+- 0.5.0 - Issue #1749, SPEC-049 v0.2.0 automatic enrollment. R002: for privacy-class key records only, a SPEC-049-R025 durable enrollment binds the identity key to the authenticated provider ID like an operator pin, and the buyer pin may come from the SPEC-049-R028 operator-signed identity directory; network discovery is permitted only through that signed directory. §2 admits the `privacy_enrollment` claim. Plain relay-blind key records, the pin schema, envelopes, reservations, and errors are unchanged. Status remains draft, pending-reconciliation, and not-deployed.
 - 0.4.0 - Issue #1851. R006: under SPEC-022 `enforce`, relay-blind work operates only through SPEC-022 relay-blind coverage (R-14, `relay-blind-settlement-v1`, `relay_blind_settled`) instead of only under `observe`; the exclusion list is unchanged. R005: the opaque path commits an R-14 relay-blind snapshot rather than a plaintext one, attaches `relay_blind_settlement` metadata rather than v0.4 `settlement`, and the receipt joins the persisted validated and terminal evidence; a receipt withheld before a pinned model handle with validated usage exists is missing evidence. §1 states that the basis-labelled envelope binding is not a prompt hash. No envelope, key-record, reservation, or error-inventory change. Status remains draft, pending-reconciliation, and not-deployed.
 - 0.3.0 - Admitted the SPEC-049 operator-constrained privacy-class additions to the R002/R004/R005 closed schemas, only when privacy class is requested; SPEC-049 owns them. No other SPEC-041 obligation changes. Status remains draft, pending-reconciliation, and not-deployed.
 - 0.2.0 - Reconciled the complete default-off global-pool pilot: dedicated operator-pinned Ed25519 identity and buyer pin; exact key/envelope framing; opaque buyer binding; reservation/consume state; typed opaque provider wire and journal; observe-mode settlement with receipt/reward exclusion; truthful per-request disclosure; and five-stage implementation/recovery gate. Status remains draft, pending-reconciliation, and not-deployed.

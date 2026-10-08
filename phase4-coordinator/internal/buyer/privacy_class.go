@@ -84,6 +84,26 @@ func (s *Server) privacyDisabledNow(ctx context.Context) bool {
 	return err != nil || disabled
 }
 
+// handlePrivacyDirectory serves the SPEC-049-R028 signed identity
+// directory. A build or signing failure fails closed; it is never partial.
+func (s *Server) handlePrivacyDirectory(w http.ResponseWriter, r *http.Request) {
+	directory := s.privacyAuthority.IdentityDirectory()
+	if directory == nil || s.privacyDisabledNow(r.Context()) {
+		writePrivacyClassError(w, privacyClassDisabled, "")
+		return
+	}
+	raw, err := directory.Envelope(r.Context(), s.now())
+	if err != nil {
+		s.log.Warn().Err(err).Msg("privacy identity directory unavailable")
+		writePrivacyClassError(w, privacyClassUnavailable, "")
+		return
+	}
+	setRelayBlindNoStore(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
 // privacyObservedCode keeps disabled stable. Every other gate failure is
 // unavailable before consume and posture-stale after it.
 func privacyObservedCode(code string, beforeConsume bool) string {

@@ -53,6 +53,7 @@ type swiftRelayDescriptor struct {
 	SigningIdentifier     string            `json:"signing_identifier"`
 	BinaryVersion         string            `json:"binary_version"`
 	PrivacyKeyRecords     []json.RawMessage `json:"privacy_key_records"`
+	PrivacyEnrollment     json.RawMessage   `json:"privacy_enrollment"`
 }
 
 type swiftRelayFixture struct {
@@ -708,6 +709,9 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		// The same kid cannot be relay-blind and privacy. Production privacy
 		// mode omits relay_blind_key_records; a second class is rejected.
 		hello["privacy_key_records"] = records
+		if len(fixture.descriptor.PrivacyEnrollment) > 0 {
+			hello["privacy_enrollment"] = fixture.descriptor.PrivacyEnrollment
+		}
 	} else {
 		hello["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	}
@@ -735,6 +739,9 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 	ready := readyStateUpdate(defaultFakeModelID, "")
 	if records := fixture.privacyKeyRecords(); len(records) > 0 {
 		ready["privacy_key_records"] = records
+		if len(fixture.descriptor.PrivacyEnrollment) > 0 {
+			ready["privacy_enrollment"] = fixture.descriptor.PrivacyEnrollment
+		}
 	} else {
 		ready["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 	}
@@ -826,6 +833,9 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 				}
 				if records := fixture.privacyKeyRecords(); len(records) > 0 {
 					hb["privacy_key_records"] = records
+					if len(fixture.descriptor.PrivacyEnrollment) > 0 {
+						hb["privacy_enrollment"] = fixture.descriptor.PrivacyEnrollment
+					}
 				} else {
 					hb["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
 				}

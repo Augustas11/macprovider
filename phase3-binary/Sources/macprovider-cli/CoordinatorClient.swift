@@ -486,9 +486,12 @@ actor CoordinatorClient {
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
     // SE liveness challenge signing (Phase 1, Track P1-C).
-    // Nil until first challenge; lazily loads SecureEnclaveIdentity on arm64.
+    // Nil until first challenge except isolated privacy-lab launches, which bind
+    // liveness to the same scoped signer used for privacy posture and Tier2.
     // Tests inject a SELivenessTestSigning double via the init parameter.
     private var seLivenessSigner: (any SELivenessSigning)?
+    private let privacySESigner: (any SEBlobSigner)?
+    private let privacyLabIdentityScope: PrivacyLabIdentityScope?
     // M1-1 / XSEC-1: the factory now takes a URLRequest so the binary can
     // attach an Authorization: Bearer header when a provider token is
     // configured. The header is required when the coordinator runs with
@@ -736,14 +739,7 @@ actor CoordinatorClient {
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         reconnectInitialBackoffNanoseconds: UInt64 = 1_000_000_000,
         receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
-        attestationGenerator: Tier2AttestationTokenGenerating = {
-            #if arch(arm64)
-            if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
-                return seGen
-            }
-            #endif
-            return ManagedDeviceAttestationGenerator()
-        }(),
+        attestationGenerator: Tier2AttestationTokenGenerating? = nil,
         seLivenessSignerOverride: (any SELivenessSigning)? = nil,
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
@@ -794,6 +790,7 @@ actor CoordinatorClient {
         providerCredentialSource: ProviderCredentialStatus.Source = .cliKeychain,
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
+        privacyLabIdentityScope: PrivacyLabIdentityScope? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleOperationID: String? = nil,
         operatorPausedInitially: Bool = false,
@@ -859,6 +856,9 @@ actor CoordinatorClient {
             FileHandle.standardError.write(Data("FATAL privacy_class_requires_relay_blind\n".utf8))
             return nil
         }
+        var selectedSELivenessSigner = seLivenessSignerOverride
+        var selectedPrivacySESigner: (any SEBlobSigner)?
+        var labScopedPrivacySignerForAttestation: (any SEBlobSigner)?
         if config.relayBlindEnabled {
             guard let statePath = config.relayBlindStateDirectory,
                   statePath.hasPrefix("/") else {
@@ -868,7 +868,8 @@ actor CoordinatorClient {
             let modelScope = config.supportedModels ?? [config.modelCatalogModelID ?? config.model].compactMap { $0 }
             let runtime: RelayBlindProviderRuntime
             do {
-                let root = URL(fileURLWithPath: statePath, isDirectory: true)
+                let root = privacyLabIdentityScope?.stateRoot
+                    ?? URL(fileURLWithPath: statePath, isDirectory: true)
                 let keys = try RelayBlindKeyManager(
                     directory: root,
                     models: modelScope,
@@ -892,9 +893,22 @@ actor CoordinatorClient {
                     signer = privacySESignerOverride
                     backend = Self.privacySEBackend(privacySESignerOverride)
                 } else {
-                    let production = Self.loadPrivacySEIdentity()
+                    let production = Self.loadPrivacySEIdentity(scope: privacyLabIdentityScope)
                     signer = production.signer
                     backend = production.backend
+                }
+                selectedPrivacySESigner = signer
+                if privacyLabIdentityScope != nil {
+                    labScopedPrivacySignerForAttestation = signer
+                    guard let scopedLivenessSigner = Self.labScopedLivenessSigner(
+                        privacySigner: signer,
+                        explicitLivenessSigner: selectedSELivenessSigner,
+                        scope: privacyLabIdentityScope
+                    ) else {
+                        FileHandle.standardError.write(Data("FATAL privacy_class_se_liveness_identity_mismatch\n".utf8))
+                        return nil
+                    }
+                    selectedSELivenessSigner = scopedLivenessSigner
                 }
                 let probe = privacyPostureProbeOverride ?? SystemPrivacyPostureProbe()
                 self.privacyPostureProbe = probe
@@ -940,8 +954,34 @@ actor CoordinatorClient {
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.reconnectInitialBackoffNanoseconds = reconnectInitialBackoffNanoseconds
         self.receiptKeyRotationTimeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
-        self.attestationGenerator = attestationGenerator
-        self.seLivenessSigner = seLivenessSignerOverride
+        if let attestationGenerator {
+            self.attestationGenerator = attestationGenerator
+        } else if config.privacyClassBeta, privacyLabIdentityScope != nil {
+            guard let labScopedPrivacySignerForAttestation else {
+                FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                return nil
+            }
+            #if arch(arm64)
+            self.attestationGenerator = SecureEnclaveAttestationGenerator(signer: labScopedPrivacySignerForAttestation)
+            #else
+            FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+            return nil
+            #endif
+        } else if privacyLabIdentityScope != nil {
+            self.attestationGenerator = ManagedDeviceAttestationGenerator(artifactPath: nil, environment: [:])
+        } else {
+            #if arch(arm64)
+            if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
+                self.attestationGenerator = seGen
+            } else {
+                self.attestationGenerator = ManagedDeviceAttestationGenerator()
+            }
+            #else
+            self.attestationGenerator = ManagedDeviceAttestationGenerator()
+            #endif
+        }
+        self.seLivenessSigner = selectedSELivenessSigner
+        self.privacySESigner = selectedPrivacySESigner
         self.webSocketFactory = webSocketFactory
         self.providerToken = config.providerToken.flatMap { value in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -952,6 +992,7 @@ actor CoordinatorClient {
         self.providerCredentialSource = providerCredentialSource
         self.credentialStatusRuntime = credentialStatusRuntime
         self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
+        self.privacyLabIdentityScope = privacyLabIdentityScope
         self.lifecycleStateStore = lifecycleStateStore
         self.lifecycleOperationID = lifecycleOperationID
         self.operatorPaused = operatorPausedInitially
@@ -1808,6 +1849,9 @@ actor CoordinatorClient {
             reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
             receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
             attestationGenerator: attestationGenerator,
+            seLivenessSignerOverride: seLivenessSigner,
+            privacyPostureProbeOverride: privacyPostureProbe,
+            privacySESignerOverride: privacySESigner,
             webSocketFactory: webSocketFactory,
             sleepAssertionFactory: { nil },
             pairingController: pairingController,
@@ -1817,6 +1861,7 @@ actor CoordinatorClient {
             providerCredentialStore: providerCredentialStore,
             providerCredentialSource: providerCredentialSource,
             credentialStatusRuntime: credentialStatusRuntime,
+            privacyLabIdentityScope: privacyLabIdentityScope,
             watchdogExitHook: watchdogExitHook
         ) else {
             return false
@@ -3533,6 +3578,18 @@ actor CoordinatorClient {
 
     func relayAdmissionLimitForTest() -> Int {
         maxActiveRequests
+    }
+
+    static func labScopedLivenessSignerForTest(
+        privacySigner: any SEBlobSigner,
+        explicitLivenessSigner: (any SELivenessSigning)?,
+        scope: PrivacyLabIdentityScope?
+    ) -> (any SELivenessSigning)? {
+        labScopedLivenessSigner(
+            privacySigner: privacySigner,
+            explicitLivenessSigner: explicitLivenessSigner,
+            scope: scope
+        )
     }
 
     func acceptAuthResponseForTest(_ response: [String: Any], session: Tier2ProviderSession) async throws {
@@ -7156,6 +7213,10 @@ actor CoordinatorClient {
 
         // Lazily load the SE identity on arm64; use injected signer in tests.
         if seLivenessSigner == nil {
+            if privacyLabIdentityScope != nil {
+                print("WARN SE liveness challenge received without scoped privacy SE signer — ignoring")
+                return
+            }
             #if arch(arm64)
             if let seIdentity = try? SecureEnclaveIdentity.loadOrCreate() {
                 seLivenessSigner = seIdentity
@@ -7411,6 +7472,7 @@ actor CoordinatorClient {
     }
 
     /// Nil from the responder omits the field. An empty array is sent as an empty advertisement.
+    /// The SPEC-049 §4.10 enrollment claim rides beside a non-empty advertisement only.
     private func appendPrivacyKeyRecords(to message: inout [String: Any]) {
         guard appConfig.privacyClassBeta,
               let privacyPostureResponder,
@@ -7418,13 +7480,20 @@ actor CoordinatorClient {
             return
         }
         message["privacy_key_records"] = records
+        if !records.isEmpty, let claim = privacyPostureResponder.enrollmentClaim() {
+            message["privacy_enrollment"] = claim
+        }
     }
 
     /// Production SE failure exits. `CoordinatorClient.init` returning nil does not stop `serve`.
-    private static func loadPrivacySEIdentity() -> (signer: any SEBlobSigner, backend: String) {
+    private static func loadPrivacySEIdentity(scope: PrivacyLabIdentityScope? = nil) -> (signer: any SEBlobSigner, backend: String) {
         #if arch(arm64)
         do {
-            let identity = try SecureEnclaveIdentity.loadOrCreate(quiet: true)
+            let identity = try SecureEnclaveIdentity.loadOrCreate(
+                label: scope?.secureEnclaveLabel,
+                quiet: true,
+                fileBackedURL: scope?.secureEnclaveFileURL
+            )
             return (identity, identity.backendName)
         } catch {
             FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
@@ -7434,6 +7503,23 @@ actor CoordinatorClient {
         FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
         Darwin.exit(78)
         #endif
+    }
+
+    private static func labScopedLivenessSigner(
+        privacySigner: any SEBlobSigner,
+        explicitLivenessSigner: (any SELivenessSigning)?,
+        scope: PrivacyLabIdentityScope?
+    ) -> (any SELivenessSigning)? {
+        guard scope != nil else { return explicitLivenessSigner }
+        let expected = privacySigner.publicKeyRaw.base64EncodedString()
+        if let explicitLivenessSigner {
+            return explicitLivenessSigner.publicKeyBase64 == expected ? explicitLivenessSigner : nil
+        }
+        guard let shared = privacySigner as? any SELivenessSigning,
+              shared.publicKeyBase64 == expected else {
+            return nil
+        }
+        return shared
     }
 
     private static func privacySEBackend(_ signer: any SEBlobSigner) -> String {
