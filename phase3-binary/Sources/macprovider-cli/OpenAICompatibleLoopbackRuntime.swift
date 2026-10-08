@@ -885,6 +885,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// symlinked huggingface_hub cache is refused, as native serving refuses
     /// it. Nil when none is available.
     private let recountTokenizer: Task<PinnedSnapshotTokenizer?, Never>?
+    /// Startup capacity is advisory, unlike cancellation receipt counting.
+    /// An expected binding must never silently downgrade when unavailable.
+    private let startupRecountRequired: Bool
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -958,9 +961,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback or omlx_loopback")
             }
             self.identity = .mlxSnapshot(mlxSnapshot)
+            self.startupRecountRequired = true
             self.recountTokenizer = Task.detached(priority: .utility) { await pinRecountTokenizer(mlxSnapshot) }
         } else {
             let expected = siblingSnapshotSHA256.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            self.startupRecountRequired = expected?.isEmpty == false
             if let expected, !expected.isEmpty, !siblingSnapshotDirectories.isEmpty {
                 self.recountTokenizer = Task.detached(priority: .utility) {
                     // The first candidate whose canonical snapshot-manifest
@@ -1320,7 +1325,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// model load count. The counted tokens are the minimum of the upstream's
     /// own count (`usage.completion_tokens`, else `timings.predicted_n` from
     /// llama-server only) and the trusted pinned-tokenizer recount of the
-    /// returned assistant content. Both counts must be positive and
+    /// returned assistant content when a trusted binding is expected. GGUF
+    /// without a signed sibling uses bounded upstream count for this advisory
+    /// startup estimate only; receipt/cancel counting is unchanged.
+    /// Both expected counts must be positive and
     /// independently within `maxTokens`; tool calls and missing or changed
     /// tokenizer identity fail closed. The bound identity (llama-server's
     /// `/props` served file included) is checked immediately before and after
@@ -1350,10 +1358,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         let outcome = await Self.bounded(until: deadline, cancelWithCaller: true) { [self] () async -> LoopbackStartupThroughputOutcome? in
             guard await self.probeServesBoundIdentity() else { return .failed(reason: "identity_unbound") }
-            guard let tokenizerTask = self.recountTokenizer else {
-                return .failed(reason: "tokenizer_unavailable")
-            }
-            guard let tokenizer = await tokenizerTask.value else {
+            let tokenizer = await self.recountTokenizer?.value
+            guard !self.startupRecountRequired || tokenizer != nil else {
                 return .failed(reason: "tokenizer_unavailable")
             }
             let measured = await Self.runStartupThroughputProbe(
@@ -1363,6 +1369,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 maxTokens: maxTokens,
                 acceptsPredictedN: acceptsPredictedN,
                 recountTokenizer: tokenizer,
+                allowUpstreamOnly: !self.startupRecountRequired,
                 timeouts: timeouts
             )
             guard case .ok = measured else { return measured }
@@ -1388,7 +1395,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         body: Data,
         maxTokens: Int,
         acceptsPredictedN: Bool,
-        recountTokenizer: PinnedSnapshotTokenizer,
+        recountTokenizer: PinnedSnapshotTokenizer?,
+        allowUpstreamOnly: Bool,
         timeouts: LoopbackGenerationTimeouts
     ) async -> LoopbackStartupThroughputOutcome {
         let startedAt = ProcessInfo.processInfo.systemUptime
@@ -1423,8 +1431,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 return .failed(reason: "tool_calls")
             }
             let contentPresent = !result.content.isEmpty
-            let recounted = contentPresent ? recountTokenizer.count(result.content) : nil
-            if contentPresent && recounted == nil {
+            let recounted = contentPresent ? recountTokenizer?.count(result.content) : nil
+            if contentPresent && recounted == nil && !allowUpstreamOnly {
                 return .failed(reason: "tokenizer_identity_changed")
             }
             let upstream = accumulator.decodedFromPlainBody
@@ -1434,6 +1442,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 contentPresent: contentPresent,
                 upstreamCompletionTokens: upstream,
                 recountedCompletionTokens: recounted,
+                allowUpstreamOnly: allowUpstreamOnly,
                 maxTokens: maxTokens,
                 elapsedSeconds: endedAt - startedAt
             )
@@ -1448,26 +1457,32 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     /// The startup rate through `ModelRuntime.startupThroughputRate`, the
     /// native probe's formula. The claim is bounded: content must have
-    /// streamed, the upstream count and trusted recount must each be positive
+    /// streamed, the upstream count and any required trusted recount must be positive
     /// and at most `maxTokens`, and the elapsed time must be finite and
     /// positive; anything else fails closed.
     static func startupThroughputOutcome(
         contentPresent: Bool,
         upstreamCompletionTokens: Int?,
         recountedCompletionTokens: Int?,
+        allowUpstreamOnly: Bool = false,
         maxTokens: Int,
         elapsedSeconds: TimeInterval
     ) -> LoopbackStartupThroughputOutcome {
         guard contentPresent else { return .failed(reason: "no_content") }
         guard let upstreamCompletionTokens, upstreamCompletionTokens > 0 else { return .failed(reason: "no_tokens") }
         guard upstreamCompletionTokens <= maxTokens else { return .failed(reason: "usage_exceeds_max_tokens") }
-        guard let recountedCompletionTokens, recountedCompletionTokens > 0 else {
-            return .failed(reason: "tokenizer_identity_changed")
+        let countedTokens: Int
+        if let recountedCompletionTokens {
+            guard recountedCompletionTokens > 0 else { return .failed(reason: "tokenizer_identity_changed") }
+            guard recountedCompletionTokens <= maxTokens else { return .failed(reason: "recount_exceeds_max_tokens") }
+            countedTokens = min(upstreamCompletionTokens, recountedCompletionTokens)
+        } else {
+            guard allowUpstreamOnly else { return .failed(reason: "tokenizer_identity_changed") }
+            countedTokens = upstreamCompletionTokens
         }
-        guard recountedCompletionTokens <= maxTokens else { return .failed(reason: "recount_exceeds_max_tokens") }
         guard elapsedSeconds.isFinite, elapsedSeconds > 0 else { return .failed(reason: "no_elapsed_time") }
         return .ok(tps: ModelRuntime.startupThroughputRate(
-            completionTokens: min(upstreamCompletionTokens, recountedCompletionTokens),
+            completionTokens: countedTokens,
             elapsedSeconds: elapsedSeconds
         ))
     }

@@ -2205,19 +2205,47 @@ extension OpenAICompatibleLoopbackRuntimeTests {
         XCTAssertEqual(mixedOutcome, .failed(reason: "tool_calls"))
     }
 
-    func testLoopbackStartupProbeMissingTrustedTokenizerDoesNotPOSTAndServingContinues() async throws {
+    func testPoolOnlyGGUFStartupProbeWithoutSiblingUsesBoundedUpstreamUsage() async throws {
         let store = try makeStore()
         let client = StubLoopbackHTTPClient(responseBody: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11))
         let runtime = try makeRuntime(httpClient: client, store: store)
 
         let outcome = await runtime.measureStartupThroughput()
-        XCTAssertEqual(outcome, .failed(reason: "tokenizer_unavailable"))
-        XCTAssertEqual(client.postCount, 0, "missing trusted tokenizer fails before the probe POST")
+        XCTAssertGreaterThan(outcome.tps, 0, "pool-only GGUF must not require a catalog sibling: \(outcome)")
+        XCTAssertEqual(client.postCount, 1, "one advisory startup probe")
 
         let served = try await runtime.complete(try makeRequest(model: "ollama:gemma3:270m"))
         XCTAssertEqual(served.content, "ok")
         XCTAssertEqual(served.completionTokens, 3)
-        XCTAssertEqual(client.postCount, 1, "ordinary serving is unaffected")
+        XCTAssertEqual(client.postCount, 2, "ordinary serving is unaffected")
+    }
+
+    func testGGUFStartupProbeExpectedButUnavailableSiblingDoesNotDowngrade() async throws {
+        let store = try makeStore()
+        let client = StubLoopbackHTTPClient(responseBody: Self.completionJSON(content: "ok", completionTokens: 3, promptTokens: 11))
+        let runtime = try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: "ollama:gemma3:270m",
+            origin: "http://127.0.0.1:11434",
+            httpClient: client,
+            digestResolver: makeResolver(store),
+            siblingSnapshotSHA256: String(repeating: "a", count: 64),
+            siblingSnapshotDirectories: []
+        )
+        let outcome = await runtime.measureStartupThroughput()
+        XCTAssertEqual(outcome, .failed(reason: "tokenizer_unavailable"))
+        XCTAssertEqual(client.postCount, 0)
+        let served = try await runtime.complete(try makeRequest(model: "ollama:gemma3:270m"))
+        XCTAssertEqual(served.content, "ok")
+        XCTAssertEqual(client.postCount, 1, "ordinary serving remains independent of startup capacity")
+    }
+
+    func testGGUFStartupProbeWithoutSiblingStillRejectsOverBudgetUsage() async throws {
+        let store = try makeStore()
+        let client = StubLoopbackHTTPClient(responseBody: Self.completionJSON(content: "ok", completionTokens: 9, promptTokens: 11))
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let outcome = await runtime.measureStartupThroughput(maxTokens: 8)
+        XCTAssertEqual(outcome, .failed(reason: "usage_exceeds_max_tokens"))
+        XCTAssertEqual(client.postCount, 1)
     }
 
     func testLoopbackStartupProbeRejectsTokenizerIdentityMutation() async throws {

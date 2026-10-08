@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.31 (2026-10-07, trusted loopback startup count)
+**Version:** 1.9.32 (2026-10-08, pool-only GGUF startup count)
+
+**Change log v1.9.32 (2026-10-08, pool-only GGUF startup count):**
+Scopes v1.9.31's independent startup recount to runtimes with an expected
+trusted tokenizer binding. MLX snapshots and GGUF runtimes configured with a
+signed sibling snapshot digest still require that recount, failing closed if
+it cannot load or changes. A GGUF runtime without a signed sibling binding
+uses its bounded upstream completion count for this advisory startup estimate
+only. Pool-only identity intentionally excludes catalog identity; absence of a
+catalog sibling must not make that valid serving class permanently unroutable.
+Identity checks, tool rejection, the token budget and deadline remain required.
+This grants no usage, receipt, cancellation, attestation or settlement authority.
 
 **Change log v1.9.31 (2026-10-07, trusted loopback startup count):**
 Tightens the v1.9.29 loopback FR-20 startup probe count authority. A loopback
@@ -1196,9 +1207,10 @@ responsibility ends at sending accurate values.
 `serve` generates at most 8 tokens once after model load and divides the tokens
 produced by elapsed time including prefill (0 when the probe fails or does not
 run). A loopback runtime (v1.9.29) measures the same quantity through its
-upstream (FR-20) with the same formula and a trusted tokenizer recount of the
-assistant content, so the value is the one cross-runtime quantity SPEC-002
-v1.6.9 routes on. A warm swap carries the value forward without re-probing. Its wire
+upstream (FR-20) with the same formula and, when a trusted tokenizer binding is
+expected, a pinned recount of the assistant content. GGUF without a signed
+sibling binding uses bounded upstream usage for this advisory estimate only.
+SPEC-002 v1.6.10 routes on this quantity. A warm swap carries the value forward without re-probing. Its wire
 semantics are unchanged by v1.9.20.
 
 **Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
@@ -1654,12 +1666,18 @@ for `runtime_source: llamacpp_loopback` only (any other runtime's
 `predicted_n` is ignored); an upstream rate such as
 `timings.predicted_per_second` is ignored. The second independent count is the
 served snapshot's trusted pinned tokenizer recount of the complete assistant
-content returned by the probe. The counted tokens are the minimum of the
+content returned by the probe when a trusted binding is expected (every MLX
+snapshot, and GGUF with a signed sibling snapshot digest). In that case the counted tokens are the minimum of the
 upstream count and that tokenizer recount; both counts must be positive and
 independently `<= max_tokens`, so neither the upstream usage nor tokenizer
-fragmentation can inflate the rate. The chunk count alone is never a count.
+fragmentation can inflate the rate. A GGUF runtime with no signed sibling
+binding instead uses the upstream count alone, requiring it to be positive
+and `<= max_tokens`. This provider-reported advisory estimate is not an
+independently verified count and cannot authorize usage or settlement. A
+configured sibling binding that is unavailable must not fall back. The chunk
+count alone is never a count.
 The probe fails closed when no content streamed (`no_content`), the upstream
-reports no count (`no_tokens`), no trusted tokenizer is available before the
+reports no count (`no_tokens`), an expected trusted tokenizer is unavailable before the
 probe deadline (`tokenizer_unavailable`, with no upstream POST), the tokenizer
 cannot count the content because the pinned identity changed
 (`tokenizer_identity_changed`), the result contains any `tool_calls`

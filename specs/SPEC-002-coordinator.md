@@ -1,6 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.9 (2026-10-07, trusted loopback startup count)
+**Version:** 1.6.10 (2026-10-08, pool-only GGUF startup count)
+
+**Change log v1.6.10 (2026-10-08, issue #1690):** Aligns with SPEC-001
+v1.9.32: GGUF without a signed sibling tokenizer binding may use bounded
+upstream completion usage for advisory startup TPS. An expected tokenizer
+binding still requires independent pinned recount; unavailability cannot
+trigger fallback. This restores pool-only GGUF capacity reporting, without
+changing the routing floor, pool authorization, billing or receipt authority.
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
 
 **Change log v1.6.5 (2026-10-02, issue #1793):** The primary money database
@@ -2015,8 +2022,10 @@ elapsed time of that request, prefill, first token and decode included. The
 signed CLI measures it once at `serve` startup with the same formula for a
 native MLX runtime and for every loopback runtime (SPEC-001 FR-20; a loopback
 count is the minimum of the upstream's own count and the trusted
-pinned-tokenizer recount of the assistant content, with either missing or
-over-budget count failing closed).
+pinned-tokenizer recount when a tokenizer binding is expected, with either
+missing or over-budget count failing closed. GGUF without a signed sibling
+binding uses bounded upstream count alone for this advisory estimate; an
+expected but unavailable tokenizer never triggers fallback).
 It is 0 when unmeasured (probe failed, did not run, or an autotune candidate),
 which sits below any positive floor. It is a provider-reported startup value,
 not a sustained decode benchmark, and not a billed or attested quantity.
