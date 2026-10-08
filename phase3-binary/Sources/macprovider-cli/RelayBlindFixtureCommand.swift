@@ -235,6 +235,11 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             descriptor["binary_version"] = CoordinatorClient.binaryVersion
             if let records = privacyResponder?.privacyKeyRecords() {
                 descriptor["privacy_key_records"] = records
+                // SPEC-049 §4.10: the claim rides beside a non-empty
+                // advertisement only, as the serving provider sends it.
+                if !records.isEmpty, let claim = privacyResponder?.enrollmentClaim() {
+                    descriptor["privacy_enrollment"] = claim
+                }
             }
         }
         try await writer.write(descriptor)

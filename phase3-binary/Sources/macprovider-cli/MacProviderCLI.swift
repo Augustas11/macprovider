@@ -519,6 +519,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("isolate-lifecycle"), help: "Keep launchd/lease/control files off the live 8080 incumbent while still joining a coordinator. Requires --credential-store protected_file. Lab only.")
     var isolateLifecycle = false
 
+    @Flag(name: .customLong("lab-identity-scope"), help: "Use an isolated privacy lab identity scope. Requires --isolate-lifecycle, protected_file credentials, a literal loopback coordinator, and an explicit 0700 relay-blind state root.")
+    var labIdentityScope = false
+
+    @Option(name: .customLong("privacy-lab-config-change-checkpoint-fd"), help: .private)
+    var privacyLabConfigChangeCheckpointFD: Int?
+
     // Internal marker for CandidateProviderRunner. Stage 1 owns warmup and
     // throughput measurement for these non-joining subprocesses.
     @Flag(name: .customLong("autotune-candidate"), help: .private)
@@ -530,6 +536,23 @@ struct ServeCommand: AsyncParsableCommand {
         }
         if isolateLifecycle && autotuneCandidate {
             throw ValidationError("--isolate-lifecycle is incompatible with --autotune-candidate")
+        }
+        if labIdentityScope && !isolateLifecycle {
+            throw ValidationError("--lab-identity-scope requires --isolate-lifecycle")
+        }
+        if privacyLabConfigChangeCheckpointFD != nil {
+            guard labIdentityScope else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires --lab-identity-scope")
+            }
+            guard isolateLifecycle else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires --isolate-lifecycle")
+            }
+            guard !noJoin else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd requires coordinator join")
+            }
+            guard !autotuneCandidate else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd is incompatible with --autotune-candidate")
+            }
         }
     }
 
@@ -2029,28 +2052,128 @@ struct ServeCommand: AsyncParsableCommand {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
-    /// SPEC-049-R007 ordering. Privacy mode is decided from non-secret inputs
-    /// only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`).
-    /// In privacy mode the canonical re-exec decision and hardening run on the
-    /// non-secret bootstrap before any provider credential is resolved.
-    /// Otherwise the order is unchanged: full load, then the re-exec decision.
+    @discardableResult
+    static func validatePrivacyLabIdentityScopeIfRequested(
+        config: AppConfig,
+        isolateLifecycle: Bool,
+        requested: Bool
+    ) throws -> PrivacyLabIdentityScope? {
+        try PrivacyLabIdentityScope.validatedIfRequested(
+            config: config,
+            isolateLifecycle: isolateLifecycle,
+            requested: requested
+        )
+    }
+
+    static func samePrivacyLabIdentityInputs(_ checked: AppConfig, _ serving: AppConfig) -> Bool {
+        checked.credentialStore == serving.credentialStore
+            && normalizedCoordinatorURL(checked.coordinatorURL) == normalizedCoordinatorURL(serving.coordinatorURL)
+    }
+
+    private static func normalizedCoordinatorURL(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// SPEC-049-R007/R024 ordering. Privacy mode is decided from non-secret
+    /// inputs only (flag > `MACPROVIDER_PRIVACY_CLASS_BETA` > `privacy_class_beta`,
+    /// and an explicit `relay_blind_enabled: false` opts out). In privacy mode
+    /// the canonical re-exec decision and hardening run on the non-secret
+    /// bootstrap before any provider credential is resolved. Forced mode keeps
+    /// the hardening refusal. Automatic mode (unset, with `automatic` hooks)
+    /// enters privacy mode only when the read-only eligibility check and then
+    /// the hardening both pass, and otherwise serves ordinarily. Without hooks,
+    /// unset means off. Otherwise the order is unchanged: full load, then the
+    /// re-exec decision.
     static func resolveServeConfig(
         load: (_ resolveCredentials: Bool) throws -> AppConfig,
+        loadAfterNonCredentialValidation: ((_ validate: (AppConfig) throws -> Void) throws -> AppConfig)? = nil,
         canonicalReexec: (AppConfig) throws -> Void,
-        harden: (AppConfig) throws -> Void
+        harden: (AppConfig) throws -> Void,
+        automatic: PrivacyAutoEnrollmentHooks? = nil,
+        sameLabIdentityInputs: ((AppConfig, AppConfig) -> Bool)? = nil,
+        automaticPostHardenCheckpoint: ((AppConfig) throws -> Void)? = nil
     ) throws -> AppConfig {
         let bootstrap = try load(false)
-        guard bootstrap.privacyClassBeta else {
-            let resolved = try load(true)
-            try canonicalReexec(resolved)
-            if resolved.privacyClassBeta {
-                try harden(resolved)
+        // A fallback after the automatic check may serve only ordinary mode.
+        // A configuration that switched to forced privacy between the reads
+        // was never checked or hardened as such, so it refuses.
+        func ordinaryAfterAutomaticCheck(_ final: AppConfig) throws -> AppConfig {
+            guard !final.privacyClassBeta else {
+                throw PrivacyAutoEnrollmentError.configurationChanged
             }
+            return final
+        }
+        func validateBeforeCredentialResolution(_ config: AppConfig) throws {
+            try canonicalReexec(config)
+            if config.privacyClassBeta {
+                try harden(config)
+            }
+        }
+        func ordinary() throws -> AppConfig {
+            if let loadAfterNonCredentialValidation {
+                return try loadAfterNonCredentialValidation(validateBeforeCredentialResolution)
+            }
+            let resolved = try load(true)
+            try validateBeforeCredentialResolution(resolved)
             return resolved
         }
-        try canonicalReexec(bootstrap)
-        try harden(bootstrap)
-        return try load(true)
+        func ordinaryAfterFailedAutomaticHardening() throws -> AppConfig {
+            if let loadAfterNonCredentialValidation {
+                return try loadAfterNonCredentialValidation { final in
+                    guard !final.privacyClassBeta else {
+                        throw PrivacyAutoEnrollmentError.configurationChanged
+                    }
+                }
+            }
+            return try ordinaryAfterAutomaticCheck(try load(true))
+        }
+        if automaticPostHardenCheckpoint != nil, PrivacyAutoEnrollment.mode(bootstrap) != .automatic {
+            throw PrivacyLabConfigChangeCheckpointError.malformed
+        }
+        switch PrivacyAutoEnrollment.mode(bootstrap) {
+        case .forced:
+            let candidate = PrivacyAutoEnrollment.withStateDirectory(bootstrap)
+            try canonicalReexec(candidate)
+            try harden(candidate)
+            let final = PrivacyAutoEnrollment.withStateDirectory(try load(true))
+            // The checked snapshot must be the one that serves.
+            guard PrivacyAutoEnrollment.sameEligibilityInputs(candidate, final),
+                  sameLabIdentityInputs?(candidate, final) ?? true else {
+                throw PrivacyAutoEnrollmentError.configurationChanged
+            }
+            return final
+        case .off:
+            return try ordinary()
+        case .automatic:
+            guard let automatic else { return try ordinary() }
+            let candidate = PrivacyAutoEnrollment.enable(bootstrap)
+            let ineligible = automatic.eligibility(candidate)
+            guard ineligible.isEmpty else {
+                automatic.log(PrivacyAutoEnrollment.ineligibleLine(ineligible))
+                return try ordinary()
+            }
+            try canonicalReexec(candidate)
+            let hardeningFailures = automatic.harden(candidate)
+            guard hardeningFailures.isEmpty else {
+                // Process-wide hardening already applied stays applied; the
+                // provider serves ordinarily and never advertises privacy keys.
+                automatic.log(PrivacyAutoEnrollment.hardeningFailedLine(hardeningFailures))
+                return try ordinaryAfterFailedAutomaticHardening()
+            }
+            try automaticPostHardenCheckpoint?(candidate)
+            let final = try load(true)
+            // The checked snapshot must be the one that serves; a change
+            // between the two reads falls back to ordinary serving.
+            guard PrivacyAutoEnrollment.mode(final) == .automatic,
+                  PrivacyAutoEnrollment.sameEligibilityInputs(candidate, PrivacyAutoEnrollment.enable(final)),
+                  sameLabIdentityInputs?(candidate, final) ?? true else {
+                automatic.log(PrivacyAutoEnrollment.hardeningFailedLine([PrivacyHardeningCode.configurationChanged]))
+                return try ordinaryAfterAutomaticCheck(final)
+            }
+            return PrivacyAutoEnrollment.enable(final)
+        }
     }
 
     func run() async throws {
@@ -2105,9 +2228,33 @@ struct ServeCommand: AsyncParsableCommand {
             pagedKV: pagedKVCLIOverrides
         )
         let serveMarkerStore = AutoUpdateMarkerStore()
+        let isolateLifecycleForPrivacy = isolateLifecycle
+        let labIdentityScopeForPrivacy = labIdentityScope
+        let labConfigChangeCheckpoint: PrivacyLabConfigChangeCheckpoint?
+        if let checkpointFD = privacyLabConfigChangeCheckpointFD {
+            guard checkpointFD >= 3, checkpointFD <= Int(Int32.max) else {
+                throw ValidationError("--privacy-lab-config-change-checkpoint-fd must be an inherited descriptor >= 3")
+            }
+            let inheritedFD = Int32(checkpointFD)
+            do {
+                labConfigChangeCheckpoint = try PrivacyLabConfigChangeCheckpoint(fd: inheritedFD)
+                Darwin.close(inheritedFD)
+            } catch {
+                Darwin.close(inheritedFD)
+                throw error
+            }
+        } else {
+            labConfigChangeCheckpoint = nil
+        }
         var resolved = try Self.resolveServeConfig(
             load: { resolveCredentials in
                 try ConfigLoader.load(cli: cliOverrides, resolveCredentials: resolveCredentials)
+            },
+            loadAfterNonCredentialValidation: { validate in
+                try ConfigLoader.loadAfterNonCredentialValidation(
+                    cli: cliOverrides,
+                    validate: validate
+                )
             },
             canonicalReexec: { loaded in
                 // #616/#610: repair a stale PATH regular-file entrypoint to install
@@ -2124,6 +2271,11 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             },
             harden: { loaded in
+                _ = try Self.validatePrivacyLabIdentityScopeIfRequested(
+                    config: loaded,
+                    isolateLifecycle: isolateLifecycleForPrivacy,
+                    requested: labIdentityScopeForPrivacy
+                )
                 // SPEC-049-R007: after canonical re-exec, before credentials, model
                 // load, HTTPServer, or CoordinatorClient. The live probe calls
                 // ptrace(PT_DENY_ATTACH); tests inject a probe and never do.
@@ -2136,7 +2288,41 @@ struct ServeCommand: AsyncParsableCommand {
                     try? FileHandle.standardError.synchronize()
                     throw ExitCode(78)
                 }
+            },
+            // SPEC-049-R024: automatic mode only for a serving provider that
+            // joins the coordinator; autotune candidates and --no-join stay off.
+            automatic: autotuneCandidate || noJoin ? nil : PrivacyAutoEnrollment.liveHooks(
+                labIdentityScope: { config in
+                    try PrivacyLabIdentityScope.validatedIfRequested(
+                        config: config,
+                        isolateLifecycle: isolateLifecycleForPrivacy,
+                        requested: labIdentityScopeForPrivacy
+                    )
+                }
+            ),
+            sameLabIdentityInputs: labIdentityScopeForPrivacy ? Self.samePrivacyLabIdentityInputs : nil,
+            automaticPostHardenCheckpoint: labConfigChangeCheckpoint.map { checkpoint in
+                { config in
+                    guard labIdentityScopeForPrivacy,
+                          isolateLifecycleForPrivacy else {
+                        throw PrivacyLabConfigChangeCheckpointError.malformed
+                    }
+                    guard let scope = try Self.validatePrivacyLabIdentityScopeIfRequested(
+                        config: config,
+                        isolateLifecycle: isolateLifecycleForPrivacy,
+                        requested: labIdentityScopeForPrivacy
+                    ) else {
+                        throw PrivacyLabConfigChangeCheckpointError.malformed
+                    }
+                    try checkpoint.signalReady(scope: scope)
+                }
             }
+        )
+
+        let privacyLabIdentityScope = try Self.validatePrivacyLabIdentityScopeIfRequested(
+            config: resolved,
+            isolateLifecycle: isolateLifecycleForPrivacy,
+            requested: labIdentityScopeForPrivacy
         )
 
         // v1.8.53 can leave its one-shot reload helper alive long enough to
@@ -3069,6 +3255,46 @@ struct ServeCommand: AsyncParsableCommand {
                     expectedProviderVersion: CoordinatorClient.binaryVersion
                 )
             }()
+        let labScopedPrivacySESigner: (any SEBlobSigner)?
+        let labScopedSELivenessSigner: (any SELivenessSigning)?
+        let labScopedAttestationGenerator: Tier2AttestationTokenGenerating?
+        if let privacyLabIdentityScope {
+            #if arch(arm64)
+            do {
+                let identity = try SecureEnclaveIdentity.loadOrCreate(
+                    label: privacyLabIdentityScope.secureEnclaveLabel,
+                    quiet: true,
+                    fileBackedURL: privacyLabIdentityScope.secureEnclaveFileURL
+                )
+                labScopedPrivacySESigner = resolved.privacyClassBeta ? identity : nil
+                labScopedSELivenessSigner = identity
+                labScopedAttestationGenerator = SecureEnclaveAttestationGenerator(signer: identity)
+            } catch {
+                if resolved.privacyClassBeta {
+                    FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                    throw ExitCode(78)
+                } else {
+                    labScopedPrivacySESigner = nil
+                    labScopedSELivenessSigner = nil
+                    labScopedAttestationGenerator = nil
+                    FileHandle.standardError.write(Data("WARN privacy_lab_scoped_identity_unavailable ordinary_mode_omits_se_identity\n".utf8))
+                }
+            }
+            #else
+            if resolved.privacyClassBeta {
+                FileHandle.standardError.write(Data("FATAL privacy_class_se_identity_failed\n".utf8))
+                throw ExitCode(78)
+            } else {
+                labScopedPrivacySESigner = nil
+                labScopedSELivenessSigner = nil
+                labScopedAttestationGenerator = nil
+            }
+            #endif
+        } else {
+            labScopedPrivacySESigner = nil
+            labScopedSELivenessSigner = nil
+            labScopedAttestationGenerator = nil
+        }
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
@@ -3085,13 +3311,18 @@ struct ServeCommand: AsyncParsableCommand {
                 providerStatus: providerStatus,
                 runtimeSource: helloRuntimeSource,
                 attestationGenerator: {
-                    #if arch(arm64)
-                    if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
-                        return seGen
+                    if privacyLabIdentityScope != nil {
+                        return labScopedAttestationGenerator
                     }
-                    #endif
+                    #if arch(arm64)
+                    return SecureEnclaveAttestationGenerator.loadIfAvailable()
+                        ?? ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                    #else
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                    #endif
                 }(),
+                seLivenessSignerOverride: labScopedSELivenessSigner,
+                privacySESignerOverride: labScopedPrivacySESigner,
                 providerReceiptPublicKey: providerReceiptPublicKey,
                 providerAdmissionPublicKey: providerAdmissionPublicKey,
                 providerAdmissionNextPublicKey: providerAdmissionNextPublicKey,
@@ -3125,6 +3356,7 @@ struct ServeCommand: AsyncParsableCommand {
                 providerCredentialSource: credentialSource,
                 credentialStatusRuntime: credentialStatusRuntime,
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
+                privacyLabIdentityScope: privacyLabIdentityScope,
                 lifecycleStateStore: lifecycleStateStore,
                 lifecycleOperationID: lifecycleOperationID,
                 operatorPausedInitially: operatorPausedInitially,

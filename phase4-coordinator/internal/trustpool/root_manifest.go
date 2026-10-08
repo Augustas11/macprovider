@@ -312,7 +312,7 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 		}
 		return errManifestSnapshot
 	}
-	if err := ValidatePromiseClaimsText(core.ModelAllowlist...); err != nil {
+	if err := validateModelAllowlistPromiseClaims(core.ModelAllowlist); err != nil {
 		return err
 	}
 	if err := ValidatePromiseClaimsText(

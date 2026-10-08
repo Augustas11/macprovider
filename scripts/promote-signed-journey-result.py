@@ -21,7 +21,7 @@ from typing import Any
 from check_spec_governance import (
     JOURNEY_RESULT_ENVELOPE_SCHEMA,
     JOURNEY_RESULT_PUBLIC_KEY_SHA256,
-    PRIVACY_CLASS_BETA_JOURNEY_ID,
+    PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS,
     TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
     TRUSTED_POOL_LAYER2_JOURNEY_ID,
     TRUSTED_POOL_MODEL_JOURNEY_ID,
@@ -239,8 +239,8 @@ def promote_requirement_in_memory(
     requirement = matches[0]
     if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
         die(f"{TRUSTED_POOL_LAYER2_JOURNEY_ID} is evidence-only and cannot promote full SPEC-042 requirement rows")
-    if journey_id == PRIVACY_CLASS_BETA_JOURNEY_ID:
-        die(f"{PRIVACY_CLASS_BETA_JOURNEY_ID} is evidence-only until SPEC-049-R023's staged canary and audits are recorded")
+    if journey_id in PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS:
+        die(f"{journey_id} is evidence-only until SPEC-049-R023's staged canary and audits are recorded")
     if journey_id == TRUSTED_POOL_MODEL_JOURNEY_ID:
         prerequisite = trusted_pool_model_prerequisite_error(conformance, requirement_id)
         if prerequisite:

@@ -396,6 +396,10 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         try keyManager.identitySignatureBase64URL(for: message)
     }
 
+    func identityPublicKeyBase64URL() -> String {
+        keyManager.identityPublicKeyBase64URL()
+    }
+
     func open(
         envelopeBody: String,
         outerRequestID: String,
@@ -1094,6 +1098,12 @@ enum RelayBlindStrictJSON {
 }
 
 private enum RelayBlindSecureFileError: Error { case alreadyExists, invalid }
+
+/// SPEC-049-R024 eligibility: opens or creates a relay-blind state
+/// directory with the SPEC-041 custody checks and releases it again.
+func relayBlindStateDirectoryUsable(_ url: URL) -> Bool {
+    (try? RelayBlindSecureDirectory.openOrCreate(url)) != nil
+}
 
 private final class RelayBlindSecureDirectory: @unchecked Sendable {
     let path: String

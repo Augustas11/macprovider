@@ -74,6 +74,10 @@ enum PrivacyHardeningCode {
     static let runtimeSource = "runtime_source"
     static let binaryVersion = "binary_version"
     static let probeRejected = "probe_rejected"
+    static let notArm64 = "not_arm64"
+    static let seIdentityUnavailable = "se_identity_unavailable"
+    static let stateDirectoryUnavailable = "state_directory_unavailable"
+    static let configurationChanged = "configuration_changed"
 }
 
 enum PrivacySIP {
@@ -392,7 +396,7 @@ enum PrivacyRuntimeHardening {
         }
     }
 
-    private static func isCodeCDHash(_ value: String) -> Bool {
+    static func isCodeCDHash(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         guard bytes.count == 40 else { return false }
         return bytes.allSatisfy { byte in
@@ -400,7 +404,7 @@ enum PrivacyRuntimeHardening {
         }
     }
 
-    private static func isTeamID(_ value: String) -> Bool {
+    static func isTeamID(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         guard bytes.count == 10 else { return false }
         return bytes.allSatisfy { byte in
@@ -408,7 +412,7 @@ enum PrivacyRuntimeHardening {
         }
     }
 
-    private static func isSigningIdentifier(_ value: String) -> Bool {
+    static func isSigningIdentifier(_ value: String) -> Bool {
         let bytes = Array(value.utf8)
         guard (1...256).contains(bytes.count) else { return false }
         return bytes.allSatisfy { byte in byte >= 0x21 && byte <= 0x7e }

@@ -244,6 +244,12 @@ public struct AppConfig: Equatable, Sendable {
     /// On while relay-blind is off fails configuration validation.
     public var privacyClassBeta: Bool
     public var relayBlindStateDirectory: String?
+    /// SPEC-049-R024 explicit intent, independent of the resolved booleans
+    /// above. Nil means the operator did not say: `privacyClassRequested`
+    /// nil selects automatic mode at serve, and `relayBlindRequested` false
+    /// is an explicit opt-out of automatic privacy mode.
+    public var privacyClassRequested: Bool? = nil
+    public var relayBlindRequested: Bool? = nil
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
     public var switchStatePath: String?
@@ -656,13 +662,71 @@ public enum ConfigLoader {
             config.pagedKV.enabled = false
             config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
         }
+        // SPEC-049-R024: forcing the privacy class on turns relay-blind on
+        // unless relay-blind is explicitly disabled.
+        if config.privacyClassBeta && config.relayBlindRequested == nil {
+            config.relayBlindEnabled = true
+        }
         try validatePrivacyClass(config)
         return config
     }
 
-    /// SPEC-049-R001. Privacy class on with relay-blind off is a configuration
-    /// error. The hardening probe refuses the same combination again before
-    /// any network, with a bounded reason code.
+    /// SPEC-049-R007 credential boundary. Capture the operator YAML once,
+    /// validate the non-credential configuration produced from that captured
+    /// snapshot, and only then resolve credentials from the same captured
+    /// YAML/environment/CLI inputs. This prevents a mutable config file from
+    /// switching privacy mode on between a pre-credential guard and token
+    /// assignment or `--token-file` open.
+    public static func loadAfterNonCredentialValidation(
+        cli: CLIOverrides,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: expandTilde($0)) },
+        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) },
+        validate: (AppConfig) throws -> Void
+    ) throws -> AppConfig {
+        let configPath = cli.configPath
+            ?? environment["MACPROVIDER_CONFIG"]
+            ?? AppConfig.defaultConfigPath
+        let exists = fileExists(configPath)
+        let capturedText: String?
+        if exists {
+            do {
+                capturedText = try readFile(configPath)
+            } catch {
+                throw ConfigError.unreadableConfig(path: configPath, underlying: String(describing: error))
+            }
+        } else {
+            capturedText = nil
+        }
+        let snapshotExists: (String) -> Bool = { path in
+            path == configPath ? exists : fileExists(path)
+        }
+        let snapshotRead: (String) throws -> String = { path in
+            if path == configPath, let capturedText {
+                return capturedText
+            }
+            return try readFile(path)
+        }
+        let checked = try load(
+            cli: cli,
+            environment: environment,
+            fileExists: snapshotExists,
+            readFile: snapshotRead,
+            resolveCredentials: false
+        )
+        try validate(checked)
+        return try load(
+            cli: cli,
+            environment: environment,
+            fileExists: snapshotExists,
+            readFile: snapshotRead,
+            resolveCredentials: true
+        )
+    }
+
+    /// SPEC-049-R001. Privacy class forced on with relay-blind explicitly off
+    /// is a configuration error. The hardening probe refuses the same
+    /// combination again before any network, with a bounded reason code.
     private static func validatePrivacyClass(_ config: AppConfig) throws {
         if config.privacyClassBeta && !config.relayBlindEnabled {
             throw ConfigError.invalidValue(
@@ -774,6 +838,8 @@ public enum ConfigLoader {
         try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: dict, key: "relay_blind_enabled", expected: "boolean")
         try assign(&config.privacyClassBeta, from: dict, key: "privacy_class_beta", expected: "boolean")
+        try assign(&config.relayBlindRequested, from: dict, key: "relay_blind_enabled", expected: "boolean")
+        try assign(&config.privacyClassRequested, from: dict, key: "privacy_class_beta", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: dict, key: "relay_blind_state_directory", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
@@ -998,6 +1064,8 @@ public enum ConfigLoader {
         try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
         try assign(&config.relayBlindEnabled, from: environment, env: "MACPROVIDER_RELAY_BLIND_ENABLED", expected: "boolean")
         try assign(&config.privacyClassBeta, from: environment, env: "MACPROVIDER_PRIVACY_CLASS_BETA", expected: "boolean")
+        try assign(&config.relayBlindRequested, from: environment, env: "MACPROVIDER_RELAY_BLIND_ENABLED", expected: "boolean")
+        try assign(&config.privacyClassRequested, from: environment, env: "MACPROVIDER_PRIVACY_CLASS_BETA", expected: "boolean")
         try assign(&config.relayBlindStateDirectory, from: environment, env: "MACPROVIDER_RELAY_BLIND_STATE_DIRECTORY", expected: "absolute string")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
@@ -1157,9 +1225,11 @@ public enum ConfigLoader {
         }
         if let relayBlindEnabled = cli.relayBlindEnabled {
             config.relayBlindEnabled = relayBlindEnabled
+            config.relayBlindRequested = relayBlindEnabled
         }
         if let privacyClassBeta = cli.privacyClassBeta {
             config.privacyClassBeta = privacyClassBeta
+            config.privacyClassRequested = privacyClassBeta
         }
         if let relayBlindStateDirectory = cli.relayBlindStateDirectory {
             config.relayBlindStateDirectory = relayBlindStateDirectory

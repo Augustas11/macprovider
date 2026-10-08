@@ -25,9 +25,21 @@ struct PrivacyClassIdentityCommand: ParsableCommand {
     @Option(name: .customLong("model"), help: "Model id in the relay-blind key scope. Repeat for each model. Defaults to the configured model list.")
     var model: [String] = []
 
+    @Flag(name: .customLong("lab-identity-scope"), help: "Use the isolated privacy lab identity scope. Requires --isolate-lifecycle, protected_file credentials, a literal loopback coordinator, and an explicit 0700 state root.")
+    var labIdentityScope = false
+
+    @Flag(name: .customLong("isolate-lifecycle"), help: "Required with --lab-identity-scope; mirrors serve's isolated lifecycle lab gate.")
+    var isolateLifecycle = false
+
     func run() throws {
-        let resolved = try Self.resolve(stateDir: stateDir, configPath: config, models: model)
-        let se = try Self.loadSecureEnclave()
+        let resolved = try Self.resolve(
+            stateDir: stateDir,
+            configPath: config,
+            models: model,
+            labIdentityScope: labIdentityScope,
+            isolateLifecycle: isolateLifecycle
+        )
+        let se = try Self.loadSecureEnclave(scope: resolved.labScope)
         let relay = try PrivacyClassIdentityReport.relayBlindPublic(
             stateDirectory: resolved.stateDirectory,
             models: resolved.models
@@ -48,11 +60,14 @@ struct PrivacyClassIdentityCommand: ParsableCommand {
     private static func resolve(
         stateDir: String?,
         configPath: String?,
-        models: [String]
-    ) throws -> (stateDirectory: URL, models: [String]) {
+        models: [String],
+        labIdentityScope: Bool = false,
+        isolateLifecycle: Bool = false
+    ) throws -> (stateDirectory: URL, models: [String], labScope: PrivacyLabIdentityScope?) {
         if let stateDir, !models.isEmpty {
             guard isAbsoluteDirectory(stateDir) else { try fail("state_directory_missing") }
-            return (URL(fileURLWithPath: stateDir, isDirectory: true), models)
+            guard !labIdentityScope else { try fail("lab_identity_scope_requires_config") }
+            return (URL(fileURLWithPath: stateDir, isDirectory: true), models, nil)
         }
         let loaded: AppConfig
         do {
@@ -68,13 +83,30 @@ struct PrivacyClassIdentityCommand: ParsableCommand {
         guard isAbsoluteDirectory(path) else { try fail("state_directory_missing") }
         let scope = !models.isEmpty ? models : (loaded.supportedModels ?? [loaded.model].compactMap { $0 })
         guard !scope.isEmpty else { try fail("model_scope_missing") }
-        return (URL(fileURLWithPath: path, isDirectory: true), scope)
+        let labScope: PrivacyLabIdentityScope?
+        if labIdentityScope {
+            do {
+                labScope = try PrivacyLabIdentityScope.validated(
+                    config: loaded,
+                    isolateLifecycle: isolateLifecycle
+                )
+            } catch {
+                try fail("lab_identity_scope_invalid")
+            }
+        } else {
+            labScope = nil
+        }
+        return (URL(fileURLWithPath: path, isDirectory: true), scope, labScope)
     }
 
-    private static func loadSecureEnclave() throws -> (publicKey: String, backend: String) {
+    private static func loadSecureEnclave(scope: PrivacyLabIdentityScope? = nil) throws -> (publicKey: String, backend: String) {
         #if arch(arm64)
         do {
-            let identity = try SecureEnclaveIdentity.loadOrCreate(quiet: true)
+            let identity = try SecureEnclaveIdentity.loadOrCreate(
+                label: scope?.secureEnclaveLabel,
+                quiet: true,
+                fileBackedURL: scope?.secureEnclaveFileURL
+            )
             let backend = identity.backendName
             guard backend == PrivacyClassConstants.seBackendFile
                     || backend == PrivacyClassConstants.seBackendKeychain else {

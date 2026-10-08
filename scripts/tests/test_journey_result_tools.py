@@ -16,6 +16,7 @@ from pathlib import Path
 
 from scripts.check_spec_governance import (
     LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS,
+    PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
     ValidationResult,
     _validate_conformance_schema,
     _validate_local_consumer_evidence_control_mappings,
@@ -850,6 +851,39 @@ class JourneyResultToolsTests(unittest.TestCase):
                 )
 
             self.assertIn("JOURNEY-TRUSTED-POOL-LAYER2-MVP is evidence-only", stderr.getvalue())
+            self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
+
+    def test_promoter_rejects_privacy_class_beta_v2_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            evidence_path = root / "journeys" / "evidence" / "privacy-class-beta-v2.signed.json"
+            evidence_path.write_text(
+                json.dumps({
+                    "schema_version": "macprovider.journey-result-envelope.v1",
+                    "signed": {
+                        "repository": {"commit": "0" * 40},
+                        "journey_id": PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
+                        "captured_at": "2026-10-07T00:00:00Z",
+                        "expires_at": "2027-01-01",
+                    },
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            original = conformance_path.read_text(encoding="utf-8")
+
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/privacy-class-beta-v2.signed.json",
+                    base_ref="HEAD",
+                )
+
+            self.assertIn(f"{PRIVACY_CLASS_BETA_V2_JOURNEY_ID} is evidence-only", stderr.getvalue())
             self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
 
     def test_promoter_rejects_trusted_pool_creator_mvp_evidence_only_without_rewrite(self) -> None:

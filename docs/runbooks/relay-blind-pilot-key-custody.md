@@ -8,6 +8,8 @@ Use an operator-selected directory outside the repository with mode 0700 and pri
 
 The buyer pin is public material but is integrity-critical. Prefer `~/.config/macprovider/relay-blind-pins/<provider>.json` beneath 0700 directories, with the pin mode 0600 or 0644. The reference CLI accepts only `--identity-pin /absolute/local/file.json`; it rejects network URLs, TOFU, discovery defaults, symlinks, writable/foreign-owner ancestry, non-regular files, and files larger than 16 KiB. It must not print private material or full signed records.
 
+SPEC-041 v0.5.0 / SPEC-049 v0.2.0: for privacy-class keys only, the coordinator can bind the identity by automatic enrollment instead of a configured mapping, and the buyer can take the pin from the operator-signed identity directory instead of a file. That is the only permitted network discovery, and it is verified against a directory key the buyer pinned once out of band. The procedure is in [Privacy class beta operations](privacy-class-beta-operations.md). Plain relay-blind keys still follow this runbook unchanged.
+
 ## Initial provisioning
 
 1. Create the Ed25519 identity and X25519 encryption keys with the implementation's non-printing key command, writing directly to the operator store.

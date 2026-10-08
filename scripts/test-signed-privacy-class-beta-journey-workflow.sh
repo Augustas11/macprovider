@@ -47,7 +47,11 @@ required_workflow = [
     '--evidence-sha "$EVIDENCE_SHA"',
     "scripts/preflight-signed-journey-promotion.py",
     "Preflight selector freshness before signing",
-    "--journey-id JOURNEY-PRIVACY-CLASS-BETA",
+    'journey_id="$(python3 -c',
+    'JOURNEY-PRIVACY-CLASS-BETA|JOURNEY-PRIVACY-CLASS-BETA-V2',
+    "printf 'journey_id=%s\\n'",
+    'JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}',
+    '--journey-id "$JOURNEY_ID"',
     "scripts/verify-github-release-posture.sh",
     "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}",
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}",
@@ -59,7 +63,7 @@ required_workflow = [
     "retention-days: 1",
     "signed-privacy-class-beta-journey-evidence-${{ steps.request.outputs.source_sha }}",
     "macprovider.signed-privacy-class-beta-journey-evidence.v1",
-    "JOURNEY-PRIVACY-CLASS-BETA",
+    '"journey_id": journey_id',
     "SPEC-049-R023",
 ]
 for value in required_workflow:
@@ -73,6 +77,28 @@ for forbidden in ("contents: write", "pull-requests: write", "git push", "gh pr 
         raise SystemExit(f"workflow contains an unnecessary write/publication capability: {forbidden}")
 if "requirement_ids:\n" in workflow.split("jobs:", 1)[0]:
     raise SystemExit("requirement IDs are derived from the evidence contract, not a dispatch input")
+if "journey_id:\n" in workflow.split("jobs:", 1)[0]:
+    raise SystemExit("journey ID is derived from the validated payload, not a dispatch input")
+if "--journey-id JOURNEY-PRIVACY-CLASS-BETA" in workflow:
+    raise SystemExit("preflight must use the journey ID derived from the validated payload")
+if '"journey_id": "JOURNEY-PRIVACY-CLASS-BETA"' in workflow:
+    raise SystemExit("export manifest must use the journey ID derived from the validated payload")
+whitelist = re.search(
+    r'case "\$journey_id" in\s*\n\s*([^\n)]+)\) ;;',
+    workflow,
+)
+if whitelist is None:
+    raise SystemExit("workflow must fail closed on an explicit derived journey-ID whitelist")
+allowed_journey_ids = set(whitelist.group(1).split("|"))
+expected_journey_ids = {
+    "JOURNEY-PRIVACY-CLASS-BETA",
+    "JOURNEY-PRIVACY-CLASS-BETA-V2",
+}
+if allowed_journey_ids != expected_journey_ids:
+    raise SystemExit(f"workflow journey-ID whitelist is not exact: {sorted(allowed_journey_ids)}")
+for invalid_journey_id in ("", "JOURNEY-PRIVACY-CLASS-BETA-V3", "JOURNEY-OTHER"):
+    if invalid_journey_id in allowed_journey_ids:
+        raise SystemExit(f"workflow journey-ID whitelist accepts invalid selector: {invalid_journey_id!r}")
 if "cat \"$MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM\"" in workflow:
     raise SystemExit("workflow must not print private key material")
 if re.search(r'echo .*MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM', workflow):
@@ -126,6 +152,19 @@ for required_step_name in (preflight_name, posture_name, sign_name):
         raise SystemExit(f"workflow step is missing: {required_step_name}")
 if step_names.index(preflight_name) > step_names.index(sign_name):
     raise SystemExit("preflight step must execute before the signing step")
+preflight_block = "\n".join(step_by_name[preflight_name]["lines"])
+if 'JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}' not in preflight_block:
+    raise SystemExit("preflight must receive the journey ID derived from the validated payload")
+if '--journey-id "$JOURNEY_ID"' not in preflight_block:
+    raise SystemExit("preflight must select the journey derived from the validated payload")
+export_name = "Export signed evidence artifact"
+if export_name not in step_by_name:
+    raise SystemExit(f"workflow step is missing: {export_name}")
+export_block = "\n".join(step_by_name[export_name]["lines"])
+if 'JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}' not in export_block:
+    raise SystemExit("export step must receive the journey ID derived from the validated payload")
+if '"$REQUIREMENT_IDS" "$JOURNEY_ID"' not in export_block or '"journey_id": journey_id' not in export_block:
+    raise SystemExit("export manifest must bind the derived journey ID")
 secret_owners = {
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM": [sign_name],
     "GH_TOKEN": [posture_name],
