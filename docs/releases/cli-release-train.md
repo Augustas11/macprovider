@@ -74,16 +74,27 @@ signature proves automatic privacy enrollment or network activation.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
-Promotion-ready candidate preparation, authorized 2026-10-08: reserve
-`v1.8.224` for the consolidated merged BYOM/privacy source. The only new source
-delta is the CLI/App/build-ledger version identity; existing source acceptance
-and unchanged decode qualification carry forward. Cut one candidate from the
-reviewed current main after this identity change lands, using the existing
-acceptance workflow with `promotion_ready=true`. No candidate has been signed
-by this preparation entry. Keep the fleet recommendation and compatibility
+Promotion-ready candidate cut, authorized 2026-10-08: `v1.8.224` is being built
+and signed by [acceptance run37743452851](https://github.com/Augustas11/macprovider/actions/runs/37743452851)
+from exact current-main source/control `ac7cfde0516cf69c0e2ce3f919329f9052786202`,
+with `promotion_ready=true` and `strict_post_migration`. Version-only
+[#1896](https://github.com/Augustas11/macprovider/pull/1896) landed normally
+after all16 checks passed and antfleet-ops approved its exact head. Existing
+BYOM/privacy source acceptance and unchanged decode qualification carry
+forward; the new source delta is CLI/App/build-ledger identity224 only.
+The exact-source preflight passed; the candidate is not yet signed or accepted
+at this entry. Keep the fleet recommendation and compatibility
 target on223 until signed-byte installation, buyer-path and promotion gates
 pass. Native MTP activation remains owned by the separate #1894 campaign;
 the224 cut does not claim new MTP/CB acceptance or privacy fleet activation.
+
+Backend check for this train: privacy #1871/#1892 change coordinator/gateway
+directory, enrollment and grouped model-scope validation. Live runtime223
+predates those changes, so the corresponding paired backend runtime needs a
+new deployment; identity admission/target config alone cannot ship that code.
+BYOM #1895 itself is CLI-only. No backend deployment or privacy activation was
+performed by this candidate cut. Follow the existing Pearl rollout ordering
+and keep deployment separate from catalog/config activation.
 
 Privacy automatic enrollment [#1871](https://github.com/Augustas11/macprovider/pull/1871)
 merged on 2026-10-08 as `d6e8bb2ff370d7368d3a1bb79d28b935bc2a72b6`,
