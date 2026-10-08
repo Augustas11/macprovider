@@ -966,6 +966,24 @@ fi
 chown -R root:macprovider "$scratch"
 chmod -R g+rX,g-w,o-rwx "$scratch"
 python3 -I "$window" plan --root "$sroot" --incoming "releases/$name" > "$scratch/plan.json"
+# Record the exact retained identities the live validator must load first.
+# Additional authenticated restamps and row-continuity catalogs may follow
+# this ordered prefix in previous_loaded.
+python3 -I - "$scratch/plan.json" "$sroot" <<'PY'
+import json, os, sys
+path, root = sys.argv[1:]
+plan = json.load(open(path))
+expected = []
+for entry in plan["window_after"]:
+    release = json.load(open(os.path.join(root, entry, "release.json")))
+    expected.append({
+        "release_id": release["release_id"],
+        "candidates_sha256": release["feeds"]["autotune-candidates.json"]["sha256"].lower(),
+    })
+plan["expected_retained"] = expected
+with open(path, "w") as fh:
+    json.dump(plan, fh, sort_keys=True)
+PY
 # The validator resolves the planned window, and scans same-version restamps,
 # under <dir of --previous-target>/releases: the LIVE releases/ (as deploy's
 # coverage check does), so its admitted set includes restamps.
@@ -1055,7 +1073,9 @@ try:
     v = json.loads(open(path).read())
 except ValueError:
     print("coordinator dry-load printed no JSON verdict (rc=%s)" % rc); raise SystemExit(1)
-want = len(json.load(open(plan))["window_after"])
+plan_data = json.load(open(plan))
+expected = plan_data["expected_retained"]
+want = len(expected)
 problems = list(v.get("errors") or [])
 if rc != "0" or v.get("ok") is not True:
     problems.insert(0, "dry-load not ok (rc=%s)" % rc)
@@ -1063,8 +1083,9 @@ if v.get("release_id") != rid or v.get("candidates_sha256") != sha:
     problems.append("dry-load loaded %s/%s, expected %s/%s" % (v.get("release_id"), v.get("candidates_sha256"), rid, sha))
 if v.get("tier2_catalog_id") != t2id or v.get("tier2_sha256") != t2sha:
     problems.append("dry-load Tier-2 %s/%s, expected %s/%s" % (v.get("tier2_catalog_id"), v.get("tier2_sha256"), t2id, t2sha))
-if len(v.get("previous_loaded") or []) != want:
-    problems.append("dry-load retained %d of %d window releases" % (len(v.get("previous_loaded") or []), want))
+loaded = v.get("previous_loaded") or []
+if loaded[:want] != expected:
+    problems.append("dry-load retained window mismatch: loaded prefix %s, expected %s" % (loaded[:want], expected))
 # The config the validator decoded must be the config the coordinator applied
 # (pricing: the spliced candidate over the applied overlay).
 if not cfg_sha:

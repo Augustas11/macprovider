@@ -338,7 +338,10 @@ opkey = os.environ["CCR_OPKEY"]
 current = os.path.join(fake, "opt/macprovider/autotune/current")
 FEEDS = {"/v1/autotune-candidates": "autotune-candidates.json", "/v1/demand-rank": "demand-rank.json",
          "/v1/rate-card": "rate-card.json", "/v1/continuous-batching-policy": "continuous-batching-policy.json",
-         "/v1/catalog-artifacts": "autotune-artifacts.json"}
+         "/v1/catalog-artifacts": "autotune-artifacts.json",
+         "/v1/native-mtp-admission": "native-mtp-admission.json",
+         "/v1/native-mtp-artifact-manifest": "native-mtp-artifact-manifest.json",
+         "/v1/native-mtp-selftest-bank": "native-mtp-selftest-bank.json"}
 state = {"hups": 0, "snap": 1}
 lock = threading.Lock()
 sys.path.insert(0, os.environ["CCR_T"])
@@ -865,6 +868,29 @@ git -C "$R" reset -q --hard "$COMMIT"
 # ---------------------------------------------------------------------------
 # One fresh fake Pearl + canary per case.
 # ---------------------------------------------------------------------------
+# SPEC-023 §12.5: a Pearl serving a native-MTP-bound release carries the six
+# autotune.native_mtp_* keys, edited in place (docs/runbooks/native-mtp-enablement.md).
+native_live_yaml() { # <yaml>: in place, when the committed release binds native-MTP
+  if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' \
+    "$root/phase3-binary/catalog/autotune/release.json"; then
+    python3 - "$1" <<'PY'
+import sys
+path = sys.argv[1]
+lines = open(path).read().splitlines()
+anchor = next(i for i, line in enumerate(lines) if line.startswith("  catalog_artifacts_sig_path:"))
+current = "/opt/macprovider/autotune/current/"
+native = [
+    "  native_mtp_admission_path: " + current + "native-mtp-admission.json",
+    "  native_mtp_admission_sig_path: " + current + "native-mtp-admission.json.sig",
+    "  native_mtp_artifact_manifest_path: " + current + "native-mtp-artifact-manifest.json",
+    "  native_mtp_selftest_bank_path: " + current + "native-mtp-selftest-bank.json",
+    "  native_mtp_selftest_bank_sig_path: " + current + "native-mtp-selftest-bank.json.sig",
+    "  native_mtp_revocations_dir: /opt/macprovider/native-mtp-revocations/current",
+]
+open(path, "w").write("\n".join(lines[:anchor + 1] + native + lines[anchor + 1:]) + "\n")
+PY
+  fi
+}
 setup_env() {
   [ -z "$STUB_PID" ] || { kill "$STUB_PID" 2>/dev/null || true; wait "$STUB_PID" 2>/dev/null || true; STUB_PID=""; }
   local E="$T/env"
@@ -887,6 +913,7 @@ setup_env() {
   # The live base yaml is the tracked yaml the live release was cut with: its
   # rate_card is in parity with the live card (the stub checks it on every HUP).
   git -C "$R" show "$LIVE_COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$CCR_FAKE/opt/macprovider/coordinator.yaml"
+  native_live_yaml "$CCR_FAKE/opt/macprovider/coordinator.yaml"
   chmod 0640 "$CCR_FAKE/opt/macprovider/coordinator.yaml"
   touch -t 202001010000 "$CCR_FAKE/opt/macprovider/coordinator.yaml"
   printf 'PATH=/usr/bin\0OPERATOR_KEY=%s\0' "$OPKEY" >"$CCR_FAKE/proc-environ"
@@ -983,14 +1010,21 @@ def ident(rel_dir):
     r = json.load(open(os.path.join(rel_dir, "release.json")))
     return r["release_id"], r["feeds"]["autotune-candidates.json"]["sha256"].lower()
 admitted = [dict(zip(("release_id", "candidates_sha256"), ident(d)), source="current")]
+previous_loaded = [dict(zip(("release_id", "candidates_sha256"), ident(os.path.join(sroot, p)))) for p in prev]
 for p in prev:
     rid, sha = ident(os.path.join(sroot, p))
     if all(a["candidates_sha256"] != sha for a in admitted):
         admitted.append({"release_id": rid, "candidates_sha256": sha, "source": "retained"})
+if os.path.exists(os.path.join(ctl, "dryload-omit-retained")):
+    previous_loaded = previous_loaded[:-1]
+if os.path.exists(os.path.join(ctl, "dryload-extra-restamp")):
+    restamp = {"release_id": previous_loaded[0]["release_id"], "candidates_sha256": "f" * 64}
+    previous_loaded.append(restamp)
+    admitted.append(dict(restamp, source="restamp"))
 print(json.dumps({"ok": not bad, "release_id": m["release_id"], "candidates_sha256": m["feeds"]["autotune-candidates.json"]["sha256"],
                   "tier2_catalog_id": json.loads(t2)["catalog_id"], "tier2_sha256": hashlib.sha256(t2).hexdigest(),
                   "config_sha256": config_sha, "overlay_sha256": overlay_sha,
-                  "previous_loaded": [{"release_id": p} for p in prev], "admitted": [] if bad else admitted,
+                  "previous_loaded": previous_loaded, "admitted": [] if bad else admitted,
                   "rate_table_sha256": stubparity.rate_table_sha(cand_rows), "signed_rate_card_sha256": hashlib.sha256(open(os.path.join(d, "rate-card.json"), "rb").read()).hexdigest(),
                   "model_resolutions": resolutions,
                   "errors": (errors or ["tier2: stub reject"]) if bad else [], "notes": []}))
@@ -1076,6 +1110,12 @@ setup_env; printf 'pricing\n' >"$CCR_TEST_CTL/lane"; expect_no_go "wrong lane" c
 setup_env; touch "$CCR_TEST_CTL/closure-fail"; expect_no_go "closure miss" content_gate
 grep -q 'serving closure' "$T/out" || fail "a closure miss must be reported by content_gate: $(cat "$T/out")"
 setup_env; touch "$CCR_TEST_CTL/dryload-fail"; expect_no_go "dry-load failure" coordinator_dry_load
+setup_env; touch "$CCR_TEST_CTL/dryload-extra-restamp"
+run preflight
+[ "$RC" -eq 0 ] && [ "$(verdict_check coordinator_dry_load)" = true ] ||
+  fail "an authenticated compatible restamp after the retained window must be accepted (rc=$RC): $(cat "$T/out")"
+note "ok: dry-load accepts an authenticated compatible suffix after the retained window"
+setup_env; touch "$CCR_TEST_CTL/dryload-omit-retained"; expect_no_go "dry-load missing retained entry" coordinator_dry_load
 setup_env
 printf '[{"provider_id":"p9","catalog_release_id":"ghost-release","catalog_candidate_sha256":"%s","hash_status":"hash_verified"}]\n' \
   "$(printf 'ee%.0s' $(seq 1 32))" >"$CCR_TEST_CTL/poolz-extra.json"
@@ -1121,6 +1161,12 @@ setup_env
 grep -v 'catalog_artifacts' "$CCR_FAKE/opt/macprovider/coordinator.yaml" >"$T/unbound-config.yaml"
 cat "$T/unbound-config.yaml" >"$CCR_FAKE/opt/macprovider/coordinator.yaml"
 expect_no_go "bound release under a config without the artifact-feed pair" artifact_feed_config
+if grep -q native_mtp_admission_path "$CCR_FAKE/opt/macprovider/coordinator.yaml"; then
+  setup_env
+  grep -v 'native_mtp_' "$CCR_FAKE/opt/macprovider/coordinator.yaml" >"$T/native-unbound-config.yaml"
+  cat "$T/native-unbound-config.yaml" >"$CCR_FAKE/opt/macprovider/coordinator.yaml"
+  expect_no_go "native-MTP-bound release under a config without the native_mtp_* keys" artifact_feed_config
+fi
 setup_env
 printf 'autotune:\n  catalog_artifacts_path: /elsewhere/autotune-artifacts.json\n' >"$CCR_FAKE/etc/macprovider/coordinator.pearl-overlays.yaml"
 expect_no_go "overlay redirects the artifact feed" artifact_feed_config
@@ -1366,7 +1412,9 @@ note "ok: deploy refused while a renewal/deploy holds the Pearl lock"
 # #1693 pricing releases.
 # ---------------------------------------------------------------------------
 YAML="$T/env/fake/opt/macprovider/coordinator.yaml"
-PRIOR_YAML_SHA="$(git -C "$R" show "$LIVE_COMMIT:phase4-coordinator/dist/coordinator.yaml" | shasum -a 256 | cut -d' ' -f1)"
+git -C "$R" show "$LIVE_COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$T/prior-coordinator.yaml"
+native_live_yaml "$T/prior-coordinator.yaml"
+PRIOR_YAML_SHA="$(shasum -a 256 "$T/prior-coordinator.yaml" | cut -d' ' -f1)"
 runc() { # <commit> <lane args...>; rc in RC
   local c="$1"; shift
   git -C "$R" update-ref refs/remotes/origin/main "$c"
@@ -1450,7 +1498,9 @@ note "ok: the acknowledged digest covers Go-resolved names"
 setup_env
 runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
 [ "$RC" -eq 0 ] || fail "pricing deploy (rc=$RC): $(tail -n 40 "$T/out") $(tail -n 20 "$T/err")"
-CAND_SHA="$(git -C "$R" show "$PRICE_COMMIT:phase4-coordinator/dist/coordinator.yaml" | shasum -a 256 | cut -d' ' -f1)"
+git -C "$R" show "$PRICE_COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$T/cand-coordinator.yaml"
+native_live_yaml "$T/cand-coordinator.yaml"
+CAND_SHA="$(shasum -a 256 "$T/cand-coordinator.yaml" | cut -d' ' -f1)"
 [ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$CAND_SHA" ] || fail "the live yaml must be the prior yaml with the commit's rate_card block"
 [ "$(stat -c '%a' "$YAML" 2>/dev/null || stat -f '%Lp' "$YAML")" = 640 ] || fail "the installed yaml must keep 0640"
 case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "pricing deploy did not activate the release" ;; esac

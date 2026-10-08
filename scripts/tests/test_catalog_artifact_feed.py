@@ -1050,9 +1050,10 @@ class LedgerV3Test(unittest.TestCase):
 
     def test_historical_rows_stay_valid_and_may_not_gain_the_new_keys(self):
         committed = catalog_release.validate_release_ledger((CATALOG / "release-ledger.json").read_bytes())
-        # The committed ledger is v3 since the activation release; every
-        # pre-activation row in it stays a historical-feed-set row.
-        self.assertEqual(committed["schema_version"], catalog_release.LEDGER_SCHEMA_V3)
+        # The committed ledger is v4 since the first native-MTP release (v3
+        # since the activation release); every pre-activation row in it stays
+        # a historical-feed-set row.
+        self.assertEqual(committed["schema_version"], catalog_release.LEDGER_SCHEMA_V4)
         rate_card_bound = {
             name: {"bytes": 10, "sha256": "a" * 64, "signer_key_id": "k", "version": CANDIDATE_OBJ["version"]}
             for name in catalog_release.RATE_CARD_BOUND_LEDGER_FEEDS
@@ -2312,6 +2313,10 @@ class HermeticRelease:
         )
         generated_at = row["generated_at"]
         (self.catalog / "autotune-artifacts.json").unlink()
+        # A native-MTP admission requires the artifact-bound feed set, so the
+        # pre-activation state has no admission inputs either.
+        for name in ("native-mtp-admission.json", "native-mtp-admission-tuple.json", "native-mtp-admission-release.json"):
+            (self.catalog / name).unlink(missing_ok=True)
         # The historical pre-activation release had no CB admission entries.
         # Rewind both the feed and its authoring source before regenerating it.
         for name in ("continuous-batching-policy.json", "continuous-batching-policy-source.json"):
@@ -2374,6 +2379,8 @@ class HermeticRelease:
         "ARTIFACT_SOURCE_PATH": "catalog/autotune-artifacts-source.json",
         "CB_POLICY_FEED_PATH": "catalog/continuous-batching-policy.json",
         "CB_POLICY_SOURCE_PATH": "catalog/continuous-batching-policy-source.json",
+        "NATIVE_MTP_TUPLE_INPUT_PATH": "catalog/native-mtp-admission-tuple.json",
+        "NATIVE_MTP_RELEASE_INPUT_PATH": "catalog/native-mtp-admission-release.json",
         "RATE_CARD_SOURCE_PATH": "catalog/rate-card-source.json",
         "MARKET_PEG_BIND_PATH": "catalog/market-peg-bind.json",
         "INTAKE_DECISION_PATH": "catalog/intake-decision.json",

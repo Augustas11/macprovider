@@ -137,6 +137,9 @@ mkdir "$tmp/release"
 bound="$(python3 -c 'import json,sys; print("bound" if "autotune-artifacts.json" in json.load(open(sys.argv[1]))["feeds"] else "unbound")' "$CANONICAL/release.json")"
 files="$release_files"
 [ "$bound" = bound ] && files="$files $bound_files"
+if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$CANONICAL/release.json"; then
+  files="$files $native_files"
+fi
 for name in $files; do
   case "$name" in
     release.json|trusted-keys.json|tier2-catalog.json) cp "$CANONICAL/$name" "$tmp/release/$name" ;;

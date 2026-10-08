@@ -126,11 +126,14 @@ assemble() {
 # The committed release is the artifact-feed activation release. The unbound
 # fixture is that release without its artifact pair: its other feeds still
 # reverse to the preceding (unbound) ledger row and keep their real signatures.
+# A native-MTP admission requires the artifact-bound feed set, so the unbound
+# fixture drops a native-MTP binding too.
 unbind_release() {
   python3 - "$1/release.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
-if m["feeds"].pop("autotune-artifacts.json", None) is not None:
+native = m["feeds"].pop("native-mtp-admission.json", None)
+if m["feeds"].pop("autotune-artifacts.json", None) is not None or native is not None:
     open(sys.argv[1], "w").write(json.dumps(m, indent=2, sort_keys=True) + "\n")
 PY
 }

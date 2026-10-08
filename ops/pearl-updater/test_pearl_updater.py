@@ -237,6 +237,7 @@ class PearlUpdaterTests(unittest.TestCase):
         runtime_only: bool = False,
         stats_sidecars: bool = False,
         artifact_feed: bool = True,
+        native_mtp_feed: bool = False,
         provider_code_identity: dict | None = None,
         ):
         tag = "v" + version
@@ -254,7 +255,7 @@ class PearlUpdaterTests(unittest.TestCase):
             sidecar.unlink(missing_ok=True)
             if stats_sidecars:
                 sidecar.write_bytes(fake_elf(sidecar.name))
-        for name in updater_module.ARTIFACT_BOUND_CATALOG_ASSETS:
+        for name in updater_module.NATIVE_MTP_BOUND_CATALOG_ASSETS:
             (self.bundle / name).unlink(missing_ok=True)
         catalog_metadata = None
         catalog_assets = []
@@ -278,9 +279,17 @@ class PearlUpdaterTests(unittest.TestCase):
                 shutil.copyfile(source, self.bundle / name)
             catalog_manifest = json.loads((self.bundle / "release.json").read_text(encoding="utf-8"))
             feed = updater_module.CATALOG_ARTIFACT_FEED
-            if feed in catalog_manifest["feeds"] and not artifact_feed:
+            native_feed = updater_module.NATIVE_MTP_FEED
+            # A native-MTP binding requires the artifact feed (SPEC-023 §12.5).
+            unbind = [
+                name
+                for name, keep in ((native_feed, native_mtp_feed and artifact_feed), (feed, artifact_feed))
+                if name in catalog_manifest["feeds"] and not keep
+            ]
+            if unbind:
                 # The unbound manifest verify-directory expects beside the base files.
-                del catalog_manifest["feeds"][feed]
+                for name in unbind:
+                    del catalog_manifest["feeds"][name]
                 (self.bundle / "release.json").write_text(
                     json.dumps(catalog_manifest, indent=2, sort_keys=True) + "\n"
                 )
@@ -290,6 +299,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 self.catalog_assets = updater_module.ARTIFACT_BOUND_CATALOG_ASSETS
             else:
                 self.catalog_assets = updater_module.CATALOG_ASSETS
+            if native_feed in catalog_manifest["feeds"]:
+                for name in updater_module.NATIVE_MTP_FEED_ASSETS:
+                    shutil.copyfile(REPO_ROOT / "phase3-binary/dist/static" / name, self.bundle / name)
+                self.catalog_assets = updater_module.NATIVE_MTP_BOUND_CATALOG_ASSETS
             catalog_assets = [self.bundle / name for name in self.catalog_assets]
             catalog_metadata = {
                 "release_id": catalog_manifest["release_id"],
@@ -807,6 +820,64 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.installed_catalog_is_coherent(release))
         (installed / feed).chmod(0o600)
         self.assertFalse(self.updater.installed_catalog_is_coherent(release))
+
+    def test_native_mtp_bound_release_verifies_installs_and_configures_admission_set(self):
+        self.make_bundle(native_mtp_feed=True)
+        release = self.stage(self.verify())
+
+        self.assertEqual(release.catalog.assets, updater_module.NATIVE_MTP_BOUND_CATALOG_ASSETS)
+        for name in updater_module.NATIVE_MTP_FEED_ASSETS:
+            self.assertEqual(updater_module.sha256_file(release.directory / name), release.catalog.files[name])
+        self.updater.verify_catalog_release(release)
+        base = self._artifact_feed_config_fixture()
+        staged = self.updater.prepare_config_update(release).staged.read_text()
+        current = self.updater.install_root / "autotune" / "current"
+        for key, value in (
+            ("native_mtp_admission_path", current / "native-mtp-admission.json"),
+            ("native_mtp_admission_sig_path", current / "native-mtp-admission.json.sig"),
+            ("native_mtp_artifact_manifest_path", current / "native-mtp-artifact-manifest.json"),
+            ("native_mtp_selftest_bank_path", current / "native-mtp-selftest-bank.json"),
+            ("native_mtp_selftest_bank_sig_path", current / "native-mtp-selftest-bank.json.sig"),
+            ("native_mtp_revocations_dir", updater_module.NATIVE_MTP_REVOCATIONS_DIR),
+        ):
+            self.assertIn(f"  {key}: {value}\n", staged)
+        self.assertNotIn("native_mtp_", base.read_text())
+
+        self._catalog_install_fixture("releases/catalog-b", "")
+        self.updater.install_catalog(release)
+        installed = current.resolve()
+        self.assertEqual(
+            sorted(path.name for path in installed.iterdir()),
+            sorted(updater_module.NATIVE_MTP_BOUND_CATALOG_ASSETS),
+        )
+        self.assertTrue(self.updater.installed_catalog_is_coherent(release))
+
+    def test_native_mtp_unbound_release_clears_admission_paths(self):
+        release = self.stage(self.verify())
+        self.assertNotIn(updater_module.NATIVE_MTP_FEED, release.catalog.files)
+        current = self.updater.install_root / "autotune" / "current"
+        self._artifact_feed_config_fixture(
+            f"  native_mtp_admission_path: {current}/native-mtp-admission.json\n"
+            f"  native_mtp_revocations_dir: {updater_module.NATIVE_MTP_REVOCATIONS_DIR}\n"
+        )
+        self.assertNotIn("native_mtp_", self.updater.prepare_config_update(release).staged.read_text())
+
+    def test_native_mtp_signer_identity_mismatch_is_refused(self):
+        self.make_bundle(native_mtp_feed=True)
+        sidecar = self.bundle / "native-mtp-admission.json.sig"
+        signature = json.loads(sidecar.read_text(encoding="utf-8"))
+        signature["key_id"] = "streamvc-autotune-static-v5"
+        sidecar.write_text(json.dumps(signature, sort_keys=True, separators=(",", ":")) + "\n")
+
+        def rebind(metadata):
+            metadata["catalog"]["files"][sidecar.name] = updater_module.sha256_file(sidecar)
+
+        self.resign_bundle(rebind)
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError, "catalog signature identity mismatch for native-mtp-admission.json"
+        ):
+            self.verify()
 
     def test_artifact_feed_paths_in_a_non_target_config_are_refused(self):
         release = self.stage(self.verify())
@@ -3183,6 +3254,7 @@ class PearlUpdaterTests(unittest.TestCase):
         release = self.verify()
         self.updater.catalog_admission_ready = mock.Mock(return_value=True)
         self.updater.public_catalog_artifact_feed_ready = mock.Mock(return_value=True)
+        self.updater.public_native_mtp_feed_ready = mock.Mock(return_value=True)
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
         self.updater.audit = mock.Mock()
 
@@ -3237,6 +3309,48 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.public_catalog_artifact_feed_ready(release))
         served["https://coordinator.malibu.tech/v1/catalog-artifacts"] = (200, b"{}")
         self.assertFalse(self.updater.public_catalog_artifact_feed_ready(release))
+
+    def test_public_native_mtp_set_must_serve_the_bound_bytes_through_nginx(self):
+        self.make_bundle(native_mtp_feed=True)
+        release = self.verify()
+        served = {
+            "https://coordinator.malibu.tech" + path: (200, (release.directory / asset).read_bytes())
+            for path, asset in zip(updater_module.PUBLIC_NATIVE_MTP_PATHS, updater_module.NATIVE_MTP_FEED_ASSETS)
+        }
+        key_id = json.loads((release.directory / updater_module.NATIVE_MTP_FEED).read_bytes())["revocation_signer_key_id"]
+        revocation = f"https://coordinator.malibu.tech/v1/native-mtp-revocations.{key_id}.json"
+        served[revocation] = (200, b"{}")
+        served[revocation + ".sig"] = (200, b"{}")
+        self.updater.get_public_bytes = mock.Mock(side_effect=lambda url: served[url])
+        self.assertTrue(self.updater.public_native_mtp_feed_ready(release))
+        # No current revocation slot: providers fail closed, so not ready.
+        served[revocation] = (404, b"")
+        self.assertFalse(self.updater.public_native_mtp_feed_ready(release))
+        served[revocation] = (200, b"{}")
+        bank = "https://coordinator.malibu.tech/v1/native-mtp-selftest-bank"
+        good = served[bank]
+        served[bank] = (404, b"")
+        self.assertFalse(self.updater.public_native_mtp_feed_ready(release))
+        served[bank] = (200, good[1] + b" ")
+        self.assertFalse(self.updater.public_native_mtp_feed_ready(release))
+        served[bank] = (404, b"")
+
+        # The rollout fails (and so rolls back) with the actionable nginx step.
+        self.updater.catalog_admission_ready = mock.Mock(return_value=True)
+        self.updater.public_catalog_artifact_feed_ready = mock.Mock(return_value=True)
+        self.updater.audit = mock.Mock()
+        self.updater.sleep = mock.Mock()
+        self.updater.config = updater_module.dataclasses.replace(self.updater.config, service_health_timeout_s=1)
+        with self.assertRaisesRegex(updater_module.UpdateError, "location` blocks for /v1/native-mtp-"):
+            self.updater.verify_exact_catalog_admission(release)
+
+    def test_public_native_mtp_set_absent_for_an_unbound_release(self):
+        release = self.verify()
+        served = {"https://coordinator.malibu.tech" + path: (404, b"") for path in updater_module.PUBLIC_NATIVE_MTP_PATHS}
+        self.updater.get_public_bytes = mock.Mock(side_effect=lambda url: served[url])
+        self.assertTrue(self.updater.public_native_mtp_feed_ready(release))
+        served["https://coordinator.malibu.tech/v1/native-mtp-admission"] = (200, b"{}")
+        self.assertFalse(self.updater.public_native_mtp_feed_ready(release))
 
     def test_exact_provider_canary_matches_pool_envelope_to_independent_mac_row(self):
         release = self.verify()

@@ -60,6 +60,12 @@ stage_release() {
   cp "$CANONICAL/tier2-catalog.json" "$TMP/release/"
   cp "$STATIC/autotune-artifacts.json" "$TMP/release/"
   cp "$STATIC/autotune-artifacts.json.sig" "$TMP/release/"
+  if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$TMP/release/release.json"; then
+    for name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json \
+      native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+      cp "$STATIC/$name" "$TMP/release/"
+    done
+  fi
 }
 
 expect_rejected() {
@@ -271,6 +277,10 @@ expected_history = {
     # Retained predecessors of the signed CB223 cut.
     "published-2026-10-01-artifact-feed-activation-v1",
     "published-2026-10-07-inband-provenance-v1",
+    # Superseded by the native-MTP-bound v223 cut; retained by the append-only ledger.
+    "published-2026-10-08-a3b-cb-v223-v1",
+    # Superseded by the re-bind to signed CLI 224; never deployed.
+    "published-2026-10-08-native-mtp-v223-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

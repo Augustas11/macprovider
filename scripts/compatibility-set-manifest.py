@@ -517,7 +517,7 @@ def validate_payload_artifacts(payload: dict, payload_directory: pathlib.Path) -
     # exact nine-name catalog-release set, so shipping it inside the payload
     # would fail-close the fleet. Its presence here is a producer error.
     catalog_directory = payload_directory / "catalog-release"
-    sidecars = (CATALOG_ARTIFACT_FEED, CB_POLICY_FEED)
+    sidecars = (CATALOG_ARTIFACT_FEED, CB_POLICY_FEED, NATIVE_MTP_ADMISSION_FEED)
     present = [name for feed in sidecars for name in (feed, feed + ".sig") if (catalog_directory / name).exists()]
     if present:
         fail(f"payload catalog: {', '.join(present)} is not a provider-payload member at Stage A (SPEC-023 §3.7.8); publish it as a release asset")
@@ -610,6 +610,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
     # bridge-safe signed `files` map at Stage A (see CATALOG_FILES).
     catalog_bytes.pop(CATALOG_ARTIFACT_FEED, None)
     catalog_bytes.pop(CB_POLICY_FEED, None)
+    catalog_bytes.pop(NATIVE_MTP_ADMISSION_FEED, None)
     return {
         "activation": "local",
         "files": {name: hashlib.sha256(data).hexdigest() for name, data in sorted(catalog_bytes.items())},
