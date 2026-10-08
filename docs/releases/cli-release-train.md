@@ -59,19 +59,28 @@ train.
 ## Next CLI candidate — net changes vs 1.8.207
 
 Privacy automatic enrollment [#1871](https://github.com/Augustas11/macprovider/pull/1871)
-remains an open draft as of 2026-10-08, at integrated source commit
-`60d97dacf51047e10100622eeba1a093d76b63da`, based on current CLI-223-era
-`main` commit `3afca62b45fc5df6443f352e34358d1352111640`. Exact-head
-[CI](https://github.com/Augustas11/macprovider/actions/runs/37711353541) is still
-running; [spec-index](https://github.com/Augustas11/macprovider/actions/runs/37711353502)
-passed. The source-built CLI release build and isolated coordinator, operator
-CLI, gateway, and relay-blind client builds passed on the designated Studio.
-Positive privacy E2E acceptance and the final full-product freeze audit remain
-pending; these build/check results are not signed-package or fleet acceptance.
-The PR is not merged, is not included in a candidate cut from `main`, and is not
-ready for a candidate cut or fleet activation. No candidate identity is reserved
-by this entry. Published CLI 1.8.223 does not contain this unmerged enrollment
-change; updating to 223 alone does not activate network-wide privacy.
+merged on 2026-10-08 as `d6e8bb2ff370d7368d3a1bb79d28b935bc2a72b6`,
+with antfleet-ops approval. Product source `60d97dacf51047e10100622eeba1a093d76b63da`
+passed [CI](https://github.com/Augustas11/macprovider/actions/runs/37711353541)
+and [spec-index](https://github.com/Augustas11/macprovider/actions/runs/37711353502).
+The final `3175f1c7` head differed only by release-train documentation;
+the operator explicitly authorized admin merge without repeating CI on that delta.
+Source builds for the CLI, coordinator, operator CLI, gateway and buyer client
+passed on the designated Studio; final source audit reconciliation was clear.
+The signed 16-step baseline and subsequent regression/audit evidence are retained.
+These results do not assert signed V2 enrollment acceptance or fleet activation.
+
+Next activation sequence: include the merged enrollment changes in the next
+signed CLI train after the remaining in-scope slices land; verify changed
+enrollment/directory behavior on Studio; deploy the matching Pearl runtime;
+authorize the signed release identity and a current v0.2 activation exception;
+configure the signed directory and buyer key distribution; canary private
+stream/nonstream traffic under load, then promote and verify eligible-fleet
+automatic enrollment, preserving explicit opt-outs. Close #1749 only after
+its buyer-path, disclosure, support-matrix and incident criteria are evidenced.
+No candidate identity is reserved by this entry. Published CLI 1.8.223 does
+not contain these newly merged enrollment changes; updating to 223 alone
+does not activate network-wide privacy.
 
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
@@ -101,7 +110,7 @@ are consumed and must not be reused.
 | Net change in CLI / Malibu / installer | Status | PR |
 |---|---|---|
 | Pool model status names the qualifying pool and says eligible to earn only on qualifying settled requests. Malibu clears stale positive bindings when status readback is unavailable, inactive, or mismatched; eligibility wording does not claim current paid work or income. | merged `00700349b` 2026-10-07; awaiting a reviewed signed CLI/app release | [#1883](https://github.com/Augustas11/macprovider/pull/1883) ([#1880](https://github.com/Augustas11/macprovider/issues/1880)) |
-| Automatic privacy-class eligibility and enrollment, preserving explicit opt-out and refusing ineligible posture; fleet availability still requires accepted E2E, reviewed signed identity, and rollout. | in progress; privacy E2E acceptance pending; not in a `main` candidate | [#1871](https://github.com/Augustas11/macprovider/pull/1871) (#1749) |
+| Automatic privacy-class eligibility and enrollment, preserving explicit opt-out and refusing ineligible posture; fleet availability still requires signed-release acceptance, approved identity, directory configuration and staged rollout. | merged `d6e8bb2ff` 2026-10-08; not yet released or activated fleet-wide | [#1871](https://github.com/Augustas11/macprovider/pull/1871) (#1749) |
 | Operator pause remains authoritative when coordinator drain first moves the provider to `network_offline` or `coordinator_unavailable`; only the operator command may write those pause transitions. | merged `9384e5280` 2026-10-03 | #1834 (#1770) |
 | Qwen3.6 35B-A3B ordinary decode uses the fused A3B MoE kernels (fork pin `Augustas11/mlx-swift-lm@b1811029`): decode and verify rows of at most 7 tokens stay fused at any batch size in chunks of at most 7, prefill stays on the stock kernel, and exact per-tensor layout validation gates the path. Studio qualification: ordinary decode 1.25x / 1.15x / 0.97x vs stock at 1 / 2 / 8 rows, 0 parity mismatches in 36 paired blocks, bit-identical run to run. `MLX_LM_QWEN35_FUSED_MOE=0` disables it. `KVBuildIdentity` changes, so prior KV cold-tier entries miss once. Native MTP stays default-off; the native-MTP lab tooling is compiled only under `DEBUG \|\| MACPROVIDER_LAB_HARNESS`, and signed R024 `proposal_depth` is capped at 6. | merged `280f0e95d` 2026-10-05 | #1832 (#1770) |
 | Privacy-class work settles under production `enforce`: a relay-blind route snapshot, a provider-signed content-free `relay-blind-settlement-v1` receipt, and the `relay_blind_settled` outcome, which is never `verified`. The provider withholds the receipt on any unvalidated usage or frame failure. | merged `d4d73c253` 2026-10-05 | #1853 (#1749) |
