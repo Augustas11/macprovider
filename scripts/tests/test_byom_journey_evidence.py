@@ -1846,12 +1846,23 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                     )
                     self.assertIn("fresh signed JOURNEY-NETWORK-MODEL-ADMISSION", row["gap"]["rationale"])
                     continue
-                if requirement_id in ("SPEC-046-R001", "SPEC-046-R008"):
-                    self.assertIn(
-                        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests",
-                        row["tests"],
-                        requirement_id,
-                    )
+                if requirement_id == "SPEC-046-R001":
+                    expected_tests = {
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRequiresJSONFlag",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferCommandRequiresDryRunJSONFlags",
+                    }
+                    self.assertTrue(expected_tests.issubset(row["tests"]), requirement_id)
+                elif requirement_id == "SPEC-046-R008":
+                    expected_tests = {
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunEmitsExactClosedTopLevelSchema",
+                        "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferSubmissionPackageBindsAdmissionIdentityAndCandidate",
+                        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run",
+                    }
+                    self.assertTrue(expected_tests.issubset(row["tests"]), requirement_id)
                 self.assertEqual("conformant", row["state"], requirement_id)
                 self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
