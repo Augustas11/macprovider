@@ -668,7 +668,14 @@ smoke_release() { # <all|base> <dir>
 if python3 -c 'import json, sys; sys.exit(0 if "autotune-artifacts.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' \
   "$repo_root/phase3-binary/catalog/autotune/release.json"; then
   mkdir "$artifact_guard_dir/smoke-all" "$artifact_guard_dir/smoke-base"
-  smoke_release all "$artifact_guard_dir/smoke-all"
+  # A native-MTP-bound release.json also binds the native admission set, which
+  # the deploy smoke then fetches too (AUTOTUNE_NATIVE_MTP_BOUND=bound).
+  smoke_all=all
+  if python3 -c 'import json, sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' \
+    "$repo_root/phase3-binary/catalog/autotune/release.json"; then
+    smoke_all=native
+  fi
+  smoke_release "$smoke_all" "$artifact_guard_dir/smoke-all"
   smoke_release base "$artifact_guard_dir/smoke-base"
   [ "$(smoke_names all | wc -l)" -eq 10 ] && [ "$(smoke_names base | wc -l)" -eq 8 ] ||
     fail "deploy smoke spec list did not parse"

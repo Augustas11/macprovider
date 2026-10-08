@@ -133,6 +133,26 @@ CATALOG_ARTIFACT_FEED_ASSETS = (CATALOG_ARTIFACT_FEED, f"{CATALOG_ARTIFACT_FEED}
 PUBLIC_CATALOG_ARTIFACT_PATHS = ("/v1/catalog-artifacts", "/v1/catalog-artifacts.sig")
 PUBLIC_FEED_MAX_BYTES = 16 * 1024 * 1024
 ARTIFACT_BOUND_CATALOG_ASSETS = (*CATALOG_ASSETS, *CATALOG_ARTIFACT_FEED_ASSETS)
+# SPEC-023 §12.5 Stage A: a native-MTP-bound release.json also binds the
+# admission sidecar; the sidecar, its projection manifest, and the signed
+# challenge bank are catalog members exactly then (only beside the artifact feed).
+NATIVE_MTP_FEED = "native-mtp-admission.json"
+NATIVE_MTP_FEED_ASSETS = (
+    NATIVE_MTP_FEED,
+    f"{NATIVE_MTP_FEED}.sig",
+    "native-mtp-artifact-manifest.json",
+    "native-mtp-selftest-bank.json",
+    "native-mtp-selftest-bank.json.sig",
+)
+NATIVE_MTP_BOUND_CATALOG_ASSETS = (*ARTIFACT_BOUND_CATALOG_ASSETS, *NATIVE_MTP_FEED_ASSETS)
+NATIVE_MTP_REVOCATIONS_DIR = "/opt/macprovider/native-mtp-revocations/current"
+PUBLIC_NATIVE_MTP_PATHS = (
+    "/v1/native-mtp-admission",
+    "/v1/native-mtp-admission.sig",
+    "/v1/native-mtp-artifact-manifest",
+    "/v1/native-mtp-selftest-bank",
+    "/v1/native-mtp-selftest-bank.sig",
+)
 CONTROL_ASSETS = (
     "pearl-release.json",
     "pearl-release.json.sig",
@@ -393,6 +413,8 @@ class CatalogRelease:
 
     @property
     def assets(self) -> tuple[str, ...]:
+        if NATIVE_MTP_FEED in self.files:
+            return NATIVE_MTP_BOUND_CATALOG_ASSETS
         if CATALOG_ARTIFACT_FEED in self.files:
             return ARTIFACT_BOUND_CATALOG_ASSETS
         return CATALOG_ASSETS
@@ -883,6 +905,8 @@ def catalog_asset_names(names) -> tuple[str, ...] | None:
         return CATALOG_ASSETS
     if set(names) == set(ARTIFACT_BOUND_CATALOG_ASSETS):
         return ARTIFACT_BOUND_CATALOG_ASSETS
+    if set(names) == set(NATIVE_MTP_BOUND_CATALOG_ASSETS):
+        return NATIVE_MTP_BOUND_CATALOG_ASSETS
     return None
 
 
@@ -1486,7 +1510,7 @@ class Updater:
 
     def acquire_release(self, work: Path, source_dir: Path | None, requested_tag: str | None) -> Release:
         if source_dir is not None:
-            for asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS, *STATS_SIDECAR_ASSETS, *ARTIFACT_BOUND_CATALOG_ASSETS):
+            for asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS, *STATS_SIDECAR_ASSETS, *NATIVE_MTP_BOUND_CATALOG_ASSETS):
                 source = source_dir / asset
                 if asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS) and not source.is_file():
                     raise UpdateError(f"test source missing asset: {asset}")
@@ -1523,6 +1547,8 @@ class Updater:
                 catalog_assets = CATALOG_ASSETS
                 if isinstance(catalog_files, dict) and CATALOG_ARTIFACT_FEED in catalog_files:
                     catalog_assets = ARTIFACT_BOUND_CATALOG_ASSETS
+                if isinstance(catalog_files, dict) and NATIVE_MTP_FEED in catalog_files:
+                    catalog_assets = NATIVE_MTP_BOUND_CATALOG_ASSETS
                 for asset in catalog_assets:
                     self.download(f"{base}/{asset}", candidate / asset)
             if metadata_binds_stats_sidecars(metadata):
@@ -1672,6 +1698,9 @@ class Updater:
         artifact_bound = CATALOG_ARTIFACT_FEED in catalog.files
         if artifact_bound:
             expected_feeds.add(CATALOG_ARTIFACT_FEED)
+        native_mtp_bound = NATIVE_MTP_FEED in catalog.files
+        if native_mtp_bound:
+            expected_feeds.add(NATIVE_MTP_FEED)
         if not isinstance(feeds, dict) or set(feeds) != expected_feeds:
             raise UpdateError("catalog release manifest feed set is invalid")
         try:
@@ -1776,6 +1805,32 @@ class Updater:
                 or artifact_signature.get("key_id") != artifact_row.get("signer_key_id")
             ):
                 raise UpdateError(f"catalog signature identity mismatch for {CATALOG_ARTIFACT_FEED}")
+        if native_mtp_bound:
+            # The sidecar binds the projection manifest and challenge bank by
+            # digest; verify-directory below checks the signatures and that
+            # cross-binding.
+            native_row = feeds[NATIVE_MTP_FEED]
+            native_path = release.directory / NATIVE_MTP_FEED
+            if (
+                not isinstance(native_row, dict)
+                or native_row.get("sha256") != sha256_file(native_path)
+                or native_row.get("bytes") != native_path.stat().st_size
+                or native_row.get("signer_key_id") not in keys
+                or native_row.get("version") != catalog.release_id
+            ):
+                raise UpdateError(f"catalog release manifest binding mismatch for {NATIVE_MTP_FEED}")
+            try:
+                native_signature = json.loads(
+                    (release.directory / f"{NATIVE_MTP_FEED}.sig").read_text(encoding="utf-8")
+                )
+            except (ValueError, OSError) as exc:
+                raise UpdateError(f"catalog feed/signature JSON is invalid for {NATIVE_MTP_FEED}") from exc
+            if (
+                not isinstance(native_signature, dict)
+                or native_signature.get("alg") != "ed25519"
+                or native_signature.get("key_id") != native_row.get("signer_key_id")
+            ):
+                raise UpdateError(f"catalog signature identity mismatch for {NATIVE_MTP_FEED}")
         tier2_row = feeds["tier2-catalog.json"]
         tier2_path = release.directory / "tier2-catalog.json"
         if (
@@ -3084,6 +3139,30 @@ class Updater:
                     str(current_catalog / f"{CATALOG_ARTIFACT_FEED}.sig") if artifact_bound else None
                 ),
             }
+            # SPEC-023 §12.5: the six native-MTP keys follow the release binding
+            # the same way (deploy-pearl-vps.sh refuses any other combination).
+            native_mtp_bound = NATIVE_MTP_FEED in release.catalog.files
+            next_artifact_paths.update(
+                {
+                    "native_mtp_admission_path": str(current_catalog / NATIVE_MTP_FEED),
+                    "native_mtp_admission_sig_path": str(current_catalog / f"{NATIVE_MTP_FEED}.sig"),
+                    "native_mtp_artifact_manifest_path": str(current_catalog / "native-mtp-artifact-manifest.json"),
+                    "native_mtp_selftest_bank_path": str(current_catalog / "native-mtp-selftest-bank.json"),
+                    "native_mtp_selftest_bank_sig_path": str(current_catalog / "native-mtp-selftest-bank.json.sig"),
+                    "native_mtp_revocations_dir": NATIVE_MTP_REVOCATIONS_DIR,
+                }
+                if native_mtp_bound
+                else dict.fromkeys(
+                    (
+                        "native_mtp_admission_path",
+                        "native_mtp_admission_sig_path",
+                        "native_mtp_artifact_manifest_path",
+                        "native_mtp_selftest_bank_path",
+                        "native_mtp_selftest_bank_sig_path",
+                        "native_mtp_revocations_dir",
+                    )
+                )
+            )
             for path in config_paths:
                 if path == target:
                     continue
@@ -5797,6 +5876,22 @@ class Updater:
                 return False
         return True
 
+    def public_native_mtp_feed_ready(self, release: Release) -> bool:
+        """The native-MTP admission set as providers fetch it, through Pearl's nginx.
+
+        SPEC-023 §12.5: like the artifact feed, a bound release must serve the
+        exact bytes it commits to and an unbound one must serve none.
+        """
+        bound = NATIVE_MTP_FEED in release.catalog.files
+        for path, asset in zip(PUBLIC_NATIVE_MTP_PATHS, NATIVE_MTP_FEED_ASSETS):
+            status, data = self.get_public_bytes("https://coordinator.malibu.tech" + path)
+            if bound:
+                if status != 200 or hashlib.sha256(data).hexdigest() != release.catalog.files.get(asset):
+                    return False
+            elif status == 200:
+                return False
+        return True
+
     def verify_exact_catalog_admission(self, release: Release) -> None:
         self.wait_for(
             "local exact catalog admission",
@@ -5828,6 +5923,24 @@ class Updater:
                 ) from exc
             raise UpdateError(
                 "public https://coordinator.malibu.tech/v1/catalog-artifacts still serves a feed for a "
+                "release that binds none; check Pearl's nginx vhost and coordinator config"
+            ) from exc
+        try:
+            self.wait_for(
+                "public native-MTP admission set",
+                self.config.service_health_timeout_s,
+                lambda: self.public_native_mtp_feed_ready(release),
+            )
+        except UpdateError as exc:
+            if NATIVE_MTP_FEED in release.catalog.files:
+                raise UpdateError(
+                    "public https://coordinator.malibu.tech/v1/native-mtp-* does not serve this release's bound "
+                    "admission set; add the nginx `location` blocks for /v1/native-mtp-* to Pearl's coordinator "
+                    "vhost (docs/runbooks/native-mtp-enablement.md), run `nginx -t && systemctl reload nginx`, "
+                    "then re-run the update"
+                ) from exc
+            raise UpdateError(
+                "public https://coordinator.malibu.tech/v1/native-mtp-* still serves an admission set for a "
                 "release that binds none; check Pearl's nginx vhost and coordinator config"
             ) from exc
         self.audit(

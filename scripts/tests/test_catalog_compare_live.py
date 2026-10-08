@@ -32,6 +32,10 @@ STATIC_FILES = (
     "rate-card.json", "rate-card.json.sig",
     "continuous-batching-policy.json", "continuous-batching-policy.json.sig",
     "autotune-artifacts.json", "autotune-artifacts.json.sig",
+    # The committed release is native-MTP-bound (SPEC-023 §12.5).
+    "native-mtp-admission.json", "native-mtp-admission.json.sig",
+    "native-mtp-artifact-manifest.json",
+    "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
 )
 
 

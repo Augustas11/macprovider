@@ -635,6 +635,11 @@ real_release() { # the repo's committed release, assembled as the lane does, as 
   if grep -q '"autotune-artifacts.json"' "$A/releases/new/release.json"; then
     cp "$REPO_ROOT/phase3-binary/dist/static/autotune-artifacts.json" "$REPO_ROOT/phase3-binary/dist/static/autotune-artifacts.json.sig" "$A/releases/new/"
   fi
+  if grep -q '"native-mtp-admission.json"' "$A/releases/new/release.json"; then
+    for n in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+      cp "$REPO_ROOT/phase3-binary/dist/static/$n" "$A/releases/new/"
+    done
+  fi
   chmod 0750 "$A/releases/new"
 }
 verified_real() { setup; real_release; forward_until 5; h phase hup-intent; h phase verifying; h phase verified; }

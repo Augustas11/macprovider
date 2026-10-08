@@ -60,6 +60,12 @@ stage_release() {
   cp "$CANONICAL/tier2-catalog.json" "$TMP/release/"
   cp "$STATIC/autotune-artifacts.json" "$TMP/release/"
   cp "$STATIC/autotune-artifacts.json.sig" "$TMP/release/"
+  if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$TMP/release/release.json"; then
+    for name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json \
+      native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+      cp "$STATIC/$name" "$TMP/release/"
+    done
+  fi
 }
 
 expect_rejected() {
