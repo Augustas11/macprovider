@@ -171,10 +171,10 @@ for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "
 (d / "release.json").write_text(json.dumps(m, indent=2))
 PY
 }
-# The committed ledger plus a v3 artifact-bound row for $BOUND_ID, taken from an
-# assembled bound release (what the tag that cut it would carry).
+# Record the actual temporary fixture feeds in its temporary ledger. Stripping
+# artifacts no longer reconstructs a real predecessor after CB content changes.
 bound_ledger() {
-  python3 - "$1" "$2" "$BOUND_ID" <<'PY'
+  python3 - "$1" "$2" "${3:-$BOUND_ID}" <<'PY'
 import json, pathlib, sys
 d, out, rid = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 ledger = json.loads(out.read_bytes())
@@ -183,8 +183,9 @@ m = json.loads((d / "release.json").read_bytes())
 ledger["releases"][rid] = {
     "generated_at": m["generated_at"], "policy_version": m["policy_version"],
     "feeds": {name: {k: e[k] for k in ("bytes", "sha256", "signer_key_id", "version")} for name, e in m["feeds"].items()},
-    "artifact_bindings": [], "intake_decision_sha256": None,
 }
+if "autotune-artifacts.json" in m["feeds"]:
+    ledger["releases"][rid].update(artifact_bindings=[], intake_decision_sha256=None)
 out.write_text(json.dumps(ledger, indent=2))
 PY
 }
@@ -247,6 +248,9 @@ reset() {
   mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts" "$TMP/pinned" "$TMP/etc/macprovider"
   assemble "$DEPLOY_TMP"
   cp "$REPO_ROOT/phase3-binary/catalog/autotune/release-ledger.json" "$DEPLOY_TMP/release-ledger.json"
+  rm -rf "$TMP/unbound-base"
+  BOUND=0 assemble "$TMP/unbound-base"
+  bound_ledger "$TMP/unbound-base" "$DEPLOY_TMP/release-ledger.json" "$COMMITTED_ID"
   if [ "$BOUND" = 1 ]; then
     rm -rf "$TMP/bound-base"
     assemble "$TMP/bound-base"
