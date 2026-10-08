@@ -3,14 +3,14 @@
   "entry": {
     "artifact_manifest_sha256": "2d06c6978f745b31cdfd88576d2bca4992e988ecef891961ed6933bf2e0e85e7",
     "challenge_bank_sha256": "58aab86835927ff260b0f84e264604dd21dbbe03e74a19b729e96cab7fd16769",
-    "live_executable_cdhash": "5d7e0c39fea84ff5113cd7c6313f0035d7e85bb0",
-    "provider_revision": "9c8c87dbff8ee00ba2c72f7923e1dce268c42e78",
-    "reproducible_build_sha256": "edd099be5f0b0ea6bb6f05e05aa39bff649897c2a05b0d825a234651d8d8c5eb",
-    "source_commit": "9c8c87dbff8ee00ba2c72f7923e1dce268c42e78"
+    "live_executable_cdhash": "94b66febaee9ac7265dc0fe1a6ad87559ff602b8",
+    "provider_revision": "2a053670c260b11ddba17b06ad383d77efb31553",
+    "reproducible_build_sha256": "0d498525b296ce291fd1b29563430cf1b3f89c1373976b091290911104828644",
+    "source_commit": "2a053670c260b11ddba17b06ad383d77efb31553"
   },
-  "expires_at": "2027-01-05T03:52:38Z",
-  "issued_at": "2026-10-08T03:52:38Z",
-  "release_id": "published-2026-10-08-native-mtp-v223-v1",
+  "expires_at": "2027-01-05T08:49:30Z",
+  "issued_at": "2026-10-08T08:49:30Z",
+  "release_id": "published-2026-10-08-native-mtp-v224-v1",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"
