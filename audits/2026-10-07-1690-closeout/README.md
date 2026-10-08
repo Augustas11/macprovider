@@ -1,5 +1,75 @@
 # #1690 acceptance closeout — 2026-10-07
 
+## Post-contract BYOM signing — 2026-10-08
+
+Protected [run 37715135336](https://github.com/Augustas11/macprovider/actions/runs/37715135336)
+completed successfully after exact-current-main CI passed and antfleet-ops
+approved its evidence-only gate. It signs the ten-step reviewed capture from
+`9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`, with reviewed controls at
+`855149bd06da45e66ba5c427fc7fba0517cc2e3c`. Export-manifest hashes and the
+committed capture match. Independent integration validation passed the pinned
+public-key signature, payload/artifact bindings, expiry and current selectors
+for exactly SPEC-046-R001/R008. The envelope SHA-256 is
+`f25f38443dba9f3688f6d45860f389d82c94a30444dc38f557017bdb42169ef8`;
+its evidence expires 2026-11-06. Older signed envelopes remain unchanged.
+
+The protected promotion output changes only those two requirement records.
+Reviewed integration is pending; this does not prove released-CLI updater,
+paid-buyer, anonymous-discovery, R009 serving or rollout/rollback acceptance.
+
+## Public v1.8.223 package proof reconciliation — 2026-10-08
+
+The final public-asset verifier in protected
+[release run 37642806955, signing job 112867369577](https://github.com/Augustas11/macprovider/actions/runs/37642806955/job/112867369577)
+passed after publication from reviewed source
+`9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`. At 15:31:17 UTC it verified the
+provider package's CLI against the public standalone tarball; at 15:31:33 UTC
+it verified the CLI embedded in the final Malibu.app DMG against that same
+tarball. Both binary SHA-256 values were
+`edd099be5f0b0ea6bb6f05e05aa39bff649897c2a05b0d825a234651d8d8c5eb`.
+The public tarball checksum was
+`736c5a8a5969c77d8d6b86b3f009bec086f7945a7700b0132c1b2113eb380d2a`;
+the DMG checksum was
+`d5e0ac4919b73f7f28704d58604f4b44ad4853a906cdb054c9abf7eac6f2d29d`.
+
+The same job recorded Apple notarization acceptance, validated stapled tickets,
+and passed final app code-signature verification. Its DMG `spctl -t open`
+assessment rejected the container, then the verifier's documented fallback
+`spctl -t exec` accepted the mounted, notarized Malibu.app. This is app
+Gatekeeper acceptance, not an independent successful DMG-container assessment.
+The earlier legacy app-only verifier explicitly skipped standalone CLI byte
+identity; the later public-asset verifier supplied the identity proof above.
+Arm64 runtime execution was deferred by this Intel signing job and is not
+claimed by its structural package verification.
+
+These logs close package byte-identity/signing/notarization reconciliation,
+not previous-stable updater, released-CLI paid-buyer, anonymous-discovery,
+or mixed-version rollout/rollback acceptance. Anonymous discovery retry
+[37647854323, attempt 3](https://github.com/Augustas11/macprovider/actions/runs/37647854323/attempts/3)
+still failed with HTTP 403 after the released CLI passed code-signature
+verification. The protected publisher was not rerun for that child-only retry.
+
+## Current rollback compatibility preflight — 2026-10-08
+
+A read-only invocation of the deployed coordinator's
+`pool-rollback-preflight --target-tier p1816`, using its live configuration,
+overlay and service environment, exited 0. It inspected 127 pool route
+snapshots and 63 accepted manifest snapshots (all v2). It reported zero open
+pool verdicts, zero in-window pool attempts without verdict, and
+`rollback_blocked=false`. The accepted runtime classes were
+`llamacpp_loopback` and `ollama_loopback`; the accepted extensions were
+`pool_attested_members/v1` and `pool_model_entries/v1`, with no unreplayable
+entries. The immutable public v1.8.221 source
+`2fa09b09a7bb96c521197222f7de3eaebb998184` contains the #1816 merge.
+
+This is a point-in-time compatibility result for the named target tier, not a
+rollback execution or readiness claim for an arbitrary older binary. Pools
+were not paused, ingress was not blocked, holds were not drained and no binary,
+configuration or database was changed. Feed parsing, exact rollback artifact
+verification, all-pool drain/hold checks, controlled transition and recovery
+proof remain required. The historical v1-only preflight refusal remains valid
+for that incompatible target; it is not superseded as a passing v1 rollback.
+
 This is an in-progress evidence record, not an issue-completion or production
 Creator-launch claim. #1879 merged at `bc117360106d91055221e01f0f8b0de4cd2ac550`;
 signed-evidence integration and release acceptance continue under #1690. Existing coordinator v1.8.221
