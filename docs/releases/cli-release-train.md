@@ -41,12 +41,28 @@ binary the Mac runs.
   in-scope change.
 
 Pearl coordinator/gateway release numbering is independent from the provider
-CLI train. Pearl currently reports runtime `v1.8.211`; failed or superseded
-runtime attempts remain consumed tags. Public provider release `v1.8.207` is
-the current fleet recommendation and none of those tags may be reused by either
-train.
+CLI train. Pearl currently reports runtime `v1.8.223` and recommends provider
+`1.8.223`; failed or superseded runtime attempts remain consumed tags. Public
+provider release `v1.8.223` is published, and none of those tags may be reused
+by either train. The historical promotion table below is not today's version
+selection.
 
-## Current promoted stable
+## Current published release and fleet target
+
+Verified 2026-10-08 against public release metadata and live health:
+
+| Field | Value |
+|---|---|
+| GitHub provider release | [v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223) |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.223@9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` |
+| Pearl runtime / recommended provider | `v1.8.223` / `1.8.223` |
+| Compatibility target | `1.8.223`; applied target recorded in the coordinator release train on 2026-10-08 |
+| Mirror discovery caveat | `download.malibu.tech/releases/latest.json` still reports `v1.8.207`; do not claim all installer/mirror channels are synchronized |
+
+CLI223 predates #1871 and #1892. Neither this version alignment nor its public
+signature proves automatic privacy enrollment or network activation.
+
+## Historical fully documented 207 promotion
 
 | Field | Value |
 |---|---|
