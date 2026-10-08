@@ -98,6 +98,23 @@ No candidate identity is reserved by this entry. Published CLI 1.8.223 does
 not contain these newly merged enrollment changes; updating to 223 alone
 does not activate network-wide privacy.
 
+Privacy post-#1895 source acceptance on 2026-10-08: exact combined head
+`2329c3ae036477b1c747dcf0cf6c4ab6fc480027` built on the designated Studio
+(release 183.68s; debug 18.19s). The release executable SHA-256 is
+`7811ceae336ace4ae9160903ce9852bbe3e7508f3b6addbe47d5e533a1bbc8af`.
+Both Qwen artifact/catalog model names completed native stream and nonstream
+requests from the verified worktree executable. Six isolated encrypted-stack
+E2Es passed with no skips in 11.606s: private stream/nonstream, redaction,
+automatic enrollment with signed-directory discovery, wrong-directory-key
+rejection, and enrollment key-change quarantine. The encrypted cases use the
+debug fixture; they are not signed native-runtime acceptance. Live provider
+bytes were unchanged, and retained dependency revisions did not change.
+An additional local Swift unit-test attempt could not compile because the
+Studio Command Line Tools lack XCTest; the executed #1895 Swift CI passed.
+These source checks support proceeding to a consolidated promotion-ready
+candidate; they do not cut a candidate, authorize production enablement or
+replace final signed-identity and changed buyer-path confirmation.
+
 Privacy activation follow-up [#1892](https://github.com/Augustas11/macprovider/pull/1892)
 merged on 2026-10-08 as `394bf61aea689075ac5506c506484cc75168649a`,
 with antfleet-ops approval and all checks green. The accepted campaign includes
