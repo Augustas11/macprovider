@@ -1,5 +1,28 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## CLI 1.8.223 compatibility admission — 2026-10-08 00:21 UTC
+
+Pearl now accepts the signed release compatibility identity
+`Augustas11/macprovider:v1.8.223@9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`.
+The exact identity was read from the verified public release manifest. The
+existing target and seven accepted identities were preserved; the accepted
+list now contains eight entries. This admits 223 without promoting the
+compatibility target from 207.
+
+The candidate configuration passed validation with the coordinator service
+environment before the one-entry edit. A coordinator-only restart loaded the
+updated configuration at 00:21:07 UTC. Its applied configuration hash matched
+the live file. Restart invocation through the first healthy local response
+took 28.134 seconds; precise external downtime was not sampled. Subsequent
+public coordinator and gateway health checks passed on 1.8.223, with five
+providers connected, three ready, and trust authority not degraded.
+
+This change does not resolve Studio's auto-update eligibility: its signed
+1.8.217 logs show an operator-managed update skip because its credential
+backend is `protected_file`. Native MTP remains off pending the supported
+provider upgrade and release-bound activation policy/evidence.
+
+
 **This file is the single source of truth for Pearl coordinator releases** (the
 coordinator and gateway binaries plus the Pearl-side deploy assets). The
 provider CLI has its own train: `docs/releases/cli-release-train.md`. Work
