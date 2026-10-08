@@ -1088,14 +1088,13 @@ struct AutoUpdater: Sendable {
     /// provider whose updates are operator-managed through the signed installer
     /// acceptance bundle rather than the consumer autoupdate path (SPEC-020
     /// R-4.13). Grounded in the same authorities the mutating-update gate uses
-    /// (`MacProviderCLI.validateHeadlessUpdateMode`): `protected_file` credential
-    /// custody, an install manifest declaring the `headless_fleet` profile or
-    /// `system` launchd domain, or a managed system LaunchDaemon present on disk,
-    /// loaded in launchd, or in an indeterminate launchd state. Read-only and
-    /// non-mutating, but NOT free: reaching the system-artifact check runs
-    /// `launchctl print` (via `validateNoHeadlessSystemArtifactsPresent`), so keep
-    /// it off hot paths. The cheap `protected_file` and manifest signals
-    /// short-circuit before any `launchctl` call.
+    /// (`MacProviderCLI.validateHeadlessUpdateMode`): an install manifest
+    /// declaring the `headless_fleet` profile or `system` launchd domain,
+    /// `protected_file` custody without a positive `consumer_user` / `gui/<uid>`
+    /// manifest, or a managed system LaunchDaemon present on disk, loaded in
+    /// launchd, or in an indeterminate launchd state. Read-only and non-mutating,
+    /// but NOT free: reaching the system-artifact check runs `launchctl print`
+    /// (via `validateNoHeadlessSystemArtifactsPresent`), so keep it off hot paths.
     static func defaultHeadlessOperatorManagedTopology(
         config: AppConfig,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
@@ -1113,10 +1112,6 @@ struct AutoUpdater: Sendable {
             return process.terminationStatus
         }
     ) -> Bool {
-        // Canonical headless custody marker (same as validateHeadlessUpdateMode).
-        if config.credentialStore == .protectedFile {
-            return true
-        }
         // Install manifest declaring the headless profile / system domain. A
         // manifest that fails to load (nil) is invalid/indeterminate — fail closed
         // to headless so an unprovable topology is never driven by the consumer
@@ -1126,7 +1121,15 @@ struct AutoUpdater: Sendable {
             if manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system" {
                 return true
             }
+            if config.credentialStore == .protectedFile {
+                guard manifestDeclaresConsumerGUIForCurrentUser(manifest) else {
+                    return true
+                }
+            }
         case .some(.missing):
+            if config.credentialStore == .protectedFile {
+                return true
+            }
             break
         case .none:
             return true
@@ -1145,6 +1148,14 @@ struct AutoUpdater: Sendable {
         } catch {
             return true
         }
+    }
+
+    static func manifestDeclaresConsumerGUIForCurrentUser(
+        _ manifest: UninstallCommand.InstallManifest,
+        uid: uid_t = getuid()
+    ) -> Bool {
+        manifest.installProfile == "consumer_user"
+            && manifest.launchdDomain == "gui/\(uid)"
     }
 
     static func restartLaunchdIfInstalled() throws {

@@ -2330,11 +2330,12 @@ struct ServeCommand: AsyncParsableCommand {
         // helper before configuration/model work, but only while two durable
         // authorities agree that this exact executable is the intended
         // self-update child. Ordinary launches never touch reload jobs.
+        let consumerUpdaterLifecycleAllowed = !AutoUpdater.defaultHeadlessOperatorManagedTopology(config: resolved)
         let startupReloadFenceAuthorized = autotuneCandidate
             ? false
-            : resolved.credentialStore == .protectedFile
-                ? false
-                : try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
+            : consumerUpdaterLifecycleAllowed
+                ? try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
+                : false
 
         // Reject invalid invocation-only model catalogs before startup writes
         // lifecycle state or touches credential custody. The complete startup
@@ -2412,9 +2413,9 @@ struct ServeCommand: AsyncParsableCommand {
         // A compatibility-set updater can durably hand its maintenance lease to
         // one exact launchd child. Carry that operation ID through the full
         // startup transition chain; ordinary starts get a fresh serve ID.
-        let startupHandoffOperationID = resolved.credentialStore == .protectedFile
-            ? nil
-            : Self.startupHandoffOperationID(in: lifecycleLeaseStore)
+        let startupHandoffOperationID = consumerUpdaterLifecycleAllowed
+            ? Self.startupHandoffOperationID(in: lifecycleLeaseStore)
+            : nil
         let lifecycleOperationID = startupHandoffOperationID
             ?? "serve:\(UUID().uuidString.lowercased())"
         let startupReason: String
@@ -2448,7 +2449,7 @@ struct ServeCommand: AsyncParsableCommand {
             guard case .operationFenced = fence,
                   !autotuneCandidate,
                   candidateIsolationRoot == nil,
-                  resolved.credentialStore != .protectedFile
+                  consumerUpdaterLifecycleAllowed
             else { throw fence }
             let recovery = WedgedUpdateRecovery(
                 markerStore: AutoUpdateMarkerStore(),
@@ -2564,7 +2565,7 @@ struct ServeCommand: AsyncParsableCommand {
         )
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
-        let allowStartupHandoff = resolved.credentialStore != .protectedFile
+        let allowStartupHandoff = consumerUpdaterLifecycleAllowed
         var acquiredStartupLease: ProviderLifecycleLeaseRecord?
         do {
             startupPreflight = try await Self.runServeStartupPreflights(
@@ -4387,9 +4388,6 @@ struct UpdateCommand: AsyncParsableCommand {
     ) throws {
         if checkOnly, !hasAcceptanceOptions { return }
         let rejectMessage = "headless_fleet does not support mutating malibu-cli update yet; use the signed headless installer acceptance bundle"
-        if config?.credentialStore == .protectedFile {
-            throw ValidationError(rejectMessage)
-        }
         let loadManifest = manifestLoader ?? {
             try UninstallCommand.loadManifest(home: home)
         }
@@ -4399,8 +4397,15 @@ struct UpdateCommand: AsyncParsableCommand {
                 if manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system" {
                     throw ValidationError(rejectMessage)
                 }
+                if config?.credentialStore == .protectedFile {
+                    guard AutoUpdater.manifestDeclaresConsumerGUIForCurrentUser(manifest) else {
+                        throw ValidationError(rejectMessage)
+                    }
+                }
             case .missing:
-                break
+                if config?.credentialStore == .protectedFile {
+                    throw ValidationError(rejectMessage)
+                }
             }
             let validator = validateSystemArtifactsAbsent ?? { systemPlists, run in
                 try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(

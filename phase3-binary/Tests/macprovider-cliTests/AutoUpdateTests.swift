@@ -3434,6 +3434,8 @@ final class AutoUpdateTests: XCTestCase {
         let noManifest: () -> UninstallCommand.ManifestLoadResult? = { UninstallCommand.ManifestLoadResult.missing }
         // launchctl "print" absent status (isLaunchdAbsentStatus): no system daemon.
         let launchdAbsent: ([String]) throws -> Int32 = { _ in 113 }
+        let guiDomain = "gui/\(getuid())"
+        let mismatchedGUIDomain = "gui/\(getuid() + 1)"
         func manifest(profile: String?, domain: String?) -> UninstallCommand.InstallManifest {
             UninstallCommand.InstallManifest(
                 installPrefix: "/opt/macprovider",
@@ -3448,7 +3450,8 @@ final class AutoUpdateTests: XCTestCase {
             )
         }
 
-        // protected_file custody is the canonical headless_fleet marker.
+        // protected_file custody without a positive consumer GUI manifest still
+        // fails closed to the headless handoff.
         var headless = config
         headless.credentialStore = .protectedFile
         XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
@@ -3456,6 +3459,33 @@ final class AutoUpdateTests: XCTestCase {
             fileExists: { _ in false },
             loadInstallManifest: noManifest,
             runLaunchctl: launchdAbsent
+        ))
+        // protected_file custody is allowed through the consumer path only when
+        // a valid consumer_user / gui/<uid> manifest is present and the system
+        // artifacts/services are proven absent.
+        XCTAssertFalse(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: headless,
+            fileExists: { _ in false },
+            loadInstallManifest: { .loaded(manifest(profile: "consumer_user", domain: guiDomain)) },
+            runLaunchctl: launchdAbsent
+        ))
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: headless,
+            fileExists: { _ in false },
+            loadInstallManifest: { .loaded(manifest(profile: "consumer_user", domain: "gui")) },
+            runLaunchctl: launchdAbsent
+        ))
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: headless,
+            fileExists: { _ in false },
+            loadInstallManifest: { .loaded(manifest(profile: "consumer_user", domain: mismatchedGUIDomain)) },
+            runLaunchctl: launchdAbsent
+        ))
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: headless,
+            fileExists: { _ in false },
+            loadInstallManifest: { .loaded(manifest(profile: "consumer_user", domain: guiDomain)) },
+            runLaunchctl: { _ in 0 }
         ))
         // consumer_user keychain custody, no manifest, no plist, no loaded daemon.
         XCTAssertFalse(AutoUpdater.defaultHeadlessOperatorManagedTopology(

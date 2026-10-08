@@ -1097,7 +1097,7 @@ actor CoordinatorClient {
     }
 
     func start() async {
-        if appConfig.credentialStore != .protectedFile,
+        if !AutoUpdater.defaultHeadlessOperatorManagedTopology(config: appConfig),
            appConfig.autoUpdateEnabled != false,
            appConfig.autoupdateEnabled != false {
             await runStartupAutoupdateRecovery()
