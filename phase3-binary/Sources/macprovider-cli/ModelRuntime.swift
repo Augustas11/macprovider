@@ -5155,7 +5155,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func isConfiguredCatalogModel(_ targetModelID: String) -> Bool {
-        targetModelID == modelID || targetModelID == catalogModelIDAlias
+        targetModelID == modelID || modelIDAliasList(catalogModelIDAlias).contains(targetModelID)
     }
 
     private func targetAuthority(for targetModelID: String) -> ModelRuntimeTargetAuthority? {

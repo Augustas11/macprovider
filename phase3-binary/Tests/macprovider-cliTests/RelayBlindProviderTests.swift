@@ -6,6 +6,35 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class RelayBlindProviderTests: XCTestCase {
+    func testCatalogAndArtifactNamesDecryptWithoutRewritingTheBoundModel() throws {
+        let root = temporaryStateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let models = RelayBlindCatalogModels.names("mlx-community/Qwen3.6-35B-A3B-4bit")
+        XCTAssertEqual(models.count, 2)
+        let keys = try RelayBlindKeyManager(directory: root, models: models, modelGroups: [models.sorted()])
+        let runtime = RelayBlindProviderRuntime(
+            keyManager: keys,
+            journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
+            assignedSession: "alias-session"
+        )
+        for (index, model) in models.enumerated() {
+            let message = try makeInferenceMessage(
+                keys: keys, model: model, session: "alias-session",
+                requestID: "alias-\(index)", inputCap: 5, outputCap: 4
+            )
+            let opened = try open(runtime, message: message)
+            XCTAssertEqual(opened.request.model, model)
+            XCTAssertEqual(opened.envelope.model, model)
+            let record = try XCTUnwrap(keys.currentRecords().first { $0.kid == opened.envelope.kid })
+            XCTAssertEqual(record.models, models.sorted())
+        }
+        let mismatch = try makeInferenceMessage(
+            keys: keys, model: models[0], session: "alias-session", requestID: "alias-mismatch",
+            inputCap: 5, outputCap: 4, extra: ["model": models[1]]
+        )
+        XCTAssertThrowsError(try open(runtime, message: mismatch))
+    }
+
     func testSharedGoldenVectorMatchesGoAndDecrypts() throws {
         let root = try goldenFixture()
         let keyRecord = try XCTUnwrap(root["key_record"] as? [String: Any])
@@ -666,7 +695,7 @@ final class RelayBlindProviderTests: XCTestCase {
         outputCap: UInt64,
         extra: [String: Any] = [:]
     ) throws -> [String: Any] {
-        let record = try keys.currentRecord()
+        let record = try XCTUnwrap(keys.currentRecords().first { $0.models.contains(model) })
         let buyer = Curve25519.KeyAgreement.PrivateKey()
         let providerBinding = RelayBlindBase64URL.encode(Data(repeating: 0x41, count: 32))
         let buyerBinding = RelayBlindBase64URL.encode(Data(SHA256.hash(data: Data(requestID.utf8))))

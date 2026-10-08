@@ -82,6 +82,20 @@ No candidate identity is reserved by this entry. Published CLI 1.8.223 does
 not contain these newly merged enrollment changes; updating to 223 alone
 does not activate network-wide privacy.
 
+Privacy activation follow-up [#1892](https://github.com/Augustas11/macprovider/pull/1892)
+remains one draft campaign: exact signed-catalog/artifact model scopes, grouped
+key-record budget, compatible reservation parsing, bounded rejection reasons,
+and reliable isolated-stack migration/bootstrap and executable provenance.
+Studio worktree release/debug builds and native stream/nonstream model-name
+checks passed; encrypted automatic-enrollment transport fixtures passed.
+Linux privacy/backend/updater and repeated real-service boundary checks passed.
+These separate results are not signed native-runtime or fleet activation.
+Reuse the retained signed baseline and unchanged decode qualification; resolve
+campaign findings before one reviewed train cut, then confirm the final signed
+identity and changed buyer path. No candidate version is reserved here, and
+#1749 remains open until private traffic is actually serving on eligible fleet
+providers, including new joins.
+
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
 was produced by acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296)

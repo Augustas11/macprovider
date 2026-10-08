@@ -1,6 +1,6 @@
 # SPEC-041 - Relay-Blind Request Encryption
 
-**Version:** 0.5.0
+**Version:** 0.5.1
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/928
@@ -10,7 +10,7 @@ Audit history: v0.2.0 reconciles the default-off pilot contract before full impl
 {
   "spec_id": "SPEC-041",
   "title": "Relay-Blind Request Encryption",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "path": "specs/SPEC-041-relay-blind-request-encryption.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -144,6 +144,8 @@ Public and coordinator buyer-port `POST /v1/relay-blind/route-reservations` pres
 The successful closed response contains exactly: `version: relay-blind-reservation-v1`, `provider_binding`, `buyer_binding`, `key_record_digest`, `key_record`, `kid`, `endpoint_family`, `model`, `provider_model`, `stream`, `max_encrypted_request_bytes`, `max_output_tokens`, `input_token_upper_bound`, `reservation_token_cap`, `expires_at_unix`, `cache_policy: no-store`, and `failover_policy: disabled`. It contains no stable provider ID or assigned-session ID. Public success and error metadata MUST NOT expose `X-Provider-Id` or any equivalent stable peer identifier. TTL is at most 30 seconds and no later than signed key expiry.
 
 Reservation binds immutably to the authenticated account/session, live provider ID and assigned session, signed record digest and `kid`, canonical and provider models, endpoint, stream, all caps, byte bound, and explicit empty pool selection. Key discovery does not reserve capacity or quota. Existing provider capacity is acquired only at dispatch.
+
+For a configured model that uniquely matches a pinned row in the verified signed catalog, the provider MAY advertise both that row's exact catalog key and exact artifact `model_id` as signed model scopes. Local serving MUST accept the advertised names only while serving that same configured model. Unknown, ambiguous, unpinned, or merely billing-equivalent names MUST NOT acquire additional scope. The buyer's chosen name MUST itself be signed in the selected key record and MUST remain identical in the reservation, envelope, encrypted request, and clear usage model; no model rewriting or weakened binding is permitted.
 
 Before quota or dispatch, the gateway calls internal `POST /v1/relay-blind/consume` with the exact envelope and same trusted account/session context. The closed success response contains exactly `version: relay-blind-consume-v1`, `provider_binding`, `buyer_binding`, `envelope_digest`, `execution_authorization`, `consumed_at_unix`, and `expires_at_unix`. Consumption cannot dispatch. The authorization is opaque outside the coordinator and stored only as a hash in durable state. Buyer-supplied execution authorization is stripped; trusted authorization is carried only on the internal dispatch hop and stripped before any provider runtime/upstream request header set.
 

@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.2.0
+**Version:** 0.2.1
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -461,6 +461,8 @@ The provider SHOULD zero decrypted request bytes and its copy of the shared-secr
 The header marker (§4.2), the reservation version (§4.6), the reservation row's privacy flag, the opaque dispatch context key, and the `inference_request` field (§4.7) MUST agree for every request. The coordinator MUST compare the header with the stored reservation privacy flag at consume and at chat, in both directions. The gateway and coordinator MUST reject the header on a non-envelope (plaintext) body before quota or dispatch. A privacy-mode provider MUST reject relay-blind dispatch that lacks the marker, and a provider not in privacy mode MUST reject relay-blind dispatch that carries the marker; both rejections occur before decryption with SPEC-041-R005 bound rejection evidence carrying `error_code: privacy_class_downgrade_rejected`. Every such mismatch MUST surface as `privacy_class_downgrade_rejected`.
 
 ### SPEC-049-R013 - Routing gate at every phase
+
+Privacy-class model scopes follow SPEC-041-R004: both exact names of one uniquely matched pinned signed-catalog row may be advertised. The buyer-selected signed name remains unchanged through every cryptographic and routing binding. No general billing-equivalence expansion is allowed.
 
 At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext.
 
