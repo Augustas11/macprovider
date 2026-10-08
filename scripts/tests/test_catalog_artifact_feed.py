@@ -2312,6 +2312,14 @@ class HermeticRelease:
         )
         generated_at = row["generated_at"]
         (self.catalog / "autotune-artifacts.json").unlink()
+        # The historical pre-activation release had no CB admission entries.
+        # Rewind both the feed and its authoring source before regenerating it.
+        for name in ("continuous-batching-policy.json", "continuous-batching-policy-source.json"):
+            path = self.catalog / name
+            if path.exists():
+                obj = json.loads(path.read_text())
+                obj["entries"] = []
+                path.write_bytes(catalog_release.canonical_bytes(obj))
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
