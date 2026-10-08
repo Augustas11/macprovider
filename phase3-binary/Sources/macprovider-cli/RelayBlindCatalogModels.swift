@@ -2,6 +2,11 @@ import Foundation
 
 /// Exact names from a single verified catalog row, never billing normalization.
 enum RelayBlindCatalogModels {
+    static func groups(_ models: [String]) -> [[String]] {
+        Array(Set(models.map { names($0).sorted() }))
+            .sorted { $0.lexicographicallyPrecedes($1) }
+    }
+
     private static let signedNames: [String: [String]] = {
         guard let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
             Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)

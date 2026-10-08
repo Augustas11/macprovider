@@ -866,7 +866,8 @@ actor CoordinatorClient {
                 return nil
             }
             let configuredModelScope = config.supportedModels ?? [config.modelCatalogModelID ?? config.model].compactMap { $0 }
-            let modelScope = Array(Set(configuredModelScope.flatMap { RelayBlindCatalogModels.names($0) })).sorted()
+            let modelGroups = RelayBlindCatalogModels.groups(configuredModelScope)
+            let modelScope = modelGroups.flatMap { $0 }.sorted()
             let runtime: RelayBlindProviderRuntime
             do {
                 let root = privacyLabIdentityScope?.stateRoot
@@ -874,6 +875,7 @@ actor CoordinatorClient {
                 let keys = try RelayBlindKeyManager(
                     directory: root,
                     models: modelScope,
+                    modelGroups: modelGroups,
                     maxEncryptedRequestBytes: UInt64(min(config.maxRequestBodyBytes, 1_048_576)),
                     persistAgreementKey: !config.privacyClassBeta
                 )

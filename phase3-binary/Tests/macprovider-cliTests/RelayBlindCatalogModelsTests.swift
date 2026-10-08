@@ -42,16 +42,24 @@ final class RelayBlindCatalogModelsTests: XCTestCase {
         XCTAssertEqual(RelayBlindCatalogModels.names(artifactID, catalog: signed), [artifactID])
     }
 
-    func testBothNamesAreActuallySignedAsSeparateKeyScopes() throws {
+    func testBothNamesAreSignedWithoutDoublingTheRecordBudget() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
-        let keys = try RelayBlindKeyManager(directory: root, models: RelayBlindCatalogModels.names(artifactID))
+        let names = RelayBlindCatalogModels.names(artifactID)
+        let groups = RelayBlindCatalogModels.groups([artifactID, catalogKey])
+        XCTAssertEqual(groups, [names.sorted()])
+        let keys = try RelayBlindKeyManager(directory: root, models: names, modelGroups: groups)
         let records = try keys.currentRecords()
         XCTAssertEqual(Set(records.flatMap(\.models)), Set([catalogKey, artifactID]))
-        XCTAssertEqual(records.count, 2)
-        XCTAssertTrue(records.allSatisfy { $0.models.count == 1 })
-        XCTAssertEqual(Set(records.map(\.kid)).count, 2)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].models, names.sorted())
+        let oldKid = records[0].kid
+        let rotated = try keys.rotate()
+        XCTAssertNotEqual(rotated.kid, oldKid)
+        XCTAssertEqual(rotated.models, names.sorted())
+        try keys.revoke(kid: rotated.kid)
+        XCTAssertEqual(try keys.currentRecords(), [])
     }
 
     func testCounterpartCollisionCannotCrossCatalogRows() throws {
@@ -60,5 +68,14 @@ final class RelayBlindCatalogModelsTests: XCTestCase {
         conflicting.modelID = catalogKey
         signed.rows["other/row"] = conflicting
         XCTAssertEqual(RelayBlindCatalogModels.names(artifactID, catalog: signed), [artifactID])
+    }
+
+    func testModelGroupsCannotAddOmitOrDuplicateSignedScope() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for groups in [[["model-a"]], [["model-a", "model-b", "model-c"]], [["model-a"], ["model-a", "model-b"]]] {
+            XCTAssertThrowsError(try RelayBlindKeyManager(directory: root, models: ["model-a", "model-b"], modelGroups: groups))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 }

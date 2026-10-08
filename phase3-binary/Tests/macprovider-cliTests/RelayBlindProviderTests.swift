@@ -11,7 +11,7 @@ final class RelayBlindProviderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let models = RelayBlindCatalogModels.names("mlx-community/Qwen3.6-35B-A3B-4bit")
         XCTAssertEqual(models.count, 2)
-        let keys = try RelayBlindKeyManager(directory: root, models: models)
+        let keys = try RelayBlindKeyManager(directory: root, models: models, modelGroups: [models.sorted()])
         let runtime = RelayBlindProviderRuntime(
             keyManager: keys,
             journal: try RelayBlindExecutionJournal(directory: root.appendingPathComponent("journal")),
@@ -26,7 +26,7 @@ final class RelayBlindProviderTests: XCTestCase {
             XCTAssertEqual(opened.request.model, model)
             XCTAssertEqual(opened.envelope.model, model)
             let record = try XCTUnwrap(keys.currentRecords().first { $0.kid == opened.envelope.kid })
-            XCTAssertEqual(record.models, [model])
+            XCTAssertEqual(record.models, models.sorted())
         }
         let mismatch = try makeInferenceMessage(
             keys: keys, model: models[0], session: "alias-session", requestID: "alias-mismatch",

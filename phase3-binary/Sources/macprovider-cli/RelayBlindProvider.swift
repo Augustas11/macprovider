@@ -535,7 +535,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
     private var notBeforeUnix: Int64
     private var expiresAtUnix: Int64
     private var revokedKids: Set<String>
-    private let models: [String]
+    private let modelGroups: [[String]]
     private let maxEncryptedRequestBytes: UInt64
     private let lifetimeSeconds: Int64
     private let persistAgreementKey: Bool
@@ -543,6 +543,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
     init(
         directory: URL,
         models: [String],
+        modelGroups: [[String]]? = nil,
         maxEncryptedRequestBytes: UInt64 = 1_048_576,
         lifetimeSeconds: Int64 = 3_600,
         persistAgreementKey: Bool = true,
@@ -555,6 +556,14 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         if !persistAgreementKey && lifetimeSeconds > PrivacyClassConstants.maxKeyLifetimeSeconds {
             throw RelayBlindProviderError.invalidConfiguration("privacy agreement key lifetime exceeds 3600s")
         }
+        let canonicalModels = try RelayBlindValidation.canonicalModels(models)
+        let groups = try (modelGroups ?? canonicalModels.map { [$0] })
+            .map { try RelayBlindValidation.canonicalModels($0) }
+            .sorted { $0.lexicographicallyPrecedes($1) }
+        let groupedModels = groups.flatMap { $0 }
+        guard groupedModels.sorted() == canonicalModels else {
+            throw RelayBlindProviderError.invalidConfiguration("relay-blind model groups must partition the configured scope")
+        }
         let secureDirectory = try RelayBlindSecureDirectory.openOrCreate(directory)
         try RelayBlindSecureFiles.removeOrphanTemps(
             secureDirectory,
@@ -562,7 +571,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         )
         self.directory = directory
         self.secureDirectory = secureDirectory
-        self.models = try RelayBlindValidation.canonicalModels(models)
+        self.modelGroups = groups
         self.maxEncryptedRequestBytes = maxEncryptedRequestBytes
         self.lifetimeSeconds = lifetimeSeconds
         self.persistAgreementKey = persistAgreementKey
@@ -615,7 +624,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         if expiresAtUnix <= nowUnix {
             try rotateLocked(nowUnix: nowUnix)
         }
-        let records = try models.map { try makeRecordLocked(models: [$0]) }
+        let records = try modelGroups.map { try makeRecordLocked(models: $0) }
             .filter { !revokedKids.contains($0.kid) }
         return records
     }
@@ -624,7 +633,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try reloadRevocationsLocked()
-        guard let record = try models.lazy.map({ try makeRecordLocked(models: [$0]) })
+        guard let record = try modelGroups.lazy.map({ try makeRecordLocked(models: $0) })
             .first(where: { $0.kid == kid }) else {
             throw RelayBlindProviderError.ciphertextInvalid
         }
@@ -642,15 +651,15 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try rotateLocked(nowUnix: Int64(now.timeIntervalSince1970))
-        return try makeRecordLocked(models: [models[0]])
+        return try makeRecordLocked(models: modelGroups[0])
     }
 
     func revokeCurrent(now: Date = Date()) throws {
         lock.lock()
         defer { lock.unlock() }
         try reloadRevocationsLocked()
-        for model in models {
-            revokedKids.insert(try makeRecordLocked(models: [model]).kid)
+        for group in modelGroups {
+            revokedKids.insert(try makeRecordLocked(models: group).kid)
         }
         try RelayBlindSecureFiles.storeRevocations(secureDirectory, name: "revoked-kids.json", revokedKids)
     }
@@ -660,7 +669,7 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         defer { lock.unlock() }
         try reloadRevocationsLocked()
         _ = try RelayBlindBase64URL.decode(kid, exactCount: 16)
-        let currentKids = try Set(models.map { try makeRecordLocked(models: [$0]).kid })
+        let currentKids = try Set(modelGroups.map { try makeRecordLocked(models: $0).kid })
         guard currentKids.contains(kid) else { throw RelayBlindProviderError.invalidConfiguration("unknown relay-blind kid") }
         revokedKids.insert(kid)
         try RelayBlindSecureFiles.storeRevocations(secureDirectory, name: "revoked-kids.json", revokedKids)
