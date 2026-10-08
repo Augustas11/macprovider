@@ -268,6 +268,9 @@ expected_history = {
     "published-2026-09-23-tier2-buyer-closure-v1",
     # Superseded by the artifact-feed activation cut (#1816).
     "published-2026-09-25-artifact-hash-correction-v1",
+    # Retained predecessors of the signed CB223 cut.
+    "published-2026-10-01-artifact-feed-activation-v1",
+    "published-2026-10-07-inband-provenance-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

@@ -183,7 +183,7 @@ curl -sS https://coordinator.malibu.tech/v1/rate-card | python3 -c \
 # → completion_rate_per_mtok 27000
 
 # Static (on-host — nginx /static/ returns 404/rate-limit from this executor IP)
-ssh root@159.223.165.194 python3 -c \
+ssh root@<pearl-host> python3 -c \
   "import json; d=json.load(open('/opt/macprovider/static/autotune-candidates.json')); \
    print(d['version'], len(d['rows']), d['rows']['qwen3-8b']['runtime_status'])"
 # → published-2026-07-07-p2-qwen3-8b 9 recommendable

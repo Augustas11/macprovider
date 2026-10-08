@@ -42,7 +42,7 @@ exists to exercise the WS-tunneled path.
 Mac Provider routes buyer inference requests across a pool of
 volunteer Apple Silicon Macs. As of 2026-05-28:
 
-  - `coordinator.malibu.tech` (Pearl VPS, 159.223.165.194) live
+  - `coordinator.malibu.tech` (Pearl VPS, <pearl-host>) live
     with pool N=2 (M4 Qwen 7B, M1 Llama 3.2 3B)
   - Current coordinator v1.0.4 uses HTTP-forwarding path only —
     coordinator GETs to provider.endpoint_url

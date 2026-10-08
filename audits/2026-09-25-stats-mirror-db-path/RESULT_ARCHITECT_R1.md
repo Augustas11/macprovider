@@ -2162,8 +2162,8 @@ test-dist:
 143-# shellcheck source=lib/pearl_tls.sh
 144:. "$_PEARL_TLS_SCRIPT_DIR/lib/pearl_tls.sh"
 145-
-146-SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-147-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+146-SSH_KEY="${SSH_KEY:-$HOME/.ssh/<operator-ssh-key>}"
+147-VPS_HOST="${VPS_HOST:-<pearl-host>}"
 148-VPS_USER="${VPS_USER:-root}"
 149-DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 150-STATS_DOMAIN="${STATS_DOMAIN:-stats.malibu.tech}"

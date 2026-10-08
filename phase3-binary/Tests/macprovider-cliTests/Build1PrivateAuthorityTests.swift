@@ -6,10 +6,16 @@ import XCTest
 final class Build1PrivateAuthorityTests: XCTestCase {
     func testCommittedOrcaRouterAuthorityVerifiesAndRemainsPrivate() throws {
         let fixture = Self.committedFixture()
+        // This signed authority binds the historical catalog, not the current bake.
+        let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(of: "published-2026-10-08-a3b-cb-v223-v1", with: "published-2026-10-01-artifact-feed-activation-v1")
+            .replacingOccurrences(of: "2026-10-08T01:05:00Z", with: "2026-10-01T04:20:42Z").utf8)
+        XCTAssertEqual(Build1PrivateAuthorityLoader.sha256Hex(candidateBytes), "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666")
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
             signatureURL: fixture.signature,
-            now: Self.date("2026-10-02T00:00:00Z")
+            now: Self.date("2026-10-02T00:00:00Z"),
+            candidateBytes: candidateBytes
         )
 
         XCTAssertEqual(authority.catalogKey, Build1PrivatePrepareProfile.modelKey)
@@ -98,6 +104,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         var root = fixture.root
         var guardObject = root["catalog_guard"] as! [String: Any]
         guardObject["candidate_catalog_sha256"] = Build1PrivateAuthorityLoader.sha256Hex(candidateBytes)
+        guardObject["candidate_release_id"] = candidate["version"]
         root["catalog_guard"] = guardObject
         try Self.write(root, to: fixture.urls.authority)
 

@@ -60,7 +60,7 @@ the complete compatibility set rather than only the provider binary.
 
 ### Historical download host
 
-Pearl VPS nginx static host. DNS: `download.malibu.tech` **A** → `159.223.165.194`.
+Pearl VPS nginx static host. DNS: `download.malibu.tech` **A** → `<pearl-host>`.
 
 The former Pearl appcast/`latest.dmg` publication is retired. GitHub's immutable
 release plus the signed compatibility artifact index is the sole update source.

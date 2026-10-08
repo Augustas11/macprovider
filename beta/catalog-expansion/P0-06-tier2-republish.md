@@ -55,7 +55,7 @@ Private signing key used from `.omc/tier2/catalog-signing-key.priv` (not reprodu
 |-------|-------|
 | **Method** | Option B — catalog-only SCP + install (minimal blast radius) |
 | **Deploy timestamp (UTC)** | `2026-07-07T06:12:04Z` |
-| **Target host** | Pearl VPS `159.223.165.194` (`ubuntu-s-2vcpu-4gb-120gb-intel-nyc1`) |
+| **Target host** | Pearl VPS `<pearl-host>` (`ubuntu-s-2vcpu-4gb-120gb-intel-nyc1`) |
 | **Destination** | `/opt/macprovider/tier2-catalog.json` (root:macprovider, mode 0640) |
 | **Backup** | `/opt/macprovider/tier2-catalog.json.bak-p0-06-<timestamp>` |
 | **Reload** | `systemctl kill -s HUP macprovider-coordinator` |

@@ -25,8 +25,8 @@ guarded `deploy-pearl-vps.sh` path, not this retired overlay runbook.
 ## 1. Preconditions
 
 - [ ] `main` includes `LoadWithOverlay` + CLI flags (merged #478)
-- [ ] Pearl SSH key: `~/.ssh/pearl_operator_ed25519` (or set `SSH_KEY`)
-- [ ] Pearl host: `159.223.165.194` (`coordinator.malibu.tech`)
+- [ ] Pearl SSH key: `~/.ssh/<operator-ssh-key>` (or set `SSH_KEY`)
+- [ ] Pearl host: `<pearl-host>` (`coordinator.malibu.tech`)
 - [ ] `/etc/macprovider/coordinator.env` present on Pearl (secrets)
 - [ ] **1–2 lab providers** ready to observe (Malibu on your Mac counts)
 - [ ] Prefer **zero connected providers** at restart, or set `FORCE_RESTART=1`
@@ -81,8 +81,8 @@ GOOS=linux GOARCH=amd64 go build \
 ### 3.2 Upload overlay artifacts only
 
 ```bash
-SSH_KEY=~/.ssh/pearl_operator_ed25519
-PEARL=root@159.223.165.194
+SSH_KEY=~/.ssh/<operator-ssh-key>
+PEARL=root@<pearl-host>
 
 scp -i "$SSH_KEY" coordinator.opoi-v0-staging.yaml "$PEARL:/etc/macprovider/"
 scp -i "$SSH_KEY" dist/systemd/opoi-v0.conf.example "$PEARL:/tmp/opoi-v0.conf"
@@ -152,7 +152,7 @@ Version should match the exact checked-out release tag (`vX.Y.Z`).
 ### 5.2 Canary logs (wait up to `canary_interval_s` = 300s)
 
 ```bash
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> \
   'journalctl -u macprovider-coordinator --since "10 min ago" --no-pager' \
   | grep -E 'canary (passed|failed|skipped)'
 ```

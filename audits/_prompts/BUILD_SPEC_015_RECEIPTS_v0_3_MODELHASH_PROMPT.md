@@ -128,7 +128,7 @@ Each AC MUST cite a concrete test command an implementer can run.
 - `phase4-coordinator/internal/config/config.go:142,335` — current state of `RequireHashVerified` flag (default false, observation mode); v0.3 does NOT change this
 - `beta/DECISION_CRITERIA.md` Entry 80 — the deferral context for enforcement flag; v0.3 must respect it
 - The v0.1/v0.2 audit transcripts — `specs/SPEC-015-audit.md` (SPEC-level audit history) and `specs/SPEC-015-IMPL-STEP_N-audit.md` (per-IMPL-step transcripts). The `specs/AUDIT_SPEC_015_*_PROMPT.md` files are audit INPUT prompts, not transcripts — read both. Knowing what got deferred from v0.1/v0.2 surfaces likely v0.3 audit hotspots
-- **Pearl journald (live evidence):** `ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 'journalctl -u macprovider-coordinator --since "24h" --no-pager | grep model_hash_verified | head -3'` — confirms observation mode is live; cite this in §M as proof of catalog infrastructure readiness
+- **Pearl journald (live evidence):** `ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> 'journalctl -u macprovider-coordinator --since "24h" --no-pager | grep model_hash_verified | head -3'` — confirms observation mode is live; cite this in §M as proof of catalog infrastructure readiness
 
 ## Audit-loop discipline (NON-NEGOTIABLE)
 

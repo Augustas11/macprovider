@@ -2,7 +2,7 @@
 
 **Status:** engineering + ops  
 **Depends on:** APNs push cert vaulted (see `docs/runbooks/apple-mdm-partner-registration.md`)  
-**Host:** Pearl (`coordinator.malibu.tech` → 159.223.165.194)
+**Host:** Pearl (`coordinator.malibu.tech` → <pearl-host>)
 
 ## Goal
 

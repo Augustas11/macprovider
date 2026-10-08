@@ -3,7 +3,7 @@
 ## Context
 
 You are working on **macprovider-poc** — a P2P Mac inference marketplace. The
-coordinator runs at `coordinator.malibu.tech` (Pearl VPS, `159.223.165.194`).
+coordinator runs at `coordinator.malibu.tech` (Pearl VPS, `<pearl-host>`).
 The buyer-facing API gateway runs at `api.malibu.tech` (same VPS). Providers
 are Mac machines (M1/M4) running the phase3-binary Swift CLI, each serving one
 MLX model via a WebSocket connection to the coordinator.
@@ -244,7 +244,7 @@ scripts/                                                        # new: hash-mode
 
 ## SSH + deploy notes
 
-- Pearl VPS: `ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194`
+- Pearl VPS: `ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host>`
 - Live coordinator config: `/opt/macprovider/coordinator.yaml` — contains real secrets, never overwrite wholesale
 - Merge `tier2:` section only: read live config, add section, write back
 - First-time `catalog_path` / `catalog_public_key` activation requires coordinator restart

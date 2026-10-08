@@ -262,7 +262,7 @@ holds only GitHub assets, including one named `release.json`), and re-downloads 
    free space first (`df -h /var/www/malibu-download`); each release adds
    about 90 MB. If it failed, rerun it:
    ```bash
-   GH_TOKEN=... MALIBU_DOWNLOAD_SSH_KEY=~/.ssh/pearl_operator_ed25519 \
+   GH_TOKEN=... MALIBU_DOWNLOAD_SSH_KEY=~/.ssh/<operator-ssh-key> \
      bash scripts/publish-release-mirror.sh --tag vX.Y.Z
    ```
 2. Spot-check byte identity against GitHub from any host:

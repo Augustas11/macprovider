@@ -204,7 +204,7 @@ an attacker can open unlimited slow-loris connections.
 ### Fix required
 
 Edit `/etc/nginx/sites-available/api.malibu.tech` on Pearl VPS
-(`159.223.165.194`). The local copy tracked in the repo is at:
+(`<pearl-host>`). The local copy tracked in the repo is at:
 `phase4-coordinator/dist/deploy-pearl-vps.sh` (which templates the nginx config
 inline). **Both the live file on Pearl AND the repo template must be updated.**
 
@@ -259,7 +259,7 @@ Confirm that connections beyond 20 receive HTTP 429, and that `grep 'limiting co
    # Check git identity first
    gh auth status   # must show Augustas11 active, or run: gh auth switch -u Augustas11
    # Deploy
-   ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 "
+   ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> "
      systemctl stop macprovider-gateway
      cp /opt/macprovider/dist/gateway-linux-amd64 /opt/macprovider/gateway
      systemctl start macprovider-gateway

@@ -105,7 +105,7 @@ Buyers should:
 Pearl journald already shows `model_hash_verified` events from the coordinator-side observation mode. After v0.3 deploys, watch:
 
 ```bash
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> \
   'journalctl -u macprovider-coordinator --since "24h" --no-pager | grep -E "model_hash_verified|catalog_loaded|catalog_signature_invalid"'
 ```
 
@@ -125,7 +125,7 @@ TL;DR for the v0.3 IMPL bundle:
 # phase4-coordinator/dist/deploy-pearl-vps.sh step 4/9 snapshots the
 # pre-upload binary to /opt/macprovider/coordinator.prev. Issue #244
 # R4+R5 tightened ownership to `root:macprovider 0750`. Swap in place:
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> \
   'systemctl stop macprovider-coordinator && \
    install -o root -g macprovider -m 0750 \
      /opt/macprovider/coordinator.prev /opt/macprovider/coordinator && \
@@ -138,7 +138,7 @@ new conf is installed. If you want a runtime rollback for the nginx
 site, snapshot it BEFORE the deploy:
 
 ```bash
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> \
   "cp /etc/nginx/sites-available/coordinator.malibu.tech.conf \
       /etc/nginx/sites-available/coordinator.malibu.tech.conf.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 ```

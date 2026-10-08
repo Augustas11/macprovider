@@ -41,7 +41,7 @@ run MLX inference, a VPS-hosted coordinator routes buyer requests,
 and the network is presented as one seller to the Antseed marketplace
 (deferred). Production state as of 2026-05-28:
 
-  - `coordinator.malibu.tech` live on Pearl VPS (159.223.165.194)
+  - `coordinator.malibu.tech` live on Pearl VPS (<pearl-host>)
   - Pool N=2: M4 partner (Qwen 7B, MacBook Air) + M1 partner
     (Llama 3.2 3B, the M1 partner's Mac)
   - Multi-model end-to-end working (2.3-2.5s real inference)

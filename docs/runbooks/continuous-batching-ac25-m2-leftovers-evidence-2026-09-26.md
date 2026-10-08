@@ -15,7 +15,7 @@ secrets, raw tokens, raw receipt blobs, authorization headers, or private logs.
 - Studio branch binary SHA-256:
   `95d9b943cee6c7cdf3dee458e1a4d96786baa44bdceb496c2f4d98811fc4b08b`.
 - The isolated candidate joined on `:18080` as provider
-  `mp-5aad6b654611666e16edf83dc0f326eb`, initially loaded with
+  `<studio-provider-id>`, initially loaded with
   `qwen/qwen3.6-27b` at artifact hash
   `518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931`.
   Readiness showed `connected=true`, `buyer_serving`, catalog

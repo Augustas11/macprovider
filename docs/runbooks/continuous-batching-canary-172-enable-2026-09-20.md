@@ -7,14 +7,14 @@ No secrets, tokens, or raw completions are recorded here.
 
 - **Date:** 2026-09-20
 - **Operator:** augstar
-- **Provider id:** `mp-5aad6b654611666e16edf83dc0f326eb`
+- **Provider id:** `<studio-provider-id>`
 - **Installed RC:** signed `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`
   ([run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454)
   attempt 1)
-- **Binary path:** `/Users/a1/macprovider/macprovider-cli` (launchd
+- **Binary path:** `<studio-home>/macprovider/macprovider-cli` (launchd
   `gui/501/live.malibu.provider`); CLI SHA-256
   `7bd43fe8582206043b70e95b8bc232eb0826511832fc43ff0ffe91555c92ac60`
-- **Metallib:** co-located `/Users/a1/macprovider/mlx.metallib` present
+- **Metallib:** co-located `<studio-home>/macprovider/mlx.metallib` present
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1
   (25E253), thermal `nominal`, not throttled, AC power
 - **Model tuple:** served `qwen3-coder-30b-a3b-instruct` /
@@ -59,7 +59,7 @@ would 503 live traffic.
 
 ## Rollback
 
-Restored `/Users/a1/.config/macprovider/config.yaml` from
+Restored `<studio-home>/.config/macprovider/config.yaml` from
 `config.yaml.bak-cb-canary-20260920T230131Z` (no `continuous_batching`, no
 `paged_kv`). Kickstart `gui/501/live.malibu.provider`.
 
