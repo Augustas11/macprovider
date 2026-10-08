@@ -74,19 +74,22 @@ signature proves automatic privacy enrollment or network activation.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
-Promotion-ready candidate cut, authorized 2026-10-08: `v1.8.224` is being built
-and signed by [acceptance run37743452851](https://github.com/Augustas11/macprovider/actions/runs/37743452851)
-from exact current-main source/control `ac7cfde0516cf69c0e2ce3f919329f9052786202`,
+Promotion-ready candidate cut, authorized 2026-10-08, for `v1.8.224`. **Not yet
+signed.** [Acceptance run 37743452851](https://github.com/Augustas11/macprovider/actions/runs/37743452851)
+at `ac7cfde0516cf69c0e2ce3f919329f9052786202` was cancelled during the unsigned
+build (07:37Z), as were the three earlier attempts; no signed 224 bytes and no
+tag exist. It was stopped because the checked-in coordinator recommendation
+still advertised `1.8.207`, so `scripts/release-staged-version-policy.sh` would
+have treated 207 rather than the live stable 223 as the previous stable for the
+updater-path checks. The three `latest_binary_version` rows move to `1.8.223`
+in the release-train PR; the candidate is then cut from that merged main tip
 with `promotion_ready=true` and `strict_post_migration`. Version-only
-[#1896](https://github.com/Augustas11/macprovider/pull/1896) landed normally
-after all16 checks passed and antfleet-ops approved its exact head. Existing
-BYOM/privacy source acceptance and unchanged decode qualification carry
-forward; the new source delta is CLI/App/build-ledger identity224 only.
-The exact-source preflight passed; the candidate is not yet signed or accepted
-at this entry. Keep the fleet recommendation and compatibility
-target on223 until signed-byte installation, buyer-path and promotion gates
-pass. Native MTP activation remains owned by the separate #1894 campaign;
-the224 cut does not claim new MTP/CB acceptance or privacy fleet activation.
+[#1896](https://github.com/Augustas11/macprovider/pull/1896) carries identity
+224. Existing BYOM/privacy source acceptance and unchanged decode qualification
+carry forward. Keep the fleet recommendation and compatibility target on 223
+until signed-byte installation, buyer-path and promotion gates pass. Native MTP
+and CB activation stay in [#1894](https://github.com/Augustas11/macprovider/pull/1894),
+which re-binds to the signed 224 identity after this cut.
 
 Backend check for this train: privacy #1871/#1892 change coordinator/gateway
 directory, enrollment and grouped model-scope validation. Live runtime223
