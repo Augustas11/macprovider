@@ -119,6 +119,29 @@ identity and changed buyer path. No candidate version is reserved here, and
 #1749 remains open until private traffic is actually serving on eligible fleet
 providers, including new joins.
 
+BYOM completion campaign [#1895](https://github.com/Augustas11/macprovider/pull/1895)
+merged normally on 2026-10-08 as `9bb865b823ac7278315846ce4d0ed762994c0084`,
+after all 16 checks passed on reviewed head `0e4aead880e6265039474d698bc5f89d55357268`
+and antfleet-ops approved that exact head. The complete code, security and
+architecture audit lanes were clear. [CI](https://github.com/Augustas11/macprovider/actions/runs/37736012113)
+and [spec-index](https://github.com/Augustas11/macprovider/actions/runs/37736012108)
+passed. Pool-only GGUF startup can use bounded advisory upstream counts when
+there is no signed sibling tokenizer; pinned recount, identity checks and the
+production floor remain enforced where applicable. Protected-file credential
+custody no longer blocks a positively proven consumer-user GUI updater;
+headless/system and ambiguous topology remain denied.
+
+On the designated Studio, the isolated source release build passed. That exact
+source served Ollama without joining the coordinator: startup measured
+13.0164 TPS, bounded nonstream output and streaming content with `[DONE]`
+passed. This is local source evidence, not signed-candidate paid acceptance.
+No new CLI was cut by this merge. #1690 remains 2/6 actually complete despite
+its closed GitHub state: updated signed-candidate Ollama paid acceptance,
+supported previous-stable installation/restart, formal mixed rollout/rollback,
+and final acceptance/conformance reconciliation are still pending. Reuse the
+existing release and acceptance paths; no new harness or signing tooling is
+required by this campaign.
+
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
 was produced by acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296)
@@ -149,6 +172,7 @@ are consumed and must not be reused.
 | Pool model status names the qualifying pool and says eligible to earn only on qualifying settled requests. Malibu clears stale positive bindings when status readback is unavailable, inactive, or mismatched; eligibility wording does not claim current paid work or income. | merged `00700349b` 2026-10-07; awaiting a reviewed signed CLI/app release | [#1883](https://github.com/Augustas11/macprovider/pull/1883) ([#1880](https://github.com/Augustas11/macprovider/issues/1880)) |
 | Automatic privacy-class eligibility and enrollment, preserving explicit opt-out and refusing ineligible posture; fleet availability still requires signed-release acceptance, approved identity, directory configuration and staged rollout. | merged `d6e8bb2ff` 2026-10-08; not yet released or activated fleet-wide | [#1871](https://github.com/Augustas11/macprovider/pull/1871) (#1749) |
 | Exact catalog/artifact privacy model scopes share one signed key record; reservation parsers accept grouped scopes while keeping exact request binding. Bounded rejection diagnostics and isolated-stack bootstrap/provenance fixes complete the source campaign. | merged `394bf61ae` 2026-10-08; source accepted, signed identity and live activation pending | [#1892](https://github.com/Augustas11/macprovider/pull/1892) (#1749) |
+| Pool-only GGUF advisory startup TPS without a catalog sibling, and protected-file consumer GUI updater/recovery under positively proven topology. Money-path counting and headless/system restrictions are unchanged. | merged `9bb865b82` 2026-10-08; isolated Studio source smoke passed, signed-candidate acceptance pending | [#1895](https://github.com/Augustas11/macprovider/pull/1895) (#1690) |
 | Operator pause remains authoritative when coordinator drain first moves the provider to `network_offline` or `coordinator_unavailable`; only the operator command may write those pause transitions. | merged `9384e5280` 2026-10-03 | #1834 (#1770) |
 | Qwen3.6 35B-A3B ordinary decode uses the fused A3B MoE kernels (fork pin `Augustas11/mlx-swift-lm@b1811029`): decode and verify rows of at most 7 tokens stay fused at any batch size in chunks of at most 7, prefill stays on the stock kernel, and exact per-tensor layout validation gates the path. Studio qualification: ordinary decode 1.25x / 1.15x / 0.97x vs stock at 1 / 2 / 8 rows, 0 parity mismatches in 36 paired blocks, bit-identical run to run. `MLX_LM_QWEN35_FUSED_MOE=0` disables it. `KVBuildIdentity` changes, so prior KV cold-tier entries miss once. Native MTP stays default-off; the native-MTP lab tooling is compiled only under `DEBUG \|\| MACPROVIDER_LAB_HARNESS`, and signed R024 `proposal_depth` is capped at 6. | merged `280f0e95d` 2026-10-05 | #1832 (#1770) |
 | Privacy-class work settles under production `enforce`: a relay-blind route snapshot, a provider-signed content-free `relay-blind-settlement-v1` receipt, and the `relay_blind_settled` outcome, which is never `verified`. The provider withholds the receipt on any unvalidated usage or frame failure. | merged `d4d73c253` 2026-10-05 | #1853 (#1749) |
