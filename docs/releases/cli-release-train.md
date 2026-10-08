@@ -74,6 +74,17 @@ signature proves automatic privacy enrollment or network activation.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
+Promotion-ready candidate preparation, authorized 2026-10-08: reserve
+`v1.8.224` for the consolidated merged BYOM/privacy source. The only new source
+delta is the CLI/App/build-ledger version identity; existing source acceptance
+and unchanged decode qualification carry forward. Cut one candidate from the
+reviewed current main after this identity change lands, using the existing
+acceptance workflow with `promotion_ready=true`. No candidate has been signed
+by this preparation entry. Keep the fleet recommendation and compatibility
+target on223 until signed-byte installation, buyer-path and promotion gates
+pass. Native MTP activation remains owned by the separate #1894 campaign;
+the224 cut does not claim new MTP/CB acceptance or privacy fleet activation.
+
 Privacy automatic enrollment [#1871](https://github.com/Augustas11/macprovider/pull/1871)
 merged on 2026-10-08 as `d6e8bb2ff370d7368d3a1bb79d28b935bc2a72b6`,
 with antfleet-ops approval. Product source `60d97dacf51047e10100622eeba1a093d76b63da`
