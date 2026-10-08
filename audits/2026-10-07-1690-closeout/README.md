@@ -16,10 +16,12 @@ The public signed CLI223 SHA-256 remains `edd099be5f0b0ea6bb6f05e05aa39bff649897
   The complete runner stopped at the additional `openai:` negative-control
   error-wording assertion: startup refused before serving, with the catalog
   artifact prerequisite error rather than its expected unsupported-selector text.
-- Public223 Llama and Ollama paid requests passed streaming and non-streaming:
+- Llama and Ollama paid requests through the223 gateway/coordinator passed
+  streaming and non-streaming, but both external serving members remained222:
   four200 responses, correct engine headers, valid v0.4 receipt verdicts,
   closed verified finality, payable provider credit, and settled buyer quota
   with no holds. Llama settled44 tokens/request; Ollama45 tokens/request.
+  This is mixed222/223 settlement, not public223 provider reacceptance.
 - No-pool external selection returned503 and invalid uppercase selection400,
   with no quota/usage/credit rows. Wrong-allowlist selection returned503,
   refunded its reservation, charged zero tokens, and created no provider credit.
@@ -28,6 +30,7 @@ The public signed CLI223 SHA-256 remains `edd099be5f0b0ea6bb6f05e05aa39bff649897
   read-only compatibility check, not a performed rollback.
 
 Still required: supported previous-stable installation/restart acceptance,
+public223 external-provider paid reacceptance,
 formal mixed rollout/rollback execution, remaining receipt-authorization and
 disclosure reconciliation, and final issue/conformance audit. No new harness,
 test, tooling or signing PR was opened for these checks. #1690 remains open.

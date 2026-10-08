@@ -423,10 +423,13 @@ The release/closure gates still outstanding are:
   proof are reconciled in the
   [closeout record](../../audits/2026-10-07-1690-closeout/README.md#public-v18223-package-proof-reconciliation--2026-10-08).
   Anonymous discovery passed on both223 and previous stable217. Fresh public223
-  Llama/Ollama streaming and non-streaming requests each passed with valid v0.4
+  Llama/Ollama streaming and non-streaming requests each passed through the223
+  gateway/coordinator while both external members remained222, with valid v0.4
   receipts, payable credits, closed verified finality and no settlement holds.
   Selection refusal checks passed, including a refunded wrong-allowlist reservation.
-  Previous-stable installation/restart, receipt-authorization omission and
+  This establishes mixed222/223 settlement, not public223 provider reacceptance.
+  Public223 external-member transition/paid reacceptance, previous-stable
+  installation/restart, receipt-authorization omission and
   disclosure reconciliation remain pending. Existing envelopes remain unchanged.
 - Complete formal mixed-version rollout/rollback acceptance. Recorded
   217/219/222 coexistence is not a rolling-restart proof; a refused v1-only
