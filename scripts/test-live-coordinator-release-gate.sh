@@ -229,6 +229,9 @@ run_guard_phase() {
   if [[ "$phase" == "pre-publication" && "$previous" != "__omit__" ]]; then
     set -- "$@" --expected-previous-recommendation "$previous"
   fi
+  if [[ -n "${DESCENDANT_CATALOG_DIR:-}" ]]; then
+    set -- "$@" --descendant-catalog-dir "$DESCENDANT_CATALOG_DIR"
+  fi
   "$@"
 }
 
@@ -829,6 +832,171 @@ if captured_headers.get("User-agent") not in ("", None):
     raise SystemExit(f"expected no gate-specific user-agent, got: {captured_headers}")
 PY
 
+# Descendant catalog: the live coordinator serves a NEWER signed release that the
+# reviewed release ledger records after the release's baked catalog. The baked
+# pearl-release.json stays bound to "fixture-release"; the live feeds become
+# "fixture-release-2". Mode selects one fail-closed mutation.
+make_descendant() {
+  local directory="$1"
+  local mode="${2:-ok}"
+  FIXTURE_ARTIFACT_FEED=bound make_fixture "$directory"
+  python3 - "$directory" "$mode" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+live = directory / "live"
+catalog = directory / "catalog"
+catalog.mkdir()
+signer = "streamvc-autotune-static-v4"
+key_path = directory / "autotune-test-ed25519.pem"
+
+def dump(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+def digest(endpoint):
+    return hashlib.sha256((live / endpoint).read_bytes()).hexdigest()
+
+endpoints = {
+    "autotune-candidates.json": "v1_autotune-candidates",
+    "demand-rank.json": "v1_demand-rank",
+    "rate-card.json": "v1_rate-card",
+    "continuous-batching-policy.json": "v1_continuous-batching-policy",
+    "autotune-artifacts.json": "v1_catalog-artifacts",
+}
+
+def row(release_id, generated_at, key_id):
+    return {
+        "generated_at": generated_at,
+        "policy_version": "autotune-policy-v1",
+        "feeds": {
+            name: {
+                "bytes": (live / endpoint).stat().st_size,
+                "sha256": digest(endpoint),
+                "signer_key_id": key_id,
+                "version": release_id,
+            }
+            for name, endpoint in endpoints.items()
+        },
+    }
+
+baked_row = row("fixture-release", "2026-07-30T12:00:00Z", signer)
+
+if mode == "wrong-signer":
+    # A second, concurrently trusted key signs the descendant. The release
+    # keyring (and its pearl-release.json digest) carries both keys.
+    key_path = directory / "second-ed25519.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(key_path)], check=True)
+    public_der = subprocess.check_output(["openssl", "pkey", "-in", str(key_path), "-pubout", "-outform", "DER"])
+    keys = json.loads((directory / "trusted-keys.json").read_text(encoding="utf-8"))
+    keys["keys"]["streamvc-autotune-static-v5"] = {
+        "status": "active",
+        "public_key_base64": base64.b64encode(public_der[-32:]).decode("ascii"),
+    }
+    dump(directory / "trusted-keys.json", keys)
+    metadata = json.loads((directory / "pearl-release.json").read_text(encoding="utf-8"))
+    metadata["catalog"]["files"]["trusted-keys.json"] = hashlib.sha256(
+        (directory / "trusted-keys.json").read_bytes()
+    ).hexdigest()
+    dump(directory / "pearl-release.json", metadata)
+    signer = "streamvc-autotune-static-v5"
+
+new_id = "fixture-release-2"
+new_generated_at = "2026-07-30T12:01:00Z"
+for endpoint in ("v1_autotune-candidates", "v1_demand-rank", "v1_rate-card"):
+    value = json.loads((live / endpoint).read_text(encoding="utf-8"))
+    value["generated_at"] = new_generated_at
+    if endpoint != "v1_rate-card":
+        value["version"] = new_id
+    dump(live / endpoint, value)
+candidate_sha = digest("v1_autotune-candidates")
+for endpoint in ("v1_continuous-batching-policy", "v1_catalog-artifacts"):
+    value = json.loads((live / endpoint).read_text(encoding="utf-8"))
+    value["generated_at"] = new_generated_at
+    value["release_id"] = new_id
+    value["candidate_catalog_sha256"] = candidate_sha
+    if endpoint == "v1_catalog-artifacts":
+        value["version"] = new_id
+    else:
+        value["signer_key_id"] = signer
+    dump(live / endpoint, value)
+for endpoint in endpoints.values():
+    signature = subprocess.check_output(
+        ["openssl", "pkeyutl", "-sign", "-inkey", str(key_path), "-rawin", "-in", str(live / endpoint)],
+    )
+    dump(live / (endpoint + ".sig"), {
+        "alg": "ed25519",
+        "key_id": signer,
+        "signature": base64.b64encode(signature).decode("ascii"),
+    })
+
+live_row = row(new_id, new_generated_at, signer)
+if mode == "older-row":
+    live_row["generated_at"] = "2026-07-30T11:00:00Z"
+elif mode == "sha-mismatch":
+    live_row["feeds"]["demand-rank.json"]["sha256"] = "0" * 64
+releases = {"fixture-release": baked_row}
+if mode != "not-in-ledger":
+    releases[new_id] = live_row
+dump(catalog / "release-ledger.json", {
+    "schema_version": "macprovider.autotune-release-ledger.v3",
+    "releases": releases,
+    "tombstones": {},
+})
+shutil.copyfile(directory / "trusted-keys.json", catalog / "trusted-keys.json")
+if mode == "keyring-changed":
+    keys = json.loads((catalog / "trusted-keys.json").read_text(encoding="utf-8"))
+    keys["keys"]["streamvc-autotune-static-v6"] = {"status": "retired", "public_key_base64": "A" * 43 + "="}
+    dump(catalog / "trusted-keys.json", keys)
+PY
+}
+
+# Exact mode still passes, and names its mode, with the ledger supplied.
+FIXTURE_ARTIFACT_FEED=bound make_fixture "$work/exact-with-ledger"
+mkdir -p "$work/exact-with-ledger/catalog"
+cp "$work/exact-with-ledger/trusted-keys.json" "$work/exact-with-ledger/catalog/trusted-keys.json"
+printf '{"schema_version":"macprovider.autotune-release-ledger.v3","releases":{},"tombstones":{}}\n' \
+  > "$work/exact-with-ledger/catalog/release-ledger.json"
+DESCENDANT_CATALOG_DIR="$work/exact-with-ledger/catalog" run_guard "$work/exact-with-ledger" \
+  | grep -q 'catalog_mode=exact$'
+run_guard "$work/ok" | grep -q 'catalog_mode=exact$'
+
+make_descendant "$work/descendant-ok"
+DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard "$work/descendant-ok" \
+  | grep -q 'catalog_mode=descendant fixture-release-2 of fixture-release$'
+DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard_phase "$work/descendant-ok" pre-publication 1.8.68 \
+  | grep -q 'publication_phase=pre-publication artifact_feed=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
+# Without the reviewed ledger the gate stays exact-only.
+if run_guard "$work/descendant-ok" >"$work/descendant-no-ledger.out" 2>&1; then
+  fail "accepted a non-identical live catalog without a reviewed release ledger"
+fi
+grep -q 'live coordinator /v1/autotune-candidates sha256 .* does not match release metadata' "$work/descendant-no-ledger.out"
+
+expect_descendant_failure() {
+  local mode="$1"
+  local pattern="$2"
+  make_descendant "$work/descendant-$mode" "$mode"
+  if DESCENDANT_CATALOG_DIR="$work/descendant-$mode/catalog" run_guard "$work/descendant-$mode" \
+    >"$work/descendant-$mode.out" 2>&1; then
+    fail "accepted descendant mutation $mode"
+  fi
+  grep -q 'not a verified descendant' "$work/descendant-$mode.out" \
+    || fail "descendant mutation $mode failed for the wrong reason: $(cat "$work/descendant-$mode.out")"
+  grep -q -- "$pattern" "$work/descendant-$mode.out" \
+    || fail "descendant mutation $mode failed for the wrong reason: $(cat "$work/descendant-$mode.out")"
+}
+expect_descendant_failure not-in-ledger "live release 'fixture-release-2' is not in the release ledger"
+expect_descendant_failure older-row "live release 'fixture-release-2' is not after baked release 'fixture-release'"
+expect_descendant_failure sha-mismatch "demand-rank.json sha256 .* does not match release ledger row 'fixture-release-2'"
+expect_descendant_failure wrong-signer "is not the baked release candidate signer 'streamvc-autotune-static-v4'"
+expect_descendant_failure keyring-changed "reviewed trusted-keys.json differs from the release trusted-keys.json"
+
 python3 - "$workflow" "$promotion_workflow" "$rollout_workflow" <<'PY'
 import pathlib
 import sys
@@ -997,6 +1165,20 @@ require_stable_gate(
     final_authority_marker="origin/main moved under bound exception authority before undraft",
 )
 require_rollout(sys.argv[3])
+
+# The descendant authority is the release ledger at the pinned reviewed main
+# commit, never a working-tree or coordinator-supplied copy.
+for path, pinned, calls in (
+    (sys.argv[2], 'git show "$BOUND_EXCEPTION_SHA:phase3-binary/catalog/autotune/$name"', 1),
+    (sys.argv[3], 'git show "$GITHUB_SHA:phase3-binary/catalog/autotune/$name"', 2),
+):
+    text = pathlib.Path(path).read_text(encoding="utf-8")
+    if pinned not in text:
+        raise SystemExit(f"{path} must read the reviewed catalog from the pinned main commit")
+    if text.count('--descendant-catalog-dir "$reviewed_catalog"') != calls:
+        raise SystemExit(f"{path} must pass the reviewed catalog to every live gate call")
+    if text.find(pinned) > text.find('--descendant-catalog-dir "$reviewed_catalog"'):
+        raise SystemExit(f"{path} must materialize the reviewed catalog before the live gate")
 PY
 
 echo "PASS: live coordinator release gate"

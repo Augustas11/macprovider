@@ -132,6 +132,13 @@ jobs:
           test -s "$assets/compatibility-artifact-index.json"
           test -s "$assets/macprovider-release-discovery.json"
           test -s "$assets/macprovider-release-discovery.json.sig"
+          # A newer signed catalog is accepted only when the release ledger at
+          # the verified main head records it after the baked one.
+          reviewed_catalog="$RUNNER_TEMP/reviewed-catalog"
+          mkdir -p "$reviewed_catalog"
+          for name in release-ledger.json trusted-keys.json; do
+            git show "$GITHUB_SHA:phase3-binary/catalog/autotune/$name" > "$reviewed_catalog/$name"
+          done
           # Pearl recommendation deployment is the serialized external step;
           # this exact post-publication gate proves it is now live before the
           # release becomes discoverable through the append-only transport.
@@ -142,6 +149,7 @@ jobs:
             --trusted-keys "$assets/trusted-keys.json" \
             --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
+            --descendant-catalog-dir "$reviewed_catalog" \
             --publication-phase post-publication
           transport_tag="$(python3 - "$assets/macprovider-release-discovery.json" <<'PY'
           import json
@@ -213,6 +221,7 @@ jobs:
             --trusted-keys "$assets/trusted-keys.json" \
             --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
+            --descendant-catalog-dir "$reviewed_catalog" \
             --publication-phase post-publication
           transport_release_json="$RUNNER_TEMP/discovery-immutable.json"
           if [ "$transport_exists" = false ]; then

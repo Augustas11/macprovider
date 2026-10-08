@@ -61,6 +61,12 @@ ADVERTISED_VERSION_RE = re.compile(
 ED25519_SPKI_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 TRUSTED_KEY_STATUSES = {"active", "bridge"}
 FUTURE_TOLERANCE = datetime.timedelta(minutes=10)
+LEDGER_SCHEMAS = {
+    "macprovider.autotune-release-ledger.v1",
+    "macprovider.autotune-release-ledger.v2",
+    "macprovider.autotune-release-ledger.v3",
+    "macprovider.autotune-release-ledger.v4",
+}
 STALE_AFTER = datetime.timedelta(days=30)
 
 
@@ -303,7 +309,7 @@ def parse_signature_sidecar(value: object, name: str) -> tuple[str, bytes]:
     return key_id, signature
 
 
-def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
+def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], dict]:
     match = TAG_RE.fullmatch(args.tag)
     if match is None:
         fail("--tag must be vX.Y.Z")
@@ -344,7 +350,102 @@ def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
             f"trusted-keys.json sha256 {trusted_keys_digest} does not match "
             f"release metadata {expected['trusted-keys.json']}"
         )
-    return expected_version, expected
+    return expected_version, expected, catalog
+
+
+def ledger_order_key(release_id: str, record: dict) -> tuple[datetime.datetime, str]:
+    # Same ordering as scripts/catalog-release.py release_order_key: the
+    # generated_at INSTANT first, release_id only as the tie-breaker.
+    generated_at = record.get("generated_at")
+    if not isinstance(generated_at, str):
+        fail(f"release ledger row {release_id!r} has no generated_at")
+    return parse_rfc3339(generated_at, f"release ledger row {release_id!r}"), release_id
+
+
+def verify_descendant_catalog(
+    args: argparse.Namespace,
+    catalog: dict,
+    expected_hashes: dict[str, str],
+    bodies: dict[str, bytes],
+    parsed: dict[str, object],
+    trusted: dict[str, bytes],
+    bound_feeds: tuple[str, ...],
+) -> tuple[str, str]:
+    """Accept a live catalog that is a strict, signed, ledger-recorded
+    descendant of the catalog the CLI release baked.
+
+    A CLI joins a NEWER signed release (SPEC-023 §3.5 rejects only data older
+    than its baked snapshot), and an identity-bound catalog can only be cut
+    after the CLI identity exists, so byte equality alone would forbid ever
+    publishing a CLI after its own catalog activates. The authority for "newer"
+    is the reviewed release ledger, never the coordinator's claim.
+    """
+    catalog_dir = pathlib.Path(args.descendant_catalog_dir)
+    try:
+        reviewed_keys = (catalog_dir / "trusted-keys.json").read_bytes()
+    except OSError as exc:
+        fail(f"reviewed trusted-keys.json is unreadable: {exc}")
+    if reviewed_keys != pathlib.Path(args.trusted_keys).read_bytes():
+        fail("reviewed trusted-keys.json differs from the release trusted-keys.json; keyring changes need a full release")
+    ledger = read_json(catalog_dir / "release-ledger.json", "release ledger")
+    if not isinstance(ledger, dict) or ledger.get("schema_version") not in LEDGER_SCHEMAS:
+        fail("release ledger has unsupported schema")
+    releases = ledger.get("releases")
+    tombstones = ledger.get("tombstones", {})
+    if not isinstance(releases, dict) or not isinstance(tombstones, dict):
+        fail("release ledger releases/tombstones must be objects")
+
+    baked_id = catalog.get("release_id")
+    baked_policy = catalog.get("policy_version")
+    if not isinstance(baked_id, str) or not baked_id or not isinstance(baked_policy, str) or not baked_policy:
+        fail("pearl-release.json catalog release_id and policy_version are required")
+    baked_row = releases.get(baked_id)
+    if not isinstance(baked_row, dict) or not isinstance(baked_row.get("feeds"), dict):
+        fail(f"baked release {baked_id!r} is not in the release ledger")
+    candidate = parsed["autotune-candidates.json"]
+    live_id = candidate.get("version") if isinstance(candidate, dict) else None
+    if not isinstance(live_id, str) or not live_id:
+        fail("live autotune-candidates.json has no version")
+    if live_id == baked_id:
+        fail(f"live release {live_id!r} has the baked release_id but different bytes")
+    if live_id in tombstones:
+        fail(f"live release {live_id!r} is tombstoned in the release ledger")
+    live_row = releases.get(live_id)
+    if not isinstance(live_row, dict) or not isinstance(live_row.get("feeds"), dict):
+        fail(f"live release {live_id!r} is not in the release ledger")
+    if ledger_order_key(live_id, live_row) <= ledger_order_key(baked_id, baked_row):
+        fail(f"live release {live_id!r} is not after baked release {baked_id!r} in the release ledger")
+    if live_row.get("policy_version") != baked_row.get("policy_version") or candidate.get("policy_version") != baked_policy:
+        fail(f"live release {live_id!r} changes policy_version from baked release {baked_id!r}")
+    if (ARTIFACT_FEED in live_row["feeds"]) != (ARTIFACT_FEED in bound_feeds):
+        fail(f"live release {live_id!r} changes whether the catalog is artifact-bound")
+
+    baked_signer = None
+    for name in bound_feeds:
+        baked_feed = baked_row["feeds"].get(name)
+        live_feed = live_row["feeds"].get(name)
+        if not isinstance(baked_feed, dict) or baked_feed.get("sha256") != expected_hashes[name]:
+            fail(f"release ledger row {baked_id!r} {name} does not match the release's baked catalog")
+        if not isinstance(live_feed, dict):
+            fail(f"release ledger row {live_id!r} does not record {name}")
+        digest = sha256(bodies[name])
+        if live_feed.get("sha256") != digest:
+            fail(
+                f"live coordinator {name} sha256 {digest} does not match release ledger "
+                f"row {live_id!r} {live_feed.get('sha256')!r}"
+            )
+        if baked_signer is None:
+            baked_signer = baked_row["feeds"]["autotune-candidates.json"].get("signer_key_id")
+            if not isinstance(baked_signer, str) or baked_signer not in trusted:
+                fail(f"baked release {baked_id!r} candidate signer is not in the release trusted keyring")
+        key_id, signature = parse_signature_sidecar(parsed[name + ".sig"], name + ".sig")
+        if key_id != baked_signer or live_feed.get("signer_key_id") != baked_signer:
+            fail(
+                f"{name}.sig signer {key_id!r} (ledger {live_feed.get('signer_key_id')!r}) is not the "
+                f"baked release candidate signer {baked_signer!r}"
+            )
+        verify_ed25519(args.openssl, trusted[key_id], bodies[name], signature, name + ".sig")
+    return live_id, baked_id
 
 
 def main() -> int:
@@ -389,29 +490,54 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--descendant-catalog-dir",
+        help=(
+            "reviewed main-tree phase3-binary/catalog/autotune directory (release-ledger.json "
+            "and trusted-keys.json). When given, a live catalog that differs from the baked "
+            "one passes only as a signed, ledger-recorded strict descendant of it"
+        ),
+    )
+    parser.add_argument(
         "--now",
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
     try:
-        expected_version, expected_hashes = validate_metadata(args)
+        expected_version, expected_hashes, catalog = validate_metadata(args)
         trusted = active_keyring(pathlib.Path(args.trusted_keys))
+        artifact_bound = ARTIFACT_FEED in expected_hashes
+        served = dict(FEEDS)
+        if artifact_bound:
+            served.update(ARTIFACT_FEEDS)
 
         bodies: dict[str, bytes] = {}
         parsed: dict[str, object] = {}
-        for name, endpoint in FEEDS.items():
+        exact_mismatch = None
+        for name, endpoint in served.items():
             body = load_endpoint(args, endpoint)
             if len(body) > args.max_bytes:
                 fail(f"{endpoint} response exceeds {args.max_bytes} bytes")
             digest = sha256(body)
-            if digest != expected_hashes[name]:
-                fail(
+            if digest != expected_hashes[name] and exact_mismatch is None:
+                exact_mismatch = (
                     f"live coordinator {endpoint} sha256 {digest} does not match "
                     f"release metadata {expected_hashes[name]}"
                 )
             bodies[name] = body
             parsed[name] = parse_json_bytes(body, name)
+        catalog_mode = "exact"
+        if exact_mismatch is not None:
+            if not args.descendant_catalog_dir:
+                fail(exact_mismatch)
+            bound_feeds = PRIMARY_FEEDS + ((ARTIFACT_FEED,) if artifact_bound else ())
+            try:
+                live_id, baked_id = verify_descendant_catalog(
+                    args, catalog, expected_hashes, bodies, parsed, trusted, bound_feeds
+                )
+            except GateError as exc:
+                fail(f"{exact_mismatch}; not a verified descendant: {exc}")
+            catalog_mode = f"descendant {live_id} of {baked_id}"
 
         generated_at = None
         generated_at_instant = None
@@ -489,20 +615,7 @@ def main() -> int:
                 f"autotune-candidates.json bytes {candidate_digest}"
             )
 
-        artifact_bound = ARTIFACT_FEED in expected_hashes
         if artifact_bound:
-            for name, endpoint in ARTIFACT_FEEDS.items():
-                body = load_endpoint(args, endpoint)
-                if len(body) > args.max_bytes:
-                    fail(f"{endpoint} response exceeds {args.max_bytes} bytes")
-                digest = sha256(body)
-                if digest != expected_hashes[name]:
-                    fail(
-                        f"live coordinator {endpoint} sha256 {digest} does not match "
-                        f"release metadata {expected_hashes[name]}"
-                    )
-                bodies[name] = body
-                parsed[name] = parse_json_bytes(body, name)
             sig_name = ARTIFACT_FEED + ".sig"
             key_id, signature = parse_signature_sidecar(parsed[sig_name], sig_name)
             if key_id not in trusted:
@@ -594,7 +707,8 @@ def main() -> int:
             f"healthz_version={healthz.get('version')} "
             f"recommended_binary_version={recommended_value} "
             f"publication_phase={args.publication_phase} "
-            f"artifact_feed={'bound' if artifact_bound else 'absent'}"
+            f"artifact_feed={'bound' if artifact_bound else 'absent'} "
+            f"catalog_mode={catalog_mode}"
         )
         return 0
     except GateError as exc:
