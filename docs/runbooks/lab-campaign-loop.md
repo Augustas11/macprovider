@@ -29,6 +29,12 @@ for that e2e, proven on a locally built CLI before anyone waits on GitHub.
 3. Serve on an **isolated loopback** (`127.0.0.1`, a non-8080 port, `--no-join`
    / no Pearl unless the campaign is explicitly a live-canary confirmation).
    Do not touch `live.malibu.provider` / the buyer-serving 8080 process.
+   For non-joining worktree probes, also pass `--autotune-candidate`: `--no-join`
+   alone does not prevent canonical-install re-execution. For a local joined
+   stack, use `--isolate-lifecycle` with `protected_file` credentials instead.
+   Before sending acceptance requests, verify the running process's executable
+   resolves to the intended worktree binary, not merely that the launch command
+   named it. An installed-binary re-execution is not worktree acceptance.
 4. Run the e2e against that binary. Record sanitized evidence on the same
    branch.
 5. If it fails: change code, rebuild locally, re-run. Push commits to the

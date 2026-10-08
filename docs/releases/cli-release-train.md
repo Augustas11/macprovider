@@ -41,12 +41,28 @@ binary the Mac runs.
   in-scope change.
 
 Pearl coordinator/gateway release numbering is independent from the provider
-CLI train. Pearl currently reports runtime `v1.8.211`; failed or superseded
-runtime attempts remain consumed tags. Public provider release `v1.8.207` is
-the current fleet recommendation and none of those tags may be reused by either
-train.
+CLI train. Pearl currently reports runtime `v1.8.223` and recommends provider
+`1.8.223`; failed or superseded runtime attempts remain consumed tags. Public
+provider release `v1.8.223` is published, and none of those tags may be reused
+by either train. The historical promotion table below is not today's version
+selection.
 
-## Current promoted stable
+## Current published release and fleet target
+
+Verified 2026-10-08 against public release metadata and live health:
+
+| Field | Value |
+|---|---|
+| GitHub provider release | [v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223) |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.223@9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` |
+| Pearl runtime / recommended provider | `v1.8.223` / `1.8.223` |
+| Compatibility target | `1.8.223`; applied target recorded in the coordinator release train on 2026-10-08 |
+| Mirror discovery caveat | `download.malibu.tech/releases/latest.json` still reports `v1.8.207`; do not claim all installer/mirror channels are synchronized |
+
+CLI223 predates #1871 and #1892. Neither this version alignment nor its public
+signature proves automatic privacy enrollment or network activation.
+
+## Historical fully documented 207 promotion
 
 | Field | Value |
 |---|---|
@@ -82,6 +98,27 @@ No candidate identity is reserved by this entry. Published CLI 1.8.223 does
 not contain these newly merged enrollment changes; updating to 223 alone
 does not activate network-wide privacy.
 
+Privacy activation follow-up [#1892](https://github.com/Augustas11/macprovider/pull/1892)
+merged on 2026-10-08 as `394bf61aea689075ac5506c506484cc75168649a`,
+with antfleet-ops approval and all checks green. The accepted campaign includes
+exact signed-catalog/artifact model scopes, grouped
+key-record budget, compatible reservation parsing, bounded rejection reasons,
+and reliable isolated-stack migration/bootstrap and executable provenance.
+Studio worktree release/debug builds and native stream/nonstream model-name
+checks passed; encrypted automatic-enrollment transport fixtures passed.
+Linux privacy/backend/updater and repeated real-service boundary checks passed.
+Consolidated source `e8c525982` built successfully on the designated Studio;
+the complete code, security and architecture audit lanes report 0C/0H/0M.
+Final [CI](https://github.com/Augustas11/macprovider/actions/runs/37730968917)
+and [spec-index](https://github.com/Augustas11/macprovider/actions/runs/37730968835)
+passed without manual reruns.
+These separate results are not signed native-runtime or fleet activation.
+Reuse the retained signed baseline and unchanged decode qualification; resolve
+campaign findings before one reviewed train cut, then confirm the final signed
+identity and changed buyer path. No candidate version is reserved here, and
+#1749 remains open until private traffic is actually serving on eligible fleet
+providers, including new joins.
+
 Private signed compatibility set
 `Augustas11/macprovider:v1.8.212@d806dcf203a94f813aadbe458c8de578be476bd0`
 was produced by acceptance run [37075501296](https://github.com/Augustas11/macprovider/actions/runs/37075501296)
@@ -111,6 +148,7 @@ are consumed and must not be reused.
 |---|---|---|
 | Pool model status names the qualifying pool and says eligible to earn only on qualifying settled requests. Malibu clears stale positive bindings when status readback is unavailable, inactive, or mismatched; eligibility wording does not claim current paid work or income. | merged `00700349b` 2026-10-07; awaiting a reviewed signed CLI/app release | [#1883](https://github.com/Augustas11/macprovider/pull/1883) ([#1880](https://github.com/Augustas11/macprovider/issues/1880)) |
 | Automatic privacy-class eligibility and enrollment, preserving explicit opt-out and refusing ineligible posture; fleet availability still requires signed-release acceptance, approved identity, directory configuration and staged rollout. | merged `d6e8bb2ff` 2026-10-08; not yet released or activated fleet-wide | [#1871](https://github.com/Augustas11/macprovider/pull/1871) (#1749) |
+| Exact catalog/artifact privacy model scopes share one signed key record; reservation parsers accept grouped scopes while keeping exact request binding. Bounded rejection diagnostics and isolated-stack bootstrap/provenance fixes complete the source campaign. | merged `394bf61ae` 2026-10-08; source accepted, signed identity and live activation pending | [#1892](https://github.com/Augustas11/macprovider/pull/1892) (#1749) |
 | Operator pause remains authoritative when coordinator drain first moves the provider to `network_offline` or `coordinator_unavailable`; only the operator command may write those pause transitions. | merged `9384e5280` 2026-10-03 | #1834 (#1770) |
 | Qwen3.6 35B-A3B ordinary decode uses the fused A3B MoE kernels (fork pin `Augustas11/mlx-swift-lm@b1811029`): decode and verify rows of at most 7 tokens stay fused at any batch size in chunks of at most 7, prefill stays on the stock kernel, and exact per-tensor layout validation gates the path. Studio qualification: ordinary decode 1.25x / 1.15x / 0.97x vs stock at 1 / 2 / 8 rows, 0 parity mismatches in 36 paired blocks, bit-identical run to run. `MLX_LM_QWEN35_FUSED_MOE=0` disables it. `KVBuildIdentity` changes, so prior KV cold-tier entries miss once. Native MTP stays default-off; the native-MTP lab tooling is compiled only under `DEBUG \|\| MACPROVIDER_LAB_HARNESS`, and signed R024 `proposal_depth` is capped at 6. | merged `280f0e95d` 2026-10-05 | #1832 (#1770) |
 | Privacy-class work settles under production `enforce`: a relay-blind route snapshot, a provider-signed content-free `relay-blind-settlement-v1` receipt, and the `relay_blind_settled` outcome, which is never `verified`. The provider withholds the receipt on any unvalidated usage or frame failure. | merged `d4d73c253` 2026-10-05 | #1853 (#1749) |

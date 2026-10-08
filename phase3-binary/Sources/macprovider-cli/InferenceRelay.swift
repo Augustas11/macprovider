@@ -6,11 +6,12 @@ import MacProviderCore
 /// expected by `ChatCompletionRequest.validateModelMatches`. Trims whitespace
 /// and newlines to match the normalization applied to
 /// `catalogModelIDForCoordinator` in CoordinatorClient (see lines 324-327);
-/// returns `[]` for nil/empty so the default no-alias behavior is preserved.
+/// Adds only the other exact name of a uniquely matched pinned signed-catalog
+/// row. The configured alias remains first; nil/empty stays no-alias.
 func modelIDAliasList(_ value: String?) -> [String] {
     guard let value else { return [] }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? [] : [trimmed]
+    return RelayBlindCatalogModels.names(trimmed)
 }
 
 actor InferenceRelay {

@@ -38,6 +38,48 @@ const (
 	privacyTestSigning = "live.malibu.provider.cli"
 )
 
+func TestPrivacyGateLogsBoundedReasonsWithoutIdentifiers(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason, code string
+		mutate             func(*testing.T, *privacyHarness)
+	}{
+		{"expired posture", "posture_expired", privacyClassUnavailable, func(t *testing.T, h *privacyHarness) { h.clock.Advance(151 * time.Second) }},
+		{"quarantine", "provider_quarantined", privacyClassUnavailable, func(t *testing.T, h *privacyHarness) {
+			if err := h.store.Quarantine(context.Background(), h.provider.ProviderID, "private-canary-reason", h.clock.Now(), time.Hour); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"kill switch", "kill_switch_disabled", privacyClassDisabled, func(t *testing.T, h *privacyHarness) {
+			if err := h.store.SetPrivacyDisabled(context.Background(), true, "private-canary-reason", h.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true})
+			var logs bytes.Buffer
+			h.server.log = zerolog.New(&logs)
+			tc.mutate(t, h)
+			_, code := h.server.privacyGate(context.Background(), h.provider, h.privacyKey.KeyRecordDigest)
+			if code != tc.code {
+				t.Fatalf("code=%q want=%q", code, tc.code)
+			}
+			var event map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event["event"] != "privacy_gate_rejected" || event["reason"] != tc.reason {
+				t.Fatalf("unexpected diagnostic: %v", event)
+			}
+			for _, secret := range []string{h.provider.ProviderID, h.provider.AssignedID, h.privacyKey.KeyRecordDigest, h.privacyKey.KID, "private-canary-reason"} {
+				if secret != "" && strings.Contains(logs.String(), secret) {
+					t.Fatal("privacy gate diagnostic exposed an identifier or private value")
+				}
+			}
+		})
+	}
+}
+
 type privacyClock struct {
 	mu sync.Mutex
 	at time.Time

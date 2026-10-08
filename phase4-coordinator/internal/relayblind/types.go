@@ -346,7 +346,7 @@ func (r ReservationResponse) Validate() error {
 	if err := r.KeyRecord.validateStructure(); err != nil {
 		return ErrInvalidReservation
 	}
-	if len(r.KeyRecord.Models) != 1 || r.KeyRecord.Models[0] != r.Model || !contains(r.KeyRecord.EndpointFamilies, r.EndpointFamily) || r.ExpiresAtUnix > r.KeyRecord.ExpiresAtUnix {
+	if !contains(r.KeyRecord.Models, r.Model) || !contains(r.KeyRecord.EndpointFamilies, r.EndpointFamily) || r.ExpiresAtUnix > r.KeyRecord.ExpiresAtUnix {
 		return ErrInvalidReservation
 	}
 	return nil

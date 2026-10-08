@@ -22,7 +22,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/relayblind"
 )
 
-func pilotReservationFixture(t *testing.T, stream bool) (relayblind.ReservationResponse, []byte) {
+func pilotReservationFixture(t *testing.T, stream bool, additionalModels ...string) (relayblind.ReservationResponse, []byte) {
 	t.Helper()
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -32,7 +32,7 @@ func pilotReservationFixture(t *testing.T, stream bool) (relayblind.ReservationR
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := relayblind.NewSignedKeyRecord(key.PublicKey().Bytes(), identity, []string{"test-model"}, 4096, fixedNow().Add(-time.Minute), fixedNow().Add(time.Hour))
+	record, err := relayblind.NewSignedKeyRecord(key.PublicKey().Bytes(), identity, append([]string{"test-model"}, additionalModels...), 4096, fixedNow().Add(-time.Minute), fixedNow().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,8 @@ func pilotEnvelopeFixture(t *testing.T, res relayblind.ReservationResponse) []by
 func TestRelayBlindSuccessfulChatUsesExistingSettlementAndNeverRetries(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
-			res, _ := pilotReservationFixture(t, stream)
+			// The successful buyer path must also accept a grouped signed scope.
+			res, _ := pilotReservationFixture(t, stream, "test-model-alias")
 			raw := pilotEnvelopeFixture(t, res)
 			digest := sha256.Sum256(raw)
 			digestText := base64.RawURLEncoding.EncodeToString(digest[:])

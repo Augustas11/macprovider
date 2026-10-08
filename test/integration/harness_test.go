@@ -1227,43 +1227,16 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 // phase5-gateway/internal/auth/keys.go:64-67. Returns the full key
 // the buyer should send as Authorization: Bearer.
 //
-// We pre-boot the gateway briefly so it runs its own schema migrations,
-// then close the connection and let the real gateway take over. This is
-// simpler than re-implementing the schema in this test file (which
-// would drift the first time someone adds a column).
+// The gateway's check mode completes its own migrations and exits before
+// seeding. This avoids stopping a bootstrap process halfway through schema
+// creation or duplicating schema definitions in the harness.
 func (s *scenario) seedGatewayAccountAndKey() string {
 	s.t.Helper()
-	// Boot the gateway once to run migrations, then stop it. This
-	// uses the same binary path; we run it for ~1s, kill, then proceed.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
-	var seedLogs bytes.Buffer
-	cmd.Stderr = &seedLogs
-	cmd.Stdout = &seedLogs
-	if err := cmd.Start(); err != nil {
-		s.t.Fatalf("seed gateway start: %v", err)
-	}
-	// Poll until the schema is present, then kill.
-	deadline := time.Now().Add(4 * time.Second)
-	schemaReady := false
-	for time.Now().Before(deadline) {
-		db, err := sql.Open("sqlite", s.gatewayDB)
-		if err == nil {
-			var ok int
-			err = db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'`).Scan(&ok)
-			db.Close()
-			if err == nil {
-				schemaReady = true
-				break
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	if !schemaReady {
-		s.t.Fatalf("seed gateway did not create accounts schema: %s", seedLogs.String())
+	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML, "-check")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		s.t.Fatalf("seed gateway migrations: %v: %s", err, output)
 	}
 
 	db, err := sql.Open("sqlite", s.gatewayDB)

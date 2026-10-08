@@ -646,40 +646,60 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 }
 
 func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now time.Time) (time.Time, bool) {
+	verifiedAt, reason := a.EligibilityReason(providerID, session, keyDigest, now)
+	return verifiedAt, reason == ""
+}
+
+// EligibilityReason evaluates the same fail-closed gate and returns only a
+// fixed diagnostic category. No provider identity, key, or request data is
+// included; callers must not expose the category as buyer trust metadata.
+func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
 	if a == nil || a.store == nil || keyDigest == "" {
-		return time.Time{}, false
+		return time.Time{}, "authority_or_key_unavailable"
 	}
 	id := privacySessionID{providerID: providerID, session: session}
 	a.mu.Lock()
 	entry := a.sessions[id]
 	if entry == nil || !entry.verified {
 		a.mu.Unlock()
-		return time.Time{}, false
+		return time.Time{}, "posture_unverified"
 	}
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
 	_, listed := entry.digests[keyDigest]
 	a.mu.Unlock()
-	if !listed || now.Sub(verifiedAt) > time.Duration(a.maxAge)*time.Second {
-		return time.Time{}, false
+	if !listed {
+		return time.Time{}, "key_not_in_posture"
+	}
+	if now.Sub(verifiedAt) > time.Duration(a.maxAge)*time.Second {
+		return time.Time{}, "posture_expired"
 	}
 	if !a.identityMatches(teamID, signingID, cdhash, binary, now) {
-		return time.Time{}, false
+		return time.Time{}, "code_identity_unapproved_or_expired"
 	}
 	ctx := context.Background()
 	disabled, err := a.store.PrivacyDisabled(ctx)
-	if err != nil || disabled {
-		return time.Time{}, false
+	if err != nil {
+		return time.Time{}, "kill_switch_store_error"
+	}
+	if disabled {
+		return time.Time{}, "kill_switch_disabled"
 	}
 	quarantined, err := a.isQuarantined(ctx, providerID, now)
-	if err != nil || quarantined {
-		return time.Time{}, false
+	if err != nil {
+		return time.Time{}, "quarantine_store_error"
+	}
+	if quarantined {
+		return time.Time{}, "provider_quarantined"
 	}
 	fresh, err := a.store.PrivacyKeyFresh(ctx, providerID, session, keyDigest, now)
-	if err != nil || !fresh {
-		return time.Time{}, false
+	if err != nil {
+		return time.Time{}, "key_freshness_store_error"
 	}
-	return verifiedAt, true
+	if !fresh {
+		return time.Time{}, "key_stale_or_revoked"
+	}
+	return verifiedAt, ""
 }
 
 func (a *PrivacyAuthority) identityMatches(teamID, signingID, cdhash, binary string, now time.Time) bool {

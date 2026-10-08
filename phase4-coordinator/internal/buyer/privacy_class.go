@@ -77,11 +77,29 @@ func writePrivacyClassError(w http.ResponseWriter, code, message string) {
 // privacyDisabledNow is true when the class is off, unwired, or the kill
 // switch cannot be read. A store error fails closed.
 func (s *Server) privacyDisabledNow(ctx context.Context) bool {
+	return s.privacyDisabledReason(ctx) != ""
+}
+
+func (s *Server) privacyDisabledReason(ctx context.Context) string {
 	if s == nil || s.privacyAuthority == nil || s.relayBlind == nil || !s.relayBlind.cfg.Enabled || s.relayBlind.store == nil {
-		return true
+		return "class_not_configured"
 	}
 	disabled, err := s.relayBlind.store.PrivacyDisabled(ctx)
-	return err != nil || disabled
+	if err != nil {
+		return "kill_switch_store_error"
+	}
+	if disabled {
+		return "kill_switch_disabled"
+	}
+	return ""
+}
+
+func (s *Server) logPrivacyGateRejection(reason string) {
+	if s != nil {
+		// Fixed categories only: never log plaintext, IDs, key digests,
+		// ciphertext, reservation tokens, or raw store errors here.
+		s.log.Info().Str("event", "privacy_gate_rejected").Str("reason", reason).Msg("privacy routing gate rejected")
+	}
 }
 
 // handlePrivacyDirectory serves the SPEC-049-R028 signed identity
@@ -119,28 +137,38 @@ func privacyObservedCode(code string, beforeConsume bool) string {
 // privacyGate re-checks the SPEC-049 conditions for one live session. It
 // does not select a different provider.
 func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest string) (time.Time, string) {
-	if s.privacyDisabledNow(ctx) {
-		return time.Time{}, privacyClassDisabled
+	reject := func(reason, code string) (time.Time, string) {
+		s.logPrivacyGateRejection(reason)
+		return time.Time{}, code
+	}
+	if reason := s.privacyDisabledReason(ctx); reason != "" {
+		return reject(reason, privacyClassDisabled)
 	}
 	if !s.relayBlindAvailable() {
-		return time.Time{}, privacyClassUnavailable
+		return reject("relay_blind_unavailable", privacyClassUnavailable)
 	}
 	current, live := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
 	if !live || current.ProviderID == "" || current.AssignedID == "" || !current.IsWSTunneled() || !relayBlindSessionUsable(current) {
-		return time.Time{}, privacyClassUnavailable
+		return reject("live_session_unavailable", privacyClassUnavailable)
 	}
 	// SPEC-022 R-14.2 / SPEC-049-R021: under enforce the privacy class is a
 	// relay-blind lane and needs the same settlement prerequisites.
 	if s.relayBlindSettlementPrerequisite(current) != "" {
-		return time.Time{}, privacyClassUnavailable
+		return reject("settlement_prerequisite_missing", privacyClassUnavailable)
 	}
 	quarantined, err := s.relayBlind.store.IsQuarantined(ctx, current.ProviderID, s.now())
-	if err != nil || quarantined {
-		return time.Time{}, privacyClassUnavailable
+	if err != nil {
+		return reject("quarantine_store_error", privacyClassUnavailable)
 	}
-	verifiedAt, ok := s.privacyAuthority.Eligible(current.ProviderID, current.AssignedID, keyDigest, s.now())
-	if !ok || verifiedAt.Unix() <= 0 {
-		return time.Time{}, privacyClassUnavailable
+	if quarantined {
+		return reject("provider_quarantined", privacyClassUnavailable)
+	}
+	verifiedAt, reason := s.privacyAuthority.EligibilityReason(current.ProviderID, current.AssignedID, keyDigest, s.now())
+	if reason != "" {
+		return reject(reason, privacyClassUnavailable)
+	}
+	if verifiedAt.Unix() <= 0 {
+		return reject("posture_timestamp_invalid", privacyClassUnavailable)
 	}
 	return verifiedAt, ""
 }
@@ -157,7 +185,8 @@ type privacySelection struct {
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key.
 func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryptedBytes int64) (privacySelection, string) {
-	if s.privacyDisabledNow(ctx) {
+	if reason := s.privacyDisabledReason(ctx); reason != "" {
+		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled
 	}
 	if s.pool == nil || !s.relayBlindAvailable() {
@@ -171,6 +200,11 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
 		if err != nil || len(records) == 0 {
+			if err != nil {
+				s.logPrivacyGateRejection("key_record_store_error")
+			} else {
+				s.logPrivacyGateRejection("no_matching_fresh_privacy_key")
+			}
 			continue
 		}
 		for _, record := range records {
@@ -180,11 +214,13 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 			}
 			attestation, signature, err := s.relayBlind.store.LookupPrivacyAttestation(ctx, provider.ProviderID, record.KID, record.KeyRecordDigest)
 			if err != nil || attestation.KeyRecordDigest != record.KeyRecordDigest || attestation.NotBeforeUnix != record.NotBeforeUnix || attestation.ExpiresAtUnix != record.ExpiresAtUnix {
+				s.logPrivacyGateRejection("key_attestation_missing_or_mismatched")
 				continue
 			}
 			return privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt}, ""
 		}
 	}
+	s.logPrivacyGateRejection("no_eligible_provider")
 	return privacySelection{}, privacyClassUnavailable
 }
 
