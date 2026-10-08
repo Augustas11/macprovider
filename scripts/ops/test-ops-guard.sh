@@ -60,7 +60,55 @@ expect block "ssh host 'sudo systemctl restart macprovider-coordinator'"
 expect block 'systemctl --no-block restart macprovider-coordinator.service'
 expect allow 'systemctl status macprovider-coordinator'
 expect allow 'journalctl -u macprovider-coordinator -n 50'
-expect allow 'grep -n "systemctl restart macprovider-coordinator" docs/runbooks/pearl-coordinator-rollout.md && echo ok' Read
+expect allow 'grep -n "systemctl restart macprovider-coordinator" docs/runbooks/pearl-coordinator-rollout.md && echo ok'
+expect block 'sudo -u root systemctl try-restart macprovider-coordinator'
+expect block 'service macprovider-coordinator restart'
+expect allow 'service macprovider-coordinator status'
+
+# --- M1: guarded names as arguments of read-only commands are allowed ---
+expect allow 'grep -rn deploy-pearl-vps.sh docs'
+expect allow 'git log --oneline -- phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect allow 'bash -n phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect allow 'bash -euo pipefail -n phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect allow 'rg "gh workflow run release.yml" docs'
+expect allow 'cat scripts/catalog-content-release.sh | head -n 40'
+expect allow 'sed -n 1,20p scripts/publish-native-mtp-revocations.sh'
+expect allow "awk '/--apply/' ops/runbooks/pearl-release-updater.md"
+expect allow 'echo "run deploy-pearl-vps.sh later" # deploy-pearl-vps.sh'
+expect allow 'less docs/runbooks/pearl-coordinator-rollout.md'
+# ... but wrappers are unwrapped
+expect block 'sudo -E env FOO=1 nohup bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'time nice -n 10 ./phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block "bash -c 'cd /x && scripts/catalog-content-release.sh --deploy --commit abc'"
+expect block "sh -ec \"gh workflow run release.yml\""
+expect block "ssh -i key -p 22 host 'sudo systemctl restart macprovider-coordinator'"
+expect block "ssh host sudo systemd-run --unit=mp-update-1 -p UMask=0077 /usr/local/sbin/macprovider-pearl-update --apply --tag v1.8.230"
+expect block 'echo "$(gh workflow run release.yml)"'
+expect block 'eval "gh workflow run pearl-runtime-release.yml"'
+expect block 'timeout 60 scripts/publish-native-mtp-revocations.sh --deploy'
+
+# --- M2: display names, numeric ids, reruns ---
+expect block 'gh workflow run "Sign private acceptance candidate" --ref main'
+expect block 'gh workflow run "Promote exact physically accepted candidate"'
+expect block 'gh workflow run "release macprovider-cli" -f version=v1'
+expect block "gh workflow run 'Release Pearl runtime' -f version=v1"
+expect block 'gh workflow run "Verify live coordinator release rollout" -f tag=v1'
+expect block 'gh workflow run 123456789 --ref main'
+expect block 'gh api -X POST repos/o/r/actions/workflows/987654/dispatches -f ref=main'
+expect block 'gh run rerun 37746076994'
+expect block 'gh -R o/r run rerun 1 --failed'
+expect allow 'gh run view 37746076994 --log'
+expect allow 'gh workflow run "CI" --ref main'
+
+# --- M3: separators, comments, entry-point exemption ---
+expect block 'scripts/ops/cli-release.sh status & gh workflow run release.yml'
+expect block 'echo x # comment
+bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect allow '# bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'cat scripts/ops/README.md; bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'ls scripts/ops/ && gh workflow run release.yml'
+expect allow 'bash scripts/ops/catalog-activate.sh next --run'
+expect allow './scripts/ops/pearl-runtime.sh status'
 
 # --- entry points and the marker ---
 expect allow 'scripts/ops/catalog-activate.sh next --run'
@@ -72,6 +120,9 @@ expect block 'MACPROVIDER_OPS_ENTRYPOINT=1 gh workflow run release.yml'
 expect block 'export MACPROVIDER_OPS_ENTRYPOINT=1; bash phase4-coordinator/dist/deploy-pearl-vps.sh'
 expect block 'scripts/ops/cli-release.sh status; gh workflow run release.yml'
 expect allow 'gh workflow run release.yml' Read
+expect block 'export FOO=1 MACPROVIDER_OPS_ENTRYPOINT=1'
+expect block 'env MACPROVIDER_OPS_ENTRYPOINT=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect allow 'grep -rn "MACPROVIDER_OPS_ENTRYPOINT=" scripts/ops'
 
 # --- closing keywords ---
 expect block 'git commit -m "Fix the router. Closes #123"'
@@ -90,6 +141,12 @@ expect allow 'gh pr create --title "Part of #1749" --body "Tracks #1749"'
 expect allow 'git commit -m "Fix the prefix #3 parser"'
 expect allow 'git commit -m "fixed in 1.8.230"'
 expect allow 'git log --grep "fixes #12"'
+expect block 'git -c user.name=x -C . commit -m "closes #5"'
+expect block 'git --no-pager commit -am "Fixes https://github.com/Augustas11/macprovider/issues/1749"'
+expect block 'gh pr merge 1900 --squash --subject "Resolve #12"'
+expect block 'gh pr merge 1900 --squash --body "closed #12"'
+expect allow 'gh pr merge 1900 --squash --subject "Refs #12"'
+expect allow 'git commit -m "See https://github.com/Augustas11/macprovider/issues/1749"'
 printf 'Body\n\nThis does not resolve #55.\n' > "$tmp/body.md"
 expect block "gh pr create --title t --body-file body.md"
 printf 'Body\n\nRefs #55.\n' > "$tmp/ok.md"

@@ -1,28 +1,40 @@
 # Ops guard hooks
 
-`claude-pretooluse-ops-guard.sh` is a Claude Code `PreToolUse` hook. When an
-agent types one of these commands directly, the hook blocks the Bash call
-(exit 2) and names the entry point to use instead:
+`claude-pretooluse-ops-guard.sh` is a Claude Code `PreToolUse` hook; the
+parsing is in `ops_guard.py`. It blocks a Bash call (exit 2) and names the
+entry point to use when the command word of any simple command in it is:
 
-- `gh workflow run` (or `gh api .../dispatches`) of `acceptance-candidate.yml`,
-  `promote-acceptance-candidate.yml`, `release.yml`, `pearl-runtime-release.yml`
+- `gh workflow run` (or `gh api .../workflows/<wf>/dispatches`) of
+  `acceptance-candidate.yml`, `promote-acceptance-candidate.yml`, `release.yml`,
+  `pearl-runtime-release.yml` or `verify-live-coordinator-release-rollout.yml`,
+  by file name or by display name (read from the workflow files), or of any
+  numeric workflow id; and `gh run rerun`
 - `deploy-pearl-vps.sh`
 - `catalog-content-release.sh --deploy`
 - `publish-native-mtp-revocations.sh --deploy`
 - `macprovider-pearl-update --apply`
-- `systemctl restart macprovider-coordinator`
-- `gh pr create|edit` or `git commit` whose message, inline or in a
-  `--body-file`/`-F` file, has a closing keyword (`close`, `closes`, `closed`,
-  `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`) followed by `#N`
-  or `owner/repo#N`. A negation does not help: GitHub closes the issue on
+- `systemctl restart` (or `try-restart`, `reload-or-restart`) or
+  `service ... restart` of `macprovider-coordinator`
+- `gh pr create|edit|merge` or `git commit` (with any git global options)
+  whose message, inline, in a heredoc, or in a `--body-file`/`-F` file, has a
+  closing keyword (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+  `resolve`, `resolves`, `resolved`) followed by `#N`, `owner/repo#N` or a
+  GitHub issue/pull URL. A negation does not help: GitHub closes the issue on
   "does not close #N" too.
-- any command that sets `MACPROVIDER_OPS_ENTRYPOINT` itself
+- an assignment of `MACPROVIDER_OPS_ENTRYPOINT`
 
-The hook allows invocations of `scripts/ops/*.sh`. It allows every command when
-`MACPROVIDER_OPS_ENTRYPOINT=1` is set in the hook's own environment; the entry
-points export it for the steps they run. The guard keeps agents on the
-runbook route. It is not a security boundary. Test it with
-`bash scripts/ops/test-ops-guard.sh`.
+The line is split on `;`, `&`, `&&`, `|`, `||`, newlines and parentheses.
+Comments and heredoc bodies are removed, and `$(...)` and backtick bodies are
+checked as commands of their own. Wrappers are unwrapped: `sudo`, `env`,
+`nohup`, `time`, `nice`, `ionice`, `timeout`, `xargs`, `systemd-run`, `eval`,
+`bash|sh -c PAYLOAD`, and the remote command of `ssh HOST CMD`. A guarded name
+that is only an argument (`grep`, `rg`, `git log`, `cat`, `sed`, `bash -n`)
+is allowed.
+
+Every command is allowed when `MACPROVIDER_OPS_ENTRYPOINT=1` is set in the
+hook's own environment; the entry points export it for the steps they run.
+The guard keeps agents on the runbook route. It is not a security boundary.
+Test it with `bash scripts/ops/test-ops-guard.sh`.
 
 ## Claude Code
 
@@ -59,8 +71,9 @@ instructions. Add this to `~/.codex/AGENTS.md`, or to the session prompt:
 ## macprovider live operations
 
 - Never type these directly: `gh workflow run` of acceptance-candidate.yml,
-  promote-acceptance-candidate.yml, release.yml or pearl-runtime-release.yml;
-  deploy-pearl-vps.sh; catalog-content-release.sh --deploy;
+  promote-acceptance-candidate.yml, release.yml, pearl-runtime-release.yml or
+  verify-live-coordinator-release-rollout.yml (by file, display name or id);
+  `gh run rerun`; deploy-pearl-vps.sh; catalog-content-release.sh --deploy;
   publish-native-mtp-revocations.sh --deploy; macprovider-pearl-update --apply;
   systemctl restart macprovider-coordinator.
 - Use the entry points instead: scripts/ops/cli-release.sh,
