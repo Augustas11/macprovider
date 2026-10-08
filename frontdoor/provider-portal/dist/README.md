@@ -47,8 +47,8 @@ spec-owned doc.
 ## One-time deploy (operator action; run from the macprovider-poc repo root)
 
 ```bash
-# Set PEARL to your Pearl IP (current production: 159.223.165.194)
-PEARL=159.223.165.194
+# Set PEARL to your Pearl IP (current production: <pearl-host>)
+PEARL=<pearl-host>
 
 # 1. Stage portal files
 ssh root@$PEARL 'install -d -o www-data -g www-data -m 0755 /var/www/portal'

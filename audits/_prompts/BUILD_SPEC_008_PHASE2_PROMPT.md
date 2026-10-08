@@ -441,7 +441,7 @@ specs/SPEC-008-tier2.md                               # normative — §6, §7, 
 
 ## SSH + deploy notes (same as other sessions)
 
-- Pearl VPS: `ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194`
+- Pearl VPS: `ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host>`
 - Before any `git push`: `gh auth switch -u Augustas11`
 - Build Linux binaries: `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build`
 - Deploy: SCP binaries → install → `systemctl restart`

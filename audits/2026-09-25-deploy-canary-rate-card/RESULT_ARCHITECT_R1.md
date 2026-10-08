@@ -2259,7 +2259,7 @@ phase4-coordinator/dist/coordinator.yaml.example:298:  # When empty, /poolz fall
 phase4-coordinator/dist/coordinator.yaml.example:303:  # buyer mux. Live Pearl values belong in
 phase4-coordinator/dist/coordinator.yaml.example:407:# block was silently missing from Pearl's `/opt/macprovider/coordinator.yaml`
 phase4-coordinator/dist/systemd/malibu-emission.conf.example:3:# Install on Pearl (after deploy-malibu-emission-pearl.sh merges overlays):
-phase4-coordinator/dist/coordinator.yaml:1:# Production coordinator config — Pearl VPS deployment (159.223.165.194)
+phase4-coordinator/dist/coordinator.yaml:1:# Production coordinator config — Pearl VPS deployment (<pearl-host>)
 phase4-coordinator/dist/coordinator.yaml:16:  # Live Pearl overlays supply exact compatibility_set.target_id / accepted_ids.
 phase4-coordinator/dist/coordinator.yaml:40:  # the top honest Mac tier (64GB+). Pearl live carried an explicit 4 until
 phase4-coordinator/dist/coordinator.yaml:50:  # 2026-07-28 / #784: align the checked-in Pearl template with the live

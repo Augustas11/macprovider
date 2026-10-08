@@ -6,7 +6,7 @@ VPS (`coordinator.malibu.tech`) back to the previous build, in under
 version or when a smoke test against the new binary fails.
 
 **Prerequisites**:
-- SSH access to the VPS as `root` (e.g. `ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194`).
+- SSH access to the VPS as `root` (e.g. `ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host>`).
 - The `.prev` snapshot exists at `/opt/macprovider/coordinator.prev`. The
   deploy script (`phase4-coordinator/dist/deploy-pearl-vps.sh`) creates
   this in step 4/9, before installing the new binary. If you are
@@ -20,7 +20,7 @@ Use this when the **new binary** is the problem and the previous
 `coordinator.yaml`/service unit are still fine.
 
 ```bash
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> '
   set -e
   if [ ! -x /opt/macprovider/coordinator.prev ]; then
     echo "no .prev snapshot — fast rollback not possible" >&2
@@ -119,7 +119,7 @@ disk wipe), populate it from the next deploy by re-running
 about to be replaced. To populate it WITHOUT a new deploy:
 
 ```bash
-ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
+ssh -i ~/.ssh/<operator-ssh-key> root@<pearl-host> '
   install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
 '
 ```

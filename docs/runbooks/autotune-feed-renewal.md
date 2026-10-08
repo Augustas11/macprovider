@@ -60,7 +60,7 @@ fails closed on empty secrets. Do **not** commit key material.
 | Secret | What it is |
 | --- | --- |
 | `AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64` | Raw 32-byte Ed25519 seed, same contents as `~/.config/macprovider/keys/autotune-static-v4.private.base64`. Do not reuse the discovery-head release-signing PEM. |
-| `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | Dedicated OpenSSH private key for `root@159.223.165.194` (not `pearl_operator_ed25519`, not the download.malibu.tech upload key). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
+| `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | Dedicated OpenSSH private key for `root@<pearl-host>` (not `<operator-ssh-key>`, not the download.malibu.tech upload key). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read. Same capability as the `production-release` posture token; this environment does not inherit that secret. |
 
 ## What the signed job does

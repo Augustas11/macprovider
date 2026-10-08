@@ -197,7 +197,7 @@ Non-gating audit export for Proof-of-Model research. **Do not gate routing on Ma
 1. Build: `cd phase4-coordinator && bash scripts/build-linux.sh`
 2. Backup + install binary:
    ```bash
-   scp -i ~/.ssh/pearl_operator_ed25519 dist/coordinator-linux-amd64 root@159.223.165.194:/tmp/
+   scp -i ~/.ssh/<operator-ssh-key> dist/coordinator-linux-amd64 root@<pearl-host>:/tmp/
    ssh pearl 'cp /opt/macprovider/coordinator /opt/macprovider/coordinator.prev-$(date +%Y%m%d%H%M)
      install -o root -g macprovider -m 0750 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator'
    ```

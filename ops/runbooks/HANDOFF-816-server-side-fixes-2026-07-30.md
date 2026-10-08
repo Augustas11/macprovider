@@ -19,7 +19,7 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 - Coordinator/gateway are money-path-adjacent → **PRs, not direct push.** Each PR: fill the `SPEC-GOVERNANCE-DECLARATION` block, get **`ci-required` green + 1 approving review**, then squash-merge (`GH_TOKEN=$(gh auth token -u Augustas11) gh pr merge …`).
 - Every slice passes the **3-lane Codex audit loop** (code/security/architect) to **0 C/H/M** before merge.
 - **Release verification:** workflow-green is not production proof. After deploy, verify the running service on Pearl (healthz + the specific behaviors below).
-- **Pearl access:** `ssh pearl` (159.223.165.194). Services: `macprovider-coordinator.service`, `macprovider-gateway.service`. Deploy via the repo's Pearl deploy tooling (find `deploy-pearl-vps` / ops runbooks; mind the healthz-version blind spot).
+- **Pearl access:** `ssh pearl` (<pearl-host>). Services: `macprovider-coordinator.service`, `macprovider-gateway.service`. Deploy via the repo's Pearl deploy tooling (find `deploy-pearl-vps` / ops runbooks; mind the healthz-version blind spot).
 
 ## Root cause recap (evidence — already gathered)
 - **Not memory:** a clean 150-token 30B decode at 12k did **zero swap-outs** (`Swapouts` unchanged), decode finished cleanly. Not capacity-bound.
@@ -68,7 +68,7 @@ Before the fixes this returned intermittent `503 no_provider_available` and `Pro
 
 ### Fleet state at handoff (2026-07-30)
 - **This Mac** (`mp-26592d710fc97aa7c07b260665c67cf6`): 30B, `max_context_override=12000`, concurrency 1, `idle_prewarm` enabled — **hand-edited / drifted**.
-- **air5** (`mp-90542c0bcf7c4d303795cd10bda3830d`, `admin@192.168.8.24`, key `~/.ssh/macprovider_prebeta_newmac_ed25519`): Qwen3-8B hand-edited to 12k — also drifted. **air5 autotune must be run from air5's GUI** (headless SSH can't unlock its login keychain — `keychainReadFailed`).
+- **air5** (`mp-90542c0bcf7c4d303795cd10bda3830d`, `admin@<lan-ip>`, key `~/.ssh/macprovider_prebeta_newmac_ed25519`): Qwen3-8B hand-edited to 12k — also drifted. **air5 autotune must be run from air5's GUI** (headless SSH can't unlock its login keychain — `keychainReadFailed`).
 - Same-day related issue: **#815** (gpt-oss-20b autotune SIGTRAP + a fail-unsafe drain that strands the provider).
 
 ## Done when

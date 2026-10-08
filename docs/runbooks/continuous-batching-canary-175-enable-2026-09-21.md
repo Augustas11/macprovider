@@ -7,14 +7,14 @@ Studio-only enable. Fleet stayed on 1.8.123. Slots stayed 4. Mode is
 
 - **Date:** 2026-09-21
 - **Operator:** augstar
-- **Provider id:** `mp-5aad6b654611666e16edf83dc0f326eb`
+- **Provider id:** `<studio-provider-id>`
 - **Installed RC:** signed `v1.8.175` @ `d02798dbe0482b4454cc25bf497959da59242faa`
   ([run 35569340744](https://github.com/Augustas11/macprovider/actions/runs/35569340744)
   attempt 1)
-- **Binary path:** `/Users/a1/macprovider/macprovider-cli` (launchd
+- **Binary path:** `<studio-home>/macprovider/macprovider-cli` (launchd
   `gui/501/live.malibu.provider`); CLI SHA-256
   `27a8ceac8fc35ca1b5447743048e7e6b0008734e0967a9569cd695c78d597ec8`
-- **Metallib:** co-located `/Users/a1/macprovider/mlx.metallib` present
+- **Metallib:** co-located `<studio-home>/macprovider/mlx.metallib` present
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1
   (25E253), thermal `nominal`
 - **Model tuple:** served `qwen3-coder-30b-a3b-instruct` /
@@ -24,7 +24,7 @@ Studio-only enable. Fleet stayed on 1.8.123. Slots stayed 4. Mode is
 - **Config:** `continuous_batching: canary` plus `paged_kv.enabled: true`
   (production defaults). Queue limit unset. Launchd argv is `serve --config`
   only. Backup:
-  `/Users/a1/.config/macprovider/config.yaml.bak-cb-canary-20260921T074014Z`
+  `<studio-home>/.config/macprovider/config.yaml.bak-cb-canary-20260921T074014Z`
 
 ## Load-time attach
 

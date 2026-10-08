@@ -15,7 +15,7 @@ authoritative production config. Stay narrowly in your lane.
     and prohibits inline secrets.
   - `phase4-coordinator/dist/coordinator.yaml` (NEW to tracking) —
     contents equal what is currently running on Pearl VPS
-    (`159.223.165.194:/opt/macprovider/coordinator.yaml`); pulled via
+    (`<pearl-host>:/opt/macprovider/coordinator.yaml`); pulled via
     scp then structurally verified secret-free before commit.
 
 ## What this change does (operator summary — NOT the audit answer)

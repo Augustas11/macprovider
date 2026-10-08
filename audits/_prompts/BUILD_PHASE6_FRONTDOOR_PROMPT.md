@@ -438,7 +438,7 @@ minimal pages; mainly verifying we don't ship a 5MB image). MANUAL.
 ### Scope
 
 - Cloudflare DNS A record: `console.malibu.tech` →
-  `159.223.165.194`, DNS-only (proxied:false), TTL 300s
+  `<pearl-host>`, DNS-only (proxied:false), TTL 300s
 - nginx vhost at `/etc/nginx/sites-available/console.malibu.tech`
   serving `/var/www/console/index.html` over TLS
 - Let's Encrypt cert via certbot --webroot bootstrap pattern (proven

@@ -84,7 +84,7 @@ The nginx echo URL must be replaced with an operator-controlled endpoint that re
 One command — relies on the `.prev` snapshot the deploy script keeps:
 
 ```bash
-ssh root@159.223.165.194 '
+ssh root@<pearl-host> '
   install -o macprovider -g macprovider -m 0755 \
     /opt/macprovider/gateway.prev /opt/macprovider/gateway && \
   systemctl restart macprovider-gateway
@@ -95,7 +95,7 @@ If the nginx site changed and that broke the rollout, revert the nginx
 config separately:
 
 ```bash
-ssh root@159.223.165.194 'git -C /etc/nginx/sites-available checkout HEAD~1 api.malibu.tech && nginx -t && systemctl reload nginx'
+ssh root@<pearl-host> 'git -C /etc/nginx/sites-available checkout HEAD~1 api.malibu.tech && nginx -t && systemctl reload nginx'
 ```
 
 (That requires the operator to have started a git history in

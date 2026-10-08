@@ -193,7 +193,7 @@ select the `production-release` environment and add these environment secrets:
 | `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` | Dedicated P-256 private key matching `security/acceptance-candidate-signing-public.pem`; provision with `scripts/provision-acceptance-signing-key.sh` |
 | `SPARKLE_EDDSA_PRIVATE_KEY` | Base64 Ed25519 seed matching `scripts/dist/malibu-v1.8.32-sparkle-public-key`; used only to generate the signed Malibu appcast |
 | `MALIBU_DOWNLOAD_SSH_KEY` | Complete OpenSSH private-key contents for the root Pearl publication account; the workflow writes it to a mode-0600 temporary file |
-| `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication IPv4 address (`159.223.165.194` unless the host is deliberately migrated) |
+| `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication IPv4 address (`<pearl-host>` unless the host is deliberately migrated) |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
 
 Do not duplicate release secrets at repository scope. The unsigned `build` job
@@ -958,8 +958,8 @@ test ! -e "$RECOVERY_WORKTREE"
 git worktree add --detach "$RECOVERY_WORKTREE" "$RELEASE_COMMIT"
 cd "$RECOVERY_WORKTREE"
 
-MALIBU_DOWNLOAD_VPS_HOST=159.223.165.194 \
-MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/pearl_operator_ed25519" \
+MALIBU_DOWNLOAD_VPS_HOST=<pearl-host> \
+MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/<operator-ssh-key>" \
   bash scripts/recover-independent-malibu-publication.sh "$RELEASE_ID"
 ```
 

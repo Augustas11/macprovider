@@ -78,7 +78,7 @@ operator wants it: new environment `autotune-feed-renewal` (main-only branch pol
 admin bypass, NO reviewers) + the two secrets scoped there + workflow `environment:` and
 `POSTURE_PROFILE=unattended` support in `scripts/verify-github-release-posture.sh` (skip
 the reviewer-rule assertion only for that profile) + runbook `docs/runbooks/autotune-feed-renewal.md`.
-A dedicated deploy key (not `~/.ssh/pearl_operator_ed25519`) should be generated for CI.
+A dedicated deploy key (not `~/.ssh/<operator-ssh-key>`) should be generated for CI.
 Worktree `/Users/augstar/macprovider-feed-renewal-unattended` (branch
 `ci/autotune-feed-renewal-unattended`) exists, EMPTY.
 

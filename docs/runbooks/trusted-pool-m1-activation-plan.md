@@ -643,11 +643,11 @@ execution order at the top.
 ### 5.1 Separate provider identity on the Mac Studio
 
 Host: the Mac Studio (M3 Ultra, 256 GB, macOS 26.4.1), which already has
-llama.cpp `b11149` at `/Users/a1/bench-1690/llama.cpp-b11149/llama-b11149/llama-server`
+llama.cpp `b11149` at `<studio-home>/bench-1690/llama.cpp-b11149/llama-b11149/llama-server`
 from the lab runs.
 
 Use a **second provider identity** (`$M1_PROVIDER_ID`), not the live
-`mp-5aad6b654611666e16edf83dc0f326eb`:
+`<studio-provider-id>`:
 
 - Any `model_admission_events` row for a provider, even revoked or
   withdrawn, removes it from native default routing
@@ -662,7 +662,7 @@ Use a **second provider identity** (`$M1_PROVIDER_ID`), not the live
 
 Safest for the live provider: the member runs as its own process with its own
 config, credentials, home, lifecycle, control socket and port, never touching
-`/Users/a1/macprovider/`, `~/.config/macprovider`, `:8080`, or any
+`<studio-home>/macprovider/`, `~/.config/macprovider`, `:8080`, or any
 `live.malibu.*` launchd label, and started/stopped by recorded PID (the lab
 `pidguard.sh` pattern). Memory: Q4_K_M 3B is about 2 GB plus KV for
 `-c 8192 -np 4`; negligible beside the live model, but it shares the GPU, so
@@ -684,7 +684,7 @@ operator-issued token identity is open (B5).
 
 ### 5.3 Member layout and config
 
-Everything under `M1M=/Users/a1/malibu-m1-pool` (mode 0700):
+Everything under `M1M=<studio-home>/malibu-m1-pool` (mode 0700):
 
 ```bash
 # env for every member command (the cli.sh pattern, production URL, no lab flags)
@@ -723,7 +723,7 @@ The provider token is imported, not left in the file:
 llama-server (flags proven in the lab, `rig.sh:350`):
 
 ```bash
-/Users/a1/bench-1690/llama.cpp-b11149/llama-b11149/llama-server \
+<studio-home>/bench-1690/llama.cpp-b11149/llama-b11149/llama-server \
   -m $M1M/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
   --host 127.0.0.1 --port 18130 -c 8192 -np 4 -ngl 99 --jinja
 ```

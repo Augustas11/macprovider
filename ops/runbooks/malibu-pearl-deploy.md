@@ -24,8 +24,8 @@
 ## 1. Preconditions
 
 - [ ] `main` includes `coordinator stats-migrate` + C3 accrual read mount
-- [ ] Pearl SSH: `~/.ssh/pearl_operator_ed25519` (or `SSH_KEY`)
-- [ ] Pearl host: `159.223.165.194` (`coordinator.malibu.tech`)
+- [ ] Pearl SSH: `~/.ssh/<operator-ssh-key>` (or `SSH_KEY`)
+- [ ] Pearl host: `<pearl-host>` (`coordinator.malibu.tech`)
 - [ ] `/etc/macprovider/coordinator.env` on Pearl
 - [ ] OPoI canaries recommended (Session A) before enabling accrual ticks
 - [ ] Prefer zero connected providers at restart, or `FORCE_RESTART=1`

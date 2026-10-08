@@ -15,7 +15,7 @@ prerequisite for taking money.
 === BEGIN PROMPT ===
 
 You are running a deep-stress test on the macprovider gateway + smart router
-deployed on Pearl VPS (159.223.165.194). Prior work landed in
+deployed on Pearl VPS (<pearl-host>). Prior work landed in
 DECISION_CRITERIA Entry 34 — read that entry first for context on the 5-min
 stress test results that came before (gateway throughput ceilings,
 routing-metadata cache effectiveness, account-concurrency limit discovery,
