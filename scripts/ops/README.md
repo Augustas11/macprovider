@@ -66,3 +66,32 @@ PEARL_RUNTIME_VERSION=v<x.y.z>                   # pearl-runtime.sh target tag
 
 When a script needs ssh and its variable is unset, it fails and names the
 variable.
+
+## Release-train status lines
+
+`release-train-status.sh` prints the "Current published release and fleet
+target" and "Active candidate" sections of `docs/releases/cli-release-train.md`
+from GitHub and `/healthz` (plus `MIRROR_LATEST_URL` when set). Paste its
+output over those sections instead of typing status by hand.
+
+## Risk-sized gates (draft)
+
+`.github/workflows/fast-required.yml` is a draft and is not enabled: it runs
+only on manual dispatch. It takes under 5 minutes and scopes every check to
+the diff: gofmt and `go vet` on the touched Go packages, `catalog-release.py
+verify` when the catalog changed, `check_spec_pr_declaration.py`, and
+`bash -n` on touched scripts. It prints `lane=fast` only when every changed
+path is docs, coordinator config examples, catalog or `scripts/ops/`.
+Anything else is `lane=full`.
+
+To enable it, in one PR:
+
+1. Switch its trigger to `pull_request`.
+2. Have `ci-required` read the lane. It already gates on the `changes`
+   detector (`scripts/ci-detect-changed-paths.sh`). Add `fast-required` to
+   its `needs`. When `lane=fast`, require only `changes` and `fast-required`,
+   and treat skipped full jobs as passing. When `lane=full`, keep today's
+   rule: every job must succeed or be a detector-sanctioned skip. Keep the
+   detector failing open, so an unresolvable diff is `full`.
+3. Add `fast-required` as a required check next to `ci-required` in the
+   branch ruleset.
