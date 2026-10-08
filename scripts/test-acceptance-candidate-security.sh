@@ -605,6 +605,12 @@ cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/dist/static/autotune-artifacts.json" \
   "$root/phase3-binary/dist/static/autotune-artifacts.json.sig" \
   "$work/pearl-catalog/"
+if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in json.load(open(sys.argv[1]))["feeds"] else 1)' "$work/pearl-catalog/release.json"; then
+  for name in native-mtp-admission.json native-mtp-admission.json.sig native-mtp-artifact-manifest.json \
+    native-mtp-selftest-bank.json native-mtp-selftest-bank.json.sig; do
+    cp "$root/phase3-binary/dist/static/$name" "$work/pearl-catalog/"
+  done
+fi
 cat > "$work/pearl-compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}
 EOF
