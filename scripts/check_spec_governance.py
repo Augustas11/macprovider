@@ -173,6 +173,11 @@ TRUSTED_POOL_LAYER2_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
 PRIVACY_CLASS_BETA_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA"
 # SPEC-048 native-MTP journeys; contract in scripts/native_mtp_journey_evidence.py.
 NATIVE_MTP_JOURNEY_IDS = ("JOURNEY-NATIVE-MTP-SERVING", "JOURNEY-NATIVE-MTP-RELEASE")
+PRIVACY_CLASS_BETA_V2_JOURNEY_ID = "JOURNEY-PRIVACY-CLASS-BETA-V2"
+PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS = frozenset({
+    PRIVACY_CLASS_BETA_JOURNEY_ID,
+    PRIVACY_CLASS_BETA_V2_JOURNEY_ID,
+})
 TRUSTED_POOL_LAYER2_EXECUTION_MODE = "isolated-candidate-trusted-pool-layer2-mvp"
 TRUSTED_POOL_LAYER2_ARTIFACT_ID = "redacted-trusted-pool-layer2"
 TRUSTED_POOL_LAYER2_STEP_ID_ORDER = (
@@ -845,6 +850,83 @@ def resolve_trusted_openssl(path: str | None = None) -> str:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return str(resolved)
     raise ValueError("could not resolve trusted OpenSSL binary")
+
+
+def verify_pinned_public_ecdsa_sha256(
+    public_key_bytes: bytes,
+    expected_public_key_sha256: str,
+    message_bytes: bytes,
+    signature_bytes: bytes,
+    *,
+    trusted_binary: str | None = None,
+    timeout_seconds: int = 20,
+) -> bool:
+    """Verify exact public bytes under a pinned P-256 public PEM.
+
+    This verification-only boundary rejects private-key envelopes before any
+    filesystem or process use. The public-key digest is checked before the
+    trusted binary is resolved, so an untrusted key cannot trigger a verifier.
+    """
+    if not all(isinstance(value, bytes) for value in (public_key_bytes, message_bytes, signature_bytes)):
+        return False
+    if not isinstance(expected_public_key_sha256, str) or SHA256_HEX_RE.fullmatch(expected_public_key_sha256) is None:
+        return False
+    if not 1 <= len(public_key_bytes) <= 4096 or not 1 <= len(message_bytes) <= 1 << 20 or not 64 <= len(signature_bytes) <= 80:
+        return False
+    if hashlib.sha256(public_key_bytes).hexdigest() != expected_public_key_sha256:
+        return False
+    if b"PRIVATE KEY" in public_key_bytes:
+        return False
+    try:
+        pem = public_key_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    lines = pem.splitlines()
+    if len(lines) < 3 or lines[0] != "-----BEGIN PUBLIC KEY-----" or lines[-1] != "-----END PUBLIC KEY-----":
+        return False
+    try:
+        subject_public_key_info = base64.b64decode("".join(lines[1:-1]).encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError):
+        return False
+    # SubjectPublicKeyInfo must identify id-ecPublicKey with prime256v1.
+    if b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01" not in subject_public_key_info or b"\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07" not in subject_public_key_info:
+        return False
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 20:
+        return False
+    try:
+        verification_binary = resolve_trusted_openssl(trusted_binary)
+    except ValueError:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="public-signature-verify.") as directory:
+            tmp = Path(directory)
+            public_key_path = tmp / "public.pem"
+            message_path = tmp / "message"
+            signature_path = tmp / "signature.der"
+            public_key_path.write_bytes(public_key_bytes)
+            message_path.write_bytes(message_bytes)
+            signature_path.write_bytes(signature_bytes)
+            completed = subprocess.run(
+                [
+                    verification_binary,
+                    "dgst",
+                    "-sha256",
+                    "-verify",
+                    str(public_key_path),
+                    "-signature",
+                    str(signature_path),
+                    str(message_path),
+                ],
+                cwd=tmp,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                timeout=timeout_seconds,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def _expect_object(value: Any, location: str, result: ValidationResult) -> bool:
@@ -1534,32 +1616,13 @@ def _verify_journey_result_signature(
     if public_key_sha256 != trusted_public_key_sha256:
         result.error(location, "trusted public key does not match pinned journey-result trust anchor")
         return False
-    with tempfile.TemporaryDirectory(prefix="journey-result-verify.") as directory:
-        tmp = Path(directory)
-        message = tmp / "message"
-        signature_path = tmp / "signature.der"
-        message.write_bytes(JOURNEY_RESULT_SIGNING_DOMAIN + _canonical_json_bytes(signed))
-        signature_path.write_bytes(signature_bytes)
-        completed = subprocess.run(
-            [
-                openssl_bin,
-                "dgst",
-                "-sha256",
-                "-verify",
-                str(public_key),
-                "-signature",
-                str(signature_path),
-                str(message),
-            ],
-            cwd=root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            env={"PATH": "/usr/bin:/bin"},
-            timeout=20,
-        )
-    if completed.returncode != 0:
+    if not verify_pinned_public_ecdsa_sha256(
+        public_key_bytes,
+        trusted_public_key_sha256,
+        JOURNEY_RESULT_SIGNING_DOMAIN + _canonical_json_bytes(signed),
+        signature_bytes,
+        trusted_binary=openssl_bin,
+    ):
         result.error(f"{location}.signature", "cryptographic verification failed")
         return False
     return True
@@ -4330,7 +4393,7 @@ def _validate_signed_journey_result(
             result,
             root=root,
         )
-    if journey_id == PRIVACY_CLASS_BETA_JOURNEY_ID:
+    if journey_id in PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS:
         # Re-open the hash-bound evidence and its reviewed bundle, recompute every
         # step and observation, and require the signed payload to equal the
         # builder projection, so a hand-authored payload cannot overclaim.
@@ -4403,7 +4466,7 @@ def _signed_journey_result_satisfies(
                     f"{location}.evidence[{index}].source: trusted-pool Layer 2 journey-result is evidence-only and cannot satisfy conformant requirements"
                 )
                 continue
-            if _signed_journey_result_journey_id(root, source) == PRIVACY_CLASS_BETA_JOURNEY_ID:
+            if _signed_journey_result_journey_id(root, source) in PRIVACY_CLASS_BETA_EVIDENCE_ONLY_JOURNEY_IDS:
                 candidate_errors.append(
                     f"{location}.evidence[{index}].source: privacy-class beta journey-result is evidence-only until SPEC-049-R023's staged canary and audits are recorded and cannot satisfy conformant requirements"
                 )

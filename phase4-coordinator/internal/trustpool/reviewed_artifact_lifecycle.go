@@ -62,7 +62,10 @@ func validateReviewedArtifactLifecycle(rec ReviewedArtifactLifecycle, now time.T
 	if rec.NextReviewDueUTC.IsZero() || !now.UTC().Before(rec.NextReviewDueUTC) {
 		return fmt.Errorf("%w: next_review_due_utc must be in the future", ErrReviewedArtifactLifecycle)
 	}
-	if err := ValidatePromiseClaimsText(rec.PoolID, rec.Owner, rec.Notes); err != nil {
+	if err := validatePoolIDPromiseClaims(rec.PoolID); err != nil {
+		return err
+	}
+	if err := ValidatePromiseClaimsText(rec.Owner, rec.Notes); err != nil {
 		return err
 	}
 	return nil

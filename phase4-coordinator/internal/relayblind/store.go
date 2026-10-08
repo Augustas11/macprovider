@@ -43,7 +43,9 @@ var (
 )
 
 type Store struct {
-	db *sql.DB
+	db                                    *sql.DB
+	retryLatchedQuarantineAfterClearCheck func()
+	quarantineAndRevokeBeforeWrite        func()
 }
 
 type Reservation struct {
@@ -944,7 +946,7 @@ CREATE TABLE IF NOT EXISTS privacy_class_control (
 	if err != nil {
 		return fmt.Errorf("%w: migrate privacy class: %v", ErrStoreUnavailable, err)
 	}
-	return nil
+	return s.ensureEnrollmentSchema(ctx)
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, table, column, alter string) error {
@@ -965,6 +967,8 @@ func (s *Store) columnExists(ctx context.Context, table, column string) (bool, e
 		query = `PRAGMA table_info(relay_blind_key_records)`
 	case "relay_blind_reservations":
 		query = `PRAGMA table_info(relay_blind_reservations)`
+	case "privacy_class_operator_clear":
+		query = `PRAGMA table_info(privacy_class_operator_clear)`
 	default:
 		return false, fmt.Errorf("%w: unknown table", ErrStoreUnavailable)
 	}
@@ -1033,11 +1037,64 @@ func (s *Store) QuarantineAndRevokePrivacy(ctx context.Context, providerID, reas
 		dur = 86400 * time.Second
 	}
 	reason = boundPrivacyReason(reason)
+	if s.quarantineAndRevokeBeforeWrite != nil {
+		s.quarantineAndRevokeBeforeWrite()
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	defer tx.Rollback()
+	if err := quarantineAndRevokePrivacyTx(ctx, tx, providerID, reason, now, dur, replayRetention); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+// RetryLatchedQuarantine writes a previously failed quarantine unless an
+// operator clear that happened after the latch has already superseded it.
+func (s *Store) RetryLatchedQuarantine(ctx context.Context, providerID, reason string, clearGeneration int64, now time.Time, dur, replayRetention time.Duration) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	if strings.TrimSpace(providerID) == "" {
+		return false, fmt.Errorf("%w: provider id", ErrInvalidKeyRecord)
+	}
+	if dur <= 0 {
+		dur = 86400 * time.Second
+	}
+	reason = boundPrivacyReason(reason)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	cleared, err := operatorClearedAfterGenerationTx(ctx, tx, providerID, clearGeneration)
+	if err != nil {
+		return false, err
+	}
+	if cleared {
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+		}
+		return true, nil
+	}
+	if s.retryLatchedQuarantineAfterClearCheck != nil {
+		s.retryLatchedQuarantineAfterClearCheck()
+	}
+	if err := quarantineAndRevokePrivacyTx(ctx, tx, providerID, reason, now, dur, replayRetention); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return false, nil
+}
+
+func quarantineAndRevokePrivacyTx(ctx context.Context, tx *sql.Tx, providerID, reason string, now time.Time, dur, replayRetention time.Duration) error {
 	expires := now.Add(dur).Unix()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO privacy_class_quarantine(provider_id,reason,quarantined_at_unix,expires_at_unix) VALUES(?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET reason=excluded.reason, quarantined_at_unix=excluded.quarantined_at_unix, expires_at_unix=excluded.expires_at_unix`, providerID, reason, now.Unix(), expires); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
@@ -1074,9 +1131,6 @@ func (s *Store) QuarantineAndRevokePrivacy(ctx context.Context, providerID, reas
 	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code='relay_blind_key_expired',terminal_at_unix=? WHERE provider_id=? AND privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, now.Unix(), providerID); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
-	}
 	return nil
 }
 
@@ -1099,8 +1153,18 @@ func (s *Store) Unquarantine(ctx context.Context, providerID string) error {
 	if s == nil || s.db == nil {
 		return ErrStoreUnavailable
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM privacy_class_quarantine WHERE provider_id=?`, providerID); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := markOperatorClear(ctx, tx, providerID, time.Now()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return nil

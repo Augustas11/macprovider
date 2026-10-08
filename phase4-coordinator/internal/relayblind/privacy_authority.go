@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ type PrivacyAuthority struct {
 	sePins          map[string][]byte
 	identity        map[string]ed25519.PublicKey
 	identities      []config.ApprovedCodeIdentity
+	denied          map[string]struct{}
 	backends        map[string]struct{}
 	interval        int
 	maxAge          int
@@ -47,11 +49,21 @@ type PrivacyAuthority struct {
 	maxRecords      int
 	replayRetention time.Duration
 
-	mu         sync.Mutex
-	sessions   map[privacySessionID]*privacySession
-	epochs     map[string]uint64
-	closedGen  map[privacySessionID]uint64
-	generation uint64
+	// SPEC-049-R027 release-derived approvals, refreshed from signed
+	// pearl-release.json files. Read-mostly; guarded separately from mu.
+	releaseMu  sync.RWMutex
+	release    []config.ApprovedCodeIdentity
+	releaseDir string
+	releaseKey *ecdsa.PublicKey
+	directory  *IdentityDirectoryService
+
+	mu                sync.Mutex
+	pendingQuarantine map[string]pendingQuarantine
+	sessions          map[privacySessionID]*privacySession
+	epochs            map[string]uint64
+	closedGen         map[privacySessionID]uint64
+	generation        uint64
+	quarantineSeq     uint64
 }
 
 type privacySessionID struct {
@@ -77,6 +89,7 @@ type privacySession struct {
 	nonceIssued  int64
 	hasNonce     bool
 	attestations map[string]string
+	claim        *PrivacyEnrollmentClaim
 }
 
 type postureSnapshot struct {
@@ -88,6 +101,7 @@ type postureSnapshot struct {
 	cdhash       string
 	hasCDHash    bool
 	attestations map[string]string
+	claim        *PrivacyEnrollmentClaim
 	issuedAt     int64
 }
 
@@ -124,6 +138,10 @@ func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPi
 		}
 		identity[providerID] = append(ed25519.PublicKey(nil), decoded...)
 	}
+	denied := make(map[string]struct{}, len(cfg.DeniedCodeCDHashes))
+	for _, cdhash := range cfg.DeniedCodeCDHashes {
+		denied[cdhash] = struct{}{}
+	}
 	backends := make(map[string]struct{}, len(cfg.AllowedSEKeyBackends))
 	for _, backend := range cfg.AllowedSEKeyBackends {
 		backends[backend] = struct{}{}
@@ -144,22 +162,77 @@ func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPi
 	if quarantine <= 0 {
 		quarantine = 86400
 	}
-	return &PrivacyAuthority{
-		store:           store,
-		sePins:          sePins,
-		identity:        identity,
-		identities:      append([]config.ApprovedCodeIdentity(nil), cfg.ApprovedCodeIdentities...),
-		backends:        backends,
-		interval:        interval,
-		maxAge:          maxAge,
-		timeout:         timeout,
-		quarantine:      quarantine,
-		maxRecords:      maxRecords,
-		replayRetention: replayRetention,
-		sessions:        make(map[privacySessionID]*privacySession),
-		epochs:          make(map[string]uint64),
-		closedGen:       make(map[privacySessionID]uint64),
-	}, nil
+	authority := &PrivacyAuthority{
+		store:             store,
+		sePins:            sePins,
+		identity:          identity,
+		identities:        append([]config.ApprovedCodeIdentity(nil), cfg.ApprovedCodeIdentities...),
+		denied:            denied,
+		backends:          backends,
+		interval:          interval,
+		maxAge:            maxAge,
+		timeout:           timeout,
+		quarantine:        quarantine,
+		maxRecords:        maxRecords,
+		replayRetention:   replayRetention,
+		sessions:          make(map[privacySessionID]*privacySession),
+		epochs:            make(map[string]uint64),
+		closedGen:         make(map[privacySessionID]uint64),
+		pendingQuarantine: make(map[string]pendingQuarantine),
+	}
+	// SPEC-049-R027: a configured release signing key that cannot be read
+	// or parsed is a startup failure, never a silent empty approval set.
+	if cfg.ReleaseCodeIdentities.Configured() {
+		raw, err := os.ReadFile(cfg.ReleaseCodeIdentities.PublicKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("relayblind: release signing public key unreadable: %w", err)
+		}
+		key, err := ParseReleaseSigningPublicKey(raw)
+		if err != nil {
+			return nil, err
+		}
+		authority.releaseMu.Lock()
+		authority.releaseDir, authority.releaseKey = cfg.ReleaseCodeIdentities.MetadataDir, key
+		authority.releaseMu.Unlock()
+		authority.RefreshReleaseIdentities()
+	}
+	// SPEC-049-R028: the directory signer is loaded with the authority so
+	// the buyer route and the enrollment state share one owner.
+	if strings.TrimSpace(cfg.Directory.SigningKeyPath) != "" {
+		key, err := LoadIdentityDirectorySigningKey(cfg.Directory.SigningKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		ttl := time.Duration(cfg.Directory.TTLSeconds) * time.Second
+		if ttl == 0 {
+			ttl = 300 * time.Second
+		}
+		if err := authority.UseIdentityDirectoryKey(key, ttl); err != nil {
+			return nil, err
+		}
+	}
+	return authority, nil
+}
+
+// UseIdentityDirectoryKey installs the SPEC-049-R028 directory signer.
+func (a *PrivacyAuthority) UseIdentityDirectoryKey(key ed25519.PrivateKey, ttl time.Duration) error {
+	if a == nil {
+		return ErrStoreUnavailable
+	}
+	service, err := NewIdentityDirectoryService(a, key, ttl)
+	if err != nil {
+		return err
+	}
+	a.directory = service
+	return nil
+}
+
+// IdentityDirectory returns the directory signer, or nil when none is loaded.
+func (a *PrivacyAuthority) IdentityDirectory() *IdentityDirectoryService {
+	if a == nil {
+		return nil
+	}
+	return a.directory
 }
 
 func (a *PrivacyAuthority) ChallengeInterval() time.Duration {
@@ -183,7 +256,17 @@ func (a *PrivacyAuthority) CandidateSessions(ctx context.Context, now time.Time)
 	return a.store.FreshKeySessions(privacyCtx(ctx), now, KeyClassPrivacy)
 }
 
+// AcceptPrivacyKeys accepts an advertisement without an enrollment claim,
+// so only configured pins or an existing enrollment can verify it.
 func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, session string, recs []PrivacyKeyRecord, now time.Time) error {
+	return a.AcceptPrivacyKeysWithClaim(ctx, providerID, session, recs, nil, now)
+}
+
+// AcceptPrivacyKeysWithClaim verifies privacy key records against the
+// identity key resolved by SPEC-049-R004. A claim only names enrollment
+// candidates; it never enrolls (SPEC-049-R025). A claim that differs from an
+// active enrollment quarantines (SPEC-049-R026).
+func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, providerID, session string, recs []PrivacyKeyRecord, claim *PrivacyEnrollmentClaim, now time.Time) error {
 	if a == nil || a.store == nil {
 		return ErrStoreUnavailable
 	}
@@ -200,16 +283,34 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 	if len(recs) > a.maxRecords {
 		return ErrCapacity
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
 		return err
 	}
 	if quarantined {
 		return ErrPrivacyQuarantined
 	}
-	publicKey, ok := a.identity[providerID]
-	if !ok {
-		return fmt.Errorf("%w: provider has no operator pin", ErrInvalidPin)
+	keys, changed, err := a.resolveKeys(ctx, providerID, claim)
+	if err != nil {
+		return err
+	}
+	if changed {
+		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
+	}
+	// Before enrollment the claim is this session's only key source, so it
+	// must not change mid-session: records verified under an earlier claim
+	// would otherwise sit beside a posture enrolled under a later one.
+	if keys.needsEnrollment() && a.sessionClaimChanged(id, claim) {
+		revokeErr := a.store.RevokeMissingKeys(ctx, providerID, nil, now, a.replayRetention, KeyClassPrivacy)
+		a.forgetAdvertisement(id)
+		if revokeErr != nil {
+			return revokeErr
+		}
+		return privacyReject("privacy_enrollment_claim_changed")
+	}
+	publicKey := keys.identity
+	if publicKey == nil {
+		return fmt.Errorf("%w: provider has no operator pin, enrollment, or claim", ErrInvalidPin)
 	}
 	type accepted struct {
 		record          PrivacyKeyRecord
@@ -250,8 +351,12 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 	}
 	postureCD, hasPosture := a.verifiedCDHash(id)
 	for _, item := range verified {
-		if !a.codeApproved(item.record.Attestation.CodeCDHash, "", item.record.Attestation.BinaryVersion, now, false) {
-			return a.failQuarantine(ctx, providerID, now, "posture_unapproved_code_identity")
+		switch a.approve("", "", item.record.Attestation.CodeCDHash, item.record.Attestation.BinaryVersion, false, now) {
+		case approvalDenied:
+			return a.failQuarantine(ctx, providerID, now, "posture_denied_code_identity")
+		case approvalNone:
+			// SPEC-049-R006: not yet approved is refused without quarantine.
+			return privacyReject("posture_unapproved_code_identity")
 		}
 		if hasPosture && item.record.Attestation.CodeCDHash != postureCD {
 			return a.failQuarantine(ctx, providerID, now, "posture_attestation_cdhash_mismatch")
@@ -275,8 +380,83 @@ func (a *PrivacyAuthority) AcceptPrivacyKeys(ctx context.Context, providerID, se
 	if err := a.store.RevokeMissingKeys(ctx, providerID, kids, now, a.replayRetention, KeyClassPrivacy); err != nil {
 		return err
 	}
-	a.storeAttestations(id, attestations)
+	a.storeAdvertisement(id, attestations, claim)
 	return nil
+}
+
+type resolvedPrivacyKeys struct {
+	identity       ed25519.PublicKey
+	se             []byte
+	identityPinned bool
+	sePinned       bool
+	enrolled       bool
+}
+
+// needsEnrollment is SPEC-049-R025: no active enrollment and at least one key
+// that configuration does not pin.
+func (k resolvedPrivacyKeys) needsEnrollment() bool {
+	return !k.enrolled && !(k.identityPinned && k.sePinned)
+}
+
+// resolveKeys applies SPEC-049-R004 precedence per key: configuration pin,
+// then active enrollment, then the session's enrollment claim. changed
+// reports a claim that differs from the active enrollment on a key that
+// configuration does not pin (SPEC-049-R026).
+func (a *PrivacyAuthority) resolveKeys(ctx context.Context, providerID string, claim *PrivacyEnrollmentClaim) (resolvedPrivacyKeys, bool, error) {
+	var keys resolvedPrivacyKeys
+	if pinned, ok := a.identity[providerID]; ok {
+		keys.identity, keys.identityPinned = pinned, true
+	}
+	if pinned, ok := a.sePins[providerID]; ok {
+		keys.se, keys.sePinned = pinned, true
+	}
+	if keys.identityPinned && keys.sePinned {
+		return keys, false, nil
+	}
+	enrollment, enrolled, err := a.store.ActivePrivacyEnrollment(ctx, providerID)
+	if err != nil {
+		return resolvedPrivacyKeys{}, false, err
+	}
+	if enrolled {
+		keys.enrolled = true
+		changed := false
+		if claim != nil {
+			if !keys.identityPinned && claim.IdentityPublicKey != enrollment.IdentityPublicKey {
+				changed = true
+			}
+			if !keys.sePinned && claim.SEPublicKey != enrollment.SEPublicKey {
+				changed = true
+			}
+		}
+		if !keys.identityPinned {
+			decoded, err := decodeBase64URLFixed(enrollment.IdentityPublicKey, ed25519.PublicKeySize)
+			if err != nil {
+				return resolvedPrivacyKeys{}, false, fmt.Errorf("%w: stored enrollment identity", ErrStoreUnavailable)
+			}
+			keys.identity = ed25519.PublicKey(decoded)
+		}
+		if !keys.sePinned {
+			decoded, err := DecodeSEPublicKey(enrollment.SEPublicKey)
+			if err != nil {
+				return resolvedPrivacyKeys{}, false, fmt.Errorf("%w: stored enrollment secure enclave key", ErrStoreUnavailable)
+			}
+			keys.se = decoded
+		}
+		return keys, changed, nil
+	}
+	if claim != nil {
+		if !keys.identityPinned {
+			if decoded, err := decodeBase64URLFixed(claim.IdentityPublicKey, ed25519.PublicKeySize); err == nil {
+				keys.identity = ed25519.PublicKey(decoded)
+			}
+		}
+		if !keys.sePinned {
+			if decoded, err := DecodeSEPublicKey(claim.SEPublicKey); err == nil {
+				keys.se = decoded
+			}
+		}
+	}
+	return keys, false, nil
 }
 
 func (a *PrivacyAuthority) BeginChallenge(providerID, session string, now time.Time) (string, int64, error) {
@@ -359,25 +539,40 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if err != nil {
 		return privacyReject("posture_closed")
 	}
-	sePin, hasSE := a.sePins[providerID]
-	idPub, hasID := a.identity[providerID]
-	if !hasSE || !hasID {
+	keys, changed, err := a.resolveKeys(ctx, providerID, snap.claim)
+	if err != nil {
+		a.NoteChallengeTimeout(providerID, session)
+		return err
+	}
+	if changed {
+		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
+	}
+	sePin, idPub := keys.se, keys.identity
+	if sePin == nil || idPub == nil {
 		return privacyReject("posture_pin_missing")
 	}
 	if !verifySEPosture(sePin, framing, response.SESignature) || !verifyIdentityPosture(idPub, framing, response.IdentitySignature) {
 		return a.failQuarantine(ctx, providerID, now, "posture_signature_failure")
 	}
+	// A consumed challenge that fails without quarantine also clears the
+	// session's earlier posture, so eligibility never outlives a failed
+	// re-check until max age.
 	if statement.ProviderID != providerID || statement.AssignedSession != session {
+		a.NoteChallengeTimeout(providerID, session)
 		return privacyReject("posture_session_binding")
 	}
-	reason := a.policyFailure(statement, snap, sessionSEKey, sePin, now)
+	reason, quarantine := a.policyFailure(statement, snap, sessionSEKey, sePin, now)
 	if reason != "" {
-		return a.failQuarantine(ctx, providerID, now, reason)
+		if quarantine {
+			return a.failQuarantine(ctx, providerID, now, reason)
+		}
+		a.NoteChallengeTimeout(providerID, session)
+		return privacyReject(reason)
 	}
 	skewed := abs64(now.Unix()-statement.IssuedAtUnix) > privacyClockSkewSeconds
 	late := a.late(now.Unix(), snap.issuedAt)
 	backendOK := a.backendAllowed(statement.SEKeyBackend)
-	if late {
+	if late || skewed || !backendOK {
 		a.NoteChallengeTimeout(providerID, session)
 	}
 	if skewed {
@@ -398,7 +593,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		a.NoteChallengeTimeout(providerID, session)
 		return privacyReject("privacy_class_disabled")
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
 		a.NoteChallengeTimeout(providerID, session)
 		return err
@@ -406,6 +601,43 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if quarantined {
 		a.NoteChallengeTimeout(providerID, session)
 		return ErrPrivacyQuarantined
+	}
+	if keys.needsEnrollment() {
+		// SPEC-049-R025: only a still-current session whose listed keys are
+		// still fresh may enroll. A replaced session, or one whose keys a
+		// concurrent reenroll revoked, cannot write an enrollment.
+		if !a.postureStillCurrent(id, snap) {
+			a.NoteChallengeTimeout(providerID, session)
+			return privacyReject("posture_closed")
+		}
+		// The enrollment is durable before this posture counts as verified,
+		// and the store re-checks the listed keys' freshness inside the same
+		// transaction, so a concurrent reenroll cannot interleave.
+		err := a.store.EnrollPrivacyIdentityForSession(ctx, session, statement.PrivacyKeyRecordDigests, now, PrivacyEnrollment{
+			ProviderID:          providerID,
+			IdentityPublicKey:   encodeBase64URL(idPub),
+			IdentityFingerprint: PublicKeyFingerprint(idPub),
+			SEPublicKey:         base64.StdEncoding.EncodeToString(sePin),
+			SEFingerprint:       PublicKeyFingerprint(sePin),
+			TeamID:              statement.TeamID,
+			SigningIdentifier:   statement.SigningIdentifier,
+			CodeCDHash:          statement.CodeCDHash,
+			BinaryVersion:       statement.BinaryVersion,
+			EnrolledAtUnix:      now.Unix(),
+		})
+		switch {
+		case errors.Is(err, ErrEnrollmentKeyChanged):
+			return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
+		case errors.Is(err, ErrEnrollmentKeyInUse):
+			a.NoteChallengeTimeout(providerID, session)
+			return privacyReject("privacy_enrollment_key_in_use")
+		case errors.Is(err, ErrEnrollmentKeysStale):
+			a.NoteChallengeTimeout(providerID, session)
+			return privacyReject("posture_keys_stale")
+		case err != nil:
+			a.NoteChallengeTimeout(providerID, session)
+			return err
+		}
 	}
 	if !a.commitPosture(id, snap, statement, now) {
 		return privacyReject("posture_closed")
@@ -439,7 +671,7 @@ func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now t
 	if err != nil || disabled {
 		return time.Time{}, false
 	}
-	quarantined, err := a.store.IsQuarantined(ctx, providerID, now)
+	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil || quarantined {
 		return time.Time{}, false
 	}
@@ -451,59 +683,122 @@ func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now t
 }
 
 func (a *PrivacyAuthority) identityMatches(teamID, signingID, cdhash, binary string, now time.Time) bool {
-	for _, identity := range a.identities {
-		if identity.TeamID != teamID || identity.SigningIdentifier != signingID || identity.CDHash != cdhash {
-			continue
-		}
-		if !identity.ExpiresAt.After(now) {
-			continue
-		}
-		if identity.BinaryVersion != "" && identity.BinaryVersion != binary {
-			continue
-		}
-		return true
-	}
-	return false
+	return a.approve(teamID, signingID, cdhash, binary, true, now) == approvalApproved
 }
 
-func (a *PrivacyAuthority) codeApproved(cdhash, teamID, binary string, now time.Time, requireTeam bool) bool {
-	for _, identity := range a.identities {
-		if identity.CDHash != cdhash || !identity.ExpiresAt.After(now) {
-			continue
-		}
-		if requireTeam && (identity.TeamID != teamID || identity.SigningIdentifier == "") {
-			continue
-		}
-		if identity.BinaryVersion != "" && identity.BinaryVersion != binary {
-			continue
-		}
-		return true
+type codeApproval int
+
+const (
+	approvalNone codeApproval = iota
+	approvalApproved
+	approvalDenied
+)
+
+// approve is SPEC-049-R006: the deny list wins; configuration entries for
+// the same identity govern (an expired entry withdraws approval); otherwise
+// a release-derived identity with the same binary version approves. A key
+// attestation carries no team, so it is matched with requireTeam false.
+func (a *PrivacyAuthority) approve(teamID, signingID, cdhash, binary string, requireTeam bool, now time.Time) codeApproval {
+	if _, denied := a.denied[cdhash]; denied {
+		return approvalDenied
 	}
-	return false
+	configured := false
+	for _, identity := range a.identities {
+		if identity.CDHash != cdhash {
+			continue
+		}
+		if requireTeam && (identity.TeamID != teamID || identity.SigningIdentifier != signingID) {
+			continue
+		}
+		configured = true
+		if identity.ExpiresAt.After(now) && (identity.BinaryVersion == "" || identity.BinaryVersion == binary) {
+			return approvalApproved
+		}
+	}
+	if configured {
+		return approvalNone
+	}
+	a.releaseMu.RLock()
+	defer a.releaseMu.RUnlock()
+	for _, identity := range a.release {
+		if identity.CDHash != cdhash || identity.BinaryVersion != binary {
+			continue
+		}
+		if requireTeam && (identity.TeamID != teamID || identity.SigningIdentifier != signingID) {
+			continue
+		}
+		return approvalApproved
+	}
+	return approvalNone
 }
 
-func (a *PrivacyAuthority) policyFailure(statement PostureStatement, snap postureSnapshot, sessionSEKey, sePin []byte, now time.Time) string {
-	if !a.identityMatches(statement.TeamID, statement.SigningIdentifier, statement.CodeCDHash, statement.BinaryVersion, now) {
-		return "posture_unapproved_code_identity"
+// ConfigureReleaseIdentities sets the SPEC-049-R027 source and loads it once.
+func (a *PrivacyAuthority) ConfigureReleaseIdentities(dir string, key *ecdsa.PublicKey) ReleaseIdentityLoad {
+	if a == nil {
+		return ReleaseIdentityLoad{}
+	}
+	a.releaseMu.Lock()
+	a.releaseDir, a.releaseKey = dir, key
+	a.releaseMu.Unlock()
+	return a.RefreshReleaseIdentities()
+}
+
+// ReleaseIdentityLoad reports one release-derived reload. Rejected holds
+// file names only, never content.
+type ReleaseIdentityLoad struct {
+	Configured bool
+	Identities int
+	Rejected   []string
+	Err        error
+}
+
+// RefreshReleaseIdentities reloads release-derived approvals. A directory
+// error leaves an empty set until the next successful load (fail closed).
+func (a *PrivacyAuthority) RefreshReleaseIdentities() ReleaseIdentityLoad {
+	if a == nil {
+		return ReleaseIdentityLoad{}
+	}
+	a.releaseMu.RLock()
+	dir, key := a.releaseDir, a.releaseKey
+	a.releaseMu.RUnlock()
+	if dir == "" || key == nil {
+		return ReleaseIdentityLoad{}
+	}
+	identities, rejected, err := LoadReleaseCodeIdentities(dir, key)
+	a.releaseMu.Lock()
+	a.release = identities
+	a.releaseMu.Unlock()
+	return ReleaseIdentityLoad{Configured: true, Identities: len(identities), Rejected: rejected, Err: err}
+}
+
+// policyFailure returns the first failing check and whether it quarantines.
+// Only an unapproved, not denied, code identity is refused without one.
+func (a *PrivacyAuthority) policyFailure(statement PostureStatement, snap postureSnapshot, sessionSEKey, sePin []byte, now time.Time) (string, bool) {
+	approval := a.approve(statement.TeamID, statement.SigningIdentifier, statement.CodeCDHash, statement.BinaryVersion, true, now)
+	if approval == approvalDenied {
+		return "posture_denied_code_identity", true
 	}
 	if !requiredPosture(statement) {
-		return "posture_required_value"
+		return "posture_required_value", true
 	}
 	if snap.hasSeq && statement.Sequence <= snap.seq {
-		return "posture_sequence_regression"
+		return "posture_sequence_regression", true
 	}
 	if snap.hasCDHash && statement.CodeCDHash != snap.cdhash {
-		return "posture_cdhash_changed"
+		return "posture_cdhash_changed", true
 	}
 	for _, attested := range snap.attestations {
 		if attested != statement.CodeCDHash {
-			return "posture_attestation_cdhash_mismatch"
+			return "posture_attestation_cdhash_mismatch", true
 		}
 	}
 	if seKeyMismatch(sessionSEKey, sePin) {
-		return "posture_se_key_mismatch"
+		return "posture_se_key_mismatch", true
 	}
-	return ""
+	if approval != approvalApproved {
+		return "posture_unapproved_code_identity", false
+	}
+	return "", false
 }
 
 func requiredPosture(statement PostureStatement) bool {
@@ -521,10 +816,27 @@ func (a *PrivacyAuthority) failQuarantine(ctx context.Context, providerID string
 
 func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID string, now time.Time, reason string) error {
 	dur := time.Duration(a.quarantine) * time.Second
+	a.mu.Lock()
+	a.quarantineSeq++
+	token := a.quarantineSeq
+	a.mu.Unlock()
+	clearGeneration, clearGenErr := a.store.OperatorClearGeneration(ctx, providerID)
 	// The in-memory invalidation runs even when the store write fails, so a
 	// posture failure never leaves the live session eligible.
 	writeErr := a.store.QuarantineAndRevokePrivacy(ctx, providerID, reason, now, dur, a.replayRetention)
 	a.mu.Lock()
+	// A failed durable write keeps an in-memory latch that blocks the
+	// provider and retries the write until it lands.
+	if writeErr != nil {
+		if clearGenErr != nil {
+			clearGeneration = unknownOperatorClearGeneration
+		}
+		if pending, ok := a.pendingQuarantine[providerID]; !ok || pending.token <= token {
+			a.pendingQuarantine[providerID] = pendingQuarantine{reason: reason, clearGeneration: clearGeneration, token: token}
+		}
+	} else {
+		a.deletePendingQuarantineThroughLocked(providerID, token)
+	}
 	a.epochs[providerID]++
 	epoch := a.epochs[providerID]
 	for id, entry := range a.sessions {
@@ -559,11 +871,79 @@ func (a *PrivacyAuthority) consumeChallenge(id privacySessionID, nonce, statemen
 		cdhash:       entry.cdhash,
 		hasCDHash:    entry.hasCDHash,
 		attestations: copyAttestations(entry.attestations),
+		claim:        entry.claim,
 		issuedAt:     entry.nonceIssued,
 	}
 	entry.hasNonce = false
 	entry.nonce = ""
 	return snap, true
+}
+
+// isQuarantined is the durable quarantine plus the in-memory latch of a
+// quarantine whose durable write failed. A latched provider stays
+// quarantined; each check retries the durable write.
+func (a *PrivacyAuthority) isQuarantined(ctx context.Context, providerID string, now time.Time) (bool, error) {
+	a.mu.Lock()
+	pending, latched := a.pendingQuarantine[providerID]
+	a.mu.Unlock()
+	if latched {
+		// An operator unquarantine or reenroll after the latch wins. The
+		// retry and the generation check are one transaction, so a retry
+		// cannot re-create a quarantine that the operator already lifted.
+		dur := time.Duration(a.quarantine) * time.Second
+		cleared, err := a.store.RetryLatchedQuarantine(ctx, providerID, pending.reason, pending.clearGeneration, now, dur, a.replayRetention)
+		if err == nil && cleared {
+			a.mu.Lock()
+			current := a.deletePendingQuarantineThroughLocked(providerID, pending.token)
+			a.mu.Unlock()
+			if !current {
+				return true, nil
+			}
+			return a.store.IsQuarantined(ctx, providerID, now)
+		}
+		if err == nil {
+			a.mu.Lock()
+			a.deletePendingQuarantineThroughLocked(providerID, pending.token)
+			a.mu.Unlock()
+		}
+		return true, nil
+	}
+	return a.store.IsQuarantined(ctx, providerID, now)
+}
+
+// pendingQuarantine is a quarantine whose durable write failed.
+type pendingQuarantine struct {
+	reason          string
+	clearGeneration int64
+	token           uint64
+}
+
+// unknownOperatorClearGeneration is intentionally above any practical operator
+// clear sequence. If the baseline cannot be read, recovery fails closed: later
+// checks may still make the quarantine durable, but they do not discard the
+// latch merely because an operator-clear row exists.
+const unknownOperatorClearGeneration int64 = 1 << 62
+
+func (a *PrivacyAuthority) deletePendingQuarantineThroughLocked(providerID string, token uint64) bool {
+	pending, ok := a.pendingQuarantine[providerID]
+	if !ok {
+		return true
+	}
+	if pending.token > token {
+		return false
+	}
+	delete(a.pendingQuarantine, providerID)
+	return true
+}
+
+// postureStillCurrent reports whether the session that received the
+// challenge is still the live, unreplaced one the snapshot was taken from.
+func (a *PrivacyAuthority) postureStillCurrent(id privacySessionID, snap postureSnapshot) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.sessions[id]
+	return entry != nil && entry.generation == snap.generation && entry.boundGen == snap.boundGen &&
+		entry.epoch == snap.epoch && a.epochs[id.providerID] == snap.epoch && a.closedGen[id] == snap.boundGen
 }
 
 func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, now time.Time) bool {
@@ -603,11 +983,30 @@ func (a *PrivacyAuthority) verifiedCDHash(id privacySessionID) (string, bool) {
 	return entry.cdhash, true
 }
 
-func (a *PrivacyAuthority) storeAttestations(id privacySessionID, attestations map[string]string) {
+// sessionClaimChanged reports a claim that differs from the one this session
+// already advertised. A first claim, or a repeat of the same one, is not a
+// change.
+func (a *PrivacyAuthority) sessionClaimChanged(id privacySessionID, claim *PrivacyEnrollmentClaim) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.sessions[id]
+	if entry == nil || entry.claim == nil {
+		return false
+	}
+	return claim == nil || *entry.claim != *claim
+}
+
+func (a *PrivacyAuthority) storeAdvertisement(id privacySessionID, attestations map[string]string, claim *PrivacyEnrollmentClaim) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entry := a.ensureLocked(id)
 	entry.attestations = attestations
+	if claim != nil {
+		copied := *claim
+		entry.claim = &copied
+	} else {
+		entry.claim = nil
+	}
 }
 
 func (a *PrivacyAuthority) forgetAdvertisement(id privacySessionID) {
@@ -618,6 +1017,7 @@ func (a *PrivacyAuthority) forgetAdvertisement(id privacySessionID) {
 		return
 	}
 	entry.attestations = nil
+	entry.claim = nil
 	entry.verified = false
 	entry.digests = nil
 	entry.hasNonce = false

@@ -251,6 +251,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
 	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
+	mux.Handle(privacyDirectoryRoute, s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePrivacyDirectory)))
 	if s.cfg.Features.ResponsesAPIEnabled {
 		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
 	} else {

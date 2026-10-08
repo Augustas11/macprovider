@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 coordinator="$repo_root/phase4-coordinator/internal/relayblind"
 gateway="$repo_root/phase5-gateway/internal/relayblind"
 
-for name in types.go crypto.go pin.go crypto_test.go privacy.go privacy_test.go; do
+for name in types.go crypto.go pin.go crypto_test.go privacy.go privacy_test.go directory.go directory_test.go; do
   cmp "$coordinator/$name" "$gateway/$name"
 done
 

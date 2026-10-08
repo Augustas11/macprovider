@@ -3,6 +3,8 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -11,12 +13,29 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 )
 
+var errPrivacySessionReplaced = errors.New("privacy posture: session replaced before verification")
+
 // runPrivacyPostureLoop probes sessions that hold fresh privacy keys.
 // Eligibility is entirely in the authority; this loop only delivers challenges.
 func (s *Server) runPrivacyPostureLoop() {
 	ticker := time.NewTicker(s.privacyAuthority.ChallengeInterval())
 	defer ticker.Stop()
+	lastRelease := ""
 	for range ticker.C {
+		// SPEC-049-R027: release-derived approvals reload on the challenge
+		// cadence. A change in the loaded state is logged by file name only.
+		load := s.privacyAuthority.RefreshReleaseIdentities()
+		if load.Configured {
+			state := fmt.Sprintf("%d|%s|%v", load.Identities, strings.Join(load.Rejected, ","), load.Err)
+			if state != lastRelease {
+				lastRelease = state
+				event := s.log.Info()
+				if load.Err != nil || len(load.Rejected) > 0 {
+					event = s.log.Warn().Err(load.Err).Strs("rejected_files", load.Rejected)
+				}
+				event.Int("approved_identities", load.Identities).Msg("privacy class release-derived code identities loaded")
+			}
+		}
 		s.runPrivacyPostureSweep()
 	}
 }
@@ -101,7 +120,19 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 	defer timer.Stop()
 	select {
 	case payload := <-ch:
-		if err := s.privacyAuthority.VerifyPosture(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, provider.SEPublicKey, s.now()); err != nil {
+		// Session replacement holds the provider section, so verifying (and
+		// possibly enrolling) inside it with a current-session check means a
+		// replaced session can never write an enrollment (SPEC-049-R025).
+		var err error
+		s.withProviderSection(provider.ProviderID, func(*providerSection) {
+			if _, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID); !ok {
+				s.privacyAuthority.NoteChallengeTimeout(provider.ProviderID, provider.AssignedID)
+				err = errPrivacySessionReplaced
+				return
+			}
+			err = s.privacyAuthority.VerifyPosture(context.Background(), provider.ProviderID, provider.AssignedID, nonce, payload, provider.SEPublicKey, s.now())
+		})
+		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("privacy posture: response rejected")
 		}
 	case <-timer.C:
@@ -148,16 +179,16 @@ func (s *Server) acceptHeartbeatPrivacyKeys(providerID, assignedID string, paylo
 	if !validState(pool.State(hb.Status)) {
 		return
 	}
-	s.acceptPrivacyKeys(providerID, assignedID, hb.PrivacyKeyRecords, false)
+	s.acceptPrivacyKeys(providerID, assignedID, hb.PrivacyKeyRecords, hb.PrivacyEnrollment, false)
 }
 
 // acceptPrivacyKeyRecords is the handshake path: accepted keys are always
 // challenged once, right away.
-func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord) {
-	s.acceptPrivacyKeys(providerID, assignedID, records, true)
+func (s *Server) acceptPrivacyKeyRecords(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, claim *relayblind.PrivacyEnrollmentClaim) {
+	s.acceptPrivacyKeys(providerID, assignedID, records, claim, true)
 }
 
-func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, alwaysProbe bool) {
+func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []relayblind.PrivacyKeyRecord, claim *relayblind.PrivacyEnrollmentClaim, alwaysProbe bool) {
 	if s == nil || s.privacyAuthority == nil || records == nil {
 		return
 	}
@@ -174,7 +205,7 @@ func (s *Server) acceptPrivacyKeys(providerID, assignedID string, records []rela
 		if !ok {
 			return
 		}
-		if err := s.privacyAuthority.AcceptPrivacyKeys(context.Background(), providerID, assignedID, records, s.now()); err != nil {
+		if err := s.privacyAuthority.AcceptPrivacyKeysWithClaim(context.Background(), providerID, assignedID, records, claim, s.now()); err != nil {
 			s.privacyAdvertised.Delete(key)
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("privacy key advertisement rejected")
 			return

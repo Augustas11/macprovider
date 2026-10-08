@@ -75,10 +75,19 @@ var privacyResidualRisks = []string{
 	"secure_boot_level_not_evaluated",
 	"immutable_prompt_strings_not_zeroized",
 	"relays_observe_sizes_timing_and_token_counts",
+	"provider_identity_enrolled_on_first_attested_session",
+	"coordinator_operator_signs_provider_identity_directory",
 }
+
+// privacyDirectoryKeyEnv names the pinned SPEC-049-R028 directory public key
+// when --directory-public-key is absent.
+const privacyDirectoryKeyEnv = "MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY"
+
+const privacyDirectoryPath = "/v1/privacy-class/directory"
 
 type options struct {
 	baseURL, identityPin, model, input, apiKeyEnv, walletSessionID, walletSessionKeyEnv string
+	directoryPublicKey                                                                  string
 	maxOutputTokens, inputTokenUpperBound                                               int64
 	stream, privacyClass                                                                bool
 	timeout                                                                             time.Duration
@@ -87,7 +96,8 @@ type options struct {
 func main() {
 	var opts options
 	flag.StringVar(&opts.baseURL, "base-url", "", "gateway base URL (HTTPS, or HTTP loopback for local testing)")
-	flag.StringVar(&opts.identityPin, "identity-pin", "", "absolute path to operator-provisioned relay-blind identity pin")
+	flag.StringVar(&opts.identityPin, "identity-pin", "", "absolute path to operator-provisioned relay-blind identity pin; with --privacy-class it overrides the signed identity directory")
+	flag.StringVar(&opts.directoryPublicKey, "directory-public-key", "", "pinned base64url Ed25519 public key of the operator-signed privacy identity directory (default: $"+privacyDirectoryKeyEnv+")")
 	flag.StringVar(&opts.model, "model", "", "canonical model ID")
 	flag.StringVar(&opts.input, "input", "-", "OpenAI-compatible chat request JSON file, or - for stdin")
 	flag.Int64Var(&opts.maxOutputTokens, "max-output-tokens", 0, "maximum output token cap")
@@ -113,18 +123,33 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	if opts.identityPin == "" || !filepath.IsAbs(opts.identityPin) {
-		return errors.New("--identity-pin must name an absolute local file")
-	}
-	pin, err := relayblind.ReadIdentityPin(opts.identityPin)
-	if err != nil {
-		return fmt.Errorf("identity pin rejected: %w", err)
-	}
-	if err := pin.Verify(time.Now().UTC()); err != nil {
-		return fmt.Errorf("identity pin rejected: %w", err)
-	}
-	if !contains(pin.Models, opts.model) || !contains(pin.EndpointFamilies, relayblind.EndpointChatCompletions) {
-		return errors.New("identity pin does not authorize the requested model and endpoint")
+	// SPEC-049-R028: a privacy-class run without --identity-pin takes its
+	// pin from the operator-signed directory, verified against one pinned key.
+	useDirectory := opts.privacyClass && opts.identityPin == ""
+	var pin relayblind.IdentityPin
+	var directoryKey ed25519.PublicKey
+	if useDirectory {
+		if opts.walletSessionID != "" {
+			return errors.New("wallet sessions pin the provider with --identity-pin; the identity directory requires API-key authentication")
+		}
+		directoryKey, err = privacyDirectoryPublicKey(opts, getenv)
+		if err != nil {
+			return err
+		}
+	} else {
+		if opts.identityPin == "" || !filepath.IsAbs(opts.identityPin) {
+			return errors.New("--identity-pin must name an absolute local file")
+		}
+		pin, err = relayblind.ReadIdentityPin(opts.identityPin)
+		if err != nil {
+			return fmt.Errorf("identity pin rejected: %w", err)
+		}
+		if err := pin.Verify(time.Now().UTC()); err != nil {
+			return fmt.Errorf("identity pin rejected: %w", err)
+		}
+		if !contains(pin.Models, opts.model) || !contains(pin.EndpointFamilies, relayblind.EndpointChatCompletions) {
+			return errors.New("identity pin does not authorize the requested model and endpoint")
+		}
 	}
 	if opts.maxOutputTokens <= 0 || opts.inputTokenUpperBound <= 0 {
 		return errors.New("positive --max-output-tokens and --input-token-upper-bound are required")
@@ -144,6 +169,13 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	if err := validateInnerRequest(inner, opts); err != nil {
 		return err
+	}
+	var directory relayblind.IdentityDirectory
+	if useDirectory {
+		directory, err = fetchPrivacyDirectory(ctx, base, bearer, directoryKey)
+		if err != nil {
+			return fmt.Errorf("privacy identity directory rejected: %w", err)
+		}
 	}
 	reservationRequest := relayblind.ReservationRequest{
 		EndpointFamily: relayblind.EndpointChatCompletions, Model: opts.model, Stream: opts.stream,
@@ -172,6 +204,12 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	verificationTime := time.Now().UTC()
 	if reservation.ExpiresAtUnix <= verificationTime.Unix() {
 		return errors.New("route reservation is expired")
+	}
+	if useDirectory {
+		pin, err = directory.PinForRecord(reservation.KeyRecord, opts.model)
+		if err != nil {
+			return fmt.Errorf("provider identity rejected: %w", err)
+		}
 	}
 	if err := pin.VerifyRecord(reservation.KeyRecord, verificationTime); err != nil {
 		return fmt.Errorf("provider key record rejected: %w", err)
@@ -248,6 +286,11 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 		}
 		zeroResponseKeys(&responseKeys)
 		writePrivacySuccess(stderr, pin.Fingerprint)
+		if useDirectory {
+			fmt.Fprintf(stderr, "identity_pin_source: signed_directory directory_key_id=%s\n", relayblind.PublicKeyFingerprint(directoryKey))
+		} else {
+			fmt.Fprintf(stderr, "identity_pin_source: identity_pin_file\n")
+		}
 		return nil
 	}
 	if err := copyVerifiedResponse(response, opts.stream, stdout); err != nil {
@@ -765,10 +808,57 @@ func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, 
 }
 
 func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
+	return newSignedRequestMethod(ctx, http.MethodPost, base, path, bearer, sessionID, sessionKey, requestID, body, privacy)
+}
+
+// privacyDirectoryPublicKey reads the buyer's pinned directory key: canonical
+// base64url of a raw 32-byte Ed25519 public key.
+func privacyDirectoryPublicKey(opts options, getenv func(string) string) (ed25519.PublicKey, error) {
+	encoded := strings.TrimSpace(opts.directoryPublicKey)
+	if encoded == "" {
+		encoded = strings.TrimSpace(getenv(privacyDirectoryKeyEnv))
+	}
+	if encoded == "" {
+		return nil, errors.New("--privacy-class needs --identity-pin or a pinned directory key (--directory-public-key or " + privacyDirectoryKeyEnv + ")")
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(decoded) != ed25519.PublicKeySize || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return nil, errors.New("directory public key must be canonical base64url of a 32-byte Ed25519 key")
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+// fetchPrivacyDirectory GETs the directory from the gateway and verifies it
+// against the pinned key before any reservation. The gateway adds no trust.
+func fetchPrivacyDirectory(ctx context.Context, base *url.URL, bearer string, publicKey ed25519.PublicKey) (relayblind.IdentityDirectory, error) {
+	requestID, err := newRequestID()
+	if err != nil {
+		return relayblind.IdentityDirectory{}, err
+	}
+	request, err := newSignedRequestMethod(ctx, http.MethodGet, base, privacyDirectoryPath, bearer, "", nil, requestID, nil, false)
+	if err != nil {
+		return relayblind.IdentityDirectory{}, err
+	}
+	response, err := httpClient().Do(request)
+	if err != nil {
+		return relayblind.IdentityDirectory{}, errors.New("directory request failed")
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, relayblind.MaxIdentityDirectoryBytes+1))
+	if err != nil || len(raw) > relayblind.MaxIdentityDirectoryBytes {
+		return relayblind.IdentityDirectory{}, errors.New("directory response unreadable or too large")
+	}
+	if response.StatusCode != http.StatusOK {
+		return relayblind.IdentityDirectory{}, fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	return relayblind.VerifyIdentityDirectory(raw, publicKey, time.Now().UTC())
+}
+
+func newSignedRequestMethod(ctx context.Context, method string, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
 	target := *base
 	target.Path = strings.TrimRight(target.Path, "/") + path
 	target.RawPath = ""
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +876,7 @@ func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionI
 	}
 	timestamp := time.Now().UTC().Unix()
 	request.Header.Set("X-MacProvider-Session-Timestamp", strconv.FormatInt(timestamp, 10))
-	signatureObject, err := auth.NewWalletRequestSignatureObject(sessionID, http.MethodPost, path, requestID, body, request.Header, timestamp)
+	signatureObject, err := auth.NewWalletRequestSignatureObject(sessionID, method, path, requestID, body, request.Header, timestamp)
 	if err != nil {
 		return nil, err
 	}

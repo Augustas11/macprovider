@@ -216,7 +216,7 @@ func TestPrivacyClassConstantsMatchSharedPackage(t *testing.T) {
 	if privacyClassV1 != relayblind.PrivacyClassV1 || privacyAssuranceV1 != relayblind.PrivacyAssurance || privacyResponseEncryptionV1 != relayblind.PrivacyResponseEncryption {
 		t.Fatal("R020 short tokens drifted from relayblind")
 	}
-	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 11 {
+	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 13 {
 		t.Fatalf("list lengths protects=%d does_not=%d residual=%d", len(privacyProtects), len(privacyDoesNotProtect), len(privacyResidualRisks))
 	}
 	copied := privacyUsageMetadata(7)

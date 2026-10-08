@@ -1,6 +1,7 @@
 name: Build signed privacy-class beta journey evidence artifact
 
-# JOURNEY-PRIVACY-CLASS-BETA (SPEC-049). Validates the committed reviewed
+# JOURNEY-PRIVACY-CLASS-BETA / JOURNEY-PRIVACY-CLASS-BETA-V2 (SPEC-049).
+# Validates the committed reviewed
 # redacted evidence and its bundle, signs the journey result with the
 # acceptance key in the protected environment, and exports it. It never
 # promotes conformance: SPEC-049-R023 keeps every SPEC-049 requirement
@@ -92,19 +93,26 @@ jobs:
             "$REDACTED"
           requirement_ids="$(python3 -c 'import json, sys; print(",".join(json.load(open(sys.argv[1], encoding="utf-8"))["requirement_ids"]))' "$PAYLOAD")"
           [[ "$requirement_ids" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid derived requirement IDs" >&2; exit 1; }
+          journey_id="$(python3 -c 'import json, sys; value = json.load(open(sys.argv[1], encoding="utf-8"))["journey_id"]; print(value if isinstance(value, str) else "")' "$PAYLOAD")"
+          case "$journey_id" in
+            JOURNEY-PRIVACY-CLASS-BETA|JOURNEY-PRIVACY-CLASS-BETA-V2) ;;
+            *) echo "::error::invalid derived journey ID" >&2; exit 1 ;;
+          esac
           printf 'requirement_ids=%s\n' "$requirement_ids" >> "$GITHUB_OUTPUT"
+          printf 'journey_id=%s\n' "$journey_id" >> "$GITHUB_OUTPUT"
 
       - name: Preflight selector freshness before signing
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
           REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+          JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}
         run: |
           set -euo pipefail
           python3 scripts/preflight-signed-journey-promotion.py \
             --source-sha "$SOURCE_SHA" \
             --requirement-ids "$REQUIREMENT_IDS" \
-            --journey-id JOURNEY-PRIVACY-CLASS-BETA
+            --journey-id "$JOURNEY_ID"
 
       - name: Verify protected environment and repository posture
         shell: bash
@@ -170,27 +178,28 @@ jobs:
           BUNDLE: ${{ steps.request.outputs.bundle }}
           ENVELOPE: ${{ steps.request.outputs.envelope }}
           REQUIREMENT_IDS: ${{ steps.payload.outputs.requirement_ids }}
+          JOURNEY_ID: ${{ steps.payload.outputs.journey_id }}
         run: |
           set -euo pipefail
           export_dir="$RUNNER_TEMP/signed-privacy-class-beta-journey-evidence"
           mkdir -p "$export_dir/journeys/evidence"
           cp "$REDACTED" "$export_dir/$REDACTED"
           cp "$ENVELOPE" "$export_dir/$ENVELOPE"
-          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          python3 - "$export_dir/evidence-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$BUNDLE" "$ENVELOPE" "$REQUIREMENT_IDS" "$JOURNEY_ID" <<'PY'
           import hashlib
           import json
           import os
           import pathlib
           import sys
 
-          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids = sys.argv[1:]
+          output, source_sha, evidence_sha, redacted, bundle, envelope, requirement_ids, journey_id = sys.argv[1:]
           root = pathlib.Path(".")
           manifest = {
               "schema_version": "macprovider.signed-privacy-class-beta-journey-evidence.v1",
               "source_sha": source_sha,
               "evidence_sha": evidence_sha,
               "requirement_ids": [item for item in requirement_ids.split(",") if item],
-              "journey_id": "JOURNEY-PRIVACY-CLASS-BETA",
+              "journey_id": journey_id,
               "redacted_artifact": redacted,
               "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
               "redaction_manifest": f"{bundle}/MANIFEST.sha256",

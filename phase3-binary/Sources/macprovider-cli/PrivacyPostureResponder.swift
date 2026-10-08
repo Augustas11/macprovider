@@ -90,6 +90,24 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         }
     }
 
+    /// SPEC-049 §4.10 enrollment claim: the public relay-blind identity and
+    /// Secure Enclave keys the coordinator may enroll after a verified
+    /// posture. Nil once advertising is latched off, so a failed host never
+    /// asks to be enrolled.
+    func enrollmentClaim() -> [String: Any]? {
+        lock.lock()
+        defer { lock.unlock() }
+        noteDecryptRecheckLocked()
+        guard !advertisingDisabled else { return nil }
+        let sePublicKey = seSigner.publicKeyRaw
+        guard sePublicKey.count == 64 else { return nil }
+        return [
+            "version": PrivacyClassConstants.enrollmentVersion,
+            "identity_public_key": relayBlindRuntime.identityPublicKeyBase64URL(),
+            "se_public_key": sePublicKey.base64EncodedString(),
+        ]
+    }
+
     func respond(to challenge: [String: Any], assignedSession: String, now: Date = Date()) throws -> [String: Any]? {
         try parseChallenge(challenge)
         guard privacyVisibleASCII(assignedSession, maxBytes: PrivacyClassConstants.maxIdentifierBytes),

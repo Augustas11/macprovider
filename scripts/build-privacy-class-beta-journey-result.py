@@ -2,7 +2,8 @@
 """Build JOURNEY-PRIVACY-CLASS-BETA evidence and unsigned journey-result payloads.
 
   build-privacy-class-beta-journey-result.py compose-evidence BUNDLE_DIR --output EVIDENCE
-      Recompute the closed `macprovider.privacy-class-beta-evidence.v1` object
+      Recompute the closed privacy-class beta evidence object selected by
+      --profile (default v1; v2 must be requested explicitly)
       from a reviewed redacted bundle (`journeys/evidence/privacy-class-beta-<ts>/`).
 
   build-privacy-class-beta-journey-result.py --source-sha SHA --evidence-sha SHA \\
@@ -59,11 +60,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--root", default=".", help="repository root")
         parser.add_argument("--output", required=True, help="redacted evidence output path")
         parser.add_argument("--expires-at", default=None, help="RFC3339 UTC expiry, default captured_at + 90 days")
+        parser.add_argument("--profile", choices=("v1", "v2"), default="v1", help="evidence profile; v2 is never inferred from bundle contents")
         args = parser.parse_args(argv[1:])
         root = Path(args.root).resolve()
         bundle_dir = args.bundle_dir.rstrip("/")
         try:
-            evidence = contract.compose_evidence(root, bundle_dir, expires_at=args.expires_at)
+            evidence = contract.compose_evidence(root, bundle_dir, expires_at=args.expires_at, profile=args.profile)
             output = f"{bundle_dir}{contract.EVIDENCE_SUFFIX}"
             contract.bundle_dir_for_source(output)
         except contract.PrivacyEvidenceError as exc:

@@ -51,6 +51,9 @@ TIER2_COORDINATOR_CONFIG = Path("/opt/macprovider/coordinator.yaml")
 CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.py")
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
 INSTALL_ROOT = Path("/opt/macprovider")
+# SPEC-049-R027: signed pearl-release.json files the coordinator approves
+# provider code identities from (privacy_class.release_code_identities).
+PRIVACY_RELEASE_IDENTITY_DIRNAME = "privacy-release-identities"
 STATS_INSTALL_ROOT = Path("/opt/macprovider-stats")
 STATS_INVENTORY_PARITY_MARKER_NAME = ".coordinator-deploy-sidecar-parity-required"
 STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
@@ -1923,6 +1926,20 @@ class Updater:
                     mode=0o640,
                 )
                 self._assert_candidate_validation_file(destination, executable=False)
+        # SPEC-049-R027: the signed metadata pair travels with the release so
+        # install_release can stage it for release-derived privacy approval.
+        for name in ("pearl-release.json", "pearl-release.json.sig"):
+            source = release.directory / name
+            self._trusted_regular_file(source, f"verified {name}")
+            destination = validation / name
+            self.atomic_replace(
+                source,
+                destination,
+                uid=self.trusted_uid,
+                gid=self.candidate_gid,
+                mode=0o640,
+            )
+            self._assert_candidate_validation_file(destination, executable=False)
         _fsync_directory(validation)
         self._assert_candidate_validation_directory(validation)
         return dataclasses.replace(release, directory=validation)
@@ -4846,6 +4863,46 @@ class Updater:
             temporary.unlink(missing_ok=True)
         self._journal_transition("file_replace_complete", pending_action=None)
 
+    def install_privacy_release_identity(self, release: Release) -> None:
+        """Stage signed release metadata for SPEC-049-R027 approval.
+
+        A verified pearl-release.json that carries provider_code_identity is
+        copied with its signature, byte for byte, into the directory the
+        coordinator reads as privacy_class.release_code_identities.metadata_dir.
+        The coordinator verifies the signature again before it approves the
+        identity, so this step adds no trust; it only removes the per-release
+        configuration edit. The files are additive and survive a rollback,
+        because a rolled-back release is still a genuinely signed release.
+        """
+        metadata_path = release.directory / "pearl-release.json"
+        signature_path = release.directory / "pearl-release.json.sig"
+        self._trusted_regular_file(metadata_path, "verified pearl-release.json")
+        self._trusted_regular_file(signature_path, "verified pearl-release.json.sig")
+        self.verify_signature(metadata_path, signature_path)
+        payload = metadata_path.read_bytes()
+        try:
+            metadata = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise UpdateError("release metadata is invalid JSON") from exc
+        if not isinstance(metadata, dict) or "provider_code_identity" not in metadata:
+            self.audit("privacy_release_identity", "skipped_no_provider_code_identity", candidate=release.tag)
+            return
+        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release.tag):
+            raise UpdateError(f"release tag cannot name a privacy release identity file: {release.tag}")
+        directory = self.install_root / PRIVACY_RELEASE_IDENTITY_DIRNAME
+        if not _path_entry_exists(directory):
+            os.mkdir(directory, 0o750)
+            os.chown(directory, self.trusted_uid, self.backend_gid, follow_symlinks=False)
+            os.chmod(directory, 0o750, follow_symlinks=False)
+            _fsync_directory(directory.parent)
+        _trusted_directory(directory, "privacy release identity directory", trusted_uid=self.trusted_uid, mode=0o750)
+        signature = signature_path.read_bytes()
+        # Signature last, so the coordinator never pairs a new signature with
+        # an old payload; it rejects a pair whose signature does not verify.
+        _secure_atomic_write(directory / f"{release.tag}.json", payload, mode=0o640, uid=self.trusted_uid, gid=self.backend_gid)
+        _secure_atomic_write(directory / f"{release.tag}.json.sig", signature, mode=0o640, uid=self.trusted_uid, gid=self.backend_gid)
+        self.audit("privacy_release_identity", "staged", candidate=release.tag)
+
     def atomic_install(self, source: Path, destination: Path) -> None:
         self._trusted_regular_file(destination, f"installed {destination.name} binary")
         expected_sha256 = sha256_file(source)
@@ -5366,6 +5423,7 @@ class Updater:
             self.release_stats_inventory_parity_hold()
         if release.catalog is not None:
             self.install_catalog(release)
+        self.install_privacy_release_identity(release)
         installed_config_targets = []
         for staged, destination in (
             (self.config_update.staged, self.config_update.target),

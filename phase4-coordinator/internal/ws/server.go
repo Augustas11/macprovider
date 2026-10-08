@@ -2524,7 +2524,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords)
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, hello.PrivacyKeyRecords, hello.PrivacyEnrollment)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}
@@ -3164,7 +3164,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
-	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords)
+	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords, initial.PrivacyEnrollment)
 	if s.cfg.Pool.WarmupGateEnabled {
 		s.startWarmupGate(*entry)
 	}

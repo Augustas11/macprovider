@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -563,6 +564,43 @@ func TestAdminHandler_SignedLifecyclePausesRouteablePool(t *testing.T) {
 	}
 }
 
+func TestAdminHandler_SignedLifecycleAcceptsOpaqueSignatureClaimToken(t *testing.T) {
+	t.Parallel()
+	root := fixedOpaqueProofRootFixture(t)
+	routeable := newRouteableAdminPoolWithRoot(t, root)
+	registry := routeable.registry
+	handler := routeable.handler
+
+	body := signedLifecycleRequestBodyAt(t, routeable.store, root, "op-signed-opaque-proof", trustpool.LifecyclePaused, "", "signed incident", 1, 4102444800, false)
+	sigs := body["signatures"].([]map[string]string)
+	if len(sigs) != 1 {
+		t.Fatalf("signatures=%+v, want one signature", sigs)
+	}
+	signatureProof := `[{"key_id":"` + sigs[0]["key_id"] + `","signature":"` + sigs[0]["signature"] + `"}]`
+	if err := trustpool.ValidatePromiseClaimsText(signatureProof); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("opaque signature proof no longer exercises claim scanner: err=%v proof=%s", err, signatureProof)
+	}
+
+	rec := postAdminSignedLifecycleBody(t, handler, "", root.poolID, body, "", http.StatusAccepted)
+	var got struct {
+		Event struct {
+			Lifecycle         string `json:"lifecycle"`
+			SignedControl     string `json:"signed_control"`
+			ControlSignatures string `json:"control_signatures"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode signed opaque-proof response: %v", err)
+	}
+	if got.Event.Lifecycle != trustpool.LifecyclePaused || got.Event.SignedControl == "" || got.Event.ControlSignatures == "" {
+		t.Fatalf("signed opaque-proof event=%+v, want persisted paused proof", got.Event)
+	}
+	paused := registry.Snapshot(root.poolID)
+	if !paused.Exists || paused.Routeable || len(paused.Members) != 0 {
+		t.Fatalf("signed opaque-proof snapshot = %+v, want non-routeable paused pool", paused)
+	}
+}
+
 func TestAdminHandler_SignedRevokeImmediateRevokesProviderAndBumpsGeneration(t *testing.T) {
 	t.Parallel()
 	routeable := newRouteableAdminPool(t)
@@ -642,6 +680,35 @@ func TestAdminHandler_SignedLifecycleRetireRequiresDeliveryDrain(t *testing.T) {
 	retired := registry.Snapshot(root.poolID)
 	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
 		t.Fatalf("signed retired snapshot = %+v, want non-routeable empty members", retired)
+	}
+}
+
+func TestAdminHandler_SignedLifecycleRejectsProhibitedReason(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+	before := registry.Snapshot(root.poolID)
+	if !before.Exists || !before.Routeable || !before.Members["provider-a"] {
+		t.Fatalf("pre-prohibited-reason snapshot = %+v, want routeable provider-a", before)
+	}
+
+	rec := postAdminSignedLifecycle(t, routeable.store, handler, "", root, "op-signed-prohibited-reason", trustpool.LifecyclePaused, "Privacy Pool with anonymous routing", false, http.StatusBadRequest)
+	var got struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode prohibited reason response: %v", err)
+	}
+	if got.Error.Code != "prohibited_promise_claim" {
+		t.Fatalf("prohibited reason code=%q body=%s, want prohibited_promise_claim", got.Error.Code, rec.Body.String())
+	}
+	after := registry.Snapshot(root.poolID)
+	if !after.Exists || !after.Routeable || !after.Members["provider-a"] || after.Generation != before.Generation {
+		t.Fatalf("post-prohibited-reason snapshot = %+v, want unchanged routeable generation %d", after, before.Generation)
 	}
 }
 
@@ -2345,6 +2412,12 @@ func signedLifecycleRequestBody(t *testing.T, store *trustpool.Store, root rootF
 
 func signedLifecycleRequestBodyWithTarget(t *testing.T, store *trustpool.Store, root rootFixture, operationID, lifecycle, targetProviderID, reason string, corrupt bool) map[string]any {
 	t.Helper()
+	issued := uint64(time.Now().Add(-time.Minute).Unix())
+	return signedLifecycleRequestBodyAt(t, store, root, operationID, lifecycle, targetProviderID, reason, issued, issued+600, corrupt)
+}
+
+func signedLifecycleRequestBodyAt(t *testing.T, store *trustpool.Store, root rootFixture, operationID, lifecycle, targetProviderID, reason string, issued, expires uint64, corrupt bool) map[string]any {
+	t.Helper()
 	state, err := store.Reconstruct(t.Context())
 	if err != nil {
 		t.Fatalf("Reconstruct for signed lifecycle: %v", err)
@@ -2357,7 +2430,6 @@ func signedLifecycleRequestBodyWithTarget(t *testing.T, store *trustpool.Store, 
 	if err != nil {
 		t.Fatalf("decode manifest digest: %v", err)
 	}
-	issued := uint64(time.Now().Add(-time.Minute).Unix())
 	control := poolmanifest.EmergencyLifecycleControl{
 		PoolID:             root.poolID,
 		ManifestVersion:    pool.ManifestVersion,
@@ -2368,7 +2440,7 @@ func signedLifecycleRequestBodyWithTarget(t *testing.T, store *trustpool.Store, 
 		TargetProviderID:   targetProviderID,
 		Reason:             reason,
 		IssuedAtUnix:       issued,
-		ExpiresAtUnix:      issued + 600,
+		ExpiresAtUnix:      expires,
 	}
 	controlDigest, err := control.Digest()
 	if err != nil {
@@ -2452,6 +2524,11 @@ type routeableAdminPool struct {
 
 func newRouteableAdminPool(t *testing.T) routeableAdminPool {
 	t.Helper()
+	return newRouteableAdminPoolWithRoot(t, newRootFixture(t))
+}
+
+func newRouteableAdminPoolWithRoot(t *testing.T, root rootFixture) routeableAdminPool {
+	t.Helper()
 	store, err := trustpool.NewStore(openTrustPoolDB(t))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -2462,7 +2539,6 @@ func newRouteableAdminPool(t *testing.T) routeableAdminPool {
 		Registry:    registry,
 		OperatorKey: "operator-secret",
 	})
-	root := newRootFixture(t)
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
 		EventType:        trustpool.EventPoolCreated,
@@ -2484,4 +2560,24 @@ func newRouteableAdminPool(t *testing.T) routeableAdminPool {
 	}, "op-buyer", http.StatusAccepted)
 	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote", http.StatusAccepted)
 	return routeableAdminPool{store: store, registry: registry, handler: handler, root: root}
+}
+
+func fixedOpaqueProofRootFixture(t *testing.T) rootFixture {
+	t.Helper()
+	root := newRootFixture(t)
+	seed, err := hex.DecodeString("305994a4c521676ae760b3281af17aac08f54a3a6864cdf12be6986269afef70")
+	if err != nil {
+		t.Fatalf("decode opaque proof policy seed: %v", err)
+	}
+	policyPrivate := ed25519.NewKeyFromSeed(seed)
+	policyPublic := policyPrivate.Public().(ed25519.PublicKey)
+	root.policySigner = poolmanifest.SignerKey{KeyID: "policy-signer-1", PublicKey: policyPublic}
+	root.policySignerPrivateKey = policyPrivate
+	root.identityCore.GenesisNonce = []byte("privacy-ci-fixed")
+	poolID, err := root.identityCore.PoolID()
+	if err != nil {
+		t.Fatalf("fixed opaque proof pool ID: %v", err)
+	}
+	root.poolID = poolID
+	return root
 }
