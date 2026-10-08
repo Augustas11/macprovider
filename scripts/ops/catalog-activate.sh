@@ -27,7 +27,9 @@
 #   8 provider_restart        canary/Studio provider reports the new catalog release
 #   9 live_probe              provider /v1/status: native_mtp enabled+eligible|active,
 #                             continuous_batching active
-#  10 gateway_proof           one real buyer request through the gateway
+#  10 gateway_proof           one real buyer request through the gateway that moves the
+#                             target provider's mtp_forwards (or requests_total with CB
+#                             active); expires after 24 h
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -219,9 +221,9 @@ PY
     set_next coordinator_native_keys manual "Add the native_mtp_* keys and the pool canary to coordinator.yaml" \
 "# On Pearl, under BOTH locks, edit coordinator.yaml IN PLACE; add only these keys.
 # Under autotune: (after rate_card_sig_path)
-$(runbook_block "$MTP_DOC" "## Order" 1)
+$RB_NATIVE_AUTOTUNE_KEYS
 # Under pool:
-$(runbook_block "$MTP_DOC" "## Order" 2)"
+$RB_NATIVE_POOL_CANARY"
     next_meta coordinator_native_keys "$MTP_DOC#order" "none for the edit; the keys load at the activation restart"
   fi
 
@@ -253,6 +255,8 @@ python3 -m json.tool '$verdict'"
       fi
     fi
     step catalog_activation pending ""
+    local restore_cmd
+    restore_cmd="$(render_runbook "$RB_CATALOG_RESTORE")"
     if [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
       set_next catalog_activation mutate "Activate content release $R" \
         "scripts/catalog-content-release.sh --deploy --commit $main_sha --preflight-verdict '$verdict'"
@@ -268,7 +272,7 @@ python3 -m json.tool '$verdict'"
 "# The content gate refused: $lane_detail
 # docs/runbooks/pearl-coordinator-rollout.md 'Catalog activation (full deploy)': from a clean
 # worktree at the RUNNING tag, after the nginx and coordinator.yaml prerequisites, chain the restore:
-$(runbook_block "$ROLLOUT_DOC" "Run, with an automatic restore" 1)
+$restore_cmd
 # As soon as public /v1/autotune-release reports $R, kickstart the canary provider and confirm
 # its /v1/status catalog.release_id == $R (kickstart again at once if it came up on the old release)."
       next_meta catalog_activation "$ROLLOUT_DOC#catalog-activation-full-deploy" \
@@ -330,40 +334,96 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta live_probe "$MTP_DOC#order"
   fi
 
-  if marker_done "$OPS_SCOPE" gateway_proof; then
+  # The proof expires: a marker older than 24 h is re-verified.
+  if marker_done "$OPS_SCOPE" gateway_proof &&
+    [ -n "$(find "$(marker_path "$OPS_SCOPE" gateway_proof)" -mmin -1440 2>/dev/null)" ]; then
     step gateway_proof "done" "$(marker_field "$OPS_SCOPE" gateway_proof 'd.get("evidence")')"
   else
-    step gateway_proof pending ""
+    step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h' || true)"
     set_next gateway_proof read "Send one real buyer request through the gateway" \
       "scripts/ops/catalog-activate.sh _gateway-proof"
-    next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline" "" gateway_proof
+    next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
   fi
 
   set_next "done" "done" "$R active and proven through the gateway" ""
 }
 
-# One bounded buyer request through the gateway; prints status + request id only.
+# provider_counters FILE -> "mtp_forwards requests_total cb_active" from a
+# provider /v1/status document; fails when the counters are absent.
+provider_counters() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+mtp = (d.get("native_mtp") or {}).get("mtp_forwards")
+req = d.get("requests_total")
+cb = (d.get("continuous_batching") or {}).get("active") is True
+if not isinstance(mtp, int) or not isinstance(req, int):
+    sys.exit(1)
+print(mtp, req, "true" if cb else "false")
+PY
+}
+
+read_provider_status() {
+  studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$1" ||
+    refuse "provider /v1/status not readable over STUDIO_SSH"
+}
+
+# proof_moved B_MTP B_REQ B_CB A_MTP A_REQ A_CB: the request moved the provider.
+proof_moved() {
+  [ $(($4 - $1)) -gt 0 ] || { [ "$3" = true ] && [ "$6" = true ] && [ $(($5 - $2)) -gt 0 ]; }
+}
+
+# One bounded buyer request through the gateway, tied to the target provider:
+# its native_mtp.mtp_forwards (or, with continuous batching active, its
+# requests_total) must increase across the request, and the response must
+# carry a request id. Prints status, request id and counter deltas only.
 gateway_proof() {
   local gw model token_file
   gw="$(gateway_url)"
   [ -n "$gw" ] || refuse "GATEWAY_URL is unset"
   token_file="${BUYER_TOKEN_FILE:-}"
   [ -n "$token_file" ] && [ -f "$token_file" ] || refuse "BUYER_TOKEN_FILE must name a readable buyer token file"
+  require_studio_ssh
+  case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
   model="${PROBE_MODEL:-$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["entries"][0]["model_key"]')}"
   [ -n "$model" ] || refuse "PROBE_MODEL is unset and no admission model_key was found"
-  local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code
+
+  local before after b_mtp b_req b_cb a_mtp a_req a_cb
+  read_provider_status "$OPS_TMP_DIR/before.json"
+  before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total"
+  read -r b_mtp b_req b_cb <<< "$before"
+
+  local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code sent_rid payload
+  sent_rid="ops-proof-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "messages": [{"role": "user", "content": "Reply with the word ok."}]}))' "$model")"
   # The bearer goes through curl --config on stdin, never argv.
   code="$(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$token_file")" |
     curl -sS -m 120 --config - -D "$headers" -o "$body" -w '%{http_code}' \
-      -H 'Content-Type: application/json' \
-      -d "$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1], "max_tokens": 32, "messages": [{"role": "user", "content": "Reply with the word ok."}]}))' "$model")" \
-      "$gw/v1/chat/completions")" || code=000
+      -H 'Content-Type: application/json' -H "X-Request-ID: $sent_rid" \
+      -d "$payload" "$gw/v1/chat/completions")" || code=000
   local rid
   rid="$(awk -F': ' 'tolower($1)=="x-request-id"{gsub("\r","",$2); print $2}' "$headers" | head -n1)"
   [ "$code" = "200" ] || die "gateway returned HTTP $code for $model (request id ${rid:-none})"
+  [ -n "$rid" ] || die "gateway response carries no X-Request-ID"
   [ -n "$(json_field "$body" 'd["choices"][0]["message"]["content"]')" ] || die "gateway 200 without completion content"
-  log "gateway proof: HTTP 200 model=$model request_id=${rid:-none}"
-  mark_done "$OPS_SCOPE" gateway_proof "HTTP 200 model=$model request_id=${rid:-none}"
+
+  local i
+  for i in 1 2 3 4 5 6; do
+    read_provider_status "$OPS_TMP_DIR/after.json"
+    after="$(provider_counters "$OPS_TMP_DIR/after.json")" || refuse "provider status lacks counters after the request"
+    read -r a_mtp a_req a_cb <<< "$after"
+    proof_moved "$b_mtp" "$b_req" "$b_cb" "$a_mtp" "$a_req" "$a_cb" && break
+    [ "$i" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
+  done
+  proof_moved "$b_mtp" "$b_req" "$b_cb" "$a_mtp" "$a_req" "$a_cb" ||
+    die "request $rid did not move the target provider: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)) (cb_active=$a_cb)"
+  local evidence="HTTP 200 model=$model request_id=$rid mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_active=$a_cb"
+  log "gateway proof: $evidence"
+  mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
+    "$(python3 -c 'import json,sys; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4])}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))")"
 }
 
 internal() {

@@ -83,6 +83,7 @@ expect block "bash -c 'cd /x && scripts/catalog-content-release.sh --deploy --co
 expect block "sh -ec \"gh workflow run release.yml\""
 expect block "ssh -i key -p 22 host 'sudo systemctl restart macprovider-coordinator'"
 expect block "ssh host sudo systemd-run --unit=mp-update-1 -p UMask=0077 /usr/local/sbin/macprovider-pearl-update --apply --tag v1.8.230"
+# shellcheck disable=SC2016  # the substitution is the command under test
 expect block 'echo "$(gh workflow run release.yml)"'
 expect block 'eval "gh workflow run pearl-runtime-release.yml"'
 expect block 'timeout 60 scripts/publish-native-mtp-revocations.sh --deploy'

@@ -314,11 +314,22 @@ run_next() {
     # Downtime first, before the lock or any command (pearl-coordinator-rollout.md rule 1).
     printf '=== EXPECTED DOWNTIME for %s: %s ===\n' "$NEXT_ID" "$NEXT_DOWNTIME"
   fi
+  if [ "$NEXT_KIND" = "mutate" ] || [ "${OPS_REQUIRE_CLEAN_FOR_ALL:-0}" = 1 ]; then
+    require_clean_origin_main
+  fi
   if [ "$NEXT_KIND" = "mutate" ]; then
     [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
       refuse "MACPROVIDER_OPS_OWNER is unset; name the session that will hold the live-ops lock"
     "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" >&2 ||
       refuse "live-ops lock not acquired; see '$OPS_DIR/live-lock.sh status'"
+    # State may have moved while we waited for the lock: decide again and run
+    # only if the same step with the same command is still next.
+    local want_id="$NEXT_ID" want_cmd="$NEXT_CMD"
+    reset_state
+    gather
+    if [ "$NEXT_ID" != "$want_id" ] || [ "$NEXT_CMD" != "$want_cmd" ]; then
+      refuse "live state changed after taking the lock: next is now '$NEXT_ID' ($NEXT_KIND), not '$want_id'; run status again"
+    fi
   fi
   print_next
   export MACPROVIDER_OPS_ENTRYPOINT=1
@@ -334,6 +345,25 @@ run_next() {
   log "step $NEXT_ID completed; re-run '$0 status' for the next step"
 }
 
+reset_state() {
+  : > "$OPS_FACTS"
+  : > "$OPS_STEPS"
+  NEXT_ID=""; NEXT_TITLE=""; NEXT_KIND=""; NEXT_CMD=""; NEXT_REASON=""
+  NEXT_DOWNTIME=""; NEXT_RUNBOOK=""; NEXT_MARK=""
+}
+
+# Mutating steps run only from a clean checkout of the exact origin/main tip,
+# so the commands and runbook constants are the reviewed ones.
+require_clean_origin_main() {
+  local head main dirty
+  main="$(origin_main_sha)"
+  head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$main" ] && [ "$head" = "$main" ] ||
+    refuse "checkout HEAD ${head:-?} is not origin/main ${main:-?}; run from a fresh worktree at origin/main"
+  dirty="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -n 5)"
+  [ -z "$dirty" ] || refuse "working tree is not clean: $(printf '%s' "$dirty" | tr '\n' ' ')"
+}
+
 # Shared CLI: status | next [--run] | next --done STEP --evidence TEXT
 ops_main() {
   local cmd="${1:-status}"
@@ -346,19 +376,31 @@ ops_main() {
       ;;
     next)
       local run=0 done_step="" evidence=""
+      DONE_RUN_IDS=""; DONE_CARRY=""; DONE_PROBE=0
       while [ $# -gt 0 ]; do
         case "$1" in
           --run) run=1 ;;
           --done) done_step="${2:-}"; shift ;;
           --evidence) evidence="${2:-}"; shift ;;
+          --run-id) DONE_RUN_IDS="$DONE_RUN_IDS ${2:-}"; shift ;;
+          --carry-forward) DONE_CARRY="${2:-}"; shift ;;
+          --probe) DONE_PROBE=1 ;;
           *) die "unknown next option: $1" ;;
         esac
         shift
       done
+      DONE_RUN_IDS="${DONE_RUN_IDS# }"
       gather
       if [ -n "$done_step" ]; then
         [ "$done_step" = "$NEXT_ID" ] || refuse "can only record the current next step ($NEXT_ID), not $done_step"
         [ "$NEXT_KIND" = "manual" ] || refuse "only operator-owned (manual) steps are recorded by hand; $NEXT_ID is $NEXT_KIND"
+        if [[ " ${STRUCTURED_STEPS:-} " == *" $done_step "* ]]; then
+          [ -z "$evidence" ] || refuse "$done_step does not accept free-text --evidence; use --run-id, --carry-forward or --probe"
+          structured_done "$done_step"
+          return 0
+        fi
+        [ -z "$DONE_RUN_IDS$DONE_CARRY" ] && [ "$DONE_PROBE" = 0 ] ||
+          refuse "--run-id/--carry-forward/--probe apply only to: ${STRUCTURED_STEPS:-none}"
         [ -n "$evidence" ] || refuse "--evidence is required"
         mark_done "$OPS_SCOPE" "$done_step" "$evidence"
         log "recorded $done_step as done in $(marker_path "$OPS_SCOPE" "$done_step")"
@@ -376,37 +418,23 @@ ops_main() {
   esac
 }
 
-# runbook_block FILE HEADING_SUBSTRING [N]
-# Print the Nth (default 1) fenced code block that follows the first heading
-# containing HEADING_SUBSTRING. Commands are read from the runbook at run time
-# so the runbook stays the single source of their text.
-runbook_block() {
-  python3 - "$REPO_ROOT/$1" "$2" "${3:-1}" <<'PY'
-import sys
-path, heading, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-lines = open(path).read().splitlines()
-start = next((i for i, l in enumerate(lines) if l.lstrip().startswith("#") and heading in l), None)
-if start is None:
-    sys.exit("runbook_block: heading %r not found in %s" % (heading, path))
-seen, buf, inside, indent = 0, [], False, 0
-for l in lines[start + 1:]:
-    s = l.strip()
-    if not inside and l.startswith("#"):
-        break
-    if s.startswith("```"):
-        if inside:
-            seen += 1
-            if seen == n:
-                print("\n".join(buf))
-                sys.exit(0)
-            buf, inside = [], False
-        else:
-            inside, indent = True, len(l) - len(l.lstrip())
-        continue
-    if inside:
-        buf.append(l[indent:] if l[:indent].strip() == "" else l)
-sys.exit("runbook_block: block %d under %r not found in %s" % (n, heading, path))
-PY
+# shellcheck source=lib/runbook-commands.sh
+. "$OPS_LIB_DIR/runbook-commands.sh"
+
+# render_runbook TEXT [VERSION]: fill the host placeholders of a runbook
+# constant (lib/runbook-commands.sh) with the configured targets.
+render_runbook() {
+  local text="$1" ver="${2:-}" url="${COORDINATOR_URL:-}"
+  if [[ "$text" == *"<coordinator-url>"* ]]; then
+    [[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "COORDINATOR_URL must be https://host[:port] to render this runbook command"
+    text="${text//<coordinator-url>/$url}"
+  fi
+  text="${text//<pearl-ssh>/\"\$PEARL_SSH\"}"
+  if [ -n "$ver" ]; then
+    is_semver "$ver" || die "render_runbook: bad version $ver"
+    text="${text//<ver>/$ver}"
+  fi
+  printf '%s\n' "$text"
 }
 
 # next_meta ID RUNBOOK [DOWNTIME] [MARK]: attach metadata only when ID is the chosen next step.

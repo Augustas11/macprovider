@@ -31,6 +31,8 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
 OPS_NAME=pearl-runtime
+# Every runnable step here touches Pearl (even --plan runs as root there).
+OPS_REQUIRE_CLEAN_FOR_ALL=1
 # shellcheck source=lib/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -39,10 +41,6 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
 
-# Runbook command with the documented `ssh pearl` replaced by the configured target.
-runbook_ssh_block() {
-  runbook_block "$ROLLOUT_DOC" "$1" "${2:-1}" | sed "s/^ssh pearl /ssh \"\$PEARL_SSH\" /"
-}
 
 max_remote_tag() {
   git -C "$REPO_ROOT" ls-remote --tags origin 'v*' 2>/dev/null |
@@ -59,6 +57,11 @@ gather() {
   live=""; gw_live=""
   if fetch_coordinator_health; then
     live="$(json_field "$OPS_TMP_DIR/healthz.json" 'd["version"]')"
+  fi
+  # Versions are validated before they reach a git refspec.
+  if [ -n "$live" ] && ! [[ "$live" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fact live_coordinator_version_invalid "$live"
+    live=""
   fi
   if [ -n "$(gateway_url)" ] && [ "$(http_get "$(gateway_url)/healthz" "$OPS_TMP_DIR/gw.json")" = "200" ]; then
     gw_live="$(json_field "$OPS_TMP_DIR/gw.json" 'd["version"]')"
@@ -84,6 +87,9 @@ EOF
   fact production_release_active_runs "$prod_active"
 
   T="${PEARL_RUNTIME_VERSION:-}"
+  if [ -n "$T" ] && ! [[ "$T" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    refuse "PEARL_RUNTIME_VERSION must be vMAJOR.MINOR.PATCH"
+  fi
   fact target_version "$T"
   NEXT_RUNBOOK="$ROLLOUT_DOC"
 
@@ -92,20 +98,28 @@ EOF
   fi
 
   # 1. rule 2: the release must change coordinator/gateway code.
-  local ref="origin/main" changed=unknown
+  local ref="origin/main" changed=unknown unknown_why="live coordinator version unreadable"
   if [ -n "$T" ] && remote_tag_exists "$T"; then
     git -C "$REPO_ROOT" fetch -q origin "refs/tags/$T:refs/tags/$T" 2>/dev/null || true
     ref="$T"
   fi
   if [ -n "$live" ]; then
     git -C "$REPO_ROOT" fetch -q origin "refs/tags/$live:refs/tags/$live" 2>/dev/null || true
-    # Tests, fixtures, docs and dist/ deploy tooling do not change the shipped binaries.
-    if git -C "$REPO_ROOT" diff --quiet "$live" "$ref" -- phase4-coordinator phase5-gateway \
-      ':(exclude)*_test.go' ':(exclude)*/testdata/*' ':(exclude)*.md' \
-      ':(exclude)phase4-coordinator/dist/*' ':(exclude)phase5-gateway/dist/*' 2>/dev/null; then
-      changed=false
-    elif git -C "$REPO_ROOT" rev-parse -q --verify "$live^{commit}" >/dev/null; then
-      changed=true
+    if ! git -C "$REPO_ROOT" rev-parse -q --verify "$live^{commit}" >/dev/null; then
+      unknown_why="live tag $live is not available locally (fetch failed or tag missing)"
+    elif ! git -C "$REPO_ROOT" rev-parse -q --verify "$ref^{commit}" >/dev/null; then
+      unknown_why="$ref is not available locally"
+    else
+      # Tests, fixtures, docs and dist/ deploy tooling do not change the shipped binaries.
+      local diff_rc=0
+      git -C "$REPO_ROOT" diff --quiet "$live" "$ref" -- phase4-coordinator phase5-gateway \
+        ':(exclude)*_test.go' ':(exclude)*/testdata/*' ':(exclude)*.md' \
+        ':(exclude)phase4-coordinator/dist/*' ':(exclude)phase5-gateway/dist/*' 2>/dev/null || diff_rc=$?
+      case "$diff_rc" in
+        0) changed=false ;;
+        1) changed=true ;;
+        *) unknown_why="git diff $live..$ref failed (rc=$diff_rc)" ;;
+      esac
     fi
   fi
   fact code_changed_vs_live "$changed"
@@ -122,7 +136,10 @@ EOF
       step code_changed blocked "$ref coordinator/gateway code == live $live"
       set_next code_changed blocked "Cut a runtime release" "" \
         "shipped coordinator/gateway code at $ref is identical to live $live (only tests/docs/dist tooling differ); a runtime apply buys nothing and costs a full outage (rollout rule 2). Fix the tooling instead." ;;
-    *) step code_changed unknown "live tag unreadable" ;;
+    *)
+      step code_changed blocked "$unknown_why"
+      set_next code_changed blocked "Compare shipped code with the live runtime" "" \
+        "cannot tell whether $ref changes shipped coordinator/gateway code: $unknown_why; refusing to proceed (rollout rule 2)" ;;
   esac
 
   if [ -z "$T" ]; then
@@ -133,7 +150,6 @@ EOF
       "set PEARL_RUNTIME_VERSION; $suggest is the next unused tag on origin, confirm it against the Consumed identities row of docs/releases/cli-release-train.md"
     return
   fi
-  [[ "$T" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse "PEARL_RUNTIME_VERSION must be vMAJOR.MINOR.PATCH"
   OPS_SCOPE="pearl-runtime-$T"
 
   # 2. signed annotated tag on main HEAD.
@@ -209,9 +225,12 @@ git push origin refs/tags/$T"
     step plan pending ""
     if [ -z "${PEARL_SSH:-}" ]; then
       set_next plan blocked "Preflight and plan on Pearl" "" "PEARL_SSH is unset"
-    else
+    elif [ -z "$NEXT_ID" ]; then
+      # Rendered only when this is the next step; a render failure aborts gather.
+      local preflight_cmd
+      preflight_cmd="$(render_runbook "$RB_PEARL_PREFLIGHT")"
       set_next plan read "Pearl preflight and updater --plan for $T (read-only)" \
-"$(runbook_ssh_block "Preflight (every time)")
+"$preflight_cmd
 ssh \"\$PEARL_SSH\" 'for l in /run/lock/macprovider-pearl-updater.lock /opt/macprovider/.coordinator-deploy.lock; do flock -n \$l true || { echo \"lock busy: \$l\" >&2; exit 1; }; done'
 ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
       next_meta plan "$ROLLOUT_DOC#preflight-every-time" "" plan
@@ -223,8 +242,11 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
     step apply "done" "$(marker_field "$OPS_SCOPE" apply 'd.get("recorded_at")')"
   else
     step apply pending ""
-    set_next apply mutate "Apply runtime $T with the signed updater" \
-      "$(runbook_ssh_block "Runtime apply (signed updater)" | sed "s/<ver>/${T#v}/g")"
+    if [ -z "$NEXT_ID" ]; then
+      local apply_cmd
+      apply_cmd="$(render_runbook "$RB_PEARL_APPLY" "${T#v}")"
+      set_next apply mutate "Apply runtime $T with the signed updater" "$apply_cmd"
+    fi
     next_meta apply "$ROLLOUT_DOC#runtime-apply-signed-updater" "$APPLY_DOWNTIME" apply
   fi
 

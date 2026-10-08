@@ -20,8 +20,18 @@
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
 #                           verify-malibu-release-artifacts.sh
 #   5 pearl_accepted_ids    add the candidate compatibility_set_id, keep target_id
-#   6 canary_smoke          exact signed-candidate install/join smoke
-#   7 promotion             promote-acceptance-candidate.yml (+ env approval)
+#   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
+#                           structured evidence: `next --done canary_smoke --probe` (the script
+#                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
+#                           candidate, coordinator.connected, candidate compatibility set) or
+#                           `--run-id N` of a successful signed journey run for the candidate
+#   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
+#                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
+#                           promote-signed-*-journey run whose head SHA, title or log names the
+#                           candidate SHA or tag) or `--carry-forward ID` (a carry-forward record
+#                           in docs/releases/cli-release-train.md naming the candidate version)
+#   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
+#                           sets physical_acceptance_confirmed=true, after 4, 6 and 7
 #   8 recommendation_bump   Pearl latest_binary_version + compatibility target
 #   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
@@ -33,6 +43,8 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
 OPS_NAME=cli-release
+# Free-text --done is refused for these; see structured_done.
+STRUCTURED_STEPS="canary_smoke e2e_gate"
 # shellcheck source=lib/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -252,15 +264,30 @@ bash scripts/release-staged-version-policy.sh v$V" \
   fi
 
   # 6. canary install/join smoke.
-  if [ "$published" = true ] || marker_done "$OPS_SCOPE" canary_smoke; then
-    step canary_smoke "done" ""
+  if [ "$published" = true ] || marker_candidate_matches canary_smoke "$ok_sha"; then
+    step canary_smoke "done" "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("evidence")')"
   else
     step canary_smoke pending ""
     set_next canary_smoke manual "Exact signed-candidate install/join smoke on the canary Mac" \
 "# docs/releases/cli-release-train.md Promotion gate item 4 (operator approval: restarts the live provider)
 # Install the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ on the canary, then confirm:
 #   macprovider-cli --version == $V; joins via compatibility set $compat_id;
-#   operator pause survives coordinator drain; one bounded buyer request is served."
+#   operator pause survives coordinator drain; one bounded buyer request is served.
+# Record it with structured evidence (free text is refused):
+#   $0 next --done canary_smoke --probe        (reads the canary /v1/status via STUDIO_SSH)
+#   $0 next --done canary_smoke --run-id <id>  (a successful signed journey run for $ok_sha)"
+  fi
+
+  # 7. in-scope e2e on the candidate (Promotion gate item 3).
+  if [ "$published" = true ] || marker_candidate_matches e2e_gate "$ok_sha"; then
+    step e2e_gate "done" "$(marker_field "$OPS_SCOPE" e2e_gate 'd.get("evidence")')"
+  else
+    step e2e_gate pending ""
+    set_next e2e_gate manual "Record the in-scope e2e evidence for candidate $ok_sha" \
+"# docs/releases/cli-release-train.md Promotion gate item 3: in-scope e2e green on this candidate,
+# or an explicit carry-forward record. Record checkable evidence only:
+#   $0 next --done e2e_gate --run-id <signed journey run id> [--run-id <id> ...]
+#   $0 next --done e2e_gate --carry-forward <record id in docs/releases/cli-release-train.md>"
   fi
 
   # 7. promotion.
@@ -280,6 +307,10 @@ bash scripts/release-staged-version-policy.sh v$V" \
     step promotion pending ""
     if [ -n "$prod_active" ]; then
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
+    elif ! marker_run_matches signed_byte_verification "$ok_id" ||
+      ! marker_candidate_matches canary_smoke "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha"; then
+      set_next promotion blocked "Promote v$V" "" \
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke and e2e evidence recorded for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
 "gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
@@ -353,6 +384,116 @@ ssh \"\$PEARL_SSH\" \"install -o root -g root -m 0755 /tmp/install.sh.new \$INST
   fi
 
   set_next "done" "done" "v$V train complete" ""
+}
+
+# marker_candidate_matches STEP SHA: the structured marker was recorded for candidate SHA.
+marker_candidate_matches() {
+  [ -n "${2-}" ] && marker_done "$OPS_SCOPE" "$1" &&
+    [ "$(marker_field "$OPS_SCOPE" "$1" 'd.get("candidate_sha")')" = "$2" ]
+}
+
+# check_journey_run RUN_ID CANDIDATE_SHA VERSION -> JSON evidence on stdout, or refuse.
+# The run must be a successful signed journey run that names the candidate.
+check_journey_run() {
+  local id="$1" sha="$2" V="$3" info
+  [[ "$id" =~ ^[0-9]+$ ]] || refuse "run id must be numeric (got '$id')"
+  info="$(gh api "repos/$(gh_repo)/actions/runs/$id" \
+    --jq '{id, conclusion, status, head_sha, path, display_title, html_url}' 2>/dev/null)" ||
+    refuse "run $id not readable via gh"
+  python3 - "$info" "$sha" "$V" <<'PY' || refuse "run $id is not a successful signed journey run"
+import json, re, sys
+d, sha, v = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+ok = d.get("status") == "completed" and d.get("conclusion") == "success"
+ok = ok and re.fullmatch(r"\.github/workflows/promote-signed-[a-z0-9-]+-journey\.yml", d.get("path") or "")
+sys.exit(0 if ok else 1)
+PY
+  local head title named=""
+  head="$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head_sha"])')"
+  title="$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["display_title"] or "")')"
+  if [ "$head" = "$sha" ]; then
+    named="head_sha"
+  elif [[ "$title" == *"$sha"* || "$title" == *"v$V"* ]]; then
+    named="display_title"
+  elif gh run view "$id" -R "$(gh_repo)" --log 2>/dev/null | grep -qF -e "$sha" -e "v$V"; then
+    named="run_log"
+  fi
+  [ -n "$named" ] || refuse "run $id does not name candidate $sha or v$V (head_sha, title or log)"
+  printf '%s' "$info" | python3 -c 'import json,sys; d=json.load(sys.stdin); d["candidate_named_by"]=sys.argv[1]; print(json.dumps(d))' "$named"
+}
+
+# structured_done STEP: record canary_smoke / e2e_gate from checkable evidence
+# (DONE_RUN_IDS, DONE_CARRY, DONE_PROBE set by ops_main).
+structured_done() {
+  local step_id="$1" V sha compat
+  V="${OPS_SCOPE#cli-release-}"
+  sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
+  compat="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  is_sha40 "$sha" || refuse "verify the candidate bytes first; no verified candidate SHA is recorded"
+  local runs_json="[]" id ev
+  for id in $DONE_RUN_IDS; do
+    id="${id##*/runs/}"; id="${id%%/*}"
+    ev="$(check_journey_run "$id" "$sha" "$V")"
+    runs_json="$(python3 -c 'import json,sys; a=json.loads(sys.argv[1]); a.append(json.loads(sys.argv[2])); print(json.dumps(a))' "$runs_json" "$ev")"
+  done
+  case "$step_id" in
+    canary_smoke)
+      if [ "$DONE_PROBE" = 1 ]; then
+        [ -n "$DONE_RUN_IDS$DONE_CARRY" ] && refuse "use one kind of evidence"
+        require_studio_ssh
+        case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
+        studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/canary.json" ||
+          refuse "canary /v1/status not readable over STUDIO_SSH"
+        local probe
+        probe="$(python3 - "$OPS_TMP_DIR/canary.json" "$V" "$compat" <<'PY'
+import json, sys
+d, v, compat = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+got = {
+    "binary_version": d.get("binary_version"),
+    "coordinator_connected": (d.get("coordinator") or {}).get("connected"),
+    "compatibility_set_id": d.get("compatibility_set_id"),
+}
+bad = []
+if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
+if got["coordinator_connected"] is not True: bad.append("coordinator.connected is not true")
+if compat and got["compatibility_set_id"] != compat: bad.append("compatibility_set_id %r != %r" % (got["compatibility_set_id"], compat))
+if bad:
+    sys.stderr.write("; ".join(bad) + "\n"); sys.exit(1)
+print(json.dumps(got, sort_keys=True))
+PY
+)" || refuse "canary probe failed the candidate checks"
+        mark_done "$OPS_SCOPE" canary_smoke "status probe: $probe" \
+          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "status_probe", "probe": json.loads(sys.argv[2])}))' "$sha" "$probe")"
+      elif [ -n "$DONE_RUN_IDS" ] && [ -z "$DONE_CARRY" ]; then
+        mark_done "$OPS_SCOPE" canary_smoke "journey runs: $DONE_RUN_IDS" \
+          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "runs", "runs": json.loads(sys.argv[2])}))' "$sha" "$runs_json")"
+      else
+        refuse "canary_smoke needs --probe or --run-id <id>; free text is not evidence"
+      fi ;;
+    e2e_gate)
+      [ "$DONE_PROBE" = 0 ] || refuse "--probe is not evidence for e2e_gate"
+      if [ -n "$DONE_CARRY" ] && [ -z "$DONE_RUN_IDS" ]; then
+        [[ "$DONE_CARRY" =~ ^[A-Za-z0-9._:#/-]{3,80}$ ]] || refuse "carry-forward id has unexpected characters"
+        local line
+        line="$(git -C "$REPO_ROOT" show "origin/main:docs/releases/cli-release-train.md" |
+          python3 -c '
+import sys
+rid, v = sys.argv[1], sys.argv[2]
+for l in sys.stdin:
+    if rid in l and "carry" in l.lower() and v in l:
+        print(l.strip()); break
+' "$DONE_CARRY" "$V")"
+        [ -n "$line" ] || refuse "no line in origin/main:docs/releases/cli-release-train.md names carry-forward '$DONE_CARRY' for $V"
+        mark_done "$OPS_SCOPE" e2e_gate "carry-forward $DONE_CARRY" \
+          "$(python3 -c 'import hashlib,json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "carry_forward", "record_id": sys.argv[2], "record_line_sha256": hashlib.sha256(sys.argv[3].encode()).hexdigest()}))' "$sha" "$DONE_CARRY" "$line")"
+      elif [ -n "$DONE_RUN_IDS" ] && [ -z "$DONE_CARRY" ]; then
+        mark_done "$OPS_SCOPE" e2e_gate "journey runs: $DONE_RUN_IDS" \
+          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "runs", "runs": json.loads(sys.argv[2])}))' "$sha" "$runs_json")"
+      else
+        refuse "e2e_gate needs --run-id <id> ... or --carry-forward <id>; free text is not evidence"
+      fi ;;
+    *) refuse "no structured evidence defined for $step_id" ;;
+  esac
+  log "recorded $step_id for candidate $sha"
 }
 
 # marker_run_matches STEP RUN_ID: the step marker exists and was made for RUN_ID.
