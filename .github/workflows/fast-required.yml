@@ -1,16 +1,19 @@
-# DRAFT, NOT ENABLED. Risk-sized fast gate for docs, config and catalog-only
-# diffs. It runs only by manual dispatch until ci-required is changed to
-# select it (see scripts/ops/README.md, "Risk-sized gates"). To enable it,
-# replace `on:` with the commented pull_request trigger in the same PR as the
-# ci-required change.
+# DRAFT, NOT ENABLED. Risk-sized fast gate. It runs only by manual dispatch
+# until ci-required is changed to select it (see scripts/ops/README.md,
+# "Risk-sized gates"). To enable it, replace `on:` with the commented
+# pull_request trigger in the same PR as the ci-required change.
 #
 # Budget: under 5 minutes. Every check is scoped to the diff:
 #   - gofmt and go vet on the touched Go packages only, per module
 #   - catalog-release.py verify when phase3-binary/catalog/ changed
+#   - the scripts/ops tests when scripts/ops/ changed
 #   - check_spec_pr_declaration.py
 #   - bash -n on touched shell scripts (syntax only, no shellcheck)
-# It also prints lane=fast|full: `fast` only when every changed path is
-# docs, config, catalog or ops tooling that no full-CI job builds or tests.
+# It also prints lane=fast|full. `fast` only when every changed path is
+# Markdown at the repo root or under docs/, audits/ or beta/, or an agent rule
+# under .cursor/rules/ (matched case-insensitively). Everything else, including
+# specs/, fixtures, coordinator config examples, the catalog and scripts/ops,
+# is `full`: those have full-CI consumers.
 name: fast-required
 
 on:
@@ -47,6 +50,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # test-runbook-commands.sh compares against origin/main.
+      - name: Fetch origin/main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Classify the diff
         id: diff
@@ -63,8 +69,10 @@ jobs:
           [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base/head must be 40-hex"; exit 1; }
           git diff --no-renames --name-only -z "$base" "$head" > "$RUNNER_TEMP/changed"
           printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
+          shopt -s nocasematch
           lane=fast
           catalog=false
+          ops=false
           : > "$RUNNER_TEMP/go-files"
           : > "$RUNNER_TEMP/sh-files"
           while IFS= read -r -d '' f; do
@@ -74,18 +82,18 @@ jobs:
             esac
             case "$f" in
               phase3-binary/catalog/*) catalog=true ;;
+              scripts/ops/*) ops=true ;;
             esac
             # Fail closed: anything not on this list needs the full CI.
             case "$f" in
-              docs/*|audits/*|beta/*|.cursor/*|*.md) ;;
-              phase3-binary/catalog/*) ;;
-              phase4-coordinator/coordinator.yaml.example|phase4-coordinator/dist/coordinator.yaml|phase4-coordinator/dist/coordinator.yaml.example) ;;
-              scripts/ops/*) ;;
+              */*.md) case "$f" in docs/*|audits/*|beta/*) ;; *) lane=full ;; esac ;;
+              *.md) ;;
+              .cursor/rules/*) ;;
               *) lane=full ;;
             esac
           done < "$RUNNER_TEMP/changed"
-          printf 'lane=%s\ncatalog=%s\n' "$lane" "$catalog" >> "$GITHUB_OUTPUT"
-          echo "lane=$lane catalog=$catalog"
+          printf 'lane=%s\ncatalog=%s\nops=%s\n' "$lane" "$catalog" "$ops" >> "$GITHUB_OUTPUT"
+          echo "lane=$lane catalog=$catalog ops=$ops"
 
       - name: Set up Go
         if: hashFiles('**/go.mod') != ''
@@ -100,20 +108,32 @@ jobs:
         run: |
           set -euo pipefail
           [ -s "$RUNNER_TEMP/go-files" ] || { echo "no Go changes"; exit 0; }
-          existing="$(while read -r f; do [ -f "$f" ] && echo "$f"; done < "$RUNNER_TEMP/go-files")"
-          [ -n "$existing" ] || { echo "only deleted Go files"; exit 0; }
-          unformatted="$(gofmt -l $existing)"
+          existing=()
+          while IFS= read -r f; do [ -f "$f" ] && existing+=("$f"); done < "$RUNNER_TEMP/go-files"
+          [ "${#existing[@]}" -gt 0 ] || { echo "only deleted Go files"; exit 0; }
+          unformatted="$(gofmt -l "${existing[@]}")"
           [ -z "$unformatted" ] || { echo "::error::gofmt needed:"; echo "$unformatted"; exit 1; }
           for module in phase4-coordinator phase5-gateway phase7-verify test/integration; do
-            pkgs="$(printf '%s\n' $existing | awk -v m="$module/" 'index($0, m) == 1 { sub(m, ""); n = split($0, p, "/"); d = "."; for (i = 1; i < n; i++) d = d "/" p[i]; print d }' | sort -u)"
-            [ -n "$pkgs" ] || continue
-            echo "go vet in $module: $pkgs"
-            (cd "$module" && go vet $pkgs)
+            pkgs=()
+            while IFS= read -r d; do [ -n "$d" ] && pkgs+=("$d"); done < <(printf '%s\n' "${existing[@]}" |
+              awk -v m="$module/" 'index($0, m) == 1 { sub(m, ""); n = split($0, p, "/"); d = "."; for (i = 1; i < n; i++) d = d "/" p[i]; print d }' | sort -u)
+            [ "${#pkgs[@]}" -gt 0 ] || continue
+            echo "go vet in $module: ${pkgs[*]}"
+            (cd "$module" && go vet "${pkgs[@]}")
           done
 
       - name: Verify the catalog release
         if: steps.diff.outputs.catalog == 'true'
         run: python3 scripts/catalog-release.py verify
+
+      - name: scripts/ops tests
+        if: steps.diff.outputs.ops == 'true'
+        run: |
+          bash scripts/ops/test-ops-guard.sh
+          bash scripts/ops/test-live-lock.sh
+          bash scripts/ops/test-runbook-commands.sh
+          bash scripts/ops/test-entrypoints.sh
+          bash scripts/ops/test-fast-required.sh
 
       - name: Require the behavior-change declaration
         if: github.event_name == 'pull_request'

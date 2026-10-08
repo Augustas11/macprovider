@@ -11,6 +11,9 @@ not add steps of its own:
 | `pearl-runtime.sh` | coordinator and gateway runtime release | `docs/runbooks/pearl-coordinator-rollout.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 
+Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
+`test-runbook-commands.sh`, `test-entrypoints.sh`, `test-fast-required.sh`.
+
 ## Use
 
 ```bash
@@ -18,7 +21,10 @@ scripts/ops/<train>.sh status        # read-only: JSON on stdout, summary on std
 scripts/ops/<train>.sh next          # the exact command for the next step
 MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
+scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
+scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
+scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```
 
 - `status` reads live state from GitHub, public HTTPS, and read-only ssh when
@@ -26,15 +32,26 @@ scripts/ops/live-lock.sh release <session-label>                 # hand back whe
 - `next --run` runs one step and then stops. It refuses when a precondition
   fails, and it refuses a second dispatch while a run for the same version is
   in flight. For any step that mutates Pearl, it prints the expected downtime
-  before it does anything else. A mutating step takes the live-ops lock first.
-  The lock stays held until you release it, because a train spans several
-  steps.
+  before it does anything else. A mutating step (and every runnable
+  `pearl-runtime.sh` step) needs a clean checkout whose HEAD is `origin/main`.
+  It then takes the live-ops lock and decides the next step again; if the
+  step changed while it waited, it refuses. The lock stays held until you
+  release it, because a train spans several steps.
+- Runbook commands are never read from the Markdown at run time. They are
+  constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
+  one drifts from its fenced block on `origin/main`.
 - Steps the operator owns are `manual`: an environment approval click, a
   Pearl `coordinator.yaml` edit, or a provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
-  it with `next --done`. A few other steps leave no trace that can be read
-  live, such as the signed-byte verification and the gateway proof. Their
-  completion is kept under `~/.config/macprovider/ops-state/`.
+  it with `next --done`. `canary_smoke` and `e2e_gate` refuse free text: they
+  take a canary status probe the script reads itself, signed journey run ids
+  that the script checks with `gh`, or a carry-forward record in
+  `docs/releases/cli-release-train.md`. Promotion sets
+  `physical_acceptance_confirmed=true` only after both. A few other steps
+  leave no trace that can be read live, such as the signed-byte verification
+  and the gateway proof (which must move the target provider's counters and
+  expires after 24 h). Their completion is kept under
+  `~/.config/macprovider/ops-state/`.
 - Every step command runs with `MACPROVIDER_OPS_ENTRYPOINT=1` exported. The
   guard in `hooks/` blocks the guarded commands when an agent types them
   directly. It allows them when that marker is set in the environment the
@@ -79,10 +96,12 @@ output over those sections instead of typing status by hand.
 `.github/workflows/fast-required.yml` is a draft and is not enabled: it runs
 only on manual dispatch. It takes under 5 minutes and scopes every check to
 the diff: gofmt and `go vet` on the touched Go packages, `catalog-release.py
-verify` when the catalog changed, `check_spec_pr_declaration.py`, and
-`bash -n` on touched scripts. It prints `lane=fast` only when every changed
-path is docs, coordinator config examples, catalog or `scripts/ops/`.
-Anything else is `lane=full`.
+verify` when the catalog changed, the `scripts/ops` tests when they changed,
+`check_spec_pr_declaration.py`, and `bash -n` on touched scripts. It prints
+`lane=fast` only when every changed path is Markdown at the repo root or under
+`docs/`, `audits/` or `beta/`, or a `.cursor/rules/` file (case-insensitive).
+Everything else, including `specs/`, fixtures, coordinator config, the catalog
+and `scripts/ops/`, is `lane=full`. `test-fast-required.sh` checks the lanes.
 
 To enable it, in one PR:
 
