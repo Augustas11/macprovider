@@ -1,5 +1,28 @@
 # Provider CLI release verification
 
+## Pearl compatibility gate before fleet recommendation
+
+For each signed provider CLI release recommended to the fleet, read the exact
+`compatibility_set_id` from its verified signed manifest. Before advancing the
+advertised recommendation, ensure Pearl's `compatibility_set.accepted_ids`
+contains that identity and `compatibility_set.target_id` names that same
+release. Preserve the prior target as an accepted rollback identity and the
+other active accepted sets; the accepted list is capped at eight.
+
+An isolated live candidate test adds its identity to `accepted_ids` while
+keeping the existing target. Fleet recommendation additionally requires the
+matching target: a binary recommendation of 223 with compatibility target
+207 fails the consumer updater's exact manifest-target comparison.
+
+Apply under both Pearl locks after following
+[the rollout runbook](pearl-coordinator-rollout.md) and announcing expected
+downtime. Validate with the running coordinator's service environment, restart
+the coordinator (SIGHUP does not reload this policy), and verify its applied
+configuration hash and public health. Publication or a healthy advertised
+version alone does not prove that the new provider compatibility set is
+accepted and targeted.
+
+
 This runbook covers release/updater correctness only. Keep product-specific
 smokes, such as Buzz tool-schema/null behavior, in a separate QA checklist.
 

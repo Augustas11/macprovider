@@ -1,5 +1,23 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## CLI 1.8.223 compatibility target — 2026-10-08 00:42 UTC
+
+Pearl's compatibility target now matches its advertised provider version:
+`Augustas11/macprovider:v1.8.223@9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`.
+All eight accepted identities were preserved, including the previous target
+207. Candidate configuration validation passed with the service environment.
+The coordinator-only restart loaded the new configuration at 00:42:12 UTC;
+its applied hash matched the live file. Restart invocation through the first
+healthy local response took 13.303 seconds; exact external downtime was not
+sampled. Both public health endpoints passed afterward, with eight providers
+connected, four ready, and no degraded trust authority.
+
+The prior target 207 would cause the consumer updater's exact compatibility
+target check to reject a prepared 223 package. This gate is now aligned.
+Studio's separate Keychain access/backend migration remains unresolved, and
+native MTP remains off.
+
+
 ## CLI 1.8.223 compatibility admission — 2026-10-08 00:21 UTC
 
 Pearl now accepts the signed release compatibility identity
