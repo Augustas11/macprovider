@@ -423,3 +423,36 @@ func TestValidateAutotuneReleaseAdmitsNothingWhenRetainedEntryInvalid(t *testing
 		})
 	}
 }
+
+// The first native-MTP-bound release is validated before `current` holds its
+// admission set, so every release-scoped native path must follow the staged
+// directory while the revocations dir stays live.
+func TestRedirectAutotuneReleasePathsCoversNativeMTPSet(t *testing.T) {
+	cur := "/opt/macprovider/autotune/current/"
+	var cfg config.Config
+	f := &cfg.AutotuneFeeds
+	f.NativeMTPAdmissionPath = cur + "native-mtp-admission.json"
+	f.NativeMTPAdmissionSigPath = cur + "native-mtp-admission.json.sig"
+	f.NativeMTPArtifactManifestPath = cur + "native-mtp-artifact-manifest.json"
+	f.NativeMTPSelftestBankPath = cur + "native-mtp-selftest-bank.json"
+	f.NativeMTPSelftestBankSigPath = cur + "native-mtp-selftest-bank.json.sig"
+	f.NativeMTPRevocationsDir = "/opt/macprovider/native-mtp-revocations/current"
+	staged := "/opt/macprovider/autotune/releases/staged"
+	redirectAutotuneReleasePaths(&cfg, staged)
+	for _, p := range []string{
+		f.NativeMTPAdmissionPath, f.NativeMTPAdmissionSigPath, f.NativeMTPArtifactManifestPath,
+		f.NativeMTPSelftestBankPath, f.NativeMTPSelftestBankSigPath,
+	} {
+		if filepath.Dir(p) != staged {
+			t.Fatalf("native path %q was not redirected to %q", p, staged)
+		}
+	}
+	if f.NativeMTPRevocationsDir != "/opt/macprovider/native-mtp-revocations/current" {
+		t.Fatalf("revocations dir must stay live, got %q", f.NativeMTPRevocationsDir)
+	}
+	var unbound config.Config
+	redirectAutotuneReleasePaths(&unbound, staged)
+	if unbound.AutotuneFeeds.NativeMTPAdmissionPath != "" {
+		t.Fatalf("unconfigured native path must stay unset")
+	}
+}

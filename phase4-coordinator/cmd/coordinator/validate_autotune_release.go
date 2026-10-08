@@ -226,6 +226,11 @@ func redirectAutotuneReleasePaths(cfg *config.Config, dir string) {
 		&feeds.AutotuneCandidatesPath, &feeds.AutotuneCandidatesSigPath,
 		&feeds.ContinuousBatchingPolicyPath, &feeds.ContinuousBatchingPolicySigPath,
 		&feeds.CatalogArtifactsPath, &feeds.CatalogArtifactsSigPath,
+		// SPEC-023 §12.5: the native-MTP admission set is release-scoped like
+		// the other feeds; the revocations dir is not, so it stays live.
+		&feeds.NativeMTPAdmissionPath, &feeds.NativeMTPAdmissionSigPath,
+		&feeds.NativeMTPArtifactManifestPath,
+		&feeds.NativeMTPSelftestBankPath, &feeds.NativeMTPSelftestBankSigPath,
 		&cfg.Tier2.CatalogPath,
 	} {
 		redirect(p)
