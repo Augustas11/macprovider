@@ -314,7 +314,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // v0.1 feeds, so its warnings reach the same warning sets.
         let inputs = AutotuneStaticInputs(
             fetch: { _ in throw URLError(.cannotConnectToHost) },
-            now: { Self.date("2026-10-02T00:00:00Z") }
+            now: { Self.date("2026-10-09T00:00:00Z") }
         )
         let loaded = await inputs.loadRecommendationInputs()
         XCTAssertTrue(loaded.demand.usedFallback)

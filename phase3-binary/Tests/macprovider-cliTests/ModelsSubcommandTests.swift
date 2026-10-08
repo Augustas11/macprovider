@@ -2371,7 +2371,7 @@ final class ModelsSubcommandTests: XCTestCase {
     }
 
     private static func currentStaticFixtureDate() -> Date {
-        prepareDate("2026-10-02T03:00:00Z")
+        prepareDate("2026-10-09T00:00:00Z")
     }
 
     private func mutateRecommendationFixture(

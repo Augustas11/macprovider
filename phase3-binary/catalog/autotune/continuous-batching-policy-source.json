@@ -1,0 +1,29 @@
+{
+  "entries": [
+    {
+      "cache_class": "mixed",
+      "cached_turns_accepted": false,
+      "chat_template_sha256": "9cf4f46deaa06769f3240ada331ac0f348694db48ec2e8b51068935f77bb18f9",
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "kv_dtype": "fp16",
+      "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+      "model_id": "qwen/qwen3.6-35b-a3b",
+      "model_key": "qwen/qwen3.6-35b-a3b",
+      "model_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+      "provenance": {
+        "evidence_id": "spec048-r014-r015-existing-qualified-proof-v223-input",
+        "live_executable_cdhash": "5d7e0c39fea84ff5113cd7c6313f0035d7e85bb0",
+        "package_manifest_sha256": "edd099be5f0b0ea6bb6f05e05aa39bff649897c2a05b0d825a234651d8d8c5eb",
+        "provider_cli_version": "1.8.223",
+        "source": "packaged_studio_campaign",
+        "status": "qualified",
+        "studio_campaign_sha256": "a66f41e644695039942f7a24b0db9a298b8360c53511fb1f54063b6e91dbca3d"
+      },
+      "requires_moe": true,
+      "rollout": "canary",
+      "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
+    }
+  ],
+  "schema_version": "macprovider.continuous-batching-policy-source.v1"
+}

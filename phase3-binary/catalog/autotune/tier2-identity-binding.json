@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666",
-  "generated_at": "2026-10-01T04:20:42Z",
+  "autotune_candidates_sha256": "da1e793dc0d48914bc74026a3464bd09162b4a50dd16c7ebc50298a847b64664",
+  "generated_at": "2026-10-08T01:05:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -123,6 +123,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-01-artifact-feed-activation-v1",
+  "release_id": "published-2026-10-08-a3b-cb-v223-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
