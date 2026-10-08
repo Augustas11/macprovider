@@ -9554,18 +9554,17 @@
         "phase3-binary/Tests/macprovider-cliTests/BYOMDiscoveryTests.swift:testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields",
         "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRequiresJSONFlag",
         "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
-        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferCommandRequiresDryRunJSONFlags",
-        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests"
+        "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferCommandRequiresDryRunJSONFlags"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
       "evidence": [
         {
-          "artifact": "commit:b883567719a564d3f67243b3f1eed60bb30d1484",
+          "artifact": "commit:9c8c87dbff8ee00ba2c72f7923e1dce268c42e78",
           "source": null,
-          "captured_at": "2026-10-08",
-          "expires_at": "2026-11-07"
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-11-06"
         },
         {
           "artifact": "sha256:f25f38443dba9f3688f6d45860f389d82c94a30444dc38f557017bdb42169ef8",
@@ -9808,18 +9807,17 @@
         "phase3-binary/Tests/macprovider-cliTests/BYOMEvaluationTests.swift:testEvaluateCommandRunsHermeticLoopbackRuntimeWithoutMutation",
         "phase3-binary/Tests/macprovider-cliTests/BYOMOfferDryRunTests.swift:testOfferDryRunEmitsExactClosedTopLevelSchema",
         "phase3-binary/Tests/macprovider-cliTests/BYOMAdmissionTests.swift:testOfferSubmissionPackageBindsAdmissionIdentityAndCandidate",
-        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run",
-        "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests"
+        "test/e2e/byom/run-cli-onboarding-e2e.py:assert_catalog_offer_dry_run"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-BYOM-DISCOVERY"
       ],
       "evidence": [
         {
-          "artifact": "commit:b883567719a564d3f67243b3f1eed60bb30d1484",
+          "artifact": "commit:9c8c87dbff8ee00ba2c72f7923e1dce268c42e78",
           "source": null,
-          "captured_at": "2026-10-08",
-          "expires_at": "2026-11-07"
+          "captured_at": "2026-10-07",
+          "expires_at": "2026-11-06"
         },
         {
           "artifact": "sha256:f25f38443dba9f3688f6d45860f389d82c94a30444dc38f557017bdb42169ef8",
