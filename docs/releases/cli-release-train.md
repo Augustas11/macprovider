@@ -407,29 +407,32 @@ The release/closure gates still outstanding are:
   completed after antfleet-ops approval. Its exported capture and envelope
   hashes, pinned public-key signature, expiry, artifact bindings and both
   current-source mappings passed integration verification. The protected output
-  promotes only R001/R008; reviewed integration is pending. This does not prove
+  promotes only R001/R008; reviewed integration merged in #1891 after green CI
+  and exact-head review. This does not prove
   released-CLI acceptance or complete #1690.
-- SPEC-046-R009 needs a dedicated signed process-level selector/identity
-  journey for the five implemented `serve` selectors. Its pending row has no
-  signed journey mapping; discovery R001-R008 and the llama.cpp-only settlement
-  envelope cannot be relabeled as R009 proof. The isolated serving/hello and
-  identity contract is being implemented. This is not a requirement to activate
-  five new engines in production.
+- All five released223 isolated `serve` selector/identity legs were executed
+  successfully, including real hello hashes, runtime model translation and503
+  drift refusals without another upstream chat. The additional `openai:` control
+  rejected startup but did not match the runner's expected error wording.
+  Conformance reconciliation remains pending; no new harness/tooling PR is
+  required or being opened. This does not activate five engines in production.
 - [CLI v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223)
   was published from reviewed `9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` by
   [release run 37642806955](https://github.com/Augustas11/macprovider/actions/runs/37642806955).
   Final public tarball/package/DMG CLI byte identity and signing/notarization
   proof are reconciled in the
   [closeout record](../../audits/2026-10-07-1690-closeout/README.md#public-v18223-package-proof-reconciliation--2026-10-08).
-  Previous-stable updater, paid-buyer and anonymous-discovery acceptance remain
-  pending. Publication and package verification alone do not complete those gates.
-  The fresh paid-buyer contract must explicitly cover SPEC-006-R016's selection
-  and refusal-accounting predicates and SPEC-015-R006's receipt-authorization
-  omission cases. Existing envelopes are not promotable for these IDs and must
-  remain unchanged; reviewed mappings and a fresh protected signature are needed.
+  Anonymous discovery passed on both223 and previous stable217. Fresh public223
+  Llama/Ollama streaming and non-streaming requests each passed with valid v0.4
+  receipts, payable credits, closed verified finality and no settlement holds.
+  Selection refusal checks passed, including a refunded wrong-allowlist reservation.
+  Previous-stable installation/restart, receipt-authorization omission and
+  disclosure reconciliation remain pending. Existing envelopes remain unchanged.
 - Complete formal mixed-version rollout/rollback acceptance. Recorded
   217/219/222 coexistence is not a rolling-restart proof; a refused v1-only
-  rollback preflight is not rollback readiness.
+  rollback preflight is not rollback readiness. Current `p1816` preflight passed
+  with131 route snapshots,63 v2 manifests and no unresolved pool verdicts;
+  the actual drill remains pending.
 - Complete the final closure audit and reconcile #1690's required gates.
 
 Current native/llama.cpp comparison and capability-aware Ollama measurements

@@ -1,5 +1,37 @@
 # #1690 acceptance closeout — 2026-10-07
 
+## Executed public223 checklist checks — 2026-10-08
+
+#1890 and #1891 merged; #1891 passed every required check and exact-head
+antfleet-ops review before normal merge. SPEC-046-R001/R008 are conformant.
+The public signed CLI223 SHA-256 remains `edd099be5f0b0ea6bb6f05e05aa39bff649897c2a05b0d825a234651d8d8c5eb`.
+
+- Anonymous released-client discovery passed for223 and previous stable217;
+ 217 reported217 →223 available. This is not installation acceptance.
+- All five isolated serving legs passed: llama.cpp, Ollama, mlx_lm.server,
+  LM Studio and oMLX. Captured hello hashes matched operator-declared artifacts,
+  chat requests used the expected runtime model names, and all five actual
+  pre-request identity drifts returned503 without another upstream chat.
+  These local fixtures establish selector behavior, not five production engines.
+  The complete runner stopped at the additional `openai:` negative-control
+  error-wording assertion: startup refused before serving, with the catalog
+  artifact prerequisite error rather than its expected unsupported-selector text.
+- Public223 Llama and Ollama paid requests passed streaming and non-streaming:
+  four200 responses, correct engine headers, valid v0.4 receipt verdicts,
+  closed verified finality, payable provider credit, and settled buyer quota
+  with no holds. Llama settled44 tokens/request; Ollama45 tokens/request.
+- No-pool external selection returned503 and invalid uppercase selection400,
+  with no quota/usage/credit rows. Wrong-allowlist selection returned503,
+  refunded its reservation, charged zero tokens, and created no provider credit.
+- Current `p1816` rollback preflight passed:131 route snapshots,63 v2 manifests,
+  zero open verdicts and zero in-window attempts missing verdicts. This is a
+  read-only compatibility check, not a performed rollback.
+
+Still required: supported previous-stable installation/restart acceptance,
+formal mixed rollout/rollback execution, remaining receipt-authorization and
+disclosure reconciliation, and final issue/conformance audit. No new harness,
+test, tooling or signing PR was opened for these checks. #1690 remains open.
+
 ## Post-contract BYOM signing — 2026-10-08
 
 Protected [run 37715135336](https://github.com/Augustas11/macprovider/actions/runs/37715135336)
@@ -14,7 +46,7 @@ for exactly SPEC-046-R001/R008. The envelope SHA-256 is
 its evidence expires 2026-11-06. Older signed envelopes remain unchanged.
 
 The protected promotion output changes only those two requirement records.
-Reviewed integration is pending; this does not prove released-CLI updater,
+Reviewed integration merged in #1891; this does not prove released-CLI updater,
 paid-buyer, anonymous-discovery, R009 serving or rollout/rollback acceptance.
 
 ## Public v1.8.223 package proof reconciliation — 2026-10-08
