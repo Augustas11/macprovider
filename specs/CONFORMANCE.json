@@ -9537,7 +9537,7 @@
     {
       "requirement_id": "SPEC-046-R001",
       "spec_id": "SPEC-046",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsDiscoverCommand",
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsEvaluateCommand",
@@ -9558,24 +9558,19 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:eedd1c1456242afab775072bef622a68c3b634a0",
+          "artifact": "commit:9c8c87dbff8ee00ba2c72f7923e1dce268c42e78",
           "source": null,
           "captured_at": "2026-10-07",
           "expires_at": "2026-11-06"
         },
         {
-          "artifact": "sha256:d70fce6bdb97e66a326f94cedf5a6765688f9e3a99e174d9e431e6a7b79b6317",
-          "source": "journeys/evidence/provider-byom-discovery-20261007T043046Z.spec-046-r001-spec-046-r008.journey-result.signed.json",
+          "artifact": "sha256:f25f38443dba9f3688f6d45860f389d82c94a30444dc38f557017bdb42169ef8",
+          "source": "journeys/evidence/provider-byom-discovery-20261007T161811Z.spec-046-r001-spec-046-r008.journey-result.signed.json",
           "captured_at": "2026-10-07",
           "expires_at": "2026-11-06"
         }
       ],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "The SPEC-001/SPEC-002 startup-throughput count-authority fix changes the mapped BYOMContractLockTests version selector after the fresh 2026-10-07 signed BYOM discovery capture at eedd1c1456242afab775072bef622a68c3b634a0. Retain that signed evidence unchanged; it does not pin the changed selector. Restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion for the merged fix."
-      }
+      "gap": null
     },
     {
       "requirement_id": "SPEC-046-R002",
@@ -9797,7 +9792,7 @@
     {
       "requirement_id": "SPEC-046-R008",
       "spec_id": "SPEC-046",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryRunner",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationRunner",
@@ -9817,24 +9812,19 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:eedd1c1456242afab775072bef622a68c3b634a0",
+          "artifact": "commit:9c8c87dbff8ee00ba2c72f7923e1dce268c42e78",
           "source": null,
           "captured_at": "2026-10-07",
           "expires_at": "2026-11-06"
         },
         {
-          "artifact": "sha256:d70fce6bdb97e66a326f94cedf5a6765688f9e3a99e174d9e431e6a7b79b6317",
-          "source": "journeys/evidence/provider-byom-discovery-20261007T043046Z.spec-046-r001-spec-046-r008.journey-result.signed.json",
+          "artifact": "sha256:f25f38443dba9f3688f6d45860f389d82c94a30444dc38f557017bdb42169ef8",
+          "source": "journeys/evidence/provider-byom-discovery-20261007T161811Z.spec-046-r001-spec-046-r008.journey-result.signed.json",
           "captured_at": "2026-10-07",
           "expires_at": "2026-11-06"
         }
       ],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "The SPEC-001/SPEC-002 startup-throughput count-authority fix changes the mapped BYOMContractLockTests version selector after the fresh 2026-10-07 signed BYOM discovery capture at eedd1c1456242afab775072bef622a68c3b634a0. Retain that signed evidence unchanged; it does not pin the changed selector. Restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion for the merged fix."
-      }
+      "gap": null
     },
     {
       "requirement_id": "SPEC-046-R009",

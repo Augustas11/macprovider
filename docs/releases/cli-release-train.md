@@ -344,7 +344,7 @@ identity; this status update does not allocate a successor version.
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202); #1808 (`1c7041800`, mixed-cache signed-policy admission); #1809 (`6d1810506`, recurrent-hybrid verifier lifecycle). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
-### #1690 merged source and remaining release gates (2026-10-07)
+### #1690 merged source and remaining release gates (2026-10-08)
 
 [PR #1879](https://github.com/Augustas11/macprovider/pull/1879) merged at
 `bc117360106d91055221e01f0f8b0de4cd2ac550`. It resolves startup throughput's
@@ -378,8 +378,8 @@ and Creator
 [run 37625855687](https://github.com/Augustas11/macprovider/actions/runs/37625855687)
 then succeeded from that main commit. All 16 fresh signature, artifact-binding,
 expiry and current-selector mappings passed targeted integration verification.
-Fresh signatures remain evidence-only (Layer2 expiry 2026-10-14; Creator
-2026-10-07); reviewed integration is pending. No Layer2/Creator conformance
+Fresh signatures landed in #1887 and remain evidence-only (Layer2 expiry
+2026-10-14; Creator 2026-10-07, now historical). No Layer2/Creator conformance
 promotion, external Creator launch or binary release is claimed.
 
 The release/closure gates still outstanding are:
@@ -389,14 +389,35 @@ The release/closure gates still outstanding are:
   [`20261007T161811Z`](../../journeys/evidence/provider-byom-discovery-20261007T161811Z.redacted.json)
   passed all ten hermetic steps on `9c8c87dbff8ee00ba2c72f7923e1dce268c42e78`,
   superseding the failed compilation attempt as current unsigned evidence.
-  Review, protected signing and signed-evidence integration remain pending;
-  this capture does not change CONFORMANCE or prove released-CLI acceptance.
+  Reviewed unsigned capture landed in #1889 (`bf88db0c1`). Exact PR-head CI
+  [37708073165](https://github.com/Augustas11/macprovider/actions/runs/37708073165)
+  subsequently passed. Current-main CI
+  [37712605781](https://github.com/Augustas11/macprovider/actions/runs/37712605781)
+  passed at `855149bd0` before protected signing
+  [37715135336](https://github.com/Augustas11/macprovider/actions/runs/37715135336)
+  completed after antfleet-ops approval. Its exported capture and envelope
+  hashes, pinned public-key signature, expiry, artifact bindings and both
+  current-source mappings passed integration verification. The protected output
+  promotes only R001/R008; reviewed integration is pending. This does not prove
+  released-CLI acceptance or complete #1690.
+- SPEC-046-R009 needs a dedicated signed process-level selector/identity
+  journey for the five implemented `serve` selectors. Its pending row has no
+  signed journey mapping; discovery R001-R008 and the llama.cpp-only settlement
+  envelope cannot be relabeled as R009 proof. The isolated serving/hello and
+  identity contract is being implemented. This is not a requirement to activate
+  five new engines in production.
 - [CLI v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223)
   was published from reviewed `9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` by
   [release run 37642806955](https://github.com/Augustas11/macprovider/actions/runs/37642806955).
-  Incorporate the final tarball/DMG byte-identity and signing/notarization proof,
-  and complete previous-stable updater and paid-buyer acceptance. Publication
-  success alone does not complete those closure gates.
+  Final public tarball/package/DMG CLI byte identity and signing/notarization
+  proof are reconciled in the
+  [closeout record](../../audits/2026-10-07-1690-closeout/README.md#public-v18223-package-proof-reconciliation--2026-10-08).
+  Previous-stable updater, paid-buyer and anonymous-discovery acceptance remain
+  pending. Publication and package verification alone do not complete those gates.
+  The fresh paid-buyer contract must explicitly cover SPEC-006-R016's selection
+  and refusal-accounting predicates and SPEC-015-R006's receipt-authorization
+  omission cases. Existing envelopes are not promotable for these IDs and must
+  remain unchanged; reviewed mappings and a fresh protected signature are needed.
 - Complete formal mixed-version rollout/rollback acceptance. Recorded
   217/219/222 coexistence is not a rolling-restart proof; a refused v1-only
   rollback preflight is not rollback readiness.

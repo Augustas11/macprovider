@@ -50,7 +50,7 @@ ADMISSION_SIGNED_SOURCE = (
     "journey-result.signed.json"
 )
 FRESH_DISCOVERY_SIGNED_SOURCE = (
-    "journeys/evidence/provider-byom-discovery-20261007T043046Z."
+    "journeys/evidence/provider-byom-discovery-20261007T161811Z."
     "spec-046-r001-spec-046-r008.journey-result.signed.json"
 )
 # #1816: rows #1830 demoted, restored by fresh signed journeys.
@@ -1819,7 +1819,7 @@ class BYOMJourneyGovernanceSourceTests(unittest.TestCase):
 
 
 class BYOMJourneyConformanceMappingTests(unittest.TestCase):
-    """Preserve signed mappings without promoting evidence for changed selectors."""
+    """Bind promoted requirements to their independently signed fresh captures."""
 
     def test_promoted_requirements_are_conformant_and_mapped(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
@@ -1847,25 +1847,13 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                     self.assertIn("fresh signed JOURNEY-NETWORK-MODEL-ADMISSION", row["gap"]["rationale"])
                     continue
                 if requirement_id in ("SPEC-046-R001", "SPEC-046-R008"):
-                    self.assertEqual("pending", row["state"], requirement_id)
-                    gap = row["gap"]
-                    self.assertEqual("UNKNOWN", gap["verdict"], requirement_id)
-                    self.assertEqual("@Augustas11", gap["owner"], requirement_id)
-                    self.assertEqual(
-                        "https://github.com/Augustas11/macprovider/issues/1690",
-                        gap["issue"],
-                        requirement_id,
-                    )
-                    self.assertIn("changed selector", gap["rationale"], requirement_id)
-                    self.assertIn("fresh independently trusted signed", gap["rationale"], requirement_id)
                     self.assertIn(
                         "scripts/tests/test_byom_contract_lock.py:class BYOMContractLockTests",
                         row["tests"],
                         requirement_id,
                     )
-                else:
-                    self.assertEqual("conformant", row["state"], requirement_id)
-                    self.assertIsNone(row["gap"], requirement_id)
+                self.assertEqual("conformant", row["state"], requirement_id)
+                self.assertIsNone(row["gap"], requirement_id)
                 sha_items = [
                     item
                     for item in row["evidence"]
