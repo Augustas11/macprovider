@@ -13,6 +13,38 @@ prerequisite is genuinely blocking (missing access, a hard permission denial),
 do everything possible around it, then surface the one specific unblock needed —
 never as a menu. Analysis and status are fine; decision-shaped menus are not.
 
+## HARD RULES — activation, evidence, and campaign discipline
+
+These exist because native MTP and CB sat qualified-but-inactive for a week
+while sessions regenerated evidence instead of deploying. Each is binding.
+
+1. **Done means live.** A task whose goal is "X active" is done only when a
+   live probe shows X serving a real buyer request through the Malibu gateway.
+   Merge is not done. A PR that changes catalog, CB, or native-MTP state must
+   name its deploy command in the body, and the merging session deploys it the
+   same day.
+2. **Reuse evidence; never regenerate it.** Before proposing any benchmark,
+   qualification, journey, or evidence capture, list the existing evidence and
+   name the decode-path code line that changed since it was produced. No named
+   line, no benchmark. A new CLI cut changes only identity binding (source,
+   SHA-256, CDHash), never the qualification.
+3. **Unclearable gates get flagged once.** If a runbook gate depends on a
+   workflow or journey that has never run, report it to the operator in one
+   line on first encounter. Do not build evidence around it and do not treat
+   it as blocking after the operator has decided.
+4. **One campaign, one PR.** Before `gh pr create`, run
+   `gh pr list --state open --search "<issue or epic number>"`. If an open PR
+   exists for that issue or epic, push to it.
+5. **Deploy-tooling refusals are fixed, not routed around.** If release or
+   deploy tooling refuses a coherent change, fix the tooling in the campaign
+   PR or follow its documented order. Never answer a refusal with more
+   evidence.
+6. **Two sessions without a live change means stop.** Write a one-paragraph
+   blocker diagnosis to the operator instead of starting a third session.
+7. **Handoffs are committed and point at paths that exist.** One session at a
+   time mutates Pearl or a Studio provider. Handback is written, naming what
+   changed live.
+
 ## Project Overview
 
 MacProvider turns Apple Silicon Macs into remote-addressable MLX inference
