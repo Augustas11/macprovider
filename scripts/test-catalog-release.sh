@@ -281,6 +281,8 @@ expected_history = {
     "published-2026-10-08-a3b-cb-v223-v1",
     # Superseded by the re-bind to signed CLI 224; never deployed.
     "published-2026-10-08-native-mtp-v223-v1",
+    # Superseded: its self-test bank still named v223 (restamp gap).
+    "published-2026-10-08-native-mtp-v224-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

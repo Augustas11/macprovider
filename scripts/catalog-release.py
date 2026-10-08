@@ -2572,6 +2572,14 @@ def validate_native_mtp_admission(
             fail(f"{entry_label}: artifact_manifest_sha256 does not match {NATIVE_MTP_MANIFEST_NAME}")
         if entry["challenge_bank_sha256"] != sha256(bank):
             fail(f"{entry_label}: challenge_bank_sha256 does not match {NATIVE_MTP_BANK_NAME}")
+    # The provider runs the self-test only from a bank that names the same
+    # release as the admission set (ModelRuntime.loadNativeMTPSelfTestChallenge).
+    try:
+        bank_obj = json.loads(bank)
+    except ValueError:
+        fail(f"{NATIVE_MTP_BANK_NAME}: not JSON")
+    if not isinstance(bank_obj, dict) or bank_obj.get("release_id") != body["release_id"]:
+        fail(f"{NATIVE_MTP_BANK_NAME}: release_id {bank_obj.get('release_id') if isinstance(bank_obj, dict) else None!r} is not this release {body['release_id']!r}")
     return body
 
 
@@ -5199,8 +5207,20 @@ def restamp(release_id: str, generated_at: str) -> None:
         native["release_id"] = release_id
         native["issued_at"] = issued.strftime("%Y-%m-%dT%H:%M:%SZ")
         native["expires_at"] = (issued + timedelta(days=NATIVE_MTP_SIDECAR_VALIDITY_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        bank_path = CATALOG_DIR / NATIVE_MTP_BANK_NAME
+        if bank_path.exists():
+            # The self-test bank names its release and has its own short window;
+            # re-bind both, then the sidecar entry to the new bank bytes.
+            bank = strict_json(bank_path.read_bytes(), NATIVE_MTP_BANK_NAME)
+            window = parse_timestamp(bank["expires_at"], "bank expires_at") - parse_timestamp(bank["issued_at"], "bank issued_at")
+            bank["release_id"] = release_id
+            bank["issued_at"] = native["issued_at"]
+            bank["expires_at"] = (issued + window).strftime("%Y-%m-%dT%H:%M:%SZ")
+            bank_bytes = canonical_sorted_bytes(bank)
+            bank_path.write_bytes(bank_bytes)
+            native["entry"]["challenge_bank_sha256"] = sha256(bank_bytes)
         NATIVE_MTP_RELEASE_INPUT_PATH.write_text(json.dumps(native, indent=2, sort_keys=True) + "\n")
-        native_note = f"; {NATIVE_MTP_RELEASE_INPUT_PATH.name} re-bound"
+        native_note = f"; {NATIVE_MTP_RELEASE_INPUT_PATH.name} and {NATIVE_MTP_BANK_NAME} re-bound"
     print(
         f"catalog-release: re-stamped candidate/demand version={release_id} "
         f"generated_at={generated_at} ({restamped_rate_card} date only){native_note}"

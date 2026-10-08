@@ -2,37 +2,37 @@
   "feeds": {
     "autotune-artifacts.json": {
       "bytes": 12381,
-      "sha256": "c7b5f8ef98ce2fb126466de42f2cbb41bf5107a2ba1e284ecd3ea04c07b32ef6",
+      "sha256": "716cd5c4ba2b3311300afe2280bd2ee7948f4074fec19d40cf0a8da1149f97a7",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-08-native-mtp-v224-v1"
+      "version": "published-2026-10-09-native-mtp-v224-v2"
     },
     "autotune-candidates.json": {
       "bytes": 15735,
-      "sha256": "490dc89ed2fbcf300bc281b49f7883e9e62751175b96bc6d9e5c45a50f3292a4",
+      "sha256": "298484c9eb2e2a63c37df8e25dc7e5f0d2f23d9cc64fdeceb08fbfab59ceaf7f",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-08-native-mtp-v224-v1"
+      "version": "published-2026-10-09-native-mtp-v224-v2"
     },
     "continuous-batching-policy.json": {
       "bytes": 1525,
-      "sha256": "2addf025aed3805c92b9c58af49c79a1bb8e07d98dbbb5a22fec918790c2b35d",
+      "sha256": "c5fab34df02aa838a7666aabbce988b7e5ce6c2735dc83c320c5b79d4d19f03c",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-08-native-mtp-v224-v1"
+      "version": "published-2026-10-09-native-mtp-v224-v2"
     },
     "demand-rank.json": {
       "bytes": 1986,
-      "sha256": "fbcd4bd1408353bebc03648cbe5315b954ce3f6fba05290ef1cdda63143e595a",
+      "sha256": "6043bda10cae583271cd5e10399dd8476538072815d98cc2a719bf7c8faf398a",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-08-native-mtp-v224-v1"
+      "version": "published-2026-10-09-native-mtp-v224-v2"
     },
     "native-mtp-admission.json": {
       "bytes": 7844,
-      "sha256": "0fa98adf394a5ff5d34de38c5b8442b50d72e571b0cdcd935a843a8e8f921213",
+      "sha256": "55cadc3d28549e3aef3d8e5927ca74e66de09b8ffe2b65b2e20db3ee6adb4282",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-08-native-mtp-v224-v1"
+      "version": "published-2026-10-09-native-mtp-v224-v2"
     },
     "rate-card.json": {
       "bytes": 3690,
-      "sha256": "a487cccaa1f98a5e47868636181f526d1835650e31d7691a0efb8726d4c2fba4",
+      "sha256": "4e0ce2adeee3aaeb083e008b6db929e3c1f9b6a1fdacefee134d6f35ff4c3a78",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4"
     },
@@ -43,8 +43,8 @@
       "version": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1"
     }
   },
-  "generated_at": "2026-10-08T08:49:30Z",
+  "generated_at": "2026-10-08T22:12:46Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-08-native-mtp-v224-v1",
+  "release_id": "published-2026-10-09-native-mtp-v224-v2",
   "schema_version": "macprovider.autotune-release.v1"
 }
