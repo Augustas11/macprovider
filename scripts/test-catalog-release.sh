@@ -271,6 +271,8 @@ expected_history = {
     # Retained predecessors of the signed CB223 cut.
     "published-2026-10-01-artifact-feed-activation-v1",
     "published-2026-10-07-inband-provenance-v1",
+    # Superseded by the native-MTP-bound v223 cut; retained by the append-only ledger.
+    "published-2026-10-08-a3b-cb-v223-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
