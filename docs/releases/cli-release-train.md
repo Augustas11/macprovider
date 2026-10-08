@@ -74,16 +74,20 @@ signature proves automatic privacy enrollment or network activation.
 
 ## Next CLI candidate — net changes vs 1.8.207
 
-Promotion-ready candidate cut, authorized 2026-10-08: `v1.8.224` is being built
-and signed by [acceptance run37743452851](https://github.com/Augustas11/macprovider/actions/runs/37743452851)
-from exact current-main source/control `ac7cfde0516cf69c0e2ce3f919329f9052786202`,
-with `promotion_ready=true` and `strict_post_migration`. Version-only
+Promotion-ready candidate preparation, authorized 2026-10-08: unsigned
+[acceptance run37743452851](https://github.com/Augustas11/macprovider/actions/runs/37743452851)
+at source/control `ac7cfde0516cf69c0e2ce3f919329f9052786202` was stopped before
+protected signing to align the packaged coordinator recommendation with the
+previous stable223, as required by the release runbook. No signed224 bytes or
+public tag were produced. After that three-line config alignment lands, run
+the same existing workflow on current main for `v1.8.224`, with
+`promotion_ready=true` and `strict_post_migration`. Version-only
 [#1896](https://github.com/Augustas11/macprovider/pull/1896) landed normally
 after all16 checks passed and antfleet-ops approved its exact head. Existing
 BYOM/privacy source acceptance and unchanged decode qualification carry
-forward; the new source delta is CLI/App/build-ledger identity224 only.
-The exact-source preflight passed; the candidate is not yet signed or accepted
-at this entry. Keep the fleet recommendation and compatibility
+forward; preparation changes only CLI/App/build-ledger identity224 and the
+packaged previous-stable recommendation223. The candidate is not yet signed
+or accepted at this entry. Keep the fleet recommendation and compatibility
 target on223 until signed-byte installation, buyer-path and promotion gates
 pass. Native MTP activation remains owned by the separate #1894 campaign;
 the224 cut does not claim new MTP/CB acceptance or privacy fleet activation.
