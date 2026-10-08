@@ -3317,8 +3317,16 @@ class PearlUpdaterTests(unittest.TestCase):
             "https://coordinator.malibu.tech" + path: (200, (release.directory / asset).read_bytes())
             for path, asset in zip(updater_module.PUBLIC_NATIVE_MTP_PATHS, updater_module.NATIVE_MTP_FEED_ASSETS)
         }
+        key_id = json.loads((release.directory / updater_module.NATIVE_MTP_FEED).read_bytes())["revocation_signer_key_id"]
+        revocation = f"https://coordinator.malibu.tech/v1/native-mtp-revocations.{key_id}.json"
+        served[revocation] = (200, b"{}")
+        served[revocation + ".sig"] = (200, b"{}")
         self.updater.get_public_bytes = mock.Mock(side_effect=lambda url: served[url])
         self.assertTrue(self.updater.public_native_mtp_feed_ready(release))
+        # No current revocation slot: providers fail closed, so not ready.
+        served[revocation] = (404, b"")
+        self.assertFalse(self.updater.public_native_mtp_feed_ready(release))
+        served[revocation] = (200, b"{}")
         bank = "https://coordinator.malibu.tech/v1/native-mtp-selftest-bank"
         good = served[bank]
         served[bank] = (404, b"")

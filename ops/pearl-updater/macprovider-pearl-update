@@ -5883,12 +5883,31 @@ class Updater:
         exact bytes it commits to and an unbound one must serve none.
         """
         bound = NATIVE_MTP_FEED in release.catalog.files
+        admission = b""
         for path, asset in zip(PUBLIC_NATIVE_MTP_PATHS, NATIVE_MTP_FEED_ASSETS):
             status, data = self.get_public_bytes("https://coordinator.malibu.tech" + path)
             if bound:
                 if status != 200 or hashlib.sha256(data).hexdigest() != release.catalog.files.get(asset):
                     return False
+                if asset == NATIVE_MTP_FEED:
+                    admission = data
             elif status == 200:
+                return False
+        if not bound:
+            return True
+        # Parity with deploy-pearl-vps.sh's native smoke: without a current
+        # revocation slot every provider fails closed and native MTP is dead.
+        try:
+            key_id = json.loads(admission)["revocation_signer_key_id"]
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not isinstance(key_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", key_id):
+            return False
+        for suffix in (".json", ".json.sig"):
+            status, _ = self.get_public_bytes(
+                f"https://coordinator.malibu.tech/v1/native-mtp-revocations.{key_id}{suffix}"
+            )
+            if status != 200:
                 return False
         return True
 
@@ -5935,9 +5954,10 @@ class Updater:
             if NATIVE_MTP_FEED in release.catalog.files:
                 raise UpdateError(
                     "public https://coordinator.malibu.tech/v1/native-mtp-* does not serve this release's bound "
-                    "admission set; add the nginx `location` blocks for /v1/native-mtp-* to Pearl's coordinator "
-                    "vhost (docs/runbooks/native-mtp-enablement.md), run `nginx -t && systemctl reload nginx`, "
-                    "then re-run the update"
+                    "admission set or no current revocation slot; add the nginx `location` blocks for "
+                    "/v1/native-mtp-* to Pearl's coordinator vhost (docs/runbooks/native-mtp-enablement.md), run "
+                    "`nginx -t && systemctl reload nginx`, publish slots with "
+                    "`scripts/publish-native-mtp-revocations.sh --deploy`, then re-run the update"
                 ) from exc
             raise UpdateError(
                 "public https://coordinator.malibu.tech/v1/native-mtp-* still serves an admission set for a "
