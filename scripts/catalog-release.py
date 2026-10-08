@@ -2536,6 +2536,7 @@ def validate_native_mtp_admission(
     artifact_obj: dict | None,
     signer_key_id: str | None,
     label: str = NATIVE_MTP_ADMISSION_FEED_NAME,
+    require_bank_release: bool = False,
 ) -> dict:
     """SPEC-023 §12.5: the closed sidecar grammar (the generator's validator),
     bound to this release, its signer, its verified artifacts, and the exact
@@ -2574,6 +2575,10 @@ def validate_native_mtp_admission(
             fail(f"{entry_label}: challenge_bank_sha256 does not match {NATIVE_MTP_BANK_NAME}")
     # The provider runs the self-test only from a bank that names the same
     # release as the admission set (ModelRuntime.loadNativeMTPSelfTestChallenge).
+    # Enforced for releases cut from source; already-published directories
+    # (live and rollback targets) predate the check and still verify.
+    if not require_bank_release:
+        return body
     try:
         bank_obj = json.loads(bank)
     except ValueError:
@@ -2608,7 +2613,9 @@ def resolve_native_mtp_admission(
         fail(f"generate: native-MTP admission: {error}")
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
-    body = validate_native_mtp_admission(sidecar, manifest_bytes, bank, candidate_obj, artifact_obj, signer_key_id)
+    body = validate_native_mtp_admission(
+        sidecar, manifest_bytes, bank, candidate_obj, artifact_obj, signer_key_id, require_bank_release=True,
+    )
     return sidecar, body, manifest_bytes, bank
 
 
