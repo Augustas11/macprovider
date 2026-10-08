@@ -3,19 +3,22 @@
 # (pearl-coordinator-rollout.md rule 3, AGENTS.md hard rule 7).
 #
 # Usage:
-#   scripts/ops/live-lock.sh acquire <owner-label> [--purpose TEXT] [--ttl-hours N]
+#   scripts/ops/live-lock.sh acquire <owner-label> [--purpose TEXT] [--ttl-hours N] [--steal]
 #   scripts/ops/live-lock.sh release <owner-label> [--force]
 #   scripts/ops/live-lock.sh status
 #
 # The lock is a JSON file (default ~/.config/macprovider/live-ops.lock,
 # override with MACPROVIDER_LIVE_LOCK):
-#   {"owner", "session", "pid", "host", "acquired_at", "refreshed_at", "purpose"}
+#   {"owner", "session", "pid", "host", "acquired_at", "refreshed_at", "purpose",
+#    "ttl_hours"}
 #
-# acquire succeeds when the lock is free, already held by the same owner
-# (refreshes it), or held by another owner whose last refresh is older than the
-# TTL (default 6h, MACPROVIDER_LIVE_LOCK_TTL_HOURS). Otherwise it refuses and
-# prints the holder. release removes the lock only for its owner unless
-# --force (which prints the holder it removed).
+# acquire succeeds when the lock is free or already held by the same owner
+# (refreshes it). A lock held by another owner is refused, with the holder
+# printed. It may be taken over only with --steal, and only once the holder's
+# own TTL has passed since its last refresh (the TTL stored in the record;
+# default 6h, MACPROVIDER_LIVE_LOCK_TTL_HOURS, minimum 1). An unreadable or
+# unparsable lock file is refused. release removes the lock only for its
+# owner unless --force (which prints the holder it removed).
 #
 # The session id comes from MACPROVIDER_OPS_SESSION, CLAUDE_SESSION_ID or
 # CODEX_SESSION_ID. The lock is local to this machine: it serializes agents
@@ -35,6 +38,7 @@ shift
 owner=""
 purpose=""
 force=0
+steal=0
 case "$cmd" in
   acquire|release)
     owner="${1:-}"
@@ -50,11 +54,12 @@ while [ $# -gt 0 ]; do
     --purpose) purpose="${2:-}"; shift ;;
     --ttl-hours) TTL_HOURS="${2:-}"; shift ;;
     --force) force=1 ;;
+    --steal) steal=1 ;;
     *) echo "live-lock: unknown option $1" >&2; exit 2 ;;
   esac
   shift
 done
-case "$TTL_HOURS" in ""|*[!0-9]*) echo "live-lock: TTL hours must be a positive integer" >&2; exit 2 ;; esac
+case "$TTL_HOURS" in ""|*[!0-9]*|0*) echo "live-lock: TTL hours must be a positive integer without leading zeros" >&2; exit 2 ;; esac
 case "$owner" in *[!A-Za-z0-9._@:/+-]*) echo "live-lock: owner label may use only [A-Za-z0-9._@:/+-]" >&2; exit 2 ;; esac
 
 mkdir -p "$(dirname "$LOCK_PATH")"
@@ -62,11 +67,10 @@ chmod 700 "$(dirname "$LOCK_PATH")" 2>/dev/null || true
 
 session="${MACPROVIDER_OPS_SESSION:-${CLAUDE_SESSION_ID:-${CODEX_SESSION_ID:-unknown}}}"
 
-exec python3 - "$cmd" "$LOCK_PATH" "$TTL_HOURS" "$owner" "$purpose" "$force" "$session" "$PPID" <<'PY'
+exec python3 - "$cmd" "$LOCK_PATH" "$TTL_HOURS" "$owner" "$purpose" "$force" "$session" "$PPID" "$steal" <<'PY'
 import datetime, fcntl, json, os, socket, sys
 
-cmd, path, ttl_hours, owner, purpose, force, session, pid = sys.argv[1:9]
-ttl = datetime.timedelta(hours=int(ttl_hours))
+cmd, path, ttl_hours, owner, purpose, force, session, pid, steal = sys.argv[1:10]
 now = datetime.datetime.now(datetime.timezone.utc)
 fmt = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -74,26 +78,30 @@ def parse(ts):
     return datetime.datetime.strptime(ts, fmt).replace(tzinfo=datetime.timezone.utc)
 
 def holder_line(rec):
-    return "held by owner=%s session=%s pid=%s host=%s since %s (refreshed %s) purpose=%s" % (
+    return "held by owner=%s session=%s pid=%s host=%s since %s (refreshed %s, ttl %sh) purpose=%s" % (
         rec.get("owner"), rec.get("session"), rec.get("pid"), rec.get("host"),
-        rec.get("acquired_at"), rec.get("refreshed_at"), rec.get("purpose") or "-")
+        rec.get("acquired_at"), rec.get("refreshed_at"), rec.get("ttl_hours", "?"), rec.get("purpose") or "-")
 
 # Serialize read-modify-write through a sidecar mutex.
 mutex = open(path + ".mutex", "a")
 fcntl.flock(mutex, fcntl.LOCK_EX)
 
 rec = None
+unreadable = False
 if os.path.exists(path):
     try:
         rec = json.load(open(path))
+        if not isinstance(rec, dict) or not rec.get("owner"):
+            raise ValueError("no owner")
+        parse(rec.get("refreshed_at") or rec["acquired_at"])
+        int(rec.get("ttl_hours", ttl_hours))
     except Exception:
-        rec = {"owner": "<unreadable>", "refreshed_at": None}
+        unreadable = True
 
-def age(r):
-    try:
-        return now - parse(r.get("refreshed_at") or r.get("acquired_at"))
-    except Exception:
-        return None
+def stale(r):
+    """True once the holder's own TTL has passed since its last refresh."""
+    holder_ttl = datetime.timedelta(hours=int(r.get("ttl_hours", ttl_hours)))
+    return now - parse(r.get("refreshed_at") or r["acquired_at"]) > holder_ttl
 
 def write(r):
     tmp = path + ".tmp"
@@ -103,25 +111,40 @@ def write(r):
         f.write("\n")
     os.replace(tmp, path)
 
+if unreadable:
+    if cmd == "status":
+        print(json.dumps({"held": True, "unreadable": True, "path": path}))
+        sys.stderr.write("live-ops lock file is unreadable; inspect %s by hand\n" % path)
+        sys.exit(0)
+    if cmd == "release" and force == "1":
+        os.remove(path)
+        sys.stderr.write("live-lock: force-removed an unreadable lock file\n")
+        sys.exit(0)
+    sys.stderr.write("live-lock: REFUSED: lock file %s is unreadable or unparsable; inspect it by hand\n" % path)
+    sys.exit(3)
+
 if cmd == "status":
     if rec is None:
         print(json.dumps({"held": False, "path": path}))
         sys.stderr.write("live-ops lock is free\n")
     else:
-        a = age(rec)
-        stale = a is None or a > ttl
-        print(json.dumps({"held": True, "stale": stale, "path": path, "lock": rec}, sort_keys=True))
-        sys.stderr.write("live-ops lock %s%s\n" % (holder_line(rec), " [STALE: older than TTL]" if stale else ""))
+        is_stale = stale(rec)
+        print(json.dumps({"held": True, "stale": is_stale, "path": path, "lock": rec}, sort_keys=True))
+        sys.stderr.write("live-ops lock %s%s\n" % (holder_line(rec), " [STALE: older than its TTL]" if is_stale else ""))
     sys.exit(0)
 
 if cmd == "acquire":
     stamp = now.strftime(fmt)
     if rec is not None and rec.get("owner") != owner:
-        a = age(rec)
-        if a is not None and a <= ttl:
+        if not stale(rec):
             sys.stderr.write("live-lock: REFUSED: %s\n" % holder_line(rec))
             sys.exit(3)
-        sys.stderr.write("live-lock: taking over stale lock (older than %sh): %s\n" % (ttl_hours, holder_line(rec)))
+        if steal != "1":
+            sys.stderr.write("live-lock: REFUSED: stale (past the holder's %sh TTL) but still %s; "
+                             "take it over only with --steal after confirming the holder is gone\n"
+                             % (rec.get("ttl_hours", ttl_hours), holder_line(rec)))
+            sys.exit(3)
+        sys.stderr.write("live-lock: STEALING stale lock %s\n" % holder_line(rec))
         rec = None
     if rec is None:
         rec = {"owner": owner, "acquired_at": stamp}
@@ -131,6 +154,7 @@ if cmd == "acquire":
         "host": socket.gethostname().split(".")[0],
         "refreshed_at": stamp,
         "purpose": purpose or rec.get("purpose", ""),
+        "ttl_hours": int(ttl_hours),
     })
     write(rec)
     sys.stderr.write("live-lock: acquired by %s (%s)\n" % (owner, rec["purpose"] or "-"))
