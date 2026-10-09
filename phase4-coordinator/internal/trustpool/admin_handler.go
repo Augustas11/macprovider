@@ -1180,12 +1180,25 @@ func (h *adminHandler) handleCreatorRestrictiveLifecycle(w http.ResponseWriter, 
 		Lifecycle:           lifecycle,
 		Reason:              strings.TrimSpace(body.Reason),
 	}
+	if principal.SelfServe {
+		e.CreatorAccountID = principal.CreatorID
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	existing, ok, err := h.deps.Store.ExistingEvent(r.Context(), e.OperationID)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
+	}
+	if principal.SelfServe && !ok {
+		var limit errSelfServeLimit
+		if err := h.selfServeEventCaps(r.Context(), principal, e); errors.As(err, &limit) {
+			writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "self_serve_limit_reached", "limit": limit.limit}})
+			return
+		} else if err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		}
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {

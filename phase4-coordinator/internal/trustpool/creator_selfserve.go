@@ -67,6 +67,10 @@ const (
 	SelfServeMaxPools = 256
 	// SelfServeMaxEventsPerPool caps durable events per self-serve pool.
 	SelfServeMaxEventsPerPool = 512
+	// SelfServeRestrictiveHeadroom lets a creator pause, drain, or retire a
+	// pool already at the cap: the lifecycle machine allows at most three
+	// such transitions without a new (capped) promotion.
+	SelfServeRestrictiveHeadroom = 8
 	// SelfServeRateWindow, SelfServeMaxWritesPerWindow, and
 	// SelfServeMaxRequestsPerWindow bound one account's request rate.
 	SelfServeRateWindow           = time.Hour
@@ -151,7 +155,21 @@ func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.
 		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
 		return
 	}
-	if retryAfter, ok := h.selfServeRate.allow(principal.CreatorID, r.Method != http.MethodGet, time.Now()); !ok {
+	write := r.Method != http.MethodGet
+	if write {
+		// A retry of an operation that already committed spends only the
+		// request budget, so a lost response stays recoverable after the
+		// write budget is used up.
+		if key := strings.TrimSpace(r.Header.Get("Idempotency-Key")); key != "" {
+			if _, replay, err := h.deps.Store.ExistingEvent(r.Context(), key); err != nil {
+				h.writeLookupError(w, "creator_lookup_failed", err)
+				return
+			} else if replay {
+				write = false
+			}
+		}
+	}
+	if retryAfter, ok := h.selfServeRate.allow(principal.CreatorID, write, time.Now()); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 		writeAdminJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]string{"code": "rate_limited"}})
 		return
@@ -732,7 +750,7 @@ func (h *adminHandler) handleSelfServePromote(w http.ResponseWriter, r *http.Req
 		return
 	} else if !replay {
 		var limit errSelfServeLimit
-		if err := h.selfServeEventCaps(r.Context(), principal, DurableEvent{EventType: EventLifecycleChanged, PoolID: poolID}); errors.As(err, &limit) {
+		if err := h.selfServeEventCaps(r.Context(), principal, DurableEvent{EventType: EventLifecycleChanged, PoolID: poolID, Lifecycle: LifecycleActive}); errors.As(err, &limit) {
 			writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "self_serve_limit_reached", "limit": limit.limit}})
 			return
 		} else if err != nil {
@@ -942,6 +960,10 @@ func (e errSelfServeLimit) Error() string { return "trustpool: self-serve limit 
 // replayed) self-serve event. The caller holds h.mu, so the counts and the
 // append are serialized with every other control-plane write.
 func (h *adminHandler) selfServeEventCaps(ctx context.Context, principal creatorPrincipal, e DurableEvent) error {
+	limit := SelfServeMaxEventsPerPool
+	if e.EventType == EventLifecycleChanged && e.Lifecycle != "" && e.Lifecycle != LifecycleActive {
+		limit += SelfServeRestrictiveHeadroom
+	}
 	if e.EventType == EventPoolCreated {
 		creatorPools, allPools, err := h.deps.Store.selfServePoolCounts(ctx, principal.CreatorID)
 		if err != nil {
@@ -959,7 +981,7 @@ func (h *adminHandler) selfServeEventCaps(ctx context.Context, principal creator
 	if err != nil {
 		return err
 	}
-	if events >= SelfServeMaxEventsPerPool {
+	if events >= limit {
 		return errSelfServeLimit{limit: "events_per_pool"}
 	}
 	return nil

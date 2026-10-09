@@ -476,3 +476,97 @@ func TestSelfServeHistoryCapsRejectBeforeReplay(t *testing.T) {
 		t.Fatalf("per-creator cap body = %s", over.Body.String())
 	}
 }
+
+func selfServePoolEventCount(t *testing.T, db *sql.DB, poolID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM trustpool_events WHERE pool_id = ?`, poolID).Scan(&n); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	return n
+}
+
+// fillReplayableBuyerGrants pads a pool with real, replayable buyer grants.
+func fillReplayableBuyerGrants(t *testing.T, db *sql.DB, poolID string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		e := trustpool.DurableEvent{
+			OperationID: fmt.Sprintf("pad-%s-%d", poolID, i), TimestampUTC: time.Now().UTC(),
+			EventType: trustpool.EventBuyerAuthorized, PoolID: poolID, BuyerAccountID: selfServeBuyer,
+		}
+		payload, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal pad: %v", err)
+		}
+		if _, err := db.Exec(`INSERT INTO trustpool_events (operation_id, ts_utc, event_type, pool_id, buyer_account_id, payload_json) VALUES (?, ?, ?, ?, ?, ?)`,
+			e.OperationID, e.TimestampUTC.Format(time.RFC3339Nano), e.EventType, poolID, selfServeBuyer, string(payload)); err != nil {
+			t.Fatalf("pad history: %v", err)
+		}
+	}
+}
+
+// Restrictive lifecycle transitions keep a small headroom over the per-pool
+// cap so a creator can always pause a capped pool, and the headroom is
+// itself capped; every self-serve lifecycle event names its account.
+func TestSelfServeLifecycleRouteIsCappedWithRestrictiveHeadroom(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	_, root := selfServeBuildPool(t, f)
+	selfServeAdmitAndGrant(t, f, root.poolID)
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/promote", nil, "op-ss-promote"), http.StatusAccepted, "promotion")
+	fillReplayableBuyerGrants(t, f.db, root.poolID, trustpool.SelfServeMaxEventsPerPool-selfServePoolEventCount(t, f.db, root.poolID))
+
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", trustpool.DurableEvent{
+		EventType: trustpool.EventBuyerAuthorizationRm, PoolID: root.poolID, BuyerAccountID: selfServeBuyer,
+	}, "op-ss-buyer-rm-capped"), http.StatusConflict, "grant change at the cap")
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": "paused", "reason": "maintenance"}, "op-ss-pause-capped"), http.StatusAccepted, "pause at the cap")
+	existing, ok, err := f.store.ExistingEvent(context.Background(), "op-ss-pause-capped")
+	if err != nil || !ok || existing.CreatorAccountID != selfServeCreator || existing.CreatorCredentialID != selfServeKeyID {
+		t.Fatalf("pause event = %+v ok=%v err=%v", existing, ok, err)
+	}
+
+	if _, err := f.db.Exec(`INSERT INTO trustpool_events (operation_id, ts_utc, event_type, pool_id, payload_json)
+		SELECT 'headroom-' || id, ts_utc, 'test_filler', pool_id, '{}' FROM trustpool_events WHERE pool_id = ? LIMIT ?`, root.poolID, trustpool.SelfServeRestrictiveHeadroom); err != nil {
+		t.Fatalf("fill headroom: %v", err)
+	}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": "draining"}, "op-ss-drain-capped"), http.StatusConflict, "lifecycle beyond the headroom")
+}
+
+// A repeat compromise report for an already-frozen root never appends: the
+// emergency route stays uncapped for the first report, and repeats cannot
+// grow history.
+func TestSelfServeRepeatRootCompromiseReportDoesNotAppend(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	_, root := selfServeBuildPool(t, f)
+	fillReplayableBuyerGrants(t, f.db, root.poolID, trustpool.SelfServeMaxEventsPerPool+trustpool.SelfServeRestrictiveHeadroom)
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "emergency/root-compromise", map[string]string{"pool_id": root.poolID}, "op-ss-compromise-1"), http.StatusAccepted, "first compromise report over the cap")
+	before := selfServePoolEventCount(t, f.db, root.poolID)
+	for i := 2; i <= 4; i++ {
+		selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "emergency/root-compromise", map[string]string{"pool_id": root.poolID}, fmt.Sprintf("op-ss-compromise-%d", i)), http.StatusAccepted, "repeat compromise report")
+	}
+	if after := selfServePoolEventCount(t, f.db, root.poolID); after != before {
+		t.Fatalf("repeat compromise reports grew history %d -> %d", before, after)
+	}
+}
+
+// After the write budget is spent, a retry of an already-committed operation
+// still gets its replay answer instead of 429.
+func TestSelfServeReplayOfCommittedOperationSkipsTheWriteBudget(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	_, root := selfServeBuildPool(t, f)
+	admit := trustpool.DurableEvent{EventType: trustpool.EventMemberAdmitted, PoolID: root.poolID, ProviderID: selfServeOwnedMac}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", admit, "op-ss-member"), http.StatusAccepted, "admit")
+	rejected := selfServeAgreementBody()
+	rejected["accept"] = false
+	for {
+		rec := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", rejected, "")
+		if rec.Code == http.StatusTooManyRequests {
+			break
+		}
+		selfServeExpect(t, rec, http.StatusBadRequest, "spend write budget")
+	}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", admit, "op-ss-member"), http.StatusAccepted, "replay after the write budget")
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", admit, "op-ss-member-new"), http.StatusTooManyRequests, "new write after the write budget")
+}
