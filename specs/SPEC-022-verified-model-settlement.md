@@ -1,11 +1,32 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.3.1
+Version: v0.4.0
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.0
+
+Issue #1793 (priority 1): settled evidence retention. Adds requirement group
+R-15 (`SPEC-022-R015`, pending). The hot coordinator database has grown
+without bound because per-attempt settlement evidence is never deleted. R-15
+defines:
+
+- which evidence rows may leave hot storage;
+- the settlement finality point after which they may leave (credits settled
+  into a non-voided payout whose window is at least two completed settlement
+  cycles old, outside every reconcile horizon, with no quarantine, hold, open
+  verdict, undrained or poisoned outbox row, or unmaterialized journal row);
+- what the archive must preserve to rederive a settled credit.
+
+Deletion refuses unless the archive has been re-verified locally and its
+checksum has been confirmed at an off-host destination. Archived credits stay
+payable, and they stay verified for the billing mirror and reward counts,
+through hot tombstones. Ledger, operator-credit, payout, and settlement-window
+rows are never deleted. Retention is off by default. The conformance state of
+`SPEC-022-R001`..`SPEC-022-R014` does not change.
 
 ### v0.3.1
 
@@ -1913,6 +1934,122 @@ bounded id window per pass, so it needs no index build at coordinator
 startup; a new process starts its walk at snapshots decided within the last
 seven days, and older attempts close on a finality read.
 
+### R-15. Settled evidence retention (SPEC-022-R015)
+
+R-15.1. Scope. Retention MAY move these per-attempt evidence rows out of the
+hot coordinator database: `settlement_route_snapshots`,
+`settlement_receipt_verdicts`, `settlement_attempt_outputs`,
+`settlement_compute_integrity_captures`, drained
+`settlement_receipt_audit_outbox` rows, and the mirrored copies of archived
+route snapshots in the route-snapshot journal database. It MUST NOT delete
+`ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`,
+`ledger_settlement_windows`, `ledger_quarantine_resolutions`, or any other
+settlement or payout row. The money record stays hot.
+
+R-15.2. Finality point. Retention works on whole requests. A request is
+eligible only when every one of the following holds:
+
+- it has at least one ledger credit;
+- every ledger credit for the request is `settled = 1` and `quarantined = 0`;
+- every credit is in `spec022_payable_request_credits`;
+- every credit has no `ledger_quarantine_resolutions` row (no force-credit
+  hold and no force-void);
+- every credit's `settlement_id` names a `ledger_payout_ready` row whose
+  status is `ready` or `consumed` (never `voided`) and whose `window_end_utc`
+  is at or before the end of the settlement window that is
+  `min_settlement_cycles` completed windows (at least 2) older than the
+  newest completed window in `ledger_settlement_windows` for the configured
+  cadence;
+- every credit's `ts_utc` is older than the nightly-reconcile and
+  startup-scan horizons plus the recovery grace;
+- every verdict for the request is closed, and none is `pending` or
+  `quarantined`;
+- every audit outbox row for the request is drained and not poisoned;
+- every attempt-output journal row is materialized and not poisoned;
+- every route-snapshot journal row for the request is mirrored and has the
+  digest of its archived snapshot;
+- no verdict for the request is its provider's earliest closed, valid,
+  `verified` verdict. That verdict is the referral serving evidence and stays
+  hot.
+
+A request that fails any condition stays hot in full. When a run deletes a
+request's rows, it re-checks these conditions inside the delete transaction.
+
+R-15.3. Archive. Before anything is deleted, the eligible rows MUST be written
+to an archive file. Each archive file is gzip-compressed JSON lines and holds:
+
+- every evidence row named in R-15.1 for each archived request, with every
+  column, losslessly;
+- reference copies of the request's `ledger_request_credits` and
+  `ledger_operator_credits` rows;
+- the `ledger_payout_ready` rows they settled into.
+
+These rows are enough to rederive each settled credit. The archive has a
+manifest that records:
+
+- the archive's SHA-256;
+- its byte size;
+- per-table row counts;
+- the request count;
+- the settlement cutoff.
+
+The hot database records each archive in `settlement_evidence_archives`.
+
+R-15.4. Deletion refuses without a verified archive. Deletion MUST NOT start
+unless all of the following hold:
+
+1. The local archive has been re-read and passes these checks: its SHA-256
+   and byte size match the manifest, every line parses, and every per-table
+   row count matches.
+2. The archive's SHA-256 has been confirmed at the configured off-host
+   destination by the operator-configured verification command. With no
+   command configured, retention exports and verifies the archive but
+   deletes nothing.
+
+Deletion takes its row identities from the verified archive file, not from
+process memory. It deletes only rows present in that file, and refuses a
+request whose hot rows include any row that is not in the archive.
+
+R-15.5. Bounded work. Retention uses one short `BEGIN IMMEDIATE` transaction
+per batch of requests and pauses between batches, so the hot-path writer is
+never starved. The number of requests per run and the ledger rows scanned
+per run are bounded by configuration. Retention reclaims space only through
+`PRAGMA incremental_vacuum` in bounded page steps. It MUST NOT run a full
+`VACUUM`. A database that is not in `auto_vacuum = INCREMENTAL` mode reports
+that fact and needs the operator's one-time conversion.
+
+R-15.6. Archived state stays visible. In the delete transaction, retention
+records:
+
+- a tombstone row for each archived ledger credit, in
+  `settlement_evidence_archived_credits`. It holds the archive id and whether
+  the credit had a literal closed, valid, `verified` verdict.
+- per-provider counts of archived verdicts by outcome and receipt result, in
+  `settlement_evidence_archived_verdict_counts`.
+
+Readers MUST degrade gracefully on archived requests:
+
+- A tombstoned credit stays in `spec022_payable_request_credits`, so earnings
+  totals, payout revalidation, and admin totals do not change.
+- The billing mirror keeps `spec022_verified` from the tombstone.
+- Reward unlock verified-receipt counts and unranged provider receipt
+  summaries add the archived verdict counts.
+- Ledger reconciliation never reports a mismatch on a settled, tombstoned
+  credit whose receipt evidence was archived.
+- The settlement-finality lookup never treats an archived credit as missing
+  evidence. A finality or receipt lookup for a fully archived request
+  returns not found; the archive is the authority for that request.
+
+R-15.7. Rederivation. The operator procedure MUST rederive a settled credit
+from the archive alone. It checks that the archived verdict is closed and
+payable, recomputes the credit from the archived attempt output's usage under
+the archived credit's rate contract, and checks that the result equals the
+hot ledger credit.
+
+R-15.8. Default off. Retention is disabled by default
+(`billing.retention.enabled: false`). A dry run reports the eligible request
+count and the row and payload-byte counts per table, without writing.
+
 ## Acceptance criteria
 
 - **AC-022-1:** With enforce mode enabled, a provider/model pair whose
@@ -2183,6 +2320,30 @@ seven days, and older attempts close on a finality read.
   bound to the relay-blind entrypoint, basis, and profile is not payable.
 - **AC-022-70 (v0.3.0):** No artifact of an R-14 attempt contains a plaintext
   prompt or output hash. Disclosure never reports the request as `verified`.
+- **AC-022-71 (v0.4.0):** Retention never selects a request with:
+  - an unsettled, quarantined, held, or force-resolved credit;
+  - a credit settled into a voided payout, or into a window fewer than
+    `min_settlement_cycles` completed cycles old;
+  - an open, pending, or quarantined verdict;
+  - an undrained or poisoned outbox row;
+  - an unmaterialized output journal row;
+  - an unmirrored route-snapshot journal row;
+  - its provider's earliest verified verdict.
+- **AC-022-72 (v0.4.0):** Retention deletes nothing when any of these fail:
+  - the archive checksum, size, parse, or row-count check;
+  - the off-host confirmation.
+
+  It deletes only rows present in the verified archive, in bounded
+  transactions.
+- **AC-022-73 (v0.4.0):** After retention, these do not change for archived
+  requests:
+  - payable totals;
+  - payout revalidation;
+  - billing-mirror `spec022_verified`;
+  - reward verified-receipt counts;
+  - ledger reconciliation.
+
+  A settled credit can be rederived from the archive alone.
 
 ## Implementation sequencing
 
