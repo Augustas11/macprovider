@@ -795,9 +795,10 @@ mainland-provider installer handoff.
    `privacy_release_identity` copies the verified candidate
    `pearl-release.json` + `.sig` into Pearl's
    `privacy_class.release_code_identities.metadata_dir` as `v<ver>.json`
-   (hot, no restart). It refuses with the one-time setup in
-   `docs/runbooks/privacy-class-beta-operations.md` "Approved code identities"
-   while Pearl has no `metadata_dir`. CLI 1.8.230 shipped without this and
+   (hot, no restart). While Pearl has no `metadata_dir`, the operator-owned
+   step `privacy_release_setup` comes first and prints the one-time setup
+   (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup"); record
+   it with `next --done privacy_release_setup --evidence ...`. CLI 1.8.230 shipped without this and
    every upgraded provider's privacy advertisement was refused for ~12 h.
 5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
@@ -805,28 +806,41 @@ mainland-provider installer handoff.
    the designated Studio until the operator releases its current session lock.
    The canary probe also fails when Pearl's coordinator journal shows its
    privacy advertisement rejected as `posture_unapproved_code_identity` in
-   the last 10 minutes.
-6. Registrations gate (`registrations`, read-only over `PEARL_SSH`):
-   promotion is refused unless the candidate `compatibility_set_id` is in
-   `compatibility_set.accepted_ids` and its `code_cdhash` is approved by a
-   verifying `v<ver>.json` in `metadata_dir` or an
-   `approved_code_identities` entry, with the on-disk config no newer than
-   the running coordinator. The refusal names the missing item.
+   the last 10 minutes, or when the running coordinator does not positively
+   hold the candidate's registrations (item 6).
+6. Registrations gate (`registrations`, read-only over `PEARL_SSH`), checked
+   on every status, also after publication, so it gates promotion, the
+   recommendation bump and rollout verification. It passes only when the
+   RUNNING coordinator holds every registration: the candidate
+   `compatibility_set_id` is in `accepted_ids` and the on-disk config's
+   sha256 equals the running process's boot `coordinator_config_applied`
+   digests (restart-only fields), `privacy_class.enabled` is true, and the
+   candidate `code_cdhash` is approved either by a `v<ver>.json` that
+   verifies and that the coordinator reports as loaded
+   (`relayblind_privacy_release_identity_loaded`), or by an unexpired
+   `approved_code_identities` entry in that applied config. Unknown fails
+   closed; the refusal names the missing item.
 7. Signed release tag (`release_tag`): `promote-acceptance-candidate.yml`
    runs `scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin
    --require-existing`, so `v<ver>` must already be an annotated tag on the
    candidate SHA. `cli-release.sh next --run` creates it with the operator's
    git signing key (`git tag -s -a v<ver> -m "macprovider-cli <ver>"
    <candidate_sha>`), checks it with `git verify-tag`, pushes it and confirms
-   origin's target. It refuses when `v<ver>` already exists on another commit
-   or as a lightweight tag. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
+   origin's target. An existing `v<ver>` counts only when it is annotated,
+   peels to the candidate, and its exact remote tag object passes
+   `git verify-tag` against the operator's signer trust; an unsigned or
+   untrusted tag, a tag on another commit, or a lightweight tag is refused. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
    until this tag was made by hand.
 8. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
 9. `verify-live-coordinator-release-rollout` before publishing discovery.
-   `cli-release.sh` refuses it after the recommendation bump while the
-   coordinator counts `posture_unapproved_code_identity` rejections since its
-   restart (`relayblind_privacy_posture_rejections_total`, journal fallback).
+   `cli-release.sh` runs `_check-privacy-rejections` before the dispatch: it
+   samples `relayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"}`
+   twice, `PRIVACY_REJECTION_WINDOW_SECONDS` (default 180) apart, and refuses
+   on any new rejection (journal lines in the window when the metric is not
+   served). The lifetime count is only reported, so historical rejections
+   never block; a provider that keeps being rejected does, until its identity
+   is registered or denied.
 10. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
 11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served

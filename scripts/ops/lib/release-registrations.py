@@ -11,27 +11,30 @@ challenge interval) or a privacy_class.approved_code_identities entry
 Subcommands. The first three are sent over SSH (`python3 - CMD ... < this
 file`) and print JSON; they never print credentials or the full config.
 
-  facts CONFIG OVERLAY UNIT VERSION
+  facts CONFIG OVERLAY UNIT VERSION METRICS_URL
       read-only: the registration fields of the merged config, the release
-      metadata pair for VERSION, the release public key, and whether the
-      on-disk config is newer than the running coordinator.
+      metadata pair for VERSION, the release public key, the sha256 of the
+      on-disk config files next to the digests the RUNNING coordinator logged
+      when it booted (event coordinator_config_applied, source boot, current
+      systemd invocation), and the release versions the running coordinator
+      has loaded (relayblind_privacy_release_identity_loaded).
   stage DIR VERSION OWNER GROUP JSON_B64 SIG_B64
       write v<VERSION>.json then v<VERSION>.json.sig atomically into DIR
       (created 0750 OWNER:GROUP when absent), mode 0640 OWNER:GROUP, then read
       both back. Refuses to replace a different existing pair.
-  unapproved UNIT METRICS_URL [PROVIDER_ID SINCE]
-      count posture_unapproved_code_identity rejections: from the
-      relayblind_privacy_posture_rejections_total metric (process lifetime)
-      when served, else from the coordinator journal since the coordinator
-      started. With PROVIDER_ID, journal lines naming that provider since
-      SINCE (journalctl syntax).
+  unapproved UNIT METRICS_URL [PROVIDER_ID|- SINCE]
+      count posture_unapproved_code_identity rejections. Two arguments: the
+      process-lifetime count, from relayblind_privacy_posture_rejections_total
+      when served, else from the journal of the current coordinator
+      invocation; "source" says which. Four arguments: journal lines since
+      SINCE (journalctl syntax), naming PROVIDER_ID unless it is "-".
 
   evaluate FACTS_JSON VERSION COMPAT_ID PEARL_RELEASE_JSON PEARL_RELEASE_SIG
       local: decide the metadata state and whether the candidate is fully
       registered; prints a JSON verdict.
 """
 import base64
-import calendar
+import datetime
 import hashlib
 import json
 import os
@@ -71,27 +74,65 @@ def read_bounded(path):
         return f.read(MAX_FILE + 1)
 
 
-def coordinator_started(unit):
+def invocation_journal(unit):
+    """Journal lines of the coordinator's current systemd invocation."""
+    inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    if not re.match(r"^[0-9a-f]{32}$", inv):
+        return None
+    proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
+                          capture_output=True, text=True, timeout=60)
+    return proc.stdout.splitlines() if proc.returncode == 0 else None
+
+
+def boot_digests(lines):
+    """config/overlay sha256 the running process applied at boot, or None."""
+    found = None
+    for line in lines or []:
+        if "coordinator_config_applied" not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("event") == "coordinator_config_applied" and event.get("source") == "boot":
+            found = {"config_sha256": event.get("config_sha256", ""), "overlay_sha256": event.get("overlay_sha256", "")}
+    return found
+
+
+def fetch_metrics(url):
     try:
-        out = subprocess.run(["systemctl", "show", "-p", "ExecMainStartTimestamp", "--value", unit],
-                             capture_output=True, text=True, timeout=15).stdout.strip()
-        return calendar.timegm(time.strptime(out, "%a %Y-%m-%d %H:%M:%S UTC"))
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            return resp.read(8 << 20).decode()
     except Exception:
         return None
 
 
-def facts(cfg_path, overlay_path, unit, version):
+def loaded_versions(text):
+    """Versions the running coordinator approves from release files; None
+    when the metric is not served (an older coordinator, or no versions)."""
+    if text is None:
+        return None
+    out = []
+    for m in re.finditer(r'^relayblind_privacy_release_identity_loaded\{[^}]*binary_version="([0-9.]+)"[^}]*\}\s+1(?:\.0+)?\s*$',
+                         text, re.M):
+        out.append(m.group(1))
+    return sorted(set(out)) if out else None
+
+
+def facts(cfg_path, overlay_path, unit, version, metrics_url):
     import yaml  # remote side only
 
     if not VERSION.match(version):
         fail("bad version")
-    cfg, mtimes = {}, []
-    for path in (cfg_path, overlay_path):
+    cfg, disk = {}, {"config_sha256": "", "overlay_sha256": ""}
+    for key, path in (("config_sha256", cfg_path), ("overlay_sha256", overlay_path)):
         if not path or path == "-":
             continue
-        with open(path) as f:
-            cfg = merge(cfg, yaml.safe_load(f) or {})
-        mtimes.append(os.stat(path).st_mtime)
+        with open(path, "rb") as f:
+            raw = f.read()
+        disk[key] = hashlib.sha256(raw).hexdigest()
+        cfg = merge(cfg, yaml.safe_load(raw) or {})
     coord = cfg.get("coordinator") or {}
     compat = coord.get("compatibility_set") or {}
     pc = cfg.get("privacy_class") or {}
@@ -111,8 +152,9 @@ def facts(cfg_path, overlay_path, unit, version):
         "metadata_dir": str(rel.get("metadata_dir") or "").strip(),
         "public_key_path": str(rel.get("public_key_path") or "").strip(),
         "public_key_pem": None,
-        "config_mtime": max(mtimes) if mtimes else None,
-        "coordinator_started": coordinator_started(unit),
+        "disk_digests": disk,
+        "boot_digests": boot_digests(invocation_journal(unit)),
+        "loaded_versions": loaded_versions(fetch_metrics(metrics_url)) if metrics_url != "-" else None,
         "metadata": None,
         "metadata_error": "",
     }
@@ -197,10 +239,8 @@ def stage(directory, version, owner, group, json_b64, sig_b64):
 
 
 def metric_count(url):
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            text = resp.read(8 << 20).decode()
-    except Exception:
+    text = fetch_metrics(url)
+    if text is None:
         return None
     pat = re.compile(r'^relayblind_privacy_posture_rejections_total\{[^}]*reason="%s"[^}]*\}\s+([0-9.eE+]+)\s*$' % UNAPPROVED)
     seen_family = False
@@ -223,8 +263,10 @@ def journal_count(unit, since, provider_id):
 
 
 def unapproved(unit, url, provider_id="", since=""):
-    if provider_id:
-        if not re.match(r"^[A-Za-z0-9_-]{1,128}$", provider_id):
+    if since:
+        if provider_id == "-":
+            provider_id = ""
+        if provider_id and not re.match(r"^[A-Za-z0-9_-]{1,128}$", provider_id):
             fail("bad provider id")
         print(json.dumps({"source": "journal", "since": since, "count": journal_count(unit, since, provider_id)}))
         return
@@ -232,10 +274,10 @@ def unapproved(unit, url, provider_id="", since=""):
     if count is not None:
         print(json.dumps({"source": "metric", "count": count}))
         return
-    started = coordinator_started(unit)
-    if started is None:
-        fail("neither the rejection metric nor the coordinator start time is readable")
-    print(json.dumps({"source": "journal", "since": "@%d" % started, "count": journal_count(unit, "@%d" % started, "")}))
+    lines = invocation_journal(unit)
+    if lines is None:
+        fail("neither the rejection metric nor the coordinator invocation journal is readable")
+    print(json.dumps({"source": "journal", "count": sum(1 for line in lines if UNAPPROVED in line)}))
 
 
 def verify_sig(pem, payload, signature):
@@ -256,13 +298,21 @@ def code_identity(payload):
 
 
 def expired(value, now):
+    """Go time.Time semantics: an RFC3339 instant with its offset; YAML may
+    hand back "YYYY-MM-DD HH:MM:SS+00:00". A value without an offset is UTC,
+    as the YAML decoder reads it. Unparseable fails closed (expired)."""
     if not value:
         return False
     try:
-        # Offsets are ignored; YAML may hand back "YYYY-MM-DD HH:MM:SS+00:00".
-        return calendar.timegm(time.strptime(value.replace(" ", "T")[:19], "%Y-%m-%dT%H:%M:%S")) <= now
+        text = value.strip().replace(" ", "T", 1)
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.datetime.fromisoformat(text)
     except ValueError:
         return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.timestamp() <= now
 
 
 def evaluate(facts_path, version, compat_id, prj, prjsig):
@@ -285,13 +335,21 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
     out = {"metadata_state": state, "missing": []}
     miss = out["missing"]
     now = time.time()
-    started, mtime = f.get("coordinator_started"), f.get("config_mtime")
-    out["config_applied"] = started is not None and mtime is not None and int(mtime) <= started
+    # Restart-only fields count only when the bytes on disk are exactly the
+    # bytes the running process booted with (its coordinator_config_applied
+    # event); anything else, including an unreadable journal, fails closed.
+    boot, disk = f.get("boot_digests"), f.get("disk_digests")
+    out["config_applied"] = bool(boot) and boot == disk
     if not out["config_applied"]:
-        miss.append("the on-disk coordinator config is newer than the running coordinator (or its start "
-                    "time is unreadable): restart-only registrations are not proven applied")
+        miss.append("the on-disk coordinator config differs from the config the running coordinator booted "
+                    "with (or its boot digest is unreadable): restart-only registrations are not proven live")
+    if not f.get("privacy_class_enabled"):
+        miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
     if compat_id and compat_id != f.get("target_id") and compat_id not in f.get("accepted_ids", []):
         miss.append("compatibility_set.accepted_ids lacks %s (pearl_accepted_ids step)" % compat_id)
+    if local is None and remote is not None and f.get("public_key_pem") and verify_sig(f["public_key_pem"], remote, remote_sig):
+        # A published release with no local bytes: the signed file names the identity.
+        local, local_sig = remote, remote_sig
     if local is None:
         out["cdhash"] = ""
         miss.append("no verified candidate pearl-release.json is recorded (signed_byte_verification step)")
@@ -317,17 +375,25 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
             got = None
         release_ok = got == want
         release_why = "" if release_ok else "v%s.json names a different code identity" % version
+        loaded = f.get("loaded_versions")
+        if release_ok and version not in (loaded or []):
+            # The file verifies on disk; only the running coordinator's own
+            # metric proves it loaded it (key, permissions and reload all ok).
+            release_ok = False
+            release_why = ("the running coordinator does not report v%s as loaded "
+                           "(relayblind_privacy_release_identity_loaded%s)"
+                           % (version, " unreadable" if loaded is None else ""))
     entries = [e for e in f.get("approved_code_identities", []) if e.get("code_cdhash") == cd
                and e.get("team_id") == want["team_id"] and e.get("signing_identifier") == want["signing_identifier"]]
-    config_ok = any(not expired(e.get("expires_at"), now) and e.get("binary_version", "") in ("", version)
-                    for e in entries)
+    config_ok = out["config_applied"] and any(
+        not expired(e.get("expires_at"), now) and e.get("binary_version", "") in ("", version) for e in entries)
     if cd in f.get("denied_code_cdhashes", []):
         out["approved_by"] = ""
         miss.append("code_cdhash %s is in privacy_class.denied_code_cdhashes" % cd)
     elif entries:
         # A config entry for the identity governs over release metadata.
         out["approved_by"] = "approved_code_identities" if config_ok else ""
-        if not config_ok:
+        if not config_ok and out["config_applied"]:
             miss.append("privacy_class.approved_code_identities has an expired or version-mismatched entry for "
                         "code_cdhash %s, which overrides release metadata" % cd)
     elif release_ok:
@@ -343,7 +409,7 @@ def main(argv):
     if not argv:
         fail("usage: facts|stage|unapproved|evaluate ...")
     cmd, args = argv[0], argv[1:]
-    if cmd == "facts" and len(args) == 4:
+    if cmd == "facts" and len(args) == 5:
         facts(*args)
     elif cmd == "stage" and len(args) == 6:
         stage(*args)

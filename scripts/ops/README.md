@@ -43,21 +43,24 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.
 - `cli-release.sh` registers each new CLI on Pearl before it can be
-  promoted. Step `privacy_release_identity` stages the verified
-  `pearl-release.json` as `v<ver>.json` in Pearl's privacy release metadata
-  dir (hot, no restart; blocked with the one-time setup while Pearl has no
-  `metadata_dir`). The read-only `registrations` gate refuses promotion until
-  the candidate is in `compatibility_set.accepted_ids` and its code cdhash is
-  approved. `canary_smoke --probe` fails on a privacy rejection of the canary
-  in Pearl's journal, and `verify_live_rollout` is refused while the
-  coordinator counts `posture_unapproved_code_identity` rejections since the
-  recommendation-bump restart.
+  promoted. The operator-owned `privacy_release_setup` step prints the
+  one-time Pearl setup while Pearl has no privacy release metadata dir. Step
+  `privacy_release_identity` stages the verified `pearl-release.json` as
+  `v<ver>.json` there (hot, no restart). The read-only `registrations` gate,
+  evaluated on every status, requires the running coordinator to hold the
+  registrations (loaded-identity metric, boot config digests) and gates the
+  canary, promotion, the recommendation bump and rollout verification.
+  `canary_smoke --probe` also fails on a privacy rejection of the canary in
+  Pearl's journal. `verify_live_rollout` runs `_check-privacy-rejections`
+  first: two samples of the unapproved-rejection counter over a window
+  (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180).
 - `cli-release.sh` step `release_tag`, just before `promotion`, creates the
   signed annotated `v<ver>` tag on the verified candidate SHA with the
   operator's git signing key, checks it with `git verify-tag`, and pushes it;
   the promotion workflow requires that tag to exist. It is done when origin's
-  `v<ver>` is annotated and peels to the candidate SHA, and it refuses when
-  `v<ver>` exists on another commit.
+  `v<ver>` is annotated, peels to the candidate SHA and its exact remote tag
+  object passes `git verify-tag`; it refuses an unsigned, untrusted,
+  lightweight or other-commit `v<ver>`.
 - Steps the operator owns are `manual`: an environment approval click, a
   Pearl `coordinator.yaml` edit, or a provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record

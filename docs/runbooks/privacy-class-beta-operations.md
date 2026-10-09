@@ -82,12 +82,12 @@ A provider's privacy advertisement is refused as `posture_unapproved_code_identi
 
 Two writers fill `metadata_dir`, because CLI releases and Pearl runtime releases use separate tags:
 
-- **CLI releases:** `scripts/ops/cli-release.sh` step `privacy_release_identity`, right after the candidate's signed bytes are verified and before any canary or fleet provider runs it, copies the verified `pearl-release.json` and signature to `metadata_dir` as `v<ver>.json` and `v<ver>.json.sig` (`root:macprovider`, mode 0640, payload before signature). No restart. The `registrations` gate then refuses promotion until the candidate is in `compatibility_set.accepted_ids` and its cdhash is approved.
+- **CLI releases:** `scripts/ops/cli-release.sh` step `privacy_release_identity`, right after the candidate's signed bytes are verified and before any canary or fleet provider runs it, copies the verified `pearl-release.json` and signature to `metadata_dir` as `v<ver>.json` and `v<ver>.json.sig` (`root:macprovider`, mode 0640, payload before signature). No restart. The `registrations` gate then refuses the canary, promotion, the recommendation bump and rollout verification until the running coordinator holds the registration: the file verifies and `relayblind_privacy_release_identity_loaded{binary_version="<ver>"}` is 1 on the coordinator, or an `approved_code_identities` entry is in a config whose sha256 equals the running process's boot `coordinator_config_applied` digests.
 - **Pearl runtime releases:** the Pearl updater writes the same pair for a runtime tag whose `pearl-release.json` carries `provider_code_identity`.
 
 #### One-time setup (operator, Pearl)
 
-Until this is done, `cli-release.sh` blocks at `privacy_release_identity` and prints these lines; the status fact `privacy_release_metadata_dir` reads `unset`. Under both locks, edit `/opt/macprovider/coordinator.yaml` in place (the `privacy_class` block; the overlay must not override it):
+This is the operator-owned `cli-release.sh` step `privacy_release_setup`, like `pearl_accepted_ids`: `scripts/ops/cli-release.sh next` prints the exact sequence (key preflight, directory, in-place edit, validation, restart with backup restore, health check), and you record it with `scripts/ops/cli-release.sh next --done privacy_release_setup --evidence '<applied config sha256 + healthz>'`. Status keeps reading `privacy_release_metadata_dir` from Pearl itself, so the record alone never completes the step. Under both locks, edit `/opt/macprovider/coordinator.yaml` in place (the `privacy_class` block; the overlay must not override it):
 
 ```yaml
 privacy_class:
@@ -100,7 +100,7 @@ privacy_class:
 install -d -o root -g macprovider -m 0750 /opt/macprovider/privacy-release-identities
 ```
 
-Then restart the coordinator (the key is read at startup; a configured key that cannot be read stops startup) and run `scripts/ops/cli-release.sh status`; `privacy_release_metadata_dir` must name the directory. The directory owner and mode match what the Pearl updater requires (`root:macprovider`, 0750).
+Before the edit, confirm `/usr/local/share/macprovider/release-signing-public.pem` has the sha256 of `ops/pearl-updater/release-signing-public.pem` and that the `macprovider` user can read it: a configured key that cannot be read stops startup, so keep the config backup and restore it if `/healthz` does not return after the restart. Then run `scripts/ops/cli-release.sh status`; `privacy_release_metadata_dir` must name the directory. The directory owner and mode match what the Pearl updater requires (`root:macprovider`, 0750).
 
 Overrides, in this order:
 

@@ -81,10 +81,11 @@ printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$OPS_SRC/tests/gh_stub.py"
 # or reads the fake Pearl files under $tmp/pearl).
 # shellcheck disable=SC2016  # the stub's own "$@" must stay literal
 printf '#!/usr/bin/env bash\nexec bash -c "${@: -1}"\n' > "$tmp/bin/ssh"
-# Pearl's systemctl/journalctl: the coordinator started "now"; the journal is a file.
+# Pearl's systemctl/journalctl: one fixed coordinator invocation whose journal
+# is boot.txt (its coordinator_config_applied event) plus journal.txt.
 # shellcheck disable=SC2016  # the fake's own "$1 $3" must stay literal
-printf '#!/usr/bin/env bash\n[ "$1 $3" = "show ExecMainStartTimestamp" ] || exit 1\ndate -u "+%%a %%Y-%%m-%%d %%H:%%M:%%S UTC"\n' > "$tmp/bin/systemctl"
-printf '#!/usr/bin/env bash\ncat %q 2>/dev/null || true\n' "$tmp/svc/journal.txt" > "$tmp/bin/journalctl"
+printf '#!/usr/bin/env bash\n[ "$1 $3" = "show InvocationID" ] || exit 1\necho 0123456789abcdef0123456789abcdef\n' > "$tmp/bin/systemctl"
+printf '#!/usr/bin/env bash\ncat %q %q 2>/dev/null || true\n' "$tmp/svc/boot.txt" "$tmp/svc/journal.txt" > "$tmp/bin/journalctl"
 chmod +x "$tmp/bin/gh" "$tmp/bin/ssh" "$tmp/bin/systemctl" "$tmp/bin/journalctl"
 python3 "$OPS_SRC/tests/fake_services.py" "$tmp/svc" &
 server_pid=$!
@@ -198,17 +199,33 @@ pearl_config() {  # pearl_config ACCEPTED_IDS_YAML_LIST METADATA_DIR_OR_EMPTY [A
     [ -z "${3:-}" ] || printf '  approved_code_identities:\n  - team_id: ABCDE12345\n    signing_identifier: live.malibu.provider.cli\n    code_cdhash: %s\n    binary_version: "%s"\n' "$3" "$CAND"
   } > "$tmp/pearl/overlay.yaml"
 }
+# pearl_boot: the running coordinator (re)starts with the config now on disk.
+pearl_boot() {
+  printf '{"level":"info","config_sha256":"%s","overlay_sha256":"%s","source":"boot","event":"coordinator_config_applied","message":"coordinator config applied"}\n' \
+    "$(shasum -a 256 "$tmp/pearl/coordinator.yaml" | awk '{print $1}')" "$(shasum -a 256 "$tmp/pearl/overlay.yaml" | awk '{print $1}')" > "$tmp/svc/boot.txt"
+}
+# loaded VERSION...: the release versions the running coordinator reports as loaded.
+loaded() { for v in "$@"; do printf 'relayblind_privacy_release_identity_loaded{binary_version="%s"} 1\n' "$v"; done > "$tmp/svc/loaded.txt"; }
 COMPAT="test/repo:v$CAND@$B"
 META="$tmp/pearl/privacy-release-identities"
 pearl_config "[\"$COMPAT\"]" ""
+pearl_boot
 run_rc 0 "cli status without a Pearl metadata_dir" scripts/ops/cli-release.sh status
-expect_next privacy_release_identity:blocked
-case "$(next_field command)" in *"metadata_dir: /opt/macprovider/privacy-release-identities"*) ok ;; *) bad "no one-time setup in: $(next_field command)" ;; esac
+expect_next privacy_release_setup:manual
+case "$(next_field command)" in
+  *"metadata_dir: /opt/macprovider/privacy-release-identities"*"next --done privacy_release_setup --evidence"*) ok ;;
+  *) bad "no one-time setup in: $(next_field command)" ;;
+esac
 fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
 if [ "$(fact_of privacy_release_metadata_dir)" = "unset" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
+MACPROVIDER_OPS_OWNER=t run_rc 3 "the one-time setup is operator-owned" scripts/ops/cli-release.sh next --run
 run_rc 3 "privacy step refuses without a metadata_dir" scripts/ops/cli-release.sh _stage-privacy-identity "$CAND"
 expect_err "one-time setup"
+run_rc 0 "one-time setup recorded with evidence" scripts/ops/cli-release.sh next --done privacy_release_setup --evidence "applied config sha + healthz"
+run_rc 0 "cli status with the setup recorded but not live" scripts/ops/cli-release.sh status
+expect_next privacy_release_setup:blocked
 pearl_config "[\"$COMPAT\"]" "$META"
+pearl_boot
 run_rc 0 "cli status with an empty metadata dir" scripts/ops/cli-release.sh status
 expect_next privacy_release_identity:mutate
 MACPROVIDER_OPS_OWNER=t run_rc 0 "privacy step stages the candidate identity" scripts/ops/cli-release.sh next --run
@@ -219,7 +236,7 @@ if [ "$(state_of privacy_release_identity)" = "done" ]; then ok; else bad "stage
 if [ "$(fact_of privacy_release_metadata_dir)" = "$META" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
 step_ids() { python3 -c 'import json,sys; print(" ".join(s["id"] for s in json.load(open(sys.argv[1]))["steps"]))' "$tmp/out"; }
 case " $(step_ids) " in
-  *" signed_byte_verification privacy_release_identity pearl_accepted_ids "*) ok ;;
+  *" signed_byte_verification privacy_release_setup privacy_release_identity pearl_accepted_ids "*) ok ;;
   *) bad "privacy_release_identity is not right after signed_byte_verification: $(step_ids)" ;;
 esac
 status_doc() {
@@ -258,6 +275,10 @@ printf '{"level":"warn","error":"relayblind: privacy posture rejected: posture_u
 run_rc 3 "canary probe refused when Pearl rejects its privacy advertisement" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "rejected the canary's privacy advertisement 1 time"
 printf '{"level":"warn","error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"other-provider","message":"privacy key advertisement rejected"}\n' > "$tmp/svc/journal.txt"
+rm -f "$tmp/svc/loaded.txt"
+run_rc 3 "canary probe refused without positive live registration" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "not registered in the running coordinator"
+loaded "$CAND"
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
 rm -f "$tmp/svc/journal.txt"
 run_rc 0 "cli status after canary" scripts/ops/cli-release.sh status
@@ -282,6 +303,23 @@ git -C "$W" config user.email t@example.invalid
 git -C "$W" config gpg.format ssh
 git -C "$W" config user.signingkey "$tmp/keys/git-signing"
 git -C "$W" config gpg.ssh.allowedSignersFile "$tmp/keys/allowed_signers"
+# An annotated tag on the candidate that is unsigned, or signed by an
+# untrusted key, does not satisfy the signed-tag gate.
+git -C "$W" tag -a "v$CAND" -m unsigned "$B"
+git -C "$W" push -q origin "refs/tags/v$CAND"
+run_rc 0 "cli status with an unsigned v$CAND on the candidate" scripts/ops/cli-release.sh status
+expect_next release_tag:blocked
+case "$(next_field reason)" in *"unverified on $B"*) ok ;; *) bad "unsigned tag reason: $(next_field reason)" ;; esac
+run_rc 3 "release tag refused for an unsigned tag on the candidate" scripts/ops/cli-release.sh _release-tag "$CAND" "$B"
+git -C "$W" push -q origin ":refs/tags/v$CAND"
+git -C "$W" tag -d "v$CAND" >/dev/null
+ssh-keygen -q -t ed25519 -N '' -C x -f "$tmp/keys/untrusted" </dev/null
+git -C "$W" -c user.signingkey="$tmp/keys/untrusted" tag -s -a "v$CAND" -m untrusted "$B"
+git -C "$W" push -q origin "refs/tags/v$CAND"
+run_rc 0 "cli status with an untrusted signature on v$CAND" scripts/ops/cli-release.sh status
+expect_next release_tag:blocked
+git -C "$W" push -q origin ":refs/tags/v$CAND"
+git -C "$W" tag -d "v$CAND" >/dev/null
 # A tag on another commit is never moved or reused.
 git -C "$W" tag -a "v$CAND" -m other "$B~1"
 git -C "$W" push -q origin "refs/tags/v$CAND"
@@ -307,10 +345,19 @@ case " $(step_ids) " in
 esac
 # Registrations gate: each missing Pearl registration refuses promotion by name.
 pearl_config "[]" "$META"
+pearl_boot
 run_rc 0 "cli status without the candidate in accepted_ids" scripts/ops/cli-release.sh status
 expect_next registrations:blocked
 case "$(next_field reason)" in *"accepted_ids lacks $COMPAT"*) ok ;; *) bad "accepted_ids reason: $(next_field reason)" ;; esac
 pearl_config "[\"$COMPAT\"]" "$META"
+pearl_boot
+# A verifying file the running coordinator has not loaded is not approval.
+loaded 1.0.0
+run_rc 0 "cli status with v$CAND on disk but not loaded" scripts/ops/cli-release.sh status
+case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
+  *"does not report v$CAND as loaded"*) ok ;; *) bad "unloaded release identity accepted" ;;
+esac
+loaded "$CAND"
 mkdir -p "$tmp/pearl/aside" && mv "$META"/v"$CAND".json* "$tmp/pearl/aside/"
 run_rc 0 "cli status with the candidate cdhash unapproved" scripts/ops/cli-release.sh status
 if [ "$(state_of registrations)" = "pending" ] && [ "$(next_field id)" != "promotion" ]; then ok; else bad "unapproved cdhash did not refuse promotion: $(next_field id)"; fi
@@ -318,38 +365,45 @@ case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(ope
   *"$CDHASH"*"not approved"*) ok ;; *) bad "registrations note does not name the cdhash" ;;
 esac
 pearl_config "[\"$COMPAT\"]" "$META" "$CDHASH"
+run_rc 0 "cli status with a config approval not yet applied" scripts/ops/cli-release.sh status
+case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
+  *"differs from the config the running coordinator booted with"*) ok ;; *) bad "unapplied config edit not refused" ;;
+esac
+pearl_boot
 run_rc 0 "cli status with a config approval" scripts/ops/cli-release.sh status
 if [ "$(state_of registrations)" = "done" ]; then ok; else bad "approved_code_identities entry not accepted: $(next_field reason)"; fi
-touch -t "$(date -v+2H +%Y%m%d%H%M 2>/dev/null || date -d '+2 hours' +%Y%m%d%H%M)" "$tmp/pearl/overlay.yaml"
-run_rc 0 "cli status with an unapplied config edit" scripts/ops/cli-release.sh status
-case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
-  *"newer than the running coordinator"*) ok ;; *) bad "unapplied config edit not refused" ;;
-esac
 mv "$tmp/pearl/aside"/* "$META/"
 pearl_config "[\"$COMPAT\"]" "$META"
+pearl_boot
 run_rc 0 "cli status with registrations restored" scripts/ops/cli-release.sh status
 expect_next promotion:mutate
 rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 
-# verify_live_rollout after the bump refuses while privacy rejections count.
+# After the bump: registrations are re-checked, the lifetime rejection count is
+# reported only, and the dispatch is gated on rejections inside a window.
 fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
   "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
   "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]}}'
 health v9.0.0 "$CAND"
-printf '# TYPE relayblind_privacy_posture_rejections_total counter\nrelayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"} 3' > "$tmp/svc/metrics.txt"
-run_rc 0 "cli status after the bump with rejections" scripts/ops/cli-release.sh status
-expect_next verify_live_rollout:blocked
-case "$(next_field reason)" in *"rejected 3 privacy advertisement"*) ok ;; *) bad "rejection reason: $(next_field reason)" ;; esac
-MACPROVIDER_OPS_OWNER=t run_rc 3 "verify_live_rollout refuses to run with rejections" scripts/ops/cli-release.sh next --run
-printf '# TYPE relayblind_privacy_posture_rejections_total counter\nrelayblind_privacy_posture_rejections_total{reason="posture_closed"} 2' > "$tmp/svc/metrics.txt"
-run_rc 0 "cli status after the bump without unapproved rejections" scripts/ops/cli-release.sh status
+rm -f "$tmp/svc/loaded.txt"
+run_rc 0 "cli status after the bump with the identity no longer loaded" scripts/ops/cli-release.sh status
+expect_next registrations:blocked
+loaded "$CAND"
+printf '3' > "$tmp/svc/rejections"
+run_rc 0 "cli status after the bump with historical rejections" scripts/ops/cli-release.sh status
 expect_next verify_live_rollout:mutate
-rm -f "$tmp/svc/metrics.txt"
+case "$(next_field command)" in *"_check-privacy-rejections"*"verify-live-coordinator-release-rollout.yml"*) ok ;; *) bad "rollout command: $(next_field command)" ;; esac
+if [ "$(fact_of privacy_unapproved_rejections_lifetime)" = "3" ]; then ok; else bad "lifetime fact: $(fact_of privacy_unapproved_rejections_lifetime)"; fi
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 0 "no new rejections in the window" scripts/ops/cli-release.sh _check-privacy-rejections
+printf '1' > "$tmp/svc/rejections_bump"
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "new rejections in the window refuse rollout verification" scripts/ops/cli-release.sh _check-privacy-rejections
+expect_err "rejected 1 privacy advertisement"
+rm -f "$tmp/svc/rejections" "$tmp/svc/rejections_bump" "$tmp/svc/metrics_reads"
 printf '{"error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"p1"}\n' > "$tmp/svc/journal.txt"
-run_rc 0 "cli status falls back to the journal without the metric" scripts/ops/cli-release.sh status
-expect_next verify_live_rollout:blocked
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "journal fallback refuses rejections in the window" scripts/ops/cli-release.sh _check-privacy-rejections
+run_rc 0 "cli status reports the journal source without the metric" scripts/ops/cli-release.sh status
 if [ "$(fact_of privacy_unapproved_rejections_source)" = "journal" ]; then ok; else bad "fallback source: $(fact_of privacy_unapproved_rejections_source)"; fi
 rm -f "$tmp/svc/journal.txt"
 
