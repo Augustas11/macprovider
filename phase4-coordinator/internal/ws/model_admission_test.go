@@ -1981,3 +1981,24 @@ func TestModelAdmissionSignatureDigestFixture(t *testing.T) {
 		t.Fatal("empty digest")
 	}
 }
+
+// #1880: the offer endpoint accepts a signed requested_pool_model_id, refuses
+// one that is not a pool model id, and refuses an unsigned addition.
+func TestModelAdmissionOfferRequestedPoolModelID(t *testing.T) {
+	h, bearer, priv := newModelAdmissionHarness(t, "provider-byom-a")
+	defer h.HTTP.Close()
+	requested := "pool/QpsclmzwdJaWJTk3zowcXQ/creator-gguf"
+	signed := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID("p"), "ollama:qwen3-8b", priv, map[string]any{"requested_pool_model_id": requested})
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, signed); status != http.StatusOK {
+		t.Fatalf("signed requested offer status=%d body=%s", status, body)
+	}
+	bad := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID("q"), "ollama:qwen3-8b", priv, map[string]any{"requested_pool_model_id": "creator-gguf"})
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, bad); status != http.StatusBadRequest {
+		t.Fatalf("non-pool requested id status=%d body=%s", status, body)
+	}
+	unsigned := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID("r"), "ollama:qwen3-8b", priv, nil)
+	unsigned["requested_pool_model_id"] = requested
+	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, unsigned); status != http.StatusUnauthorized {
+		t.Fatalf("unsigned requested id status=%d body=%s", status, body)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -172,6 +173,11 @@ type ModelAdmissionEvent struct {
 	// (offer events only), kept so a pool entry accepted after the offer can
 	// still be matched exactly (SPEC-047-R011). Never an identity by itself.
 	OfferedArtifactHashes map[string]string
+	// RequestedPoolModelID is the offer's optional provider-signed
+	// requested_pool_model_id (#1880): when set, the R011 bind considers only
+	// that pool and entry. Carried forward on every later event of the
+	// candidate; never an identity, price, or route by itself.
+	RequestedPoolModelID string
 	// SPEC-047-R011 (#1816) closed pool_binding object, carried only by a
 	// pool-scoped bind/rebind event and the revocation derived from it.
 	// BindingScope is "" (global, every pre-existing event) or "pool". The
@@ -770,6 +776,8 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		{name: "pool_provider_account_id", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_provider_account_id TEXT NOT NULL DEFAULT ''`},
 		{name: "pool_probe_evidence_digest", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_probe_evidence_digest TEXT NOT NULL DEFAULT ''`},
 		{name: "pool_observed_catalog_model_key", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_observed_catalog_model_key TEXT NOT NULL DEFAULT ''`},
+		// #1880 explicit pool selection for the R011 bind.
+		{name: "requested_pool_model_id", sql: `ALTER TABLE model_admission_events ADD COLUMN requested_pool_model_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if columns[column.name] {
 			continue
@@ -1097,8 +1105,8 @@ INSERT INTO model_admission_events(
     pool_manifest_core_digest, pool_prompt_rate_per_mtok,
     pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
     pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
-    pool_probe_evidence_digest, pool_observed_catalog_model_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    pool_probe_evidence_digest, pool_observed_catalog_model_key, requested_pool_model_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ProviderID,
 		event.CandidateID,
 		event.ServedModelRef,
@@ -1156,6 +1164,7 @@ INSERT INTO model_admission_events(
 		event.PoolProviderAccountID,
 		event.PoolProbeEvidenceDigest,
 		event.PoolObservedCatalogModelKey,
+		event.RequestedPoolModelID,
 	)
 	return err
 }
@@ -1398,6 +1407,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&event.PoolProviderAccountID,
 		&event.PoolProbeEvidenceDigest,
 		&event.PoolObservedCatalogModelKey,
+		&event.RequestedPoolModelID,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1440,7 +1450,7 @@ func modelAdmissionEventSelect(tail string) string {
        pool_manifest_core_digest, pool_prompt_rate_per_mtok,
        pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
        pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
-       pool_probe_evidence_digest, pool_observed_catalog_model_key` + tail
+       pool_probe_evidence_digest, pool_observed_catalog_model_key, requested_pool_model_id` + tail
 }
 
 func scanModelAdmissionEvents(ctx context.Context, q interface {
@@ -1594,6 +1604,12 @@ func modelAdmissionOfferRepeatsHead(head, offer ModelAdmissionEvent) bool {
 	if modelAdmissionStateTerminal(head.State) || !sameModelAdmissionTuple(head, offer) ||
 		modelAdmissionRuntimeClass(head.RuntimeSource) != modelAdmissionRuntimeClass(offer.RuntimeSource) ||
 		modelAdmissionEvidenceRefreshed(head, offer) || head.RequestedDisclosureClass != offer.RequestedDisclosureClass {
+		return false
+	}
+	// A bound head repeats an offer that requests nothing or its own entry;
+	// an unbound head only an offer requesting the same entry (#1880).
+	if offer.RequestedPoolModelID != head.RequestedPoolModelID &&
+		(!head.PoolScoped() || (offer.RequestedPoolModelID != "" && offer.RequestedPoolModelID != head.PoolModelID)) {
 		return false
 	}
 	if len(head.OfferedArtifactHashes) > 0 {
@@ -2436,6 +2452,9 @@ type modelAdmissionOfferSubmitRequest struct {
 	SignatureAlgorithm       string                              `json:"signature_algorithm"`
 	ProviderSignature        string                              `json:"provider_signature"`
 	CLIVersion               string                              `json:"cli_version"`
+	// RequestedPoolModelID (#1880, SPEC-047-R002 0.2.8) is optional; it is
+	// signed only when present, so offers without it keep their bytes.
+	RequestedPoolModelID string `json:"requested_pool_model_id,omitempty"`
 }
 
 type modelAdmissionWithdrawRequest struct {
@@ -2493,7 +2512,7 @@ func (v *modelAdmissionNullableString) UnmarshalJSON(data []byte) error {
 }
 
 func (p modelAdmissionOfferSubmitRequest) canonicalMap() map[string]any {
-	return map[string]any{
+	canonical := map[string]any{
 		"signature_domain":           p.SignatureDomain,
 		"provider_id":                p.ProviderID,
 		"candidate_id":               p.CandidateID,
@@ -2513,6 +2532,10 @@ func (p modelAdmissionOfferSubmitRequest) canonicalMap() map[string]any {
 		"signing_key_digest":         p.SigningKeyDigest,
 		"cli_version":                p.CLIVersion,
 	}
+	if p.RequestedPoolModelID != "" {
+		canonical["requested_pool_model_id"] = p.RequestedPoolModelID
+	}
+	return canonical
 }
 
 type modelAdmissionAdvisoryCapabilities struct {
@@ -2619,6 +2642,11 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	}
 	if payload.CatalogModelKey != "" && len(payload.CatalogModelKey) > 128 {
 		return fmt.Errorf("invalid catalog_model_key")
+	}
+	if payload.RequestedPoolModelID != "" {
+		if _, _, ok := poolmanifest.ParsePoolModelID(payload.RequestedPoolModelID); !ok {
+			return fmt.Errorf("invalid requested_pool_model_id")
+		}
 	}
 	if payload.ArtifactHashes == nil || payload.AdvisoryCapabilities == nil {
 		return fmt.Errorf("invalid model admission evidence")
@@ -2737,6 +2765,10 @@ func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent
 	// status, so every global status keeps its bytes.
 	if binding := modelAdmissionPoolBindingObject(event); binding != nil {
 		response["pool_binding"] = binding
+	}
+	// #1880: an unbound candidate the R011 bind cannot place says why.
+	if warning := poolBindingWarning(s.poolModels.Load(), event.ProviderID, event, s.classifyCatalogPair); warning != "" {
+		response["warnings"] = []string{warning}
 	}
 	// SPEC-047-R002/R010: pool_attested_earning is claimed only while the
 	// current pool predicate holds; a binding the sweep has not yet revoked
