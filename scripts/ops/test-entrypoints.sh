@@ -333,23 +333,6 @@ rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 
-fixture '{"runs": {"renew-release-discovery-head.yml": []}}'
-MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=24 run_rc 3 "short discovery renewal validity refused" scripts/ops/discovery-renew.sh status
-expect_err "must be 168"
-MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 0 "discovery renewal status" scripts/ops/discovery-renew.sh status
-expect_next dispatch:mutate
-case "$(next_field command)" in
-  *"renew-release-discovery-head.yml"*"validity_hours=168"*) ok ;;
-  *) bad "discovery renewal command: $(next_field command)" ;;
-esac
-MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 3 "discovery renewal dispatch needs owner" scripts/ops/discovery-renew.sh next --run
-expect_err "MACPROVIDER_OPS_OWNER is unset"
-MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 MACPROVIDER_OPS_OWNER=t run_rc 0 "discovery renewal dispatch through entrypoint" scripts/ops/discovery-renew.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
-run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
-expect_next env_approval:manual
-=======
 # verify_live_rollout after the bump refuses while privacy rejections count.
 fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
   "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
@@ -370,7 +353,24 @@ expect_next verify_live_rollout:blocked
 if [ "$(fact_of privacy_unapproved_rejections_source)" = "journal" ]; then ok; else bad "fallback source: $(fact_of privacy_unapproved_rejections_source)"; fi
 rm -f "$tmp/svc/journal.txt"
 
-# ==== discovery-renew ==================================================
+# ==== discovery-renew =========================================================
+fixture '{"runs": {"renew-release-discovery-head.yml": []}}'
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=24 run_rc 3 "short discovery renewal validity refused" scripts/ops/discovery-renew.sh status
+expect_err "must be 168"
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 0 "discovery renewal status" scripts/ops/discovery-renew.sh status
+expect_next dispatch:mutate
+case "$(next_field command)" in
+  *"renew-release-discovery-head.yml"*"validity_hours=168"*) ok ;;
+  *) bad "discovery renewal command: $(next_field command)" ;;
+esac
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 3 "discovery renewal dispatch needs owner" scripts/ops/discovery-renew.sh next --run
+expect_err "MACPROVIDER_OPS_OWNER is unset"
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 MACPROVIDER_OPS_OWNER=t run_rc 0 "discovery renewal dispatch through entrypoint" scripts/ops/discovery-renew.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
+run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
+expect_next env_approval:manual
+
 # ==== catalog-activate gateway proof ==========================================
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
