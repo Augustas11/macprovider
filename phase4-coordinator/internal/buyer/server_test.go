@@ -2960,7 +2960,9 @@ func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testin
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	row := queryLatestBillingRow(t, dbPath)
-	wantEstimate := int64((len(responseBody) + 15) / 16)
+	// SPEC-005 §5.3: the non-streaming ceiling is the body length (one byte
+	// per token); an inflated report is still clamped to it.
+	wantEstimate := int64(len(responseBody))
 	if row.UsageSource != "byte_estimated" {
 		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
 	}

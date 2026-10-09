@@ -1179,7 +1179,7 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	} else {
 		contractMismatch = contractMismatch || !recoveryRateContractMatches(input, promptRate, completionRate)
 	}
-	receiptExpected, hasVerifiedReceipt, err := verifiedReceiptExpectedCreditTx(ctx, tx, id, input, cached, promptRate, completionRate, multiplier, share, faultFlag)
+	receiptExpected, hasVerifiedReceipt, err := verifiedReceiptExpectedCreditTx(ctx, tx, id, input, cached, estimated, promptRate, completionRate, multiplier, share, faultFlag)
 	if err != nil {
 		return 0, 0, true, false, err
 	}
@@ -1230,7 +1230,11 @@ UPDATE ledger_request_credits
 	return gross, summaryExpected.GrossCredits, true, mismatch, nil
 }
 
-func verifiedReceiptExpectedCreditTx(ctx context.Context, tx *sql.Tx, requestCreditID int64, input HotPathInput, cached sql.NullInt64, promptRate, completionRate, multiplier, share int64, faultFlag string) (BilledRow, bool, error) {
+// verifiedReceiptExpectedCreditTx is the credit the verified-receipt sync
+// produced for a row. ceiling is the row's stored completion estimate: the
+// sync (and a SPEC-005 §7.5b ceiling restatement) keeps it only when it
+// clamped, so re-pricing against it reproduces the stored credit.
+func verifiedReceiptExpectedCreditTx(ctx context.Context, tx *sql.Tx, requestCreditID int64, input HotPathInput, cached, ceiling sql.NullInt64, promptRate, completionRate, multiplier, share int64, faultFlag string) (BilledRow, bool, error) {
 	var usageJSON string
 	err := tx.QueryRowContext(ctx, `
 SELECT sao.usage_canonical_json
@@ -1286,7 +1290,7 @@ SELECT sao.usage_canonical_json
 		cachedPrompt = &cached.Int64
 		rateEntry = input.RateEntry
 	}
-	return ComputeCreditsWithCache(&chargedPrompt, cachedPrompt, &completion, nil, UsageProviderReported, faultFlag, rateEntry, multiplier, share), true, nil
+	return ComputeCreditsWithCache(&chargedPrompt, cachedPrompt, &completion, intPtrFromNull(ceiling), UsageProviderReported, faultFlag, rateEntry, multiplier, share), true, nil
 }
 
 func recoveryRateContractMatches(input HotPathInput, promptRate, completionRate int64) bool {

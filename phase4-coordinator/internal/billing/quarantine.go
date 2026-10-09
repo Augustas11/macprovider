@@ -421,88 +421,8 @@ type forceVoidBody struct {
 //   - distinguish 413 (body too large) from 400 (other JSON errors).
 func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody, bool) {
 	body := forceVoidBody{}
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		var mbErr *http.MaxBytesError
-		if errors.As(err, &mbErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
-		} else {
-			writeError(w, http.StatusBadRequest, "bad_request", "failed to read body")
-		}
-		return body, false
-	}
-	// R2 fix (SEC-M1 / CODE-H2): MaxBytesReader is set to
-	// maxBodyBytes+1 above so a body of exactly 4097 bytes returns
-	// without a MaxBytesError, but SPEC §11.6.1.1 rejects bodies
-	// strictly greater than 4 KiB. Explicit post-read length check
-	// closes the off-by-one for chunked / unknown-length requests.
-	if len(raw) > maxBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
-		return body, false
-	}
-	// SPEC §11.6.3 rule 1: UTF-8 well-formedness BEFORE any
-	// JSON-induced normalization (json.Unmarshal silently replaces
-	// invalid UTF-8 with U+FFFD).
-	if !utf8.Valid(raw) {
-		writeValidationError(w, "invalid_utf8", "body is not valid UTF-8")
-		return body, false
-	}
-	// Token-scan the top-level object to enforce SPEC §11.6.1.1
-	// duplicate / unknown key rules.
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	tok, err := dec.Token()
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
-		return body, false
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		writeError(w, http.StatusBadRequest, "bad_request", "body must be a JSON object")
-		return body, false
-	}
-	seenKeys := map[string]bool{}
-	allowedKeys := map[string]bool{"operator_id": true, "reason": true}
-	rawFields := map[string]json.RawMessage{}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
-			return body, false
-		}
-		key, ok := keyTok.(string)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
-			return body, false
-		}
-		if seenKeys[key] {
-			writeError(w, http.StatusBadRequest, "bad_request", "duplicate key: "+key)
-			return body, false
-		}
-		seenKeys[key] = true
-		if !allowedKeys[key] {
-			writeError(w, http.StatusBadRequest, "bad_request", "unknown key: "+key)
-			return body, false
-		}
-		var val json.RawMessage
-		if err := dec.Decode(&val); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid json value for "+key)
-			return body, false
-		}
-		rawFields[key] = val
-	}
-	// Closing `}`.
-	if tok, err := dec.Token(); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
-		return body, false
-	} else if d, ok := tok.(json.Delim); !ok || d != '}' {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
-		return body, false
-	}
-	// R2 fix (CODE-H3): dec.More() only reports remaining elements
-	// inside the current array/object; once we've consumed the
-	// top-level `}` we must explicitly require io.EOF, otherwise
-	// `{...} {}` or `{...} 42` would be accepted.
-	if _, err := dec.Token(); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "bad_request", "body must contain a single JSON object")
+	rawFields, ok := readStrictJSONObject(w, r, map[string]bool{"operator_id": true, "reason": true})
+	if !ok {
 		return body, false
 	}
 	opRaw, hasOp := rawFields["operator_id"]
@@ -545,6 +465,96 @@ func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody,
 		return body, false
 	}
 	return body, true
+}
+
+// readStrictJSONObject reads a §11.6.1.1-strict JSON object body: at most
+// 4 KiB, valid UTF-8, one top-level object, no duplicate keys, and only
+// allowedKeys. It writes the error response and returns false on rejection.
+func readStrictJSONObject(w http.ResponseWriter, r *http.Request, allowedKeys map[string]bool) (map[string]json.RawMessage, bool) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
+		} else {
+			writeError(w, http.StatusBadRequest, "bad_request", "failed to read body")
+		}
+		return nil, false
+	}
+	// R2 fix (SEC-M1 / CODE-H2): MaxBytesReader is set to
+	// maxBodyBytes+1 above so a body of exactly 4097 bytes returns
+	// without a MaxBytesError, but SPEC §11.6.1.1 rejects bodies
+	// strictly greater than 4 KiB. Explicit post-read length check
+	// closes the off-by-one for chunked / unknown-length requests.
+	if len(raw) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
+		return nil, false
+	}
+	// SPEC §11.6.3 rule 1: UTF-8 well-formedness BEFORE any
+	// JSON-induced normalization (json.Unmarshal silently replaces
+	// invalid UTF-8 with U+FFFD).
+	if !utf8.Valid(raw) {
+		writeValidationError(w, "invalid_utf8", "body is not valid UTF-8")
+		return nil, false
+	}
+	// Token-scan the top-level object to enforce SPEC §11.6.1.1
+	// duplicate / unknown key rules.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return nil, false
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		writeError(w, http.StatusBadRequest, "bad_request", "body must be a JSON object")
+		return nil, false
+	}
+	seenKeys := map[string]bool{}
+	rawFields := map[string]json.RawMessage{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return nil, false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return nil, false
+		}
+		if seenKeys[key] {
+			writeError(w, http.StatusBadRequest, "bad_request", "duplicate key: "+key)
+			return nil, false
+		}
+		seenKeys[key] = true
+		if !allowedKeys[key] {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown key: "+key)
+			return nil, false
+		}
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json value for "+key)
+			return nil, false
+		}
+		rawFields[key] = val
+	}
+	// Closing `}`.
+	if tok, err := dec.Token(); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return nil, false
+	} else if d, ok := tok.(json.Delim); !ok || d != '}' {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return nil, false
+	}
+	// R2 fix (CODE-H3): dec.More() only reports remaining elements
+	// inside the current array/object; once we've consumed the
+	// top-level `}` we must explicitly require io.EOF, otherwise
+	// `{...} {}` or `{...} 42` would be accepted.
+	if _, err := dec.Token(); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "bad_request", "body must contain a single JSON object")
+		return nil, false
+	}
+	return rawFields, true
 }
 
 // trimSpaceASCII trims ONLY the §11.6.3 whitespace set (`\t \n \r
