@@ -37,7 +37,7 @@ macprovider-cli claim
 GitHub. Pass `--no-browser` to print the URL instead of opening it. The Mac
 must already have a provider token from the install.
 
-`creator admit` (step 6) only sees Macs claimed by the GitHub user tied to
+`creator admit` (step 5) only sees Macs claimed by the GitHub user tied to
 your creator API key. A Mac claimed by anyone else cannot be admitted to your
 pool, and delegated membership is not available to self-serve pools.
 
@@ -98,7 +98,22 @@ If you are both creator and provider, you review your own proposal.
 
 ## 4. Creator: sign and submit the manifest
 
-Review the proposal, then write `models.json` from its `model_entry`,
+The quickest path signs straight from the proposal. `--from-proposal` keeps
+the proposal's hash and runtime as they are and fills only your fields; it
+can be repeated, one per proposal:
+
+```bash
+macprovider-cli creator manifest sign --pool <pool-id> --from-proposal proposal.json \
+  --license Apache-2.0 --attest-paid-serving \
+  --prompt-rate-per-mtok 20000 --prompt-cache-hit-rate-per-mtok 5000 \
+  --completion-rate-per-mtok 40000 --max-context-tokens 16384
+```
+
+The rates are needed only when the proposal suggests none, and
+`--max-context-tokens` only when it reports none. A proposal for another pool
+is refused.
+
+Alternatively, write `models.json` from the proposal's `model_entry`,
 adding your fields:
 
 ```json
@@ -130,18 +145,18 @@ macprovider-cli creator manifest sign --pool <pool-id> --models-file models.json
 macprovider-cli creator manifest submit --pool <pool-id>
 ```
 
-`sign` works offline and prints `manifest_version` and
-`manifest_core_digest`. Useful options: `--validity-days` (default 90),
+`sign` works offline and prints `manifest_version`, `manifest_core_digest`,
+`effective_from` and `expires_at`. Useful options: `--validity-days` (default 90),
 `--settlement-mode` (default `enforce`; pool entries require it),
 `--min-binary-version` (default `1.8.0`), `--min-eligible-members`
 (default 1). Re-run `sign` and `submit` for each change; there is no
 in-place edit.
 
-> **Currently awkward.** A new manifest version takes effect when the
-> previous version expires, not when you submit it. With the default 90-day
-> validity, a change (a new model, a price edit) can wait a long time. Until
-> this changes, keep `--validity-days` short while you iterate. This
-> behavior is being changed.
+> **Manifest timing.** On the current release a new manifest version takes
+> effect when the previous version expires, so keep `--validity-days` short
+> while you iterate. Taking effect at submit lands with this release.
+> `creator status --pool <pool-id>` shows the accepted version's
+> `effective_from` and `expires_at`.
 
 ## 5. Creator: admit, authorize, promote
 
@@ -169,7 +184,9 @@ macprovider-cli models admission status <candidate> --json
 Use the same discovery flags as in `propose` (for example
 `--llamacpp-origin` and `--llamacpp-model-path`). `status` should show
 `binding_scope: pool` and your `pool_model_id`. To withdraw an offer, use
-`models admission withdraw`.
+`models admission withdraw`. An offer answered `409 replay_conflict` means a
+different offer for that candidate is already recorded: withdraw it, then
+offer again.
 
 Then set the pool model id in the provider config
 (`~/.config/macprovider/config.yaml`) and restart:
@@ -182,16 +199,33 @@ pool_model_id: pool/<pool-id>/<slug>
 hello binds to the pool:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/live.malibu.provider
+macprovider-cli restart
 ```
 
-This is the launchd label the installer creates. A dedicated
-`macprovider-cli restart` command is not available yet.
+`restart` restarts the installed provider service and waits for the new
+serve process.
 
 An uncatalogued pool model becomes routable only after the Mac is a member,
 the pool is active, and the Mac has restarted after both.
 
-## 7. Check status and earnings
+## 7. Revoke, pause, drain, retire
+
+```bash
+macprovider-cli creator revoke --pool <pool-id> --provider <provider-id>
+macprovider-cli creator revoke --pool <pool-id> --model pool/<pool-id>/<slug>
+macprovider-cli creator lifecycle --pool <pool-id> --set paused|draining|retired [--reason "..."]
+```
+
+- `revoke --provider` removes a member Mac from the pool's routes.
+- `revoke --model` signs the next manifest version without that entry,
+  keeping every other entry and setting, and leaves it pending. Run
+  `creator manifest submit --pool <pool-id>` to apply it. It follows the
+  manifest timing in step 4. A pool's only model cannot be revoked; retire
+  the pool instead.
+- `lifecycle` pauses, drains or retires the pool. Retired is final. A paused
+  or draining pool returns to active with `creator promote`.
+
+## 8. Check status and earnings
 
 ```bash
 macprovider-cli creator status --pool <pool-id>
@@ -213,11 +247,11 @@ the pool's runtime allowlist must name it. Full detail:
 
 | Engine | Model reference | `allowed_runtime_sources` | What it needs |
 |---|---|---|---|
-| Native MLX | Hugging Face snapshot | `mlx_cache` | The snapshot in the Hugging Face cache (`--mlx-cache-dir` if elsewhere) |
+| Native MLX | Hugging Face snapshot | `mlx_cache` | The snapshot in the Hugging Face cache or the model store `serve` uses (`--mlx-cache-dir` to inspect only another cache) |
 | llama.cpp | `llamacpp:<file stem>` | `llamacpp_loopback` | `llama-server --jinja`, and `--llamacpp-model-path` pinning the one GGUF file |
 | Ollama | `ollama:<tag>` | `ollama_loopback` | A pulled tag; `OLLAMA_MODELS` if not `~/.ollama/models` |
-| LM Studio | `lmstudio:<model key>` | `lmstudio_loopback` | LM Studio 0.4+, the model loaded under its own key; the key must resolve to exactly one `.gguf`, no custom identifier |
-| `mlx_lm.server` | `mlxlm:<snapshot dir>` | `mlxlm_loopback` | `MACPROVIDER_MLXLM_MODEL_PATH` set (required) |
+| LM Studio | `lmstudio:<model key or identifier>` | `lmstudio_loopback` | LM Studio 0.4+ with the model loaded; several quantizations resolve to the loaded one |
+| `mlx_lm.server` | `mlxlm:<snapshot dir>` | `mlxlm_loopback` | Started with a local snapshot path (`--model <path>`, port 8081); auto-detected, or set `MACPROVIDER_MLXLM_MODEL_PATH` |
 | oMLX | `omlx:<snapshot dir>` | `omlx_loopback` | `MACPROVIDER_OMLX_MODEL_PATH`; no API key on the server |
 
 Notes:
@@ -283,10 +317,8 @@ Buyers pay your signed rates under the standard formula and platform fee.
 
 ## Known gaps
 
-- A new manifest version waits for the previous one to expire (see step 4).
-- No `creator revoke` or `creator lifecycle` command yet; pausing or
-  retiring a pool is not available from the creator CLI.
+- On the current release a new manifest version waits for the previous one
+  to expire (see step 4).
 - A Mac in two active pools with the same artifact does not bind
   automatically.
-- No dedicated restart command (step 6).
 - Price bounds are not discoverable before signing.
