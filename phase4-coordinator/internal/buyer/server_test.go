@@ -5931,10 +5931,10 @@ func TestChatCompletionsStreamingWSTunneledQueueFullExhaustionShedsCapacity(t *t
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	assertCapacityShed(t, rr)
+	if rr.Header().Get("X-MacProvider-Settlement-No-Prior-Dispatch") != "1" {
+		t.Fatalf("capacity shed after a refused dispatch lost the no-charge marker; headers=%v", rr.Header())
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
 		t.Fatalf("p1 = %#v ok=%v, want busy", p1, ok)
 	}
@@ -5948,11 +5948,11 @@ func TestChatCompletionsStreamingWSTunneledQueueFullExhaustionShedsCapacity(t *t
 	if rows[0].ErrorCode.String != "error_queue_full" {
 		t.Fatalf("rows[0].ErrorCode = %#v, want error_queue_full", rows[0].ErrorCode)
 	}
-	if rows[1].ProviderAssignedID.Valid || rows[1].Status != http.StatusServiceUnavailable || rows[1].Retried != 0 {
-		t.Fatalf("row = %+v, want aggregate 503/retried=0 without provider assignment", rows[1])
+	if rows[1].ProviderAssignedID.Valid || rows[1].Status != http.StatusTooManyRequests || rows[1].Retried != 0 {
+		t.Fatalf("row = %+v, want aggregate 429/retried=0 without provider assignment", rows[1])
 	}
-	if rows[1].Error.String != "No provider available for model model-a" {
-		t.Fatalf("rows[1].Error = %#v, want aggregate no-provider message", rows[1].Error)
+	if rows[1].Error.String != "All providers for model model-a are at capacity; retry shortly" {
+		t.Fatalf("rows[1].Error = %#v, want aggregate capacity-shed message", rows[1].Error)
 	}
 }
 
@@ -5987,9 +5987,7 @@ func TestChatCompletionsStreamingWSTunneledQueueFullRefundsAdmissionQuota(t *tes
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-	}
+	assertCapacityShed(t, rr)
 	if !adm.TryReserveRequest(pool.Provider{ProviderID: "p1", Tier: pool.TierProvisional}) {
 		t.Fatal("streaming queue-full did not refund admission quota")
 	}
@@ -6860,13 +6858,9 @@ func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
 		t.Fatalf("unknown body = %s", unknown.Body.String())
 	}
 
+	// The only provider is busy, not absent: a capacity shed (#1906).
 	unavailable := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
-	if unavailable.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unavailable status = %d, body=%s", unavailable.Code, unavailable.Body.String())
-	}
-	if !bytes.Contains(unavailable.Body.Bytes(), []byte(`"code":"no_provider_available"`)) {
-		t.Fatalf("unavailable body = %s", unavailable.Body.String())
-	}
+	assertCapacityShed(t, unavailable)
 }
 
 // SPEC-002 § 7.2 / issue #185: when the only provider for a model
@@ -7060,6 +7054,22 @@ func assertRetryableAndNoProviderBodyForwarded(t *testing.T, rr *httptest.Respon
 // error.message non-empty, error.param is null). Used by the cold-
 // start race test to ensure OpenAI-compatible SDK clients can route
 // on a structured error rather than a substring match.
+// assertCapacityShed checks the SPEC-006 §7.8 capacity shed: the model has
+// serving-capable supply but every provider is full (#1906).
+func assertCapacityShed(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("capacity shed status = %d, want 429 body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("capacity shed Retry-After = %q, want 1", got)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "rate_limit_exceeded")
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("capacity shed body not retryable: %s", rr.Body.String())
+	}
+}
+
 func assertOpenAIErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, wantCode, wantType string) {
 	t.Helper()
 	var body struct {
@@ -8268,10 +8278,7 @@ func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
 		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5, SlotQueueDeadlineS: 1, SlotQueuePollIntervalMS: 5}),
 	)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("all-capacity-zero: expected 503; got %d body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
@@ -8591,10 +8598,7 @@ func TestSlotQueueExpiresToNoProviderAvailable(t *testing.T) {
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expired queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
@@ -8618,8 +8622,8 @@ func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		go func() {
 			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-			if rr.Code != http.StatusServiceUnavailable {
-				errs <- fmt.Errorf("background status = %d, want 503", rr.Code)
+			if rr.Code != http.StatusTooManyRequests {
+				errs <- fmt.Errorf("background status = %d, want 429", rr.Code)
 				return
 			}
 			errs <- nil
@@ -8627,10 +8631,7 @@ func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("fifth queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 	for i := 0; i < 4; i++ {
 		if err := <-errs; err != nil {
 			t.Fatal(err)
@@ -8683,13 +8684,10 @@ func TestSlotQueueDoesNotApplyToHardPinnedProvider(t *testing.T) {
 
 	start := time.Now()
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"pinned"}})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("pinned busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Fatalf("pinned busy request waited %v; hard pins should not enter slot queue", elapsed)
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueAppliesToWholesalePartner(t *testing.T) {
@@ -8716,13 +8714,10 @@ func TestSlotQueueAppliesToWholesalePartner(t *testing.T) {
 		"X-MacProvider-Account":            []string{"acct_openrouter"},
 		"X-MacProvider-Internal-Wholesale": []string{"1"},
 	})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("wholesale busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
 	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
 		t.Fatalf("wholesale busy request returned before bounded slot queue deadline: elapsed=%v", elapsed)
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueExitsWhenQueuedProviderStartsDraining(t *testing.T) {
@@ -8968,10 +8963,12 @@ func TestSlotQueueReservationBlocksPinnedOverDispatch(t *testing.T) {
 	}
 
 	pinned := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"queued"}})
-	if pinned.Code != http.StatusServiceUnavailable {
-		t.Fatalf("pinned status = %d, want 503 while queued reservation owns only free slot; body=%s", pinned.Code, pinned.Body.String())
+	// The queued reservation owns the only free seat: a capacity shed.
+	if pinned.Code != http.StatusTooManyRequests {
+		close(release)
+		t.Fatalf("pinned status = %d, want 429 while queued reservation owns only free slot; body=%s", pinned.Code, pinned.Body.String())
 	}
-	assertOpenAIErrorEnvelope(t, pinned, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, pinned)
 	select {
 	case <-hits:
 		t.Fatal("pinned request dispatched while queued reservation owned the only free slot")

@@ -49,8 +49,8 @@ func TestSelectProviderReservesDirectSlot(t *testing.T) {
 
 	blockedState := &forwardState{slotReservationsEnabled: true}
 	_, routeErr = s.selectProviderExcluding(context.Background(), "rid-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", blockedState)
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("second selection with slot reserved: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("second selection with slot reserved: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 
 	s.releaseQueuedSlotReservation(state)
@@ -83,8 +83,8 @@ func TestSelectProviderReservationsShedAfterAllSlotsTaken(t *testing.T) {
 	}
 
 	_, routeErr = s.selectProviderExcluding(context.Background(), "rid-3", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("third selection with all slots reserved: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("third selection with all slots reserved: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestReservedSlotOverflowShedsWithoutQueueWait(t *testing.T) {
 	state2 := &forwardState{slotReservationsEnabled: true}
 	started := time.Now()
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", state2)
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("overflow selection with reserved slot: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("overflow selection with reserved slot: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 	if state2.queueWait != 0 {
 		t.Fatalf("overflow selection queueWait=%s, want 0", state2.queueWait)
@@ -194,8 +194,8 @@ func TestFourSlotProviderAdmitsFourReservations(t *testing.T) {
 		}
 	}
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-four-5", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("fifth selection with four slots reserved: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("fifth selection with four slots reserved: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 }
 
@@ -220,8 +220,8 @@ func TestAcceptedRequestReleasesReservationAllowsSiblingSelect(t *testing.T) {
 		t.Fatalf("after accept occupancy = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
 	}
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-accept-2", poolChatReq(""), http.Header{}, nil, "2026-09-14", &forwardState{slotReservationsEnabled: true})
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("sibling after accept: want 503 no_provider_available, got provider=%v err=%+v", routeErr == nil, routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("sibling after accept: want 429 no_provider_available capacity shed, got provider=%v err=%+v", routeErr == nil, routeErr)
 	}
 }
 
@@ -316,8 +316,8 @@ func TestPublicRequestDoesNotFollowWholesaleReservationOverflowWaiter(t *testing
 	statePublic := &forwardState{slotReservationsEnabled: true}
 	started := time.Now()
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-public", poolChatReq(""), http.Header{}, nil, "2026-09-14", statePublic)
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("public request behind wholesale overflow waiter: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("public request behind wholesale overflow waiter: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 	if statePublic.queueWait != 0 {
 		t.Fatalf("public request queueWait=%s, want 0", statePublic.queueWait)
@@ -425,8 +425,8 @@ func TestWholesaleSelectionUsesBoundedSlotQueue(t *testing.T) {
 	state := &forwardState{slotReservationsEnabled: true}
 	started := time.Now()
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid-1", poolChatReq(""), headers, nil, "2026-09-14", state)
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("wholesale queued selection: want 503 no_provider_available, got %+v", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("wholesale queued selection: want 429 no_provider_available capacity shed, got %+v", routeErr)
 	}
 	if state.queueWait <= 0 {
 		t.Fatal("wholesale request bypassed the bounded slot queue")

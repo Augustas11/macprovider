@@ -156,6 +156,11 @@ type forwardState struct {
 	// excludes the provider like any other fault.
 	queueFullRequeueUntil time.Time
 
+	// capacityRefused records that a provider refused this request for
+	// capacity (error_queue_full or relay backpressure). A later selection
+	// that finds no route sheds as a SPEC-006 §7.8 capacity 429, not 503.
+	capacityRefused bool
+
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
 	// advanceToNextProvider exactly once per advance; failover

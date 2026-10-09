@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.47 (2026-10-07, coordinator no-dispatch source exports)
+**Version:** 0.9.48 (2026-10-09, capacity shed is a retryable 429)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.48 (2026-10-09, issue #1906 — capacity shed is a retryable 429):**
+- §7.8 / §17.3: when the model has at least one serving-capable provider but every such provider is full, the coordinator returns `429` with `code: no_provider_available`, `type: rate_limit_exceeded`, `retryable: true` and `Retry-After: 1`. Full means the bounded slot queue expired or was at its cap, coordinator reservations already claim every free seat, or the provider refused with `error_queue_full` or relay backpressure and no alternate route exists. `503 no_provider_available` stays the answer when no serving-capable provider exists. The 429 is a pre-dispatch outcome: dispatched attempts behind it stay unbilled `503` attempt rows and the response keeps the no-prior-dispatch marker.
+- §17.9: the gateway passes the coordinator capacity `429` through to every buyer, public and wholesale, with `Retry-After`, refunds it under the same no-prior-dispatch proof as the `503`, and retries it under `retry_503.retry_no_provider_available`. The wholesale `503`→`429` rewrite is unchanged.
+- §7.8: the per-provider waiter cap is 4 or the provider's advertised `slots_total`, whichever is larger. A provider `error_queue_full` refusal holds that provider's routing only until its next forwarded completion (or a ready report when nothing is in flight) and returns the refused seat to the coordinator count. While other forwarded chats are open on that provider, the refused request waits in its slot queue for at most one queue deadline. While the coordinator owns occupancy, a provider report never lowers its count; refusal and thermal reports do.
+- Pinned requests whose target is full or reservation-blocked shed with the same `429`.
 
 **Change log v0.9.47 (2026-10-07, issue #1880 — coordinator no-dispatch source exports):**
 - §5.4.3.2 defines a private operator-authenticated coordinator export for strictly bounded no-dispatch terminals, with immutable source provenance, atomic terminal fencing and closed fact projections. This does not promote acceptance or permit raw rejected-input disclosure.
@@ -2820,15 +2826,17 @@ The response MUST include `X-RateLimit-Reset`.
 
 The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
-For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`, or while that provider is draining waiters already admitted during a zero-slot observation. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 10 seconds. The coordinator MUST NOT use this queue to park requests that are blocked only because the coordinator has already reserved the provider's positive `slots_free` capacity for other in-flight selections and there is no existing zero-slot queue for that provider; those same-moment overflow requests MUST shed immediately as retryable `no_provider_available`.
+For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0` or is under a capacity safety hold, or while that provider is draining waiters already admitted during a zero-slot observation. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters per `provider_id` at 4 or the provider's advertised `slots_total`, whichever is larger, and MUST use a total deadline no longer than 10 seconds. The coordinator MUST NOT use this queue to park requests that are blocked only because the coordinator has already reserved the provider's positive `slots_free` capacity for other in-flight selections and there is no existing zero-slot queue for that provider; those same-moment overflow requests MUST shed immediately as the capacity shed below. Reservation checks MUST read the provider's live `slots_free`, not the selection snapshot.
 
-A coordinator-local reservation of advertised `slots_free` MUST be released once the selected provider has accepted the request (successful WebSocket relay start, or HTTP response headers from the provider). In-flight occupancy after accept is the provider heartbeat `slots_free`, not a coordinator lease held for the remainder of the stream. Failover and retry MUST release before selecting the next route.
+A coordinator-local reservation of advertised `slots_free` MUST be released once the selected provider has accepted the request (successful WebSocket relay start, or HTTP response headers from the provider). Accept consumes one seat from the coordinator count, and that consume and the reservation release MUST be observed together, so no selector counts one request twice. Failover and retry MUST release before selecting the next route. While forwarded chats the coordinator dispatched are in flight, or until a ready report after they finish, the coordinator owns occupancy: a provider report MUST NOT lower the coordinator count, because the provider retires a chat only after sending its end frame. Explicit refusal and thermal reports lower capacity.
 
-If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
+A provider `error_queue_full` refusal means no inference ran. The coordinator MUST return the refused attempt's seat to its count and MUST hold routing to that provider until its next forwarded completion, or until a ready report with free seats when nothing is in flight. While other forwarded chats are open on that provider, the refused non-pinned request MAY wait in that provider's slot queue for at most one queue deadline before it is excluded like any other fault. Thermal holds still last until a ready report.
 
-Pinned provider or session requests MUST NOT enter this queue. If the pinned target has no immediately available slot, return 503.
+**Capacity shed.** If the model has at least one serving-capable provider but none can take the request, return `429` with `code: no_provider_available`, `type: rate_limit_exceeded`, `retryable: true` and `Retry-After: 1`. This covers four cases: no slot became available before the bounded queue deadline, the queue was at its cap, reservations already claim every free seat, or the provider refused with `error_queue_full` or relay backpressure and no alternate route exists. The capacity shed is a pre-dispatch outcome. A dispatched attempt behind it stays an unbilled `503` attempt row, and the response carries the no-prior-dispatch marker exactly as the `503` it replaces did. If the only candidate leaves `ready` state, or no serving-capable provider exists, return `503 no_provider_available`.
 
-Wholesale partner accounts (`auth.wholesale_account_ids`) MAY enter this queue because they are non-pinned traffic. If no slot becomes available before the bounded queue deadline, the coordinator MUST return `503 no_provider_available`; the gateway MUST translate that outcome to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
+Pinned provider or session requests MUST NOT enter this queue. If the pinned target is full or reservation-blocked, return the capacity shed. If it is otherwise not routable, return 503.
+
+Wholesale partner accounts (`auth.wholesale_account_ids`) MAY enter this queue because they are non-pinned traffic. A coordinator capacity shed reaches them as the same `429`. A coordinator `503 no_provider_available` MUST still be translated at the gateway to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
 
 If the account concurrency cap is reached, return 429.
 
@@ -3710,9 +3718,9 @@ model_not_found
 
 ### 17.3 Model unavailable
 
-If a model is known — served, **declared in `supported_models`**, or recently seen (§ 17.2 / SPEC-010 R-3.3.4) — but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
+If a model is known — served, **declared in `supported_models`**, or recently seen (§ 17.2 / SPEC-010 R-3.3.4) — but no serving-capable provider can take it, return 503. If a serving-capable provider exists but every one is full after any allowed bounded pre-dispatch slot queue, return the §7.8 capacity shed (`429`, `Retry-After: 1`) instead.
 
-Code:
+Code (both statuses):
 
 ```text
 no_provider_available
@@ -3825,6 +3833,8 @@ The code MUST distinguish:
 - `beta_paused`
 
 ### 17.9 Wholesale partner shed
+
+For every account, a coordinator §7.8 capacity shed (`429 no_provider_available`) MUST pass through as `429` with `retryable: true` and the gateway `Retry-After`. The gateway MUST settle it exactly like a coordinator `503 no_provider_available`: refund with a zero-token audit row when the no-prior-dispatch marker proves no provider ran, settle conservatively otherwise, and retry it under `retry_503.retry_no_provider_available`.
 
 For accounts in `auth.wholesale_account_ids` only:
 

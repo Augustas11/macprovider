@@ -285,8 +285,8 @@ func TestLegacyModelAdmissionQueuedSelectionDoesNotReadStoreWhileSaturated(t *te
 	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq(""), http.Header{}, nil, "2026-09-15", &forwardState{})
 	elapsed := time.Since(started)
 
-	if routeErr == nil || routeErr.status != http.StatusServiceUnavailable || routeErr.code != "no_provider_available" {
-		t.Fatalf("routeErr=%+v, want bounded queue no_provider_available", routeErr)
+	if routeErr == nil || routeErr.status != http.StatusTooManyRequests || routeErr.code != "no_provider_available" {
+		t.Fatalf("routeErr=%+v, want bounded queue capacity shed (429 no_provider_available)", routeErr)
 	}
 	if routeErr.routeSnapshotPressure {
 		t.Fatalf("routeErr=%+v, want saturated queue timeout without route-snapshot pressure marker", routeErr)

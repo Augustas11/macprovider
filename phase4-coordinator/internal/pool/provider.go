@@ -1702,6 +1702,19 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 	return true
 }
 
+// ForwardedInFlight reports how many accepted forwarded chats the coordinator
+// still has open on this session. A queue-full hold clears on the next one to
+// finish, so with none open a refused request has nothing to wait for.
+func (r *Registry) ForwardedInFlight(providerID, assignedID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
+		return 0
+	}
+	return p.forwardedInFlight
+}
+
 // RoutableSlotsFree reports the live seat count routing may reserve against:
 // slots_free, or 0 while a capacity safety hold is up. Selection snapshots go
 // stale between read and reservation; reserving against this live value keeps

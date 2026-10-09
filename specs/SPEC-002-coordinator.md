@@ -1,6 +1,16 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.10 (2026-10-08, pool-only GGUF startup count)
+**Version:** 1.6.11 (2026-10-09, capacity shed is a retryable 429)
+
+**Change log v1.6.11 (2026-10-09, issue #1906):** A known model with
+serving-capable supply whose providers are all full now sheds as `429
+no_provider_available` with `Retry-After: 1` (SPEC-006 v0.9.48 §7.8), not
+`503`. `503 no_provider_available` stays for a known model with no
+serving-capable provider. FR-P14.1 `error_queue_full` keeps the re-route,
+returns the refused seat to the coordinator count, holds that provider only
+until its next forwarded completion, and sheds the final buyer response as
+the capacity `429`. Its attempt row stays an unbilled `503`. FR-B4, the
+validation table and the error table follow.
 
 **Change log v1.6.10 (2026-10-08, issue #1690):** Aligns with SPEC-001
 v1.9.32: GGUF without a signed sibling tokenizer binding may use bounded
@@ -1485,7 +1495,7 @@ coordinator maps the `status` field to buyer-facing behavior:
 | `"cancelled"` | Close buyer connection cleanly (buyer already disconnected) |
 | `"error_model_not_loaded"` | Return HTTP 503 to buyer; do NOT try next provider |
 | `"error_context_exceeded"` | Return HTTP 413 to buyer |
-| `"error_queue_full"` | Return HTTP 503 to buyer; try next provider in candidates list |
+| `"error_queue_full"` | Try next provider in candidates list (or wait in this provider's slot queue for its next completion, SPEC-006 §7.8); if none can take it, return the HTTP 429 capacity shed. The attempt row is an unbilled 503 |
 | `"error_internal"` | Return HTTP 502 to buyer; do NOT try next provider |
 | (no message received within `request_timeout_s`) | Return HTTP 504 to buyer |
 
@@ -1497,7 +1507,9 @@ the standard OpenAI error envelope (§ 7.2). The `error` field in
 **`error_queue_full` is the only status that triggers re-routing.**
 On receiving `error_queue_full`, the coordinator treats this provider
 as temporarily full and continues iterating through the § 5 candidate
-list. All other error statuses result in an immediate error response
+list. The refusal returns the refused seat to the coordinator count and
+holds routing to this provider only until its next forwarded completion
+(SPEC-006 §7.8). All other error statuses result in an immediate error response
 to the buyer per FR-B7 (no silent retry in v1).
 
 **FR-P15. Admission tier assignment.**
@@ -1840,8 +1852,11 @@ time-to-first-token fidelity.
 
 **FR-B4. Route request to best provider.**
 The coordinator selects a provider using the routing algorithm defined
-in Section 5. If no eligible provider exists, the coordinator returns
-HTTP 503:
+in Section 5. If serving-capable providers exist but every one is full,
+the coordinator returns the SPEC-006 §7.8 capacity shed: HTTP 429,
+`code: no_provider_available`, `type: rate_limit_exceeded`,
+`retryable: true`, `Retry-After: 1`. If no serving-capable provider
+exists, the coordinator returns HTTP 503:
 ```json
 {
   "error": {
@@ -3079,7 +3094,7 @@ Validation order:
 | 4 | Per-message role and content validation | 400 `invalid_request` |
 | 5 | Tool/tool_call shape validation | 400 `invalid_tools` |
 | 6 | Model exists in pool | 404 `model_not_found` |
-| 7 | Provider available (routing) | 503 `no_provider_available` |
+| 7 | Provider available (routing) | 503 `no_provider_available` (no serving-capable provider) or 429 `no_provider_available` capacity shed (all full) |
 | 8 | Preflight (if applicable) | 503 `preflight_rejected` |
 
 Note: steps 7-8 replace SPEC-001's steps 7-9 (Stage 1/2 pre-flight
@@ -3137,7 +3152,8 @@ the same value space — the stable `provider_id`.)
 | 404 | No connected provider serves or declares (`supported_models`) this `model_id`, and it has not been seen this process lifetime — model unknown to the pool (R-3.X.6 / SPEC-010 R-3.3.4; see "404 vs 503 split" below) | `model_not_found` |
 | 429 | Rate limit exceeded (future, not enforced in v1) | `rate_limit_exceeded` |
 | 502 | Selected provider returned an error or disconnected mid-request | `provider_error` |
-| 503 | Model is known to the pool but no eligible provider is currently available (all matching providers busy/degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
+| 429 | Model is known and has serving-capable providers, but every one is full (SPEC-006 §7.8 capacity shed; `Retry-After: 1`) | `no_provider_available` |
+| 503 | Model is known to the pool but no serving-capable provider is currently available (all matching providers degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
 | 504 | Provider did not respond within timeout | `provider_timeout` |
 
 **404 vs 503 split (clarified):**
