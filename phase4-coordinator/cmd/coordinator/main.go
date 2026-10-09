@@ -432,6 +432,7 @@ func main() {
 		os.Exit(1)
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
+	billingStore.SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
 	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
 		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
 		os.Exit(1)
@@ -4264,6 +4265,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
+	if len(billingStores) > 0 && billingStores[0] != nil {
+		billingStores[0].SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
+	}
 	billingSnapshotCommitted := false
 	var billingSnapshotID int64
 	if len(billingStores) > 0 && billingStores[0] != nil {
@@ -4285,6 +4289,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		)
 		if err != nil {
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
+			// Fail closed: a rejected reload never leaves the one-time
+			// ceiling restatement reachable.
+			if offErr := billingStores[0].SetCeilingRestatementEnabled(context.Background(), false, "sighup"); offErr != nil {
+				logger.Error().Err(offErr).Msg("billing ceiling-restatement flag could not be forced off after a rejected reload")
+			}
 			return
 		}
 		// SPEC-005-R013 I2: the committed table is published below together
