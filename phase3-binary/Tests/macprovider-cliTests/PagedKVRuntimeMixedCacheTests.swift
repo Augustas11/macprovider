@@ -8,10 +8,8 @@ import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     /// The native-MTP bench and hardware E2E inject a real paged-KV backend.
-    /// That path must use the serve path's decode window: a hybrid (Qwen3.6)
-    /// row decodes one token per hop and streams per token, so a 16-step
-    /// window there made the bench's ordinary path deliver 16-token bursts
-    /// production never emits.
+    /// That path must use the serve path's decode window, which is the same
+    /// 16-step window for hybrid (Qwen3.6) and KV-only layouts.
     func testInjectedPagedBackendUsesServePathDecodeWindow() {
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
@@ -34,7 +32,10 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
             poolEpoch: 1,
             layerCount: 2
         )
-        XCTAssertEqual(ModelRuntime.decodeLockstepWindow(backendOverride: hybrid), 1)
+        XCTAssertEqual(
+            ModelRuntime.decodeLockstepWindow(backendOverride: hybrid),
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
         XCTAssertEqual(
             ModelRuntime.decodeLockstepWindow(backendOverride: hybrid),
             ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention])

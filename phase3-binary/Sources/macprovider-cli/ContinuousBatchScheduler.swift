@@ -972,6 +972,11 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// produced it, and advances the row's drafter over them before the
     /// row's next native proposal (SPEC-048-R006/R007).
     var captureNativeMTPDrafterColumns: Bool = false
+    /// The row's stop sequences. A hybrid backend checks them per window step
+    /// so a row that stops mid-window keeps a recurrent checkpoint at its stop
+    /// boundary: the rest of the window advances its recurrent state past the
+    /// stop, and recurrent state cannot be trimmed (SPEC-038 FR-CB2).
+    var stopTokenSequences: [[Int]] = []
 }
 
 struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
@@ -4374,7 +4379,8 @@ actor ContinuousBatchScheduler {
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
                     samplerStep: row.generatedTokens.count,
-                    captureNativeMTPDrafterColumns: row.usesNativeMTP
+                    captureNativeMTPDrafterColumns: row.usesNativeMTP,
+                    stopTokenSequences: row.request.stopTokenSequences
                 )))
             } catch {
                 if beganDecode {

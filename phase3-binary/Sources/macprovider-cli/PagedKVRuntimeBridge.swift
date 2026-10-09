@@ -591,6 +591,24 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private struct RowState {
         var caches: [KVCache]
         var state: LMOutput.State?
+        /// Hybrid rows: where the last ordinary decode window left the
+        /// recurrent state, plus the stop-boundary checkpoints taken inside it.
+        var recurrentWindow: RecurrentWindowRecord? = nil
+    }
+
+    /// A multi-step window runs every row for all of its steps, so a row that
+    /// stops mid-window ends it with recurrent state past its stop. Paged KV
+    /// is trimmed back at terminal; recurrent state cannot be, so the window
+    /// keeps the row's state at the stop step and the step after (the
+    /// model-stop and request-stop covered lengths, SPEC-038 FR-CB4/AC-26).
+    private struct RecurrentWindowRecord {
+        /// Tokens the row's recurrent state covers after the window.
+        let endTokenCount: Int
+        /// The row's recurrent state arrays after the window. Any later
+        /// forward replaces them, which retires this record. Held strongly so
+        /// a replacement array can never reuse their identity.
+        let endState: [MLXArray]
+        let checkpoints: [RecurrentStateCheckpoint]
     }
 
     private struct DecodeSession {
@@ -1549,6 +1567,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return await container.perform { _ in
             let row = self.existingRowState(for: requestID)
             guard let row else { return nil }
+            if let window = row.recurrentWindow,
+               window.endTokenCount != tokenCount,
+               self.recurrentStateIDs(row.caches) == window.endState.map(ObjectIdentifier.init) {
+                // The state is at the window end, past this boundary. Only a
+                // checkpoint taken at exactly `tokenCount` is that state; with
+                // none, fail closed rather than mislabel (SPEC-038 FR-CB4).
+                return window.checkpoints.first { $0.tokenCount == tokenCount }
+            }
             var states: [Int: [MLXArray]] = [:]
             for (index, kind) in self.cacheKinds.enumerated() where kind == .recurrentMamba {
                 guard row.caches.indices.contains(index) else { return nil }
@@ -1800,6 +1826,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // Set when the step observer ends the window because every row in it
         // is cancelled; their partially advanced state is then not recorded.
         var endedEarly = false
+        // Hybrid rows that stop mid-window: recurrent state at the stop step
+        // and the step after, by row index.
+        var windowCheckpoints: [Int: [RecurrentStateCheckpoint]] = [:]
         if canCompile {
             var compiledCaches: [KVCache]
             let step: CompiledDecodeStep
@@ -1861,6 +1890,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             session?.compiledStep = nil
             var currentTokens = supportedInputs.map(\.currentToken)
             var collected: [[Int]] = supportedInputs.map { _ in [] }
+            let checkpointStops = decodeSteps > 1 && cacheKinds.contains(.recurrentMamba)
+            var stopStepByRow: [Int: Int] = [:]
             for stepIndex in 0 ..< decodeSteps {
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
@@ -1905,6 +1936,28 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 for index in supportedInputs.indices {
                     collected[index].append(stepSampled[index])
                 }
+                if checkpointStops && stepIndex + 1 < decodeSteps {
+                    for (index, input) in supportedInputs.enumerated() {
+                        if stopStepByRow[index] == nil,
+                           Self.endsWithStopSequence(
+                               history: input.generatedTokens,
+                               window: collected[index],
+                               stopSequences: input.stopTokenSequences
+                           ) {
+                            stopStepByRow[index] = stepIndex
+                        }
+                        // After step i the state covers committed + i + 1
+                        // tokens. A model stop at step k is covered through
+                        // step k; a request stop also covers its stop token,
+                        // which step k + 1 feeds.
+                        guard let stopStep = stopStepByRow[index], stepIndex - stopStep <= 1 else { continue }
+                        windowCheckpoints[index, default: []].append(recurrentRowCheckpoint(
+                            batchedCaches,
+                            row: index,
+                            tokenCount: input.committedKVTokenCount + stepIndex + 1
+                        ))
+                    }
+                }
                 currentTokens = stepSampled
                 try throwIfCancelRequested()
                 if let onStep, !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepSampled)) {
@@ -1930,7 +1983,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         // Reusing a packed Mamba batch across windows can carry row-state at the
         // wrong boundary after long prefills, so force the next hybrid window to
         // rebuild from the just-synced row caches. KV-only layouts still keep the
-        // reusable session that amortizes contiguous compiled decode.
+        // reusable session that amortizes contiguous compiled decode. Inside a
+        // window the packed state advances one token per step exactly as
+        // one-step windows would; the window end is a token boundary.
         if endedEarly {
             // Every row is cancelled and about to be released. Its KV now ends
             // before its block table (extended for the full window), so it
@@ -1947,6 +2002,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
         }
         storeDecodeSession(cacheKinds.contains(.recurrentMamba) ? nil : session)
+        if cacheKinds.contains(.recurrentMamba) {
+            for (index, input) in supportedInputs.enumerated() {
+                rowStates[index].recurrentWindow = RecurrentWindowRecord(
+                    endTokenCount: input.committedKVTokenCount + ranSteps,
+                    endState: recurrentStateArrays(rowStates[index].caches),
+                    checkpoints: windowCheckpoints[index] ?? []
+                )
+            }
+        }
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
@@ -1965,6 +2029,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 tokens: tokens
             ))
         }
+    }
+
+    /// True when the row's history (before the window, then this window's
+    /// tokens) ends with one of its stop sequences: the scheduler's stop rule
+    /// without copying the whole history every step.
+    static func endsWithStopSequence(history: [Int], window: [Int], stopSequences: [[Int]]) -> Bool {
+        stopSequences.contains { sequence in
+            guard !sequence.isEmpty, sequence.count <= history.count + window.count else { return false }
+            let fromHistory = history.suffix(max(0, sequence.count - window.count))
+            return Array(fromHistory) + window.suffix(sequence.count - fromHistory.count) == sequence
+        }
+    }
+
+    /// One row's recurrent state in the packed window batch, as a checkpoint.
+    /// A gather allocates its own output, so evaluating it detaches the
+    /// checkpoint from this step's packed state.
+    private func recurrentRowCheckpoint(
+        _ batchedCaches: [PagedKVSharedLayerBatch],
+        row: Int,
+        tokenCount: Int
+    ) -> RecurrentStateCheckpoint {
+        let rowIndex = MLXArray([Int32(row)])
+        var states: [Int: [MLXArray]] = [:]
+        for (index, kind) in cacheKinds.enumerated() where kind == .recurrentMamba {
+            states[index] = batchedCaches[index].cache.state.map { $0.take(rowIndex, axis: 0) }
+        }
+        eval(states.values.flatMap { $0 })
+        return RecurrentStateCheckpoint(tokenCount: tokenCount, states: states)
+    }
+
+    private func recurrentStateArrays(_ caches: [KVCache]) -> [MLXArray] {
+        cacheKinds.indices
+            .filter { cacheKinds[$0] == .recurrentMamba && caches.indices.contains($0) }
+            .flatMap { caches[$0].state }
+    }
+
+    private func recurrentStateIDs(_ caches: [KVCache]) -> [ObjectIdentifier] {
+        recurrentStateArrays(caches).map(ObjectIdentifier.init)
     }
 
     private func copyDecodeSession() -> DecodeSession? {
