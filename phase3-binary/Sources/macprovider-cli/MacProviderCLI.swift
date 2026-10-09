@@ -1186,7 +1186,7 @@ struct ServeCommand: AsyncParsableCommand {
         let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: true)
         guard inputs.candidate.value.version == catalogTrust.releaseID,
               AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes) == catalogTrust.digest,
-              inputs.artifactFeed.warnings.isEmpty,
+              inputs.artifactFeed.warnings.blockingArtifactFeedWarnings.isEmpty,
               let qualified = inputs.artifactFeed.value,
               qualified.releaseID == catalogTrust.releaseID,
               qualified.feedSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,

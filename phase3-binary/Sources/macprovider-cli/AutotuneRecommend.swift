@@ -83,6 +83,15 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case buyerTTFTCeilingExceeded = "buyer_ttft_ceiling_exceeded"
 }
 
+extension Collection where Element == AutotuneRecommendWarning {
+    /// Warnings that must block artifact-derived capabilities. Feed age is
+    /// advisory (SPEC-023 v0.22.15): a valid signed, release-bound feed that
+    /// is merely old stays usable.
+    var blockingArtifactFeedWarnings: [AutotuneRecommendWarning] {
+        filter { $0 != .catalogArtifactFeedStale }
+    }
+}
+
 enum BandwidthTier: String, Codable, CaseIterable, Comparable {
     case c = "C"
     case b = "B"

@@ -756,4 +756,16 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         // Age alone never disables the authenticated compiled-in artifact feed.
         XCTAssertNotNil(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(365 * 86_400)))
     }
+
+    func testStaleFeedWarningIsAdvisoryForArtifactAuthority() {
+        // SPEC-023 v0.22.15: age alone must not drop artifact authority (native
+        // MTP admission, artifact preparation); other warnings still block.
+        let staleOnly: Set<AutotuneRecommendWarning> = [.catalogArtifactFeedStale]
+        XCTAssertTrue(staleOnly.blockingArtifactFeedWarnings.isEmpty)
+        let staleAndOther: Set<AutotuneRecommendWarning> = Set(AutotuneRecommendWarning.allCases)
+        XCTAssertEqual(
+            Set(staleAndOther.blockingArtifactFeedWarnings),
+            staleAndOther.subtracting([.catalogArtifactFeedStale])
+        )
+    }
 }

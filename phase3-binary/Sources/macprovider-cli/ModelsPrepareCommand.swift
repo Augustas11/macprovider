@@ -157,8 +157,8 @@ enum Build1LaneAArtifactAuthorityResolver {
         )
         let inputs = makeStaticInputs(baseURL)
         let selection = await inputs.loadLiveArtifactFeed(candidate: candidate, baseURL: baseURL)
-        guard selection.warnings.isEmpty, let qualified = selection.value else {
-            throw Build1LaneAArtifactAuthorityError.artifactAuthorityUnavailable(selection.warnings.map(\.rawValue).sorted())
+        guard selection.warnings.blockingArtifactFeedWarnings.isEmpty, let qualified = selection.value else {
+            throw Build1LaneAArtifactAuthorityError.artifactAuthorityUnavailable(selection.warnings.blockingArtifactFeedWarnings.map(\.rawValue).sorted())
         }
         guard let model = qualified.feed.models[Build1LaneAPrepareProfile.catalogKey],
               model.primaryArtifactID == Build1LaneAPrepareProfile.artifactID
