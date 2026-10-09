@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -44,6 +45,9 @@ type relayBlindService struct {
 	// waiters counts relay-blind slot waiters per provider. It is capped so
 	// relay-blind waits cannot fill the shared queue plaintext routing uses.
 	waiters map[string]int
+	// selectRotation offsets the start of each candidate tier so concurrent
+	// reservations spread across equally ranked providers.
+	selectRotation atomic.Uint64
 }
 
 // relayBlindDurableWriteTimeout bounds each store write that must land even
@@ -473,9 +477,8 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 }
 
 func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
-	providers := s.pool.Snapshot()
-	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
-	for _, provider := range providers {
+	var candidates []pool.Provider
+	for _, provider := range s.pool.Snapshot() {
 		eligible := relayBlindBindable(provider)
 		if requireFree {
 			eligible = provider.RoutingEligible()
@@ -488,6 +491,9 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if provider.ModelAdmissionPoolModelID != "" {
 			continue
 		}
+		candidates = append(candidates, provider)
+	}
+	for _, provider := range s.orderRelayBlindCandidates(candidates) {
 		if s.relayBlindSettlementPrerequisite(provider) != "" {
 			continue
 		}
@@ -497,6 +503,37 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		}
 	}
 	return pool.Provider{}, relayblind.KeyRecord{}, false
+}
+
+// orderRelayBlindCandidates ranks providers whose free slot is not already
+// claimed by the slot queue ahead of busy ones, and rotates the start within
+// each tier. A reservation is pinned to one provider, so binding every
+// reservation to the first provider in session order leaves idle providers
+// unused while the first one's queue times out.
+func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []pool.Provider {
+	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
+	var free, busy []pool.Provider
+	for _, provider := range providers {
+		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree)) {
+			free = append(free, provider)
+		} else {
+			busy = append(busy, provider)
+		}
+	}
+	var offset uint64
+	if s.relayBlind != nil {
+		offset = s.relayBlind.selectRotation.Add(1) - 1
+	}
+	ordered := make([]pool.Provider, 0, len(providers))
+	for _, tier := range [][]pool.Provider{free, busy} {
+		if len(tier) == 0 {
+			continue
+		}
+		start := int(offset % uint64(len(tier)))
+		ordered = append(ordered, tier[start:]...)
+		ordered = append(ordered, tier[:start]...)
+	}
+	return ordered
 }
 
 func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request) {

@@ -10993,6 +10993,8 @@
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_class_test.go:TestPrivacyReservationRequiresEligibleProvider",
+        "phase4-coordinator/internal/buyer/relay_blind_select_order_test.go:TestRelayBlindCandidatesPreferFreeSlot",
+        "phase4-coordinator/internal/buyer/relay_blind_select_order_test.go:TestRelayBlindCandidatesRotateWithinTier",
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderStreamEndToEnd",
         "test/integration/privacy_class_integration_test.go:TestPrivacyClassSwiftProviderNonstreamEndToEnd"
       ],

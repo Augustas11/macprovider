@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -192,12 +191,13 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 	if s.pool == nil || !s.relayBlindAvailable() {
 		return privacySelection{}, privacyClassUnavailable
 	}
-	providers := s.pool.Snapshot()
-	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
-	for _, provider := range providers {
-		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
-			continue
+	var candidates []pool.Provider
+	for _, provider := range s.pool.Snapshot() {
+		if relayBlindBindable(provider) && provider.IsWSTunneled() && modelIDEqual(provider.ModelID, model) {
+			candidates = append(candidates, provider)
 		}
+	}
+	for _, provider := range s.orderRelayBlindCandidates(candidates) {
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
 		if err != nil || len(records) == 0 {
 			if err != nil {
