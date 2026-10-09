@@ -440,7 +440,6 @@ def entry_matches_stable_baseline(entry: dict, baseline: dict) -> bool:
 def require_continuous_batching_tuple(
     cb_policy: object,
     baseline_id: str,
-    now: datetime.datetime,
 ) -> dict:
     # The entry's provider CLI version, CDHash and package digest are recorded
     # provenance, not an activation gate: the signed decode-path tuple must
@@ -462,8 +461,8 @@ def require_continuous_batching_tuple(
     expires_at = parse_rfc3339(cb_policy.get("expires_at"), "continuous-batching-policy.json expires_at")
     if generated_at >= expires_at:
         fail("continuous-batching-policy.json expires_at must be after generated_at")
-    if now >= expires_at:
-        fail(f"continuous-batching-policy.json expired at {cb_policy.get('expires_at')!r}")
+    # expires_at is structural only: the runtime keeps authorizing a signed
+    # tuple past it, so a lapsed calendar date does not block a release.
     entries = cb_policy.get("entries")
     if not isinstance(entries, list):
         fail("continuous-batching-policy.json entries is not an array")
@@ -1012,7 +1011,6 @@ def main() -> int:
             require_continuous_batching_tuple(
                 cb_policy,
                 args.required_continuous_batching_baseline,
-                now,
             )
 
         if artifact_bound:

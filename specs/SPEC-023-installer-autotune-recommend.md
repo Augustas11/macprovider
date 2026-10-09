@@ -1,12 +1,21 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.13
+version: v0.22.14
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.14 (2026-10-09)** — Calendar expiry no longer turns serving off.
+  A continuous-batching policy's `expires_at` is structural only (it must
+  follow `generated_at`); the decode path no longer rechecks it, and a release
+  gate no longer fails on it, so a signed tuple keeps authorizing CB past the
+  date. The future-dated `generated_at` check is unchanged. Rollback remains
+  the local emergency-off override and a newer installed release that omits
+  the tuple. The SPEC-031 native-MTP self-test bank window follows the same
+  rule (SPEC-031 v0.3.6).
 
 - **v0.22.13 (2026-10-09)** — CLI identity is recorded provenance, not an
   activation gate (#1893). A native-MTP admission entry's `provider_revision`,
@@ -3580,12 +3589,13 @@ consumer MUST NOT require them to equal the running CLI's version, CDHash, or
 package digest, and a release gate that requires a baseline to stay covered
 checks only the decode-path tuple, rollout, and qualified provenance source
 and status, never a per-release CLI identity.
-Unknown, missing, stale, unsigned, wrong-signer, malformed,
-expired, catalog-mismatched, or tuple-identity-mismatched policy cannot authorize CB;
-the policy bytes recorded for one release are immutable. V1 remote invalidation
-is bounded by `expires_at`, which the decode path rechecks before admission; a
-new release may omit an old tuple, but affects a provider only after that release
-is installed. The local emergency-off override is the immediate rollback path.
+Unknown, missing, stale, unsigned, wrong-signer, malformed, future-dated,
+catalog-mismatched, or tuple-identity-mismatched policy cannot authorize CB;
+the policy bytes recorded for one release are immutable. **[v0.22.14]**
+`expires_at` MUST follow `generated_at` but is not an activation gate: the
+decode path and release gates MUST NOT turn CB off or fail because the date
+has passed. A new release may omit an old tuple, but affects a provider only
+after that release is installed. The local emergency-off override is the immediate rollback path.
 A mutable, rollback-protected remote revocation feed is outside v1 rather than
 being implied by an unauthenticated notion of a "later" replacement.
 SPEC-038 local parity, row-isolation, and load-time attach probes remain

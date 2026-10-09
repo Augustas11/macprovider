@@ -83,9 +83,9 @@ final class NativeMTPSelfTestTests: XCTestCase {
 
     func testParserRejectsInvalidBankTimeBounds() throws {
         let fixture = makeBankFixture()
-        var expired = fixture.bank
-        expired["expires_at"] = "2020-01-02T00:00:00Z"
-        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(expired))) { error in
+        var inverted = fixture.bank
+        inverted["expires_at"] = inverted["issued_at"]
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(inverted))) { error in
             XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("issued_at"))
         }
 
@@ -94,6 +94,18 @@ final class NativeMTPSelfTestTests: XCTestCase {
         XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(fractional))) { error in
             XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("issued_at"))
         }
+    }
+
+    func testParserAcceptsHashPinnedBankOutsideItsWindow() throws {
+        // A missed weekly renewal: the window ended long ago, but the bytes
+        // are pinned by the signed admission, so the bank still parses.
+        let fixture = makeBankFixture()
+        var lapsed = fixture.bank
+        lapsed["issued_at"] = "2020-01-01T00:00:00Z"
+        lapsed["expires_at"] = "2020-01-02T00:00:00Z"
+        let bank = try NativeMTPSelfTest.parseChallengeBank(try jsonData(lapsed))
+        XCTAssertFalse(bank.entries.isEmpty)
+        XCTAssertLessThan(bank.expiresAt, Date())
     }
 
     func testParserRejectsPromptAndCompletionBounds() throws {

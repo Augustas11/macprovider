@@ -523,10 +523,9 @@ metadata["catalog"]["files"]["continuous-batching-policy.json"] = __import__("ha
 metadata["catalog"]["files"]["continuous-batching-policy.json.sig"] = __import__("hashlib").sha256((d / "live" / "v1_continuous-batching-policy.sig").read_bytes()).hexdigest()
 metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-if run_guard_cb_required "$work/cb-required-expired" >"$work/cb-required-expired.out" 2>&1; then
-  fail "accepted an expired continuous-batching policy"
-fi
-grep -q 'continuous-batching-policy.json expired at' "$work/cb-required-expired.out"
+# A policy past expires_at still covers the baseline: the runtime keeps
+# authorizing CB after the calendar date.
+run_guard_cb_required "$work/cb-required-expired" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
 # SPEC-023 §3.7 artifact feed (BYOM v0.2 slice 2b): served feed set must equal
 # the release's feed set, and a bound feed is signer-equal and release-bound.

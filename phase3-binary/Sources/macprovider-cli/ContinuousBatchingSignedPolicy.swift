@@ -71,7 +71,6 @@ enum ContinuousBatchingSignedPolicyError: Error, Equatable, CustomStringConverti
     case signatureInvalid(String)
     case catalogMismatch
     case rowMismatch(String)
-    case expired
     case futureDated
 
     var description: String {
@@ -85,7 +84,6 @@ enum ContinuousBatchingSignedPolicyError: Error, Equatable, CustomStringConverti
         case .signatureInvalid(let reason): return "signature invalid: \(reason)"
         case .catalogMismatch: return "candidate catalog mismatch"
         case .rowMismatch(let field): return "catalog row mismatch: \(field)"
-        case .expired: return "policy expired"
         case .futureDated: return "policy generated_at is in the future"
         }
     }
@@ -155,9 +153,10 @@ enum ContinuousBatchingSignedPolicy {
         guard parsed.generatedAt <= now.addingTimeInterval(maxClockSkew) else {
             throw ContinuousBatchingSignedPolicyError.futureDated
         }
-        guard now < parsed.expiresAt else {
-            throw ContinuousBatchingSignedPolicyError.expired
-        }
+        // expires_at is structural only (generated_at < expires_at): a signed
+        // tuple keeps authorizing CB after the calendar date so a missed
+        // renewal cannot turn CB off fleet-wide. Emergency-off and a new
+        // release that omits the tuple remain the rollback paths.
         try validateCatalogRows(parsed.entries, catalog: catalog.value)
         return ContinuousBatchingPolicySelection(
             releaseID: parsed.releaseID,
@@ -596,7 +595,7 @@ extension AutotuneStaticInputs {
         } catch let error as ContinuousBatchingSignedPolicyError {
             let status: ContinuousBatchingPolicyLoadStatus
             switch error {
-            case .expired, .futureDated, .catalogMismatch, .rowMismatch:
+            case .futureDated, .catalogMismatch, .rowMismatch:
                 status = .updateRequiredFallback
             case .invalidJSON, .unknownField, .missingField, .wrongType, .invalidValue, .unsupported, .signatureInvalid:
                 status = .integrityFailureFallback

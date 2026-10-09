@@ -3303,7 +3303,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private func continuousBatchingPolicySnapshot() -> RuntimeContinuousBatchingPolicySnapshot {
         let loadResult = continuousBatchingPolicyLoadResult
         let selection = loadResult.selection
-        let policyUnexpired = loadResult.status == .liveVerified && Date() < selection.expiresAt
+        let policyLive = loadResult.status == .liveVerified
         let requestedTuple = continuousBatchingRequestedTuple()
         // The entry's provider CLI version and CDHash are recorded provenance
         // only; the decode-path tuple alone authorizes the signed entry.
@@ -3337,7 +3337,7 @@ actor ModelRuntime: ModelRuntimeServing {
         case .fallback, .rejected, .attached:
             localProofResult = "failed"
         }
-        let signedPolicyAuthorized = policyUnexpired
+        let signedPolicyAuthorized = policyLive
             && matchingEntry != nil
             && !continuousBatchingEmergencyOffOverride
         let locallyAuthorized = signedPolicyAuthorized && descriptorAdmitted
@@ -3346,8 +3346,6 @@ actor ModelRuntime: ModelRuntimeServing {
             decisionReason = "emergency_off"
         } else if loadResult.status != .liveVerified {
             decisionReason = loadResult.status.rawValue
-        } else if !policyUnexpired {
-            decisionReason = "policy_expired"
         } else if requestedTuple == nil {
             decisionReason = "local_identity_unavailable"
         } else if matchingEntry == nil {
@@ -4354,10 +4352,6 @@ actor ModelRuntime: ModelRuntimeServing {
         requestedTuple: ContinuousBatchingRequestedTuple? = nil
     ) -> ContinuousBatchingMode {
         if continuousBatchingEmergencyOffOverride { return .off }
-        if continuousBatchingPolicyLoadResult.status == .liveVerified,
-           Date() >= continuousBatchingPolicyLoadResult.selection.expiresAt {
-            return .off
-        }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
         let policyMode = tuple.flatMap { requested in
             continuousBatchingPolicyLoadResult.selection.entries.first { entry in

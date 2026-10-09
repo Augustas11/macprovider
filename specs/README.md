@@ -102,7 +102,8 @@ python3 scripts/check_spec_governance.py
 The governance validator uses only the Python standard library. It validates
 both manifest schemas, exact authority ownership, canonical file references,
 lifecycle/conformance states, stable requirement definitions and mappings,
-cross-spec references, gap ownership, and evidence expiry. Pull requests that
+cross-spec references, gap ownership, and evidence freshness (mapped-fragment
+drift; calendar expiry is recorded, not enforced). Pull requests that
 touch canonical SPEC bodies or governance manifests must include the
 marker-delimited `spec-pr-governance-v1` JSON declaration described in
 [`PROCESS.md`](PROCESS.md).

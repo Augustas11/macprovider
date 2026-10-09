@@ -150,20 +150,26 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         ))
     }
 
-    func testRejectsExpiredFutureAndCatalogMismatchedPolicy() throws {
-        let expired = try makeFixture(
+    func testRejectsFutureAndCatalogMismatchedPolicyButNotPastExpiry() throws {
+        // A policy past expires_at still authorizes CB: the calendar date is
+        // recorded, not enforced.
+        let lapsed = try makeFixture(
             generatedAt: "2026-09-28T00:00:00Z",
             expiresAt: "2026-09-29T00:00:00Z"
         )
-        XCTAssertThrowsError(try ContinuousBatchingSignedPolicy.verify(
-            policyData: expired.policyData,
-            signatureData: expired.signatureData,
-            catalog: expired.catalog,
-            trustedKeyring: expired.trustedKeyring,
-            now: expired.now
-        )) { error in
-            XCTAssertEqual(error as? ContinuousBatchingSignedPolicyError, .expired)
-        }
+        XCTAssertLessThan(
+            try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-29T00:00:00Z")),
+            lapsed.now
+        )
+        let lapsedSelection = try ContinuousBatchingSignedPolicy.verify(
+            policyData: lapsed.policyData,
+            signatureData: lapsed.signatureData,
+            catalog: lapsed.catalog,
+            trustedKeyring: lapsed.trustedKeyring,
+            now: lapsed.now
+        )
+        XCTAssertFalse(lapsedSelection.entries.isEmpty)
+        XCTAssertTrue(lapsedSelection.acceptanceCoverage.covers(lapsed.requestedTuple))
 
         let future = try makeFixture(generatedAt: "2026-10-01T00:00:00Z")
         XCTAssertThrowsError(try ContinuousBatchingSignedPolicy.verify(

@@ -644,15 +644,18 @@ def apply_mutation(repository: dict[str, object], mutation: dict[str, object]) -
         specs[0]["production_status"] = "physically-verified"
     elif operation == "production_physically_verified_without_requirements":
         specs[1]["production_status"] = "physically-verified"
-    elif operation == "stale_evidence":
+    elif operation in {"stale_evidence", "evidence_expires_before_capture"}:
         digest = hashlib.sha256(b"proof\n").hexdigest()
         requirements[0]["state"] = "conformant"
         requirements[0]["journeys"] = ["JOURNEY-BOOT"]
+        dates = ("2025-01-01", "2025-12-31")
+        if operation == "evidence_expires_before_capture":
+            dates = dates[::-1]
         requirements[0]["evidence"] = [{
             "artifact": f"sha256:{digest}",
             "source": "journeys/evidence/proof.txt",
-            "captured_at": "2025-01-01",
-            "expires_at": "2025-12-31",
+            "captured_at": dates[0],
+            "expires_at": dates[1],
         }]
         requirements[0]["gap"] = None
     elif operation == "unregistered_journey":
@@ -1425,6 +1428,25 @@ class GovernanceValidatorTests(unittest.TestCase):
             apply_post_write_mutation(root, repository)
             self.assertEqual([], validate_repository_with_fixture_key(root))
 
+    def test_signed_journey_result_past_expires_at_still_passes(self) -> None:
+        import datetime as _datetime
+
+        import scripts.check_spec_governance as governance
+
+        class LaterDate(_datetime.date):
+            @classmethod
+            def today(cls):
+                return cls(2099, 6, 1)
+
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "valid_signed_journey_result"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            with mock.patch.object(governance, "date", LaterDate):
+                self.assertEqual([], validate_repository_with_fixture_key(root))
+
     def test_signed_journey_result_can_coexist_with_other_physical_evidence(self) -> None:
         repository = base_repository()
         apply_mutation(repository, {"operation": "signed_journey_result_mixed_physical_evidence"})
@@ -1469,6 +1491,18 @@ class GovernanceValidatorTests(unittest.TestCase):
                     apply_post_write_mutation(root, repository)
                     errors = validate_repository_with_fixture_key(root)
                 self.assertIn(payload["expected"], "\n".join(errors))
+
+    def test_calendar_expired_evidence_is_not_an_error(self) -> None:
+        # Calendar expiry is recorded provenance; mapped-fragment staleness is
+        # the freshness check, so evidence past expires_at stays valid.
+        repository = base_repository()
+        apply_mutation(repository, {"operation": "stale_evidence"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            apply_post_write_mutation(root, repository)
+            errors = "\n".join(validate_repository_with_fixture_key(root))
+        self.assertNotIn("expired", errors)
 
     def test_duplicate_json_object_keys_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

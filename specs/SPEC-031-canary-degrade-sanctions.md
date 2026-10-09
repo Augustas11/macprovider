@@ -1,6 +1,6 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.3
+**Status:** v0.3.6
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
@@ -826,8 +826,11 @@ admission entry's `challenge_bank_sha256`. The decoded body's `signer_key_id`
 and detached envelope `key_id` MUST both equal the admission sidecar's exact
 `challenge_bank_signer_key_id`; a valid signature by any other concurrently
 trusted key is an integrity failure. Unknown, missing, duplicate, unsorted,
-wrong-typed, over-bound, expired, cross-release, or identity-mismatched bank
-data disables only that admission tuple. A canary request MUST select one exact
+wrong-typed, over-bound, cross-release, or identity-mismatched bank
+data disables only that admission tuple. **[v0.3.6]** `issued_at < expires_at`
+is structural; a provider MUST NOT disable the tuple because the current time
+is outside the bank window, since the bank bytes are pinned by the signed
+admission. A canary request MUST select one exact
 bank record and MUST NOT accept a caller-supplied prompt or expected value in
 its place.
 
@@ -1128,6 +1131,12 @@ before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
+- **v0.3.6 (2026-10-09):** The native-MTP challenge bank's `issued_at` must
+  precede its `expires_at`, but a provider no longer refuses a bank because
+  the current time is outside that window. The bank bytes are pinned by the
+  signed admission's `challenge_bank_sha256` and `release_id`, so a missed
+  weekly renewal cannot turn native MTP off. The coordinator self-test still
+  compares exact token IDs.
 - **v0.2 (2026-07-13):** Runbook item 1(b)/1(c) IMPL landed (docs updated to match
   code; no spec-behavior change beyond marking Gaps closed).
   - **FR-CAN22 sole-provider floor → Implemented.** `RecordCanaryResult` spares the

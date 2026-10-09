@@ -84,7 +84,7 @@ insufficient, a conformance state, and evidence. Allowed states are
 `pending`, `blocked`, `conformant`, `nonconformant`, and `not-applicable`.
 
 - `conformant` requires implementation mapping, a test or journey, reachable
-  commit evidence for the code mappings, and current evidence with an expiry
+  commit evidence for the code mappings, and evidence with a recorded expiry
   date. Every mapped source and test selector fragment must match between the
   evidence commit and the current tree. A later unrelated edit in the same file
   does not invalidate evidence by itself, but selector body drift or removal
@@ -114,13 +114,16 @@ insufficient, a conformance state, and evidence. Allowed states are
   `security/acceptance-candidate-signing-public.pem` trust anchor, the mapped
   journey ID, the promoted requirement ID, a repository commit matching the
   requirement's commit evidence, operator and environment bindings, a passing
-  run result, passing step results that reference hash-bound artifacts, current
-  expiry, and explicit redaction confirmations. A Markdown journey description,
+  run result, passing step results that reference hash-bound artifacts, a
+  recorded expiry, and explicit redaction confirmations. A Markdown journey description,
   arbitrary digest, mutable public key, or self-asserted signature status alone
   cannot promote lifecycle state.
 - Evidence records the proving reachable commit or an immutable artifact whose
   repository source bytes reproduce its SHA-256 digest, plus capture date and
-  expiry. Expired evidence fails validation rather than silently downgrading.
+  expiry. The expiry is recorded, not enforced: a calendar date passing does
+  not invalidate evidence. Freshness is the mapped-fragment check above, so
+  evidence goes stale only when the code or test it proves changes. A capture
+  date in the future, or an expiry before the capture date, still fails.
 - Implementation and test mappings name repository files plus selectors that
   resolve in those files; physical journey IDs resolve to tracked journey
   records. Evidence uses a reachable full commit SHA or a SHA-256 digest
