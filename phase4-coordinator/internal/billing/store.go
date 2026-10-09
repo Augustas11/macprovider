@@ -94,6 +94,10 @@ type Store struct {
 	// earningsViewFallbacks counts earnings reads the rollup could not serve.
 	earningsViewFallbacks atomic.Int64
 	earningsRollupSched   earningsRollupScheduler
+	// evidenceRetention holds the SPEC-022 R-15 settings and last report;
+	// evidenceRetentionRun makes runs single-flight.
+	evidenceRetention    evidenceRetentionRuntime
+	evidenceRetentionRun sync.Mutex
 }
 
 type SQLiteMetrics interface {
@@ -671,6 +675,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureLedgerRequestCreditSettlementPolicyGuards(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
 		return err
 	}
 	if err := s.rebuildSpec022PayableRequestCreditsView(ctx); err != nil {
@@ -1469,6 +1476,16 @@ SELECT lrc.*
    )
    AND (
        COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
+       -- SPEC-022 R-15.6: a settled credit whose evidence retention archived
+       -- was payable when archived and stays payable.
+       OR (
+           lrc.settled = 1
+           AND EXISTS (
+               SELECT 1
+                 FROM settlement_evidence_archived_credits archived
+                WHERE archived.request_credit_id = lrc.id
+           )
+       )
        OR (
            lrc.settlement_policy_mode = 'enforce'
            AND lrc.settlement_account_scope_hash IS NOT NULL

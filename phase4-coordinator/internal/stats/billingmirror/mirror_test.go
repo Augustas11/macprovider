@@ -434,3 +434,70 @@ VALUES
 		}
 	}
 }
+
+// SPEC-022 R-15.6: a credit whose verdict retention archived keeps
+// spec022_verified from its tombstone; an unverified tombstone does not
+// promote a credit.
+func TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request-log.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE ledger_request_credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL, attempt_n INTEGER NOT NULL, provider_id TEXT NOT NULL,
+    ts_utc TEXT NOT NULL, created_at_utc TEXT NOT NULL, updated_at_utc TEXT NULL,
+    prompt_tokens INTEGER NULL, completion_tokens INTEGER NULL, estimated_completion_tokens INTEGER NULL,
+    usage_source TEXT NOT NULL, provider_credits INTEGER NOT NULL, fault_flag TEXT NOT NULL, quarantined INTEGER NOT NULL,
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy', settlement_account_scope_hash TEXT NULL,
+    positive_verification_excluded INTEGER NOT NULL DEFAULT 0
+);
+CREATE VIEW spec022_payable_request_credits AS
+SELECT * FROM ledger_request_credits WHERE quarantined = 0 AND settlement_policy_mode = 'enforce';
+CREATE TABLE settlement_receipt_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, account_scope_hash TEXT NOT NULL, request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL, provider_id TEXT NOT NULL, receipt_result TEXT NOT NULL,
+    settlement_outcome TEXT NOT NULL, closed INTEGER NOT NULL
+);
+CREATE TABLE settlement_evidence_archived_credits (
+    request_credit_id INTEGER PRIMARY KEY, request_id TEXT NOT NULL, archive_id INTEGER NOT NULL,
+    spec022_verified INTEGER NOT NULL, archived_at_utc TEXT NOT NULL
+);
+INSERT INTO ledger_request_credits (request_id, attempt_n, provider_id, ts_utc, created_at_utc, usage_source,
+    provider_credits, fault_flag, quarantined, settlement_policy_mode, settlement_account_scope_hash, positive_verification_excluded)
+VALUES
+    ('req-archived-verified', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 0),
+    ('req-archived-unverified', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 0),
+    ('req-archived-excluded', 0, 'p', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', 'coordinator_observed', 10, 'none', 0, 'enforce', 'scope', 1);
+INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc)
+VALUES (1, 'req-archived-verified', 1, 1, '2026-10-30T00:00:00Z'),
+       (2, 'req-archived-unverified', 1, 0, '2026-10-30T00:00:00Z'),
+       (3, 'req-archived-excluded', 1, 1, '2026-10-30T00:00:00Z');
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	rows, err := FetchRequestCredits(context.Background(), source, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, row := range rows {
+		got[row.RequestID] = row.Spec022Verified
+	}
+	want := map[string]bool{"req-archived-verified": true, "req-archived-unverified": false, "req-archived-excluded": false}
+	for id, verified := range want {
+		if got[id] != verified {
+			t.Fatalf("%s spec022_verified=%v want %v (all=%v)", id, got[id], verified, got)
+		}
+	}
+}

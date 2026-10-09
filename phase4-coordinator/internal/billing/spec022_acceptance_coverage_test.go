@@ -98,9 +98,9 @@ func TestSPEC022D8AcceptanceCoverageMapIncludesAllACs(t *testing.T) {
 		"AC-022-68 (v0.3.0)": "Partial",
 		"AC-022-69 (v0.3.0)": "Partial",
 		"AC-022-70 (v0.3.0)": "Partial",
-		"AC-022-71 (v0.4.0)": "Partial",
-		"AC-022-72 (v0.4.0)": "Partial",
-		"AC-022-73 (v0.4.0)": "Partial",
+		"AC-022-71 (v0.4.0)": "Covered",
+		"AC-022-72 (v0.4.0)": "Covered",
+		"AC-022-73 (v0.4.0)": "Covered",
 	}
 
 	rows := parseSPEC022CoverageRows(t, text)

@@ -7234,6 +7234,42 @@
       }
     },
     {
+      "requirement_id": "SPEC-022-R015",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/evidence_retention.go:func evaluateRetentionEligibility",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) RunEvidenceRetention",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) deleteArchivedBatch",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func incrementalVacuum",
+        "phase4-coordinator/internal/billing/evidence_archive.go:func verifyEvidenceArchive",
+        "phase4-coordinator/internal/billing/evidence_archive.go:func RederiveArchivedCredit",
+        "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) dropArchivedEvidenceCredits",
+        "phase4-coordinator/internal/billing/recovery.go:func creditEvidenceArchivedTx",
+        "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDeletesOnlyArchivedRowsInBoundedBatches",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRederivesSettledCreditFromArchive",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionReadersTolerateArchivedRequests",
+        "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone",
+        "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification, the operator-configured off-host confirmation that refuses deletion by default, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified, and bounded incremental vacuum. It is off by default. Pending: the first dry run and live run on the production database, the off-host destination, and a bounded hot database across two weekly settlements."
+      }
+    },
+    {
       "requirement_id": "SPEC-016-R001",
       "spec_id": "SPEC-016",
       "state": "pending",

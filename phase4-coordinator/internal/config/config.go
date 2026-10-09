@@ -1742,6 +1742,42 @@ type BillingConfig struct {
 	// non-streaming ceiling restatement. Default false (HTTP 404);
 	// SIGHUP-reloadable.
 	CeilingRestatementEnabled bool `yaml:"ceiling_restatement_enabled"`
+	// Retention is the SPEC-022 R-15 settled-evidence retention job
+	// (#1793). Default off.
+	Retention BillingRetentionConfig `yaml:"retention"`
+}
+
+// BillingRetentionConfig moves settled SPEC-022 evidence rows out of the hot
+// SQLite database into verified, off-host-confirmed archives (SPEC-022 R-15).
+type BillingRetentionConfig struct {
+	// Enabled arms the nightly job and the admin run route. Dry runs are
+	// always available to the operator.
+	Enabled bool `yaml:"enabled"`
+	// ArchiveDir receives the gzip JSONL archives and their manifests. It
+	// must be an absolute path when Enabled.
+	ArchiveDir string `yaml:"archive_dir"`
+	// MinSettlementCycles is how many completed settlement windows must
+	// follow the window a credit settled in. Floor 2.
+	MinSettlementCycles int `yaml:"min_settlement_cycles"`
+	// BatchSize is the number of requests deleted per short transaction.
+	BatchSize int `yaml:"batch_size"`
+	// BatchPauseMS is the pause between delete batches that yields the
+	// SQLite writer to the hot path.
+	BatchPauseMS int `yaml:"batch_pause_ms"`
+	// MaxRequestsPerRun bounds the requests one run archives.
+	MaxRequestsPerRun int `yaml:"max_requests_per_run"`
+	// MaxScanRowsPerRun bounds the ledger credits one run walks.
+	MaxScanRowsPerRun int `yaml:"max_scan_rows_per_run"`
+	// IncrementalVacuumPages is the page budget per incremental_vacuum step;
+	// IncrementalVacuumMaxSteps bounds the steps per run.
+	IncrementalVacuumPages    int `yaml:"incremental_vacuum_pages"`
+	IncrementalVacuumMaxSteps int `yaml:"incremental_vacuum_max_steps"`
+	// OffhostVerifyCommand is run as argv + [archive_path, sha256_hex] and
+	// must exit 0 only when that checksum is confirmed present at the
+	// off-host destination. Empty means deletion always refuses.
+	OffhostVerifyCommand []string `yaml:"offhost_verify_command"`
+	// OffhostVerifyTimeoutSeconds bounds one verification command.
+	OffhostVerifyTimeoutSeconds int `yaml:"offhost_verify_timeout_seconds"`
 }
 
 type EndpointsConfig struct {
@@ -1980,6 +2016,19 @@ func Default() Config {
 					PromptCacheHitCreditsPerMtok: 500000,
 					CompletionCreditsPerMtok:     1000000,
 				},
+			},
+		},
+		Billing: BillingConfig{
+			Retention: BillingRetentionConfig{
+				Enabled:                     false,
+				MinSettlementCycles:         2,
+				BatchSize:                   50,
+				BatchPauseMS:                200,
+				MaxRequestsPerRun:           20000,
+				MaxScanRowsPerRun:           500000,
+				IncrementalVacuumPages:      2048,
+				IncrementalVacuumMaxSteps:   256,
+				OffhostVerifyTimeoutSeconds: 300,
 			},
 		},
 		Settlement: SettlementConfig{
@@ -3184,6 +3233,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
 	}
 	if err := c.validateExplorer(); err != nil {
+		return err
+	}
+	if err := c.validateBillingRetention(); err != nil {
 		return err
 	}
 	if err := c.validateStats(); err != nil {
@@ -4595,6 +4647,43 @@ func ValidateEndpointURL(endpoint string) error {
 	isLocal := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLocal) {
 		return fmt.Errorf("endpoint_url must be a valid https URL")
+	}
+	return nil
+}
+
+func (c Config) validateBillingRetention() error {
+	r := c.Billing.Retention
+	if r.MinSettlementCycles < 2 {
+		return fmt.Errorf("billing.retention.min_settlement_cycles must be >= 2")
+	}
+	if r.BatchSize < 1 || r.BatchSize > 1000 {
+		return fmt.Errorf("billing.retention.batch_size must be in [1, 1000]")
+	}
+	if r.BatchPauseMS < 0 || r.BatchPauseMS > 60000 {
+		return fmt.Errorf("billing.retention.batch_pause_ms must be in [0, 60000]")
+	}
+	if r.MaxRequestsPerRun < 1 {
+		return fmt.Errorf("billing.retention.max_requests_per_run must be >= 1")
+	}
+	if r.MaxScanRowsPerRun < 1 {
+		return fmt.Errorf("billing.retention.max_scan_rows_per_run must be >= 1")
+	}
+	if r.IncrementalVacuumPages < 0 || r.IncrementalVacuumMaxSteps < 0 {
+		return fmt.Errorf("billing.retention.incremental_vacuum_pages and incremental_vacuum_max_steps must be >= 0")
+	}
+	if r.OffhostVerifyTimeoutSeconds < 1 {
+		return fmt.Errorf("billing.retention.offhost_verify_timeout_seconds must be >= 1")
+	}
+	for _, arg := range r.OffhostVerifyCommand {
+		if strings.TrimSpace(arg) == "" {
+			return fmt.Errorf("billing.retention.offhost_verify_command must not contain empty arguments")
+		}
+	}
+	if len(r.OffhostVerifyCommand) > 0 && !filepath.IsAbs(r.OffhostVerifyCommand[0]) {
+		return fmt.Errorf("billing.retention.offhost_verify_command[0] must be an absolute path")
+	}
+	if r.Enabled && (r.ArchiveDir == "" || !filepath.IsAbs(r.ArchiveDir)) {
+		return fmt.Errorf("billing.retention.archive_dir must be an absolute path when billing.retention.enabled is true")
 	}
 	return nil
 }

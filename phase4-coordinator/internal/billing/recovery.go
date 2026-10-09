@@ -1183,6 +1183,18 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	if err != nil {
 		return 0, 0, true, false, err
 	}
+	if !hasVerifiedReceipt && (settled == 1 || settlementID.Valid) {
+		archived, err := creditEvidenceArchivedTx(ctx, tx, id)
+		if err != nil {
+			return 0, 0, true, false, err
+		}
+		if archived {
+			// SPEC-022 R-15.6: retention archived this settled credit's
+			// receipt-bound evidence; the settled ledger row stands and the
+			// archive is its rederivation source (R-15.7).
+			return gross, gross, true, false, nil
+		}
+	}
 	if hasVerifiedReceipt {
 		summaryExpected = receiptExpected
 		rowRecomputed = receiptExpected
@@ -1228,6 +1240,12 @@ UPDATE ledger_request_credits
 		}
 	}
 	return gross, summaryExpected.GrossCredits, true, mismatch, nil
+}
+
+func creditEvidenceArchivedTx(ctx context.Context, tx *sql.Tx, requestCreditID int64) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_credit_id = ?`, requestCreditID).Scan(&n)
+	return n > 0, err
 }
 
 // verifiedReceiptExpectedCreditTx is the credit the verified-receipt sync

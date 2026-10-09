@@ -1,0 +1,794 @@
+package billing
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
+)
+
+// retentionFixture is a billing store holding settled SPEC-022 enforce
+// requests whose settlement window is two completed cycles old.
+type retentionFixture struct {
+	store       *Store
+	base        SettlementVerifyInput
+	windowStart time.Time
+	windowEnd   time.Time
+	journalDB   *sql.DB
+	inputs      map[string]SettlementVerifyInput
+}
+
+func newRetentionFixture(t *testing.T, withJournal bool) *retentionFixture {
+	t.Helper()
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	base := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	base.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	f := &retentionFixture{store: store, base: base, inputs: map[string]SettlementVerifyInput{}}
+	f.windowStart, f.windowEnd = settlementWindowForInput(base)
+	now := f.windowEnd.AddDate(0, 0, 40)
+	store.now = func() time.Time { return now }
+	if withJournal {
+		path := filepath.Join(t.TempDir(), "coordinator.db.route-snapshots")
+		journalDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		journalDB.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = journalDB.Close() })
+		store.SetRouteSnapshotJournalDB(journalDB)
+		if err := store.InitRouteSnapshotJournal(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f.journalDB = journalDB
+	}
+	return f
+}
+
+// seed writes one enforce request with a verified receipt and a
+// receipt-bound credit. Seeding order is verdict id order, so the first
+// seeded request of a provider holds its earliest verified verdict.
+func (f *retentionFixture) seed(t *testing.T, suffix string) SettlementVerifyInput {
+	t.Helper()
+	input := f.base
+	input.RequestID = f.base.RequestID + "-" + suffix
+	input.RouteSnapshot.RequestID = input.RequestID
+	seedSettlementReceiptEvidence(t, f.store, input)
+	insertSPEC022ReceiptBoundLedgerCredit(t, f.store.db, input, 0)
+	markSPEC022ReceiptVerified(t, f.store.db, input)
+	f.inputs[suffix] = input
+	return input
+}
+
+// settle runs the weekly settlement for the fixture window and records two
+// later completed windows, so the window is two completed cycles old.
+func (f *retentionFixture) settle(t *testing.T) {
+	t.Helper()
+	if err := f.store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, f.windowStart, f.windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	f.addLaterWindows(t, 2)
+}
+
+func (f *retentionFixture) addLaterWindows(t *testing.T, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		end := f.windowEnd.AddDate(0, 0, 7*i)
+		if _, err := f.store.db.Exec(`
+INSERT OR IGNORE INTO ledger_settlement_windows (window_start_utc, window_end_utc, cadence_days, completed_at_utc)
+VALUES (?, ?, 7, ?)`, sqliteTimeText(end.AddDate(0, 0, -7)), sqliteTimeText(end), sqliteTimeText(end)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func (f *retentionFixture) creditID(t *testing.T, suffix string) int64 {
+	t.Helper()
+	in := f.inputs[suffix]
+	return scalar(t, f.store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, in.RequestID)
+}
+
+func (f *retentionFixture) hotRows(t *testing.T, suffix string) int64 {
+	t.Helper()
+	in := f.inputs[suffix]
+	return scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_route_snapshots WHERE request_id = ?`, in.RequestID) +
+		scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ?`, in.RequestID) +
+		scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_attempt_outputs WHERE request_id = ?`, in.RequestID)
+}
+
+func (f *retentionFixture) addDrainedOutbox(t *testing.T, suffix string, drained, poisoned bool) {
+	t.Helper()
+	in := f.inputs[suffix]
+	verdictID := scalar(t, f.store.db, `SELECT id FROM settlement_receipt_verdicts WHERE request_id = ?`, in.RequestID)
+	var drainedAt, poisonedAt any
+	if drained {
+		drainedAt = sqliteTimeText(f.windowEnd)
+	}
+	if poisoned {
+		poisonedAt = sqliteTimeText(f.windowEnd)
+	}
+	if _, err := f.store.db.Exec(`
+INSERT INTO settlement_receipt_audit_outbox (
+    settlement_receipt_verdict_id, event_type, account_scope_hash, request_id, attempt_n,
+    provider_id, attempted_received_at_unix_ms, idempotency_status, created_at_utc,
+    drained_at_utc, poisoned_at_utc
+) VALUES (?, 'settlement_receipt_verdict', ?, ?, ?, ?, ?, 'first_terminal', ?, ?, ?)`,
+		verdictID, SettlementAccountScopeHash(in.AccountScope), in.RequestID, in.AttemptN, in.ProviderID,
+		in.ReceiptReceivedUnixMS, sqliteTimeText(f.windowStart), drainedAt, poisonedAt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type recordingVerifier struct {
+	calls []string
+	err   error
+	hook  func()
+}
+
+func (r *recordingVerifier) verify(_ context.Context, path, sha string) error {
+	r.calls = append(r.calls, filepath.Base(path)+"|"+sha)
+	if r.hook != nil {
+		r.hook()
+	}
+	return r.err
+}
+
+func retentionTestOptions(dir string, verifier EvidenceArchiveOffhostVerifier) EvidenceRetentionOptions {
+	return EvidenceRetentionOptions{
+		Enabled:                   true,
+		ArchiveDir:                dir,
+		MinSettlementCycles:       2,
+		CadenceDays:               7,
+		ReconcileHorizon:          8 * 24 * time.Hour,
+		BatchSize:                 1,
+		MaxRequestsPerRun:         100,
+		MaxScanRowsPerRun:         10000,
+		IncrementalVacuumPages:    16,
+		IncrementalVacuumMaxSteps: 4,
+		OffhostVerifier:           verifier,
+	}
+}
+
+func TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, true)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.seed(t, "c")
+	f.addDrainedOutbox(t, "b", true, false)
+	if n, err := f.store.MirrorPendingRouteSnapshots(ctx, 100); err != nil || n != 3 {
+		t.Fatalf("mirror route journal n=%d err=%v", n, err)
+	}
+	f.settle(t)
+	payableBefore := scalar(t, f.store.db, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`)
+	payoutID := scalar(t, f.store.db, `SELECT id FROM ledger_payout_ready WHERE provider_id = ?`, b.ProviderID)
+	payoutGross := scalar(t, f.store.db, `SELECT gross_credits FROM ledger_payout_ready WHERE id = ?`, payoutID)
+	if payableBefore <= 0 {
+		t.Fatalf("payable before retention=%d", payableBefore)
+	}
+
+	dir := t.TempDir()
+	verifier := &recordingVerifier{}
+	dry, err := f.store.DryRunEvidenceRetention(ctx, retentionTestOptions(dir, verifier.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.Status != EvidenceRetentionStatusDryRun || dry.EligibleRequests != 2 {
+		t.Fatalf("dry run=%+v", dry)
+	}
+	if dry.SkippedRequests[retentionSkipFirstVerified] != 1 {
+		t.Fatalf("dry run skipped=%v want the provider's first verified request kept", dry.SkippedRequests)
+	}
+	for _, table := range []string{"settlement_route_snapshots", "settlement_receipt_verdicts", "settlement_attempt_outputs"} {
+		if st := dry.Tables[table]; st.Rows != 2 || st.PayloadBytes <= 0 {
+			t.Fatalf("dry run %s=%+v", table, st)
+		}
+	}
+	if st := dry.Tables["settlement_receipt_audit_outbox"]; st.Rows != 1 {
+		t.Fatalf("dry run outbox=%+v", st)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`); got != 0 {
+		t.Fatalf("dry run wrote archives=%d", got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("dry run wrote files: %v", entries)
+	}
+
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, verifier.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 2 {
+		t.Fatalf("run report=%+v", report)
+	}
+	if len(verifier.calls) != 1 || verifier.calls[0] != report.ArchiveFile+"|"+report.ArchiveSHA256 {
+		t.Fatalf("off-host verifier calls=%v report=%+v", verifier.calls, report)
+	}
+	if f.hotRows(t, "first") != 3 || f.hotRows(t, "b") != 0 || f.hotRows(t, "c") != 0 {
+		t.Fatalf("hot rows first=%d b=%d c=%d", f.hotRows(t, "first"), f.hotRows(t, "b"), f.hotRows(t, "c"))
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox`); got != 0 {
+		t.Fatalf("drained outbox rows=%d want 0", got)
+	}
+	if got := scalar(t, f.journalDB, `SELECT COUNT(*) FROM settlement_route_snapshot_journal`); got != 1 {
+		t.Fatalf("route journal rows=%d want 1 (first request only)", got)
+	}
+	if report.RouteJournalDeletedRows != 2 {
+		t.Fatalf("route journal deleted=%d want 2", report.RouteJournalDeletedRows)
+	}
+	// The money record stays hot and unchanged.
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE settled = 1`); got != 3 {
+		t.Fatalf("settled credits=%d want 3", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_operator_credits`); got != 3 {
+		t.Fatalf("operator credits=%d want 3", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE spec022_verified = 1`); got != 2 {
+		t.Fatalf("verified tombstones=%d want 2", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT verdict_count FROM settlement_evidence_archived_verdict_counts WHERE provider_id = ? AND settlement_outcome = 'verified' AND receipt_result = 'valid'`, b.ProviderID); got != 2 {
+		t.Fatalf("archived verdict count=%d want 2", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`); got != payableBefore {
+		t.Fatalf("payable after retention=%d want %d", got, payableBefore)
+	}
+	if got := scalar(t, f.store.db, `SELECT status = 'deleted' FROM settlement_evidence_archives WHERE id = ?`, report.ArchiveID); got != 1 {
+		t.Fatal("archive row not marked deleted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, report.ArchiveFile+evidenceArchiveManifestSuffix)); err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	if len(report.Vacuum) != 2 || report.Vacuum[0].AutoVacuumMode == "" {
+		t.Fatalf("vacuum report=%+v", report.Vacuum)
+	}
+	// Payout revalidation still sees every source credit as payable.
+	claimed, err := f.store.ClaimPayoutReady(ctx, payoutID, payoutGross, "external-after-retention", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("payout claim failed revalidation after retention")
+	}
+	// A second run finds nothing new and deletes nothing.
+	again, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, verifier.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Status != EvidenceRetentionStatusNothingEligible || again.DeletedRequests != 0 {
+		t.Fatalf("second run=%+v", again)
+	}
+	if f.hotRows(t, "first") != 3 {
+		t.Fatal("second run touched the first verified request")
+	}
+}
+
+func TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusOffhostUnverified || report.DeletedRequests != 0 {
+		t.Fatalf("no-verifier run=%+v", report)
+	}
+	failing := &recordingVerifier{err: errors.New("checksum not found off host")}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, failing.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusOffhostUnverified || !report.ResumedArchive || report.DeletedRequests != 0 {
+		t.Fatalf("failing-verifier run=%+v", report)
+	}
+	if f.hotRows(t, "b") != 3 {
+		t.Fatal("evidence deleted without off-host confirmation")
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`); got != 1 {
+		t.Fatalf("archives=%d want one resumed archive, never a duplicate", got)
+	}
+	ok := &recordingVerifier{}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, ok.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 1 || f.hotRows(t, "b") != 0 {
+		t.Fatalf("confirmed run=%+v hot=%d", report, f.hotRows(t, "b"))
+	}
+}
+
+func TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, report.ArchiveFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)/2] ^= 0xff
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok := &recordingVerifier{}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, ok.verify))
+	if !errors.Is(err, ErrEvidenceArchiveInvalid) {
+		t.Fatalf("corrupt archive err=%v", err)
+	}
+	if report.Status != EvidenceRetentionStatusArchiveInvalid || len(ok.calls) != 0 {
+		t.Fatalf("corrupt archive report=%+v verifier calls=%v", report, ok.calls)
+	}
+	if f.hotRows(t, "b") != 3 {
+		t.Fatal("evidence deleted against a corrupt archive")
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives WHERE status = 'failed'`); got != 1 {
+		t.Fatalf("failed archives=%d want 1", got)
+	}
+	// The next run writes a fresh archive and deletes against it.
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, ok.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 1 {
+		t.Fatalf("fresh archive run=%+v", report)
+	}
+}
+
+func TestEvidenceArchiveVerificationRejectsTampering(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, report.ArchiveFile)
+	manifest, err := readEvidenceArchiveManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyEvidenceArchive(path, manifest); err != nil {
+		t.Fatalf("intact archive failed verification: %v", err)
+	}
+	for name, mutate := range map[string]func(m *EvidenceArchiveManifest){
+		"sha256":    func(m *EvidenceArchiveManifest) { m.SHA256 = strings.Repeat("0", 64) },
+		"size":      func(m *EvidenceArchiveManifest) { m.SizeBytes++ },
+		"row_count": func(m *EvidenceArchiveManifest) { m.RowCounts["settlement_route_snapshots"]++ },
+		"requests":  func(m *EvidenceArchiveManifest) { m.RequestCount++ },
+		"format":    func(m *EvidenceArchiveManifest) { m.Format = "other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := manifest
+			m.RowCounts = map[string]int64{}
+			for k, v := range manifest.RowCounts {
+				m.RowCounts[k] = v
+			}
+			mutate(&m)
+			if _, err := verifyEvidenceArchive(path, m); !errors.Is(err, ErrEvidenceArchiveInvalid) {
+				t.Fatalf("tampered %s err=%v", name, err)
+			}
+		})
+	}
+	if err := os.WriteFile(path, append(mustReadFile(t, path), 'x'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyEvidenceArchive(path, manifest); !errors.Is(err, ErrEvidenceArchiveInvalid) {
+		t.Fatalf("appended bytes err=%v", err)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestEvidenceRetentionDeletesOnlyArchivedRowsInBoundedBatches(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.seed(t, "c")
+	f.seed(t, "d")
+	f.settle(t)
+	dir := t.TempDir()
+	// Between export and deletion a new evidence row appears for request b:
+	// it is not in the archive, so b must stay hot in full.
+	verifier := &recordingVerifier{hook: func() {
+		if _, err := f.store.db.Exec(`
+INSERT INTO settlement_receipt_audit_outbox (
+    settlement_receipt_verdict_id, event_type, account_scope_hash, request_id, attempt_n,
+    provider_id, attempted_received_at_unix_ms, idempotency_status, created_at_utc, drained_at_utc
+) SELECT id, 'settlement_receipt_verdict', account_scope_hash, request_id, attempt_n, provider_id,
+         received_at_unix_ms, 'first_terminal', created_at_utc, created_at_utc
+    FROM settlement_receipt_verdicts WHERE request_id = ?`, b.RequestID); err != nil {
+			t.Error(err)
+		}
+	}}
+	opts := retentionTestOptions(dir, verifier.verify)
+	opts.BatchSize = 2
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedRequests != 2 || report.SkippedRequests[retentionSkipHotRowNotArchived] != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	if f.hotRows(t, "b") != 3 || f.hotRows(t, "c") != 0 || f.hotRows(t, "d") != 0 {
+		t.Fatalf("hot rows b=%d c=%d d=%d", f.hotRows(t, "b"), f.hotRows(t, "c"), f.hotRows(t, "d"))
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_id = ?`, b.RequestID); got != 0 {
+		t.Fatalf("skipped request tombstones=%d want 0", got)
+	}
+	if got := report.Tables["settlement_route_snapshots"].DeletedRows; got != 2 {
+		t.Fatalf("deleted route snapshots=%d want 2", got)
+	}
+}
+
+func TestEvidenceRetentionRespectsSettlementCycleFinality(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	if err := f.store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, f.windowStart, f.windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	f.addLaterWindows(t, 1)
+	dry, err := f.store.DryRunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.EligibleRequests != 0 || dry.SkippedRequests[retentionSkipWindowTooRecent] == 0 {
+		t.Fatalf("one completed cycle: %+v", dry)
+	}
+	f.addLaterWindows(t, 2)
+	dry, err = f.store.DryRunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.EligibleRequests != 1 {
+		t.Fatalf("two completed cycles: %+v", dry)
+	}
+	opts := retentionTestOptions(t.TempDir(), nil)
+	opts.ReconcileHorizon = 365 * 24 * time.Hour
+	dry, err = f.store.DryRunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.EligibleRequests != 0 {
+		t.Fatalf("inside reconcile horizon: %+v", dry)
+	}
+}
+
+func TestEvidenceRetentionRederivesSettledCreditFromArchive(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, (&recordingVerifier{}).verify))
+	if err != nil || report.DeletedRequests != 1 {
+		t.Fatalf("run=%+v err=%v", report, err)
+	}
+	creditID := f.creditID(t, "b")
+	got, err := RederiveArchivedCredit(filepath.Join(dir, report.ArchiveFile), creditID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Matches || got.Basis != "receipt_bound_usage" || got.RederivedGrossCredits <= 0 {
+		t.Fatalf("rederivation=%+v", got)
+	}
+	if want := scalar(t, f.store.db, `SELECT gross_credits FROM ledger_request_credits WHERE id = ?`, creditID); got.RederivedGrossCredits != want {
+		t.Fatalf("rederived gross=%d hot ledger=%d", got.RederivedGrossCredits, want)
+	}
+	if _, err := RederiveArchivedCredit(filepath.Join(dir, report.ArchiveFile), creditID+1000); err == nil {
+		t.Fatal("rederived a credit that is not in the archive")
+	}
+}
+
+func TestEvidenceRetentionReadersTolerateArchivedRequests(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.settle(t)
+	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify)); err != nil {
+		t.Fatal(err)
+	}
+	verdictsBefore := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`)
+
+	// The finality lookup never synthesizes a missing-evidence refund for an
+	// archived credit, and writes nothing.
+	_, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatal("archived request reported a finality from missing evidence")
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`); got != verdictsBefore {
+		t.Fatalf("finality lookup wrote verdicts: %d -> %d", verdictsBefore, got)
+	}
+
+	// Ledger reconciliation of the settled, archived credit with different
+	// request-log usage is not a settled-credit mismatch.
+	prompt, completion := int64(1), int64(999999)
+	tx, err := f.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	input := HotPathInput{
+		RequestID: b.RequestID, AttemptN: int(b.AttemptN), ProviderID: b.ProviderID,
+		PromptTokens: &prompt, CompletionTokens: &completion,
+		RateEntry:     RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 1000000},
+		MultiplierPPM: 1000000, ProviderShareBps: 10000,
+	}
+	expected := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, input.RateEntry, 1000000, 10000)
+	gross, expectedGross, exists, mismatch, err := reconcileExistingCreditTx(ctx, tx, input, expected, sqliteTimeText(f.store.nowUTC()))
+	if err != nil || !exists || mismatch || gross != expectedGross {
+		t.Fatalf("reconcile archived settled credit gross=%d expected=%d exists=%v mismatch=%v err=%v", gross, expectedGross, exists, mismatch, err)
+	}
+	_ = tx.Rollback()
+
+	// Unranged receipt summaries still count the archived verdict.
+	h := &handler{store: f.store}
+	summaries, err := h.settlementReceiptSummariesForProviders(ctx, []string{b.ProviderID}, time.Time{}, time.Time{}, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := summaries[b.ProviderID].VerifiedCount; got != 2 {
+		t.Fatalf("unranged verified count=%d want 2 (1 hot + 1 archived)", got)
+	}
+}
+
+func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cut := evidenceRetentionCutoffs{windowEnd: now.AddDate(0, 0, -14), windowEndSet: true, creditBefore: now.AddDate(0, 0, -9)}
+	settlementID := int64(7)
+	eligible := func() requestEvidenceBundle {
+		return requestEvidenceBundle{
+			requestID: "req",
+			credits: []retentionCredit{{
+				id: 1, settled: true, settlementID: &settlementID, payable: true,
+				tsUTC: now.AddDate(0, 0, -30), providerID: "p", scopeHash: "h",
+			}},
+			payouts: map[int64]archiveRow{7: {"id": int64(7), "status": "ready", "window_end_utc": sqliteTimeText(now.AddDate(0, 0, -21))}},
+			evidence: map[string][]archiveRow{
+				"settlement_route_snapshots":      {{"id": int64(3), "account_scope": "s", "request_id": "req", "attempt_n": int64(0), "provider_id": "p", "route_snapshot_digest": "d"}},
+				"settlement_receipt_verdicts":     {{"id": int64(10), "provider_id": "p", "closed": int64(1), "settlement_outcome": "verified", "receipt_result": "valid"}},
+				"settlement_receipt_audit_outbox": {{"id": int64(20), "drained_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
+			},
+			outputJournal: []archiveRow{{"id": int64(30), "materialized_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
+			routeJournal:  []archiveRow{{"account_scope": "s", "request_id": "req", "attempt_n": int64(0), "provider_id": "p", "route_snapshot_digest": "d", "mirrored_at_utc": "2026-01-01T00:00:00Z"}},
+		}
+	}
+	firstVerified := map[string]int64{"p": 9}
+	if ok, reason := evaluateRetentionEligibility(eligible(), cut, firstVerified, true); !ok {
+		t.Fatalf("baseline not eligible: %s", reason)
+	}
+	cases := []struct {
+		name   string
+		want   string
+		mutate func(b *requestEvidenceBundle, first map[string]int64, cut *evidenceRetentionCutoffs)
+	}{
+		{"no credit", retentionSkipNoCredit, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) { b.credits = nil }},
+		{"unsettled", retentionSkipUnsettled, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].settled = false
+		}},
+		{"no settlement id", retentionSkipUnsettled, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].settlementID = nil
+		}},
+		{"quarantined", retentionSkipQuarantined, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].quarantined = true
+		}},
+		{"held or force-resolved", retentionSkipResolution, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].resolutions = 1
+		}},
+		{"not payable", retentionSkipNotPayable, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].payable = false
+		}},
+		{"inside reconcile horizon", retentionSkipInsideReconcile, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].tsUTC = now.AddDate(0, 0, -2)
+		}},
+		{"payout missing", retentionSkipPayoutMissing, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.payouts = map[int64]archiveRow{}
+		}},
+		{"payout voided", retentionSkipPayoutVoided, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.payouts[7]["status"] = "voided"
+		}},
+		{"window too recent", retentionSkipWindowTooRecent, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.payouts[7]["window_end_utc"] = sqliteTimeText(now.AddDate(0, 0, -7))
+		}},
+		{"fewer completed cycles than required", retentionSkipWindowTooRecent, func(_ *requestEvidenceBundle, _ map[string]int64, c *evidenceRetentionCutoffs) {
+			c.windowEndSet = false
+		}},
+		{"verdict open", retentionSkipVerdictOpen, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["closed"] = int64(0)
+		}},
+		{"verdict pending", retentionSkipVerdictOpen, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["settlement_outcome"] = "pending"
+		}},
+		{"verdict quarantined", retentionSkipVerdictQuarantined, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["settlement_outcome"] = "quarantined"
+		}},
+		{"provider first verified verdict", retentionSkipFirstVerified, func(_ *requestEvidenceBundle, first map[string]int64, _ *evidenceRetentionCutoffs) {
+			first["p"] = 10
+		}},
+		{"outbox undelivered", retentionSkipOutboxUndelivered, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_audit_outbox"][0]["drained_at_utc"] = nil
+		}},
+		{"outbox poisoned", retentionSkipOutboxPoisoned, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_audit_outbox"][0]["drained_at_utc"] = nil
+			b.evidence["settlement_receipt_audit_outbox"][0]["poisoned_at_utc"] = "2026-01-01T00:00:00Z"
+		}},
+		{"output journal pending", retentionSkipOutputJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.outputJournal[0]["materialized_at_utc"] = nil
+		}},
+		{"output journal poisoned", retentionSkipOutputJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.outputJournal[0]["poisoned_at_utc"] = "2026-01-01T00:00:00Z"
+		}},
+		{"route journal unmirrored", retentionSkipRouteJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.routeJournal[0]["mirrored_at_utc"] = nil
+		}},
+		{"route journal digest differs", retentionSkipRouteJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.routeJournal[0]["route_snapshot_digest"] = "other"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := eligible()
+			first := map[string]int64{"p": 9}
+			c := cut
+			tc.mutate(&b, first, &c)
+			ok, reason := evaluateRetentionEligibility(b, c, first, true)
+			if ok || reason != tc.want {
+				t.Fatalf("eligible=%v reason=%q want %q", ok, reason, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvidenceRetentionKeepsUnsettledAndQuarantinedRequestsHot(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "settled")
+	f.seed(t, "undrained")
+	f.addDrainedOutbox(t, "undrained", false, false)
+	f.settle(t)
+	// Seeded after settlement: unsettled.
+	f.seed(t, "unsettled")
+	// Quarantined after settlement: the settled-link trigger allows it.
+	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 1, quarantine_reason = 'operator' WHERE request_id = ?`, f.inputs["settled"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusNothingEligible {
+		t.Fatalf("report=%+v", report)
+	}
+	for _, suffix := range []string{"first", "settled", "undrained", "unsettled"} {
+		if f.hotRows(t, suffix) != 3 {
+			t.Fatalf("%s lost hot evidence", suffix)
+		}
+	}
+	for _, reason := range []string{retentionSkipFirstVerified, retentionSkipQuarantined, retentionSkipOutboxUndelivered} {
+		if report.SkippedRequests[reason] != 1 {
+			t.Fatalf("skipped=%v missing %s", report.SkippedRequests, reason)
+		}
+	}
+}
+
+func TestEvidenceRetentionIncrementalVacuumIsBounded(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "incremental.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA auto_vacuum = INCREMENTAL; CREATE TABLE t (v TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := db.Exec(`INSERT INTO t (v) VALUES (?)`, strings.Repeat("x", 4000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM t`); err != nil {
+		t.Fatal(err)
+	}
+	r := incrementalVacuum(ctx, db, "test", EvidenceRetentionOptions{IncrementalVacuumPages: 10, IncrementalVacuumMaxSteps: 3})
+	if r.AutoVacuumMode != "incremental" || r.Steps != 3 || r.FreelistBefore-r.FreelistAfter != 30 {
+		t.Fatalf("bounded vacuum=%+v", r)
+	}
+	plain, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "plain.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if _, err := plain.Exec(`CREATE TABLE t (v TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	r = incrementalVacuum(ctx, plain, "plain", EvidenceRetentionOptions{IncrementalVacuumPages: 10, IncrementalVacuumMaxSteps: 3})
+	if r.AutoVacuumMode != "none" || !r.ConversionNeeds || r.Steps != 0 {
+		t.Fatalf("non-incremental vacuum=%+v", r)
+	}
+}
+
+func TestEvidenceRetentionRunCapResumesAtNextCandidate(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	opts := retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify)
+	opts.MaxRequestsPerRun = 1
+	for run, want := range []string{"b", "c"} {
+		report, err := f.store.RunEvidenceRetention(ctx, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.DeletedRequests != 1 || f.hotRows(t, want) != 0 {
+			t.Fatalf("run %d report=%+v hot(%s)=%d", run, report, want, f.hotRows(t, want))
+		}
+	}
+	if f.hotRows(t, "first") != 3 {
+		t.Fatal("cap resume touched the first verified request")
+	}
+}
+
+func TestEvidenceRetentionStopsDeletingWhenDisabledMidRun(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+	opts := retentionTestOptions(dir, nil)
+	f.store.SetEvidenceRetentionOptions(opts)
+	disabled := opts
+	disabled.Enabled = false
+	verifier := &recordingVerifier{hook: func() { f.store.SetEvidenceRetentionOptions(disabled) }}
+	opts.OffhostVerifier = verifier.verify
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if !errors.Is(err, ErrEvidenceRetentionDisabled) || report.DeletedRequests != 0 || f.hotRows(t, "b") != 3 {
+		t.Fatalf("disabled mid-run err=%v report=%+v hot=%d", err, report, f.hotRows(t, "b"))
+	}
+	f.store.SetEvidenceRetentionOptions(opts)
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || !report.ResumedArchive || report.DeletedRequests != 1 {
+		t.Fatalf("re-enabled run err=%v report=%+v", err, report)
+	}
+}

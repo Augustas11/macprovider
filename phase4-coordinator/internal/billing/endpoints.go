@@ -1388,6 +1388,39 @@ SELECT provider_id,
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	if !hasRange {
+		// SPEC-022 R-15.6: unranged totals include verdicts that retention
+		// moved to the settled-evidence archive.
+		archived, err := h.store.reader().QueryContext(ctx, `
+SELECT provider_id,
+       COALESCE(SUM(CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN verdict_count ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN verdict_count ELSE 0 END), 0)
+  FROM settlement_evidence_archived_verdict_counts
+ WHERE provider_id IN (`+placeholders+`)
+ GROUP BY provider_id`, args[:len(providerIDs)]...)
+		if err != nil {
+			return nil, err
+		}
+		for archived.Next() {
+			var providerID string
+			var verified, zeroSettled int64
+			if err := archived.Scan(&providerID, &verified, &zeroSettled); err != nil {
+				archived.Close()
+				return nil, err
+			}
+			summary := out[providerID]
+			summary.VerifiedCount += verified
+			summary.ZeroSettledCount += zeroSettled
+			out[providerID] = summary
+		}
+		if err := archived.Err(); err != nil {
+			archived.Close()
+			return nil, err
+		}
+		if err := archived.Close(); err != nil {
+			return nil, err
+		}
+	}
 	if recentLimit <= 0 {
 		return out, nil
 	}
