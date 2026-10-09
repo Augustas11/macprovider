@@ -11777,11 +11777,19 @@
         "phase4-coordinator/internal/ws/server.go:requireCompatibleSet",
         "phase4-coordinator/cmd/coordinator/main.go:reloadCoordinatorConfig",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
-        "scripts/ops/cli-release.sh:provider_version_policy_status"
+        "scripts/ops/cli-release.sh:provider_version_policy_status",
+        "scripts/ops/compatibility-policy-migrate.sh:apply"
       ],
       "tests": [
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetMinimumVersionAcceptsFutureSameRepoWithoutAllowlist",
-        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap"
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadFencesActiveRevokedSession",
+        "phase4-coordinator/internal/ws/autotune_catalog_reload_test.go:TestCompatibilityReloadCatalogPublishDoesNotDeadlockParallelRegistration",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testTier2PreChallengeRejectedAuthResponseKeepsCoordinatorError",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState",
+        "scripts/ops/tests/test-compatibility-policy.py:CompatibilityPolicyTest",
+        "scripts/ops/tests/test-compatibility-policy-migration.py:MigrationTest"
       ],
       "journeys": [],
       "evidence": [],

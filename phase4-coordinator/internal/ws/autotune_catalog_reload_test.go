@@ -1,11 +1,16 @@
 package ws
 
 import (
+	"context"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
 )
@@ -35,6 +40,106 @@ func reloadTestCatalogSHA(t *testing.T, version, modelSHA string) *autotune.Cata
 		t.Fatalf("parse catalog %q: %v", version, err)
 	}
 	return catalog
+}
+
+type releaseSweepModelAdmissionStore struct {
+	ModelAdmissionStore
+	event ModelAdmissionEvent
+}
+
+func (s releaseSweepModelAdmissionStore) LatestModelAdmissionStatusesInStates(context.Context, []string) ([]ModelAdmissionEvent, error) {
+	return []ModelAdmissionEvent{s.event}, nil
+}
+
+func (s releaseSweepModelAdmissionStore) LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error) {
+	return s.event, true, nil
+}
+
+func TestCompatibilityReloadCatalogPublishDoesNotDeadlockParallelRegistration(t *testing.T) {
+	v1 := reloadTestCatalog(t, "cat-lock-v1")
+	v2 := reloadTestCatalog(t, "cat-lock-v2")
+	registry := pool.NewRegistry(nil)
+	server := NewServer(admissionCeilingEnforcementConfig(), registry, zerolog.Nop(),
+		WithAutotuneCatalog(v1),
+		WithModelAdmissionStore(releaseSweepModelAdmissionStore{ModelAdmissionStore: NewMemoryModelAdmissionStore(), event: ModelAdmissionEvent{
+			ProviderID: "p-lock", CandidateID: "byom_" + strings.Repeat("a", 52), ServedModelRef: "ref-lock", CatalogModelKey: "small", State: "catalog_priced",
+		}}),
+	)
+
+	if _, ok := registry.Register(&pool.Provider{
+		ProviderID:           "p-lock",
+		AssignedID:           "s-existing",
+		ModelID:              "small-model",
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		MaxContextTokens:     8192,
+		EndpointURL:          "https://provider-lock.example.test",
+		InferencePath:        pool.InferencePathHTTPForwarding,
+		CatalogAdmissionMode: "not_required",
+	}, nil); !ok {
+		t.Fatal("seed p-lock provider was not registered")
+	}
+
+	reload, err := server.BeginCompatibilitySetPolicyReload(config.CompatibilitySetConfig{})
+	if err != nil {
+		t.Fatalf("BeginCompatibilitySetPolicyReload: %v", err)
+	}
+	defer reload.Abort()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	rowIdentity, ok := v1.RowIdentity("small")
+	if !ok {
+		t.Fatal("missing small row identity")
+	}
+	registrationStarted := make(chan struct{})
+	registrationDone := make(chan struct{})
+	go func() {
+		defer close(registrationDone)
+		close(registrationStarted)
+		entry := &pool.Provider{
+			ProviderID:             "p-lock",
+			AssignedID:             "s-lock",
+			ModelID:                "small-model",
+			State:                  pool.StateReady,
+			SlotsFree:              1,
+			SlotsTotal:             1,
+			MaxConcurrency:         1,
+			MaxContextTokens:       8192,
+			CatalogAdmissionMode:   "current",
+			CatalogReleaseID:       v1.Version,
+			CatalogPolicyVersion:   v1.PolicyVersion,
+			CandidateCatalogSHA256: v1.SHA256,
+			CatalogSignerKeyID:     v1.SignerKeyID,
+			CandidateRowIdentity:   rowIdentity,
+		}
+		server.registerProviderSession(serverConn, entry)
+	}()
+
+	// If registration takes provider-section or bridge locks before the
+	// compatibility reservation, this catalog publication path can deadlock with
+	// the reload transaction. The seeded p-lock session forces publication to
+	// sweep that provider while the same provider is reconnecting.
+	<-registrationStarted
+	time.Sleep(25 * time.Millisecond)
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		server.SetAutotuneCatalog(v2, v1)
+	}()
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetAutotuneCatalog deadlocked behind parallel registration during compatibility reload")
+	}
+	reload.Publish()
+	select {
+	case <-registrationDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parallel registration did not finish after compatibility reload published")
+	}
 }
 
 // TestSetAutotuneCatalogHotSwap verifies the #1268 SIGHUP swap: the active

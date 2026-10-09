@@ -7,6 +7,7 @@ not add steps of its own:
 | Script | Train | Runbooks |
 |---|---|---|
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
+| `compatibility-policy-migrate.sh` | one-time locked legacy allowlist to version-floor migration | `docs/runbooks/pearl-coordinator-rollout.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release | `docs/runbooks/pearl-coordinator-rollout.md` |
@@ -25,6 +26,8 @@ MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
 scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
 scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
+scripts/ops/compatibility-policy-migrate.sh status --floor <x.y.z>
+scripts/ops/compatibility-policy-migrate.sh next --floor <x.y.z> --run
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
 scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```

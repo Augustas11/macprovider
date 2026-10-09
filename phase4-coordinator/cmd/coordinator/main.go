@@ -4420,6 +4420,18 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("autotune runtime economics reload rejected")
 		return
 	}
+	compatibilityReload, err := wsServer.BeginCompatibilitySetPolicyReload(cfg.Coordinator.CompatibilitySet)
+	if err != nil {
+		logger.Error().Err(err).Msg("compatibility_set config reload rejected")
+		return
+	}
+	compatibilityPublished := false
+	defer func() {
+		if !compatibilityPublished {
+			compatibilityReload.Abort()
+		}
+	}()
+
 	// M3-8d (audit TEST-4): build a fresh *Catalog and atomically swap the
 	// package singleton, rather than mutating the in-place global. A reader
 	// holding the old pointer mid-VerifyProviderHash completes against the
@@ -4523,7 +4535,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	} else if billingSnapshotCommitted {
 		buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, nil)
 	}
-	compatibilityClosed := wsServer.SetCompatibilitySetPolicy(cfg.Coordinator.CompatibilitySet)
+	compatibilityClosed := compatibilityReload.Publish()
+	compatibilityPublished = true
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
 	benchmarkQuarantinesCleared := 0

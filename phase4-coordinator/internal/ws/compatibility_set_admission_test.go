@@ -28,6 +28,8 @@ const (
 	compatibilityFirstHopSet = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
 	compatibilityFutureSet   = "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"
 	compatibilityRevokedSet  = "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	compatibilityLaterSet    = "Augustas11/macprovider:v1.8.13@ffffffffffffffffffffffffffffffffffffffff"
+	compatibilityOtherRepo   = "Augustas11/other:v1.8.12@1111111111111111111111111111111111111111"
 )
 
 func strictCompatibilityPolicy(cfg *config.Config) {
@@ -155,6 +157,7 @@ func TestVersionFloorCompatibilitySetRejectsRevokedAndMismatchedHello(t *testing
 		{name: "below floor", setID: compatibilityRollbackSet, version: "1.8.3", reason: "provider_version_below_minimum"},
 		{name: "revoked", setID: compatibilityRevokedSet, version: "1.8.10", reason: "provider_release_revoked"},
 		{name: "binary mismatch", setID: compatibilityFutureSet, version: "1.8.11", reason: "provider_binary_version_mismatch"},
+		{name: "leading zero binary version", setID: compatibilityFutureSet, version: "01.8.12", reason: "provider_binary_version_mismatch"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -243,11 +246,14 @@ func TestCompatibilityPolicyReloadDuringAckWindowDeliversAckThenCloses(t *testin
 	h = newProviderHarnessWithServerOptions(t, store, []providerws.Option{
 		providerws.WithBeforeHandshakeAckSendForTest(func() {
 			once.Do(func() {
-				closed := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
+				closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
 					TargetID:       compatibilityTargetSet,
 					MinimumVersion: "1.8.4",
 					RevokedIDs:     []string{compatibilityFutureSet},
 				})
+				if err != nil {
+					t.Errorf("SetCompatibilitySetPolicy error = %v", err)
+				}
 				if closed != 0 {
 					t.Errorf("SetCompatibilitySetPolicy closed %d ack-pending sessions, want 0", closed)
 				}
@@ -327,11 +333,14 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || !provider.RoutingEligible() {
 		t.Fatalf("provider should start routable: ok=%v provider=%+v", ok, provider)
 	}
-	closed := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
+	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
 		TargetID:       compatibilityTargetSet,
 		MinimumVersion: "1.8.4",
 		RevokedIDs:     []string{compatibilityFutureSet},
 	})
+	if err != nil {
+		t.Fatalf("SetCompatibilitySetPolicy error = %v", err)
+	}
 	if closed != 1 {
 		t.Fatalf("closed sessions = %d, want 1", closed)
 	}
@@ -364,7 +373,125 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 	}
 }
 
-func TestCompatibilityPolicyReloadClosesBuyerServingSessionDemotedToBridgeOnly(t *testing.T) {
+func TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*config.Config)
+		setID      string
+		version    string
+		reload     config.CompatibilitySetConfig
+		wantReason string
+	}{
+		{
+			name:      "floor raise",
+			configure: versionFloorCompatibilityPolicy,
+			setID:     compatibilityFutureSet,
+			version:   "1.8.12",
+			reload: config.CompatibilitySetConfig{
+				TargetID:       compatibilityLaterSet,
+				MinimumVersion: "1.8.13",
+			},
+			wantReason: "provider_version_below_minimum",
+		},
+		{
+			name:      "repository drift",
+			configure: versionFloorCompatibilityPolicy,
+			setID:     compatibilityFutureSet,
+			version:   "1.8.12",
+			reload: config.CompatibilitySetConfig{
+				TargetID:       compatibilityOtherRepo,
+				MinimumVersion: "1.8.4",
+			},
+			wantReason: "compatibility_set_repository_mismatch",
+		},
+		{
+			name:      "legacy allowlist drift",
+			configure: strictCompatibilityPolicy,
+			setID:     compatibilityRollbackSet,
+			version:   "1.8.3",
+			reload: config.CompatibilitySetConfig{
+				TargetID:    compatibilityTargetSet,
+				AcceptedIDs: []string{compatibilityTargetSet, compatibilityFutureSet},
+			},
+			wantReason: "compatibility_set_unaccepted",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newProviderHarness(t, test.configure)
+			defer h.HTTP.Close()
+			conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			hello := validHello("m4-anon")
+			hello["compatibility_set_id"] = test.setID
+			hello["binary_version"] = test.version
+			if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+				t.Fatalf("write hello: %v", err)
+			}
+			payload, _, err := wsutil.ReadServerData(conn)
+			if err != nil {
+				t.Fatalf("read hello_ack: %v", err)
+			}
+			var ack providerws.HelloAck
+			if err := json.Unmarshal(payload, &ack); err != nil {
+				t.Fatalf("decode hello_ack: %v", err)
+			}
+			if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || !provider.RoutingEligible() {
+				t.Fatalf("provider should start routable: ok=%v provider=%+v", ok, provider)
+			}
+			closed, err := h.Provider.SetCompatibilitySetPolicy(test.reload)
+			if err == nil || !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("SetCompatibilitySetPolicy error = %v, want %q", err, test.wantReason)
+			}
+			if closed != 0 {
+				t.Fatalf("closed sessions = %d, want 0", closed)
+			}
+			if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || !provider.RoutingEligible() {
+				t.Fatalf("provider should remain routable after refused reload: ok=%v provider=%+v", ok, provider)
+			}
+		})
+	}
+}
+
+func TestCompatibilityPolicyReloadRefusesFloorDriftForHTTPForwardingProvider(t *testing.T) {
+	h := newProviderHarness(t, versionFloorCompatibilityPolicy)
+	defer h.HTTP.Close()
+	provider := &pool.Provider{
+		ProviderID:           "http-live",
+		AssignedID:           "http-session",
+		EndpointURL:          "https://provider.example.test",
+		InferencePath:        pool.InferencePathHTTPForwarding,
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		MaxContextTokens:     8192,
+		BinaryVersion:        "1.8.12",
+		CompatibilitySetID:   compatibilityFutureSet,
+		CatalogAdmissionMode: "current",
+	}
+	if _, ok := h.Registry.Register(provider, nil); !ok {
+		t.Fatal("register HTTP provider failed")
+	}
+	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
+		TargetID:       compatibilityLaterSet,
+		MinimumVersion: "1.8.13",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider_version_below_minimum") {
+		t.Fatalf("SetCompatibilitySetPolicy error = %v, want provider_version_below_minimum", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed sessions = %d, want 0", closed)
+	}
+	if got, ok := h.Registry.Resolve("http-live", "http-session"); !ok || got.State != pool.StateReady || !got.RoutingEligible() {
+		t.Fatalf("HTTP provider should remain routable after refused reload: ok=%v provider=%+v", ok, got)
+	}
+}
+
+func TestCompatibilityPolicyReloadRefusesBuyerServingSessionDemotedToBridgeOnly(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
 			TargetID:       compatibilityFutureSet,
@@ -394,16 +521,19 @@ func TestCompatibilityPolicyReloadClosesBuyerServingSessionDemotedToBridgeOnly(t
 	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.CatalogAdmissionMode == "update_bridge" || !provider.RoutingEligible() {
 		t.Fatalf("provider should start as buyer-serving, not bridge-only: ok=%v provider=%+v", ok, provider)
 	}
-	closed := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
+	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
 		TargetID:          compatibilityFutureSet,
 		MinimumVersion:    "1.8.12",
 		FirstHopBridgeIDs: []string{compatibilityRevokedSet},
 	})
-	if closed != 1 {
-		t.Fatalf("closed sessions = %d, want 1", closed)
+	if err == nil || !strings.Contains(err.Error(), "compatibility_set_bridge_only") {
+		t.Fatalf("SetCompatibilitySetPolicy error = %v, want bridge-only rejection", err)
 	}
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.State != "unavailable" || provider.RoutingEligible() {
-		t.Fatalf("provider should be fenced when demoted to bridge-only: ok=%v provider=%+v", ok, provider)
+	if closed != 0 {
+		t.Fatalf("closed sessions = %d, want 0", closed)
+	}
+	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.State == "unavailable" || !provider.RoutingEligible() {
+		t.Fatalf("provider should remain routable after refused bridge demotion: ok=%v provider=%+v", ok, provider)
 	}
 }
 

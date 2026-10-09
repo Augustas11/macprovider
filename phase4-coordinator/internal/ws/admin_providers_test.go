@@ -194,23 +194,24 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 
 	now := time.Now().UTC()
 	provider := &pool.Provider{
-		ProviderID:        "m4-anon",
-		AssignedID:        "asg-live",
-		BinaryVersion:     "1.8.57",
-		ModelID:           "llama",
-		State:             pool.StateReady,
-		AuthState:         pool.AuthBearerValidated,
-		ConnectedAt:       now,
-		LastHeartbeatAt:   now,
-		LastActivityAt:    now,
-		SlotsFree:         1,
-		SlotsTotal:        1,
-		Hostname:          "m4-anon.local",
-		Tier:              pool.TierTrusted,
-		HashStatus:        pool.HashStatusVerified,
-		AttestationStatus: pool.AttestationStatusAttested,
-		AttestationTier:   pool.AttestationTierHardware,
-		EncryptedLeg:      true,
+		ProviderID:         "m4-anon",
+		AssignedID:         "asg-live",
+		BinaryVersion:      "1.8.57",
+		CompatibilitySetID: "Augustas11/macprovider:v1.8.57@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ModelID:            "llama",
+		State:              pool.StateReady,
+		AuthState:          pool.AuthBearerValidated,
+		ConnectedAt:        now,
+		LastHeartbeatAt:    now,
+		LastActivityAt:     now,
+		SlotsFree:          1,
+		SlotsTotal:         1,
+		Hostname:           "m4-anon.local",
+		Tier:               pool.TierTrusted,
+		HashStatus:         pool.HashStatusVerified,
+		AttestationStatus:  pool.AttestationStatusAttested,
+		AttestationTier:    pool.AttestationTierHardware,
+		EncryptedLeg:       true,
 	}
 	if _, ok := h.Registry.Register(provider, nil); !ok {
 		t.Fatal("register live provider failed")
@@ -240,6 +241,9 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 	}
 	if body.Provider["binary_version"] != "1.8.57" {
 		t.Fatalf("binary_version=%v", body.Provider["binary_version"])
+	}
+	if body.Provider["compatibility_set_id"] != "Augustas11/macprovider:v1.8.57@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("compatibility_set_id=%v", body.Provider["compatibility_set_id"])
 	}
 	if body.Provider["model_id"] != "llama" || body.Provider["routing_eligible"] != true {
 		t.Fatalf("live fields were not authoritative: %#v", body.Provider)
@@ -282,6 +286,9 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 	}
 	if listBody.Providers[0]["presence"] != "connected" || listBody.Providers[0]["binary_version"] != "1.8.57" {
 		t.Fatalf("list did not use live fields: %#v", listBody.Providers[0])
+	}
+	if listBody.Providers[0]["compatibility_set_id"] != "Augustas11/macprovider:v1.8.57@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("list compatibility_set_id=%v", listBody.Providers[0]["compatibility_set_id"])
 	}
 	if listBody.Providers[0]["diagnostic"] != "network_offline: redacted" || listBody.Providers[0]["diagnostic_at"] == nil {
 		t.Fatalf("list dropped diagnostic fields: %#v", listBody.Providers[0])

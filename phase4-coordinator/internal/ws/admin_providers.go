@@ -14,23 +14,24 @@ import (
 )
 
 type adminProviderView struct {
-	ProviderID      string     `json:"provider_id"`
-	Presence        string     `json:"presence"`
-	AssignedID      string     `json:"assigned_id,omitempty"`
-	BinaryVersion   string     `json:"binary_version,omitempty"`
-	ModelID         string     `json:"model_id,omitempty"`
-	ModelLoaded     bool       `json:"model_loaded,omitempty"`
-	ModelHash       string     `json:"model_hash,omitempty"`
-	State           string     `json:"state,omitempty"`
-	AuthState       string     `json:"auth_state,omitempty"`
-	ConnectedAt     *time.Time `json:"connected_at,omitempty"`
-	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastActivityAt  *time.Time `json:"last_activity_at,omitempty"`
-	LastSeenAt      time.Time  `json:"last_seen_at"`
-	RoutingEligible bool       `json:"routing_eligible"`
-	RecentEvents    int        `json:"recent_event_count,omitempty"`
-	Diagnostic      string     `json:"diagnostic,omitempty"`
-	DiagnosticAt    *time.Time `json:"diagnostic_at,omitempty"`
+	ProviderID         string     `json:"provider_id"`
+	Presence           string     `json:"presence"`
+	AssignedID         string     `json:"assigned_id,omitempty"`
+	BinaryVersion      string     `json:"binary_version,omitempty"`
+	CompatibilitySetID string     `json:"compatibility_set_id,omitempty"`
+	ModelID            string     `json:"model_id,omitempty"`
+	ModelLoaded        bool       `json:"model_loaded,omitempty"`
+	ModelHash          string     `json:"model_hash,omitempty"`
+	State              string     `json:"state,omitempty"`
+	AuthState          string     `json:"auth_state,omitempty"`
+	ConnectedAt        *time.Time `json:"connected_at,omitempty"`
+	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastActivityAt     *time.Time `json:"last_activity_at,omitempty"`
+	LastSeenAt         time.Time  `json:"last_seen_at"`
+	RoutingEligible    bool       `json:"routing_eligible"`
+	RecentEvents       int        `json:"recent_event_count,omitempty"`
+	Diagnostic         string     `json:"diagnostic,omitempty"`
+	DiagnosticAt       *time.Time `json:"diagnostic_at,omitempty"`
 	// Operator-only classification fields projected from live pool.Provider
 	// (and, for the durable scalars, from the offline LastKnown snapshot).
 	// These stay behind operator auth and are never surfaced buyer-side.
@@ -266,6 +267,7 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 		Presence:                 "connected",
 		AssignedID:               p.AssignedID,
 		BinaryVersion:            p.BinaryVersion,
+		CompatibilitySetID:       p.CompatibilitySetID,
 		ModelID:                  p.ModelID,
 		ModelLoaded:              p.State == pool.StateReady || p.State == pool.StateBusy || p.State == pool.StateDegraded,
 		ModelHash:                p.ModelHash,

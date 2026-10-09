@@ -2079,6 +2079,74 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	}
 }
 
+func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState(t *testing.T) {
+	defer tier2.ResetForTest()
+	statePath := useAppliedConfigStatePath(t)
+	startup := config.Default()
+	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:       "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		MinimumVersion: "1.8.4",
+	}
+	startup, registry, wsServer, buyerServer := reloadTestServers(startup)
+	registry.Register(&pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "session-a",
+		ModelID:              "model-a",
+		Tier:                 pool.TierProvisional,
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		MaxContextTokens:     8192,
+		EndpointURL:          "https://provider-a.example.test",
+		InferencePath:        pool.InferencePathHTTPForwarding,
+		BinaryVersion:        "1.8.12",
+		CompatibilitySetID:   "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		CatalogAdmissionMode: "not_required",
+	}, nil)
+	server := httptest.NewServer(wsServer.Handler())
+	defer server.Close()
+
+	reloadCoordinatorConfig(writeReloadConfig(t, startup), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	beforeRecord, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("baseline applied-config record: %v", err)
+	}
+	beforeHealth := fetchReloadCompatibilityHealth(t, server.URL)
+	beforeTier2 := fetchReloadTier2Metadata(t, buyerServer)
+
+	next := startup
+	next.Tier2.ObserveEnabled = true
+	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:       "Augustas11/macprovider:v1.8.13@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MinimumVersion: "1.8.13",
+	}
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+	if !strings.Contains(logs.String(), "compatibility_set config reload rejected") {
+		t.Fatalf("expected compatibility guard rejection, logs=%s", logs.String())
+	}
+
+	afterHealth := fetchReloadCompatibilityHealth(t, server.URL)
+	if !reflect.DeepEqual(afterHealth, beforeHealth) {
+		t.Fatalf("rejected compatibility reload changed health policy: before=%+v after=%+v", beforeHealth, afterHealth)
+	}
+	afterTier2 := fetchReloadTier2Metadata(t, buyerServer)
+	if afterTier2 != beforeTier2 || afterTier2.ModelHash.Active {
+		t.Fatalf("rejected compatibility reload published tier2 state: before=%+v after=%+v", beforeTier2, afterTier2)
+	}
+	afterRecord, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("applied-config record after rejected reload: %v", err)
+	}
+	if !bytes.Equal(beforeRecord, afterRecord) {
+		t.Fatalf("rejected compatibility reload rewrote the applied-config record: before=%s after=%s", beforeRecord, afterRecord)
+	}
+	if provider, ok := registry.Resolve("provider-a", "session-a"); !ok || provider.State != pool.StateReady || !provider.RoutingEligible() {
+		t.Fatalf("unsafe compatibility reload disrupted connected provider: ok=%v provider=%+v", ok, provider)
+	}
+}
+
 func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *testing.T) {
 	defer tier2.ResetForTest()
 	startup := config.Default()
@@ -2131,6 +2199,7 @@ func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *t
 
 func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
 	CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
+	CompatibilityPolicyTargetID       string   `json:"compatibility_policy_target_id"`
 	CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version"`
 	CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
 } {
@@ -2142,6 +2211,7 @@ func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
 	defer resp.Body.Close()
 	var body struct {
 		CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID       string   `json:"compatibility_policy_target_id"`
 		CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version"`
 		CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
 	}

@@ -154,6 +154,22 @@ func TestCompatibilitySetMinimumVersionRejectsUnsafeConfig(t *testing.T) {
 			want: "strict three-component numeric version",
 		},
 		{
+			name: "leading zero floor",
+			policy: CompatibilitySetConfig{
+				TargetID:       compatibilitySetTarget,
+				MinimumVersion: "01.8.4",
+			},
+			want: "strict three-component numeric version",
+		},
+		{
+			name: "leading zero target",
+			policy: CompatibilitySetConfig{
+				TargetID:       "Augustas11/macprovider:v01.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				MinimumVersion: "1.8.4",
+			},
+			want: "invalid compatibility_set_id",
+		},
+		{
 			name: "target below floor",
 			policy: CompatibilitySetConfig{
 				TargetID:       compatibilitySetTarget,

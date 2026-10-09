@@ -37,8 +37,8 @@ const (
 	maxFirstHopBridgeSets = 4
 )
 
-var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$`)
-var compatibilitySetMinimumVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)@[0-9a-f]{40}$`)
+var compatibilitySetMinimumVersionPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
 
 // ValidateProviderID is the canonical validator for ProviderID across every
 // registration path. Issue #274: WS self-serve registration previously
@@ -76,9 +76,13 @@ func compatibilitySetIDParts(id string) (repo string, version string, ok bool) {
 	return id[:colon], id[colon+2 : at], true
 }
 
-func validCompatibilitySetMinimumVersion(version string) bool {
+func ValidCompatibilitySetVersion(version string) bool {
 	trimmed := strings.TrimSpace(version)
 	return version == trimmed && compatibilitySetMinimumVersionPattern.MatchString(version) && versionfloor.Valid(version)
+}
+
+func validCompatibilitySetMinimumVersion(version string) bool {
+	return ValidCompatibilitySetVersion(version)
 }
 
 // minAuditLogRetentionDays is the compliance floor for audit_log retention.

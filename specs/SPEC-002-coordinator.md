@@ -5170,7 +5170,7 @@ exact signed-manifest recommendation identity, in `owner/repo:vMAJOR.MINOR.PATCH
 form. It is not an admission allowlist. Buyer-serving release admission MUST
 accept any valid identity from the target repository at or above the numeric
 three-component minimum, except an exact identity in `revoked_ids`. Numeric
-overflow and malformed versions MUST fail closed. For buyer-serving admission, the reported binary version
+overflow, malformed versions, and noncanonical leading-zero components MUST fail closed. For buyer-serving admission, the reported binary version
 MUST agree numerically with the identity's version. These reported fields do
 not authenticate a binary or grant a trust tier; provider authentication,
 attestation, catalog admission, and signed update verification remain separate.
@@ -5185,15 +5185,24 @@ The deprecated `accepted_ids` policy MAY remain available for deployment
 migration when `minimum_version` and `revoked_ids` are absent. Configuration
 MUST reject mixing the legacy allowlist with the new policy. An entirely
 unconfigured policy retains existing local/lab behavior. Release tooling MUST
-verify the running coordinator uses the new policy and that the candidate
-satisfies its floor, repository, and revocation checks; it MUST NOT request a
-per-release allowlist edit. Signed candidate verification and canary proof
+verify that the running coordinator admits the candidate under its applied
+policy. During migration, a legacy allowlist MAY satisfy this gate only when
+the exact candidate identity is already admitted; missing policy metadata
+MUST NOT imply admission. Version-floor policies MUST enforce the floor,
+repository, and revocation checks. Version-floor tooling MUST NOT request a
+per-release allowlist edit; the legacy train MAY retain its existing verified
+admission step until migration. A locked, scripted migration MUST refuse a floor above any
+connected provider or an unknown connected release identity, preserve unrelated
+configuration, and verify the applied policy after reload. Signed candidate verification and canary proof
 remain required.
 
 A validated SIGHUP reload MUST publish one immutable compatibility policy
 snapshot after fallible reload preparation succeeds. A rejected reload MUST
-leave the prior policy intact. Newly revoked or below-floor connected sessions
-MUST become unroutable and close; an in-flight admission MUST recheck the
+leave the prior policy intact. Before publication, a reload MUST refuse a
+policy that would reject any authenticated connected session through a floor,
+repository, or legacy allowlist change. This guard MUST be serialized with
+admission and policy publication. Explicit exact revocations remain intentional:
+newly revoked connected sessions MUST become unroutable and close; an in-flight admission MUST recheck the
 current policy before becoming routable so it cannot escape reload enforcement.
 After durable credential mutation, an admission invalidated by reload MUST
 remain held out of routing, deliver its credential-bearing acknowledgement,

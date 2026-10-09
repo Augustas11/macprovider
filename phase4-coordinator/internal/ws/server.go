@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/big"
@@ -1341,14 +1342,65 @@ func (s *Server) compatibilitySetPolicy() config.CompatibilitySetConfig {
 	return cloneCompatibilitySetPolicy(s.compatibilitySet)
 }
 
-// SetCompatibilitySetPolicy publishes the already-validated SIGHUP policy and
-// immediately fences live sessions that are no longer admitted by it.
-func (s *Server) SetCompatibilitySetPolicy(policy config.CompatibilitySetConfig) int {
+// CompatibilitySetPolicyReload reserves the compatibility admission/publication
+// lane for a validated SIGHUP policy. Call Publish to commit the policy or Abort
+// to release the reservation after a later reload preparation failure.
+type CompatibilitySetPolicyReload struct {
+	server   *Server
+	policy   config.CompatibilitySetConfig
+	released bool
+}
+
+// BeginCompatibilitySetPolicyReload refuses reload policies that would strand
+// currently connected sessions through accidental floor/repository/allowlist
+// drift. The server keeps compatibilitySetMu locked until Publish or Abort, so
+// admission verdicts, final ack release, and policy publication are serialized.
+func (s *Server) BeginCompatibilitySetPolicyReload(policy config.CompatibilitySetConfig) (*CompatibilitySetPolicyReload, error) {
 	policy = cloneCompatibilitySetPolicy(policy)
 	s.compatibilitySetMu.Lock()
-	s.compatibilitySet = policy
+	if err := s.compatibilitySetPolicyReloadErrorLocked(policy); err != nil {
+		s.compatibilitySetMu.Unlock()
+		return nil, err
+	}
+	return &CompatibilitySetPolicyReload{server: s, policy: policy}, nil
+}
+
+// SetCompatibilitySetPolicy publishes the already-validated SIGHUP policy and
+// immediately fences live sessions that are no longer admitted by it.
+func (s *Server) SetCompatibilitySetPolicy(policy config.CompatibilitySetConfig) (int, error) {
+	reload, err := s.BeginCompatibilitySetPolicyReload(policy)
+	if err != nil {
+		return 0, err
+	}
+	return reload.Publish(), nil
+}
+
+func (r *CompatibilitySetPolicyReload) Publish() int {
+	if r == nil || r.released {
+		return 0
+	}
+	s := r.server
+	s.compatibilitySet = r.policy
+	closed, pendingCloses := s.closeCompatibilitySetRejectedSessionsLocked(r.policy)
+	r.released = true
 	s.compatibilitySetMu.Unlock()
-	return s.closeCompatibilitySetRejectedSessions(policy)
+	for _, pending := range pendingCloses {
+		s.closeSession(pending.session, CloseInvalidHello, pending.reason)
+	}
+	return closed
+}
+
+func (r *CompatibilitySetPolicyReload) Abort() {
+	if r == nil || r.released {
+		return
+	}
+	r.released = true
+	r.server.compatibilitySetMu.Unlock()
+}
+
+type compatibilitySetPendingClose struct {
+	session *providerSession
+	reason  string
 }
 
 // canaryBuyerServing reports whether p passes the coordinator's REQUEST-INDEPENDENT
@@ -3928,11 +3980,41 @@ func (s *Server) releaseAckedSessionIfCompatibilityAllowed(session *providerSess
 	return false
 }
 
-func (s *Server) closeCompatibilitySetRejectedSessions(policy config.CompatibilitySetConfig) int {
+func (s *Server) compatibilitySetPolicyReloadErrorLocked(policy config.CompatibilitySetConfig) error {
 	if s.pool == nil {
-		return 0
+		return nil
+	}
+	for _, provider := range s.pool.Snapshot() {
+		if !s.isProviderTransportConnected(provider) {
+			continue
+		}
+		code := compatibilitySetProviderRejectionLocked(policy, provider.CompatibilitySetID, provider.BinaryVersion, provider.CatalogAdmissionMode)
+		if code == "" || compatibilitySetExactRevocation(policy, provider.CompatibilitySetID, code) {
+			continue
+		}
+		return fmt.Errorf("compatibility policy reload would reject connected provider %s/%s set %q binary %q: %s", provider.ProviderID, provider.AssignedID, provider.CompatibilitySetID, provider.BinaryVersion, code)
+	}
+	return nil
+}
+
+func compatibilitySetExactRevocation(policy config.CompatibilitySetConfig, id, code string) bool {
+	if code != "provider_release_revoked" {
+		return false
+	}
+	for _, revoked := range policy.RevokedIDs {
+		if id == revoked {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) closeCompatibilitySetRejectedSessionsLocked(policy config.CompatibilitySetConfig) (int, []compatibilitySetPendingClose) {
+	if s.pool == nil {
+		return 0, nil
 	}
 	closed := 0
+	pendingCloses := []compatibilitySetPendingClose{}
 	for _, provider := range s.pool.Snapshot() {
 		code := compatibilitySetProviderRejectionLocked(policy, provider.CompatibilitySetID, provider.BinaryVersion, provider.CatalogAdmissionMode)
 		if code == "" {
@@ -3952,11 +4034,11 @@ func (s *Server) closeCompatibilitySetRejectedSessions(policy config.Compatibili
 		}
 		event.Msg("provider compatibility policy reloaded; closing session")
 		if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
-			s.closeSession(session, CloseInvalidHello, compatibilitySetCloseReason(policy, code))
+			pendingCloses = append(pendingCloses, compatibilitySetPendingClose{session: session, reason: compatibilitySetCloseReason(policy, code)})
 		}
 		closed++
 	}
-	return closed
+	return closed, pendingCloses
 }
 
 // fenceCatalogDivergedSession makes one diverged session unroutable at once,
@@ -4092,6 +4174,9 @@ func compatibilitySetRejectionLocked(policy config.CompatibilitySetConfig, provi
 		tagVersion := compatibilitySetTagVersion(providedID)
 		if tagVersion == "" {
 			return "compatibility_set_invalid"
+		}
+		if !config.ValidCompatibilitySetVersion(binaryVersion) {
+			return "provider_binary_version_mismatch"
 		}
 		if cmp, ok := versionfloor.Compare(strings.TrimSpace(binaryVersion), tagVersion); !ok || cmp != 0 {
 			return "provider_binary_version_mismatch"
@@ -4306,6 +4391,12 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		session *providerSession
 		refusal pool.RegisterRefusal
 	)
+	// Hold the compatibility-policy read lock across the provider-section,
+	// registry publication, and session storage. SIGHUP publication takes the
+	// write lock before its sweep, so reload and admission share one lock order:
+	// compatibility policy → provider section → registry/session.
+	s.compatibilitySetMu.RLock()
+	defer s.compatibilitySetMu.RUnlock()
 	// A catalog-bound session is published held out of routing and released
 	// only after the catalog re-check below, so no buyer route can observe it
 	// between registration and that check. The hold is a registry flag, not a
@@ -4351,15 +4442,8 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	if entry.CatalogAdmissionMode == "legacy_bridge" && !s.autotuneCatalogBridgeActive() {
 		entry.CatalogAdmissionMode = "legacy"
 	}
-	// Hold the compatibility-policy read lock across registry publication and
-	// session storage. A SIGHUP policy publish takes the write lock before its
-	// sweep, so the sweep either sees neither provider nor session or sees both.
-	// The post-ack eviction below handles the case where a new policy landed
-	// between credential mint and this registration without stranding credentials.
-	s.compatibilitySetMu.RLock()
 	old, ok, refusal := s.pool.RegisterAtDetailed(entry, conn, s.now())
 	if !ok {
-		s.compatibilitySetMu.RUnlock()
 		// SPEC-003 v0.8.3 FR-C9.4 eviction defense fired: a
 		// bearer-less duplicate tried to evict an existing routable
 		// session for the same provider_id. Log + signal the caller
@@ -4376,7 +4460,6 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	session.onWriteFailure = s.handleProviderWriteFailure
 	session.ackPending = entry.HandshakeAckPending
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
-	s.compatibilitySetMu.RUnlock()
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
 	s.rememberProviderSnapshot(*entry)
 	s.recordConnectionEvent(providerevents.Event{
