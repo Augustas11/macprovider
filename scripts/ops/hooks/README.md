@@ -25,9 +25,12 @@ entry point to use when the command word of any simple command in it is:
 
 The line is split on `;`, `&`, `&&`, `|`, `||`, newlines and parentheses.
 Comments and heredoc bodies are removed, and `$(...)` and backtick bodies are
-checked as commands of their own. Wrappers are unwrapped: `sudo`, `env`,
-`nohup`, `time`, `nice`, `ionice`, `timeout`, `xargs`, `systemd-run`, `eval`,
-`bash|sh -c PAYLOAD`, and the remote command of `ssh HOST CMD`. A guarded name
+checked as commands of their own. Wrappers are unwrapped: `sudo`, `doas`,
+`env`, `nohup`, `time`, `nice`, `ionice`, `timeout`, `xargs`, `setsid`,
+`systemd-run`, `chroot DIR`, `flock [-c]`, `su|runuser -c`, `script -c`,
+`watch`, `eval`, `bash|sh -c PAYLOAD`, the remote command of `ssh HOST [--]
+CMD`, and `source`/`.` (the sourced path is classified). A workflow named
+through a shell expansion (`$WF`) is blocked because it cannot be checked. A guarded name
 that is only an argument (`grep`, `rg`, `git log`, `cat`, `sed`, `bash -n`)
 is allowed.
 

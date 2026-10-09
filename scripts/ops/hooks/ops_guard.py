@@ -209,6 +209,12 @@ def skip_options(toks, i, with_arg):
     return i
 
 
+def reparse(text, depth):
+    """Parse a wrapped command string (bash -c, ssh, su -c, watch...) again."""
+    for sub in segments(text):
+        yield from simple_commands(sub, depth + 1)
+
+
 def simple_commands(segment, depth=0):
     """Yield (word_basename, raw_word, args) for a segment, unwrapping wrappers."""
     if depth > 8:
@@ -280,9 +286,43 @@ def simple_commands(segment, depth=0):
             return
         elif w == "ssh":
             i = skip_options(toks, i + 1, {"-%s" % c for c in "BbcDEeFIiJLlmOoPpQRSWw"})
+            rest = toks[i + 1:]
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            if rest:
+                yield from reparse(" ".join(rest), depth)
+            return
+        elif w == "flock":
+            # flock [opts] LOCK (-c PAYLOAD | COMMAND...)
+            i = skip_options(toks, i + 1, {"-E", "-w", "--conflict-exit-code", "--timeout"}) + 1
+            if i < len(toks) and toks[i] in ("-c", "--command"):
+                if i + 1 < len(toks):
+                    yield from reparse(toks[i + 1], depth)
+                return
+        elif w in ("su", "runuser"):
+            payload = flag_values(toks[i + 1:], {"-c", "--command"})
+            for p in payload:
+                yield from reparse(p, depth)
+            return
+        elif w == "doas":
+            i = skip_options(toks, i + 1, {"-u", "-C"})
+        elif w == "setsid":
+            i = skip_options(toks, i + 1, set())
+        elif w == "watch":
+            # watch runs its arguments through sh -c unless -x; parse them either way.
+            i = skip_options(toks, i + 1, {"-n", "--interval", "-q", "--equexit"})
+            if i < len(toks):
+                yield from reparse(" ".join(toks[i:]), depth)
+            return
+        elif w == "script":
+            for p in flag_values(toks[i + 1:], {"-c", "--command"}):
+                yield from reparse(p, depth)
+            return
+        elif w == "chroot":
+            i = skip_options(toks, i + 1, {"--userspec", "--groups"}) + 1
+        elif w in ("source", "."):
             if i + 1 < len(toks):
-                for sub in segments(" ".join(toks[i + 1:])):
-                    yield from simple_commands(sub, depth + 1)
+                yield os.path.basename(toks[i + 1]), toks[i + 1], toks[i + 2:]
             return
         else:
             break
@@ -308,6 +348,9 @@ def positional_after(args, value_flags):
 def guard_workflow(ref, names):
     if ref is None:
         return
+    if "$" in ref or "`" in ref:
+        raise Blocked("workflow named through a shell expansion (%s) cannot be checked" % ref,
+                      "Dispatch by literal workflow file name through the scripts/ops entry points.")
     base = os.path.basename(ref)
     stem = re.sub(r"\.ya?ml$", "", base)
     if stem in WORKFLOWS and base != stem:

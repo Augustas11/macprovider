@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # command lines under test are literal text
 # Block/allow cases for scripts/ops/hooks/claude-pretooluse-ops-guard.sh.
 # Usage: bash scripts/ops/test-ops-guard.sh
 set -euo pipefail
@@ -83,7 +84,6 @@ expect block "bash -c 'cd /x && scripts/catalog-content-release.sh --deploy --co
 expect block "sh -ec \"gh workflow run release.yml\""
 expect block "ssh -i key -p 22 host 'sudo systemctl restart macprovider-coordinator'"
 expect block "ssh host sudo systemd-run --unit=mp-update-1 -p UMask=0077 /usr/local/sbin/macprovider-pearl-update --apply --tag v1.8.230"
-# shellcheck disable=SC2016  # the substitution is the command under test
 expect block 'echo "$(gh workflow run release.yml)"'
 expect block 'eval "gh workflow run pearl-runtime-release.yml"'
 expect block 'timeout 60 scripts/publish-native-mtp-revocations.sh --deploy'
@@ -154,6 +154,28 @@ printf 'Body\n\nRefs #55.\n' > "$tmp/ok.md"
 expect allow "gh pr create --title t --body-file ok.md"
 printf 'Subject\n\nfixes #8\n' > "$tmp/msg.txt"
 expect block "git commit -F msg.txt"
+
+# --- round 2: more wrappers ---
+expect block "ssh pearl 'flock -n /run/lock/a flock -n /opt/b systemctl restart macprovider-coordinator'"
+expect block 'flock /tmp/l bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'flock -w 30 -E 9 /tmp/l -c "scripts/catalog-content-release.sh --deploy --commit abc"'
+expect block "su -c 'systemctl restart macprovider-coordinator'"
+expect block "su - root -c 'systemctl restart macprovider-coordinator'"
+expect block "runuser -u root -- bash -c 'systemctl restart macprovider-coordinator'"
+expect block '. phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'source phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block 'watch -n 5 systemctl restart macprovider-coordinator'
+expect block "ssh -o BatchMode=yes -p 22 pearl -- 'macprovider-pearl-update --apply'"
+expect block 'doas -u root systemctl restart macprovider-coordinator'
+expect block 'setsid -f bash phase4-coordinator/dist/deploy-pearl-vps.sh'
+expect block "script -q -c 'gh workflow run release.yml' /dev/null"
+expect block 'chroot /srv/root /usr/local/sbin/macprovider-pearl-update --apply'
+expect block 'gh api -X POST "repos/o/r/actions/workflows/$WF/dispatches" -f ref=main'
+expect block 'gh workflow run "$WORKFLOW" --ref main'
+expect allow 'flock -n /tmp/l true'
+expect allow 'source scripts/ops/lib/common.sh'
+expect allow 'watch -n 5 curl -s localhost/healthz'
+expect allow "ssh pearl -- 'macprovider-pearl-update --plan --tag v1.8.230'"
 
 # --- malformed input fails open ---
 rc=0; printf 'not json' | bash "$GUARD" 2>/dev/null || rc=$?

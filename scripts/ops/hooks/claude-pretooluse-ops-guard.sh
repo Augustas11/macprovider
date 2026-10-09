@@ -15,7 +15,8 @@
 #     message, inline, heredoc or --body-file/-F file, has a GitHub closing
 #     keyword followed by #N, owner/repo#N or an issue/pull URL, negated or not
 #   - an assignment of MACPROVIDER_OPS_ENTRYPOINT
-# Wrappers (sudo, env, nohup, time, nice, ionice, timeout, xargs, systemd-run,
+# Wrappers (sudo, doas, env, nohup, time, nice, ionice, timeout, xargs, setsid,
+# systemd-run, chroot, flock, su/runuser -c, script -c, watch, source/.,
 # eval, bash/sh -c, ssh HOST CMD) are unwrapped; read-only uses such as
 # grep/rg/git log/cat/bash -n of a guarded name are allowed. Parsing lives in
 # ops_guard.py.
