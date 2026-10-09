@@ -110,9 +110,10 @@ or `omlx_loopback` (v0.20.0) must not be cut before every consumer reads it
    - llama.cpp needs `--jinja` for chat templates and tool calls.
    - LM Studio: the name must resolve to one `.gguf` under the models root
      (`<publisher>/<repo>/<file>.gguf`). When several quantizations of one
-     repo match, the CLI keeps the file whose publisher, exact size and path
-     match the loaded entry in `GET /api/v1/models`; if that still leaves
-     more than one, it reports no identity. A model loaded with a custom
+     repo match, the CLI narrows those locally name-matched files by the
+     publisher and exact size of the loaded entry in `GET /api/v1/models`
+     (never by a path LM Studio reports); if more than one file remains, it
+     fails closed and names the files to remove. A model loaded with a custom
      `--identifier` is offered and served as `lmstudio:<identifier>`; the
      identifier maps to its entry's key, and chat requests name the
      identifier. LM Studio's list only narrows the files the name already
