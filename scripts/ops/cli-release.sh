@@ -29,14 +29,20 @@
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
 #                           candidate, coordinator.connected, candidate compatibility set,
 #                           CB active, live_verified, authorized, local proof passed, paged KV attached,
-#                           then sends one provider-attributed buyer request through the gateway)
+#                           then sends one provider-attributed buyer request through the gateway;
+#                           refused when Pearl's journal shows the canary's privacy advertisement
+#                           rejected as posture_unapproved_code_identity in the last 10 minutes)
 #   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
 #                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
 #                           promote-signed-*-journey run whose head SHA, title or log names the
 #                           candidate SHA or tag) or `--carry-forward ID` (a carry-forward record
 #                           in docs/releases/cli-release-train.md naming the candidate version)
+#   7a registrations        read-only gate over PEARL_SSH: the candidate compatibility_set_id is
+#                           in accepted_ids AND its code_cdhash is approved (a verifying
+#                           v<ver>.json in metadata_dir or an approved_code_identities entry),
+#                           with the on-disk config no newer than the running coordinator
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
-#                           sets physical_acceptance_confirmed=true, after 4, 6 and 7
+#                           sets physical_acceptance_confirmed=true, after 4, 6, 7 and 7a
 #   8 recommendation_bump   Pearl latest_binary_version + compatibility target
 #   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
@@ -401,6 +407,19 @@ bash scripts/release-staged-version-policy.sh v$V" \
 #   $0 next --done e2e_gate --carry-forward <record id in docs/releases/cli-release-train.md>"
   fi
 
+  # 7a. registrations: every coordinator-side registration of the candidate
+  # binary is live before it can be promoted.
+  if [ "$published" = true ]; then
+    step registrations "done" "v$V published"
+  elif [ "$REG_STATE" != unknown ] && [ -z "$REG_MISSING" ]; then
+    step registrations "done" "accepted_ids has $compat_id; code identity approved by $REG_BY"
+  else
+    step registrations pending "${REG_MISSING:-$REG_ERR}"
+    set_next registrations blocked "Pearl registrations for v$V before promotion" "" \
+      "promotion refused: ${REG_MISSING:-$REG_ERR}"
+    next_meta registrations "$TRAIN_DOC#promotion-gate-checklist"
+  fi
+
   # 7. promotion.
   local cs
   cs="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')"
@@ -419,9 +438,10 @@ bash scripts/release-staged-version-policy.sh v$V" \
     if [ -n "$prod_active" ]; then
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
-      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha"; then
+      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha" ||
+      [ "$REG_STATE" = unknown ] || [ -n "$REG_MISSING" ]; then
       set_next promotion blocked "Promote v$V" "" \
-        "physical_acceptance_confirmed=true needs verified bytes, canary smoke and e2e evidence recorded for $ok_sha"
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence and live Pearl registrations for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
 "gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
@@ -597,6 +617,17 @@ if bad:
 print(json.dumps(got, sort_keys=True))
 PY
 )" || refuse "canary probe failed the candidate checks"
+        # The coordinator must accept the canary's privacy advertisement:
+        # a rejection is only a log line on Pearl, so read it there.
+        local canary_id rejected
+        canary_id="$(json_field "$OPS_TMP_DIR/canary.json" 'd["provider_id"]')"
+        [ -n "$canary_id" ] || refuse "canary /v1/status reports no provider_id"
+        require_pearl_ssh
+        rejected="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" - "$canary_id" -10min |
+          python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])')" ||
+          refuse "Pearl coordinator journal not readable over PEARL_SSH"
+        [ "$rejected" = 0 ] ||
+          refuse "Pearl rejected the canary's privacy advertisement $rejected time(s) in the last 10 minutes (posture_unapproved_code_identity): register v$V's code identity first"
         local gateway_proof
         gateway_proof="$({ "$OPS_DIR/catalog-activate.sh" _gateway-proof; } 2>&1)" ||
           refuse "canary gateway proof failed after status validation: $gateway_proof"

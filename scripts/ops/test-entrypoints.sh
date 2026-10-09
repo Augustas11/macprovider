@@ -251,7 +251,12 @@ printf 'canary-test-id' > "$tmp/svc/provider_id"
 printf 'move' > "$tmp/svc/mode"
 rm -f "$tmp/svc/served"
 status_doc $CAND true
+printf '{"level":"warn","error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"canary-test-id","message":"privacy key advertisement rejected"}\n' > "$tmp/svc/journal.txt"
+run_rc 3 "canary probe refused when Pearl rejects its privacy advertisement" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "rejected the canary's privacy advertisement 1 time"
+printf '{"level":"warn","error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"other-provider","message":"privacy key advertisement rejected"}\n' > "$tmp/svc/journal.txt"
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
+rm -f "$tmp/svc/journal.txt"
 run_rc 0 "cli status after canary" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 run_rc 3 "free-text e2e evidence refused" scripts/ops/cli-release.sh next --done e2e_gate --evidence "all green"
@@ -269,6 +274,34 @@ case "$(next_field command)" in
   *"candidate_run_id=111"*"physical_acceptance_confirmed=true"*) ok ;;
   *) bad "promotion command: $(next_field command)" ;;
 esac
+case " $(step_ids) " in
+  *" e2e_gate registrations promotion "*) ok ;;
+  *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
+esac
+# Registrations gate: each missing Pearl registration refuses promotion by name.
+pearl_config "[]" "$META"
+run_rc 0 "cli status without the candidate in accepted_ids" scripts/ops/cli-release.sh status
+expect_next registrations:blocked
+case "$(next_field reason)" in *"accepted_ids lacks $COMPAT"*) ok ;; *) bad "accepted_ids reason: $(next_field reason)" ;; esac
+pearl_config "[\"$COMPAT\"]" "$META"
+mkdir -p "$tmp/pearl/aside" && mv "$META"/v"$CAND".json* "$tmp/pearl/aside/"
+run_rc 0 "cli status with the candidate cdhash unapproved" scripts/ops/cli-release.sh status
+if [ "$(state_of registrations)" = "pending" ] && [ "$(next_field id)" != "promotion" ]; then ok; else bad "unapproved cdhash did not refuse promotion: $(next_field id)"; fi
+case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
+  *"$CDHASH"*"not approved"*) ok ;; *) bad "registrations note does not name the cdhash" ;;
+esac
+pearl_config "[\"$COMPAT\"]" "$META" "$CDHASH"
+run_rc 0 "cli status with a config approval" scripts/ops/cli-release.sh status
+if [ "$(state_of registrations)" = "done" ]; then ok; else bad "approved_code_identities entry not accepted: $(next_field reason)"; fi
+touch -t "$(date -v+2H +%Y%m%d%H%M 2>/dev/null || date -d '+2 hours' +%Y%m%d%H%M)" "$tmp/pearl/overlay.yaml"
+run_rc 0 "cli status with an unapplied config edit" scripts/ops/cli-release.sh status
+case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
+  *"newer than the running coordinator"*) ok ;; *) bad "unapplied config edit not refused" ;;
+esac
+mv "$tmp/pearl/aside"/* "$META/"
+pearl_config "[\"$COMPAT\"]" "$META"
+run_rc 0 "cli status with registrations restored" scripts/ops/cli-release.sh status
+expect_next promotion:mutate
 rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
