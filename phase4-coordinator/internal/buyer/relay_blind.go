@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -44,10 +45,10 @@ type relayBlindService struct {
 	// waiters counts relay-blind slot waiters per provider. It is capped so
 	// relay-blind waits cannot fill the shared queue plaintext routing uses.
 	waiters map[string]int
-	// rotations offsets the start of each candidate tier per model and key
-	// class, so concurrent reservations spread across equally ranked
-	// providers.
-	rotations map[string]uint64
+	// pick chooses the start of a candidate tier; nil means uniform random.
+	// Random needs no shared state, so no interleaving of models, key classes
+	// or request sizes can concentrate reservations on one provider.
+	pick func(n int) int
 }
 
 // relayBlindDurableWriteTimeout bounds each store write that must land even
@@ -501,7 +502,7 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 			keys = append(keys, records[0])
 		}
 	}
-	order := s.orderRelayBlindCandidates(providers, class+"\x00"+model)
+	order := s.orderRelayBlindCandidates(providers)
 	if len(order) == 0 {
 		return pool.Provider{}, relayblind.KeyRecord{}, false
 	}
@@ -510,11 +511,11 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 
 // orderRelayBlindCandidates returns the indexes of fully eligible providers
 // in selection order: providers whose free slot is not already claimed by the
-// slot queue first, then busy ones, each tier rotated per rotation key
-// (key class and model). A reservation is pinned to one provider, so binding
-// every reservation to the first provider in session order leaves idle
-// providers unused while the first one's queue times out.
-func (s *Server) orderRelayBlindCandidates(providers []pool.Provider, rotationKey string) []int {
+// slot queue first, then busy ones, each tier starting at a random provider.
+// A reservation is pinned to one provider, so binding every reservation to
+// the first provider in session order leaves idle providers unused while the
+// first one's queue times out.
+func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []int {
 	sorted := make([]int, len(providers))
 	for i := range sorted {
 		sorted[i] = i
@@ -529,31 +530,20 @@ func (s *Server) orderRelayBlindCandidates(providers []pool.Provider, rotationKe
 			busy = append(busy, i)
 		}
 	}
-	var offset uint64
-	if s.relayBlind != nil && len(providers) > 1 {
-		offset = s.relayBlind.nextRotation(rotationKey)
+	pick := rand.IntN
+	if s.relayBlind != nil && s.relayBlind.pick != nil {
+		pick = s.relayBlind.pick
 	}
 	ordered := make([]int, 0, len(providers))
 	for _, tier := range [][]int{free, busy} {
 		if len(tier) == 0 {
 			continue
 		}
-		start := int(offset % uint64(len(tier)))
+		start := pick(len(tier))
 		ordered = append(ordered, tier[start:]...)
 		ordered = append(ordered, tier[:start]...)
 	}
 	return ordered
-}
-
-func (r *relayBlindService) nextRotation(key string) uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.rotations == nil {
-		r.rotations = map[string]uint64{}
-	}
-	offset := r.rotations[key]
-	r.rotations[key] = offset + 1
-	return offset
 }
 
 func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request) {

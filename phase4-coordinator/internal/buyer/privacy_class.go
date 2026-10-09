@@ -221,7 +221,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 			break
 		}
 	}
-	if order := s.orderRelayBlindCandidates(providers, relayblind.KeyClassPrivacy+"\x00"+model); len(order) > 0 {
+	if order := s.orderRelayBlindCandidates(providers); len(order) > 0 {
 		return selections[order[0]], ""
 	}
 	s.logPrivacyGateRejection("no_eligible_provider")

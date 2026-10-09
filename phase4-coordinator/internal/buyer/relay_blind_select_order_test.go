@@ -14,8 +14,18 @@ func selectOrderProvider(id string, slotsFree int) pool.Provider {
 	return pool.Provider{ProviderID: id, AssignedID: "session-" + id, ModelID: "model-a", SlotsFree: slotsFree, SlotsTotal: 1, State: state, AuthState: pool.AuthBearerValidated, InferencePath: pool.InferencePathWSTunneled}
 }
 
-func selectOrderIDs(s *Server, providers []pool.Provider, key string) []string {
-	order := s.orderRelayBlindCandidates(providers, key)
+// cyclingPick returns 0, 1, 2, ... modulo n, standing in for the random
+// tier start so tests are deterministic.
+func cyclingPick() func(int) int {
+	next := 0
+	return func(n int) int {
+		next++
+		return (next - 1) % n
+	}
+}
+
+func selectOrderIDs(s *Server, providers []pool.Provider) []string {
+	order := s.orderRelayBlindCandidates(providers)
 	ids := make([]string, len(order))
 	for i, index := range order {
 		ids[i] = providers[index].ProviderID
@@ -27,7 +37,7 @@ func selectOrderIDs(s *Server, providers []pool.Provider, key string) []string {
 // another provider has a free slot.
 func TestRelayBlindCandidatesPreferFreeSlot(t *testing.T) {
 	s := &Server{relayBlind: &relayBlindService{}}
-	got := selectOrderIDs(s, []pool.Provider{selectOrderProvider("b", 1), selectOrderProvider("a", 0)}, "m")
+	got := selectOrderIDs(s, []pool.Provider{selectOrderProvider("b", 1), selectOrderProvider("a", 0)})
 	if got[0] != "b" || got[1] != "a" {
 		t.Fatalf("order=%v, want the free provider first", got)
 	}
@@ -36,11 +46,11 @@ func TestRelayBlindCandidatesPreferFreeSlot(t *testing.T) {
 // Concurrent reservations spread across equally ranked providers instead of
 // all binding the first one in session order.
 func TestRelayBlindCandidatesRotateWithinTier(t *testing.T) {
-	s := &Server{relayBlind: &relayBlindService{}}
+	s := &Server{relayBlind: &relayBlindService{pick: cyclingPick()}}
 	firsts := map[string]int{}
 	for range 6 {
 		providers := []pool.Provider{selectOrderProvider("a", 1), selectOrderProvider("b", 1), selectOrderProvider("c", 1), selectOrderProvider("d", 0)}
-		got := selectOrderIDs(s, providers, "m")
+		got := selectOrderIDs(s, providers)
 		if got[3] != "d" {
 			t.Fatalf("order=%v, want the busy provider last", got)
 		}
@@ -61,26 +71,28 @@ func TestRelayBlindCandidatesTreatClaimedSlotAsBusy(t *testing.T) {
 		t.Fatal("could not claim the slot")
 	}
 	s := &Server{relayBlind: &relayBlindService{}, slotQueue: queue}
-	got := selectOrderIDs(s, []pool.Provider{selectOrderProvider("a", 1), selectOrderProvider("b", 1)}, "m")
+	got := selectOrderIDs(s, []pool.Provider{selectOrderProvider("a", 1), selectOrderProvider("b", 1)})
 	if got[0] != "b" {
 		t.Fatalf("order=%v, want the unclaimed provider first", got)
 	}
 }
 
-// Interleaved reservations for different models each rotate over their own
-// providers instead of sharing one counter.
-func TestRelayBlindCandidatesRotatePerModel(t *testing.T) {
+// The default picker is random, so every free provider is chosen across many
+// reservations whatever the interleaving.
+func TestRelayBlindCandidatesRandomStartReachesEveryFreeProvider(t *testing.T) {
 	s := &Server{relayBlind: &relayBlindService{}}
-	x := []pool.Provider{selectOrderProvider("x1", 1), selectOrderProvider("x2", 1)}
-	y := []pool.Provider{selectOrderProvider("y1", 1), selectOrderProvider("y2", 1)}
+	providers := []pool.Provider{selectOrderProvider("a", 1), selectOrderProvider("b", 1), selectOrderProvider("c", 1), selectOrderProvider("d", 0)}
 	firsts := map[string]int{}
-	for range 4 {
-		firsts[selectOrderIDs(s, x, "privacy\x00model-x")[0]]++
-		firsts[selectOrderIDs(s, y, "privacy\x00model-y")[0]]++
+	for range 300 {
+		got := selectOrderIDs(s, providers)
+		if got[3] != "d" {
+			t.Fatalf("order=%v, want the busy provider last", got)
+		}
+		firsts[got[0]]++
 	}
-	for _, id := range []string{"x1", "x2", "y1", "y2"} {
-		if firsts[id] != 2 {
-			t.Fatalf("first-choice counts=%v, want each provider twice", firsts)
+	for _, id := range []string{"a", "b", "c"} {
+		if firsts[id] == 0 {
+			t.Fatalf("first-choice counts=%v, provider %s never chosen", firsts, id)
 		}
 	}
 }
