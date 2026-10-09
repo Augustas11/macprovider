@@ -1,0 +1,4 @@
+binary_sha256 ea42fd7226bf599ef8afd54136467c3c2199ef9b9ad018bf2b3df96ae2c3c73d
+msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=16 block=16 serial_tps_p50=145.7 engine_1row_tps_p50=107.1 aggregate_tps_p50=302.7 uplift_vs_1row=2.83x aggregate_vs_serial=2.08x peak_rss_mb=38425
+msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=32 block=16 serial_tps_p50=145.7 engine_1row_tps_p50=107.9 aggregate_tps_p50=349.7 uplift_vs_1row=3.24x aggregate_vs_serial=2.40x peak_rss_mb=38419
+msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=8 block=16 serial_tps_p50=145.2 engine_1row_tps_p50=107.6 aggregate_tps_p50=253.3 uplift_vs_1row=2.35x aggregate_vs_serial=1.74x peak_rss_mb=38404
