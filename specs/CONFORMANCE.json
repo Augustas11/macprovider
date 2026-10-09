@@ -7247,7 +7247,9 @@
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
         "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) dropArchivedEvidenceCredits",
         "phase4-coordinator/internal/billing/recovery.go:func creditEvidenceArchivedTx",
-        "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention"
+        "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention",
+        "phase4-coordinator/internal/billing/evidence_retention_endpoint.go:func (h *handler) evidenceRetentionHandler",
+        "phase4-coordinator/cmd/coordinator-cli/settlement_evidence_archive.go:func settlementEvidenceArchive"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
@@ -7258,7 +7260,8 @@
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRederivesSettledCreditFromArchive",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionReadersTolerateArchivedRequests",
         "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone",
-        "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts"
+        "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts",
+        "phase4-coordinator/internal/billing/evidence_retention_endpoint_test.go:TestEvidenceRetentionAdminRouteIsOperatorOnlyAndGatedByEnabled"
       ],
       "journeys": [],
       "evidence": [],

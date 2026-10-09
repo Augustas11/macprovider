@@ -327,6 +327,10 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.wholesaleStatementItem(w, r)
 		return
 	}
+	if r.URL.Path == evidenceRetentionPath || r.URL.Path == evidenceRetentionRunPath {
+		h.evidenceRetentionHandler(w, r)
+		return
+	}
 	if r.URL.Path == settlementReceiptAuditOutboxPoisonPath {
 		h.settlementReceiptAuditOutboxPoisonListHandler(w, r)
 		return
