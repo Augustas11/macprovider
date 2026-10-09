@@ -121,6 +121,10 @@ func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.
 		h.writeLookupError(w, "creator_lookup_failed", err)
 		return
 	}
+	if strings.HasPrefix(rest, "pools/") && strings.HasSuffix(rest, "/promote") {
+		h.handleSelfServePromote(w, r, principal, strings.TrimSuffix(strings.TrimPrefix(rest, "pools/"), "/promote"))
+		return
+	}
 	rewritten := r.Clone(r.Context())
 	rewritten.URL.Path = "/creator/trust-pools/" + rest
 	rewritten.URL.RawPath = ""
@@ -404,4 +408,74 @@ func (h *adminHandler) fillSelfServeNonceIssue(ctx context.Context, issue *RootR
 		issue.ExpiresAtUTC = time.Now().UTC().Add(selfServeRootNonceTTL)
 	}
 	return nil
+}
+
+type selfServePromotionRequest struct {
+	OperationID string `json:"operation_id,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// handleSelfServePromote activates the creator's own self_serve_private pool
+// through the same atomic PromotePool path operators use. validatePromotion
+// applies the automated SPEC-043-R008 0.3.0 subset for that launch
+// environment; any other pool answers not_found, as on the bearer surface.
+func (h *adminHandler) handleSelfServePromote(w http.ResponseWriter, r *http.Request, principal creatorPrincipal, poolID string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	if poolID == "" || strings.Contains(poolID, "/") {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var body selfServePromotionRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil || pool.CreatorAccountID != principal.CreatorID || pool.RootIssuer == nil ||
+		pool.RootIssuer.LaunchEnvironment != LaunchEnvironmentSelfServePrivate {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, committed, _, err := h.deps.Store.PromotePool(r.Context(), DurableEvent{
+		OperationID:         operationID,
+		EventType:           EventLifecycleChanged,
+		PoolID:              poolID,
+		CreatorCredentialID: principal.CredentialID,
+		Lifecycle:           LifecycleActive,
+		Reason:              strings.TrimSpace(body.Reason),
+	})
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
 }

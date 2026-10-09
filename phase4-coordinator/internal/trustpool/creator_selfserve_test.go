@@ -29,9 +29,9 @@ type selfServeFixture struct {
 	registry *trustpool.Registry
 }
 
-func newSelfServeFixture(t *testing.T) selfServeFixture {
+func newSelfServeFixture(t *testing.T, opts ...trustpool.StoreOption) selfServeFixture {
 	t.Helper()
-	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	store, err := trustpool.NewStore(openTrustPoolDB(t), opts...)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

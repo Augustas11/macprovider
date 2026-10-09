@@ -2217,7 +2217,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		if err := preState.validatePromotion(e, now, s.productionActivationGate, onCall); err != nil {
 			return err
 		}
-		if root := preState.Pools[e.PoolID].RootIssuer; root.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+		if root := preState.Pools[e.PoolID].RootIssuer; launchEnvironmentRequiresProductionGate(root.LaunchEnvironment) {
 			e.RootCustodyClass = s.productionActivationGate.rootCustodyClasses[root.StructuredCustodyDisclosureHash]
 		}
 		next := append(append([]DurableEvent(nil), events...), e)
@@ -2907,7 +2907,7 @@ func (s *ReconstructedState) applyProductionRouteGates(gate productionActivation
 			continue
 		}
 		environment := p.RootIssuer.LaunchEnvironment
-		if environment == promotionLaunchEnvironmentCandidate {
+		if !launchEnvironmentRequiresProductionGate(environment) {
 			continue
 		}
 		reason := ""
@@ -3569,8 +3569,17 @@ func publicAnnouncementLaunchAllowed(p *ReconstructedPoolState) bool {
 	if p == nil || p.RootIssuer == nil {
 		return false
 	}
-	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
-	return environment != "" && environment != promotionLaunchEnvironmentCandidate
+	return launchEnvironmentRequiresProductionGate(p.RootIssuer.LaunchEnvironment)
+}
+
+// launchEnvironmentRequiresProductionGate reports whether a root's launch
+// environment is a production launch: neither the isolated candidate nor a
+// SPEC-043 0.3.0 self-serve private pool, which is activated by its creator
+// through the automated subset of the R008 gate and is never publicly
+// announced.
+func launchEnvironmentRequiresProductionGate(environment string) bool {
+	environment = strings.TrimSpace(environment)
+	return environment != "" && environment != promotionLaunchEnvironmentCandidate && environment != LaunchEnvironmentSelfServePrivate
 }
 
 func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now time.Time) error {
@@ -3635,12 +3644,13 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, ga
 	if p.RootIssuer == nil {
 		return PromotionPreconditionError{Reason: "root_issuer_missing"}
 	}
-	production := p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate
+	selfServe := p.RootIssuer.LaunchEnvironment == LaunchEnvironmentSelfServePrivate
+	production := launchEnvironmentRequiresProductionGate(p.RootIssuer.LaunchEnvironment)
 	if production {
 		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
 			return err
 		}
-	} else if gate.enabled {
+	} else if !selfServe && gate.enabled {
 		// A production-activated coordinator never promotes a candidate root:
 		// that would skip the production, on-call, and lifecycle gates.
 		return PromotionPreconditionError{Reason: "launch_environment_candidate_on_production"}
