@@ -47,6 +47,42 @@ enum MLXLMLoopbackServeModel {
             ?? defaultOrigin
     }
 
+    /// The port docs and help recommend for mlx_lm.server on a provider Mac,
+    /// whose own `serve` already holds mlx_lm.server's default 8080.
+    static let recommendedOrigin = "http://127.0.0.1:8081"
+
+    /// Origins `models discover` probes when MACPROVIDER_MLXLM_MODEL_PATH is
+    /// unset: the operator's MACPROVIDER_MLXLM_ORIGIN alone, else the
+    /// mlx_lm.server default and the recommended non-clashing port.
+    static func discoveryOrigins(configured: String?) -> [String] {
+        if let configured = LoopbackServeSelection.nonEmpty(configured) { return [configured] }
+        return [defaultOrigin, recommendedOrigin]
+    }
+
+    /// The snapshot directory a running mlx_lm.server was started with.
+    /// mlx_lm.server lists its `--model` path, resolved, beside the repo ids
+    /// of every MLX model in the HF cache; only that absolute path names the
+    /// loaded model, so exactly one listed existing directory is required. A
+    /// macprovider `serve` on the same port lists catalog ids and yields nil.
+    static func inferSnapshotDirectory(_ client: any BYOMDiscoveryHTTPClient, origin: URL) async -> URL? {
+        guard let response = try? await client.get(
+            origin.appendingPathComponent("v1/models"),
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: maxModelsBodyBytes
+        ), response.statusCode == 200, let ids = modelIDs(from: response.body) else {
+            return nil
+        }
+        var directories = Set<URL>()
+        for id in ids where id.hasPrefix("/") {
+            let url = URL(fileURLWithPath: id, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                directories.insert(url)
+            }
+        }
+        return directories.count == 1 ? directories.first : nil
+    }
+
     /// The operator-declared snapshot directory, resolved and standardized.
     /// Nil when unset: there is then no identity leg, and serving fails closed.
     static func snapshotDirectory(

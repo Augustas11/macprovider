@@ -133,6 +133,38 @@ final class MLXLMLoopbackTests: XCTestCase {
         XCTAssertEqual(rejected.adapter.status, "rejected")
     }
 
+    func testDiscoveryInfersTheRunningMLXLMServerSnapshotWithoutEnv() async throws {
+        let snapshot = try makeSnapshot()
+        let base = BYOMDiscoveryEnvironment(
+            namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent"), ollamaOrigin: nil
+        )
+        XCTAssertTrue(base.mlxSnapshotLoopbacks.isEmpty)
+
+        // serve on 8080 lists catalog ids; mlx_lm.server on 8081 lists the HF
+        // cache repos plus its --model path.
+        let ports = MLXLMPortStubClient(listings: [
+            8080: ["qwen/qwen3.6-35b-a3b"],
+            8081: ["mlx-community/Other-4bit", snapshot.path],
+        ])
+        let inferred = await base.withInferredMLXLMSnapshot(httpClient: ports)
+        XCTAssertEqual(inferred.mlxlmOrigin, "http://127.0.0.1:8081")
+        XCTAssertEqual(inferred.mlxlmModelPath?.path, snapshot.resolvingSymlinksInPath().standardizedFileURL.path)
+        XCTAssertEqual(inferred.mlxSnapshotLoopbacks.count, 1)
+        let found = await BYOMDiscoveryRunner(environment: inferred, httpClient: ports).discoverIncludingMLXLM()
+        XCTAssertEqual(found.candidates.filter { $0.runtimeSource == "mlxlm_loopback" }.map(\.servedModelRef), ["mlxlm:" + snapshot.lastPathComponent])
+
+        // Only repo ids (no --model path), or a serve-only port: nothing inferred.
+        let none = await base.withInferredMLXLMSnapshot(httpClient: MLXLMPortStubClient(listings: [8080: ["qwen/x"], 8081: ["mlx-community/Other-4bit"]]))
+        XCTAssertNil(none.mlxlmModelPath)
+        // An explicit origin is the only one probed.
+        var explicit = base
+        explicit.mlxlmOrigin = "http://127.0.0.1:9191"
+        let pinned = await explicit.withInferredMLXLMSnapshot(httpClient: ports)
+        XCTAssertNil(pinned.mlxlmModelPath)
+        XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: nil), ["http://127.0.0.1:8080", "http://127.0.0.1:8081"])
+        XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: "http://127.0.0.1:9191"), ["http://127.0.0.1:9191"])
+    }
+
     func testPoolUsageGuardAppliesToMLXLM() {
         let auth = { (source: String) -> PoolRuntimeAuthorization in
             PoolRuntimeAuthorization(wire: [
@@ -422,6 +454,24 @@ private final class MLXLMRecordingClientR3: BYOMDiscoveryHTTPClient, @unchecked 
         let body: [String: Any] = ["object": "list", "data": listed.map { ["id": $0, "object": "model"] }]
         return BYOMHTTPResponse(statusCode: 200, headers: [], body: try JSONSerialization.data(withJSONObject: body))
     }
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
+    }
+}
+
+private final class MLXLMPortStubClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
+    private let listings: [Int: [String]]
+
+    init(listings: [Int: [String]]) { self.listings = listings }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        guard url.path == "/v1/models", let ids = listings[url.port ?? 0] else {
+            throw URLError(.cannotConnectToHost)
+        }
+        let body: [String: Any] = ["object": "list", "data": ids.map { ["id": $0, "object": "model"] }]
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: try JSONSerialization.data(withJSONObject: body))
+    }
+
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
         BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
     }

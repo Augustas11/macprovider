@@ -2398,8 +2398,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// SPEC-046 v0.3.0 `mlxlm_loopback` (#1690 M8): the operator-named
     /// mlx_lm.server origin and the MLX snapshot directory it serves. The
     /// adapter has no default and is attempted only when both are set.
-    let mlxlmOrigin: String?
-    let mlxlmModelPath: URL?
+    var mlxlmOrigin: String?
+    var mlxlmModelPath: URL?
     /// SPEC-046 v0.5.0 `omlx_loopback` (#1690 M9): the operator-named oMLX
     /// origin and the MLX snapshot directory it serves; attempted only when
     /// both are set.
@@ -2530,6 +2530,23 @@ struct BYOMDiscoveryEnvironment: Sendable {
             // An explicit --mlx-cache-dir pins the one MLX root inspected.
             durableModelRoot: mlxCacheDir == nil ? defaultDurableModelRoot(environment: environment, homeDirectory: homeDirectory) : nil
         )
+    }
+
+    /// When MACPROVIDER_MLXLM_MODEL_PATH is unset, finds a running
+    /// mlx_lm.server on its probe origins and binds the adapter to the
+    /// snapshot directory that server reports loading. Explicit settings win.
+    func withInferredMLXLMSnapshot(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async -> BYOMDiscoveryEnvironment {
+        guard mlxlmModelPath == nil else { return self }
+        for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin) {
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin),
+                  let directory = await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL)
+            else { continue }
+            var copy = self
+            copy.mlxlmOrigin = origin
+            copy.mlxlmModelPath = directory
+            return copy
+        }
+        return self
     }
 
     /// Mirrors `DurableModelArtifactStore.defaultRoot` with injectable inputs.
