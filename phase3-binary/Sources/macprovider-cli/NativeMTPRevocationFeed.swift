@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import LocalAuthentication
 import Security
 
 struct NativeMTPRevocationFeed: Equatable, Sendable {
@@ -200,6 +201,8 @@ protocol NativeMTPRevocationStore: Sendable {
     ) throws
 }
 
+protocol NativeMTPRevocationStoreRequiresBoundedAsyncTransactions: NativeMTPRevocationStore {}
+
 struct NativeMTPRevocationState: Equatable, Sendable {
     let feed: NativeMTPRevocationFeed
     let source: Source
@@ -217,6 +220,7 @@ struct NativeMTPRevocationState: Equatable, Sendable {
 enum NativeMTPRevocationFeedManager {
     static var productionOrigin: URL { StaticFeedOrigin.base.appendingPathComponent("v1", isDirectory: true) }
     static let refreshIntervalSeconds: TimeInterval = 15 * 60
+    static let startupStoreTransactionTimeoutSeconds: TimeInterval = 1
     typealias Fetcher = @Sendable (URL, Int) async throws -> NativeMTPRevocationFetchResponse
     typealias Sleeper = @Sendable (UInt64) async throws -> Void
 
@@ -363,7 +367,8 @@ enum NativeMTPRevocationFeedManager {
         store: NativeMTPRevocationStore,
         origin: URL = productionOrigin,
         fetcher: Fetcher = defaultFetch,
-        now: Date = Date()
+        now: Date = Date(),
+        storeTransactionTimeoutSeconds: TimeInterval = startupStoreTransactionTimeoutSeconds
     ) async throws -> NativeMTPRevocationState {
         do {
             let urls = try feedURLs(pinnedSignerKeyID: pinnedSignerKeyID, origin: origin)
@@ -373,22 +378,46 @@ enum NativeMTPRevocationFeedManager {
                 maxBytes: NativeMTPRevocationFeed.maxSignatureBytes,
                 fetcher: fetcher
             )
-            return try accept(
-                feedData: feedData,
-                signatureData: signatureData,
-                pinnedSignerKeyID: pinnedSignerKeyID,
-                verifier: verifier,
+            return try await runStoreTransaction(
                 store: store,
-                now: now
-            )
+                timeoutSeconds: storeTransactionTimeoutSeconds
+            ) {
+                try accept(
+                    feedData: feedData,
+                    signatureData: signatureData,
+                    pinnedSignerKeyID: pinnedSignerKeyID,
+                    verifier: verifier,
+                    store: store,
+                    now: now
+                )
+            }
         } catch let error as NativeMTPRevocationFeedError where error.isTransportOrHTTPFailure {
-            return try loadCached(
-                pinnedSignerKeyID: pinnedSignerKeyID,
-                verifier: verifier,
+            return try await runStoreTransaction(
                 store: store,
-                now: now
-            )
+                timeoutSeconds: storeTransactionTimeoutSeconds
+            ) {
+                try loadCached(
+                    pinnedSignerKeyID: pinnedSignerKeyID,
+                    verifier: verifier,
+                    store: store,
+                    now: now
+                )
+            }
         }
+    }
+
+    private static func runStoreTransaction<T: Sendable>(
+        store: NativeMTPRevocationStore,
+        timeoutSeconds: TimeInterval,
+        _ body: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        guard store is NativeMTPRevocationStoreRequiresBoundedAsyncTransactions else {
+            return try body()
+        }
+        return try await NativeMTPRevocationStoreTransactionExecutor.shared.run(
+            timeoutSeconds: timeoutSeconds,
+            body
+        )
     }
 
     @discardableResult
@@ -400,6 +429,7 @@ enum NativeMTPRevocationFeedManager {
         origin: URL = productionOrigin,
         fetcher: Fetcher = defaultFetch,
         now: Date = Date(),
+        storeTransactionTimeoutSeconds: TimeInterval = startupStoreTransactionTimeoutSeconds,
         onRevoked: @Sendable (NativeMTPRevocationState) async -> Void
     ) async throws -> NativeMTPRevocationState {
         let state = try await loadNetworkFirst(
@@ -408,7 +438,8 @@ enum NativeMTPRevocationFeedManager {
             store: store,
             origin: origin,
             fetcher: fetcher,
-            now: now
+            now: now,
+            storeTransactionTimeoutSeconds: storeTransactionTimeoutSeconds
         )
         if state.isRevoked(tupleSHA256: tupleSHA256) {
             await onRevoked(state)
@@ -639,6 +670,78 @@ private extension NativeMTPRevocationFeedError {
         default:
             return false
         }
+    }
+}
+
+private final class NativeMTPRevocationStoreTransactionExecutor: @unchecked Sendable {
+    static let shared = NativeMTPRevocationStoreTransactionExecutor()
+
+    private let queue = DispatchQueue(label: "tech.malibu.native-mtp-revocation-store")
+    private let deadlineQueue = DispatchQueue(label: "tech.malibu.native-mtp-revocation-store.deadline")
+    private let lock = NSLock()
+    private var busy = false
+
+    func run<T: Sendable>(
+        timeoutSeconds: TimeInterval,
+        _ body: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            let gate = NativeMTPRevocationStoreTransactionContinuation(continuation)
+            lock.lock()
+            guard !busy else {
+                lock.unlock()
+                gate.resume(throwing: NativeMTPRevocationFeedError.storeFailed("transaction_busy"))
+                return
+            }
+            busy = true
+            lock.unlock()
+
+            let boundedTimeout = max(0.001, timeoutSeconds)
+            deadlineQueue.asyncAfter(deadline: .now() + boundedTimeout) {
+                gate.resume(throwing: NativeMTPRevocationFeedError.storeFailed("transaction_timeout"))
+            }
+            queue.async { [self] in
+                do {
+                    let result = try body()
+                    lock.lock()
+                    busy = false
+                    lock.unlock()
+                    gate.resume(returning: result)
+                } catch {
+                    lock.lock()
+                    busy = false
+                    lock.unlock()
+                    gate.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+private final class NativeMTPRevocationStoreTransactionContinuation<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: T) {
+        let continuation = takeContinuation()
+        continuation?.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        let continuation = takeContinuation()
+        continuation?.resume(throwing: error)
+    }
+
+    private func takeContinuation() -> CheckedContinuation<T, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = continuation
+        continuation = nil
+        return current
     }
 }
 
@@ -1127,7 +1230,7 @@ final class FileNativeMTPRevocationStore: NativeMTPRevocationStore, @unchecked S
     }
 }
 
-final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @unchecked Sendable {
+final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStoreRequiresBoundedAsyncTransactions, @unchecked Sendable {
     static let anchorService = "macprovider.native-mtp-revocation-generation"
 
     private let cacheStore: FileNativeMTPRevocationStore
@@ -1138,13 +1241,7 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
 
     func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor? {
         var result: CFTypeRef?
-        let status = SecItemCopyMatching([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.anchorService,
-            kSecAttrAccount as String: signerKeyID,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ] as CFDictionary, &result)
+        let status = SecItemCopyMatching(Self.anchorQuery(signerKeyID: signerKeyID, returningData: true) as CFDictionary, &result)
         switch status {
         case errSecSuccess:
             guard let data = result as? Data else {
@@ -1160,6 +1257,29 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
         default:
             throw NativeMTPRevocationFeedError.storeFailed("keychain_read_\(status)")
         }
+    }
+
+    static func anchorQuery(signerKeyID: String, returningData: Bool = false) -> [String: Any] {
+        var context: LAContext?
+        if #available(macOS 10.11, *) {
+            let nonInteractiveContext = LAContext()
+            nonInteractiveContext.interactionNotAllowed = true
+            context = nonInteractiveContext
+        }
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.anchorService,
+            kSecAttrAccount as String: signerKeyID,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+        ]
+        if let context {
+            query[kSecUseAuthenticationContext as String] = context
+        }
+        if returningData {
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+        }
+        return query
     }
 
     func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
@@ -1183,11 +1303,7 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
     }
 
     private func replaceAnchor(_ data: Data, signerKeyID: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.anchorService,
-            kSecAttrAccount as String: signerKeyID,
-        ]
+        let query = Self.anchorQuery(signerKeyID: signerKeyID)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
         ]
