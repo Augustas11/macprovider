@@ -137,6 +137,25 @@ func TestCreatorProxyMapsUnreachableCoordinatorToBadGateway(t *testing.T) {
 	}
 }
 
+// An upstream 401 means the coordinator refused the gateway service token;
+// the caller's key was valid, so the caller sees a gateway fault, not 401.
+func TestCreatorProxyMapsUpstreamUnauthorizedToBadGateway(t *testing.T) {
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized"}}`))
+	}))
+	defer coordinator.Close()
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+	}, WithHTTPClient(coordinator.Client()))
+	key := createAccountAndKey(t, store, cfg, "acct_creator")
+	rec := assertStatus(t, h, http.MethodGet, "/v1/creator/me", key, "", "1.2.3.4", http.StatusBadGateway)
+	if !strings.Contains(rec.Body.String(), "creator_upstream_error") {
+		t.Fatalf("body=%s", rec.Body.String())
+	}
+}
+
 func TestCreatorProxyNeverTargetsChat(t *testing.T) {
 	for _, target := range []string{"http://c/v1/chat/completions", "http://c/internal/routing", "http://c/internal/creator/../../v1/chat/completions"} {
 		if _, err := newCreatorUpstreamRequest(context.Background(), http.MethodPost, target, nil); err == nil {

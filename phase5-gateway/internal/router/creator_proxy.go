@@ -117,6 +117,13 @@ func (s *Server) handleCreatorProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	// The caller's key already passed here, so an upstream 401 means the
+	// coordinator refused the gateway service token: a gateway fault, never a
+	// client credential failure.
+	if resp.StatusCode == http.StatusUnauthorized {
+		writeError(w, http.StatusBadGateway, "api_error", "creator_upstream_error", "Could not reach the pool control plane")
+		return
+	}
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, creatorProxyMaxResultBytes+1))
 	if err != nil || len(payload) > creatorProxyMaxResultBytes {
 		writeError(w, http.StatusBadGateway, "api_error", "creator_upstream_error", "Could not reach the pool control plane")
