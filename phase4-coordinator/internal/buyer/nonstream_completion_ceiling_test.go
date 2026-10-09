@@ -215,3 +215,70 @@ func TestStreamingCompletionEstimateUnchangedByNonStreamCeiling(t *testing.T) {
 		t.Fatalf("streaming completion=%v want 1", row.completion)
 	}
 }
+
+// toolCallJSONOfSize is a provider JSON tool-call completion of exactly size
+// bytes reporting completion tokens.
+func toolCallJSONOfSize(t *testing.T, size int, completion int64) []byte {
+	t.Helper()
+	build := func(pad int) []byte {
+		return []byte(fmt.Sprintf(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_0123456789abcdef","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo %s\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":%d,"total_tokens":%d}}`, strings.Repeat("a", pad), completion, completion+4))
+	}
+	pad := size - len(build(0))
+	if pad < 0 {
+		t.Fatalf("body size %d below envelope size %d", size, len(build(0)))
+	}
+	return build(pad)
+}
+
+// A streaming tool-call request the provider answers with one JSON body is
+// clamped to that body's length, not to /16 of the rendered SSE.
+func TestStreamingToolCallJSONCompletionCeilingIsProviderBodyBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		reported       int64
+		wantBilledComp int64
+	}{
+		{name: "honest report bills the report", reported: 400, wantBilledComp: 400},
+		{name: "inflated report clamps to the provider body length", reported: 5000, wantBilledComp: 1800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := toolCallJSONOfSize(t, 1800, tc.reported)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}))
+			defer upstream.Close()
+			reqLog, dbPath := openBuyerRequestLog(t)
+			defer reqLog.Close()
+			billingStore, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
+			rewards := config.RewardsConfig{GlobalMultiplier: 1.0, ProviderShare: 0.90, RateCard: map[string]config.RateCardEntry{
+				"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+			}}
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+			registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+				buyer.WithRequestLog(reqLog),
+				buyer.WithBilling(billingStore, rewards),
+				buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+			)
+			rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"run echo"}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}]}`), nil)
+			if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "data: ") {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			row := latestCeilingLedgerRow(t, dbPath)
+			if !row.estimate.Valid || row.estimate.Int64 != 1800 {
+				t.Fatalf("estimated_completion_tokens=%v want the provider body length 1800", row.estimate)
+			}
+			if !row.completion.Valid || row.completion.Int64 != tc.reported {
+				t.Fatalf("stored provider completion=%v want %d", row.completion, tc.reported)
+			}
+			if want := 4 + 2*tc.wantBilledComp; row.gross != want {
+				t.Fatalf("gross_credits=%d want %d (completion %d)", row.gross, want, tc.wantBilledComp)
+			}
+		})
+	}
+}

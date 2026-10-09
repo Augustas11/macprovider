@@ -4816,12 +4816,15 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: receiptValue}
+	attempt := requestLogAttempt{Status: http.StatusOK, SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: receiptValue}
 	if hasDuplicateJSONKeys(raw) {
 		attempt.SettlementOutput = settlementOutputUnavailable()
 	}
 	usage := acct.completionUsage(nil)
 	attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = usage.prompt, usage.cached, usage.completion
+	// The provider answered with one JSON body, so a reported completion is
+	// bounded by that body's length (SPEC-005 §6.8), not by the rendered SSE.
+	attempt.EstimatedCompTokens = nonStreamLedgerCompletionEstimate(usage.completion, s.observedCompletionTokensFromBytes(acct.deliveredBytes()), len(providerRaw))
 	return wsForwardComplete, http.StatusOK, attempt
 }
 
