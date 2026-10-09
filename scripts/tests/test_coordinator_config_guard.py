@@ -118,6 +118,9 @@ S3_OWNED = {
     "phase4-coordinator/dist/coordinator-deploy-recover.sh",
     "phase4-coordinator/dist/coordinator-pricing-recover",
     "scripts/catalog-content-release.sh",
+    # Stores the reviewed rollout-runbook text; its coordinator.yaml write is
+    # the deploy-pearl-vps.sh chained restore, run only through catalog-activate.sh.
+    "scripts/ops/lib/runbook-commands.sh",
     "scripts/lib/autotune-activate.sh",
 }
 RETIRED = {
