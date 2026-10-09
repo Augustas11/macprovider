@@ -5652,19 +5652,40 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
     ):
         drift.append(ARTIFACT_FEED_NAME)
-    # SPEC-023 §12.5 (G4): a renewal re-binds the native-MTP sidecar to the
-    # new release and restarts its window; presence, every entry, the
-    # projection manifest, and the challenge bank must be unchanged.
+    # SPEC-023 §12.5 (G4): a renewal re-binds the native-MTP sidecar and the
+    # self-test bank to the new release and restarts their windows (restamp);
+    # presence, every entry, the projection manifest, and the bank's content
+    # must be unchanged, and each entry must name the re-bound bank bytes.
     incoming_native = incoming / NATIVE_MTP_ADMISSION_FEED_NAME
     live_native = live / NATIVE_MTP_ADMISSION_FEED_NAME
     if incoming_native.exists() != live_native.exists():
         drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
     elif incoming_native.exists():
-        if stripped(incoming_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS) != stripped(live_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS):
+        def native_content(path: pathlib.Path) -> str:
+            obj = strict_json(path.read_bytes(), str(path))
+            for field in RENEWAL_NATIVE_MTP_RELEASE_FIELDS:
+                obj.pop(field, None)
+            for entry in obj.get("entries", []):
+                if isinstance(entry, dict):
+                    entry.pop("challenge_bank_sha256", None)
+            return json.dumps(obj, sort_keys=True)
+
+        incoming_bank = incoming / NATIVE_MTP_BANK_NAME
+        incoming_obj = strict_json(incoming_native.read_bytes(), str(incoming_native))
+        bank_digest = sha256(incoming_bank.read_bytes()) if incoming_bank.exists() else None
+        if native_content(incoming_native) != native_content(live_native) or any(
+            not isinstance(entry, dict) or entry.get("challenge_bank_sha256") != bank_digest
+            for entry in incoming_obj.get("entries", [])
+        ):
             drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
-        for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME):
-            if not (incoming / name).exists() or not (live / name).exists() or (incoming / name).read_bytes() != (live / name).read_bytes():
-                drift.append(name)
+        name = NATIVE_MTP_MANIFEST_NAME
+        if not (incoming / name).exists() or not (live / name).exists() or (incoming / name).read_bytes() != (live / name).read_bytes():
+            drift.append(name)
+        name = NATIVE_MTP_BANK_NAME
+        if not (incoming / name).exists() or not (live / name).exists() or stripped(
+            incoming / name, RENEWAL_NATIVE_MTP_RELEASE_FIELDS
+        ) != stripped(live / name, RENEWAL_NATIVE_MTP_RELEASE_FIELDS):
+            drift.append(name)
     if _tier2_content(incoming)[0] != _tier2_content(live)[0]:
         drift.append(TIER2_CATALOG_FEED_NAME)
     if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
