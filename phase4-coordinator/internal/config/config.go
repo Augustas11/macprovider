@@ -1640,6 +1640,11 @@ type BillingConfig struct {
 	// force-credit resolutions. Zero means the SPEC-005 v0.5 default
 	// of 24 hours.
 	ForceCreditSettlementHoldSeconds int `yaml:"force_credit_settlement_hold_seconds"`
+	// CeilingRestatementEnabled gates POST
+	// /admin/ledger/ceiling-restatement, the SPEC-005 §7.5b one-time
+	// non-streaming ceiling restatement. Default false (HTTP 404);
+	// SIGHUP-reloadable.
+	CeilingRestatementEnabled bool `yaml:"ceiling_restatement_enabled"`
 }
 
 type EndpointsConfig struct {

@@ -218,6 +218,32 @@ type settlementVerdictCounter struct {
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// SPEC-005 §7.5b ceiling restatement: indistinguishable from an absent
+	// route while billing.ceiling_restatement_enabled is off.
+	if r.URL.Path == ceilingRestatementPath {
+		if !h.store.CeilingRestatementEnabled() {
+			if auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+				if !h.allowAdminRequest(w) {
+					return
+				}
+			}
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
+		if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+			writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+			return
+		}
+		if !h.allowAdminRequest(w) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		h.ceilingRestatementHandler(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/ledger/quarantine" {
 		h.quarantineListHandler(w, r)
 		return

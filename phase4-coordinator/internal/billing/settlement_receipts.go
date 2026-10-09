@@ -606,16 +606,28 @@ func (s *Store) poolRouteSettlementDecision(ctx context.Context, q PoolFenceQuer
 	return nil
 }
 
-func (s *Store) syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
-	var requestCreditID int64
-	var promptRate, completionRate, multiplier, share int64
-	var cachedPromptTokens, configSnapshotID sql.NullInt64
-	var ledgerPrompt, ledgerCompletion, ledgerEstimate sql.NullInt64
-	var ledgerGross, ledgerProvider int64
-	var accountScopeHash string
-	var faultFlag, ledgerUsageSource string
-	var model string
-	var usageJSON, routeSnapshotJSON string
+// verifiedReceiptCreditRow is a ledger credit with a closed, payable,
+// enforce-mode verified receipt whose route snapshot matches and whose
+// attempt output does not overlap: the rows SPEC-005 §7.5b lets re-pricing
+// touch.
+type verifiedReceiptCreditRow struct {
+	requestCreditID                      int64
+	requestID, providerID                string
+	attemptN                             int64
+	model                                string
+	cachedPromptTokens, configSnapshotID sql.NullInt64
+	ledgerPrompt, ledgerCompletion       sql.NullInt64
+	ledgerEstimate                       sql.NullInt64
+	promptRate, completionRate           int64
+	multiplier, share                    int64
+	ledgerGross, ledgerProvider          int64
+	accountScopeHash                     string
+	ledgerUsageSource, faultFlag         string
+	usageJSON, routeSnapshotJSON         string
+}
+
+func loadVerifiedReceiptCreditRowTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (verifiedReceiptCreditRow, bool, error) {
+	row := verifiedReceiptCreditRow{requestID: requestID, attemptN: attemptN, providerID: providerID}
 	err := db.QueryRowContext(ctx, `
 SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
        lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens,
@@ -670,137 +682,101 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		requestID,
 		attemptN,
 		providerID,
-	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON, &routeSnapshotJSON)
+	).Scan(&row.requestCreditID, &row.model, &row.cachedPromptTokens, &row.ledgerPrompt, &row.ledgerCompletion, &row.ledgerEstimate, &row.promptRate, &row.completionRate, &row.multiplier, &row.share, &row.ledgerGross, &row.ledgerProvider, &row.accountScopeHash, &row.ledgerUsageSource, &row.faultFlag, &row.configSnapshotID, &row.usageJSON, &row.routeSnapshotJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", nil
+			return verifiedReceiptCreditRow{}, false, nil
 		}
-		return "", err
+		return verifiedReceiptCreditRow{}, false, err
 	}
+	return row, true, nil
+}
+
+// verifiedReceiptCreditPlan is the outcome of re-pricing one row: either a
+// quarantine reason or the re-priced credit and the estimate the row keeps.
+type verifiedReceiptCreditPlan struct {
+	quarantineReason string
+	result           BilledRow
+	keptEstimate     *int64
+}
+
+// planVerifiedReceiptCreditTx re-prices row from its receipt-bound usage
+// against completionCeiling, reading (never writing) the pool fence and
+// the cache config snapshot through db.
+func (s *Store) planVerifiedReceiptCreditTx(ctx context.Context, db settlementReceiptCreditSyncDB, row verifiedReceiptCreditRow, completionCeiling *int64) (verifiedReceiptCreditPlan, error) {
 	// SPEC-042-R015 / SPEC-005-R015 / SPEC-022-R012-R013: the terminal
 	// verdict and its credit commit in this transaction, so the durable pool
 	// fence and the settlement-time label are decided here, against the
 	// state this commit is made against. A decided failure zero-bills and
 	// quarantines; an unreadable state rolls the receipt back for a retry.
 	var route RouteSnapshot
-	if err := json.Unmarshal([]byte(routeSnapshotJSON), &route); err != nil {
-		return "", fmt.Errorf("decode settlement route snapshot: %w", err)
+	if err := json.Unmarshal([]byte(row.routeSnapshotJSON), &route); err != nil {
+		return verifiedReceiptCreditPlan{}, fmt.Errorf("decode settlement route snapshot: %w", err)
 	}
 	if poolRouteSettlementFenced(route) {
 		if err := s.poolRouteSettlementDecision(ctx, db, route); err != nil {
 			if !poolOperatorAttestationPermanent(err) {
-				return "", fmt.Errorf("%w: %v", ErrPoolOperatorAttestationTransient, err)
+				return verifiedReceiptCreditPlan{}, fmt.Errorf("%w: %v", ErrPoolOperatorAttestationTransient, err)
 			}
-			reason := PoolRouteFenceNotSettlementEligible
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+			return verifiedReceiptCreditPlan{quarantineReason: PoolRouteFenceNotSettlementEligible}, nil
 		}
 	}
 	var usage settlementUsageV04
-	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
-		return "", fmt.Errorf("decode settlement receipt-bound usage: %w", err)
+	if err := json.Unmarshal([]byte(row.usageJSON), &usage); err != nil {
+		return verifiedReceiptCreditPlan{}, fmt.Errorf("decode settlement receipt-bound usage: %w", err)
 	}
 	prompt := usage.BillableInputTokens
 	chargedPrompt := prompt
-	if ledgerPrompt.Valid && chargedPrompt > ledgerPrompt.Int64 {
-		chargedPrompt = ledgerPrompt.Int64
+	if row.ledgerPrompt.Valid && chargedPrompt > row.ledgerPrompt.Int64 {
+		chargedPrompt = row.ledgerPrompt.Int64
 	}
 	completion := usage.BillableOutputTokens
-	// SPEC-015/SPEC-005 completion clamp: a signed receipt proves its tuple,
-	// not the delivered bytes, so final usage never exceeds the ledger's
-	// independent byte-derived ceiling. The formula applies the hot path's
-	// clamp to it (the lower value bills, as byte_estimated).
-	var completionCeiling *int64
-	if ledgerEstimate.Valid {
-		ceiling := ledgerEstimate.Int64
-		completionCeiling = &ceiling
-	}
-	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
+	rateEntry := RateCardEntry{PromptCreditsPerMtok: row.promptRate, CompletionCreditsPerMtok: row.completionRate}
 	var cached *int64
-	if cachedPromptTokens.Valid && cachedPromptTokens.Int64 > 0 {
-		if cachedPromptTokens.Int64 > chargedPrompt {
-			reason := "invalid_cached_prompt_tokens"
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+	if row.cachedPromptTokens.Valid && row.cachedPromptTokens.Int64 > 0 {
+		if row.cachedPromptTokens.Int64 > chargedPrompt {
+			return verifiedReceiptCreditPlan{quarantineReason: "invalid_cached_prompt_tokens"}, nil
 		}
-		if !configSnapshotID.Valid {
-			reason := "missing_cache_config_snapshot"
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+		if !row.configSnapshotID.Valid {
+			return verifiedReceiptCreditPlan{quarantineReason: "missing_cache_config_snapshot"}, nil
 		}
-		rewards, snapshotMultiplier, snapshotShare, err := snapshotByIDQueryer(ctx, db, configSnapshotID.Int64)
+		rewards, snapshotMultiplier, snapshotShare, err := snapshotByIDQueryer(ctx, db, row.configSnapshotID.Int64)
 		if err != nil {
 			if !errors.Is(err, ErrNoSnapshot) {
-				return "", err
+				return verifiedReceiptCreditPlan{}, err
 			}
-			reason := "missing_cache_config_snapshot"
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+			return verifiedReceiptCreditPlan{quarantineReason: "missing_cache_config_snapshot"}, nil
 		}
-		rateEntry = RateFor(rewards.RateCard, model)
+		rateEntry = RateFor(rewards.RateCard, row.model)
 		// SPEC-005-R015: a pool-model attempt's cache-hit rate is its route
 		// snapshot's signed entry rate, never a rate-card lookup.
-		if poolmanifest.IsPoolModelID(model) {
-			rateEntry = poolModelRateEntryFromRouteJSON(routeSnapshotJSON)
+		if poolmanifest.IsPoolModelID(row.model) {
+			rateEntry = poolModelRateEntryFromRouteJSON(row.routeSnapshotJSON)
 		}
-		if rateEntry.PromptCreditsPerMtok != promptRate ||
-			rateEntry.CompletionCreditsPerMtok != completionRate ||
-			snapshotMultiplier != multiplier ||
-			snapshotShare != share {
-			reason := "cache_config_snapshot_rate_mismatch"
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+		if rateEntry.PromptCreditsPerMtok != row.promptRate ||
+			rateEntry.CompletionCreditsPerMtok != row.completionRate ||
+			snapshotMultiplier != row.multiplier ||
+			snapshotShare != row.share {
+			return verifiedReceiptCreditPlan{quarantineReason: "cache_config_snapshot_rate_mismatch"}, nil
 		}
 		current := ComputeCreditsWithCache(
-			ppFromNull(ledgerPrompt),
-			&cachedPromptTokens.Int64,
-			cpFromNull(ledgerCompletion),
-			intPtrFromNull(ledgerEstimate),
-			ledgerUsageSource,
-			faultFlag,
+			ppFromNull(row.ledgerPrompt),
+			&row.cachedPromptTokens.Int64,
+			cpFromNull(row.ledgerCompletion),
+			intPtrFromNull(row.ledgerEstimate),
+			row.ledgerUsageSource,
+			row.faultFlag,
 			rateEntry,
-			multiplier,
-			share,
+			row.multiplier,
+			row.share,
 		)
-		if current.GrossCredits != ledgerGross ||
-			current.ProviderCredits != ledgerProvider ||
-			current.UsageSource != ledgerUsageSource ||
-			current.FaultFlag != faultFlag {
-			reason := "cache_config_snapshot_rate_mismatch"
-			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
-				return "", err
-			}
-			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
-				return "", err
-			}
-			return reason, nil
+		if current.GrossCredits != row.ledgerGross ||
+			current.ProviderCredits != row.ledgerProvider ||
+			current.UsageSource != row.ledgerUsageSource ||
+			current.FaultFlag != row.faultFlag {
+			return verifiedReceiptCreditPlan{quarantineReason: "cache_config_snapshot_rate_mismatch"}, nil
 		}
-		cached = &cachedPromptTokens.Int64
+		cached = &row.cachedPromptTokens.Int64
 	}
 	result := ComputeCreditsWithCache(
 		&chargedPrompt,
@@ -808,17 +784,25 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		&completion,
 		completionCeiling,
 		UsageProviderReported,
-		faultFlag,
+		row.faultFlag,
 		rateEntry,
-		multiplier,
-		share,
+		row.multiplier,
+		row.share,
 	)
-	var keptEstimate *int64
+	plan := verifiedReceiptCreditPlan{result: result}
 	if result.UsageSource == UsageByteEstimated {
-		keptEstimate = completionCeiling
+		plan.keptEstimate = completionCeiling
 	}
+	return plan, nil
+}
+
+// applyVerifiedReceiptCreditTx writes a re-priced credit to the request
+// credit and its linked operator credit. It reports whether the guarded
+// request-credit UPDATE matched (the row is still unsettled and payable).
+func applyVerifiedReceiptCreditTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestCreditID int64, plan verifiedReceiptCreditPlan) (bool, error) {
+	result := plan.result
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		UPDATE ledger_request_credits
 		   SET prompt_tokens = ?,
 		       charged_prompt_tokens = ?,
@@ -829,19 +813,26 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
        provider_credits = ?,
        fault_flag = ?,
        updated_at_utc = ?
-		 WHERE id = ?`,
+		 WHERE id = ?
+		   AND quarantined = 0
+		   AND settled = 0
+		   AND settlement_id IS NULL`,
 		nullInt64(result.PromptTokens),
 		nullInt64(result.PromptTokens),
 		nullInt64(result.CompletionTokens),
-		nullInt64(keptEstimate),
+		nullInt64(plan.keptEstimate),
 		result.UsageSource,
 		result.GrossCredits,
 		result.ProviderCredits,
 		result.FaultFlag,
 		now,
 		requestCreditID,
-	); err != nil {
-		return "", err
+	)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, err
 	}
 	_, err = db.ExecContext(ctx, `
 UPDATE ledger_operator_credits
@@ -854,6 +845,32 @@ UPDATE ledger_operator_credits
 		result.FaultFlag,
 		requestCreditID,
 	)
+	return err == nil, err
+}
+
+func (s *Store) syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
+	row, found, err := loadVerifiedReceiptCreditRowTx(ctx, db, requestID, attemptN, providerID)
+	if err != nil || !found {
+		return "", err
+	}
+	// SPEC-015/SPEC-005 completion clamp: a signed receipt proves its tuple,
+	// not the delivered bytes, so final usage never exceeds the ledger's
+	// independent byte-derived ceiling. The formula applies the hot path's
+	// clamp to it (the lower value bills, as byte_estimated).
+	plan, err := s.planVerifiedReceiptCreditTx(ctx, db, row, intPtrFromNull(row.ledgerEstimate))
+	if err != nil {
+		return "", err
+	}
+	if reason := plan.quarantineReason; reason != "" {
+		if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, row.requestCreditID, reason); err != nil {
+			return "", err
+		}
+		if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, row.accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+			return "", err
+		}
+		return reason, nil
+	}
+	_, err = applyVerifiedReceiptCreditTx(ctx, db, row.requestCreditID, plan)
 	return "", err
 }
 

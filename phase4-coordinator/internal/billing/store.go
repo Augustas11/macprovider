@@ -67,8 +67,11 @@ type Store struct {
 	forceVoidEnabled       atomic.Bool
 	forceCreditEnabled     atomic.Bool
 	forceCreditHoldSeconds atomic.Int64
-	wholesaleMu            sync.RWMutex
-	usdPerMillionCredits   float64
+	// ceilingRestatementEnabled gates the SPEC-005 §7.5b ceiling
+	// restatement route; written only by SetCeilingRestatementEnabled.
+	ceilingRestatementEnabled atomic.Bool
+	wholesaleMu               sync.RWMutex
+	usdPerMillionCredits      float64
 }
 
 type SQLiteMetrics interface {
@@ -1705,6 +1708,18 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 
 func (s *Store) SetForceCreditEnabled(ctx context.Context, newValue bool, reloadSource string) error {
 	return s.setQuarantineFlagEnabled(ctx, "quarantine_resolution_force_credit_enabled", &s.forceCreditEnabled, newValue, reloadSource)
+}
+
+// CeilingRestatementEnabled reports the billing.ceiling_restatement_enabled
+// route-layer flag.
+func (s *Store) CeilingRestatementEnabled() bool {
+	return s.ceilingRestatementEnabled.Load()
+}
+
+// SetCeilingRestatementEnabled publishes billing.ceiling_restatement_enabled,
+// auditing a non-startup flip exactly like the quarantine-resolution flags.
+func (s *Store) SetCeilingRestatementEnabled(ctx context.Context, newValue bool, reloadSource string) error {
+	return s.setQuarantineFlagEnabled(ctx, "ceiling_restatement_enabled", &s.ceilingRestatementEnabled, newValue, reloadSource)
 }
 
 func (s *Store) setQuarantineFlagEnabled(ctx context.Context, flagName string, flag *atomic.Bool, newValue bool, reloadSource string) error {

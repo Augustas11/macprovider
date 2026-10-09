@@ -131,7 +131,7 @@ func TestRelayBlindRecoveryAndUndeliveredGuardAdmitBoundSettlement(t *testing.T)
 		t.Fatal(err)
 	}
 	prompt, completion := int64(37), int64(9)
-	_, has, err := verifiedReceiptExpectedCreditTx(ctx, tx, id, HotPathInput{PromptTokens: &prompt, CompletionTokens: &completion}, sql.NullInt64{}, 1, 1, 1000000, 10000, FaultNone)
+	_, has, err := verifiedReceiptExpectedCreditTx(ctx, tx, id, HotPathInput{PromptTokens: &prompt, CompletionTokens: &completion}, sql.NullInt64{}, sql.NullInt64{}, 1, 1, 1000000, 10000, FaultNone)
 	_ = tx.Rollback()
 	if err != nil || !has {
 		t.Fatalf("recovery expected-credit check has=%v err=%v", has, err)
