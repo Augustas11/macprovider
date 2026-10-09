@@ -348,21 +348,25 @@ jobs:
         run: go test -race -count=1 -timeout 5m ./spec_014_v0_2_pairing
 
   dist-tooling:
-    name: deploy tooling (check-deploy-config gate)
+    name: deploy tooling (check-deploy-config gate) ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # The full suite reached its final ops tests at the old 30-minute cap
-    # (run 37874148614). Preserve every gate and allow bounded finish headroom.
-    timeout-minutes: 45
+    # `make test-dist` ran ~30 minutes serially and stopped at the first
+    # failure. Each shard is a Makefile sub-target (see test-dist-* in the
+    # Makefile) and reports its own failures; ci-required sees the matrix as
+    # one result that fails if any shard fails. The slowest shard (catalog
+    # content release) takes about 12 minutes.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [catalog, python, release, deploy]
     # Guards the fail-closed C2 pre-deploy gate
     # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
-    # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
-    # build — so it stays isolated. The full dist shell/e2e matrix now runs
-    # just over five minutes on hosted runners, so keep a 10-minute cap rather
-    # than canceling a passing regression suite near completion. Closes the 2026-06-17
-    # regression where an env:NAME-indirected operator_key false-failed the
-    # gate and pushed operators into SKIP_C2_CHECK=1. Catalog release tests now
-    # authenticate Tier-2 with the reviewed Go verifier, so install the pinned
-    # toolchain even though this job does not build a service binary.
+    # phase5-gateway/dist/deploy-pearl-vps.sh, among the deploy and release
+    # tooling suites. Bash + python3 + node only; no service build. Catalog
+    # release tests authenticate Tier-2 with the reviewed Go verifier, so every
+    # shard installs the pinned toolchain even though none builds a service
+    # binary.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -390,8 +394,8 @@ jobs:
           sudo chmod -R go-w /private/var/macprovider-go-verifier
           sudo test -x /private/var/macprovider-go-verifier/bin/go
 
-      - name: make test-dist
-        run: make test-dist
+      - name: make test-dist-${{ matrix.shard }}
+        run: make test-dist-${{ matrix.shard }}
 
   swift-tests:
     name: phase3-binary (swift test)
