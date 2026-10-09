@@ -271,6 +271,11 @@ test-dist:
 	bash test/e2e/canary-buyer/run-canary.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
 	bash scripts/test-relay-blind-parity.sh
+	bash scripts/ops/test-ops-guard.sh
+	bash scripts/ops/test-live-lock.sh
+	bash scripts/ops/test-runbook-commands.sh
+	bash scripts/ops/test-entrypoints.sh
+	bash scripts/ops/test-fast-required.sh
 
 test-relay-blind-parity:
 	bash scripts/test-relay-blind-parity.sh
