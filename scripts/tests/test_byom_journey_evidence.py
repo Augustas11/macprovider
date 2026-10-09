@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.check_spec_governance import (
@@ -33,6 +34,9 @@ from scripts.check_spec_governance import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "scripts" / "tests" / "fixtures" / "byom_journeys"
 OPERATOR_FINGERPRINT = "a" * 64
+# The payload step refuses expired evidence, and expiry defaults to 30 days
+# after capture, so the round trip captures "today" rather than a fixed date.
+ROUND_TRIP_CAPTURED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
 PROMOTABLE_BYOM_REQUIREMENT_IDS = frozenset(
     [f"SPEC-046-R{index:03d}" for index in range(1, 9)]
     + [f"SPEC-047-R{index:03d}" for index in range(1, 9)]
@@ -1130,7 +1134,7 @@ class BYOMJourneyRoundTripTests(unittest.TestCase):
             operator_identity_fingerprint=OPERATOR_FINGERPRINT,
             hardware_profile="ci-hermetic-runner",
             candidate="cli-fixture",
-            captured_at="2026-09-08T00:00:00Z",
+            captured_at=ROUND_TRIP_CAPTURED_AT,
             expires_at=None,
             summary="fixture journey run",
         )
