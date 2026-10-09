@@ -248,7 +248,8 @@ struct NativeMTPSelfTestEvaluation: Sendable, Equatable {
 
 enum NativeMTPSelfTest {
     static func parseChallengeBank(
-        _ data: Data
+        _ data: Data,
+        now: Date = Date()
     ) throws -> NativeMTPSelfTestChallengeBankEnvelope {
         do {
             try AutotuneStrictJSON.rejectDuplicateKeys(data)
@@ -267,10 +268,11 @@ enum NativeMTPSelfTest {
         let releaseID = try printableString(object, "release_id", maxBytes: 128)
         let issuedAt = try utcSecondsDate(object, "issued_at")
         let expiresAt = try utcSecondsDate(object, "expires_at")
-        // The window is structural only: the bank bytes are pinned by the
-        // signed admission's challenge_bank_sha256 and release_id, so a missed
-        // renewal must not turn native MTP off.
-        guard issuedAt < expiresAt else {
+        // An elapsed expires_at no longer disables the bank: its bytes are
+        // pinned by the signed admission's challenge_bank_sha256 and
+        // release_id, so a missed renewal must not turn native MTP off. A bank
+        // issued in the future is still refused.
+        guard issuedAt < expiresAt, now >= issuedAt else {
             throw NativeMTPSelfTestError.missingOrInvalidField("issued_at")
         }
         let signerKeyID = try printableString(object, "signer_key_id", maxBytes: 128)

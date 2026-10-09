@@ -828,9 +828,9 @@ and detached envelope `key_id` MUST both equal the admission sidecar's exact
 trusted key is an integrity failure. Unknown, missing, duplicate, unsorted,
 wrong-typed, over-bound, cross-release, or identity-mismatched bank
 data disables only that admission tuple. **[v0.3.6]** `issued_at < expires_at`
-is structural; a provider MUST NOT disable the tuple because the current time
-is outside the bank window, since the bank bytes are pinned by the signed
-admission. A canary request MUST select one exact
+is structural; a provider MUST NOT disable the tuple because `expires_at` has
+passed, since the bank bytes are pinned by the signed admission. A bank whose
+`issued_at` is in the future MUST still be refused. A canary request MUST select one exact
 bank record and MUST NOT accept a caller-supplied prompt or expected value in
 its place.
 

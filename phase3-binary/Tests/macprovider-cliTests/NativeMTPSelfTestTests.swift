@@ -108,6 +108,16 @@ final class NativeMTPSelfTestTests: XCTestCase {
         XCTAssertLessThan(bank.expiresAt, Date())
     }
 
+    func testParserRejectsFutureIssuedBank() throws {
+        let fixture = makeBankFixture()
+        var future = fixture.bank
+        future["issued_at"] = "2099-01-01T00:00:00Z"
+        future["expires_at"] = "2099-02-01T00:00:00Z"
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(future))) { error in
+            XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("issued_at"))
+        }
+    }
+
     func testParserRejectsPromptAndCompletionBounds() throws {
         let fixture = makeBankFixture()
         XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(
