@@ -440,6 +440,7 @@ func runCoordinator() (exitCode int) {
 		os.Exit(1)
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
+	billingStore.SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
 	billingStore.SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
 	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
 		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
@@ -1372,6 +1373,7 @@ func runCoordinator() (exitCode int) {
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 		Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
 		Bool("billing.ceiling_restatement_enabled", cfg.Billing.CeilingRestatementEnabled).
+		Bool("billing.retention.enabled", cfg.Billing.Retention.Enabled).
 		Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 		Str("event", "spec005_v0_4_route_layer_flag_init").
 		Msg("quarantine force-void route-layer flag initialized")
@@ -1626,6 +1628,19 @@ func runCoordinator() (exitCode int) {
 	startSettlementAttemptOutputJournalMaterializer(shutdownCtx, billingStore, metricsHandle, cfg.Storage.AuditLogRetentionDays, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
+	billingStore.StartEvidenceRetention(shutdownCtx, func(report billing.EvidenceRetentionReport, err error) {
+		event := logger.Info()
+		if err != nil {
+			event = logger.Error().Err(err)
+		}
+		event.Str("event", "settlement_evidence_retention").
+			Str("status", report.Status).
+			Int("eligible_requests", report.EligibleRequests).
+			Int("deleted_requests", report.DeletedRequests).
+			Int64("archive_id", report.ArchiveID).
+			Str("archive_sha256", report.ArchiveSHA256).
+			Msg("nightly settlement evidence retention finished")
+	})
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
@@ -4488,6 +4503,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// them.
 		billingSnapshotCommitted, billingSnapshotID = true, snapshotID
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		billingStores[0].SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
 		if err := billingStores[0].SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "sighup"); err != nil {
 			logger.Error().Err(err).Msg("billing ceiling-restatement flag reload rejected")
 		}
