@@ -555,3 +555,15 @@ func subtleEqual(a, b []byte) bool {
 	}
 	return diff == 0
 }
+
+// An approval without expires_at never expires.
+func TestApprovalWithoutExpiryStaysApproved(t *testing.T) {
+	f := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
+		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash, time.Time{})}
+	})
+	f.accept()
+	f.verify(0, nil)
+	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); !ok {
+		t.Fatal("approval without expiry was not eligible")
+	}
+}

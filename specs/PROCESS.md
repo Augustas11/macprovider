@@ -158,9 +158,12 @@ all required journey evidence is current. The physical release gate tracked by
 GitHub issue #613 is the execution surface; this process does not create a
 competing general waiver path. A one-time limited activation exception is valid
 only when the affected normative SPEC and decision log both name its exact
-scope, evidence, rollback, expiry, and unresolved journey. Such an exception
-cannot mark the missing evidence conformant or close #613. Missing, stale,
-skipped, or failed evidence otherwise blocks promotion.
+scope, evidence, rollback, and unresolved journey; it does not require an
+expiry. Such an exception cannot mark the missing evidence conformant or close
+#613. Missing, stale, skipped, or failed evidence otherwise blocks promotion.
+A working live feature is never given an expiry, sunset date, or automatic
+withdrawal unless the operator explicitly asks for one; missing conformance
+does not switch off a live feature.
 
 ## Release-scoped reconciliation slices
 

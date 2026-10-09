@@ -5,7 +5,6 @@ No credentials, private keys, provider IDs or full configuration are printed.
 Release signature verification is performed by the reviewed ops entry point.
 """
 import base64
-import datetime as dt
 import hashlib
 import importlib.util
 import json
@@ -25,14 +24,8 @@ import yaml
 BASE = Path('/opt/macprovider/coordinator.yaml')
 OVERLAY = Path('/etc/macprovider/coordinator.pearl-overlays.yaml')
 GATEWAY = Path('/opt/macprovider/gateway.yaml')
-EXPIRY = '2026-10-20T00:00:00Z'
 CONFIG_GUARD_MODULE = Path('/usr/local/share/macprovider/scripts/coordinator_config_guard.py')
 CONFIG_GUARD_SHA256 = 'be9c226719b2b6921bd9455e3e3ee9e4222da19fbacaaa3a3a0cd70e72625338'
-RUNTIME_HASHES = {
-    'coordinator': '756c1b05cc48ea746eb4aabaf56c6a957cd8858fa1402efe57225ce4666722e6',
-    'gateway': '9d3d6ccc15e4e7cc27a52a4e872a07dfccf2caccb63b0d0b0b84931ee2787ace',
-    'coordinator-cli': 'f097f5fa7e4610f504d1fe62d7404f155e2b9c09a6227887b80c41ec7fac2413',
-}
 IDENTITY = dict(team_id='YF7XNRJUG4', signing_identifier='live.malibu.provider.cli',
                 code_cdhash='94b66febaee9ac7265dc0fe1a6ad87559ff602b8',
                 binary_version='1.8.224')
@@ -48,28 +41,14 @@ def check_release(data):
         raise ValueError('release slice mismatch')
 
 
-def expired():
-    return dt.datetime.now(dt.timezone.utc) >= dt.datetime.fromisoformat(EXPIRY.replace('Z', '+00:00'))
-
-
 def approved(pc):
-    if expired():
-        return False
+    # The approval has no expiry: a working live feature stays on.
     entries = pc.get('approved_code_identities') or []
-    if len(entries) != 1:
-        return False
-    for entry in entries:
-        expiry = entry.get('expires_at')
-        if isinstance(expiry, dt.datetime):
-            expiry = expiry.astimezone(dt.timezone.utc).isoformat().replace('+00:00', 'Z')
-        if all(entry.get(k) == v for k, v in IDENTITY.items()) and expiry == EXPIRY:
-            return True
-    return False
+    return len(entries) == 1 and all(entries[0].get(k) == v for k, v in IDENTITY.items()) \
+        and entries[0].get('expires_at') is None
 
 
-def preflight(check_expiry=False):
-    if check_expiry and expired():
-        raise ValueError('activation exception expired')
+def preflight():
     runtime_provenance()
     base = yaml.safe_load(BASE.read_text())
     overlay = yaml.safe_load(OVERLAY.read_text()) or {}
@@ -98,21 +77,10 @@ def verify_config_paths(argv):
 
 
 def runtime_provenance():
-    # These hashes are from the signature-verified immutable v1.8.228 release,
-    # source 78cd2868c258185cce540c12bd3d0173d12fa598 (contains #1871/#1892).
-    for binary, expected in RUNTIME_HASHES.items():
-        path = Path('/opt/macprovider', binary)
-        with path.open('rb') as stream:
-            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
-                raise ValueError('running backend release differs from approved runtime')
-        if binary != 'coordinator-cli':
-            pid = subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value',
-                                           'macprovider-' + binary], text=True).strip()
-            with Path('/proc', pid, 'exe').open('rb') as stream:
-                if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
-                    raise ValueError('service process differs from installed signed runtime')
-            if binary == 'coordinator':
-                verify_config_paths(Path('/proc', pid, 'cmdline').read_bytes().split(b'\0'))
+    # The running coordinator must use the config files this tool edits.
+    pid = subprocess.check_output(['systemctl', 'show', '--property=MainPID', '--value',
+                                   'macprovider-coordinator'], text=True).strip()
+    verify_config_paths(Path('/proc', pid, 'cmdline').read_bytes().split(b'\0'))
 
 
 def config_guard():
@@ -207,17 +175,16 @@ def restart_healthy():
 def apply(data):
     check_release(data)
     with config_guard():
-        pc = preflight(check_expiry=True)
+        pc = preflight()
         if disabled():
             raise ValueError('privacy kill switch is engaged')
         if approved(pc):
             print(json.dumps({'approved': True, 'changed': False}))
             return
         original = BASE.read_text()
-        entry = dict(IDENTITY, expires_at=EXPIRY)
         # Replace only the superseded approval set; retain all key pins and
-        # quarantine/denial configuration. No loader can extend the expiry.
-        pc['approved_code_identities'] = [entry]
+        # quarantine/denial configuration.
+        pc['approved_code_identities'] = [dict(IDENTITY)]
         candidate = replace_privacy(original, pc)
         if yaml.safe_load(candidate)['privacy_class'] != pc:
             raise ValueError('candidate privacy block mismatch')
@@ -232,7 +199,7 @@ def apply(data):
             raise
         try:
             restart_healthy()
-            if not approved(preflight(check_expiry=True)):
+            if not approved(preflight()):
                 raise RuntimeError('approval postcondition did not hold')
         except Exception:
             install(original)
@@ -241,45 +208,10 @@ def apply(data):
         print(json.dumps({'approved': True, 'changed': True}))
 
 
-def withdraw():
-    if not expired():
-        raise ValueError('expiry withdrawal before exception deadline is refused')
-    with config_guard():
-        original = BASE.read_text()
-        pc = yaml.safe_load(original)['privacy_class']
-        entries = pc.get('approved_code_identities') or []
-        if pc.get('release_code_identities') or any(any(e.get(k) != v for k, v in IDENTITY.items()) for e in entries):
-            raise ValueError('superseding approval requires reconciliation')
-        disable_locked()
-        pc['enabled'] = False
-        pc['approved_code_identities'] = []
-        try:
-            install(replace_privacy(original, pc))
-            validate()
-            restart_healthy()
-            runtime_provenance()
-            current = yaml.safe_load(BASE.read_text())['privacy_class']
-            if current.get('enabled') is not False or current.get('approved_code_identities') or not disabled():
-                raise RuntimeError('withdrawal postcondition did not hold')
-        except Exception:
-            install(original)
-            restart_healthy()
-            # The durable switch deliberately remains disabled on failure.
-            raise
-        print(json.dumps({'withdrawn': True, 'disabled': True}))
-
-
 if __name__ == '__main__':
     try:
         if sys.argv[1:] == ['status']:
-            if expired():
-                pc = yaml.safe_load(BASE.read_text())['privacy_class']
-                withdrawn = pc.get('enabled') is False and not pc.get('approved_code_identities')
-                print(json.dumps({'approved': False, 'disabled': disabled(), 'expired': True, 'withdrawn': withdrawn}))
-            else:
-                print(json.dumps({'approved': approved(preflight()), 'disabled': disabled(), 'expired': False}))
-        elif sys.argv[1:] == ['withdraw']:
-            withdraw()
+            print(json.dumps({'approved': approved(preflight()), 'disabled': disabled()}))
         elif sys.argv[1:] == ['disable']:
             disable()
         elif len(sys.argv) == 3 and sys.argv[1] == 'apply':

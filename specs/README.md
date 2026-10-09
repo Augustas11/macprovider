@@ -57,7 +57,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | conformant: 8, pending: 1 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.7 | draft | complete | conformant: 7, pending: 5 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 | SPEC-048 | Native Multi-Token Prediction Serving | 0.1.26 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
-| SPEC-049 | Operator-Constrained Privacy Class | 0.2.2 | draft | complete | pending: 28 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
+| SPEC-049 | Operator-Constrained Privacy Class | 0.2.3 | draft | complete | pending: 28 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**
