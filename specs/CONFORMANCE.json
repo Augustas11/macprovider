@@ -371,7 +371,7 @@
     {
       "spec_id": "SPEC-014",
       "title": "Provider Portal (seller-facing web surface)",
-      "version": "0.10",
+      "version": "0.11",
       "path": "specs/SPEC-014-provider-portal.md",
       "status": "draft",
       "owner": "@Augustas11",

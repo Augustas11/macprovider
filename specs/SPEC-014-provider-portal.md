@@ -1,8 +1,21 @@
 # SPEC-014 — Provider Portal (seller-facing web surface)
 
-**Version:** 0.10
+**Version:** 0.11
 **Status:** Draft (v0.10 operator-minted portal read session)
 **Date drafted:** 2026-06-21 (v0.10 operator-minted session 2026-08-22)
+**Change log v0.11 (2026-10-09, #1880 GitHub-mode earnings):**
+  Closes the §2.5.0 earnings gap. `GET /providers/{id}/earnings` with **no**
+    `Authorization` header is authorized by the `mp_session` cookie when the
+    coordinator runs with GitHub OAuth enabled and the session's GitHub user owns
+    `{id}` in `provider_ownership` (the table `/v1/auth/me/providers` lists): an
+    invalid or missing session answers `401 session_invalid`, a non-owned
+    provider `403 forbidden`. The read shares the per-provider earnings rate
+    limit; the bearer path (FR-P12 token or portal read session) is unchanged and
+    never consults the cookie. In GitHub mode the portal treats only a `401` from
+    `/v1/auth/me/providers` as an expired session; a `401`/`403`/`404` from a
+    data endpoint is an inline dashboard error and never restarts sign-in. The
+    MALIBU accrual, wallet, and reward-audit reads stay bearer-only and are not
+    called in cookie mode.
 **Change log v0.10 (2026-08-22, operator-minted portal read session):**
   Adds a third auth path that does **not** ask the provider to paste
     `provider_token`. An operator holding `operator_key` may mint a
@@ -556,6 +569,10 @@ cookie mode reads it fine without a bearer. The gap is narrower than "no data
 surface works": it is the **earnings** surfaces only, documented as a carried gap,
 not fixed here (this is a spec-only change):
 
+- **[Superseded v0.11, #1880]** The earnings read is now cookie-authorized with
+  the server-side ownership check below, and a data-endpoint refusal no longer
+  re-launches OAuth (see the v0.11 change log). The original v0.9 disclosure
+  follows for history.
 - **The aggregate-earnings surfaces (A.2, C.1, A.5) cannot load in cookie mode.**
   The coordinator mounts `/providers/{id}/earnings` directly to the billing
   handler, which accepts **only** an FR-P12 provider bearer and never consults
@@ -864,6 +881,10 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   logout ever touches. A stolen or orphaned session therefore survives the user's
   logout and lives until its own 30-day sliding-idle expiry; "theft ends at logout"
   is **not** guaranteed. There is no "log out all sessions" control.
+- **[Closed v0.11, #1880]** The cookie-authorized earnings read enforces
+  `mp_session.github_user_id → provider_ownership(provider_id) == path
+  provider_id` (`ws.AuthorizeProviderSessionRead`). The v0.9 text follows for
+  history.
 - **Missing ownership authorization on data reads (IDOR — carried gap).** The
   earnings read is not cookie-authorized today (§2.5.0); when it is wired, it MUST
   enforce `mp_session.github_user_id → provider_ownership(provider_id) == path
