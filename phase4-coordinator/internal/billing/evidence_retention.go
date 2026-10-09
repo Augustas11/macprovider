@@ -1116,11 +1116,11 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	if err != nil {
 		if errors.Is(err, ErrEvidenceArchiveInvalid) {
 			report.Status = EvidenceRetentionStatusArchiveInvalid
-			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, err.Error(), deleted)
+			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, err.Error(), 0)
 		}
 		return report, err
 	}
-	if err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusDeleted, "", deleted); err != nil {
+	if err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusDeleted, "", 0); err != nil {
 		return report, err
 	}
 	report.DeletedRequests = deleted
@@ -1449,6 +1449,14 @@ VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stam
 		}
 		done = append(done, req)
 		cleanup = append(cleanup, req)
+	}
+	// The count commits with the deletion it counts, so a run interrupted
+	// before its journal step never leaves the archive's total short.
+	if len(done) > 0 {
+		if _, err := conn.ExecContext(ctx, `
+UPDATE settlement_evidence_archives SET deleted_requests = deleted_requests + ? WHERE id = ?`, len(done), archiveID); err != nil {
+			return nil, nil, err
+		}
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return nil, nil, err
