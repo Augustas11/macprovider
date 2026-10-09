@@ -5,12 +5,21 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 workflow="$root/.github/workflows/renew-release-discovery-head.yml"
 bridge="$root/scripts/verify-v1855-discovery-bridge.sh"
+anonymous_verifier="$root/scripts/verify-anonymous-release-discovery.sh"
 [[ -f "$workflow" ]] || {
   printf '[test-renew-release-discovery-head] ERROR: missing renewal workflow\n' >&2
   exit 1
 }
 [[ -f "$bridge" ]] || {
   printf '[test-renew-release-discovery-head] ERROR: missing v1.8.55 bridge verifier\n' >&2
+  exit 1
+}
+[[ -f "$anonymous_verifier" ]] || {
+  printf '[test-renew-release-discovery-head] ERROR: missing anonymous verifier\n' >&2
+  exit 1
+}
+grep -Fq -- '--retry-all-errors' "$anonymous_verifier" || {
+  printf '[test-renew-release-discovery-head] ERROR: anonymous verifier must retry transient HTTP asset errors\n' >&2
   exit 1
 }
 

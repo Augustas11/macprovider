@@ -26,6 +26,10 @@ trap 'rm -rf "$work"' EXIT
 curl_common_args=(
   --show-error --silent --location --proto '=https' --tlsv1.2
   --connect-timeout 20 --max-time 240 --retry 5 --retry-delay 2
+  # GitHub release assets can briefly return HTTP 403 while the public CDN URL
+  # propagates after an immutable release is published. Plain --retry does not
+  # retry HTTP errors, so keep the anonymous proof bounded but retry 403/429.
+  --retry-all-errors
 )
 curl_args=(--fail "${curl_common_args[@]}")
 # API calls run without --fail so a rate-limit 403/429 can be told apart from a
