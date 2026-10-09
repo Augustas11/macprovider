@@ -86,9 +86,9 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertEqual(pending.state.manifestVersion, 1)
         XCTAssertTrue(fake.requests.count == 4, "signing must not touch the network")
         _ = try await CreatorOperations.submitManifest(home: home, client: client, poolID: identity.poolID)
-        _ = try await CreatorOperations.admit(client: client, poolID: identity.poolID, providerID: "mp-owned")
-        _ = try await CreatorOperations.authorizeBuyer(client: client, poolID: identity.poolID, accountID: "acct_buyer", remove: false)
-        _ = try await CreatorOperations.promote(client: client, poolID: identity.poolID)
+        _ = try await CreatorOperations.admit(home: home, client: client, poolID: identity.poolID, providerID: "mp-owned")
+        _ = try await CreatorOperations.authorizeBuyer(home: home, client: client, poolID: identity.poolID, accountID: "acct_buyer", remove: false)
+        _ = try await CreatorOperations.promote(home: home, client: client, poolID: identity.poolID)
 
         let requests = fake.requests
         XCTAssertEqual(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" }, [
@@ -173,11 +173,49 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertThrowsError(try CreatorClient.validatedGatewayURL("not a url"))
     }
 
+    func testRetriedWritesReuseTheOperationIDUntilADefinitiveAnswer() async throws {
+        final class Flaky: CreatorTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private var calls = 0
+            private(set) var keys: [String] = []
+            func send(_ request: URLRequest) async throws -> CreatorResponse {
+                let attempt = lock.withLock { () -> Int in
+                    calls += 1
+                    keys.append(request.value(forHTTPHeaderField: "Idempotency-Key") ?? "")
+                    return calls
+                }
+                switch attempt {
+                case 1: throw CreatorCLIError.transport("connection reset")
+                case 2: return jsonResponse(503, ["error": ["code": "unavailable"]])
+                default: return jsonResponse(202, ["event": ["ok": true]])
+                }
+            }
+        }
+        let fake = Flaky()
+        let home = CreatorHome(root: homeURL)
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        do { _ = try await CreatorOperations.admit(home: home, client: client, poolID: pool, providerID: "mp-owned"); XCTFail("expected transport error") } catch {}
+        do { _ = try await CreatorOperations.admit(home: home, client: client, poolID: pool, providerID: "mp-owned"); XCTFail("expected 503") } catch {}
+        _ = try await CreatorOperations.admit(home: home, client: client, poolID: pool, providerID: "mp-owned")
+        _ = try await CreatorOperations.admit(home: home, client: client, poolID: pool, providerID: "mp-owned")
+        XCTAssertEqual(fake.keys.count, 4)
+        XCTAssertEqual(Set(fake.keys[0...2]).count, 1, "retries before a definitive answer must reuse one operation id")
+        XCTAssertNotEqual(fake.keys[3], fake.keys[2], "a new run after success is a new operation")
+    }
+
+    func testOptionalPoolMustBeAWellFormedPoolID() {
+        XCTAssertThrowsError(try CreatorStatusCommand.parse(["--pool", "../me"]))
+        XCTAssertThrowsError(try CreatorEarningsCommand.parse(["--pool", "short"]))
+        XCTAssertNoThrow(try CreatorStatusCommand.parse(["--pool", "AAAAAAAAAAAAAAAAAAAAAA"]))
+        XCTAssertNoThrow(try CreatorEarningsCommand.parse([]))
+    }
+
     func testHTTPErrorsSurfaceTheGatewayBody() async throws {
         let fake = RecordingCreatorTransport { _ in jsonResponse(409, ["error": ["code": "promotion_precondition_failed", "reason": "member_missing"]]) }
         let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
         do {
-            _ = try await CreatorOperations.promote(client: client, poolID: "AAAAAAAAAAAAAAAAAAAAAA")
+            _ = try await CreatorOperations.promote(home: CreatorHome(root: homeURL), client: client, poolID: "AAAAAAAAAAAAAAAAAAAAAA")
             XCTFail("expected an error")
         } catch let error as CreatorCLIError {
             XCTAssertTrue(error.description.contains("member_missing"))

@@ -226,6 +226,29 @@ struct CreatorHome {
         return try read(CreatorPoolKeys.self, from: url)
     }
 
+    /// Operation ids awaiting a definitive answer, per pool. A retry after a
+    /// transport failure or a 5xx reuses the id, so the coordinator replays
+    /// the first write instead of appending a second one.
+    func pendingOperationsURL(_ poolID: String) -> URL { poolDir(poolID).appendingPathComponent("pending-operations.json") }
+
+    func stickyOperationID(poolID: String, key: String, label: String) throws -> String {
+        let url = pendingOperationsURL(poolID)
+        var pending = FileManager.default.fileExists(atPath: url.path) ? try read([String: String].self, from: url) : [:]
+        if let existing = pending[key] { return existing }
+        let id = CreatorOutput.operationID(label)
+        pending[key] = id
+        try write(pending, to: url, mode: 0o600)
+        return id
+    }
+
+    func clearOperationID(poolID: String, key: String) throws {
+        let url = pendingOperationsURL(poolID)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        var pending = try read([String: String].self, from: url)
+        guard pending.removeValue(forKey: key) != nil else { return }
+        try write(pending, to: url, mode: 0o600)
+    }
+
     func manifestState(_ poolID: String) throws -> CreatorManifestState? {
         let url = poolDir(poolID).appendingPathComponent("manifest-state.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -438,7 +461,7 @@ enum CreatorOperations {
         event["pool_id"] = poolID
         event["root_issuer_public_key_der"] = identity.rootIssuerPublicKeyDER.base64EncodedString()
         event["proof_of_possession_signature"] = signature
-        return try client.expect(try await client.request("POST", "events", body: event, operationID: CreatorOutput.operationID("root")))
+        return try await stickyRequest(home: home, client: client, poolID: poolID, key: "root", label: "root", path: "events", body: event)
     }
 
     struct ManifestOptions {
@@ -587,20 +610,31 @@ enum CreatorOperations {
         return result
     }
 
-    static func admit(client: CreatorClient, poolID: String, providerID: String) async throws -> [String: Any] {
-        try client.expect(try await client.request("POST", "events", body: [
+    /// POSTs under a per-pool sticky operation id: the id is kept until the
+    /// gateway gives a definitive (< 500) answer, so re-running a command after
+    /// a lost response replays instead of appending a duplicate event.
+    static func stickyRequest(home: CreatorHome, client: CreatorClient, poolID: String, key: String, label: String, path: String, body: [String: Any]) async throws -> [String: Any] {
+        let operationID = try home.stickyOperationID(poolID: poolID, key: key, label: label)
+        let response = try await client.request("POST", path, body: body, operationID: operationID)
+        if response.status < 500 { try home.clearOperationID(poolID: poolID, key: key) }
+        return try client.expect(response)
+    }
+
+    static func admit(home: CreatorHome, client: CreatorClient, poolID: String, providerID: String) async throws -> [String: Any] {
+        try await stickyRequest(home: home, client: client, poolID: poolID, key: "admit:\(providerID)", label: "admit", path: "events", body: [
             "event_type": "member_admitted", "pool_id": poolID, "provider_id": providerID,
-        ], operationID: CreatorOutput.operationID("admit")))
+        ])
     }
 
-    static func authorizeBuyer(client: CreatorClient, poolID: String, accountID: String, remove: Bool) async throws -> [String: Any] {
-        try client.expect(try await client.request("POST", "events", body: [
+    static func authorizeBuyer(home: CreatorHome, client: CreatorClient, poolID: String, accountID: String, remove: Bool) async throws -> [String: Any] {
+        let label = remove ? "buyer-remove" : "buyer"
+        return try await stickyRequest(home: home, client: client, poolID: poolID, key: "\(label):\(accountID)", label: label, path: "events", body: [
             "event_type": remove ? "buyer_authorization_removed" : "buyer_authorized", "pool_id": poolID, "buyer_account_id": accountID,
-        ], operationID: CreatorOutput.operationID(remove ? "buyer-remove" : "buyer")))
+        ])
     }
 
-    static func promote(client: CreatorClient, poolID: String) async throws -> [String: Any] {
-        try client.expect(try await client.request("POST", "pools/\(poolID)/promote", body: [:], operationID: CreatorOutput.operationID("promote")))
+    static func promote(home: CreatorHome, client: CreatorClient, poolID: String) async throws -> [String: Any] {
+        try await stickyRequest(home: home, client: client, poolID: poolID, key: "promote", label: "promote", path: "pools/\(poolID)/promote", body: [:])
     }
 }
 
@@ -610,11 +644,13 @@ struct CreatorPoolOption: ParsableArguments {
     @Option(name: .customLong("pool"), help: "The pool id printed by `creator keygen`.")
     var poolID: String
 
-    func validate() throws {
+    static func validate(_ poolID: String) throws {
         guard poolID.range(of: #"^[A-Za-z0-9_-]{22}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--pool must be a 22-character pool id")
         }
     }
+
+    func validate() throws { try Self.validate(poolID) }
 }
 
 struct CreatorLoginCommand: AsyncParsableCommand {
@@ -762,7 +798,7 @@ struct CreatorAdmitCommand: AsyncParsableCommand {
 
     func run() async throws {
         let context = try CreatorContext.load()
-        CreatorOutput.printJSON(try await CreatorOperations.admit(client: context.client, poolID: pool.poolID, providerID: providerID))
+        CreatorOutput.printJSON(try await CreatorOperations.admit(home: context.home, client: context.client, poolID: pool.poolID, providerID: providerID))
     }
 }
 
@@ -774,7 +810,7 @@ struct CreatorAuthorizeBuyerCommand: AsyncParsableCommand {
 
     func run() async throws {
         let context = try CreatorContext.load()
-        CreatorOutput.printJSON(try await CreatorOperations.authorizeBuyer(client: context.client, poolID: pool.poolID, accountID: accountID, remove: remove))
+        CreatorOutput.printJSON(try await CreatorOperations.authorizeBuyer(home: context.home, client: context.client, poolID: pool.poolID, accountID: accountID, remove: remove))
     }
 }
 
@@ -784,7 +820,7 @@ struct CreatorPromoteCommand: AsyncParsableCommand {
 
     func run() async throws {
         let context = try CreatorContext.load()
-        CreatorOutput.printJSON(try await CreatorOperations.promote(client: context.client, poolID: pool.poolID))
+        CreatorOutput.printJSON(try await CreatorOperations.promote(home: context.home, client: context.client, poolID: pool.poolID))
         print("Pool active. Restart macprovider-cli on each member Mac so it serves the pool's models.")
     }
 }
@@ -792,6 +828,8 @@ struct CreatorPromoteCommand: AsyncParsableCommand {
 struct CreatorStatusCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status", abstract: "Show your approval and pools, or one pool.")
     @Option(name: .customLong("pool"), help: "One pool id.") var poolID: String?
+
+    func validate() throws { if let poolID { try CreatorPoolOption.validate(poolID) } }
 
     func run() async throws {
         let context = try CreatorContext.load()
@@ -816,6 +854,8 @@ struct CreatorEarningsCommand: AsyncParsableCommand {
     @Option(name: .customLong("pool"), help: "One pool id.") var poolID: String?
     @Option(help: "UTC start day YYYY-MM-DD (with --to, at most 31 days).") var from: String?
     @Option(help: "UTC end day YYYY-MM-DD, exclusive.") var to: String?
+
+    func validate() throws { if let poolID { try CreatorPoolOption.validate(poolID) } }
 
     func run() async throws {
         let context = try CreatorContext.load()
