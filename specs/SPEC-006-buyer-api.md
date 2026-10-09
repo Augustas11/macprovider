@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.47 (2026-10-07, coordinator no-dispatch source exports)
+**Version:** 0.9.48 (2026-10-09, creator self-serve proxy)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.48 (2026-10-09, issue #1880 — creator self-serve proxy):**
+- §5.11 adds `/v1/creator/*`, the authenticated SPEC-043 0.3.0 self-serve creator surface. The gateway authenticates the caller's own account API key, drops client-supplied principal headers, and forwards a verified principal to the coordinator's service-token internal creator mount. It changes no buyer chat, quota, or money path.
 
 **Change log v0.9.47 (2026-10-07, issue #1880 — coordinator no-dispatch source exports):**
 - §5.4.3.2 defines a private operator-authenticated coordinator export for strictly bounded no-dispatch terminals, with immutable source provenance, atomic terminal fencing and closed fact projections. This does not promote acceptance or permit raw rejected-input disclosure.
@@ -2475,6 +2478,16 @@ Unauthenticated HTML page. MUST state honestly:
 - Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 90 days by default, matching the shipped coordinator `storage.request_log_retention_days` value. If an operator changes that configuration, the public page MUST be updated in the same change.
 
 MUST NOT claim private inference, hardware attestation, or a US datacenter region.
+
+
+### 5.11 `/v1/creator/*` self-serve creator proxy (v0.9.48, SPEC-043 0.3.0, #1880)
+
+`/v1/creator/*` is the gateway surface for SPEC-043 self-serve private Trusted Pools. SPEC-043-R001/R005-R008/R010 own the operations and their rules; this section owns only the gateway contract.
+
+1. **Authentication.** Every request MUST carry a valid account API key (§6), validated exactly as for chat. A missing, invalid, or revoked key, or a blocked account, gets the §6 error. Wallet-session bearers and demo tokens are refused with `403 permission_error` before any upstream call.
+2. **Principal.** The gateway MUST drop every client-supplied header whose name starts with `X-MacProvider-Creator-` and MUST build a new upstream request that carries only `Content-Type`, `Idempotency-Key`, `X-Request-ID`, the gateway service token (§15 `coordinator.service_token`), and the verified principal: `X-MacProvider-Creator-Account-ID` (the key's account id), `X-MacProvider-Creator-Credential-ID` (the key id), and `X-MacProvider-Creator-GitHub-User-ID` when the account has a linked GitHub identity. No other client header is forwarded.
+3. **Mapping.** `/v1/creator/<rest>` maps to the coordinator's `/internal/creator/trust-pools/<rest>` with the same method and query string. Only `GET` and `POST` are proxied. The request body is capped at 64 KiB and the upstream response at 1 MiB. The coordinator's status and JSON body are returned unchanged with `Cache-Control: no-store`. An unreachable coordinator or an oversized response returns `502 api_error` / `creator_upstream_error`.
+4. **Scope.** The surface never selects a pool for chat, never changes quota or billing state, and is not listed in `/v1/models`. Its operations are Agreement acceptance, pool creation and signed-event submission, root-registration nonces, member admission and revocation, buyer grants, restrictive lifecycle, self-serve promotion, pool reads and exports, the owned-provider list, and the earnings read.
 
 ---
 
