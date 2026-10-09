@@ -77,4 +77,13 @@ if missing:
     raise SystemExit("scheduled workflows without an ops-alarm job: " + ", ".join(missing))
 PY
 
+proposer="$root/.github/workflows/openrouter-catalog-propose.yml"
+fresh_output='mktemp -d)/out'
+old_output='mktemp -d)"'
+grep -Fq "$fresh_output" "$proposer" ||
+  fail "OpenRouter proposer must pass a non-existent child directory to the engine"
+if grep -Fq "$old_output" "$proposer"; then
+  fail "OpenRouter proposer must not pass mktemp's already-existing directory"
+fi
+
 printf '[test-ops-alarm] PASS\n'

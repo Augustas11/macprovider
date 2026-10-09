@@ -25,6 +25,27 @@ python3 "$root/scripts/build-release-discovery-head.py" \
   --public-key "$work/public.pem" \
   --output "$work/macprovider-release-discovery.json" \
   --signature "$work/macprovider-release-discovery.json.sig"
+
+# A release-built head omits --expires-at. Its default must remain the full
+# seven-day window so the 48-hour freshness alarm cannot fire immediately.
+python3 "$root/scripts/build-release-discovery-head.py" \
+  --release-sequence 611 \
+  --compatibility-manifest "$work/compatibility-set.json" \
+  --target-artifact-index "$work/compatibility-artifact-index.json" \
+  --issued-at 2026-07-17T00:00:00Z \
+  --private-key "$work/private.pem" \
+  --public-key "$work/public.pem" \
+  --output "$work/default-validity.json" \
+  --signature "$work/default-validity.json.sig"
+python3 - "$work/default-validity.json" <<'PY'
+import json
+import pathlib
+import sys
+
+head = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert head["signed"]["expires_at"] == "2026-07-24T00:00:00Z"
+PY
+
 python3 "$root/scripts/build-release-discovery-head.py" \
   --sequence 610 \
   --attempt 3 \

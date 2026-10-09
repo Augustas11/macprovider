@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import sys
 
 
@@ -36,8 +37,8 @@ def main(argv: list[str] | None = None) -> int:
         help="alarm if the head expires within this many hours (default 48)",
     )
     args = parser.parse_args(argv)
-    if args.min_hours < 0:
-        fail("--min-hours must be non-negative")
+    if not math.isfinite(args.min_hours) or args.min_hours < 0:
+        fail("--min-hours must be finite and non-negative")
 
     raw = sys.stdin.read()
     if not raw.strip():
