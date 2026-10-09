@@ -79,6 +79,21 @@ type Store struct {
 	// session cookie) mode read provider earnings (#1880); nil keeps the
 	// bearer-only behavior.
 	providerSessionAuthorizer atomic.Pointer[ProviderSessionAuthorizer]
+	// earningsRollupBackfillBatch overrides the provider earnings rollup
+	// backfill batch size (tests); zero uses the default.
+	earningsRollupBackfillBatch int
+	// earningsRollupAfterRead runs between a bucket recompute's read snapshot
+	// and its write transaction (tests only).
+	earningsRollupAfterRead func(providerID, hour string)
+	// earningsRollupReadHook runs inside an earnings read between the cache
+	// eligibility check and the live reads (tests only).
+	earningsRollupReadHook func()
+	// earningsViewReadHook runs inside a full-view earnings read between its
+	// payable totals and its pending sum (tests only).
+	earningsViewReadHook func()
+	// earningsViewFallbacks counts earnings reads the rollup could not serve.
+	earningsViewFallbacks atomic.Int64
+	earningsRollupSched   earningsRollupScheduler
 }
 
 type SQLiteMetrics interface {
@@ -668,6 +683,11 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {
+		return err
+	}
+	// Last: it fingerprints the payable view rebuilt above and must see every
+	// table rebuild that could have dropped its triggers.
+	if err := s.ensureProviderEarningsRollup(ctx); err != nil {
 		return err
 	}
 	return s.validateRequestLog(ctx)

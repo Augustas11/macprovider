@@ -1247,6 +1247,7 @@ func runCoordinator() (exitCode int) {
 	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
 	// because disabling it is one way to stop pool traffic before a rollback.
 	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
+	startProviderEarningsRollupRefresher(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	if privacyAuthority != nil {
 		buyerOpts = append(buyerOpts, buyer.WithPrivacyAuthority(privacyAuthority))
 	}
@@ -2961,6 +2962,105 @@ func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlemen
 				return
 			case <-ticker.C:
 				sweepIfIdle()
+			}
+		}
+	}()
+}
+
+type providerEarningsRollupRefresher interface {
+	RefreshProviderEarningsRollup(context.Context, int) (billing.ProviderEarningsRollupPass, error)
+	ProviderEarningsRollupBacklog(context.Context) (billing.ProviderEarningsRollupBacklog, error)
+}
+
+const (
+	providerEarningsRollupTick = 5 * time.Second
+	// providerEarningsRollupTickBudget is the hard work budget of one tick:
+	// every pass runs under a context that expires with it, and a pass stops
+	// between buckets once it expires. Reads use the billing read pool and
+	// each write is one bucket's few-row transaction.
+	providerEarningsRollupTickBudget = time.Second
+	// providerEarningsRollupMaxDeferral bounds how long the refresher yields
+	// to buyer money-path traffic, so the cache still converges under steady
+	// load (at most one 1 s tick per 15 s then).
+	providerEarningsRollupMaxDeferral = 15 * time.Second
+	providerEarningsRollupPassPause   = 10 * time.Millisecond
+	// providerEarningsRollupReportEvery is how often the refresher logs its
+	// backlog and the reads that fell back to the full view.
+	providerEarningsRollupReportEvery = time.Minute
+)
+
+// startProviderEarningsRollupRefresher keeps the provider earnings rollup
+// (#1925) current: it runs the one-time backfill and recomputes buckets that
+// writers marked dirty, that a maturing force credit made stale, or that a
+// reset left on an older epoch. The earnings endpoint stays exact without it
+// (unrefreshed hours are read live), only slower.
+func startProviderEarningsRollupRefresher(ctx context.Context, refresher providerEarningsRollupRefresher, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
+	if refresher == nil {
+		return
+	}
+	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
+		backfillDone := false
+		tick := func() {
+			attempts.MarkAttempt(time.Now())
+			tickCtx, cancel := context.WithTimeout(ctx, providerEarningsRollupTickBudget)
+			defer cancel()
+			for tickCtx.Err() == nil {
+				pass, err := refresher.RefreshProviderEarningsRollup(tickCtx, billing.DefaultProviderEarningsRollupLimit)
+				if err != nil {
+					if tickCtx.Err() == nil {
+						logger.Error().Err(err).Msg("provider earnings rollup refresh failed")
+					}
+					return
+				}
+				if pass.SlowOrFailed > 0 {
+					logger.Warn().Err(pass.LastFailure).Int("slow_or_failed", pass.SlowOrFailed).Int("conflicts", pass.Conflicts).Int("recomputed", pass.Recomputed).Msg("provider earnings rollup buckets backed off")
+				}
+				if pass.BackfillComplete && !backfillDone {
+					backfillDone = true
+					logger.Info().Msg("provider earnings rollup backfill complete")
+				}
+				if !pass.More {
+					return
+				}
+				select {
+				case <-tickCtx.Done():
+					return
+				case <-time.After(providerEarningsRollupPassPause):
+				}
+			}
+		}
+		report := func() {
+			reportCtx, cancel := context.WithTimeout(ctx, providerEarningsRollupTickBudget)
+			defer cancel()
+			backlog, err := refresher.ProviderEarningsRollupBacklog(reportCtx)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn().Err(err).Msg("provider earnings rollup backlog unavailable")
+				}
+				return
+			}
+			if !backlog.BackfillComplete || backlog.Dirty+backlog.Stale+backlog.OldEpoch+backlog.ViewFallbacksSinceLast > 0 {
+				logger.Info().Bool("backfill_complete", backlog.BackfillComplete).Int64("dirty", backlog.Dirty).Int64("stale", backlog.Stale).Int64("old_epoch", backlog.OldEpoch).Int64("view_fallbacks", backlog.ViewFallbacksSinceLast).Msg("provider earnings rollup backlog")
+			}
+		}
+		tick()
+		ticker := time.NewTicker(providerEarningsRollupTick)
+		defer ticker.Stop()
+		lastReport := time.Now()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if time.Since(lastReport) >= providerEarningsRollupReportEvery {
+					lastReport = time.Now()
+					report()
+				}
+				if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, providerEarningsRollupMaxDeferral, time.Now()) {
+					continue
+				}
+				tick()
 			}
 		}
 	}()
