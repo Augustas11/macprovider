@@ -1447,6 +1447,9 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case artifactIdentityChanged
     case artifactHashingTimedOut
     case invalidRequestedPoolModelID
+    /// The offer named a pool entry and the coordinator refused the field
+    /// as unknown (`400 invalid_json`): it predates pool selection.
+    case poolSelectionUnsupported
 
     var description: String {
         switch self {
@@ -1478,6 +1481,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "pool_model_id must be pool/<22-character pool id>/<slug>; fix pool_model_id (or MACPROVIDER_POOL_MODEL_ID) in the provider config"
         case .artifactHashingTimedOut:
             return "artifact hashing exceeded its time budget; identity not reported (SPEC-010-R007(a)); retry on a faster volume or with the store local"
+        case .poolSelectionUnsupported:
+            return "the coordinator does not support pool selection (requested_pool_model_id) yet, so the offer was not submitted; to offer without choosing a pool, remove pool_model_id from the provider config (and unset MACPROVIDER_POOL_MODEL_ID), or wait for the coordinator upgrade and run models offer again"
         case .httpStatus(let status):
             if status == 404 || status == 405 {
                 // A pre-BYOM coordinator has no SPEC-047 admission endpoints.
@@ -1818,6 +1823,15 @@ struct BYOMModelAdmissionClient: Sendable {
         return .ephemeral
     }
 
+    /// `error.code` of a coordinator `{"error":{"code":...}}` body.
+    static func errorCode(in data: Data) -> String? {
+        guard data.count <= maxStatusResponseBytes,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = root["error"] as? [String: Any]
+        else { return nil }
+        return error["code"] as? String
+    }
+
     func submitOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/offers"))
         request.httpMethod = "POST"
@@ -1828,7 +1842,8 @@ struct BYOMModelAdmissionClient: Sendable {
         return try await perform(
             request,
             expectedProviderID: package.request.providerID,
-            expectedCandidateID: package.request.candidateID
+            expectedCandidateID: package.request.candidateID,
+            poolSelectionRequested: package.request.requestedPoolModelID != nil
         )
     }
 
@@ -1908,7 +1923,8 @@ struct BYOMModelAdmissionClient: Sendable {
     private func perform(
         _ request: URLRequest,
         expectedProviderID: String?,
-        expectedCandidateID: String?
+        expectedCandidateID: String?,
+        poolSelectionRequested: Bool = false
     ) async throws -> BYOMAdmissionStatusWire {
         let data: Data
         let response: URLResponse
@@ -1927,6 +1943,12 @@ struct BYOMModelAdmissionClient: Sendable {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
         guard (200..<300).contains(http.statusCode) else {
+            // A coordinator without pool selection decodes the offer
+            // strictly and refuses the unknown field; never resubmit without
+            // it, which would silently drop the operator's pool choice.
+            if poolSelectionRequested, http.statusCode == 400, Self.errorCode(in: data) == "invalid_json" {
+                throw BYOMModelAdmissionError.poolSelectionUnsupported
+            }
             throw BYOMModelAdmissionError.httpStatus(http.statusCode)
         }
         guard data.count <= Self.maxStatusResponseBytes else {

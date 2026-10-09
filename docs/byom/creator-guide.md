@@ -331,3 +331,7 @@ Buyers pay your signed rates under the standard formula and platform fee.
   <candidate> --yes --json` again, then `macprovider-cli restart`. A
   `pool_model_id` that matches no active entry warns
   `pool_binding_requested_entry_unmatched`.
+- An offer that names a pool entry needs a coordinator with pool selection.
+  An older coordinator refuses it, and `models offer` says so instead of
+  offering without your pool choice: remove `pool_model_id` to offer without
+  it, or wait for the coordinator upgrade.

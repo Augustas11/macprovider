@@ -114,6 +114,47 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertTrue(BYOMPoolBindingHint.hints(for: ["pool_binding_requested_entry_unmatched"]).first?.contains("check the pool id and slug") == true)
     }
 
+    /// #1880: a coordinator that predates pool selection refuses the
+    /// unknown requested_pool_model_id as invalid_json; the CLI says so and
+    /// does not retry without the field.
+    func testOfferNamingAPoolOnACoordinatorWithoutPoolSelectionFailsClearly() async throws {
+        let identity = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"),
+            servedModelRef: "ollama:qwen3-8b",
+            catalogModelKey: "qwen3-8b"
+        )
+        func package(_ requested: String?) throws -> BYOMOfferSubmissionPackage {
+            try BYOMOfferSubmissionBuilder.makePackage(
+                providerID: "provider-byom-a", candidate: candidate, admissionIdentity: identity,
+                evaluationDigestSHA256: String(repeating: "b", count: 64), requestedDisclosureClass: "non_earning_provider_asserted",
+                requestedPoolModelID: requested,
+                now: Date(timeIntervalSince1970: 1_800_000_000), nonce: "nonce_test", idempotencyKey: "request_test", cliVersion: "test"
+            )
+        }
+        let posts = LockedBox(0)
+        let session = makeBYOMAdmissionSession { _ in
+            posts.set(posts.get() + 1)
+            return BYOMAdmissionMockHTTPResponse(statusCode: 400, body: #"{"error":{"code":"invalid_json","message":"invalid model admission offer package"}}"#)
+        }
+        let client = BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session)
+        do {
+            _ = try await client.submitOffer(try package("pool/AAAAAAAAAAAAAAAAAAAAAA/my-model"), bearerToken: "token")
+            XCTFail("an old coordinator must refuse the pool-selecting offer")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .poolSelectionUnsupported)
+            XCTAssertTrue(error.description.contains("remove pool_model_id"), error.description)
+        }
+        XCTAssertEqual(posts.get(), 1, "the offer must not be retried without requested_pool_model_id")
+        // Without a pool choice the same refusal is the plain HTTP error.
+        do {
+            _ = try await client.submitOffer(try package(nil), bearerToken: "token")
+            XCTFail("expected HTTP 400")
+        } catch let error as BYOMModelAdmissionError {
+            XCTAssertEqual(error, .httpStatus(400))
+        }
+    }
+
     func testOfferSubmissionRunnerPostsPackageAndPreservesNonEarningStatus() async throws {
         let root = try temporaryBYOMAdmissionDirectory("byom-admission-submit")
         let namespace = root.appendingPathComponent("ns")
