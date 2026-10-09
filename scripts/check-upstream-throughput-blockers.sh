@@ -148,8 +148,8 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-# mlx-swift-lm fork tag 3.32.3-macprovider.2 on upstream tag 3.32.3.
-native_mtp_exception_revision = "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
+# mlx-swift-lm fork tag 3.32.3-macprovider.3 on upstream tag 3.32.3.
+native_mtp_exception_revision = "1007bc667f3255f8ebaa52cfbbafaa76af5a3402"
 native_mtp_exception_base = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 # mlx-swift fork tag 0.32.3-macprovider.1 on upstream tag 0.32.3; its MLX core
@@ -445,7 +445,7 @@ out = {
         ),
         "note": (
             "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
-            "(3.32.3-macprovider.2) with mlx-swift 0.32.3 on a batch-invariant "
+            "(3.32.3-macprovider.3) with mlx-swift 0.32.3 on a batch-invariant "
             "small-M quantized matmul MLX core fork (0.32.3-macprovider.1); it is "
             "not approved until Studio validation and the freeze audits pass; "
             "native MTP stays default-off; upstream #645 remains the tagged-release "
@@ -470,8 +470,8 @@ out = {
             "packed_mtp_target_verification_public_cache_transactions_and_packed_"
             "drafter_plus_fused_qwen36_a3b_moe_behind_MLX_LM_QWEN35_FUSED_MOE_"
             "with_layout_validation_plus_one_pass_gdn_verify_checkpoint_plus_"
-            "unpadded_packed_ssm_mask_skip_plus_mlx_swift_and_mlx_core_batch_"
-            "invariant_small_m_quantized_matmul_fork"
+            "unpadded_packed_ssm_mask_skip_plus_compiled_mtp_verify_step_plus_"
+            "mlx_swift_and_mlx_core_batch_invariant_small_m_quantized_matmul_fork"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "
