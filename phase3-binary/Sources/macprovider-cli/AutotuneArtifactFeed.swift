@@ -542,7 +542,7 @@ extension ArtifactFeed {
 
 /// The ONE artifact selection every artifact consumer takes (SPEC-023 §3.7.6
 /// rule 5): a feed that was authenticated, BOUND to the candidate catalog of the
-/// same release with signer identity equality, and fresh at the time of use.
+/// same release with signer identity equality, and a valid timestamp at use.
 /// Only `AutotuneStaticInputs.usableArtifactFeed` (offline consumers) and
 /// `AutotuneStaticInputs.loadArtifactFeed` (fetch-or-fallback) can make one, so
 /// no consumer can reach artifact bytes around the qualification. It carries
@@ -581,12 +581,12 @@ extension AutotuneStaticInputs {
     }
 
     /// §3.7.6 rules 3–4 for whichever artifact bytes were SELECTED — the live
-    /// bytes or the compiled-in fallback alike: a future or expired stamp is
-    /// update-required; 14–30 days is stale. Both fail closed for every
-    /// artifact-derived capability (rule 5).
+    /// bytes or the compiled-in fallback alike: a future stamp is
+    /// update-required; age of 14 days or more is advisory only. Signed
+    /// artifact identities do not expire merely because the feed ages.
     static func artifactFeedFreshnessWarnings(generatedAt: Date, now: Date) -> Set<AutotuneRecommendWarning> {
         let age = now.timeIntervalSince(generatedAt)
-        if generatedAt > now.addingTimeInterval(10 * 60) || age > 30 * 24 * 3600 {
+        if generatedAt > now.addingTimeInterval(10 * 60) {
             return [.catalogArtifactFeedUpdateRequired]
         }
         if age >= 14 * 24 * 3600 {
@@ -622,8 +622,8 @@ extension AutotuneStaticInputs {
     /// discovery, which never fetches): the compiled-in bytes bound to the
     /// compiled-in candidate catalog with the three-way signer identity
     /// (manifest-bound artifact signer, candidate signer, artifact signer) AND
-    /// fresh at `now`. Nil for a rate-card-bound release, an undecodable or
-    /// unbound snapshot, or a stale / expired snapshot — exactly the cases in
+    /// valid at `now`. Nil for a rate-card-bound release, an undecodable or
+    /// unbound snapshot, or a future-dated snapshot — exactly the cases in
     /// which `loadArtifactFeed` yields no usable feed for the same bytes.
     static func usableArtifactFeed(
         bakedBytes: Data?,
@@ -635,7 +635,7 @@ extension AutotuneStaticInputs {
         guard let bytes = bakedBytes,
               let feed = try? decodeArtifactFeed(bytes),
               let catalog = try? decodeSignedStaticCandidateCatalog(candidateBytes),
-              artifactFeedFreshnessWarnings(generatedAt: feed.generatedAt, now: now).isEmpty
+              !artifactFeedFreshnessWarnings(generatedAt: feed.generatedAt, now: now).contains(.catalogArtifactFeedUpdateRequired)
         else {
             return nil
         }
@@ -711,9 +711,8 @@ extension AutotuneStaticInputs {
         ) { try Self.decodeArtifactFeed($0) }
         var warnings = selection.warnings
         if selection.usedFallback {
-            // The shared loader applies freshness only to fetched bytes (the
-            // v0.1 feeds stay usable when stale); the artifact feed is stricter
-            // (§3.7.6 rule 5), so the fallback bytes are aged here.
+            // Apply the same timestamp check and advisory age warning to the
+            // compiled-in artifact feed as to fetched bytes.
             warnings.formUnion(Self.artifactFeedFreshnessWarnings(generatedAt: selection.value.generatedAt, now: now()))
         }
         // The compiled-in bytes carry their release-manifest-bound signer; when
@@ -738,7 +737,7 @@ extension AutotuneStaticInputs {
             warnings.insert(.catalogArtifactFeedUpdateRequired)
         }
         let usable = warnings.isDisjoint(with: [
-            .catalogArtifactFeedIntegrityFailure, .catalogArtifactFeedUpdateRequired, .catalogArtifactFeedStale,
+            .catalogArtifactFeedIntegrityFailure, .catalogArtifactFeedUpdateRequired,
         ])
         return AutotuneStaticSelection(
             value: usable ? qualified : nil,

@@ -57,9 +57,18 @@ def release_input(key_id: str, manifest: bytes, bank: bytes, release_id: str = N
     }
 
 
+def bank_bytes(release_id: str = NATIVE_RELEASE_ID) -> bytes:
+    # A bank cut from source must name the release it ships in
+    # (catalog-release.py validate_native_mtp_admission require_bank_release).
+    return (
+        '{"schema_version":"macprovider.native-mtp-challenge-bank.v1","release_id":"%s",'
+        '"issued_at":"2026-10-06T00:00:00Z","expires_at":"2026-10-20T00:00:00Z","challenges":[]}'
+        % release_id
+    ).encode()
+
+
 class NativeMTPAdmissionReleaseTest(unittest.TestCase):
     MANIFEST = b'{"schema_version":"macprovider.native-mtp-artifact-manifest.v1"}'
-    BANK = b'{"schema_version":"macprovider.native-mtp-challenge-bank.v1","challenges":[]}'
 
     @classmethod
     def setUpClass(cls):
@@ -85,7 +94,7 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
                         setattr(catalog_release, name, value)
 
     def write_native_inputs(self, harness, release_id: str = NATIVE_RELEASE_ID, bank: bytes | None = None) -> None:
-        bank = self.BANK if bank is None else bank
+        bank = bank_bytes(release_id) if bank is None else bank
         (harness.catalog / "native-mtp-artifact-manifest.json").write_bytes(self.MANIFEST)
         (harness.catalog / "native-mtp-selftest-bank.json").write_bytes(bank)
         (harness.catalog / "native-mtp-admission-tuple.json").write_text(json.dumps(tuple_input(), indent=2))
@@ -135,7 +144,7 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
             sidecar = (harness.static / "native-mtp-admission.json").read_bytes()
             self.assertEqual(catalog_release.sha256(sidecar), record["sha256"])
             body = json.loads(sidecar)
-            self.assertEqual(body["entries"][0]["challenge_bank_sha256"], catalog_release.sha256(self.BANK))
+            self.assertEqual(body["entries"][0]["challenge_bank_sha256"], catalog_release.sha256(bank_bytes()))
 
             staged = self.stage_native(harness, harness.root / "staged")
             catalog_release.verify_directory(staged, allow_expired_tier2=True)
@@ -143,7 +152,7 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
             # A staged bank re-signed by the alternate trusted key is not the
             # sidecar's pinned challenge-bank signer.
             tampered = self.stage_native(harness, harness.root / "tampered-bank-signer")
-            harness.sign_into(tampered, "native-mtp-selftest-bank.json", self.BANK, key_id=harness.ALT_KEY_ID)
+            harness.sign_into(tampered, "native-mtp-selftest-bank.json", bank_bytes(), key_id=harness.ALT_KEY_ID)
             with self.assertRaisesRegex(catalog_release.CatalogError, "challenge_bank_signer_key_id"):
                 catalog_release.verify_directory(tampered, allow_expired_tier2=True)
 

@@ -175,7 +175,9 @@ def append_cb_entry(*, version, cdhash, package_sha):
         "kv_dtype": "fp16",
         "requires_moe": True,
         "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
-        "metallib_sha256": "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf",
+        "metallib_sha256": os.environ.get(
+            "FIXTURE_CB_METALLIB", "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf"
+        ),
         "kernel_identifier": "macprovider_paged_kv_gather_v1",
         "rollout": os.environ.get("FIXTURE_CB_ROLLOUT", "canary"),
         "cached_turns_accepted": False,
@@ -425,26 +427,31 @@ grep -q 'required continuous batching baseline studio-qwen3.6-a3b-v1 is missing'
 FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-ok"
 run_guard_cb_required "$work/cb-required-ok" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
+# CLI identity in a CB entry is recorded provenance, not a gate: an entry
+# recorded for the previous release (different version, CDHash and package
+# digest) still covers the successor.
 FIXTURE_CB_OLD_BASELINE=1 make_fixture "$work/cb-required-old-only"
-if run_guard_cb_required "$work/cb-required-old-only" >"$work/cb-required-old-only.out" 2>&1; then
-  fail "accepted only the previous release's continuous-batching grant for the successor"
-fi
-grep -q 'has no exact entry for release 1.8.68 and provider_code_identity CDHash' "$work/cb-required-old-only.out"
+run_guard_cb_required "$work/cb-required-old-only" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
 FIXTURE_CB_OLD_BASELINE=1 FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-old-and-new"
 run_guard_cb_required "$work/cb-required-old-and-new" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
-FIXTURE_CB_BASELINE=1 FIXTURE_CB_CDHASH="$(printf 'b%.0s' $(seq 40))" make_fixture "$work/cb-required-cdhash-drift"
-if run_guard_cb_required "$work/cb-required-cdhash-drift" >"$work/cb-required-cdhash-drift.out" 2>&1; then
-  fail "accepted a continuous-batching baseline bound to a different CDHash"
-fi
-grep -q 'has no exact entry for release 1.8.68 and provider_code_identity CDHash' "$work/cb-required-cdhash-drift.out"
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_CDHASH="$(printf 'b%.0s' $(seq 40))" FIXTURE_CB_PACKAGE_SHA="$(printf '5%.0s' $(seq 64))" \
+  make_fixture "$work/cb-required-identity-drift"
+run_guard_cb_required "$work/cb-required-identity-drift" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
-FIXTURE_CB_BASELINE=1 FIXTURE_CB_PACKAGE_SHA="$(printf '5%.0s' $(seq 64))" make_fixture "$work/cb-required-package-drift"
-if run_guard_cb_required "$work/cb-required-package-drift" >"$work/cb-required-package-drift.out" 2>&1; then
-  fail "accepted a continuous-batching baseline whose package manifest does not match the candidate binary"
+# Decode-path identity stays pinned: a different metallib no longer covers the baseline.
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_METALLIB="$(printf '9%.0s' $(seq 64))" make_fixture "$work/cb-required-metallib-drift"
+if run_guard_cb_required "$work/cb-required-metallib-drift" >"$work/cb-required-metallib-drift.out" 2>&1; then
+  fail "accepted a continuous-batching policy whose metallib no longer matches the baseline"
 fi
-grep -q 'provenance.package_manifest_sha256 does not match pearl-release.json provider_code_identity.binary_sha256' "$work/cb-required-package-drift.out"
+grep -q 'required continuous batching baseline studio-qwen3.6-a3b-v1 is missing' "$work/cb-required-metallib-drift.out"
+
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_ROLLOUT=off make_fixture "$work/cb-required-rollout-off"
+if run_guard_cb_required "$work/cb-required-rollout-off" >"$work/cb-required-rollout-off.out" 2>&1; then
+  fail "accepted a continuous-batching baseline with rollout off"
+fi
+grep -q "has rollout 'off', expected canary or on" "$work/cb-required-rollout-off.out"
 
 FIXTURE_CB_BASELINE=1 FIXTURE_CB_SOURCE=self_declared make_fixture "$work/cb-required-bad-source"
 if run_guard_cb_required "$work/cb-required-bad-source" >"$work/cb-required-bad-source.out" 2>&1; then
@@ -516,10 +523,9 @@ metadata["catalog"]["files"]["continuous-batching-policy.json"] = __import__("ha
 metadata["catalog"]["files"]["continuous-batching-policy.json.sig"] = __import__("hashlib").sha256((d / "live" / "v1_continuous-batching-policy.sig").read_bytes()).hexdigest()
 metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-if run_guard_cb_required "$work/cb-required-expired" >"$work/cb-required-expired.out" 2>&1; then
-  fail "accepted an expired continuous-batching policy"
-fi
-grep -q 'continuous-batching-policy.json expired at' "$work/cb-required-expired.out"
+# A policy past expires_at still covers the baseline: the runtime keeps
+# authorizing CB after the calendar date.
+run_guard_cb_required "$work/cb-required-expired" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
 # SPEC-023 §3.7 artifact feed (BYOM v0.2 slice 2b): served feed set must equal
 # the release's feed set, and a bound feed is signer-equal and release-bound.

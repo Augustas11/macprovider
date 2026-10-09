@@ -83,6 +83,15 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case buyerTTFTCeilingExceeded = "buyer_ttft_ceiling_exceeded"
 }
 
+extension Collection where Element == AutotuneRecommendWarning {
+    /// Warnings that must block artifact-derived capabilities. Feed age is
+    /// advisory (SPEC-023 v0.22.15): a valid signed, release-bound feed that
+    /// is merely old stays usable.
+    var blockingArtifactFeedWarnings: [AutotuneRecommendWarning] {
+        filter { $0 != .catalogArtifactFeedStale }
+    }
+}
+
 enum BandwidthTier: String, Codable, CaseIterable, Comparable {
     case c = "C"
     case b = "B"
@@ -2025,7 +2034,6 @@ struct AutotuneStaticInputs {
         let usable = warnings.isDisjoint(with: [
             .catalogArtifactFeedIntegrityFailure,
             .catalogArtifactFeedUpdateRequired,
-            .catalogArtifactFeedStale,
         ])
         return AutotuneStaticSelection(
             value: usable ? qualified : nil,
@@ -2104,7 +2112,7 @@ struct AutotuneStaticInputs {
             )
         }
         // §3.5 order: signature, then SCHEMA (an invalid document is an integrity
-        // failure), then policy / freshness (update-required). Checking policy on
+        // failure), then policy / timestamp validity (update-required). Checking policy on
         // loosely extracted text first would misclassify a schema-invalid feed.
         guard let value = try? decode(jsonBytes),
               let fetchedGeneratedAt = generatedAt(in: jsonBytes)
@@ -2128,8 +2136,7 @@ struct AutotuneStaticInputs {
         }
         let current = now()
         guard (fetchedGeneratedAt >= bakedGeneratedAt || allowOlderFetchedBytes(jsonBytes, sidecar.keyID)),
-              fetchedGeneratedAt <= current.addingTimeInterval(10 * 60),
-              current.timeIntervalSince(fetchedGeneratedAt) <= 30 * 24 * 3600
+              fetchedGeneratedAt <= current.addingTimeInterval(10 * 60)
         else {
             return AutotuneStaticSelection(
                 value: bakedValue,

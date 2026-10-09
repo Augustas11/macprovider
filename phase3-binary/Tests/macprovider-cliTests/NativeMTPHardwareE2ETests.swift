@@ -355,7 +355,6 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             context: NativeMTPAdmissionSidecar.RuntimeContext(
                 modelID: Self.modelID,
                 modelRevision: targetIdentity.digest,
-                providerRevision: Self.providerRevision,
                 upstreamMLXSwiftLMRevision: Self.upstreamRevision,
                 hardwareChip: machine.chip,
                 ramGB: machine.ramGB,
