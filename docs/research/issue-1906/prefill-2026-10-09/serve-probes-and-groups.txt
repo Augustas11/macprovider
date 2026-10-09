@@ -1,0 +1,14 @@
+== serve-ragged-trace.log
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+   8 rows=2 ragged=false
+  45 rows=2 ragged=true
+== serve-final-default.log
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+   8 rows=2 ragged=false
+  15 rows=2 ragged=true
+  14 rows=3 ragged=true
+  43 rows=4 ragged=true
+binary_sha256 23ecbe50f545b6fbcdb72dd9bddd3fb93090f9f30d5eb8c9f313e8a8b843e54f label ragged-b1024 cfg config-18091.yaml started 2026-10-09T06:11:39Z
+binary_sha256 23ecbe50f545b6fbcdb72dd9bddd3fb93090f9f30d5eb8c9f313e8a8b843e54f label ragged-b2048 cfg config-18091-b2048.yaml started 2026-10-09T06:16:23Z
