@@ -102,6 +102,7 @@ func selfServeExpect(t *testing.T, rec *httptest.ResponseRecorder, want int, lab
 func selfServeAgreementBody() map[string]any {
 	return map[string]any{
 		"creator_agreement_version":       trustpool.SelfServeCreatorAgreementVersion,
+		"agreement_terms_digest":          trustpool.SelfServeAgreementTermsDigest(),
 		"accept":                          true,
 		"public_display_name":             "Studio Pool",
 		"legal_support_contact":           "support@example.com",
@@ -174,6 +175,22 @@ func TestSelfServeAgreementCreatesBoundedSelfServeApproval(t *testing.T) {
 
 	terms := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodGet, "agreement", nil, "")
 	selfServeExpect(t, terms, http.StatusOK, "agreement terms")
+	var published struct {
+		Agreement map[string]any `json:"agreement"`
+		Digest    string         `json:"agreement_terms_digest"`
+	}
+	if err := json.Unmarshal(terms.Body.Bytes(), &published); err != nil {
+		t.Fatalf("decode terms: %v", err)
+	}
+	if published.Digest != trustpool.SelfServeAgreementTermsDigest() {
+		t.Fatalf("published digest %q, want %q", published.Digest, trustpool.SelfServeAgreementTermsDigest())
+	}
+	// SPEC-043-R006/R013/R014 creator disclosures are part of the published text.
+	for _, field := range []string{"external_runtime_accountability", "pool_model_accountability", "shared_supply_disclosure"} {
+		if text, _ := published.Agreement[field].(string); text == "" {
+			t.Fatalf("agreement omits %s: %v", field, published.Agreement)
+		}
+	}
 
 	notAccepted := selfServeAgreementBody()
 	notAccepted["accept"] = false
@@ -181,6 +198,9 @@ func TestSelfServeAgreementCreatesBoundedSelfServeApproval(t *testing.T) {
 	stale := selfServeAgreementBody()
 	stale["creator_agreement_version"] = "1999-01-01"
 	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", stale, ""), http.StatusBadRequest, "stale agreement version")
+	unbound := selfServeAgreementBody()
+	unbound["agreement_terms_digest"] = "00"
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", unbound, ""), http.StatusBadRequest, "agreement not bound to the published terms")
 	smuggled := selfServeAgreementBody()
 	smuggled["approved_by"] = "operator"
 	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", smuggled, ""), http.StatusBadRequest, "agreement with unknown field")

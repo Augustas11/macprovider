@@ -656,7 +656,8 @@ struct CreatorAgreeCommand: AsyncParsableCommand {
     func run() async throws {
         let context = try CreatorContext.load()
         let terms = try context.client.expect(try await context.client.request("GET", "agreement"))
-        guard let agreement = terms["agreement"] as? [String: Any], let version = agreement["creator_agreement_version"] as? String else {
+        guard let agreement = terms["agreement"] as? [String: Any], let version = agreement["creator_agreement_version"] as? String,
+              let termsDigest = terms["agreement_terms_digest"] as? String else {
             throw CreatorCLIError.invalidInput("malformed agreement response")
         }
         CreatorOutput.printJSON(agreement)
@@ -665,7 +666,7 @@ struct CreatorAgreeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
         let body: [String: Any] = [
-            "creator_agreement_version": version, "accept": true, "public_display_name": displayName,
+            "creator_agreement_version": version, "agreement_terms_digest": termsDigest, "accept": true, "public_display_name": displayName,
             "legal_support_contact": legalContact, "billing_contact": billingContact,
             "emergency_notification_endpoint": emergencyEndpoint,
         ]

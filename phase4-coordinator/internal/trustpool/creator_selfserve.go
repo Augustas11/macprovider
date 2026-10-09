@@ -40,7 +40,7 @@ const (
 	// fixed across Agreement renewals so a renewal never strands the pools
 	// bound to the approval; the Agreement version is recorded separately.
 	SelfServeCreatorAgreementID      = "malibu-creator-agreement-self-serve"
-	SelfServeCreatorAgreementVersion = "2026-10-09"
+	SelfServeCreatorAgreementVersion = "2026-10-09.2"
 	selfServeApprovalVersion         = "self-serve-1"
 	selfServePricingScheduleID       = "malibu-self-serve-pool"
 	selfServePricingScheduleVersion  = "2026-10-09"
@@ -57,6 +57,12 @@ const (
 	selfServeProhibitedClaimText  = "I will not describe this pool, in any product, marketing, resale, investor, sales, or support material, as a Privacy Pool, anonymous routing, coordinator-blind, end-to-end encrypted, confidential compute, zero-knowledge or ZK inference, dedicated or isolated compute, or compliant with HIPAA, GLBA, SOC 2, PCI-DSS, GDPR adequacy, or any other regulated-vertical regime."
 	selfServeBuyerDisclosureText  = "Before or at first use I will tell every buyer I authorize that prompts and responses are visible to the Malibu coordinator and that the operator of the selected provider Mac may access request content."
 	selfServeApprovalCriteriaText = "Self-serve private pool: account authenticated by its own API key, Creator Agreement accepted by click-through, launch environment self_serve_private only, never publicly announced, provider supply limited to Macs the account's GitHub identity has claimed, buyers limited to accounts the creator names."
+	// SPEC-043-R013: external-runtime accountability.
+	selfServeExternalRuntimeText = "A provider serving my pool through an external runtime earns only when its owner account is me (delegated membership is not available to a self-serve pool), and I am accountable for every member I admit or name in my signed member attestation; removing its attestation stops new selection at the next accepted manifest generation. External runtimes serve under administrative trust: the provider operator attests which process executes, the weights it loaded, and its token counts, and Malibu does not verify them. The runtime allowlist constrains the runtime identity the operator declares, not the executing process."
+	// SPEC-043-R014: pool-model identity, price, and catalog transition.
+	selfServePoolModelText = "I sign each pool model's identity and price and I am accountable for them. An entry whose artifact pair is a recommendable (priced) or blocked catalog identity is rejected; a candidate or listed catalog match keeps earning on the pool; promotion of that pair to recommendable ends the pool binding in favor of catalog pricing; removing an entry stops new routing at the next accepted generation. Artifact disclosure is exact identity provenance, not proof that the serving process loaded those bytes. Every pool model is pool-attested, not network-verified."
+	// SPEC-043-R006: shared-supply limitation.
+	selfServeSharedSupplyText = "My pool uses shared supply: its member Macs may also serve global traffic, and the pool has no throughput, latency, or capacity reservation guarantee. I will pass a materially equivalent disclosure to the buyers I authorize."
 )
 
 var selfServePrincipalIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
@@ -70,6 +76,9 @@ type selfServeAgreementTerms struct {
 	ProhibitedClaims        string `json:"prohibited_claim_acknowledgment"`
 	BuyerDisclosure         string `json:"buyer_disclosure_commitment"`
 	ApprovalCriteria        string `json:"approval_criteria"`
+	ExternalRuntime         string `json:"external_runtime_accountability"`
+	PoolModels              string `json:"pool_model_accountability"`
+	SharedSupply            string `json:"shared_supply_disclosure"`
 	TermDays                int    `json:"term_days"`
 	GraceDays               int    `json:"grace_days"`
 }
@@ -82,13 +91,29 @@ func currentSelfServeAgreementTerms() selfServeAgreementTerms {
 		ProhibitedClaims:        selfServeProhibitedClaimText,
 		BuyerDisclosure:         selfServeBuyerDisclosureText,
 		ApprovalCriteria:        selfServeApprovalCriteriaText,
+		ExternalRuntime:         selfServeExternalRuntimeText,
+		PoolModels:              selfServePoolModelText,
+		SharedSupply:            selfServeSharedSupplyText,
 		TermDays:                int(selfServeAgreementTerm / (24 * time.Hour)),
 		GraceDays:               int(selfServeAgreementGrace / (24 * time.Hour)),
 	}
 }
 
+// SelfServeAgreementTermsDigest is SHA-256 over the JSON encoding of the
+// published terms. Acceptance must echo it, so a creator accepts exactly the
+// text it was shown and a later wording change cannot inherit that acceptance.
+func SelfServeAgreementTermsDigest() string {
+	raw, err := json.Marshal(currentSelfServeAgreementTerms())
+	if err != nil {
+		panic("trustpool: self-serve agreement terms do not encode: " + err.Error())
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 type selfServeAgreementRequest struct {
 	CreatorAgreementVersion       string `json:"creator_agreement_version"`
+	AgreementTermsDigest          string `json:"agreement_terms_digest"`
 	Accept                        bool   `json:"accept"`
 	PublicDisplayName             string `json:"public_display_name"`
 	LegalSupportContact           string `json:"legal_support_contact"`
@@ -195,7 +220,10 @@ func (h *adminHandler) requireSelfServeApproval(ctx context.Context, creatorID s
 func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
 	switch r.Method {
 	case http.MethodGet:
-		writeAdminJSON(w, http.StatusOK, map[string]any{"agreement": currentSelfServeAgreementTerms()})
+		writeAdminJSON(w, http.StatusOK, map[string]any{
+			"agreement":              currentSelfServeAgreementTerms(),
+			"agreement_terms_digest": SelfServeAgreementTermsDigest(),
+		})
 		return
 	case http.MethodPost:
 	default:
@@ -215,8 +243,12 @@ func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.R
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
 		return
 	}
-	if !body.Accept || body.CreatorAgreementVersion != SelfServeCreatorAgreementVersion {
-		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "agreement_not_accepted", "current_version": SelfServeCreatorAgreementVersion}})
+	if !body.Accept || body.CreatorAgreementVersion != SelfServeCreatorAgreementVersion || body.AgreementTermsDigest != SelfServeAgreementTermsDigest() {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{
+			"code":                   "agreement_not_accepted",
+			"current_version":        SelfServeCreatorAgreementVersion,
+			"agreement_terms_digest": SelfServeAgreementTermsDigest(),
+		}})
 		return
 	}
 	for _, field := range []string{body.PublicDisplayName, body.LegalSupportContact, body.BillingContact, body.EmergencyNotificationEndpoint} {

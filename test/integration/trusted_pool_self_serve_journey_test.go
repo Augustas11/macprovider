@@ -113,9 +113,11 @@ func TestTrustedPoolSelfServeCreatorJourney(t *testing.T) {
 	}
 
 	// 1. Click-through Creator Agreement.
-	terms := creator(http.MethodGet, "agreement", nil, "", http.StatusOK)["agreement"].(map[string]any)
+	published := creator(http.MethodGet, "agreement", nil, "", http.StatusOK)
+	terms := published["agreement"].(map[string]any)
 	approval := creator(http.MethodPost, "agreement", map[string]any{
 		"creator_agreement_version":       terms["creator_agreement_version"],
+		"agreement_terms_digest":          published["agreement_terms_digest"],
 		"accept":                          true,
 		"public_display_name":             "Self-serve journey pool",
 		"legal_support_contact":           "legal@example.test",
