@@ -6,6 +6,7 @@ Files in STATE_DIR steer it:
   healthz.json            coordinator/gateway /healthz body
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
+  metrics.txt             coordinator /metrics body (404 when absent)
   mode                    gateway behaviour: move | stuck | serial-request |
                           no-request-id | no-provider-id | other-provider
   provider_id             X-Provider-Id the gateway reports (unless the mode drops it)
@@ -45,6 +46,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, read("healthz.json", "{}"))
         if self.path == "/v1/autotune-release" and read("autotune-release.json"):
             return self.send(200, read("autotune-release.json"))
+        if self.path == "/metrics" and read("metrics.txt") is not None:
+            return self.send(200, read("metrics.txt") + "\n")
         if self.path == "/v1/status":
             d = json.loads(read("status.json", "{}"))
             served = int(read("served", "0"))

@@ -306,7 +306,6 @@ rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 
-# ==== discovery-renew =========================================================
 fixture '{"runs": {"renew-release-discovery-head.yml": []}}'
 MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=24 run_rc 3 "short discovery renewal validity refused" scripts/ops/discovery-renew.sh status
 expect_err "must be 168"
@@ -323,7 +322,28 @@ bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
 run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
 expect_next env_approval:manual
+=======
+# verify_live_rollout after the bump refuses while privacy rejections count.
+fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
+  "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
+  "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]}}'
+health v9.0.0 "$CAND"
+printf '# TYPE relayblind_privacy_posture_rejections_total counter\nrelayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"} 3' > "$tmp/svc/metrics.txt"
+run_rc 0 "cli status after the bump with rejections" scripts/ops/cli-release.sh status
+expect_next verify_live_rollout:blocked
+case "$(next_field reason)" in *"rejected 3 privacy advertisement"*) ok ;; *) bad "rejection reason: $(next_field reason)" ;; esac
+MACPROVIDER_OPS_OWNER=t run_rc 3 "verify_live_rollout refuses to run with rejections" scripts/ops/cli-release.sh next --run
+printf '# TYPE relayblind_privacy_posture_rejections_total counter\nrelayblind_privacy_posture_rejections_total{reason="posture_closed"} 2' > "$tmp/svc/metrics.txt"
+run_rc 0 "cli status after the bump without unapproved rejections" scripts/ops/cli-release.sh status
+expect_next verify_live_rollout:mutate
+rm -f "$tmp/svc/metrics.txt"
+printf '{"error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"p1"}\n' > "$tmp/svc/journal.txt"
+run_rc 0 "cli status falls back to the journal without the metric" scripts/ops/cli-release.sh status
+expect_next verify_live_rollout:blocked
+if [ "$(fact_of privacy_unapproved_rejections_source)" = "journal" ]; then ok; else bad "fallback source: $(fact_of privacy_unapproved_rejections_source)"; fi
+rm -f "$tmp/svc/journal.txt"
 
+# ==== discovery-renew ==================================================
 # ==== catalog-activate gateway proof ==========================================
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model

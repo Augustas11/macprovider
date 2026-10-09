@@ -44,7 +44,10 @@
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
 #                           sets physical_acceptance_confirmed=true, after 4, 6, 7 and 7a
 #   8 recommendation_bump   Pearl latest_binary_version + compatibility target
-#   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml
+#   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml; refused while the
+#                           coordinator has counted posture_unapproved_code_identity rejections
+#                           since it restarted for the bump (metric
+#                           relayblind_privacy_posture_rejections_total, journal fallback)
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
 #  11 install_sh_consumer_health
 #
@@ -73,6 +76,7 @@ PRIVACY_DOC="docs/runbooks/privacy-class-beta-operations.md"
 PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
 PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
 PEARL_COORDINATOR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+PEARL_COORDINATOR_METRICS_URL="${PEARL_COORDINATOR_METRICS_URL:-http://127.0.0.1:8444/metrics}"
 PEARL_RELEASE_IDENTITY_OWNER="${PEARL_RELEASE_IDENTITY_OWNER:-root}"
 PEARL_RELEASE_IDENTITY_GROUP="${PEARL_RELEASE_IDENTITY_GROUP:-macprovider}"
 
@@ -463,8 +467,26 @@ bash scripts/release-staged-version-policy.sh v$V" \
     next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" "coordinator restart: a few seconds of buyer outage"
   fi
 
-  # 9. verify-live-coordinator-release-rollout.
-  if [ -n "$verify_ok" ]; then
+  # 9. verify-live-coordinator-release-rollout. The bump restarts the
+  # coordinator, so its process-lifetime rejection count is "since the bump".
+  local unapproved="" unapproved_why=""
+  if [ "$L" = "$V" ]; then
+    if [ -z "${PEARL_SSH:-}" ]; then
+      unapproved_why="PEARL_SSH is unset"
+    elif registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL" \
+      > "$OPS_TMP_DIR/unapproved.json" 2> "$OPS_TMP_DIR/unapproved.err"; then
+      unapproved="$(json_field "$OPS_TMP_DIR/unapproved.json" 'd["count"]')"
+      fact privacy_unapproved_rejections_source "$(json_field "$OPS_TMP_DIR/unapproved.json" 'd["source"]')"
+    else
+      unapproved_why="rejection count unreadable: $(tail -n1 "$OPS_TMP_DIR/unapproved.err")"
+    fi
+    fact privacy_unapproved_rejections "${unapproved:-unknown: $unapproved_why}"
+  fi
+  if [ "$L" = "$V" ] && [ "$unapproved" != 0 ]; then
+    step verify_live_rollout failed "posture_unapproved_code_identity rejections: ${unapproved:-unknown}"
+    set_next verify_live_rollout blocked "Clear privacy code-identity rejections before verifying the v$V rollout" "" \
+      "${unapproved_why:-the coordinator rejected $unapproved privacy advertisement(s) as posture_unapproved_code_identity since it restarted; register the code identity (privacy_release_identity) or deny it, then restart}"
+  elif [ -n "$verify_ok" ]; then
     step verify_live_rollout "done" "run $verify_ok"
   elif [ -n "$verify_active" ]; then
     step verify_live_rollout in_progress "$verify_active"

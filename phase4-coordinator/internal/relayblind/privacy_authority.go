@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -57,6 +58,8 @@ type PrivacyAuthority struct {
 	releaseKey *ecdsa.PublicKey
 	directory  *IdentityDirectoryService
 
+	metrics atomic.Pointer[privacyMetricsRef]
+
 	mu                sync.Mutex
 	pendingQuarantine map[string]pendingQuarantine
 	sessions          map[privacySessionID]*privacySession
@@ -64,6 +67,56 @@ type PrivacyAuthority struct {
 	closedGen         map[privacySessionID]uint64
 	generation        uint64
 	quarantineSeq     uint64
+}
+
+// PrivacyMetrics receives privacy-class observability: every rejection by
+// its fixed reason code, and the binary versions approved from signed
+// release metadata after each load.
+type PrivacyMetrics interface {
+	IncPrivacyPostureRejection(reason string)
+	SetPrivacyReleaseIdentityVersions(versions []string)
+}
+
+type privacyMetricsRef struct{ m PrivacyMetrics }
+
+// UseMetrics wires m and publishes the release-derived versions loaded so far.
+func (a *PrivacyAuthority) UseMetrics(m PrivacyMetrics) {
+	if a == nil || m == nil {
+		return
+	}
+	a.metrics.Store(&privacyMetricsRef{m: m})
+	a.releaseMu.RLock()
+	versions := releaseVersions(a.release)
+	a.releaseMu.RUnlock()
+	m.SetPrivacyReleaseIdentityVersions(versions)
+}
+
+func (a *PrivacyAuthority) observer() PrivacyMetrics {
+	if ref := a.metrics.Load(); ref != nil {
+		return ref.m
+	}
+	return nil
+}
+
+// reject counts a rejection that does not quarantine.
+func (a *PrivacyAuthority) reject(reason string) error {
+	if m := a.observer(); m != nil {
+		m.IncPrivacyPostureRejection(reason)
+	}
+	return privacyReject(reason)
+}
+
+func releaseVersions(identities []config.ApprovedCodeIdentity) []string {
+	seen := make(map[string]struct{}, len(identities))
+	versions := make([]string, 0, len(identities))
+	for _, identity := range identities {
+		if _, dup := seen[identity.BinaryVersion]; !dup {
+			seen[identity.BinaryVersion] = struct{}{}
+			versions = append(versions, identity.BinaryVersion)
+		}
+	}
+	sort.Strings(versions)
+	return versions
 }
 
 type privacySessionID struct {
@@ -306,7 +359,7 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 		if revokeErr != nil {
 			return revokeErr
 		}
-		return privacyReject("privacy_enrollment_claim_changed")
+		return a.reject("privacy_enrollment_claim_changed")
 	}
 	publicKey := keys.identity
 	if publicKey == nil {
@@ -356,7 +409,7 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 			return a.failQuarantine(ctx, providerID, now, "posture_denied_code_identity")
 		case approvalNone:
 			// SPEC-049-R006: not yet approved is refused without quarantine.
-			return privacyReject("posture_unapproved_code_identity")
+			return a.reject("posture_unapproved_code_identity")
 		}
 		if hasPosture && item.record.Attestation.CodeCDHash != postureCD {
 			return a.failQuarantine(ctx, providerID, now, "posture_attestation_cdhash_mismatch")
@@ -520,24 +573,24 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	}
 	ctx = privacyCtx(ctx)
 	if len(raw) == 0 || len(raw) > MaxPrivacyPostureResponseBytes {
-		return privacyReject("posture_closed")
+		return a.reject("posture_closed")
 	}
 	response, err := parsePrivacyPostureResponse(raw)
 	if err != nil {
-		return privacyReject("posture_closed")
+		return a.reject("posture_closed")
 	}
 	statement, err := ParsePostureStatement(response.Statement)
 	if err != nil {
-		return privacyReject("posture_closed")
+		return a.reject("posture_closed")
 	}
 	id := privacySessionID{providerID: providerID, session: session}
 	snap, ok := a.consumeChallenge(id, nonce, statement.Nonce)
 	if !ok {
-		return privacyReject("posture_nonce_mismatch")
+		return a.reject("posture_nonce_mismatch")
 	}
 	framing, err := statement.Framing()
 	if err != nil {
-		return privacyReject("posture_closed")
+		return a.reject("posture_closed")
 	}
 	keys, changed, err := a.resolveKeys(ctx, providerID, snap.claim)
 	if err != nil {
@@ -549,7 +602,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	}
 	sePin, idPub := keys.se, keys.identity
 	if sePin == nil || idPub == nil {
-		return privacyReject("posture_pin_missing")
+		return a.reject("posture_pin_missing")
 	}
 	if !verifySEPosture(sePin, framing, response.SESignature) || !verifyIdentityPosture(idPub, framing, response.IdentitySignature) {
 		return a.failQuarantine(ctx, providerID, now, "posture_signature_failure")
@@ -559,7 +612,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	// re-check until max age.
 	if statement.ProviderID != providerID || statement.AssignedSession != session {
 		a.NoteChallengeTimeout(providerID, session)
-		return privacyReject("posture_session_binding")
+		return a.reject("posture_session_binding")
 	}
 	reason, quarantine := a.policyFailure(statement, snap, sessionSEKey, sePin, now)
 	if reason != "" {
@@ -567,7 +620,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 			return a.failQuarantine(ctx, providerID, now, reason)
 		}
 		a.NoteChallengeTimeout(providerID, session)
-		return privacyReject(reason)
+		return a.reject(reason)
 	}
 	skewed := abs64(now.Unix()-statement.IssuedAtUnix) > privacyClockSkewSeconds
 	late := a.late(now.Unix(), snap.issuedAt)
@@ -576,13 +629,13 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		a.NoteChallengeTimeout(providerID, session)
 	}
 	if skewed {
-		return privacyReject("posture_clock_skew")
+		return a.reject("posture_clock_skew")
 	}
 	if !backendOK {
-		return privacyReject("posture_key_backend")
+		return a.reject("posture_key_backend")
 	}
 	if late {
-		return privacyReject("posture_timeout")
+		return a.reject("posture_timeout")
 	}
 	disabled, err := a.store.PrivacyDisabled(ctx)
 	if err != nil {
@@ -591,7 +644,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	}
 	if disabled {
 		a.NoteChallengeTimeout(providerID, session)
-		return privacyReject("privacy_class_disabled")
+		return a.reject("privacy_class_disabled")
 	}
 	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
@@ -608,7 +661,7 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 		// concurrent reenroll revoked, cannot write an enrollment.
 		if !a.postureStillCurrent(id, snap) {
 			a.NoteChallengeTimeout(providerID, session)
-			return privacyReject("posture_closed")
+			return a.reject("posture_closed")
 		}
 		// The enrollment is durable before this posture counts as verified,
 		// and the store re-checks the listed keys' freshness inside the same
@@ -630,17 +683,17 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 			return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
 		case errors.Is(err, ErrEnrollmentKeyInUse):
 			a.NoteChallengeTimeout(providerID, session)
-			return privacyReject("privacy_enrollment_key_in_use")
+			return a.reject("privacy_enrollment_key_in_use")
 		case errors.Is(err, ErrEnrollmentKeysStale):
 			a.NoteChallengeTimeout(providerID, session)
-			return privacyReject("posture_keys_stale")
+			return a.reject("posture_keys_stale")
 		case err != nil:
 			a.NoteChallengeTimeout(providerID, session)
 			return err
 		}
 	}
 	if !a.commitPosture(id, snap, statement, now) {
-		return privacyReject("posture_closed")
+		return a.reject("posture_closed")
 	}
 	return nil
 }
@@ -788,6 +841,9 @@ func (a *PrivacyAuthority) RefreshReleaseIdentities() ReleaseIdentityLoad {
 	a.releaseMu.Lock()
 	a.release = identities
 	a.releaseMu.Unlock()
+	if m := a.observer(); m != nil {
+		m.SetPrivacyReleaseIdentityVersions(releaseVersions(identities))
+	}
 	return ReleaseIdentityLoad{Configured: true, Identities: len(identities), Rejected: rejected, Err: err}
 }
 
@@ -828,6 +884,9 @@ func requiredPosture(statement PostureStatement) bool {
 }
 
 func (a *PrivacyAuthority) failQuarantine(ctx context.Context, providerID string, now time.Time, reason string) error {
+	if m := a.observer(); m != nil {
+		m.IncPrivacyPostureRejection(reason)
+	}
 	if err := a.recordQuarantine(ctx, providerID, now, reason); err != nil {
 		return err
 	}

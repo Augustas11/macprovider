@@ -16,6 +16,8 @@
 //	settlement_receipt_audit_outbox_stats_age_seconds           — Gauge
 //	settlement_receipt_audit_outbox_drain_total{outcome}        — Counter
 //	settlement_receipt_audit_outbox_rows_total{operation}       — Counter
+//	relayblind_privacy_posture_rejections_total{reason}         — Counter
+//	relayblind_privacy_release_identity_loaded{binary_version}  — Gauge
 //
 // Label hygiene (SECURITY M5 — Step 4.C SECURITY lane category A):
 //
@@ -65,11 +67,19 @@
 //     "route_snapshot_materializer"; route snapshot operations include
 //     "route_snapshot_insert" and "route_snapshot_materialize".
 //
+//   - `relayblind_privacy_posture_rejections_total{reason}` uses the closed
+//     SPEC-049 rejection reason set in relayblind; anything else is "other".
+//
+//   - `relayblind_privacy_release_identity_loaded{binary_version}` carries
+//     only X.Y.Z versions from signature-verified release metadata files,
+//     bounded by the 256-file load limit.
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
 
 import (
+	"regexp"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -119,6 +129,13 @@ type Metrics struct {
 	// never reset for the process lifetime, and the coordinator increments it
 	// on every offending frame rather than once per provider.
 	CapacityOverClaimTotal *prometheus.CounterVec
+	// PrivacyPostureRejectionsTotal counts SPEC-049 privacy advertisement
+	// and posture rejections; reason="posture_unapproved_code_identity" is a
+	// release whose code identity Pearl does not approve.
+	PrivacyPostureRejectionsTotal *prometheus.CounterVec
+	// PrivacyReleaseIdentityLoaded is 1 per binary version approved from
+	// signed release metadata (SPEC-049-R027) in the last load.
+	PrivacyReleaseIdentityLoaded *prometheus.GaugeVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -211,6 +228,20 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Permanent count of provider-reported capacity claims above pool.max_concurrency_ceiling, by ingest phase.",
 			},
 			[]string{"phase"},
+		),
+		PrivacyPostureRejectionsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "relayblind_privacy_posture_rejections_total",
+				Help: "Count of privacy-class key advertisement and posture rejections, by SPEC-049 reason.",
+			},
+			[]string{"reason"},
+		),
+		PrivacyReleaseIdentityLoaded: f.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "relayblind_privacy_release_identity_loaded",
+				Help: "1 for each provider binary version approved from signed release metadata in the last load.",
+			},
+			[]string{"binary_version"},
 		),
 		CredentialBootstrapTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
@@ -435,6 +466,41 @@ func (m *Metrics) IncCapacityOverClaim(phase string) {
 	}
 	m.CapacityOverClaimTotal.WithLabelValues(phase).Inc()
 }
+
+// IncPrivacyPostureRejection records one SPEC-049 rejection. Unknown
+// reasons are folded into "other" so the label set stays closed.
+func (m *Metrics) IncPrivacyPostureRejection(reason string) {
+	if m == nil || m.PrivacyPostureRejectionsTotal == nil {
+		return
+	}
+	switch reason {
+	case "posture_unapproved_code_identity", "posture_denied_code_identity", "posture_attestation_cdhash_mismatch",
+		"posture_closed", "posture_nonce_mismatch", "posture_pin_missing", "posture_signature_failure",
+		"posture_session_binding", "posture_required_value", "posture_sequence_regression", "posture_cdhash_changed",
+		"posture_se_key_mismatch", "posture_clock_skew", "posture_key_backend", "posture_timeout", "posture_keys_stale",
+		"privacy_class_disabled", "privacy_enrollment_key_changed", "privacy_enrollment_claim_changed",
+		"privacy_enrollment_key_in_use":
+	default:
+		reason = "other"
+	}
+	m.PrivacyPostureRejectionsTotal.WithLabelValues(reason).Inc()
+}
+
+// SetPrivacyReleaseIdentityVersions replaces the loaded release-identity
+// version set. Only X.Y.Z values are exported.
+func (m *Metrics) SetPrivacyReleaseIdentityVersions(versions []string) {
+	if m == nil || m.PrivacyReleaseIdentityLoaded == nil {
+		return
+	}
+	m.PrivacyReleaseIdentityLoaded.Reset()
+	for _, version := range versions {
+		if releaseVersionLabel.MatchString(version) {
+			m.PrivacyReleaseIdentityLoaded.WithLabelValues(version).Set(1)
+		}
+	}
+}
+
+var releaseVersionLabel = regexp.MustCompile(`^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$`)
 
 func (m *Metrics) IncCredentialBootstrap(outcome string) {
 	if m == nil || m.CredentialBootstrapTotal == nil {
