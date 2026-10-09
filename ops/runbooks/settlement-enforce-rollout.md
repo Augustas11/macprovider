@@ -195,8 +195,12 @@ coordinator config, and state the expected impact first (a SIGHUP reload, no
 restart).
 
 1. **Choose the window.** `from_utc` is the first deploy that carried the
-   regression; `to_utc` MUST be no later than the v0.6.18 deploy time. Rows
-   after that carry the body-bytes ceiling and must not be restated.
+   regression. `to_utc` may not be later than the `ledger_markers` row
+   `nonstream_body_ceiling_active` (written when the v0.6.18 coordinator first
+   opened the ledger); the coordinator refuses a later `to_utc`, a missing
+   marker, or an effective `tier2.output_bytes_per_token_ceiling` other than
+   16 with HTTP 409 `restatement_refused`. Historical streaming tool-call rows
+   are out of scope (SPEC-005 §7.5b).
 2. **Enable.** Set `billing.ceiling_restatement_enabled: true` in the
    coordinator config through the same idempotent merge used for other
    config changes, validate the merged config, then send SIGHUP. Confirm the
@@ -215,13 +219,14 @@ restart).
    write batch. Stop and investigate if any `skipped.would_quarantine` count
    appears, or if a delta is negative.
 4. **Write.** Re-send with `"dry_run": false`. Each batch commits on its own
-   and writes one `ledger_ceiling_restatement` audit row per restated row.
-   Repeat until `candidates` is `0`. A repeat run is a no-op, because a
-   restated row no longer matches.
+   and writes one `ledger_ceiling_restatements` row and one
+   `ledger_ceiling_restatement` audit row per restated row. Repeat until
+   `candidates` is `0`. A repeat run is a no-op: the
+   `ledger_ceiling_restatements` row keeps a restated row out.
 5. **Disable.** Set the flag back to `false` and SIGHUP. Confirm the route
    returns 404.
 6. **Verify.** The sum of `new_gross_credits - old_gross_credits` over the
-   audit rows equals the sum of the write batches' `gross_credits_delta`. The
+   `ledger_ceiling_restatements` rows equals the sum of the write batches' `gross_credits_delta`. The
    next nightly reconcile reports no `reconciliation_mismatch` quarantines for
    the restated rows. Record the outcome (counts only) in
    `beta/DECISION_CRITERIA.md` Entry 250.

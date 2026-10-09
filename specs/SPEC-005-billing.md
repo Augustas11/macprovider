@@ -5,10 +5,11 @@
 
 **Change log v0.6.18 (2026-10-09):** Money-path decision recorded in
 `beta/DECISION_CRITERIA.md` Entry 250. (1) §5.3/§6.8: a successful
-non-streaming attempt that reports its completion records the response body
-length as its completion ceiling (one byte per token); the `/16` estimate
-stays for streaming (delivered SSE bytes) and for every attempt with no
-reported completion. The clamp, its direction, `min(provider_reported,
+non-streaming attempt that reports its completion, and a streaming tool-call
+request the provider answers with one JSON body, record the provider body
+length as the completion ceiling (one byte per token); the `/16` estimate
+stays for per-token SSE streaming (delivered SSE bytes) and for every attempt
+with no reported completion. The clamp, its direction, `min(provider_reported,
 ceiling)`, the `byte_estimated` downgrade, and
 `tier2.output_bytes_per_token_ceiling` are unchanged. (2) §7.5b: the
 verified-receipt re-pricing keeps the ceiling it clamped to (it was described
@@ -1668,7 +1669,10 @@ capped at the request-log usage cap (`estimatedCompletionTokensFromBytes`,
 attempt (HTTP or WebSocket relay) that reports its completion records `body_bytes` (one byte
 per token, same floor and cap) as its completion ceiling
 (`nonStreamCompletionCeilingFromBytes`); one with no reported completion keeps the
-`/tier2.output_bytes_per_token_ceiling` estimate above. Streaming paths are unchanged. The ceiling is a coordinator config knob with **default 16**; a
+`/tier2.output_bytes_per_token_ceiling` estimate above. A streaming tool-call request that the
+provider answers with one JSON body (rendered to buyer SSE by the coordinator) uses the same
+basis over the provider's own JSON body, excluding SSE framing. Per-token SSE streaming is
+unchanged. The ceiling is a coordinator config knob with **default 16**; a
 non-positive ceiling falls back to a `4` divisor defensively (never the normal path). **This
 supersedes the prior `ceil(bytes/4)` text** (runbook item 2). The historical `ceil(bytes/4)` in
 **SPEC-006 v0.9.8 §17.7** is a documented **cross-spec drift** — SPEC-005 billing is authoritative
@@ -1844,16 +1848,26 @@ exactly as the re-pricing does, and the linked `ledger_operator_credits` row is 
 - **Scope:** `settled = 0 AND settlement_id IS NULL AND quarantined = 0`; `enforce` policy mode;
   `stream = 0`; `usage_source = 'byte_estimated'`; `estimated_completion_tokens IS NOT NULL AND
   estimated_completion_tokens < completion_tokens`; `ts_utc` in the operator-supplied half-open
-  window `[from_utc, to_utc)`, whose end MUST NOT be later than the v0.6.18 deploy; the same
-  closed, payable, enforce verdict, matching route snapshot, and non-overlapping attempt output the
-  re-pricing requires; and no earlier `ledger_ceiling_restatement` audit row for the row.
+  window `[from_utc, to_utc)`; the same closed, payable, enforce verdict, matching route snapshot,
+  and non-overlapping attempt output the re-pricing requires; and no `ledger_ceiling_restatements`
+  row for it. Historical streaming tool-call JSON rows (`stream = 1`) are **out of scope**: neither
+  the ledger nor `request_log` records which streaming rows took that path, so they cannot be told
+  apart from per-token SSE rows, whose `/16` ceiling is not superseded.
+- **Code-enforced preconditions:** the restatement refuses (HTTP 409 `restatement_refused`) unless
+  (a) the never-pruned `ledger_markers` row `nonstream_body_ceiling_active` exists (written once,
+  `INSERT OR IGNORE`, when a v0.6.18 coordinator first opens the ledger) and `to_utc` is not later
+  than it, so no row written under the body-bytes basis can match; and (b) the effective
+  `tier2.output_bytes_per_token_ceiling` is `16`, the divisor the reconstruction assumes.
 - **Gate:** the `billing.ceiling_restatement_enabled` flag (§13, default `false`; the route returns
   404 while it is off, and each reload flip emits a `billing_config_flag_changed` audit row) AND the
   operator bearer, under the admin rate limit, with `operator_id` and `reason` validated as in
   §11.6.3.
-- **Execution:** one `BEGIN IMMEDIATE` transaction per batch of at most 1000 rows, with a
-  `ledger_ceiling_restatement` audit-log row per restated row (old and new estimate,
-  `usage_source`, and gross, provider, and operator credits) in the same transaction. A dry run
+- **Execution:** one `BEGIN IMMEDIATE` transaction per batch of at most 1000 rows. Each restated
+  row gets, in the same transaction, a never-pruned `ledger_ceiling_restatements` row keyed by
+  `request_credit_id` (the dedupe: a second insert for the same row is a primary-key violation that
+  aborts the batch) and a `ledger_ceiling_restatement` audit-log row (old and new estimate,
+  `usage_source`, and gross, provider, and operator credits). A rejected billing reload forces the
+  flag off. A dry run
   returns the same rows and credit deltas and writes nothing. A row the re-pricing would quarantine
   is skipped, never quarantined. Settled or quarantined rows and buyer debits are never touched.
   A restated row no longer matches the scope, so a repeat run is a no-op.
