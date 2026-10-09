@@ -1696,7 +1696,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
-            prefillStepSize: prefillStepSize
+            prefill: .legacyRemainder(stepSize: prefillStepSize)
         )
     }
 
@@ -8849,7 +8849,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     kvBits: kvBitsOverride,
                     temperature: 0.0,
                     topP: 1.0,
-                    prefillStepSize: prefillStepSize
+                    prefill: .legacyRemainder(stepSize: prefillStepSize)
                 )
                 return try await speculativeTokenIDs(
                     input: lmInput,
@@ -8888,7 +8888,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kvBits: kvBitsOverride,
                 temperature: 0.0,
                 topP: 1.0,
-                prefillStepSize: prefillStepSize
+                prefill: .legacyRemainder(stepSize: prefillStepSize)
             )
             let plain = try await plainTokenIDs(
                 input: lmInput,

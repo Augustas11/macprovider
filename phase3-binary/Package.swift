@@ -17,9 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Fork tag 3.32.3-macprovider.1: upstream mlx-swift-lm 3.32.3 plus the
+        // packed MTP verification, fused A3B MoE and GDN checkpoint commits
+        // upstream does not carry. Resolves mlx-swift 0.32.3.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            revision: "d9897e61b45b8d286f19907594f01ed198e81124"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

@@ -876,7 +876,8 @@ enum PagedKVRuntimeParityProbe {
             let parameters = GenerateParameters(
                 maxTokens: nNew,
                 temperature: 0,
-                topP: 1
+                topP: 1,
+                prefill: .legacyRemainder(stepSize: nil)
             )
             let cache = try context.model.newCache(parameters: parameters)
             // `TokenIterator` owns the batch-axis insertion; production processor
