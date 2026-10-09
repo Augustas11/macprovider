@@ -42,6 +42,7 @@
 #   GITHUB_SHA               when set (Actions), restamp that commit instead of origin/main
 
 set -euo pipefail
+export MACPROVIDER_REQUIRED_CB_BASELINE="${MACPROVIDER_REQUIRED_CB_BASELINE:=studio-qwen3.6-a3b-v1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

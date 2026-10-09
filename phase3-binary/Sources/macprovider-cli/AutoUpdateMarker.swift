@@ -20,6 +20,133 @@ import Foundation
 /// path treats that as pending_install requiring rollback, not as an invalid
 /// marker. Malformed markers are quarantined by transaction owners; expired
 /// but otherwise valid markers are restored from their backup by CLI recovery.
+struct AutoUpdateContinuousBatchingPreservationSnapshot: Codable, Equatable, Sendable {
+    let modelID: String
+    let modelHash: String
+    let modelHashAlgorithm: String?
+    let mode: String
+    let pagedKVDecision: String
+    let cacheClass: String?
+    let loadStatus: String
+    let releaseID: String?
+    let tupleSHA256: String?
+    let decisionReason: String
+
+    enum CodingKeys: String, CodingKey {
+        case modelID = "model_id"
+        case modelHash = "model_hash"
+        case modelHashAlgorithm = "model_hash_algorithm"
+        case mode
+        case pagedKVDecision = "paged_kv_decision"
+        case cacheClass = "cache_class"
+        case loadStatus = "load_status"
+        case releaseID = "release_id"
+        case tupleSHA256 = "tuple_sha256"
+        case decisionReason = "decision_reason"
+    }
+}
+
+enum AutoUpdateContinuousBatchingPreservationGate {
+    static let failureReasonPrefix = "continuous_batching_preservation_"
+
+    static func statusHasContinuousBatchingBlock(_ status: [String: Any]?) -> Bool {
+        (status?["continuous_batching"] as? [String: Any]) != nil
+    }
+
+    static func protectedSnapshot(from status: [String: Any]?) -> AutoUpdateContinuousBatchingPreservationSnapshot? {
+        guard let status,
+              let modelID = nonEmptyString(status["model"]),
+              let modelHash = nonEmptyString(status["model_hash"]),
+              let continuousBatching = status["continuous_batching"] as? [String: Any],
+              continuousBatching["active"] as? Bool == true,
+              let mode = nonEmptyString(continuousBatching["mode"]),
+              let pagedKVDecision = nonEmptyString(continuousBatching["paged_kv_decision"]),
+              pagedKVDecision == "attached",
+              let policy = continuousBatching["policy"] as? [String: Any],
+              nonEmptyString(policy["load_status"]) == ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue,
+              policy["authorized"] as? Bool == true,
+              policy["emergency_off_override"] as? Bool != true,
+              nonEmptyString(policy["local_proof_result"]) == "passed",
+              let decisionReason = nonEmptyString(policy["decision_reason"]),
+              decisionReason == "authorized"
+        else {
+            return nil
+        }
+        return AutoUpdateContinuousBatchingPreservationSnapshot(
+            modelID: modelID,
+            modelHash: modelHash,
+            modelHashAlgorithm: nonEmptyString(status["model_hash_algorithm"]),
+            mode: mode,
+            pagedKVDecision: pagedKVDecision,
+            cacheClass: nonEmptyString(continuousBatching["cache_class"]),
+            loadStatus: ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue,
+            releaseID: nonEmptyString(policy["release_id"]),
+            tupleSHA256: nonEmptyString(policy["tuple_sha256"]),
+            decisionReason: decisionReason
+        )
+    }
+
+    static func isSatisfied(
+        by status: [String: Any]?,
+        previous: AutoUpdateContinuousBatchingPreservationSnapshot?
+    ) -> Bool {
+        failureReason(by: status, previous: previous) == nil
+    }
+
+    static func failureReason(
+        by status: [String: Any]?,
+        previous: AutoUpdateContinuousBatchingPreservationSnapshot?
+    ) -> String? {
+        guard let previous else { return nil }
+        guard let status else { return "status_missing" }
+        guard nonEmptyString(status["model"]) == previous.modelID else { return "model_changed" }
+        guard nonEmptyString(status["model_hash"]) == previous.modelHash else { return "model_hash_changed" }
+        guard nonEmptyString(status["model_hash_algorithm"]) == previous.modelHashAlgorithm else {
+            return "model_hash_algorithm_changed"
+        }
+        guard let continuousBatching = status["continuous_batching"] as? [String: Any] else {
+            return "status_block_missing"
+        }
+        guard continuousBatching["active"] as? Bool == true else { return "inactive" }
+        guard nonEmptyString(continuousBatching["mode"]) == previous.mode else { return "mode_changed" }
+        guard nonEmptyString(continuousBatching["paged_kv_decision"]) == previous.pagedKVDecision else {
+            return "paged_kv_not_attached"
+        }
+        guard nonEmptyString(continuousBatching["cache_class"]) == previous.cacheClass else {
+            return "cache_class_changed"
+        }
+        guard let policy = continuousBatching["policy"] as? [String: Any] else { return "policy_missing" }
+        guard nonEmptyString(policy["load_status"]) == ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue else {
+            return "policy_not_live_verified"
+        }
+        guard policy["authorized"] as? Bool == true else { return "policy_not_authorized" }
+        guard policy["emergency_off_override"] as? Bool != true else { return "emergency_off_override" }
+        guard nonEmptyString(policy["local_proof_result"]) == "passed" else { return "local_proof_not_passed" }
+        guard nonEmptyString(policy["decision_reason"]) == previous.decisionReason else {
+            return "decision_not_authorized"
+        }
+        guard let current = protectedSnapshot(from: status),
+              current.loadStatus == previous.loadStatus else {
+            return "protected_snapshot_missing"
+        }
+        return nil
+    }
+
+    static func failureEventReason(
+        by status: [String: Any]?,
+        previous: AutoUpdateContinuousBatchingPreservationSnapshot?
+    ) -> String? {
+        failureReason(by: status, previous: previous).map { "\(failureReasonPrefix)\($0)" }
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String,
+              !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return string
+    }
+}
+
 struct AutoUpdatePendingMarker: Codable, Equatable {
     let updateID: String
     let targetVersion: String
@@ -41,6 +168,7 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
     let discoveryHeadSHA256: String?
     let updateAuthorityMode: String?
     let transactionState: CompatibilitySetTransactionState?
+    let previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot?
 
     init(
         updateID: String,
@@ -62,7 +190,8 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         discoveryHeadSequence: UInt64? = nil,
         discoveryHeadSHA256: String? = nil,
         updateAuthorityMode: String? = nil,
-        transactionState: CompatibilitySetTransactionState? = nil
+        transactionState: CompatibilitySetTransactionState? = nil,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil
     ) {
         self.updateID = updateID
         self.targetVersion = targetVersion
@@ -84,6 +213,7 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         self.discoveryHeadSHA256 = discoveryHeadSHA256
         self.updateAuthorityMode = updateAuthorityMode
         self.transactionState = transactionState
+        self.previousContinuousBatching = previousContinuousBatching
     }
 
     enum CodingKeys: String, CodingKey {
@@ -107,6 +237,7 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         case discoveryHeadSHA256 = "discovery_head_sha256"
         case updateAuthorityMode = "update_authority_mode"
         case transactionState = "transaction_state"
+        case previousContinuousBatching = "previous_continuous_batching"
     }
 
     func withTransactionState(
@@ -133,7 +264,8 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
             discoveryHeadSequence: discoveryHeadSequence,
             discoveryHeadSHA256: discoveryHeadSHA256,
             updateAuthorityMode: updateAuthorityMode,
-            transactionState: state
+            transactionState: state,
+            previousContinuousBatching: previousContinuousBatching
         )
     }
 }
@@ -850,7 +982,8 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         discoveryHeadSequence: UInt64? = nil,
         discoveryHeadSHA256: String? = nil,
         updateAuthorityMode: String? = nil,
-        readinessTimeoutSeconds: Int = 300
+        readinessTimeoutSeconds: Int = 300,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil
     ) throws -> AutoUpdatePendingMarker {
         let installDirectory = binaryURL.deletingLastPathComponent()
         try validateTrustedBinaryDirectory(installDirectory)
@@ -924,7 +1057,8 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 discoveryHeadSequence: discoveryHeadSequence,
                 discoveryHeadSHA256: discoveryHeadSHA256,
                 updateAuthorityMode: updateAuthorityMode,
-                transactionState: previousCompatibilityManifest == nil ? nil : .activatingTarget
+                transactionState: previousCompatibilityManifest == nil ? nil : .activatingTarget,
+                previousContinuousBatching: previousContinuousBatching
             )
         } catch {
             try? fileManager.removeItem(at: releaseBackup)

@@ -53,6 +53,7 @@ struct AutoUpdater: Sendable {
     typealias FenceReloadJobs = @Sendable () throws -> Void
     typealias Availability = @Sendable () -> Bool
     typealias EvictStaleLocalStatusOwner = @Sendable (_ targetVersion: String, _ expectedExecutablePath: String) async -> Void
+    typealias LocalStatusProbe = @Sendable (_ port: Int) async throws -> [String: Any]
 
     let config: AppConfig
     let currentVersion: String
@@ -77,6 +78,7 @@ struct AutoUpdater: Sendable {
     let headlessOperatorManagedTopology: Availability
     let lifecycleLeaseStore: ProviderLifecycleLeaseStore
     let evictStaleLocalStatusOwner: EvictStaleLocalStatusOwner
+    let localStatusProbe: LocalStatusProbe
 
     init(
         config: AppConfig,
@@ -100,6 +102,9 @@ struct AutoUpdater: Sendable {
         launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
         headlessOperatorManagedTopology: Availability? = nil,
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
+        localStatusProbe: @escaping LocalStatusProbe = { port in
+            try await LocalStatusClient.fetch(port: port)
+        },
         evictStaleLocalStatusOwner: @escaping EvictStaleLocalStatusOwner = { targetVersion, expectedExecutablePath in
             await SelfUpdate.evictStaleLocalStatusOwnerIfManaged(
                 targetVersion: targetVersion,
@@ -126,6 +131,7 @@ struct AutoUpdater: Sendable {
             ?? { AutoUpdater.defaultHeadlessOperatorManagedTopology(config: config) }
         self.lifecycleLeaseStore = lifecycleLeaseStore
         self.evictStaleLocalStatusOwner = evictStaleLocalStatusOwner
+        self.localStatusProbe = localStatusProbe
     }
 
     /// Lightweight outcome of a single coordinator-recommendation cycle, used by
@@ -249,6 +255,7 @@ struct AutoUpdater: Sendable {
             try await ensureEligible(phase: .eligibility)
             let heldMutationLock = try acquireUpdateLockAndFenceReloadJobs()
             mutationLock = heldMutationLock
+            let previousContinuousBatching = try await currentContinuousBatchingPreservationSnapshot()
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
             let release: GitHubRelease
             do {
@@ -330,6 +337,7 @@ struct AutoUpdater: Sendable {
                 tracker: commitTracker,
                 authorityMode: "coordinator_recommendation",
                 discoveryHead: nil,
+                previousContinuousBatching: previousContinuousBatching,
                 swapBoundaryGate: { .ensureTrust },
                 whileHolding: heldMutationLock
             )
@@ -500,6 +508,7 @@ struct AutoUpdater: Sendable {
             }
             let lock = try acquireUpdateLockAndFenceReloadJobs()
             defer { withExtendedLifetime(lock) {} }
+            let previousContinuousBatching = try await currentContinuousBatchingPreservationSnapshot()
             let release = try await update.resolveReleaseByTags(normalizedTarget: target)
             let prepared = try await update.prepareValidatedUpdate(
                 from: release,
@@ -544,6 +553,7 @@ struct AutoUpdater: Sendable {
                     tracker: commitTracker,
                     authorityMode: "signed_release",
                     discoveryHead: head,
+                    previousContinuousBatching: previousContinuousBatching,
                     // round-6 HIGH: the swap-boundary gate is the SINGLE authoritative
                     // precedence/trust check, evaluated inside the swap critical
                     // section with no await before activateReleasePayload. For the
@@ -600,6 +610,7 @@ struct AutoUpdater: Sendable {
         tracker: AutoUpdateCommitTracker,
         authorityMode: String,
         discoveryHead: SignedReleaseDiscoveryHead?,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil,
         swapBoundaryGate: @Sendable () async -> AutoUpdateSwapBoundaryDecision,
         whileHolding lock: AutoUpdateLock
     ) async throws {
@@ -617,7 +628,8 @@ struct AutoUpdater: Sendable {
             discoveryHeadSequence: discoveryHead?.releaseSequence,
             discoveryHeadSHA256: discoveryHead?.digest,
             updateAuthorityMode: authorityMode,
-            readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
+            readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds,
+            previousContinuousBatching: previousContinuousBatching
         )
         tracker.marker = marker
         tracker.committedBackup = true
@@ -725,6 +737,7 @@ struct AutoUpdater: Sendable {
             tracker: AutoUpdateCommitTracker(),
             authorityMode: authorityMode,
             discoveryHead: discoveryHead,
+            previousContinuousBatching: nil,
             swapBoundaryGate: { decision },
             whileHolding: lock
         )
@@ -747,9 +760,23 @@ struct AutoUpdater: Sendable {
             tracker: AutoUpdateCommitTracker(),
             authorityMode: authorityMode,
             discoveryHead: discoveryHead,
+            previousContinuousBatching: nil,
             swapBoundaryGate: swapBoundaryGate,
             whileHolding: lock
         )
+    }
+
+    private func currentContinuousBatchingPreservationSnapshot() async throws -> AutoUpdateContinuousBatchingPreservationSnapshot? {
+        let status: [String: Any]
+        do {
+            status = try await localStatusProbe(config.port)
+        } catch {
+            throw AutoUpdateError.other("local_status_unavailable_before_autoupdate")
+        }
+        guard AutoUpdateContinuousBatchingPreservationGate.statusHasContinuousBatchingBlock(status) else {
+            throw AutoUpdateError.other("local_continuous_batching_status_unavailable_before_autoupdate")
+        }
+        return AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: status)
     }
 
     func prepareStartupHandoffEvictAndRestartForTest(

@@ -254,6 +254,7 @@ public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
     public let maxObservedBatchDepth: Int
     public let slotsTotal: Int
     public let slotsFree: Int
+    public let sharedForwardCalls: Int
 }
 
 public struct RuntimeContinuousBatchingPolicySnapshot: Sendable, Equatable {
@@ -3300,7 +3301,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         waitingCount: $0.waitingCount,
                         maxObservedBatchDepth: $0.maxObservedBatchDepth,
                         slotsTotal: $0.slotsTotal,
-                        slotsFree: $0.slotsFree
+                        slotsFree: $0.slotsFree,
+                        sharedForwardCalls: $0.sharedForwardCalls
                     )
                 }
             ),

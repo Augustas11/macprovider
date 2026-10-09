@@ -4712,7 +4712,8 @@ actor CoordinatorClient {
         {
             guard completedAutoupdate.previousVersion == Self.binaryVersion,
                   previousCompatibilitySetMatchesInstalled(completedAutoupdate),
-                  await waitForCoordinatorServingCapability()
+                  await waitForCoordinatorServingCapability(),
+                  await waitForStableRestoredPreviousContinuousBatching(completedAutoupdate)
             else {
                 return .pendingRollback
             }
@@ -4771,16 +4772,20 @@ actor CoordinatorClient {
             guard await waitForCoordinatorServingCapability() else {
                 return .pendingRollback
             }
-        } else if !servingConfirmed {
+        }
+        if (localSignedSetRecoveryAllowed(completedAutoupdate) && !servingConfirmed)
+            || completedAutoupdate.previousContinuousBatching != nil {
             // A caller that did not confirm coordinator buyer-serving (a held
             // BYOM loopback, which by design never becomes buyer-serving)
             // commits a local-signed marker only after the SAME local health
             // proof startup recovery requires (waitForStableLocalAutoupdate-
             // Health). Connect+auth+hello_ack alone is not sufficient to retire
             // rollback for a self-updated binary whose local serving path may be
-            // broken; without this a serving-broken signed self-update would be
-            // committed and lose auto-rollback.
+            // broken. A marker that preserved active continuous batching must
+            // also re-prove local CB even when coordinator buyer-serving has
+            // already been confirmed.
             guard await waitForStableLocalAutoupdateHealth(completedAutoupdate) else {
+                await recordLocalSignedSetHealthFailure(completedAutoupdate, phase: .postStart)
                 return .pendingRollback
             }
         }
@@ -4854,6 +4859,102 @@ actor CoordinatorClient {
             && marker.discoveryHeadSHA256 != nil
     }
 
+    private func recordLocalSignedSetHealthFailure(
+        _ marker: AutoUpdatePendingMarker,
+        phase: AutoUpdatePhase
+    ) async {
+        guard let reason = AutoUpdateContinuousBatchingPreservationGate.failureEventReason(
+            by: await autoupdateLocalStatusProbe(),
+            previous: marker.previousContinuousBatching
+        ) else { return }
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: marker.updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: marker.targetVersion,
+            phase: phase,
+            outcome: .failure,
+            reason: reason,
+            attempt: 1,
+            failureClass: .postStartHealthFailed
+        ))
+    }
+
+    private func waitForStableRestoredPreviousContinuousBatching(
+        _ marker: AutoUpdatePendingMarker
+    ) async -> Bool {
+        guard marker.previousContinuousBatching != nil else { return true }
+        let expectedInstanceKey = "\(getpid()):\(RouterHandler.serviceInstanceID)"
+        for sample in 0 ..< autoupdateLocalHealthRequiredConsecutiveSamples {
+            guard !Task.isCancelled else { return false }
+            let status = await autoupdateLocalStatusProbe()
+            guard Self.restoredPreviousContinuousBatchingInstanceKey(
+                status,
+                marker: marker,
+                expectedServiceInstanceID: RouterHandler.serviceInstanceID,
+                expectedProcessID: getpid()
+            ) == expectedInstanceKey else {
+                await recordRestoredPreviousContinuousBatchingFailure(marker, status: status)
+                return false
+            }
+            if sample + 1 < autoupdateLocalHealthRequiredConsecutiveSamples {
+                await autoupdateLocalHealthSleep()
+            }
+        }
+        return true
+    }
+
+    private func recordRestoredPreviousContinuousBatchingFailure(
+        _ marker: AutoUpdatePendingMarker,
+        status: [String: Any]?
+    ) async {
+        guard let reason = AutoUpdateContinuousBatchingPreservationGate.failureEventReason(
+            by: status,
+            previous: marker.previousContinuousBatching
+        ) else { return }
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: marker.updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: marker.targetVersion,
+            phase: .rollback,
+            outcome: .failure,
+            reason: reason,
+            attempt: 1,
+            failureClass: .postStartHealthFailed
+        ))
+    }
+
+    static func restoredPreviousContinuousBatchingInstanceKey(
+        _ status: [String: Any]?,
+        marker: AutoUpdatePendingMarker,
+        expectedServiceInstanceID: String,
+        expectedProcessID: pid_t
+    ) -> String? {
+        guard let previousVersion = marker.previousVersion else { return nil }
+        return localHealthyTargetInstanceKey(
+            status,
+            targetVersion: previousVersion,
+            expectedCompatibilitySetID: marker.previousCompatibilitySetID,
+            expectedCompatibilitySetSHA256: marker.previousCompatibilitySetSHA256,
+            previousContinuousBatching: marker.previousContinuousBatching,
+            expectedServiceInstanceID: expectedServiceInstanceID,
+            expectedProcessID: expectedProcessID
+        )
+    }
+
+    static func restoredPreviousContinuousBatchingSatisfied(
+        _ status: [String: Any]?,
+        marker: AutoUpdatePendingMarker,
+        expectedServiceInstanceID: String,
+        expectedProcessID: pid_t
+    ) -> Bool {
+        restoredPreviousContinuousBatchingInstanceKey(
+            status,
+            marker: marker,
+            expectedServiceInstanceID: expectedServiceInstanceID,
+            expectedProcessID: expectedProcessID
+        ) != nil
+    }
+
     private func waitForStableLocalAutoupdateHealth(
         _ marker: AutoUpdatePendingMarker
     ) async -> Bool {
@@ -4866,6 +4967,7 @@ actor CoordinatorClient {
                 targetVersion: marker.targetVersion,
                 expectedCompatibilitySetID: marker.targetCompatibilitySetID,
                 expectedCompatibilitySetSHA256: marker.targetCompatibilitySetSHA256,
+                previousContinuousBatching: marker.previousContinuousBatching,
                 expectedServiceInstanceID: RouterHandler.serviceInstanceID,
                 expectedProcessID: getpid()
             ) == expectedInstanceKey else {
@@ -4883,6 +4985,7 @@ actor CoordinatorClient {
         targetVersion: String,
         expectedCompatibilitySetID: String?,
         expectedCompatibilitySetSHA256: String?,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil,
         expectedServiceInstanceID: String,
         expectedProcessID: pid_t
     ) -> String? {
@@ -4901,6 +5004,12 @@ actor CoordinatorClient {
               !expectedServiceInstanceID.isEmpty,
               expectedProcessID > 0
         else {
+            return nil
+        }
+        guard AutoUpdateContinuousBatchingPreservationGate.isSatisfied(
+            by: status,
+            previous: previousContinuousBatching
+        ) else {
             return nil
         }
         return "\(processID):\(expectedServiceInstanceID)"
@@ -5326,6 +5435,7 @@ actor CoordinatorClient {
             }
             if localSignedSetRecoveryAllowed(pending),
                !(await waitForStableLocalAutoupdateHealth(pending)) {
+                await recordLocalSignedSetHealthFailure(pending, phase: .postStart)
                 return
             }
             do {
@@ -5365,6 +5475,7 @@ actor CoordinatorClient {
                localSignedSetRecoveryAllowed(marker),
                pendingCompatibilitySetMatchesInstalled(marker) {
                 guard await waitForStableLocalAutoupdateHealth(marker) else {
+                    await recordLocalSignedSetHealthFailure(marker, phase: .postStart)
                     return
                 }
                 do {

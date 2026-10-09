@@ -24,6 +24,7 @@ import argparse
 import base64
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -85,6 +86,7 @@ NATIVE_MTP_BODIES = (NATIVE_MTP_FEED, NATIVE_MTP_MANIFEST, NATIVE_MTP_BANK)
 # Top-level fields whose value the CLI decodes as a schema/policy selector.
 SHAPE_FIELDS = ("schema_version", "policy_version", "source")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_COMPONENT = r"(0|[1-9][0-9]*)"
 TAG_RE = re.compile(rf"^v{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$")
 VERSION_RE = re.compile(
@@ -104,6 +106,29 @@ LEDGER_SCHEMAS = {
     "macprovider.autotune-release-ledger.v4",
 }
 STALE_AFTER = datetime.timedelta(days=30)
+
+_baselines_spec = importlib.util.spec_from_file_location(
+    "cb_release_baselines", pathlib.Path(__file__).resolve().with_name("cb_release_baselines.py")
+)
+if _baselines_spec is None or _baselines_spec.loader is None:
+    raise RuntimeError("continuous-batching baseline module is unavailable")
+_cb_baselines = importlib.util.module_from_spec(_baselines_spec)
+_baselines_spec.loader.exec_module(_cb_baselines)
+CB_QUALIFIED_PROVENANCE_SOURCES = _cb_baselines.CB_QUALIFIED_PROVENANCE_SOURCES
+CB_POLICY_SCHEMA = _cb_baselines.CB_POLICY_SCHEMA
+CB_POLICY_TUPLE_DOMAIN = _cb_baselines.CB_POLICY_TUPLE_DOMAIN
+CB_POLICY_TUPLE_SCHEMA = _cb_baselines.CB_POLICY_TUPLE_SCHEMA
+REQUIRED_CB_BASELINES = _cb_baselines.REQUIRED_CB_BASELINES
+REQUIRED_CB_ENTRY_FIELDS = {
+    "tuple_sha256", "model_key", "model_id", "model_sha256", "tokenizer_sha256",
+    "chat_template_sha256", "cache_class", "kv_dtype", "requires_moe", "hardware_class",
+    "metallib_sha256", "kernel_identifier", "rollout", "cached_turns_accepted", "provenance",
+}
+REQUIRED_CB_PROVENANCE_FIELDS = {
+    "source", "status", "evidence_id", "package_manifest_sha256",
+    "studio_campaign_sha256", "provider_cli_version", "live_executable_cdhash",
+}
+
 
 
 class GateError(Exception):
@@ -225,6 +250,10 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def canonical_sorted_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def parse_json_bytes(data: bytes, label: str) -> object:
     try:
         return json.loads(data.decode("utf-8"))
@@ -232,14 +261,16 @@ def parse_json_bytes(data: bytes, label: str) -> object:
         fail(f"{label} response is not valid JSON: {exc}")
 
 
-def parse_rfc3339(value: str, label: str) -> datetime.datetime:
+def parse_rfc3339(value: object, label: str) -> datetime.datetime:
+    if not isinstance(value, str) or not value:
+        fail(f"{label} must be a non-empty RFC3339 string")
     try:
         normalized = value.replace("Z", "+00:00")
         parsed = datetime.datetime.fromisoformat(normalized)
     except ValueError:
-        fail(f"{label} generated_at must be RFC3339: {value!r}")
+        fail(f"{label} must be RFC3339: {value!r}")
     if parsed.tzinfo is None:
-        fail(f"{label} generated_at must include a timezone: {value!r}")
+        fail(f"{label} must include a timezone: {value!r}")
     return parsed.astimezone(datetime.timezone.utc)
 
 
@@ -345,7 +376,28 @@ def parse_signature_sidecar(value: object, name: str) -> tuple[str, bytes]:
     return key_id, signature
 
 
-def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], dict]:
+def provider_code_identity(metadata: dict) -> tuple[set[str], str]:
+    identity = metadata.get("provider_code_identity")
+    if not isinstance(identity, dict):
+        fail("pearl-release.json lacks provider_code_identity required for continuous-batching preservation")
+    binary_sha256 = identity.get("binary_sha256")
+    if not isinstance(binary_sha256, str) or SHA256_RE.fullmatch(binary_sha256) is None:
+        fail("pearl-release.json provider_code_identity.binary_sha256 is not lowercase 64-hex")
+    slices = identity.get("slices")
+    if not isinstance(slices, list) or not slices:
+        fail("pearl-release.json provider_code_identity.slices is missing or empty")
+    cdhashes: set[str] = set()
+    for index, entry in enumerate(slices):
+        if not isinstance(entry, dict):
+            fail(f"pearl-release.json provider_code_identity.slices[{index}] is not an object")
+        cdhash = entry.get("code_cdhash")
+        if not isinstance(cdhash, str) or CDHASH_RE.fullmatch(cdhash) is None:
+            fail(f"pearl-release.json provider_code_identity.slices[{index}].code_cdhash is not lowercase 40-hex")
+        cdhashes.add(cdhash)
+    return cdhashes, binary_sha256
+
+
+def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], dict, dict]:
     match = TAG_RE.fullmatch(args.tag)
     if match is None:
         fail("--tag must be vX.Y.Z")
@@ -394,8 +446,122 @@ def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], di
             f"trusted-keys.json sha256 {trusted_keys_digest} does not match "
             f"release metadata {expected['trusted-keys.json']}"
         )
-    return expected_version, expected, catalog
+    return expected_version, expected, catalog, metadata
 
+
+def entry_matches_stable_baseline(entry: dict, baseline: dict) -> bool:
+    for field, expected in baseline.items():
+        actual = entry.get(field)
+        if isinstance(expected, bool):
+            if not isinstance(actual, bool) or actual is not expected:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+def require_continuous_batching_tuple(
+    cb_policy: object,
+    baseline_id: str,
+    release_cdhashes: set[str],
+    release_binary_sha256: str,
+    expected_version: str,
+    now: datetime.datetime,
+) -> dict:
+    baseline = REQUIRED_CB_BASELINES.get(baseline_id)
+    if baseline is None:
+        fail(f"unknown continuous batching baseline {baseline_id!r}")
+    if not isinstance(cb_policy, dict):
+        fail("continuous-batching-policy.json response is not a JSON object")
+    required_top = {
+        "schema_version", "release_id", "policy_version", "generated_at", "expires_at",
+        "candidate_catalog_sha256", "signer_key_id", "entries",
+    }
+    if set(cb_policy) != required_top:
+        fail("continuous-batching-policy.json has unexpected top-level fields")
+    if cb_policy.get("schema_version") != CB_POLICY_SCHEMA:
+        fail(f"continuous-batching-policy.json schema_version must be {CB_POLICY_SCHEMA}")
+    generated_at = parse_rfc3339(cb_policy.get("generated_at"), "continuous-batching-policy.json generated_at")
+    expires_at = parse_rfc3339(cb_policy.get("expires_at"), "continuous-batching-policy.json expires_at")
+    if generated_at >= expires_at:
+        fail("continuous-batching-policy.json expires_at must be after generated_at")
+    if now >= expires_at:
+        fail(f"continuous-batching-policy.json expired at {cb_policy.get('expires_at')!r}")
+    entries = cb_policy.get("entries")
+    if not isinstance(entries, list):
+        fail("continuous-batching-policy.json entries is not an array")
+    stable_matches = 0
+    stale_identities: list[str] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            fail(f"continuous-batching-policy.json entries[{index}] is not an object")
+        if set(entry) != REQUIRED_CB_ENTRY_FIELDS:
+            fail(f"continuous-batching-policy.json entries[{index}] has unexpected fields")
+        provenance = entry.get("provenance")
+        if not isinstance(provenance, dict):
+            fail(f"continuous-batching-policy.json entries[{index}].provenance is not an object")
+        if set(provenance) != REQUIRED_CB_PROVENANCE_FIELDS:
+            fail(f"continuous-batching-policy.json entries[{index}].provenance has unexpected fields")
+        if not entry_matches_stable_baseline(entry, baseline):
+            continue
+        stable_matches += 1
+        entry_without_digest = dict(entry)
+        tuple_sha256 = entry_without_digest.pop("tuple_sha256", None)
+        identity = {
+            "schema_version": CB_POLICY_TUPLE_SCHEMA,
+            "release_id": cb_policy.get("release_id"),
+            "policy_version": cb_policy.get("policy_version"),
+            "generated_at": cb_policy.get("generated_at"),
+            "expires_at": cb_policy.get("expires_at"),
+            "candidate_catalog_sha256": cb_policy.get("candidate_catalog_sha256"),
+            "signer_key_id": cb_policy.get("signer_key_id"),
+            "entry": entry_without_digest,
+        }
+        expected_tuple_sha256 = sha256(CB_POLICY_TUPLE_DOMAIN + canonical_sorted_bytes(identity))
+        if tuple_sha256 != expected_tuple_sha256:
+            fail(
+                f"required continuous batching baseline {baseline_id} tuple_sha256 "
+                "does not match its release-bound canonical identity"
+            )
+        cdhash = provenance.get("live_executable_cdhash")
+        version = provenance.get("provider_cli_version")
+        package_manifest_sha256 = provenance.get("package_manifest_sha256")
+        if version != expected_version or cdhash not in release_cdhashes:
+            stale_identities.append(f"version={version!r} cdhash={cdhash!r}")
+            continue
+        if entry.get("rollout") not in ("canary", "on"):
+            fail(
+                f"required continuous batching baseline {baseline_id} "
+                f"has rollout {entry.get('rollout')!r}, expected canary or on"
+            )
+        if provenance.get("source") not in CB_QUALIFIED_PROVENANCE_SOURCES:
+            fail(
+                f"required continuous batching baseline {baseline_id} "
+                f"provenance.source {provenance.get('source')!r} is not a supported qualified source"
+            )
+        if provenance.get("status") != "qualified":
+            fail(
+                f"required continuous batching baseline {baseline_id} "
+                f"provenance.status {provenance.get('status')!r} is not qualified"
+            )
+        for field in ("studio_campaign_sha256",):
+            value = provenance.get(field)
+            if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+                fail(
+                    f"required continuous batching baseline {baseline_id} "
+                    f"provenance.{field} is not lowercase 64-hex"
+                )
+        if package_manifest_sha256 != release_binary_sha256:
+            fail(
+                f"required continuous batching baseline {baseline_id} provenance.package_manifest_sha256 "
+                "does not match pearl-release.json provider_code_identity.binary_sha256"
+            )
+        return entry
+    if stable_matches:
+        fail(
+            f"required continuous batching baseline {baseline_id} has no exact entry for release "
+            f"{expected_version} and provider_code_identity CDHash; saw {', '.join(stale_identities)}"
+        )
+    fail(f"required continuous batching baseline {baseline_id} is missing from continuous-batching-policy.json")
 
 def ledger_order_key(release_id: str, record: dict) -> tuple[datetime.datetime, str]:
     # Same ordering as scripts/catalog-release.py release_order_key: the
@@ -748,13 +914,25 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--required-continuous-batching-baseline",
+        choices=tuple(sorted(REQUIRED_CB_BASELINES)),
+        help=(
+            "reviewed continuous-batching baseline that must remain "
+            "covered by this release's signed policy and exact provider code identity"
+        ),
+    )
+    parser.add_argument(
         "--now",
         help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
     try:
-        expected_version, expected_hashes, catalog = validate_metadata(args)
+        expected_version, expected_hashes, catalog, metadata = validate_metadata(args)
+        release_cdhashes: set[str] = set()
+        release_binary_sha256 = ""
+        if args.required_continuous_batching_baseline is not None:
+            release_cdhashes, release_binary_sha256 = provider_code_identity(metadata)
         trusted = active_keyring(pathlib.Path(args.trusted_keys))
         artifact_bound = ARTIFACT_FEED in expected_hashes
         native_bound = NATIVE_MTP_FEED in expected_hashes
@@ -875,6 +1053,15 @@ def main() -> int:
                 f"{cb_policy.get('candidate_catalog_sha256')!r} does not match the served "
                 f"autotune-candidates.json bytes {candidate_digest}"
             )
+        if args.required_continuous_batching_baseline is not None:
+            require_continuous_batching_tuple(
+                cb_policy,
+                args.required_continuous_batching_baseline,
+                release_cdhashes,
+                release_binary_sha256,
+                expected_version,
+                now,
+            )
 
         if artifact_bound:
             sig_name = ARTIFACT_FEED + ".sig"
@@ -982,6 +1169,7 @@ def main() -> int:
             f"publication_phase={args.publication_phase} "
             f"artifact_feed={'bound' if artifact_bound else 'absent'} "
             f"native_mtp={'bound' if native_bound else 'absent'} "
+            f"continuous_batching_baseline={args.required_continuous_batching_baseline or 'unchecked'} "
             f"catalog_mode={catalog_mode}"
         )
         return 0

@@ -50,6 +50,14 @@ verified signed entry select `canary` or `on` automatically.
 A reviewed upstream `mlx-swift-lm` batch revision is historical context only
 and is not an enable path.
 
+Release/upgrade continuity is an additional operational gate. A previously active
+qualified tuple must remain covered by reviewed signed policy for the successor's
+exact package and code identity, published before recommendation or upgrade.
+After restart, policy authorization, local proof, paged-KV attachment, activation
+and a scheduler-admitted Malibu gateway response must still pass. Provider join
+is insufficient. See [the continuity investigation and gate](continuous-batching-upgrade-continuity.md).
+
+
 ## Scheduler Safety Contract
 
 The merged scheduler core is deliberately not a production runtime bridge. Any
