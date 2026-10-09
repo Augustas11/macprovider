@@ -44,7 +44,7 @@ one of these is true:
 | `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
-| `max_requests_per_run` | `20000` | Requests archived per run. |
+| `max_requests_per_run` | `20000` | Requests archived per run. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests and 16 MiB of archived payload). |
 | `max_scan_rows_per_run` | `500000` | Ledger credits scanned per run. The scan resumes from a persisted cursor and wraps. |
 | `incremental_vacuum_pages` | `2048` | Pages released per `PRAGMA incremental_vacuum` step. |
 | `incremental_vacuum_max_steps` | `256` | Steps per run, per database file. |

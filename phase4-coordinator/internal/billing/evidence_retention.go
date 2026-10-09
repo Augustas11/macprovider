@@ -57,6 +57,10 @@ const (
 
 	evidenceRetentionScanChunk = 2000
 	evidenceRetentionMinBatch  = 1
+	// evidenceRetentionBatchBytes bounds the archived payload one delete
+	// batch holds in memory, whatever batch_size says. A single request
+	// larger than it is still processed, alone.
+	evidenceRetentionBatchBytes = 16 << 20
 )
 
 // Ineligibility reasons (SPEC-022 R-15.2). A request with any of them stays
@@ -724,24 +728,26 @@ SELECT window_end_utc FROM ledger_settlement_windows
 }
 
 // selectRetentionCandidates walks ledger credits by primary key from the
-// persisted cursor, bounded by MaxScanRowsPerRun, and returns eligible
-// request bundles (bounded by MaxRequestsPerRun).
-func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRetentionOptions, cut evidenceRetentionCutoffs, report *EvidenceRetentionReport) ([]requestEvidenceBundle, int64, error) {
+// persisted cursor, bounded by MaxScanRowsPerRun, and hands each eligible
+// request bundle (at most MaxRequestsPerRun) to emit as soon as it is
+// evaluated. Bundles are never accumulated, so memory holds one request's
+// evidence at a time. It returns the number emitted and the next cursor.
+func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRetentionOptions, cut evidenceRetentionCutoffs, report *EvidenceRetentionReport, emit func(requestEvidenceBundle) error) (int, int64, error) {
 	var cursor int64
 	err := s.reader().QueryRowContext(ctx, `SELECT scan_cursor_credit_id FROM settlement_evidence_retention_state WHERE id = 1`).Scan(&cursor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, 0, err
+		return 0, 0, err
 	}
 	report.ScanFromCreditID = cursor
 	first := &providerFirstVerifiedVerdicts{q: s.reader(), cache: map[string]int64{}}
 	journalDB := s.routeSnapshotJournalDB.Load()
-	var out []requestEvidenceBundle
+	selected := 0
 	seen := map[string]bool{}
 	next := cursor
 	wrapped := false
-	for report.ScannedCredits < int64(opts.MaxScanRowsPerRun) && len(out) < opts.MaxRequestsPerRun {
+	for report.ScannedCredits < int64(opts.MaxScanRowsPerRun) && selected < opts.MaxRequestsPerRun {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return 0, 0, err
 		}
 		limit := evidenceRetentionScanChunk
 		if remaining := int64(opts.MaxScanRowsPerRun) - report.ScannedCredits; remaining < int64(limit) {
@@ -755,7 +761,7 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
  ORDER BY lrc.id
  LIMIT ?`, next, limit)
 		if err != nil {
-			return nil, 0, err
+			return 0, 0, err
 		}
 		type candidate struct {
 			requestID string
@@ -769,7 +775,7 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
 			var archived bool
 			if err := rows.Scan(&id, &requestID, &settled, &ts, &archived); err != nil {
 				rows.Close()
-				return nil, 0, err
+				return 0, 0, err
 			}
 			n++
 			next = id
@@ -783,12 +789,12 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
 			candidates = append(candidates, candidate{requestID: requestID, creditID: id})
 		}
 		if err := rows.Close(); err != nil {
-			return nil, 0, err
+			return 0, 0, err
 		}
 		report.ScannedCredits += int64(n)
 		capped := false
 		for _, cand := range candidates {
-			if len(out) >= opts.MaxRequestsPerRun {
+			if selected >= opts.MaxRequestsPerRun {
 				// Resume the next run at the first candidate not evaluated.
 				next = cand.creditID - 1
 				capped = true
@@ -796,26 +802,29 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
 			}
 			b, err := collectRequestEvidence(ctx, s.reader(), cand.requestID)
 			if err != nil {
-				return nil, 0, err
+				return 0, 0, err
 			}
 			if archivedAny, err := s.anyCreditArchived(ctx, s.reader(), b); err != nil {
-				return nil, 0, err
+				return 0, 0, err
 			} else if archivedAny {
 				report.SkippedRequests[retentionSkipAlreadyArchived]++
 				continue
 			}
 			if err := collectRouteJournal(ctx, journalDB, &b); err != nil {
-				return nil, 0, err
+				return 0, 0, err
 			}
 			firstVerified, err := first.forBundle(ctx, b)
 			if err != nil {
-				return nil, 0, err
+				return 0, 0, err
 			}
 			if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, true); !ok {
 				report.SkippedRequests[reason]++
 				continue
 			}
-			out = append(out, b)
+			if err := emit(b); err != nil {
+				return 0, 0, err
+			}
+			selected++
 		}
 		if capped {
 			break
@@ -828,7 +837,7 @@ SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
 	}
 	report.ScanToCreditID = next
 	report.ScanWrapped = wrapped
-	return out, next, nil
+	return selected, next, nil
 }
 
 func (s *Store) anyCreditArchived(ctx context.Context, q evidenceQueryer, b requestEvidenceBundle) (bool, error) {
@@ -897,14 +906,14 @@ func (s *Store) DryRunEvidenceRetention(ctx context.Context, opts EvidenceRetent
 		return report, err
 	}
 	fillCutoffs(&report, cut)
-	bundles, _, err := s.selectRetentionCandidates(ctx, opts, cut, &report)
+	selected, _, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
+		addRetentionStats(&report, b)
+		return nil
+	})
 	if err != nil {
 		return report, err
 	}
-	for _, b := range bundles {
-		addRetentionStats(&report, b)
-	}
-	report.EligibleRequests = len(bundles)
+	report.EligibleRequests = selected
 	report.Status = EvidenceRetentionStatusDryRun
 	report.FinishedAtUTC = sqliteTimeText(s.nowUTC())
 	return report, nil
@@ -948,23 +957,34 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 			return report, err
 		}
 		fillCutoffs(&report, cut)
-		bundles, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report)
+		// Each eligible request is written to the archive as it is selected
+		// and then dropped, so the run never holds more than one request.
+		var w *evidenceArchiveWriter
+		selected, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
+			if w == nil {
+				created, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
+				if err != nil {
+					return err
+				}
+				w = created
+			}
+			addRetentionStats(&report, b)
+			return w.writeRequest(b)
+		})
+		if err == nil {
+			err = s.saveEvidenceRetentionCursor(ctx, nextCursor)
+		}
 		if err != nil {
+			w.abort()
 			return report, err
 		}
-		if err := s.saveEvidenceRetentionCursor(ctx, nextCursor); err != nil {
-			return report, err
-		}
-		if len(bundles) == 0 {
+		if selected == 0 {
 			report.Status = EvidenceRetentionStatusNothingEligible
 			report.Vacuum = s.incrementalVacuumAll(ctx, opts)
 			return report, nil
 		}
-		for _, b := range bundles {
-			addRetentionStats(&report, b)
-		}
-		report.EligibleRequests = len(bundles)
-		archive, err = s.exportEvidenceArchive(ctx, opts, cut, bundles, now)
+		report.EligibleRequests = selected
+		archive, err = s.recordEvidenceArchive(ctx, w)
 		if err != nil {
 			return report, err
 		}
@@ -981,7 +1001,7 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		return report, err
 	}
 	if resumed {
-		report.EligibleRequests = len(verified.Requests)
+		report.EligibleRequests = verified.Manifest.RequestCount
 	}
 	if archive.status != evidenceArchiveStatusOffhostVerified {
 		if opts.OffhostVerifier == nil {
@@ -1001,6 +1021,10 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	}
 	deleted, err := s.deleteArchivedEvidence(ctx, opts, archive.id, verified, &report)
 	if err != nil {
+		if errors.Is(err, ErrEvidenceArchiveInvalid) {
+			report.Status = EvidenceRetentionStatusArchiveInvalid
+			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, err.Error(), deleted)
+		}
 		return report, err
 	}
 	if err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusDeleted, "", deleted); err != nil {
@@ -1045,17 +1069,9 @@ SELECT id, file_name, status, sha256, size_bytes, request_count, row_counts_json
 	return &rec, true, nil
 }
 
-func (s *Store) exportEvidenceArchive(ctx context.Context, opts EvidenceRetentionOptions, cut evidenceRetentionCutoffs, bundles []requestEvidenceBundle, now time.Time) (*evidenceArchiveRecord, error) {
-	w, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
-	if err != nil {
-		return nil, err
-	}
-	for _, b := range bundles {
-		if err := w.writeRequest(b); err != nil {
-			w.abort()
-			return nil, err
-		}
-	}
+// recordEvidenceArchive finishes a written archive and records it as
+// exported.
+func (s *Store) recordEvidenceArchive(ctx context.Context, w *evidenceArchiveWriter) (*evidenceArchiveRecord, error) {
 	manifest, path, err := w.finish()
 	if err != nil {
 		return nil, err
@@ -1104,9 +1120,12 @@ ON CONFLICT(id) DO UPDATE SET scan_cursor_credit_id = excluded.scan_cursor_credi
 }
 
 // deleteArchivedEvidence deletes, batch by batch, only rows present in the
-// verified archive. Each batch is one short BEGIN IMMEDIATE transaction that
-// re-checks R-15.2 for every request; the run then pauses so the hot-path
-// writer is never starved.
+// verified archive. It re-reads the archive as a stream and holds one batch
+// (batch_size requests, at most evidenceRetentionBatchBytes of archived
+// payload) at a time; every re-read request must match the digest of the
+// verified pass, so a file changed since verification deletes nothing. Each
+// batch is one short BEGIN IMMEDIATE transaction that re-checks R-15.2 for
+// every request; the run then pauses so the hot-path writer is never starved.
 func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetentionOptions, archiveID int64, archive verifiedEvidenceArchive, report *EvidenceRetentionReport) (int, error) {
 	now := s.nowUTC()
 	cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, now)
@@ -1116,26 +1135,36 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 	fillCutoffs(report, cut)
 	journalDB := s.routeSnapshotJournalDB.Load()
 	deleted := 0
-	for start := 0; start < len(archive.Requests); start += opts.BatchSize {
+	processed := 0
+	var batch []archivedRequest
+	var batchBytes int64
+	runBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
 		if err := ctx.Err(); err != nil {
-			return deleted, err
+			return err
 		}
 		// A SIGHUP that disables retention stops deletion at the next batch.
 		if current, ok := s.evidenceRetentionOptions(); ok && !current.Enabled {
-			return deleted, ErrEvidenceRetentionDisabled
+			return ErrEvidenceRetentionDisabled
 		}
-		end := start + opts.BatchSize
-		if end > len(archive.Requests) {
-			end = len(archive.Requests)
+		if processed > 0 && opts.BatchPause > 0 {
+			timer := time.NewTimer(opts.BatchPause)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
-		batch := archive.Requests[start:end]
 		// The route-snapshot journal lives in another database file, so its
 		// mirror state is checked before the main transaction.
 		journalOK := map[string]bool{}
 		for _, req := range batch {
 			b := requestEvidenceBundle{requestID: req.RequestID, scopes: archivedScopes(req)}
 			if err := collectRouteJournal(ctx, journalDB, &b); err != nil {
-				return deleted, err
+				return err
 			}
 			b.evidence = map[string][]archiveRow{"settlement_route_snapshots": req.Rows["settlement_route_snapshots"]}
 			ok, _ := evaluateRouteJournalOnly(b)
@@ -1143,23 +1172,28 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 		}
 		done, err := s.deleteArchivedBatch(ctx, archiveID, batch, cut, journalOK, report)
 		if err != nil {
-			return deleted, err
+			return err
 		}
 		deleted += len(done)
-		if err := deleteMirroredRouteJournalRows(ctx, journalDB, done, report); err != nil {
-			return deleted, err
-		}
-		if opts.BatchPause > 0 && end < len(archive.Requests) {
-			timer := time.NewTimer(opts.BatchPause)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return deleted, ctx.Err()
-			case <-timer.C:
-			}
-		}
+		processed += len(batch)
+		batch, batchBytes = nil, 0
+		return deleteMirroredRouteJournalRows(ctx, journalDB, done, report)
 	}
-	return deleted, nil
+	err = streamEvidenceArchive(archive.Path, archive.Manifest, func(req archivedRequest) error {
+		if want, ok := archive.Digests[req.RequestID]; !ok || want != req.Digest {
+			return fmt.Errorf("%w: request %q changed since verification", ErrEvidenceArchiveInvalid, req.RequestID)
+		}
+		batch = append(batch, req)
+		batchBytes += req.Bytes
+		if len(batch) >= opts.BatchSize || batchBytes >= evidenceRetentionBatchBytes {
+			return runBatch()
+		}
+		return nil
+	})
+	if err != nil {
+		return deleted, err
+	}
+	return deleted, runBatch()
 }
 
 func archivedScopes(req archivedRequest) []string {

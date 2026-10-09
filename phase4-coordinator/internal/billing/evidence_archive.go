@@ -2,6 +2,7 @@ package billing
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
@@ -73,20 +74,25 @@ type EvidenceArchiveManifest struct {
 	CreatedAtUTC       string           `json:"created_at_utc"`
 }
 
-// archivedRequest is one request as read back from a verified archive.
+// archivedRequest is one request as read back from an archive.
 type archivedRequest struct {
 	RequestID string
 	CreditIDs []int64
 	// Rows holds every archived row of the request by table.
 	Rows map[string][]archiveRow
+	// Digest is the SHA-256 of the request's lines as stored, and Bytes
+	// their length: a re-read is matched against a verified pass by Digest.
+	Digest [sha256.Size]byte
+	Bytes  int64
 }
 
 // verifiedEvidenceArchive is an archive whose bytes, lines, and counts were
-// re-checked against its manifest.
+// re-checked against its manifest. It keeps only each request's digest, never
+// its rows, so verification memory does not grow with the archive's payload.
 type verifiedEvidenceArchive struct {
 	Path     string
 	Manifest EvidenceArchiveManifest
-	Requests []archivedRequest
+	Digests  map[string][sha256.Size]byte
 }
 
 type evidenceArchiveWriter struct {
@@ -285,10 +291,28 @@ func readEvidenceArchiveManifest(archivePath string) (EvidenceArchiveManifest, e
 
 // verifyEvidenceArchive re-reads an archive from disk and checks it against
 // the expected manifest: byte size, SHA-256, format, every line parsing, the
-// trailer, and per-table row and request counts (SPEC-022 R-15.4 step 1).
+// trailer, and per-table row and request counts (SPEC-022 R-15.4 step 1). It
+// streams the file and keeps one request at a time.
 func verifyEvidenceArchive(archivePath string, expected EvidenceArchiveManifest) (verifiedEvidenceArchive, error) {
-	invalid := func(format string, args ...any) (verifiedEvidenceArchive, error) {
-		return verifiedEvidenceArchive{}, fmt.Errorf("%w: %s", ErrEvidenceArchiveInvalid, fmt.Sprintf(format, args...))
+	digests := map[string][sha256.Size]byte{}
+	err := streamEvidenceArchive(archivePath, expected, func(req archivedRequest) error {
+		digests[req.RequestID] = req.Digest
+		return nil
+	})
+	if err != nil {
+		return verifiedEvidenceArchive{}, err
+	}
+	return verifiedEvidenceArchive{Path: archivePath, Manifest: expected, Digests: digests}, nil
+}
+
+// streamEvidenceArchive reads an archive once and calls visit with each
+// complete request in file order; a request's rows follow its request line.
+// The whole-file checks (size, SHA-256, counts, trailer) complete only after
+// the last visit, so a caller that acts on rows before the stream ends must
+// match each request's Digest against a previously verified pass.
+func streamEvidenceArchive(archivePath string, expected EvidenceArchiveManifest, visit func(archivedRequest) error) error {
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrEvidenceArchiveInvalid, fmt.Sprintf(format, args...))
 	}
 	if expected.Format != evidenceArchiveFormat {
 		return invalid("manifest format %q", expected.Format)
@@ -307,15 +331,27 @@ func verifyEvidenceArchive(archivePath string, expected EvidenceArchiveManifest)
 	scanner := bufio.NewScanner(gz)
 	scanner.Buffer(make([]byte, 0, 1<<20), evidenceArchiveMaxLineBytes)
 	counts := map[string]int64{}
-	var requests []archivedRequest
-	byID := map[string]int{}
+	seen := map[string]bool{}
+	requests := 0
+	var current *archivedRequest
+	var currentHash hash.Hash
+	flush := func() error {
+		if current == nil {
+			return nil
+		}
+		copy(current.Digest[:], currentHash.Sum(nil))
+		req := *current
+		current = nil
+		return visit(req)
+	}
 	sawHeader, sawTrailer := false, false
 	var trailer evidenceArchiveLine
 	for scanner.Scan() {
 		if sawTrailer {
 			return invalid("data after trailer")
 		}
-		dec := json.NewDecoder(strings.NewReader(scanner.Text()))
+		raw := scanner.Bytes()
+		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		var line evidenceArchiveLine
 		if err := dec.Decode(&line); err != nil {
@@ -331,27 +367,39 @@ func verifyEvidenceArchive(archivePath string, expected EvidenceArchiveManifest)
 			if !sawHeader || line.RequestID == "" {
 				return invalid("request before header")
 			}
-			if _, dup := byID[line.RequestID]; dup {
+			if seen[line.RequestID] {
 				return invalid("duplicate request %q", line.RequestID)
 			}
-			byID[line.RequestID] = len(requests)
-			requests = append(requests, archivedRequest{RequestID: line.RequestID, CreditIDs: line.CreditIDs, Rows: map[string][]archiveRow{}})
+			if err := flush(); err != nil {
+				return err
+			}
+			seen[line.RequestID] = true
+			requests++
+			current = &archivedRequest{RequestID: line.RequestID, CreditIDs: line.CreditIDs, Rows: map[string][]archiveRow{}}
+			currentHash = sha256.New()
 		case "row":
-			idx, ok := byID[line.RequestID]
-			if !ok || !evidenceArchiveKnownTable(line.Table) || line.Row == nil {
+			if current == nil || line.RequestID != current.RequestID || !evidenceArchiveKnownTable(line.Table) || line.Row == nil {
 				return invalid("row for unknown request or table")
 			}
 			row, err := archiveRowFromJSON(line.Row)
 			if err != nil {
 				return invalid("row value: %v", err)
 			}
-			requests[idx].Rows[line.Table] = append(requests[idx].Rows[line.Table], row)
+			current.Rows[line.Table] = append(current.Rows[line.Table], row)
 			counts[line.Table]++
 		case "trailer":
+			if err := flush(); err != nil {
+				return err
+			}
 			sawTrailer = true
 			trailer = line
 		default:
 			return invalid("unknown line kind %q", line.Kind)
+		}
+		if current != nil {
+			_, _ = currentHash.Write(raw)
+			_, _ = currentHash.Write([]byte{'\n'})
+			current.Bytes += int64(len(raw)) + 1
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -373,13 +421,13 @@ func verifyEvidenceArchive(archivePath string, expected EvidenceArchiveManifest)
 	if got := hex.EncodeToString(h.Sum(nil)); got != expected.SHA256 {
 		return invalid("sha256 %s, manifest %s", got, expected.SHA256)
 	}
-	if len(requests) != expected.RequestCount || trailer.RequestCount != expected.RequestCount {
-		return invalid("request count %d, trailer %d, manifest %d", len(requests), trailer.RequestCount, expected.RequestCount)
+	if requests != expected.RequestCount || trailer.RequestCount != expected.RequestCount {
+		return invalid("request count %d, trailer %d, manifest %d", requests, trailer.RequestCount, expected.RequestCount)
 	}
 	if !equalRowCounts(counts, expected.RowCounts) || !equalRowCounts(trailer.RowCounts, expected.RowCounts) {
 		return invalid("row counts differ from manifest")
 	}
-	return verifiedEvidenceArchive{Path: archivePath, Manifest: expected, Requests: requests}, nil
+	return nil
 }
 
 func equalRowCounts(a, b map[string]int64) bool {
@@ -522,18 +570,29 @@ func RederiveArchivedCredit(archivePath string, requestCreditID int64) (Archived
 	if err != nil {
 		return ArchivedCreditRederivation{}, err
 	}
-	archive, err := verifyEvidenceArchive(archivePath, manifest)
+	// One streaming pass keeps only the credit's request. It is used only
+	// after the same pass verified the whole file it was read from.
+	var found *archivedRequest
+	var foundCredit archiveRow
+	err = streamEvidenceArchive(archivePath, manifest, func(req archivedRequest) error {
+		if found != nil {
+			return nil
+		}
+		for _, credit := range req.Rows["ledger_request_credits"] {
+			if id, _ := credit.int64("id"); id == requestCreditID {
+				found, foundCredit = &req, credit
+				return nil
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return ArchivedCreditRederivation{}, err
 	}
-	for _, req := range archive.Requests {
-		for _, credit := range req.Rows["ledger_request_credits"] {
-			if id, _ := credit.int64("id"); id == requestCreditID {
-				return rederiveArchivedCreditRow(req, credit)
-			}
-		}
+	if found == nil {
+		return ArchivedCreditRederivation{}, fmt.Errorf("request credit %d is not in archive %s", requestCreditID, filepath.Base(archivePath))
 	}
-	return ArchivedCreditRederivation{}, fmt.Errorf("request credit %d is not in archive %s", requestCreditID, filepath.Base(archivePath))
+	return rederiveArchivedCreditRow(*found, foundCredit)
 }
 
 func rederiveArchivedCreditRow(req archivedRequest, credit archiveRow) (ArchivedCreditRederivation, error) {

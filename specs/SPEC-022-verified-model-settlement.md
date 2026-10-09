@@ -2016,7 +2016,12 @@ request whose hot rows include any row that is not in the archive.
 R-15.5. Bounded work. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is
 never starved. The number of requests per run and the ledger rows scanned
-per run are bounded by configuration. Retention reclaims space only through
+per run are bounded by configuration. Memory is bounded independently of the
+number of requests per run: selection, dry run, and export hold one request's
+evidence at a time, verification keeps only a digest per request, and deletion
+re-reads the archive as a stream holding one batch, capped by the batch size
+and a fixed payload budget. Each re-read request MUST match its digest from
+the verified pass, or deletion stops. Retention reclaims space only through
 `PRAGMA incremental_vacuum` in bounded page steps. It MUST NOT run a full
 `VACUUM`. A database that is not in `auto_vacuum = INCREMENTAL` mode reports
 that fact and needs the operator's one-time conversion.

@@ -1,9 +1,12 @@
 package billing
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,6 +434,63 @@ func TestEvidenceArchiveVerificationRejectsTampering(t *testing.T) {
 	}
 	if _, err := verifyEvidenceArchive(path, manifest); !errors.Is(err, ErrEvidenceArchiveInvalid) {
 		t.Fatalf("appended bytes err=%v", err)
+	}
+}
+
+// The delete pass re-reads the archive as a stream and keeps no verified
+// rows in memory, so every re-read request must match the digest of the
+// verified pass: an archive rewritten after verification deletes nothing,
+// even before its whole-file checksum is reached.
+func TestEvidenceRetentionRefusesArchiveChangedAfterVerification(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.settle(t)
+	dir := t.TempDir()
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil || report.Status != EvidenceRetentionStatusOffhostUnverified {
+		t.Fatalf("export run=%+v err=%v", report, err)
+	}
+	path := filepath.Join(dir, report.ArchiveFile)
+	verifier := &recordingVerifier{hook: func() {
+		in, err := os.Open(path)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		zr, err := gzip.NewReader(in)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		plain, err := io.ReadAll(zr)
+		_ = in.Close()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		changed := strings.Replace(string(plain), b.RequestID, b.RequestID+"x", -1)
+		var out bytes.Buffer
+		zw := gzip.NewWriter(&out)
+		_, _ = zw.Write([]byte(changed))
+		_ = zw.Close()
+		if err := os.WriteFile(path, out.Bytes(), 0o600); err != nil {
+			t.Error(err)
+		}
+	}}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, verifier.verify))
+	if !errors.Is(err, ErrEvidenceArchiveInvalid) || report.Status != EvidenceRetentionStatusArchiveInvalid || report.DeletedRequests != 0 {
+		t.Fatalf("changed archive err=%v report=%+v", err, report)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives WHERE status = 'failed'`); got != 1 {
+		t.Fatalf("failed archives=%d want 1", got)
+	}
+	if f.hotRows(t, "b") != 3 {
+		t.Fatal("evidence deleted against an archive changed after verification")
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits`); got != 0 {
+		t.Fatalf("tombstones=%d want 0", got)
 	}
 }
 
