@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
@@ -52,6 +53,26 @@ const (
 	selfServeAgreementRenewWindow    = 30 * 24 * time.Hour
 	selfServeRootNonceTTL            = 15 * time.Minute
 	selfServeContactMaxBytes         = 256
+)
+
+// Self-serve control-plane bounds (SPEC-043-R005 0.3.0). Every pool event is
+// replayed by reconstruction, including on pool-selected chat requests, so a
+// self-serve account's share of durable history is capped, and its request
+// rate is limited before any lock or replay.
+const (
+	// SelfServeMaxPoolsPerCreator caps pool_created events per self-serve
+	// account over its lifetime; retired pools still replay and still count.
+	SelfServeMaxPoolsPerCreator = 8
+	// SelfServeMaxPools caps self-serve pools coordinator-wide.
+	SelfServeMaxPools = 256
+	// SelfServeMaxEventsPerPool caps durable events per self-serve pool.
+	SelfServeMaxEventsPerPool = 512
+	// SelfServeRateWindow, SelfServeMaxWritesPerWindow, and
+	// SelfServeMaxRequestsPerWindow bound one account's request rate.
+	SelfServeRateWindow           = time.Hour
+	SelfServeMaxWritesPerWindow   = 60
+	SelfServeMaxRequestsPerWindow = 600
+	selfServeRateTrackedAccounts  = 10000
 )
 
 // The acknowledgment texts the coordinator hashes into the approval record.
@@ -130,7 +151,22 @@ func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.
 		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
 		return
 	}
+	if retryAfter, ok := h.selfServeRate.allow(principal.CreatorID, r.Method != http.MethodGet, time.Now()); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		writeAdminJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]string{"code": "rate_limited"}})
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, selfServeCreatorPrefix)
+	// Reject an unknown or foreign pool before any lock or full replay.
+	if poolID, ok := selfServePathPoolID(rest); ok {
+		if owned, err := h.selfServeOwnsPool(r.Context(), principal, poolID); err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		} else if !owned {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
+	}
 	switch rest {
 	case "agreement":
 		h.handleSelfServeAgreement(w, r, principal)
@@ -691,6 +727,19 @@ func (h *adminHandler) handleSelfServePromote(w http.ResponseWriter, r *http.Req
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if _, replay, err := h.deps.Store.ExistingEvent(r.Context(), operationID); err != nil {
+		h.writeMutationError(w, err)
+		return
+	} else if !replay {
+		var limit errSelfServeLimit
+		if err := h.selfServeEventCaps(r.Context(), principal, DurableEvent{EventType: EventLifecycleChanged, PoolID: poolID}); errors.As(err, &limit) {
+			writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "self_serve_limit_reached", "limit": limit.limit}})
+			return
+		} else if err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		}
+	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
 		h.writeReconstructError(w, err)
@@ -761,6 +810,15 @@ func (h *adminHandler) handleSelfServeEarnings(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_range"}})
 		return
+	}
+	if poolID := strings.TrimSpace(query.Get("pool_id")); poolID != "" {
+		if owned, err := h.selfServeOwnsPool(r.Context(), principal, poolID); err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		} else if !owned {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
@@ -836,4 +894,159 @@ func parseSelfServeEarningsRange(fromRaw, toRaw string) (time.Time, time.Time, e
 		return time.Time{}, time.Time{}, errors.New("trustpool: invalid earnings range")
 	}
 	return from.UTC(), to.UTC(), nil
+}
+
+// selfServePathPoolID extracts the pool id from a pools/{id}[/...] path.
+func selfServePathPoolID(rest string) (string, bool) {
+	if !strings.HasPrefix(rest, "pools/") {
+		return "", false
+	}
+	id, _, _ := strings.Cut(strings.TrimPrefix(rest, "pools/"), "/")
+	return id, true
+}
+
+// selfServeOwnsPool answers from the pool_created row alone, without a lock
+// or a full replay.
+func (h *adminHandler) selfServeOwnsPool(ctx context.Context, principal creatorPrincipal, poolID string) (bool, error) {
+	if poolID == "" {
+		return false, nil
+	}
+	owner, ok, err := h.deps.Store.poolCreatorAccountID(ctx, poolID)
+	if err != nil || !ok {
+		return false, err
+	}
+	return owner == principal.CreatorID, nil
+}
+
+// selfServeEventOwnershipPreflight runs before the handler lock: any event on
+// an existing pool must name a pool this account created, and pool_created
+// must not name another account's pool.
+func (h *adminHandler) selfServeEventOwnershipPreflight(ctx context.Context, principal creatorPrincipal, e DurableEvent) (bool, error) {
+	owner, exists, err := h.deps.Store.poolCreatorAccountID(ctx, e.PoolID)
+	if err != nil {
+		return false, err
+	}
+	if e.EventType == EventPoolCreated {
+		return !exists || owner == principal.CreatorID, nil
+	}
+	return exists && owner == principal.CreatorID, nil
+}
+
+// errSelfServeLimit is a self-serve durable-history cap.
+type errSelfServeLimit struct{ limit string }
+
+func (e errSelfServeLimit) Error() string { return "trustpool: self-serve limit reached: " + e.limit }
+
+// selfServeEventCaps enforces the durable-history caps for a new (not
+// replayed) self-serve event. The caller holds h.mu, so the counts and the
+// append are serialized with every other control-plane write.
+func (h *adminHandler) selfServeEventCaps(ctx context.Context, principal creatorPrincipal, e DurableEvent) error {
+	if e.EventType == EventPoolCreated {
+		creatorPools, allPools, err := h.deps.Store.selfServePoolCounts(ctx, principal.CreatorID)
+		if err != nil {
+			return err
+		}
+		if creatorPools >= SelfServeMaxPoolsPerCreator {
+			return errSelfServeLimit{limit: "pools_per_creator"}
+		}
+		if allPools >= SelfServeMaxPools {
+			return errSelfServeLimit{limit: "self_serve_pools"}
+		}
+		return nil
+	}
+	events, err := h.deps.Store.poolEventCount(ctx, e.PoolID)
+	if err != nil {
+		return err
+	}
+	if events >= SelfServeMaxEventsPerPool {
+		return errSelfServeLimit{limit: "events_per_pool"}
+	}
+	return nil
+}
+
+func (s *Store) poolCreatorAccountID(ctx context.Context, poolID string) (string, bool, error) {
+	if s == nil || s.db == nil {
+		return "", false, ErrStoreClosed
+	}
+	var owner sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT creator_account_id FROM trustpool_events
+WHERE pool_id = ? AND event_type = ?
+ORDER BY id LIMIT 1`, poolID, EventPoolCreated).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return owner.String, true, nil
+}
+
+func (s *Store) selfServePoolCounts(ctx context.Context, creatorAccountID string) (int, int, error) {
+	if s == nil || s.db == nil {
+		return 0, 0, ErrStoreClosed
+	}
+	var creatorPools, allPools int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM trustpool_events WHERE creator_account_id = ? AND event_type = ?`, creatorAccountID, EventPoolCreated).Scan(&creatorPools); err != nil {
+		return 0, 0, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM trustpool_events WHERE event_type = ? AND approval_record_id LIKE 'self-serve:%'`, EventPoolCreated).Scan(&allPools); err != nil {
+		return 0, 0, err
+	}
+	return creatorPools, allPools, nil
+}
+
+func (s *Store) poolEventCount(ctx context.Context, poolID string) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, ErrStoreClosed
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trustpool_events WHERE pool_id = ?`, poolID).Scan(&n)
+	return n, err
+}
+
+// selfServeRateLimiter is a per-account fixed-window limiter. It is
+// process-local: one coordinator serves the control plane.
+type selfServeRateLimiter struct {
+	mu       sync.Mutex
+	accounts map[string]*selfServeRateWindow
+}
+
+type selfServeRateWindow struct {
+	start    time.Time
+	requests int
+	writes   int
+}
+
+func newSelfServeRateLimiter() *selfServeRateLimiter {
+	return &selfServeRateLimiter{accounts: make(map[string]*selfServeRateWindow)}
+}
+
+// allow counts one request (and one write when write is true) for account
+// and reports the wait until the window resets when a budget is spent.
+func (l *selfServeRateLimiter) allow(account string, write bool, now time.Time) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	win := l.accounts[account]
+	if win == nil || now.Sub(win.start) >= SelfServeRateWindow {
+		if win == nil && len(l.accounts) >= selfServeRateTrackedAccounts {
+			for id, old := range l.accounts {
+				if now.Sub(old.start) >= SelfServeRateWindow {
+					delete(l.accounts, id)
+				}
+			}
+		}
+		win = &selfServeRateWindow{start: now}
+		l.accounts[account] = win
+	}
+	if win.requests >= SelfServeMaxRequestsPerWindow || (write && win.writes >= SelfServeMaxWritesPerWindow) {
+		return win.start.Add(SelfServeRateWindow).Sub(now), false
+	}
+	win.requests++
+	if write {
+		win.writes++
+	}
+	return 0, true
 }

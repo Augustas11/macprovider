@@ -3,7 +3,9 @@ package trustpool_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -27,11 +29,13 @@ type selfServeFixture struct {
 	handler  http.Handler
 	store    *trustpool.Store
 	registry *trustpool.Registry
+	db       *sql.DB
 }
 
 func newSelfServeFixture(t *testing.T, opts ...trustpool.StoreOption) selfServeFixture {
 	t.Helper()
-	store, err := trustpool.NewStore(openTrustPoolDB(t), opts...)
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db, opts...)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -49,7 +53,7 @@ func newSelfServeFixture(t *testing.T, opts ...trustpool.StoreOption) selfServeF
 			return nil, nil
 		},
 	})
-	return selfServeFixture{handler: handler, store: store, registry: registry}
+	return selfServeFixture{handler: handler, store: store, registry: registry, db: db}
 }
 
 type selfServePrincipal struct {
@@ -398,4 +402,68 @@ func TestSelfServeAdmissionUsesTokenAuthenticatedPresence(t *testing.T) {
 	selfServeExpect(t, selfServeDo(t, handler, defaultSelfServePrincipal, http.MethodPost, "events", trustpool.DurableEvent{
 		EventType: trustpool.EventMemberAdmitted, PoolID: root.poolID, ProviderID: selfServeOwnedMac,
 	}, "op-ss-member"), http.StatusAccepted, "admit owned, token-authenticated provider")
+}
+
+func TestSelfServeRateLimitIsPerAccountAndPrecedesWork(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	rejected := selfServeAgreementBody()
+	rejected["accept"] = false
+	for i := 0; i < trustpool.SelfServeMaxWritesPerWindow; i++ {
+		selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", rejected, ""), http.StatusBadRequest, "budgeted write")
+	}
+	limited := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", selfServeAgreementBody(), "")
+	selfServeExpect(t, limited, http.StatusTooManyRequests, "write over budget")
+	if limited.Header().Get("Retry-After") == "" {
+		t.Fatal("rate-limited response has no Retry-After")
+	}
+	if _, ok, _ := f.store.CreatorApproval(context.Background(), selfServeCreator); ok {
+		t.Fatal("rate-limited acceptance was recorded")
+	}
+	// Reads keep their own, larger budget; another account is unaffected.
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodGet, "agreement", nil, ""), http.StatusOK, "read under write limit")
+	other := selfServePrincipal{account: "acct_other_creator", credential: "key_other", github: 9}
+	selfServeExpect(t, selfServeDo(t, f.handler, other, http.MethodPost, "agreement", selfServeAgreementBody(), ""), http.StatusAccepted, "other account")
+}
+
+// fillSelfServeHistory inserts placeholder rows that only the cap counters
+// read; the caps reject before any replay would see them.
+func fillSelfServeHistory(t *testing.T, db *sql.DB, n int, poolID, eventType, creator, approvalID string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if _, err := db.Exec(`INSERT INTO trustpool_events (operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, payload_json) VALUES (?, ?, ?, ?, ?, ?, '{}')`,
+			fmt.Sprintf("filler-%s-%s-%d", eventType, poolID, i), time.Now().UTC().Format(time.RFC3339Nano), eventType, poolID, creator, approvalID); err != nil {
+			t.Fatalf("fill history: %v", err)
+		}
+	}
+}
+
+func TestSelfServeHistoryCapsRejectBeforeReplay(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	approval, root := selfServeBuildPool(t, f)
+
+	// Another account can never create a pool under this pool id.
+	stranger := selfServePrincipal{account: "acct_stranger", credential: "key_stranger", github: selfServeGitHubID}
+	selfServeExpect(t, selfServeDo(t, f.handler, stranger, http.MethodPost, "events", creatorPoolCreatedEvent(t, root, "self-serve:acct_stranger"), "op-ss-stranger-create"), http.StatusNotFound, "pool_created over a foreign pool id")
+
+	// Per-pool event cap.
+	fillSelfServeHistory(t, f.db, trustpool.SelfServeMaxEventsPerPool, root.poolID, "test_filler", "", "")
+	capped := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", trustpool.DurableEvent{
+		EventType: trustpool.EventBuyerAuthorized, PoolID: root.poolID, BuyerAccountID: selfServeBuyer,
+	}, "op-ss-buyer-capped")
+	selfServeExpect(t, capped, http.StatusConflict, "event over the per-pool cap")
+	if !bytes.Contains(capped.Body.Bytes(), []byte("events_per_pool")) {
+		t.Fatalf("per-pool cap body = %s", capped.Body.String())
+	}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/promote", nil, "op-ss-promote-capped"), http.StatusConflict, "promotion over the per-pool cap")
+
+	// Per-creator pool cap.
+	fillSelfServeHistory(t, f.db, trustpool.SelfServeMaxPoolsPerCreator-1, "filler-pool", trustpool.EventPoolCreated, selfServeCreator, approval.ApprovalRecordID)
+	next := newRootFixture(t)
+	over := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", creatorPoolCreatedEvent(t, next, approval.ApprovalRecordID), "op-ss-create-over")
+	selfServeExpect(t, over, http.StatusConflict, "pool over the per-creator cap")
+	if !bytes.Contains(over.Body.Bytes(), []byte("pools_per_creator")) {
+		t.Fatalf("per-creator cap body = %s", over.Body.String())
+	}
 }

@@ -88,7 +88,7 @@ type AdminDeps struct {
 }
 
 func NewAdminHandler(deps AdminDeps) http.Handler {
-	h := &adminHandler{deps: deps}
+	h := &adminHandler{deps: deps, selfServeRate: newSelfServeRateLimiter()}
 	h.setCreatorAdminConfig(deps.CreatorAdminCredentials, deps.CreatorAdminProviderIDs, deps.CreatorAdminProviderDelegatedIDs, deps.CreatorAdminBuyerAccountIDs, false)
 	return h
 }
@@ -97,6 +97,7 @@ type adminHandler struct {
 	deps            AdminDeps
 	mu              sync.Mutex
 	creatorConfigMu sync.RWMutex
+	selfServeRate   *selfServeRateLimiter
 }
 
 func (h *adminHandler) SetCreatorAdminConfig(credentials []CreatorAdminCredential, providerIDs, providerDelegatedIDs, buyerAccountIDs map[string][]string) {
@@ -707,12 +708,33 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		h.writeRequestMutationError(w, err)
 		return
 	}
+	if principal.SelfServe {
+		owned, err := h.selfServeEventOwnershipPreflight(r.Context(), principal, e)
+		if err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		}
+		if !owned {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	existing, ok, err := h.deps.Store.ExistingEvent(r.Context(), e.OperationID)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
+	}
+	if principal.SelfServe && !ok {
+		var limit errSelfServeLimit
+		if err := h.selfServeEventCaps(r.Context(), principal, e); errors.As(err, &limit) {
+			writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "self_serve_limit_reached", "limit": limit.limit}})
+			return
+		} else if err != nil {
+			h.writeLookupError(w, "creator_lookup_failed", err)
+			return
+		}
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
