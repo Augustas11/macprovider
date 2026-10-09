@@ -104,7 +104,7 @@ class CatalogFetchHealthTests(unittest.TestCase):
 
     def endpoint(self, provider, count=300):
         row = {"provider_name": provider, "status": 0,
-               "pricing": {"prompt": "0.00000015", "completion": "0.00000085"},
+               "pricing": {"prompt": "0.00000015", "completion": "0.00000085", "request": "0"},
                "native_tools": {}, "supports_image_reference": False,
                "supports_multiple_audio_references": False}
         if count is not None:
@@ -137,6 +137,14 @@ class CatalogFetchHealthTests(unittest.TestCase):
                                   (self.fetch(status=401), "HTTP 401")]:
             self.assertIn(expected, propose(records)["excluded"][0]["reason"])
             self.assertIn("probe_error", records[0])
+
+    def test_nonzero_or_invalid_request_fee_does_not_enter_token_price(self):
+        for fee, expected in [("0.01", "nonzero per-request pricing"), ("NaN", "finite"), ("-1", "non-negative")]:
+            row = self.endpoint("A")
+            row["pricing"]["request"] = fee
+            records = self.fetch([row, self.endpoint("B")])
+            self.assertIn(expected, records[0]["probe_error"])
+            self.assertFalse(propose(records)["selected"])
 
     def test_absent_and_null_text_telemetry_are_probe_failures(self):
         for null_perf in [False, True]:
