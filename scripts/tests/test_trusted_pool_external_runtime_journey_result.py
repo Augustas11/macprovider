@@ -305,6 +305,12 @@ class TrustedPoolExternalRuntimeValidatorTests(unittest.TestCase):
         for requirement_id in ("SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"):
             self.assertIn(TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID, rows[requirement_id]["journeys"])
             row = rows[requirement_id]
+            if row["state"] == "pending":
+                # #1880 changed the mapped rollback preflight; the row waits for
+                # a fresh signed capture against the released coordinator.
+                self.assertEqual("https://github.com/Augustas11/macprovider/issues/1880", row["gap"]["issue"])
+                self.assertIn("fresh signed capture", row["gap"]["rationale"])
+                continue
             self.assertEqual("conformant", row["state"])
             self.assertIsNone(row["gap"])
             signed_records = [

@@ -23,6 +23,23 @@ type tokenValidator interface {
 	ValidateToken(ctx context.Context, raw string) (providerID string, ok bool, err error)
 }
 
+// ProviderSessionAuthorizer authorizes a provider-scoped read carrying no
+// provider bearer through the provider portal's MP session cookie: it
+// returns true only when the session is valid and its GitHub user owns
+// providerID, and otherwise writes the refusal (401 invalid session, 403 not
+// owned) itself.
+type ProviderSessionAuthorizer func(w http.ResponseWriter, r *http.Request, providerID string) bool
+
+// SetProviderSessionAuthorizer wires the MP session-cookie path for provider
+// earnings (#1880). Nil removes it; the bearer path is unchanged either way.
+func (s *Store) SetProviderSessionAuthorizer(fn ProviderSessionAuthorizer) {
+	if fn == nil {
+		s.providerSessionAuthorizer.Store(nil)
+		return
+	}
+	s.providerSessionAuthorizer.Store(&fn)
+}
+
 type tokenUseMarker interface {
 	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (providerID string, ok bool, err error)
 }
@@ -1150,6 +1167,10 @@ SELECT gross_credits
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
+	// Every earnings response, success or refusal, is private to the
+	// credential that asked (SPEC-014 v0.11): never stored by a shared cache.
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Vary", "Cookie, Authorization")
 	if !h.requireProviderTokens {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not enabled")
 		return
@@ -1157,6 +1178,15 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	providerID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/providers/"), "/earnings")
 	raw := bearer(r.Header.Get("Authorization"))
 	if raw == "" {
+		// #1880: the portal's GitHub mode carries only the MP session
+		// cookie; the session's GitHub user must own this provider.
+		if authorize := h.store.providerSessionAuthorizer.Load(); authorize != nil && strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+			if !(*authorize)(w, r, providerID) {
+				return
+			}
+			h.writeProviderEarnings(w, r, providerID)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
 		return
 	}
@@ -1189,13 +1219,31 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "provider token subject mismatch")
 		return
 	}
+	h.writeProviderEarnings(w, r, providerID)
+}
+
+// writeProviderEarnings serves an authorized earnings read under the
+// per-provider earnings rate limit, whichever credential authorized it.
+func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, providerID string) {
 	if !h.allowEarnings(providerID) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "provider earnings rate limit exceeded")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), providerEarningsReadTimeout)
 	defer cancel()
-	if h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=?`, providerID) == 0 {
+	// A failed or timed-out read must never render as a zero balance or a
+	// "provider not found": answer a retryable 503 and log the cause (#1925).
+	unavailable := func(stage string, err error) {
+		h.log.Warn().Err(err).Str("provider_id", providerID).Str("stage", stage).Msg("provider earnings read failed")
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider earnings temporarily unavailable")
+	}
+	known, err := sumOn(ctx, h.store.reader(), `SELECT EXISTS (SELECT 1 FROM ledger_request_credits WHERE provider_id=?)`, providerID)
+	if err != nil {
+		unavailable("provider_lookup", err)
+		return
+	}
+	if known == 0 {
 		writeError(w, http.StatusNotFound, "not_found", "provider not found")
 		return
 	}
@@ -1208,18 +1256,16 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	nowUTC := time.Now().UTC()
 	current := sqliteTimeText(currentMondayUTC(nowUTC))
 	todayUTC := sqliteTimeText(time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC))
-	models := h.modelsServed(ctx, providerID, rangeSQL, rangeArgs...)
-	totalArgs := append([]any{providerID}, rangeArgs...)
-	currentArgs := append([]any{providerID, current}, rangeArgs...)
-	todayArgs := append([]any{providerID, todayUTC}, rangeArgs...)
-	faultArgs := append([]any{providerID}, rangeArgs...)
 
 	// Payable provider_credits for the range-scoped total plus the two rolling
 	// windows the Malibu card shows. current_window == "this week" (since Monday
 	// UTC); today == since midnight UTC. These honour any from/to range.
-	totalCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...)
-	weekCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...)
-	todayCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, todayArgs...)
+	payable, err := h.providerPayableTotals(ctx, providerID, current, todayUTC, rangeSQL, rangeArgs...)
+	if err != nil {
+		unavailable("payable_totals", err)
+		return
+	}
+	totalCredits, weekCredits, todayCredits, models := payable.total, payable.week, payable.today, payable.models
 	// "Pending" = all USDC currently owed to the provider (earned, payout-
 	// eligible, not yet paid). It is a lifetime, range-INDEPENDENT figure — a
 	// from/to filter narrows the today/week/lifetime views but must never make
@@ -1231,17 +1277,49 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	// ledger_payout_ready — see internal/payout/reorg.go, orphans.go); a naive
 	// `status NOT IN ('ready','voided')` subtraction would UNDERSTATE owed money
 	// after an unresolved orphan, so it is intentionally not done here.
-	pendingCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
+	// Without a range the lifetime scan above is exactly this sum.
+	pendingCredits := totalCredits
+	if hasRange {
+		pendingCredits, err = sumOn(ctx, h.store.reader(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
+		if err != nil {
+			unavailable("pending_total", err)
+			return
+		}
+	}
+	lastPayout, err := h.lastPayout(ctx, providerID)
+	if err != nil {
+		unavailable("last_payout", err)
+		return
+	}
+	// No config snapshot yet is a legitimate 0, as before; a read failure is not.
+	shareBps, err := sumOn(ctx, h.store.reader(), `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`)
+	if errors.Is(err, sql.ErrNoRows) {
+		shareBps, err = 0, nil
+	}
+	if err != nil {
+		unavailable("provider_share", err)
+		return
+	}
+	rateCard, err := h.rateCardExcerpt(ctx, models)
+	if err != nil {
+		unavailable("rate_card", err)
+		return
+	}
+	faultCount, err := sumOn(ctx, h.store.reader(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
+	if err != nil {
+		unavailable("fault_count", err)
+		return
+	}
 
 	resp := map[string]any{
 		"provider_id":            providerID,
 		"total_credits":          totalCredits,
 		"current_window_credits": weekCredits,
-		"last_payout_ready":      h.lastPayout(ctx, providerID),
-		"provider_share_bps":     h.latestShareBps(ctx),
+		"last_payout_ready":      lastPayout,
+		"provider_share_bps":     shareBps,
 		"models_served":          models,
-		"rate_card_excerpt":      h.rateCardExcerpt(ctx, models),
-		"fault_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
+		"rate_card_excerpt":      rateCard,
+		"fault_count":            faultCount,
 		// usdc_* are the USD figures the Malibu client (ProviderEarningsClient)
 		// decodes for the "today / wk / pending / life" card. Before this the
 		// endpoint emitted only *_credits, so every card read $0.00 regardless
@@ -1274,7 +1352,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), rangeFrom, rangeTo, hasRange)
 	summaries, err := h.settlementReceiptSummariesForProviders(ctx, []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		unavailable("settlement_receipts", err)
 		return
 	}
 	resp["settlement_receipts"] = summaries[providerID]
@@ -1590,44 +1668,71 @@ func (h *handler) allowEarnings(providerID string) bool {
 	return true
 }
 
-func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL string, rangeArgs ...any) []string {
-	args := append([]any{providerID}, rangeArgs...)
-	rows, err := h.store.reader().QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
-	if err != nil {
-		return []string{}
-	}
-	defer rows.Close()
-	models := []string{}
-	for rows.Next() {
-		var model string
-		if rows.Scan(&model) == nil {
-			models = append(models, model)
-		}
-	}
-	return models
+type providerPayableTotals struct {
+	total, week, today int64
+	models             []string
 }
 
-func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[string]RateCardEntry {
+// providerPayableTotals reads the range-scoped payable total, the week and
+// today windows, and models_served in ONE pass over the provider's rows of
+// spec022_payable_request_credits. The view's per-row correlated subqueries
+// are the cost, so the former separate SUM/SUM/SUM/DISTINCT reads each paid it
+// again over the provider's lifetime. The remaining cost is still linear in
+// the provider's payable history (walked via its provider_id index).
+func (h *handler) providerPayableTotals(ctx context.Context, providerID, weekStart, todayStart, rangeSQL string, rangeArgs ...any) (providerPayableTotals, error) {
+	args := append([]any{weekStart, todayStart, providerID}, rangeArgs...)
+	rows, err := h.store.reader().QueryContext(ctx, `
+SELECT model,
+       SUM(provider_credits),
+       SUM(CASE WHEN `+sqliteTimeSince("ts_utc")+` THEN provider_credits END),
+       SUM(CASE WHEN `+sqliteTimeSince("ts_utc")+` THEN provider_credits END)
+  FROM spec022_payable_request_credits
+ WHERE provider_id=?`+rangeSQL+`
+ GROUP BY model
+ ORDER BY model`, args...)
+	if err != nil {
+		return providerPayableTotals{}, err
+	}
+	defer rows.Close()
+	out := providerPayableTotals{models: []string{}}
+	for rows.Next() {
+		var model sql.NullString
+		var total, week, today sql.NullInt64
+		if err := rows.Scan(&model, &total, &week, &today); err != nil {
+			return providerPayableTotals{}, err
+		}
+		out.total += nullInt(total)
+		out.week += nullInt(week)
+		out.today += nullInt(today)
+		if model.Valid {
+			out.models = append(out.models, model.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return providerPayableTotals{}, err
+	}
+	return out, nil
+}
+
+func (h *handler) rateCardExcerpt(ctx context.Context, models []string) (map[string]RateCardEntry, error) {
 	var raw string
-	if err := h.store.reader().QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
-		return map[string]RateCardEntry{}
+	if err := h.store.reader().QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); errors.Is(err, sql.ErrNoRows) {
+		return map[string]RateCardEntry{}, nil
+	} else if err != nil {
+		return nil, err
 	}
 	var card map[string]RateCardEntry
 	if err := json.Unmarshal([]byte(raw), &card); err != nil {
-		return map[string]RateCardEntry{}
+		return map[string]RateCardEntry{}, nil
 	}
 	out := map[string]RateCardEntry{}
 	for _, model := range models {
 		out[model] = RateFor(card, model)
 	}
-	return out
+	return out, nil
 }
 
-func (h *handler) latestShareBps(ctx context.Context) int64 {
-	return h.sum(ctx, `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`)
-}
-
-func (h *handler) lastPayout(ctx context.Context, providerID string) any {
+func (h *handler) lastPayout(ctx context.Context, providerID string) (any, error) {
 	row := h.store.reader().QueryRowContext(ctx, `
 SELECT window_start_utc, window_end_utc, provider_credits, status
   FROM ledger_payout_ready
@@ -1636,16 +1741,16 @@ SELECT window_start_utc, window_end_utc, provider_credits, status
 	var start, end, status string
 	var credits int64
 	if err := row.Scan(&start, &end, &credits, &status); errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return nil, nil
 	} else if err != nil {
-		return nil
+		return nil, err
 	}
 	return map[string]any{
 		"window_start_utc": start,
 		"window_end_utc":   end,
 		"provider_credits": credits,
 		"status":           status,
-	}
+	}, nil
 }
 
 func currentMondayUTC(t time.Time) time.Time {

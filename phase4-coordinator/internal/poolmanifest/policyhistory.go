@@ -3,7 +3,7 @@ package poolmanifest
 // SPEC-042-R001 slice 4: active-policy selection over a pool's versioned
 // policy-core history. Slice 3 versioned the signer sets; this file versions the
 // policy cores signed by them. It accepts a pool's policy-core history under the
-// R001 rollback / prev-hash-chain / non-overlapping-window rules (verifying each
+// R001 rollback / prev-hash-chain / supersession-window rules (verifying each
 // core's signature against the slice-3 authority log via slice 2) and selects the
 // single policy that is active at a given instant, or fails closed with
 // pool_policy_stale.
@@ -86,8 +86,9 @@ func deepCopyPolicyCore(pc PolicyCore) PolicyCore {
 }
 
 // PolicyHistory is the materialized, verified policy-core history for one pool:
-// the accepted versions in ascending order plus the highest version. Its windows
-// are non-overlapping, so at most one version is active at any instant.
+// the accepted versions in ascending order plus the highest version. A later
+// version may overlap an earlier one only by superseding it from its own
+// not_before, so at most one version is active at any instant.
 type PolicyHistory struct {
 	accepted   []acceptedPolicy // ascending by manifest_version
 	highestVer uint64
@@ -156,10 +157,12 @@ func buildPolicyHistory(ic IdentityCore, authLog *AuthorityLog, cores []SignedPo
 		} else if !bytes.Equal(core.PrevManifestCoreHash, prevDigest) {
 			return nil, errPolicyChainBroken
 		}
-		// (5) Non-overlapping window vs every accepted version.
+		// (5) Window vs every accepted version: disjoint, or a supersession
+		// that starts no earlier than the version it overlaps (it ends that
+		// version at its own not_before, never retroactively before it).
 		w := window{notBefore: core.NotBeforeUnix, expires: core.ExpiresAtUnix}
 		for _, a := range accepted {
-			if w.overlaps(a.window) {
+			if w.overlaps(a.window) && w.notBefore < a.window.notBefore {
 				return nil, errPolicyWindowOverlap
 			}
 		}
@@ -189,18 +192,45 @@ func buildPolicyHistory(ic IdentityCore, authLog *AuthorityLog, cores []SignedPo
 	return &PolicyHistory{accepted: accepted, highestVer: prevVersion}, nil
 }
 
-// ActivePolicy returns the single policy version whose half-open validity window
-// contains nowUnix (SPEC-042-R001). Because acceptance rejects overlapping windows,
-// at most one qualifies. If none is active — nowUnix before the earliest window, in
-// a gap, or after the latest — it returns errPoolPolicyStale and the caller MUST
-// NOT route. The returned core is a deep copy.
+// ActivePolicy returns the single policy version whose effective window contains
+// nowUnix (SPEC-042-R001). A version's effective window is its signed window cut
+// at the not_before of every higher version that overlaps it, so a superseding
+// version takes over at its not_before and the superseded one never revives.
+// Effective windows are disjoint, so at most one qualifies. If none is active —
+// nowUnix before the earliest window, in a gap, or after the latest — it returns
+// errPoolPolicyStale and the caller MUST NOT route. The returned core is a deep
+// copy.
 func (h *PolicyHistory) ActivePolicy(nowUnix uint64) (PolicyCore, error) {
-	for _, a := range h.accepted {
-		if a.window.contains(nowUnix) {
+	for i, a := range h.accepted {
+		if effectiveWindow(h.accepted, i).contains(nowUnix) {
 			return deepCopyPolicyCore(a.core), nil
 		}
 	}
 	return PolicyCore{}, errPoolPolicyStale
+}
+
+// effectiveWindow is accepted[i]'s signed window ended at the not_before of
+// every later (higher-version) accepted window that overlaps it.
+func effectiveWindow(accepted []acceptedPolicy, i int) window {
+	w := accepted[i].window
+	for _, later := range accepted[i+1:] {
+		if accepted[i].window.overlaps(later.window) && later.window.notBefore < w.expires {
+			w.expires = later.window.notBefore
+		}
+	}
+	return w
+}
+
+// SupersededExpiry is the effective end of the window [notBefore, expires) of
+// the version at index i of windows (ascending by manifest_version): the signed
+// expiry, cut at the not_before of every later window that overlaps it
+// (SPEC-042-R001 supersession). The durable projection shares this rule.
+func SupersededExpiry(windows [][2]uint64, i int) uint64 {
+	accepted := make([]acceptedPolicy, len(windows))
+	for j, w := range windows {
+		accepted[j].window = window{notBefore: w[0], expires: w[1]}
+	}
+	return effectiveWindow(accepted, i).expires
 }
 
 // HighestVersion returns the highest accepted manifest_version (the rollback floor

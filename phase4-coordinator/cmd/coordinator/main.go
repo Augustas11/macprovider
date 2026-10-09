@@ -85,6 +85,11 @@ func parseRFC3339Strict(s string) (time.Time, error) {
 var version = "dev"
 
 func main() {
+	// Exit only after runCoordinator has returned and its store-close defers ran.
+	os.Exit(runCoordinator())
+}
+
+func runCoordinator() (exitCode int) {
 	// SPEC-017 v0.1.8 Step 4.A — subcommand dispatch. When the
 	// first positional arg is a known operator-CLI verb, route
 	// to the corresponding handler and exit with its code. The
@@ -1057,6 +1062,7 @@ func main() {
 		if mdaStore, err := mdm.OpenMDAStoreWithManualWALCheckpoint(cfg.Storage.DBPath); err != nil {
 			logger.Error().Err(err).Msg("live MDA durable store open failed; continuing with in-memory only")
 		} else {
+			defer mdaStore.Close()
 			liveMDAService.SetMDAStore(mdaStore)
 			logger.Info().Str("db_path", cfg.Storage.DBPath).Msg("Phase 3 live MDA durable proof store wired")
 		}
@@ -1353,6 +1359,11 @@ func main() {
 		idlePrewarmReader,
 		cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
 	)
+	// #1880: the provider portal's GitHub mode reads earnings with the MP
+	// session cookie of the GitHub user that owns the provider.
+	if cfg.Auth.GitHubOAuth.Enabled {
+		billingStore.SetProviderSessionAuthorizer(wsServer.AuthorizeProviderSessionRead)
+	}
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
@@ -1541,8 +1552,8 @@ func main() {
 		register,
 		hardwareEvidence,
 		enrollHandler,
-		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter, autotuneEvidenceStore),
-		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), autotuneEvidenceStore),
+		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter, autotuneEvidenceStore, logger),
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), autotuneEvidenceStore, logger),
 		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
 	buyerHandler = withPortalSessionMe(buyerHandler, tokenStore)
@@ -1681,13 +1692,11 @@ func main() {
 			wsServer.DrainAll("coordinator shutdown")
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			if err := buyerHTTP.Shutdown(ctx); err != nil {
-				logger.Error().Err(err).Msg("buyer http shutdown failed")
-				os.Exit(1)
+			if err := shutdownHTTPServer(ctx, buyerHTTP, "buyer", logger); err != nil {
+				exitCode = 1
 			}
-			if err := providerHTTP.Shutdown(ctx); err != nil {
-				logger.Error().Err(err).Msg("provider http shutdown failed")
-				os.Exit(1)
+			if err := shutdownHTTPServer(ctx, providerHTTP, "provider", logger); err != nil {
+				exitCode = 1
 			}
 			wsServer.CloseAllProviderSessions("coordinator shutdown")
 			wsServer.WaitProviderConnections(2 * time.Second)
@@ -3958,7 +3967,7 @@ func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.En
 	return eh
 }
 
-func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, hardwareEvidence autotune.EvidenceStore) http.Handler {
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, hardwareEvidence autotune.EvidenceStore, logger zerolog.Logger) http.Handler {
 	if rewardsDB == nil {
 		return nil
 	}
@@ -3971,6 +3980,7 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, 
 		Connectivity:          connectivity,
 		HardwareEvidence:      hardwareEvidence,
 		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
+		Logger:                logger,
 	})
 }
 
@@ -3996,7 +4006,7 @@ func malibuRewardAuditAdminHandler(cfg config.Config, rewardsDB *sql.DB) http.Ha
 	})
 }
 
-func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter, hardwareEvidence autotune.EvidenceStore) http.Handler {
+func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter, hardwareEvidence autotune.EvidenceStore, logger zerolog.Logger) http.Handler {
 	return rewards.NewWalletStatusHandler(rewards.WalletHandlerDeps{
 		RewardsDB:             rewardsDB,
 		PayoutDB:              payoutDB,
@@ -4007,6 +4017,7 @@ func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB,
 		Limiter:               limiter,
 		HardwareEvidence:      hardwareEvidence,
 		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
+		Logger:                logger,
 	})
 }
 

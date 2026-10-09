@@ -512,26 +512,55 @@ func poolBindingDecisionForHead(wiring *poolModelWiring, providerID string, head
 	// catalog-priceable for the runtime class nor blocked (a candidate or
 	// listed row pays nothing, SPEC-042-R015 precedence); that is decided by
 	// the release classification below, not by the recorded match state.
-	if !modelAdmissionPoolBindState(head.State) {
+	matches, observedKey, ok := poolBindMatches(wiring, providerID, head, classify)
+	// Cardinality: a candidate holds at most one pool binding. An offer
+	// naming its pool entry (#1880) matched at most that one; an offer
+	// naming none binds only when exactly one pool matches.
+	if !ok || len(matches) != 1 {
 		return ModelAdmissionEvent{}, false
 	}
+	return poolBindingDecision(head, matches[0].view, matches[0].entry, matches[0].account, observedKey, ModelAdmissionReasonPoolManifestBound, now), true
+}
+
+type poolBindMatch struct {
+	view    trustpool.Snapshot
+	entry   poolmanifest.PoolModelEntry
+	account string
+}
+
+// poolBindMatches lists the current pool entries an unbound candidate head
+// could bind to: routeable pools the provider is a member of whose entry
+// lists the offered pair and runtime class inside the bounds. A head with a
+// requested_pool_model_id considers only that pool and entry. ok=false when
+// the head cannot bind at all (state, pair, or catalog precedence).
+func poolBindMatches(wiring *poolModelWiring, providerID string, head ModelAdmissionEvent, classify func(algorithm, hash string) poolCatalogPairStatus) ([]poolBindMatch, string, bool) {
+	if wiring == nil || wiring.source == nil || head.PoolScoped() || !modelAdmissionPoolBindState(head.State) {
+		return nil, "", false
+	}
+	runtime := modelAdmissionRuntimeClass(head.RuntimeSource)
 	algorithm, hash, ok := offeredPoolPair(head)
 	if !ok {
-		return ModelAdmissionEvent{}, false
+		return nil, "", false
 	}
 	catalog := classify(algorithm, hash)
 	if catalog.blocked || catalog.priceableFor(runtime) {
-		return ModelAdmissionEvent{}, false
+		return nil, "", false
 	}
-	type match struct {
-		view    trustpool.Snapshot
-		entry   poolmanifest.PoolModelEntry
-		account string
+	poolIDs := wiring.source.PoolIDs()
+	requestedPool := ""
+	if head.RequestedPoolModelID != "" {
+		poolID, _, valid := poolmanifest.ParsePoolModelID(head.RequestedPoolModelID)
+		if !valid {
+			return nil, "", false
+		}
+		requestedPool = poolID
+		poolIDs = []string{poolID}
 	}
-	var matches []match
-	for _, poolID := range wiring.source.PoolIDs() {
+	bounds := wiring.pricingBounds()
+	var matches []poolBindMatch
+	for _, poolID := range poolIDs {
 		view := wiring.source.Snapshot(poolID)
-		if !view.Routeable || view.ManifestVersion == 0 {
+		if !view.Exists || !view.Routeable || view.ManifestVersion == 0 || (requestedPool != "" && view.PoolID != requestedPool) {
 			continue
 		}
 		account, member := poolMemberAccount(view, providerID, runtime)
@@ -542,13 +571,35 @@ func poolBindingDecisionForHead(wiring *poolModelWiring, providerID string, head
 		if !ok || !entryWithinBounds(entry, bounds) {
 			continue
 		}
-		matches = append(matches, match{view: view, entry: entry, account: account})
+		if head.RequestedPoolModelID != "" && entry.PoolModelID != head.RequestedPoolModelID {
+			continue
+		}
+		matches = append(matches, poolBindMatch{view: view, entry: entry, account: account})
 	}
-	// Cardinality: a candidate holds at most one pool binding.
-	if len(matches) != 1 {
-		return ModelAdmissionEvent{}, false
+	return matches, catalog.observedKey, true
+}
+
+// Status warnings for an unbound candidate the R011 bind cannot place
+// (#1880): several pools match and the offer names none, or the offer names
+// a pool entry that does not currently match it.
+const (
+	ModelAdmissionWarningPoolBindingAmbiguous        = "pool_binding_ambiguous"
+	ModelAdmissionWarningPoolBindingRequestUnmatched = "pool_binding_requested_entry_unmatched"
+)
+
+// poolBindingWarning is the provider-facing reason an unbound candidate is
+// not bound to a pool, or "" when there is none to report.
+func poolBindingWarning(wiring *poolModelWiring, providerID string, head ModelAdmissionEvent, classify func(algorithm, hash string) poolCatalogPairStatus) string {
+	matches, _, ok := poolBindMatches(wiring, providerID, head, classify)
+	switch {
+	case !ok:
+		return ""
+	case head.RequestedPoolModelID != "" && len(matches) == 0:
+		return ModelAdmissionWarningPoolBindingRequestUnmatched
+	case head.RequestedPoolModelID == "" && len(matches) > 1:
+		return ModelAdmissionWarningPoolBindingAmbiguous
 	}
-	return poolBindingDecision(head, matches[0].view, matches[0].entry, matches[0].account, catalog.observedKey, ModelAdmissionReasonPoolManifestBound, now), true
+	return ""
 }
 
 // evaluatePoolManifestBindingsLocked re-evaluates every R011 candidate of
@@ -727,11 +778,13 @@ func modelAdmissionPoolBindingObject(event ModelAdmissionEvent) map[string]any {
 // envelope mode (no row re-check), never legacy (routable on its pool only).
 const catalogAdmissionPoolEntry = "pool_entry"
 
-// poolEntryForSession reports the single pool whose current SPEC-042-R015
-// entry lists this runtime class for this exact pair, when the provider is a
-// member there (for a loopback class: allowlisted and creator-owned or
-// attested) and the pair is neither catalog-priceable for the class nor
-// blocked (SPEC-032-R004).
+// poolEntryForSession reports a pool whose current SPEC-042-R015 entry lists
+// this runtime class for this exact pair, when the provider is a member there
+// (for a loopback class: allowlisted and creator-owned or attested) and the
+// pair is neither catalog-priceable for the class nor blocked
+// (SPEC-032-R004). With several such pools (#1880) it reports the lowest
+// pool id: the session is admitted pool-only, and the candidate's single R011
+// binding, checked at route time, decides which pool it serves.
 func (s *Server) poolEntryForSession(providerID, runtimeSource, algorithm, hash string) (string, bool) {
 	wiring := s.poolModels.Load()
 	hash = strings.ToLower(strings.TrimSpace(hash))
@@ -756,10 +809,9 @@ func (s *Server) poolEntryForSession(providerID, runtimeSource, algorithm, hash 
 		if _, ok := poolEntryForPair(view, algorithm, hash, runtime); !ok {
 			continue
 		}
-		if matched != "" {
-			return "", false
+		if matched == "" || poolID < matched {
+			matched = poolID
 		}
-		matched = poolID
 	}
 	return matched, matched != ""
 }

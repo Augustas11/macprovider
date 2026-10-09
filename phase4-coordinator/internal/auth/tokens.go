@@ -2708,6 +2708,42 @@ func (s *Store) TouchMPSession(ctx context.Context, id string, now time.Time, re
 	return err
 }
 
+// RotateMPSession replaces session oldID with a fresh id for the same GitHub
+// user and deletes oldID in one transaction (SPEC-014 v0.11 session
+// rotation). ErrSessionInvalid when oldID no longer exists.
+func (s *Store) RotateMPSession(ctx context.Context, oldID string, now time.Time) (string, error) {
+	newID, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	nowText := timeText(now)
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO mp_sessions (id, github_user_id, created_at, last_seen_at, last_setcookie_at, pending_pair_ot, pending_pair_ot_expires_at)
+SELECT ?, github_user_id, ?, ?, ?, pending_pair_ot, pending_pair_ot_expires_at
+  FROM mp_sessions
+ WHERE id = ?`, newID, nowText, nowText, nowText, oldID)
+	if err != nil {
+		return "", err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return "", err
+	} else if n == 0 {
+		return "", ErrSessionInvalid
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mp_sessions WHERE id = ?`, oldID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return newID, nil
+}
+
 func (s *Store) DeleteMPSession(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM mp_sessions WHERE id = ?`, id)
 	return err

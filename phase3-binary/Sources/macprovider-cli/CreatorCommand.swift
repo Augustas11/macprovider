@@ -19,24 +19,40 @@ struct CreatorCommand: AsyncParsableCommand {
           creator keygen                     (prints the new pool id)
           creator pool create --pool <id>
           creator register-root --pool <id> --display-name "My Pool"
-          creator manifest sign --pool <id> --models-file models.json
+          On each member Mac: `macprovider-cli claim` links it to your GitHub
+          account (admit only sees Macs your GitHub user claimed), and
+          `macprovider-cli models propose <served-model-ref> --pool <id> --json > proposal.json`
+          hashes the served model into a proposal.
+          creator manifest sign --pool <id> --from-proposal proposal.json --license <SPDX>
+              --attest-paid-serving --prompt-rate-per-mtok N --prompt-cache-hit-rate-per-mtok N
+              --completion-rate-per-mtok N --max-context-tokens N   (or --models-file models.json)
           creator manifest submit --pool <id>
           creator admit <provider-id> --pool <id>
           creator authorize-buyer <account-id> --pool <id>
           creator promote --pool <id>
-          (restart macprovider-cli on each member Mac, then run
-           `macprovider-cli models offer --yes` there for each pool model)
-          creator status --pool <id>
+          On each member Mac: set `pool_model_id: pool/<id>/<slug>` in
+          ~/.config/macprovider/config.yaml (or MACPROVIDER_POOL_MODEL_ID), run
+          `macprovider-cli models offer <served-model-ref> --yes --json`
+          (add --mlx-cache-dir <dir> for a native MLX model outside the default
+          HF cache), then `macprovider-cli restart` so serve re-reads config and
+          its next hello binds the pool entry.
+          creator status --pool <id>         (manifest effective_from and expiry)
           creator earnings --pool <id>
+          creator revoke --pool <id> --provider <provider-id> | --model <pool_model_id>
+          creator lifecycle --pool <id> --set paused|draining|retired
         A member serving an uncatalogued pool model is admitted to the pool's
         routes by its first hello after promotion, so restart it once the pool
-        is active.
+        is active. A `models offer` answered with HTTP 409 replay_conflict
+        means a different offer for that candidate is already recorded:
+        withdraw it with `macprovider-cli models admission withdraw <ref> --yes --json`
+        and submit again.
         Keys live under ~/.config/macprovider/creator (MACPROVIDER_CREATOR_HOME overrides) and never leave this Mac.
         """,
         subcommands: [
             CreatorLoginCommand.self, CreatorAgreeCommand.self, CreatorKeygenCommand.self, CreatorRegisterRootCommand.self,
             CreatorPoolCommand.self, CreatorManifestCommand.self, CreatorAdmitCommand.self, CreatorAuthorizeBuyerCommand.self,
             CreatorPromoteCommand.self, CreatorStatusCommand.self, CreatorProvidersCommand.self, CreatorEarningsCommand.self,
+            CreatorRevokeCommand.self, CreatorLifecycleCommand.self,
         ]
     )
 }
@@ -571,7 +587,9 @@ enum CreatorOperations {
                 throw CreatorCLIError.invalidInput("local manifest state is corrupt")
             }
             prevHash = digest
-            notBefore = max(notBefore, prevCore.expiresAtUnix)
+            // SPEC-042-R001 supersession: a higher version takes effect at its
+            // own not_before, which must not precede the version it replaces.
+            notBefore = max(notBefore, prevCore.notBeforeUnix)
         } else {
             let authority = try Curve25519.Signing.PrivateKey(rawRepresentation: keys.manifestAuthorityEd25519)
             version = 1
@@ -638,7 +656,22 @@ enum CreatorOperations {
         let pending = try home.read(CreatorPendingManifest.self, from: pendingURL)
         let body = pending.event.mapValues(\.anyValue)
         let operationID = (body["operation_id"] as? String) ?? CreatorOutput.operationID("manifest")
-        let result = try client.expect(try await client.request("POST", "events", body: body, operationID: operationID))
+        let response = try await client.request("POST", "events", body: body, operationID: operationID)
+        if response.status == 400, let error = response.json()["error"] as? [String: Any] {
+            switch error["code"] as? String {
+            case "pool_model_pricing_out_of_bounds":
+                throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(
+                    poolModelID: error["pool_model_id"] as? String ?? "a pool model entry",
+                    bound: error["bound"] as? String ?? "a pricing bound",
+                    limit: error["limit"] as? String ?? "?"
+                ) + "; re-sign with `creator manifest sign` and submit again")
+            case "pool_model_pricing_bounds_unset":
+                throw CreatorCLIError.invalidInput("the coordinator has no pool-model pricing bounds configured, so it refuses every manifest with pool model entries; the signed manifest is kept pending: ask the operator to configure the bounds, then run `creator manifest submit` again (or re-sign without pool model entries)")
+            default:
+                break
+            }
+        }
+        let result = try client.expect(response)
         try home.write(pending.state, to: home.poolDir(poolID).appendingPathComponent("manifest-state.json"), mode: 0o600)
         try FileManager.default.removeItem(at: pendingURL)
         return result
@@ -675,6 +708,199 @@ enum CreatorOperations {
         return try await stickyRequest(home: home, client: client, poolID: poolID, key: "\(label):\(accountID)", label: label, path: "events", body: [
             "event_type": remove ? "buyer_authorization_removed" : "buyer_authorized", "pool_id": poolID, "buyer_account_id": accountID,
         ])
+    }
+
+    /// Revokes a member Mac with the same `member_revoked` event an operator
+    /// uses (SPEC-043-R005); the coordinator drops it from routing at once.
+    static func revokeMember(home: CreatorHome, client: CreatorClient, poolID: String, providerID: String) async throws -> [String: Any] {
+        try await stickyRequest(home: home, client: client, poolID: poolID, key: "revoke:\(providerID)", label: "revoke", path: "events", body: [
+            "event_type": "member_revoked", "pool_id": poolID, "provider_id": providerID,
+        ])
+    }
+
+    /// Options for the next manifest version: the accepted core's terms with
+    /// one pool model id removed from the allowlist and the model entries.
+    static func revokeModelOptions(previous: CreatorManifestState, poolModelID: String, notBefore: Date = Date()) throws -> ManifestOptions {
+        guard let core = previous.snapshot.policies.last?.core else {
+            throw CreatorCLIError.invalidInput("local manifest state is corrupt")
+        }
+        var entries: [PoolModelEntry] = []
+        var members: [PoolAttestedMember] = []
+        for ext in core.extensions {
+            switch ext.id {
+            case PoolExtensions.modelEntriesV1: entries = try PoolExtensions.decodeModelEntries(ext.body)
+            case PoolExtensions.attestedMembersV1: members = try PoolExtensions.decodeAttestedMembers(ext.body)
+            default: throw CreatorCLIError.invalidInput("accepted manifest carries extension \(ext.id) this CLI cannot re-sign")
+            }
+        }
+        guard core.modelAllowlist.contains(poolModelID) || entries.contains(where: { $0.poolModelID == poolModelID }) else {
+            throw CreatorCLIError.invalidInput("\(poolModelID) is not in the accepted manifest (version \(previous.manifestVersion))")
+        }
+        entries.removeAll { $0.poolModelID == poolModelID }
+        let entryIDs = Set(entries.map(\.poolModelID))
+        var options = ManifestOptions()
+        options.models = core.modelAllowlist.filter { $0 != poolModelID && !entryIDs.contains($0) }
+        options.modelEntries = entries
+        options.attestedMembers = members
+        guard !options.models.isEmpty || !options.modelEntries.isEmpty else {
+            throw CreatorCLIError.invalidInput("\(poolModelID) is the pool's only model; retire the pool instead with `creator lifecycle --set retired --pool \(core.poolID)`")
+        }
+        options.settlementMode = core.settlementMode
+        options.retentionPolicyID = core.retentionPolicyID
+        options.minBinaryVersion = core.minBinaryVersion
+        options.minAttestationTier = core.minAttestationTier
+        options.minEligibleMembers = core.minEligibleMembers
+        options.notBefore = notBefore
+        options.validityDays = max(1, Int((core.expiresAtUnix &- core.notBeforeUnix) / 86400))
+        return options
+    }
+
+    /// Signs the next manifest version without `poolModelID`; nothing is sent.
+    static func signModelRevocation(home: CreatorHome, poolID: String, poolModelID: String) throws -> CreatorPendingManifest {
+        guard let previous = try home.manifestState(poolID) else {
+            throw CreatorCLIError.invalidInput("no accepted manifest for pool \(poolID); nothing to revoke")
+        }
+        return try signManifest(home: home, poolID: poolID, options: try revokeModelOptions(previous: previous, poolModelID: poolModelID))
+    }
+
+    /// The accepted core's validity window as RFC 3339 UTC. `effective_from`
+    /// is the signed not_before; the coordinator applies a version no earlier.
+    static func manifestWindow(_ state: CreatorManifestState) -> (effectiveFrom: String, expiresAt: String)? {
+        guard let core = state.snapshot.policies.last?.core else { return nil }
+        let format = ISO8601DateFormatter()
+        format.formatOptions = [.withInternetDateTime]
+        format.timeZone = TimeZone(identifier: "UTC")
+        return (
+            format.string(from: Date(timeIntervalSince1970: TimeInterval(core.notBeforeUnix))),
+            format.string(from: Date(timeIntervalSince1970: TimeInterval(core.expiresAtUnix)))
+        )
+    }
+
+    /// Creator-owned fields a pool_model_proposal.v1 leaves null.
+    struct ProposalCompletion {
+        var license: String?
+        var paidServingAttested = false
+        var pricing: PoolModelPricing?
+        var maxContextTokens: UInt64?
+    }
+
+    private struct ProposalFile: Decodable {
+        struct Entry: Decodable {
+            var poolModelID: String
+            var artifactHashAlgorithm: String
+            var artifactHash: String
+            var allowedRuntimeSources: [String]
+            var license: String?
+            var paidServingAttested: Bool?
+            var pricing: PoolModelPricing?
+            var disclosureClass: String
+            var maxContextTokens: UInt64?
+
+            enum CodingKeys: String, CodingKey {
+                case poolModelID = "pool_model_id"
+                case artifactHashAlgorithm = "artifact_hash_algorithm"
+                case artifactHash = "artifact_hash"
+                case allowedRuntimeSources = "allowed_runtime_sources"
+                case license
+                case paidServingAttested = "paid_serving_attested"
+                case pricing
+                case disclosureClass = "disclosure_class"
+                case maxContextTokens = "max_context_tokens"
+            }
+        }
+        var schema: String
+        var poolID: String
+        var modelEntry: Entry
+
+        enum CodingKeys: String, CodingKey {
+            case schema
+            case poolID = "pool_id"
+            case modelEntry = "model_entry"
+        }
+    }
+
+    /// Turns one `models propose --json` bundle into a signable entry. The
+    /// proposal's hash and runtime are kept verbatim. Every creator-owned
+    /// value comes only from the creator's flags: a proposal is untrusted
+    /// provider input, so one that already carries a license or paid-serving
+    /// attestation (always null by the proposal contract) is refused, and its
+    /// suggested rates and context limit are shown, never signed.
+    static func modelEntry(fromProposal data: Data, poolID: String, completion: ProposalCompletion) throws -> PoolModelEntry {
+        let proposal: ProposalFile
+        do {
+            proposal = try JSONDecoder().decode(ProposalFile.self, from: data)
+        } catch {
+            throw CreatorCLIError.invalidInput("--from-proposal is not a pool_model_proposal.v1 document: \(error)")
+        }
+        guard proposal.schema == PoolModelProposalWire.schemaID else {
+            throw CreatorCLIError.invalidInput("--from-proposal schema is \(proposal.schema), expected \(PoolModelProposalWire.schemaID)")
+        }
+        guard proposal.poolID == poolID, proposal.modelEntry.poolModelID.hasPrefix("pool/\(poolID)/") else {
+            throw CreatorCLIError.invalidInput("proposal is for pool \(proposal.poolID), not \(poolID)")
+        }
+        let p = proposal.modelEntry
+        guard p.license == nil, p.paidServingAttested == nil else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): the proposal sets creator-owned license or paid_serving_attested, which a pool_model_proposal.v1 always leaves null; ask the provider for an unmodified `models propose --json` output")
+        }
+        guard let license = completion.license?.trimmingCharacters(in: .whitespaces), !license.isEmpty else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --license <SPDX id or LicenseRef-*>")
+        }
+        guard completion.paidServingAttested else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --attest-paid-serving to sign paid_serving_attested=true")
+        }
+        guard let pricing = completion.pricing else {
+            let hint = p.pricing.map { " (the provider suggests prompt \($0.promptRatePerMtok), cached prompt \($0.promptCacheHitRatePerMtok), completion \($0.completionRatePerMtok))" } ?? ""
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok\(hint)")
+        }
+        guard pricing.promptCacheHitRatePerMtok <= pricing.promptRatePerMtok else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): the cached-prompt rate must not exceed the prompt rate")
+        }
+        guard let maxContext = completion.maxContextTokens, (1...1_048_576).contains(maxContext) else {
+            let hint = p.maxContextTokens.map { " (the provider reports \($0))" } ?? ""
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --max-context-tokens (1...1048576)\(hint)")
+        }
+        return PoolModelEntry(
+            poolModelID: p.poolModelID, artifactHashAlgorithm: p.artifactHashAlgorithm, artifactHash: p.artifactHash,
+            allowedRuntimeSources: p.allowedRuntimeSources.sorted(by: PoolBytes.byteLess), license: license, paidServingAttested: true,
+            pricing: pricing, disclosureClass: p.disclosureClass, maxContextTokens: maxContext
+        )
+    }
+
+    /// GET /v1/creator/pricing-bounds. `.some(nil)` is a coordinator with no
+    /// bounds configured; nil is "could not ask" (not logged in, unreachable).
+    static func fetchPricingBounds(_ client: CreatorClient) async -> CreatorPricingBounds?? {
+        guard let response = try? await client.request("GET", "pricing-bounds"), response.status == 200 else { return nil }
+        let body = response.json()
+        guard body.keys.contains("pool_model_pricing_bounds") else { return nil }
+        return .some(CreatorPricingBounds(json: body["pool_model_pricing_bounds"]))
+    }
+
+    /// Refuses, before anything is signed, an entry whose rates the
+    /// coordinator would refuse, naming the bound as the coordinator does.
+    static func checkPricingBounds(_ entries: [PoolModelEntry], bounds: CreatorPricingBounds??) throws {
+        guard let known = bounds, !entries.isEmpty else { return }
+        guard let bounds = known else {
+            throw CreatorCLIError.invalidInput("the coordinator has no pool-model pricing bounds configured, so it refuses every pool model entry; contact the operator")
+        }
+        for entry in entries {
+            if let broken = bounds.violation(entry.pricing) {
+                throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(poolModelID: entry.poolModelID, bound: broken.bound, limit: String(broken.limit)))
+            }
+        }
+    }
+
+    static let creatorLifecycles: Set<String> = ["paused", "draining", "retired"]
+
+    /// POST /v1/creator/pools/<id>/lifecycle (coordinator
+    /// handleCreatorRestrictiveLifecycle). Only restrictive states; a paused
+    /// or draining pool returns to active through `creator promote`.
+    static func setLifecycle(home: CreatorHome, client: CreatorClient, poolID: String, lifecycle: String, reason: String?) async throws -> [String: Any] {
+        guard creatorLifecycles.contains(lifecycle) else {
+            throw CreatorCLIError.invalidInput("--set must be paused, draining, or retired (use `creator promote` to reactivate)")
+        }
+        var body: [String: Any] = ["lifecycle": lifecycle]
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty { body["reason"] = reason }
+        return try await stickyRequest(home: home, client: client, poolID: poolID, key: "lifecycle:\(lifecycle)", label: "lifecycle", path: "pools/\(poolID)/lifecycle", body: body)
     }
 
     static func promote(home: CreatorHome, client: CreatorClient, poolID: String) async throws -> [String: Any] {
@@ -741,6 +967,9 @@ struct CreatorAgreeCommand: AsyncParsableCommand {
             throw CreatorCLIError.invalidInput("malformed agreement response")
         }
         CreatorOutput.printJSON(agreement)
+        if let bounds = CreatorPricingBounds(json: terms["pool_model_pricing_bounds"]) {
+            print("pool model pricing bounds (credits per million tokens): \(bounds.summary)")
+        }
         guard yes else {
             print("Not accepted. Re-run with --yes to accept Creator Agreement version \(version).")
             throw ExitCode.failure
@@ -796,7 +1025,7 @@ struct CreatorManifestCommand: ParsableCommand {
     )
 }
 
-struct CreatorManifestSignCommand: ParsableCommand {
+struct CreatorManifestSignCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "sign", abstract: "Sign the next manifest version locally. Nothing is sent.")
     @OptionGroup var pool: CreatorPoolOption
     @Option(help: "Comma-separated catalog model ids to allow.") var models = ""
@@ -807,12 +1036,37 @@ struct CreatorManifestSignCommand: ParsableCommand {
     @Option(help: "Minimum attestation tier.") var minAttestationTier = "self_signed"
     @Option(help: "Minimum eligible members.") var minEligibleMembers: UInt64 = 1
     @Option(help: "Policy validity in days.") var validityDays = 90
+    @Option(name: .customLong("from-proposal"), help: "pool_model_proposal.v1 JSON from `models propose --json` (repeatable). Its hash and runtime are kept; every creator field comes from the flags below.") var fromProposal: [String] = []
+    @Option(help: "SPDX id or LicenseRef-* for --from-proposal entries.") var license: String?
+    @Flag(help: "Attest paid serving is permitted for --from-proposal entries (signed as paid_serving_attested=true).") var attestPaidServing = false
+    @Option(help: "Prompt rate per million tokens for --from-proposal entries (required; a provider suggestion is never signed).") var promptRatePerMtok: UInt64?
+    @Option(help: "Cached-prompt rate per million tokens (no higher than the prompt rate).") var promptCacheHitRatePerMtok: UInt64?
+    @Option(help: "Completion rate per million tokens.") var completionRatePerMtok: UInt64?
+    @Option(help: "max_context_tokens for --from-proposal entries (required).") var maxContextTokens: UInt64?
 
-    func run() throws {
+    func run() async throws {
         var options = CreatorOperations.ManifestOptions()
         options.models = models.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if let modelsFile {
             (options.modelEntries, options.attestedMembers) = try CreatorOperations.loadModelsFile(modelsFile)
+        }
+        if !fromProposal.isEmpty {
+            var completion = CreatorOperations.ProposalCompletion()
+            completion.license = license
+            completion.paidServingAttested = attestPaidServing
+            if promptRatePerMtok != nil || promptCacheHitRatePerMtok != nil || completionRatePerMtok != nil {
+                guard let promptRatePerMtok, let promptCacheHitRatePerMtok, let completionRatePerMtok else {
+                    throw ValidationError("pricing needs all of --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok")
+                }
+                completion.pricing = PoolModelPricing(promptRatePerMtok: promptRatePerMtok, promptCacheHitRatePerMtok: promptCacheHitRatePerMtok, completionRatePerMtok: completionRatePerMtok)
+            }
+            completion.maxContextTokens = maxContextTokens
+            for path in fromProposal {
+                let entry = try CreatorOperations.modelEntry(fromProposal: Data(contentsOf: URL(fileURLWithPath: path)), poolID: pool.poolID, completion: completion)
+                options.modelEntries.removeAll { $0.poolModelID == entry.poolModelID }
+                options.modelEntries.append(entry)
+            }
+            options.modelEntries.sort { PoolBytes.byteLess($0.poolModelID, $1.poolModelID) }
         }
         options.settlementMode = settlementMode
         options.retentionPolicyID = retentionPolicyId
@@ -820,8 +1074,18 @@ struct CreatorManifestSignCommand: ParsableCommand {
         options.minAttestationTier = minAttestationTier
         options.minEligibleMembers = minEligibleMembers
         options.validityDays = validityDays
+        if !options.modelEntries.isEmpty, let context = try? CreatorContext.load() {
+            let bounds = await CreatorOperations.fetchPricingBounds(context.client)
+            if bounds == nil {
+                FileHandle.standardError.write(Data("warning: could not read the coordinator's pricing bounds; rates are checked at submit\n".utf8))
+            }
+            try CreatorOperations.checkPricingBounds(options.modelEntries, bounds: bounds)
+        }
         let pending = try CreatorOperations.signManifest(home: CreatorHome.resolve(), poolID: pool.poolID, options: options)
         print("signed manifest_version=\(pending.state.manifestVersion) manifest_core_digest=\(pending.state.manifestCoreDigest)")
+        if let window = CreatorOperations.manifestWindow(pending.state) {
+            print("effective_from=\(window.effectiveFrom) expires_at=\(window.expiresAt)")
+        }
     }
 }
 
@@ -865,7 +1129,7 @@ struct CreatorPromoteCommand: AsyncParsableCommand {
     func run() async throws {
         let context = try CreatorContext.load()
         CreatorOutput.printJSON(try await CreatorOperations.promote(home: context.home, client: context.client, poolID: pool.poolID))
-        print("Pool active. Restart macprovider-cli on each member Mac so it serves the pool's models.")
+        print("Pool active. Run `macprovider-cli restart` on each member Mac so it serves the pool's models.")
     }
 }
 
@@ -880,6 +1144,18 @@ struct CreatorStatusCommand: AsyncParsableCommand {
         let path = poolID.map { "pools/\($0)" } ?? "pools"
         var out: [String: Any] = ["creator": try await CreatorOperations.me(context.client)]
         out["result"] = try context.client.expect(try await context.client.request("GET", path))
+        if let bounds = await CreatorOperations.fetchPricingBounds(context.client) {
+            out["pool_model_pricing_bounds"] = bounds?.json ?? NSNull()
+        }
+        if let poolID, let state = try context.home.manifestState(poolID), let window = CreatorOperations.manifestWindow(state) {
+            // From manifest-state.json on this Mac, not the coordinator: it
+            // can be stale or absent when a manifest was submitted elsewhere.
+            out["local_manifest"] = [
+                "source": "local manifest state",
+                "manifest_version": state.manifestVersion, "manifest_core_digest": state.manifestCoreDigest,
+                "effective_from": window.effectiveFrom, "expires_at": window.expiresAt,
+            ]
+        }
         CreatorOutput.printJSON(out)
     }
 }
@@ -908,5 +1184,103 @@ struct CreatorEarningsCommand: AsyncParsableCommand {
         if let from { query.append(URLQueryItem(name: "from", value: from)) }
         if let to { query.append(URLQueryItem(name: "to", value: to)) }
         CreatorOutput.printJSON(try context.client.expect(try await context.client.request("GET", "earnings", query: query)))
+    }
+}
+
+struct CreatorRevokeCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "revoke",
+        abstract: "Revoke a member Mac (--provider) or a pool model entry (--model).",
+        discussion: """
+        --provider <id> sends member_revoked; the Mac stops routing for the pool at once.
+        --model <pool_model_id> signs the next manifest version without that entry and
+        leaves it pending: review it, then run `creator manifest submit --pool <id>`.
+        The new version takes effect when it is submitted.
+        """
+    )
+    @OptionGroup var pool: CreatorPoolOption
+    @Option(help: "Provider id of the member Mac to revoke.") var provider: String?
+    @Option(help: "pool_model_id of the manifest entry to remove.") var model: String?
+
+    func validate() throws {
+        guard (provider == nil) != (model == nil) else { throw ValidationError("give exactly one of --provider or --model") }
+    }
+
+    func run() async throws {
+        if let model {
+            let pending = try CreatorOperations.signModelRevocation(home: CreatorHome.resolve(), poolID: pool.poolID, poolModelID: model)
+            print("signed manifest_version=\(pending.state.manifestVersion) without \(model); run `macprovider-cli creator manifest submit --pool \(pool.poolID)`; it takes effect at submit")
+            return
+        }
+        let context = try CreatorContext.load()
+        CreatorOutput.printJSON(try await CreatorOperations.revokeMember(home: context.home, client: context.client, poolID: pool.poolID, providerID: provider ?? ""))
+    }
+}
+
+struct CreatorLifecycleCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lifecycle",
+        abstract: "Pause, drain, or retire a pool. Reactivate a paused or draining pool with `creator promote`."
+    )
+    @OptionGroup var pool: CreatorPoolOption
+    @Option(name: .customLong("set"), help: "paused, draining, or retired. retired is final.") var lifecycle: String
+    @Option(help: "Optional reason recorded with the change.") var reason: String?
+
+    func validate() throws {
+        guard CreatorOperations.creatorLifecycles.contains(lifecycle) else {
+            throw ValidationError("--set must be paused, draining, or retired")
+        }
+    }
+
+    func run() async throws {
+        let context = try CreatorContext.load()
+        CreatorOutput.printJSON(try await CreatorOperations.setLifecycle(home: context.home, client: context.client, poolID: pool.poolID, lifecycle: lifecycle, reason: reason))
+    }
+}
+
+/// SPEC-005-R015 pool-model pricing bounds as the creator mount serves them:
+/// inclusive credits per million tokens, keyed by the names a manifest
+/// rejection's `bound` uses.
+struct CreatorPricingBounds: Equatable {
+    static let rates = ["prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"]
+    let values: [String: Int64]
+
+    init?(json: Any?) {
+        guard let object = json as? [String: Any] else { return nil }
+        var values: [String: Int64] = [:]
+        for rate in Self.rates {
+            for side in ["min_", "max_"] {
+                guard let number = object[side + rate] as? NSNumber else { return nil }
+                values[side + rate] = number.int64Value
+            }
+        }
+        self.values = values
+    }
+
+    var json: [String: Int64] { values }
+
+    var summary: String {
+        Self.rates.map { "\($0) \(values["min_" + $0] ?? 0)..\(values["max_" + $0] ?? 0)" }.joined(separator: ", ")
+    }
+
+    /// The first bound broken, in the coordinator's order (max before min).
+    func violation(_ pricing: PoolModelPricing) -> (bound: String, limit: Int64)? {
+        let rates: [(String, UInt64)] = [
+            ("prompt_rate_per_mtok", pricing.promptRatePerMtok),
+            ("prompt_cache_hit_rate_per_mtok", pricing.promptCacheHitRatePerMtok),
+            ("completion_rate_per_mtok", pricing.completionRatePerMtok),
+        ]
+        for (name, value) in rates {
+            let hi = values["max_" + name] ?? Int64.max, lo = values["min_" + name] ?? 0
+            if value > UInt64(Int64.max) || Int64(value) > hi { return ("max_" + name, hi) }
+            if Int64(value) < lo { return ("min_" + name, lo) }
+        }
+        return nil
+    }
+
+    static func message(poolModelID: String, bound: String, limit: String) -> String {
+        let side = bound.hasPrefix("max_") ? "above the maximum" : "below the minimum"
+        let rate = bound.replacingOccurrences(of: "max_", with: "").replacingOccurrences(of: "min_", with: "")
+        return "pool_model_pricing_out_of_bounds: \(poolModelID) \(rate) is \(side) (\(bound)=\(limit) credits per million tokens)"
     }
 }

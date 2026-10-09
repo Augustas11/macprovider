@@ -16,7 +16,11 @@ struct ClaimCommand: AsyncParsableCommand {
 
     func run() async throws {
         let resolved = try ConfigLoader.load(cli: CLIOverrides(configPath: config))
-        try await ClaimCommandRunner(config: resolved, noBrowser: noBrowser).run()
+        try await ClaimCommandRunner(
+            config: resolved,
+            noBrowser: noBrowser,
+            credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved)
+        ).run()
     }
 }
 
@@ -138,6 +142,7 @@ struct ClaimCommandRunner: Sendable {
 
     let config: AppConfig
     let noBrowser: Bool
+    let credentialStore: (any ProviderCredentialStoring)?
     let claimURLFile: ClaimURLFile
     let browserOpener: BrowserOpener
     let refresher: ClaimRefresher
@@ -149,6 +154,7 @@ struct ClaimCommandRunner: Sendable {
     init(
         config: AppConfig,
         noBrowser: Bool,
+        credentialStore: (any ProviderCredentialStoring)? = nil,
         claimURLFile: ClaimURLFile? = nil,
         browserOpener: BrowserOpener = BrowserOpener(),
         refresher: ClaimRefresher = .live,
@@ -159,6 +165,7 @@ struct ClaimCommandRunner: Sendable {
     ) {
         self.config = config
         self.noBrowser = noBrowser
+        self.credentialStore = credentialStore
         self.claimURLFile = claimURLFile ?? ClaimURLFile(configPath: config.configPath)
         self.browserOpener = browserOpener
         self.refresher = refresher
@@ -175,9 +182,18 @@ struct ClaimCommandRunner: Sendable {
             return
         }
 
+        var refreshConfig = config
+        do {
+            refreshConfig.providerToken = try resolvedProviderToken()
+        } catch {
+            // Fail closed: a store that cannot be read is never replaced by
+            // an older config/env token, which may belong to another provider.
+            stderr("error: the provider credential store could not be read (\(Self.redactedStoreFailure(error))); not falling back to provider_token. Fix the credential store, or re-enroll with `macprovider-cli serve`, then retry `macprovider-cli claim`")
+            throw ExitCode(5)
+        }
         let response: ClaimRefreshResponse
         do {
-            response = try await refresher.refresh(config)
+            response = try await refresher.refresh(refreshConfig)
         } catch let error as ClaimRefreshError {
             try mapRefreshError(error)
             return
@@ -218,6 +234,37 @@ struct ClaimCommandRunner: Sendable {
         return record
     }
 
+    /// Resolves the bearer the same way `models offer` does: the configured
+    /// credential store (Keychain or protected file) is authoritative once
+    /// `serve` has handed the token off, and YAML/env `provider_token` remains
+    /// a fallback for pre-handoff and dev installs. Only a store that answers
+    /// "no credential" falls back; a read or integrity failure throws.
+    func resolvedProviderToken() throws -> String? {
+        if let credentialStore, let providerID = Self.nonEmpty(config.providerID) {
+            if let stored = try credentialStore.load(providerID: providerID) {
+                guard let token = Self.nonEmpty(stored) else {
+                    throw ProviderCredentialStoreError.invalidStoredToken(providerID: providerID)
+                }
+                return token
+            }
+        }
+        return Self.nonEmpty(config.providerToken)
+    }
+
+    /// A store failure without token material: the store's own
+    /// credential-free description, else only the error's type.
+    static func redactedStoreFailure(_ error: Error) -> String {
+        if let error = error as? ProviderCredentialStoreError { return error.description }
+        return String(describing: type(of: error))
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
     private func openOrPrint(_ claimURL: String) throws {
         if noBrowser || (environment("SSH_TTY")?.isEmpty == false) {
             stdout(claimURL)
@@ -237,7 +284,10 @@ struct ClaimCommandRunner: Sendable {
         case .rateLimited(let seconds):
             stderr("error: rate limit exceeded; retry in \(seconds) seconds")
             throw ExitCode(2)
-        case .httpStatus, .invalidResponse, .invalidCoordinatorURL, .missingProviderToken, .network:
+        case .missingProviderToken:
+            stderr("error: no provider token found in the credential store (Keychain or protected file), MACPROVIDER_PROVIDER_TOKEN, or provider_token in config; run `macprovider-cli serve` once to enroll this Mac, then retry `macprovider-cli claim`")
+            throw ExitCode(4)
+        case .httpStatus, .invalidResponse, .invalidCoordinatorURL, .network:
             stderr("error: failed to refresh claim URL")
             throw ExitCode(3)
         }

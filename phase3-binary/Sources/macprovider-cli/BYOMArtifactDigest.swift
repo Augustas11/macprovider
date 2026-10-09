@@ -345,14 +345,22 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     let runtimeSource = "lmstudio_loopback"
     static let servedModelRefPrefix = "lmstudio:"
     let root: URL
+    /// LM Studio's `/api/v1/models` list, when fetched. It only NARROWS the
+    /// files the name rule already admits under `root` with metadata, never
+    /// with a runtime-reported file path (SPEC-046, SPEC-010-R007(i)): a
+    /// custom `--identifier` maps to its entry's key, and several
+    /// quantizations answering one name narrow to the files with the served
+    /// entry's publisher and exact size. Exactly one must remain.
+    let servedModels: [LMStudioLoopbackServeModel.Model]?
     private let fileManager: FileManager
     /// Bounds the directory walk so a pathological models tree cannot turn a
     /// read-only discovery into a filesystem scan.
     private static let maxEntriesVisited = 8192
     private static let idPart = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$")
 
-    init(root: URL, fileManager: FileManager = .default) {
+    init(root: URL, servedModels: [LMStudioLoopbackServeModel.Model]? = nil, fileManager: FileManager = .default) {
         self.root = root
+        self.servedModels = servedModels
         self.fileManager = fileManager
     }
 
@@ -389,9 +397,28 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 
     /// LM Studio binds through its models directory from the id; the runtime
-    /// reports no artifact path and none is needed.
+    /// reports no artifact path and none is used.
     func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
-        guard let id = Self.modelID(from: servedModelRef) else { return nil }
+        // One file answers or none does: several matching GGUFs (e.g. every
+        // quantization of a repo with the same publisher and size) is
+        // ambiguous and must not pick silently.
+        guard let hits = matchingFiles(servedModelRef: servedModelRef), hits.count == 1, let hit = hits.first else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+
+    /// An actionable reason when several local files still answer the served
+    /// name after the metadata narrowing; nil when zero or one does.
+    func ambiguityMessage(servedModelRef: String) -> String? {
+        guard let hits = matchingFiles(servedModelRef: servedModelRef), hits.count > 1 else { return nil }
+        let files = hits.map(\.relative).sorted().joined(separator: ", ")
+        return "\(hits.count) GGUF files under the LM Studio models root answer \(servedModelRef) with the same publisher and size (\(files)); LM Studio reports no file path the CLI may trust, so remove or move the other files out of the models root, or load the model under a key that names one file (its file name)"
+    }
+
+    private func matchingFiles(servedModelRef: String) -> [(url: URL, relative: String)]? {
+        guard let served = Self.modelID(from: servedModelRef) else { return nil }
+        let entry = servedModels.flatMap { LMStudioLoopbackServeModel.servedEntry(named: served, in: $0) }
+        // A custom identifier names no file; the entry's key does.
+        let names = [served] + (entry.flatMap { Self.modelID(from: $0.key) }.map { [$0] } ?? [])
         let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
         guard let publishers = try? fileManager.contentsOfDirectory(at: rootResolved, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
             return nil
@@ -413,7 +440,7 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
                     if visited > Self.maxEntriesVisited { return nil }
                     guard fileURL.pathExtension.lowercased() == "gguf" else { continue }
                     let stem = fileURL.deletingPathExtension().lastPathComponent
-                    guard Self.matches(id: id, publisher: publisher, repo: repo, fileStem: stem) else { continue }
+                    guard names.contains(where: { Self.matches(id: $0, publisher: publisher, repo: repo, fileStem: stem) }) else { continue }
                     let resolved = fileURL.resolvingSymlinksInPath().standardizedFileURL
                     guard BYOMArtifactPathPolicy.isContained(resolved, in: rootResolved),
                           (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
@@ -422,11 +449,17 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
                 }
             }
         }
-        // One file answers or none does: several matching GGUFs (e.g. every
-        // quantization of a repo when the id names the repo) is ambiguous and
-        // must not pick silently.
-        guard hits.count == 1, let hit = hits.first else { return nil }
-        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+        // Several quantizations answering the name narrow to the one LM Studio
+        // serves under it. Each filter only drops files; it never adds one.
+        if hits.count > 1, let entry {
+            if let publisher = entry.publisher {
+                hits = hits.filter { $0.relative.split(separator: "/").first.map(String.init) == publisher }
+            }
+            if let size = entry.sizeBytes {
+                hits = hits.filter { (try? $0.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) == size }
+            }
+        }
+        return hits
     }
 }
 

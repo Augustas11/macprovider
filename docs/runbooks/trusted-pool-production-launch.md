@@ -605,9 +605,43 @@ settled, so traffic stops and holds drain first:
    | `m8` | `747557cc`, not the #1754 merge | v2 cores listing `llamacpp_loopback`, `mlxlm_loopback`, `ollama_loopback` |
    | `m9` | the #1754 merge, not the #1816 merge | also `lmstudio_loopback` and `omlx_loopback`; no extensions |
    | `p1816` | the #1816 merge | also the `pool_attested_members/v1` and `pool_model_entries/v1` extensions |
+   | `p1880` | the #1880 merge | also superseding policy windows (SPEC-042 0.0.42) and offers' `requested_pool_model_id` |
 
    Decide the tier with `git merge-base --is-ancestor 747557cc <target>` and
-   the same check against the #1754 and #1816 merge commits.
+   the same check against the #1754, #1816 and #1880 merge commits.
+
+   **#1880 downgrade blockers.** A target older than `p1880` rejects a later
+   policy window that overlaps an earlier one (a SPEC-042 0.0.42
+   supersession) while rebuilding a pool's history, which disables the pool,
+   and it ignores a model-admission offer's `requested_pool_model_id`, so it
+   could bind that offer to another pool with the same artifact. Step 4b
+   below does not see either; `coordinator pool-rollback-preflight
+   --target-tier <tier>` does, and it MUST exit 0 before any rollback to a
+   target older than `p1880`. A superseded window never leaves a pool's
+   history, so it can only be cleared by rolling forward. A live offer naming
+   a pool entry is cleared by the provider withdrawing it
+   (`macprovider-cli models admission withdraw <candidate> --yes --json`,
+   then re-offering without `pool_model_id` if it should stay offered).
+
+   **Quiescent rollback (required for any target older than `p1880`).** The
+   preflight reads a snapshot of the database; a running coordinator keeps
+   writing to it (a provider can submit a new offer naming a pool entry, or
+   a creator a superseding manifest, after a passing preflight, and paused
+   pools or a closed buyer ingress do not stop either). So:
+   1. Run the preflight against the running coordinator first and clear
+      what it lists (withdraw the named offers); this pass is advisory.
+   2. Stop the coordinator (`sudo systemctl stop macprovider-coordinator`)
+      so nothing writes to the database, and confirm the process is gone.
+   3. With it stopped, run the **current** binary's
+      `coordinator pool-rollback-preflight --target-tier <tier>` against that
+      final database. Only exit 0 here counts. On exit 3, start the current
+      coordinator again, clear the listed blockers, and repeat from step 2,
+      or roll forward.
+   4. Keep the coordinator stopped through the binary swap, then start only
+      the target binary.
+   Never run an old and a new coordinator against the same database at the
+   same time, not even briefly during the swap: the old one ignores and can
+   overwrite what the new one recorded.
 
    **Carried risk: whole-database rollback (pre-existing, #1816 freeze audit
    R1 S-M5).** Trust-pool events, their projections, and the manifest
@@ -730,7 +764,7 @@ settled, so traffic stops and holds drain first:
    every extension id it carries (a strict decode of the snapshot, not a
    search for known names);
    each snapshot holds its pool's whole accepted policy history. It fails
-   closed: a target tier other than the four in the table, an unreadable
+   closed: a target tier other than the five in the table, an unreadable
    database, an undecodable snapshot, a runtime class outside `CLASSES` or
    an extension outside `EXTENSIONS` (no known build replays it), an
    extension the target tier lacks, or no `VERDICT` line means STOP. Once
@@ -758,9 +792,11 @@ settled, so traffic stops and holds drain first:
               "ollama_loopback", "omlx_loopback"},
        "p1816": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
                  "ollama_loopback", "omlx_loopback"},
+       "p1880": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+                 "ollama_loopback", "omlx_loopback"},
    }
    ACCEPTS_EXTENSIONS = {"v1-only": set(), "m8": set(), "m9": set(),
-                         "p1816": set(EXTENSIONS)}
+                         "p1816": set(EXTENSIONS), "p1880": set(EXTENSIONS)}
    V1 = b"macprovider/spec042/manifest-snapshot/v1"
    V2 = b"macprovider/spec042/manifest-snapshot/v2"
 
@@ -959,13 +995,17 @@ has run on the new coordinator:
    ```
 
    `--target-tier` is the rollback target's tier from the step 4b table
-   (`v1-only`, `m8`, `m9`, `p1816`; default `v1-only`, the oldest). The gate
+   (`v1-only`, `m8`, `m9`, `p1816`, `p1880`; default `v1-only`, the oldest). The gate
    also strictly decodes the pool manifest history, as step 4b does: when the
    target cannot replay an accepted core (an extension or runtime class it
    lacks, or any v2 core for `v1-only`) it prints `STOP: ... cannot replay the
    pool manifest history (...)`, sets `rollback_blocked: true` and
    `manifest_history.cannot_replay`, and exits 3; waiting never clears it,
-   roll forward. An undecodable snapshot prints `STOP` and exits 1.
+   roll forward. An undecodable snapshot prints `STOP` and exits 1. For a
+   target older than `p1880` it also lists, in `manifest_history.superseded_windows`
+   and `pool_selection.live_selector_offers`, every superseded policy window
+   (roll forward) and every live offer naming a pool entry (withdraw it,
+   then re-run), with a `STOP` line for each, and exits 3.
 
    These are the paths the `macprovider-coordinator` unit runs with (live
    config, Pearl overlay, env file for the `env:` credentials the config

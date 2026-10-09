@@ -4,7 +4,7 @@ This guide takes an outside creator from a fresh Mac to a private Trusted
 Pool that serves your own model and earns credits, using only public
 surfaces. You sign everything on your own Mac. Your keys never leave it.
 
-Normative source: SPEC-043 0.3.0 (self-serve private pools) and SPEC-042
+Normative source: SPEC-043 0.3.1 (self-serve private pools) and SPEC-042
 (pool entries). A private pool is reachable only by buyer accounts you
 authorize. Public listing is operator-only and is not part of this guide.
 
@@ -37,7 +37,7 @@ macprovider-cli claim
 GitHub. Pass `--no-browser` to print the URL instead of opening it. The Mac
 must already have a provider token from the install.
 
-`creator admit` (step 6) only sees Macs claimed by the GitHub user tied to
+`creator admit` (step 5) only sees Macs claimed by the GitHub user tied to
 your creator API key. A Mac claimed by anyone else cannot be admitted to your
 pool, and delegated membership is not available to self-serve pools.
 
@@ -98,7 +98,25 @@ If you are both creator and provider, you review your own proposal.
 
 ## 4. Creator: sign and submit the manifest
 
-Review the proposal, then write `models.json` from its `model_entry`,
+The quickest path signs straight from the proposal. `--from-proposal` keeps
+the proposal's hash and runtime as they are; every creator field (license,
+paid-serving attestation, rates, context limit) comes only from your flags. It
+can be repeated, one per proposal:
+
+```bash
+macprovider-cli creator manifest sign --pool <pool-id> --from-proposal proposal.json \
+  --license Apache-2.0 --attest-paid-serving \
+  --prompt-rate-per-mtok 20000 --prompt-cache-hit-rate-per-mtok 5000 \
+  --completion-rate-per-mtok 40000 --max-context-tokens 16384
+```
+
+All of these flags are required. A rate the provider suggested, or a context
+window it reported, is shown in the error when you leave the flag out, but it
+is never signed for you. A proposal for another pool is refused, and so is one
+whose `license` or `paid_serving_attested` is not null: `models propose` always
+leaves those null, so a set value means the file was edited.
+
+Alternatively, write `models.json` from the proposal's `model_entry`,
 adding your fields:
 
 ```json
@@ -130,18 +148,25 @@ macprovider-cli creator manifest sign --pool <pool-id> --models-file models.json
 macprovider-cli creator manifest submit --pool <pool-id>
 ```
 
-`sign` works offline and prints `manifest_version` and
-`manifest_core_digest`. Useful options: `--validity-days` (default 90),
+`sign` works offline and prints `manifest_version`, `manifest_core_digest`,
+`effective_from` and `expires_at`. Useful options: `--validity-days` (default 90),
 `--settlement-mode` (default `enforce`; pool entries require it),
 `--min-binary-version` (default `1.8.0`), `--min-eligible-members`
 (default 1). Re-run `sign` and `submit` for each change; there is no
 in-place edit.
 
-> **Currently awkward.** A new manifest version takes effect when the
-> previous version expires, not when you submit it. With the default 90-day
-> validity, a change (a new model, a price edit) can wait a long time. Until
-> this changes, keep `--validity-days` short while you iterate. This
-> behavior is being changed.
+> **Manifest timing.** A higher manifest version takes effect when you submit
+> it; it does not wait for the previous version to expire.
+> `creator status --pool <pool-id>` shows, under `local_manifest`, the
+> `effective_from` and `expires_at` of the last manifest signed on this Mac.
+> That is local manifest state, not read from the coordinator: on another Mac,
+> or after a newer manifest was submitted elsewhere, it can be stale or absent.
+
+`sign` reads the coordinator's pricing bounds (`creator status` and
+`creator agree` show them too) and refuses a rate outside them before
+signing, naming the bound, for example
+`max_completion_rate_per_mtok=<limit>`. A submit refused for the same
+reason names the entry and the bound.
 
 ## 5. Creator: admit, authorize, promote
 
@@ -169,7 +194,9 @@ macprovider-cli models admission status <candidate> --json
 Use the same discovery flags as in `propose` (for example
 `--llamacpp-origin` and `--llamacpp-model-path`). `status` should show
 `binding_scope: pool` and your `pool_model_id`. To withdraw an offer, use
-`models admission withdraw`.
+`models admission withdraw`. An offer answered `409 replay_conflict` means a
+different offer for that candidate is already recorded: withdraw it, then
+offer again.
 
 Then set the pool model id in the provider config
 (`~/.config/macprovider/config.yaml`) and restart:
@@ -182,16 +209,33 @@ pool_model_id: pool/<pool-id>/<slug>
 hello binds to the pool:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/live.malibu.provider
+macprovider-cli restart
 ```
 
-This is the launchd label the installer creates. A dedicated
-`macprovider-cli restart` command is not available yet.
+`restart` restarts the installed provider service and waits for the new
+serve process.
 
 An uncatalogued pool model becomes routable only after the Mac is a member,
 the pool is active, and the Mac has restarted after both.
 
-## 7. Check status and earnings
+## 7. Revoke, pause, drain, retire
+
+```bash
+macprovider-cli creator revoke --pool <pool-id> --provider <provider-id>
+macprovider-cli creator revoke --pool <pool-id> --model pool/<pool-id>/<slug>
+macprovider-cli creator lifecycle --pool <pool-id> --set paused|draining|retired [--reason "..."]
+```
+
+- `revoke --provider` removes a member Mac from the pool's routes.
+- `revoke --model` signs the next manifest version without that entry,
+  keeping every other entry and setting, and leaves it pending. Run
+  `creator manifest submit --pool <pool-id>` to apply it. It takes effect
+  at submit. A pool's only model cannot be revoked; retire the pool
+  instead.
+- `lifecycle` pauses, drains or retires the pool. Retired is final. A paused
+  or draining pool returns to active with `creator promote`.
+
+## 8. Check status and earnings
 
 ```bash
 macprovider-cli creator status --pool <pool-id>
@@ -213,11 +257,11 @@ the pool's runtime allowlist must name it. Full detail:
 
 | Engine | Model reference | `allowed_runtime_sources` | What it needs |
 |---|---|---|---|
-| Native MLX | Hugging Face snapshot | `mlx_cache` | The snapshot in the Hugging Face cache (`--mlx-cache-dir` if elsewhere) |
+| Native MLX | Hugging Face snapshot | `mlx_cache` | The snapshot in the Hugging Face cache or the model store `serve` uses (`--mlx-cache-dir` to inspect only another cache) |
 | llama.cpp | `llamacpp:<file stem>` | `llamacpp_loopback` | `llama-server --jinja`, and `--llamacpp-model-path` pinning the one GGUF file |
 | Ollama | `ollama:<tag>` | `ollama_loopback` | A pulled tag; `OLLAMA_MODELS` if not `~/.ollama/models` |
-| LM Studio | `lmstudio:<model key>` | `lmstudio_loopback` | LM Studio 0.4+, the model loaded under its own key; the key must resolve to exactly one `.gguf`, no custom identifier |
-| `mlx_lm.server` | `mlxlm:<snapshot dir>` | `mlxlm_loopback` | `MACPROVIDER_MLXLM_MODEL_PATH` set (required) |
+| LM Studio | `lmstudio:<model key or identifier>` | `lmstudio_loopback` | LM Studio 0.4+ with the model loaded; several quantizations resolve to the loaded one by publisher and size, and files they cannot tell apart are refused |
+| `mlx_lm.server` | `mlxlm:<snapshot dir>` | `mlxlm_loopback` | Started with a local snapshot path (`--model <path>`, port 8081); auto-detected, or set `MACPROVIDER_MLXLM_MODEL_PATH` |
 | oMLX | `omlx:<snapshot dir>` | `omlx_loopback` | `MACPROVIDER_OMLX_MODEL_PATH`; no API key on the server |
 
 Notes:
@@ -237,7 +281,7 @@ Notes:
 
 ## Limits
 
-Per creator account (SPEC-043 0.3.0, enforced by the coordinator):
+Per creator account (SPEC-043 0.3.1, enforced by the coordinator):
 
 | Limit | Value | Error |
 |---|---|---|
@@ -261,12 +305,10 @@ paused with reason `creator_agreement_renewal`; promote them again.
 **Price bounds.** Each of a model's three rates (prompt, cached prompt,
 completion, in credits per million tokens) must lie inside inclusive
 network-set bounds, with cache-hit not above prompt. A rate outside them is
-refused with `pool_model_pricing_out_of_bounds`. The bounds are coordinator
-configuration; there is no creator-facing way yet to read the live values
-before signing. The runbook's proposed values, derived from the signed rate
-card, are prompt 13,500 to 425,000, cache-hit 3,375 to 106,250, completion
-27,000 to 2,160,000 ([pool-scoped-model-admission.md](../runbooks/pool-scoped-model-admission.md),
-section 1). Treat them as a starting point, not a guarantee.
+refused with `pool_model_pricing_out_of_bounds`, which names the entry, the
+bound and its limit. The bounds are coordinator configuration; read the live
+values with `creator status` (or `GET /v1/creator/pricing-bounds`).
+`creator manifest sign` checks them before signing.
 
 Buyers pay your signed rates under the standard formula and platform fee.
 
@@ -283,10 +325,15 @@ Buyers pay your signed rates under the standard formula and platform fee.
 
 ## Known gaps
 
-- A new manifest version waits for the previous one to expire (see step 4).
-- No `creator revoke` or `creator lifecycle` command yet; pausing or
-  retiring a pool is not available from the creator CLI.
-- A Mac in two active pools with the same artifact does not bind
-  automatically.
-- No dedicated restart command (step 6).
-- Price bounds are not discoverable before signing.
+- A Mac in two active pools with the same artifact binds only when its
+  config names the entry: set `pool_model_id`. Without it the offer status
+  warns `pool_binding_ambiguous`. The coordinator refuses a changed offer
+  while that one is pending, so recover in this order: `models admission
+  withdraw <candidate> --yes --json`, set `pool_model_id`, `models offer
+  <candidate> --yes --json` again, then `macprovider-cli restart`. A
+  `pool_model_id` that matches no active entry warns
+  `pool_binding_requested_entry_unmatched`.
+- An offer that names a pool entry needs a coordinator with pool selection.
+  An older coordinator refuses it, and `models offer` says so instead of
+  offering without your pool choice: remove `pool_model_id` to offer without
+  it, or wait for the coordinator upgrade.

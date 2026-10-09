@@ -47,15 +47,196 @@ enum MLXLMLoopbackServeModel {
             ?? defaultOrigin
     }
 
+    /// The port docs and help recommend for mlx_lm.server on a provider Mac,
+    /// whose own `serve` already holds mlx_lm.server's default 8080.
+    static let recommendedOrigin = "http://127.0.0.1:8081"
+
+    /// Origins `models discover` probes when MACPROVIDER_MLXLM_MODEL_PATH is
+    /// unset: the operator's MACPROVIDER_MLXLM_ORIGIN alone, else the
+    /// mlx_lm.server default and the recommended non-clashing port. A port
+    /// the provider's own serve listens on is never probed, configured or
+    /// not.
+    static func discoveryOrigins(configured: String?, excludingPort servePort: Int? = nil) -> [String] {
+        let candidates = LoopbackServeSelection.nonEmpty(configured).map { [$0] } ?? [defaultOrigin, recommendedOrigin]
+        return candidates.filter { origin in
+            guard let servePort else { return true }
+            return URL(string: origin)?.port != servePort
+        }
+    }
+
+    /// True only for the `GET /v1/models` answer mlx_lm.server itself gives
+    /// (mlx-lm 0.31-0.32 `server.py`): Python's `http.server` (`Server:
+    /// BaseHTTP/... Python/...`), a body of exactly `object: "list"` and
+    /// `data`, and entries of exactly `id`, `object: "model"` and one shared
+    /// integer `created` (no `owned_by`, which other OpenAI-compatible
+    /// servers send). Auto-detection requires it; a declared path does not.
+    static func isMLXLMServerModelList(_ response: BYOMHTTPResponse) -> Bool {
+        guard let server = response.headers.first(where: { $0.0.caseInsensitiveCompare("Server") == .orderedSame })?.1,
+              server.hasPrefix("BaseHTTP/"), server.contains("Python/"),
+              let text = String(data: response.body, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              Set(root.keys) == ["object", "data"],
+              case .string("list")? = root["object"],
+              case .array(let models)? = root["data"], !models.isEmpty
+        else { return false }
+        var created: Int?
+        for model in models {
+            guard case .object(let entry) = model,
+                  Set(entry.keys) == ["id", "object", "created"],
+                  case .string? = entry["id"],
+                  case .string("model")? = entry["object"],
+                  case .int(let stamp)? = entry["created"]
+            else { return false }
+            if let created, created != stamp { return false }
+            created = stamp
+        }
+        return true
+    }
+
+    /// Where an auto-detected snapshot may live: serve's durable model store
+    /// and the Hugging Face hub cache's `models--*/snapshots/<revision>`
+    /// directories. A directory reported by a loopback server is only
+    /// accepted inside them after symlinks are resolved; anything else must
+    /// be named explicitly in MACPROVIDER_MLXLM_MODEL_PATH.
+    struct ApprovedSnapshotRoots: Equatable, Sendable {
+        let durableModelRoot: URL
+        let hubCacheRoot: URL
+
+        static func `default`(
+            environment: [String: String] = ProcessInfo.processInfo.environment,
+            homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        ) -> ApprovedSnapshotRoots {
+            ApprovedSnapshotRoots(
+                durableModelRoot: BYOMDiscoveryEnvironment.defaultDurableModelRoot(environment: environment, homeDirectory: homeDirectory),
+                hubCacheRoot: BYOMDiscoveryEnvironment.defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory)
+            )
+        }
+
+        func contains(_ directory: URL) -> Bool {
+            let dir = directory.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            let durable = durableModelRoot.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            if dir.count > durable.count, Array(dir.prefix(durable.count)) == durable {
+                return true
+            }
+            let hub = hubCacheRoot.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            return dir.count == hub.count + 3
+                && Array(dir.prefix(hub.count)) == hub
+                && dir[hub.count].hasPrefix("models--")
+                && dir[hub.count + 1] == "snapshots"
+        }
+    }
+
+    /// What a running mlx_lm.server's model list names.
+    enum SnapshotInference: Equatable {
+        /// No server, no list, or not exactly one listed local directory.
+        case none
+        case found(URL)
+        /// Exactly one listed directory, outside the approved roots.
+        case outsideApprovedRoots(URL)
+    }
+
+    /// The snapshot directory a running mlx_lm.server was started with.
+    /// mlx_lm.server lists its `--model` path, resolved, beside the repo ids
+    /// of every MLX model in the HF cache; only that absolute path names the
+    /// loaded model, so exactly one listed existing directory is required. A
+    /// macprovider `serve` on the same port lists catalog ids and yields none.
+    /// Any loopback process can answer this list, so the directory is only
+    /// accepted inside `roots` once symlinks are resolved.
+    static func inferSnapshotDirectory(_ client: any BYOMDiscoveryHTTPClient, origin: URL, roots: ApprovedSnapshotRoots) async -> SnapshotInference {
+        guard let response = try? await client.get(
+            origin.appendingPathComponent("v1/models"),
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: maxModelsBodyBytes
+        ), response.statusCode == 200, isMLXLMServerModelList(response), let ids = modelIDs(from: response.body) else {
+            return .none
+        }
+        var directories = Set<URL>()
+        for id in ids where id.hasPrefix("/") {
+            let url = URL(fileURLWithPath: id, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                directories.insert(url)
+            }
+        }
+        guard directories.count == 1, let directory = directories.first else { return .none }
+        return roots.contains(directory) ? .found(directory) : .outsideApprovedRoots(directory)
+    }
+
+    /// The error serve answers when MACPROVIDER_MLXLM_MODEL_PATH is unset and
+    /// no running mlx_lm.server reports a local snapshot path.
+    static let undetectedSnapshotMessage = "\(snapshotPathEnvironmentKey) is unset and no mlx_lm.server on the loopback origin lists a local snapshot directory. A server started with a Hugging Face repo id is not supported: start it with `mlx_lm.server --model <path written by macprovider-cli models prepare> --host 127.0.0.1 --port 8081` (and loopback_origin: http://127.0.0.1:8081), or set \(snapshotPathEnvironmentKey) to the served snapshot directory"
+
+    /// Serve's mlx_lm.server target: the declared snapshot directory with the
+    /// configured origin, else the first probe origin (`loopback_origin`, then
+    /// MACPROVIDER_MLXLM_ORIGIN, then 8080 and 8081, skipping serve's own
+    /// port) whose server lists one local snapshot path inside the approved
+    /// roots. A malformed declared path or a detected directory outside the
+    /// roots is an error, never a fallback. The serve-time binding check
+    /// still runs on the result.
+    static func serveTarget(
+        configuredOrigin: String?,
+        client: any BYOMDiscoveryHTTPClient,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        servePort: Int? = nil,
+        roots: ApprovedSnapshotRoots? = nil
+    ) async throws -> (origin: String, directory: URL?) {
+        let resolved = resolveOrigin(configured: configuredOrigin, environment: environment)
+        switch snapshotPathSetting(environment: environment) {
+        case .invalid(let path):
+            throw MLXLMSnapshotSelectionError.invalidDeclaredPath(path)
+        case .declared(let directory):
+            return (resolved, directory)
+        case .unset:
+            break
+        }
+        let roots = roots ?? .default(environment: environment)
+        let explicit = LoopbackServeSelection.nonEmpty(configuredOrigin) ?? LoopbackServeSelection.nonEmpty(environment[originEnvironmentKey])
+        for origin in discoveryOrigins(configured: explicit, excludingPort: servePort) {
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else { continue }
+            switch await inferSnapshotDirectory(client, origin: baseURL, roots: roots) {
+            case .none:
+                continue
+            case .found(let directory):
+                servingSnapshot.set(directory)
+                return (origin, directory)
+            case .outsideApprovedRoots(let directory):
+                throw MLXLMSnapshotSelectionError.outsideApprovedRoots(origin: origin, directory: directory.path)
+            }
+        }
+        return (resolved, nil)
+    }
+
+    /// The snapshot directory serve bound to: declared, else inferred at
+    /// startup. Pool usage recounts read it.
+    static func servingSnapshotDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        snapshotDirectory(environment: environment) ?? servingSnapshot.get()
+    }
+
+    private static let servingSnapshot = MLXLMServingSnapshotBox()
+
+    /// MACPROVIDER_MLXLM_MODEL_PATH as the operator set it.
+    enum SnapshotPathSetting: Equatable {
+        /// Absent or blank: auto-detection may run.
+        case unset
+        case declared(URL)
+        /// Set but not an absolute path: a configuration error, never unset.
+        case invalid(String)
+    }
+
+    static func snapshotPathSetting(environment: [String: String] = ProcessInfo.processInfo.environment) -> SnapshotPathSetting {
+        guard let path = LoopbackServeSelection.nonEmpty(environment[snapshotPathEnvironmentKey]) else { return .unset }
+        guard path.hasPrefix("/") else { return .invalid(path) }
+        return .declared(URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL)
+    }
+
     /// The operator-declared snapshot directory, resolved and standardized.
-    /// Nil when unset: there is then no identity leg, and serving fails closed.
+    /// Nil when unset or invalid: there is then no identity leg, and serving
+    /// fails closed.
     static func snapshotDirectory(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL? {
-        guard let path = LoopbackServeSelection.nonEmpty(environment[snapshotPathEnvironmentKey]), path.hasPrefix("/") else {
-            return nil
-        }
-        return URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        if case .declared(let directory) = snapshotPathSetting(environment: environment) { return directory }
+        return nil
     }
 
     /// The served ref for a snapshot directory: its last path component.
@@ -100,6 +281,23 @@ enum MLXLMLoopbackServeModel {
         }
         return ids
     }
+}
+
+/// Why the CLI will not pick an mlx_lm.server snapshot on its own.
+enum MLXLMSnapshotSelectionError: Error, Equatable, CustomStringConvertible, LocalizedError {
+    case invalidDeclaredPath(String)
+    case outsideApprovedRoots(origin: String, directory: String)
+
+    var description: String {
+        switch self {
+        case .invalidDeclaredPath(let path):
+            return "\(MLXLMLoopbackServeModel.snapshotPathEnvironmentKey) is set to \"\(path)\", which is not an absolute path; set it to the absolute snapshot directory mlx_lm.server serves, or unset it to auto-detect"
+        case .outsideApprovedRoots(let origin, let directory):
+            return "the server on \(origin) lists \(directory), which is outside the provider model store and the Hugging Face hub cache snapshots, so it is not used automatically; if that is the snapshot you serve, set \(MLXLMLoopbackServeModel.snapshotPathEnvironmentKey)=\(directory)"
+        }
+    }
+
+    var errorDescription: String? { description }
 }
 
 enum MLXSnapshotIdentityError: Error, Equatable, CustomStringConvertible {
@@ -379,7 +577,8 @@ extension BYOMModelAdmissionRuntime {
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: [snapshot.algorithm: snapshot.digest]
+            artifactHashes: [snapshot.algorithm: snapshot.digest],
+            requestedPoolModelID: requestedPoolModelID
         )
         guard snapshot.isCurrent(),
               (try? await kind.listedModelName(httpClient, origin: baseURL, directory: snapshot.directory)) != nil
@@ -389,4 +588,12 @@ extension BYOMModelAdmissionRuntime {
         let status = try await client.submitOffer(package, bearerToken: bearer)
         return (status, candidate, [snapshot.algorithm: snapshot.digest])
     }
+}
+
+private final class MLXLMServingSnapshotBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: URL?
+
+    func set(_ url: URL) { lock.lock(); value = url; lock.unlock() }
+    func get() -> URL? { lock.lock(); defer { lock.unlock() }; return value }
 }

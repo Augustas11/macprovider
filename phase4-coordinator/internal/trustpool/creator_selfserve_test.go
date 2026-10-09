@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
@@ -569,4 +571,44 @@ func TestSelfServeReplayOfCommittedOperationSkipsTheWriteBudget(t *testing.T) {
 	}
 	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", admit, "op-ss-member"), http.StatusAccepted, "replay after the write budget")
 	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", admit, "op-ss-member-new"), http.StatusTooManyRequests, "new write after the write budget")
+}
+
+// #1880: the configured SPEC-005-R015 pool-model pricing bounds are readable
+// on the self-serve mount (and with the agreement) before signing a manifest;
+// unset bounds read back null.
+func TestSelfServePricingBoundsDiscoverable(t *testing.T) {
+	bounds := &poolmanifest.PoolModelPricingBounds{MinPromptRatePerMtok: 1, MaxPromptRatePerMtok: 2000, MaxPromptCacheHitRatePerMtok: 500, MinCompletionRatePerMtok: 3, MaxCompletionRatePerMtok: 9000}
+	f := newSelfServeFixture(t, trustpool.WithPoolModelAcceptance(func() poolmanifest.PoolModelAcceptanceContext {
+		return poolmanifest.PoolModelAcceptanceContext{PricingBounds: bounds}
+	}))
+	want := map[string]int64{
+		"min_prompt_rate_per_mtok": 1, "max_prompt_rate_per_mtok": 2000,
+		"min_prompt_cache_hit_rate_per_mtok": 0, "max_prompt_cache_hit_rate_per_mtok": 500,
+		"min_completion_rate_per_mtok": 3, "max_completion_rate_per_mtok": 9000,
+	}
+	for _, path := range []string{"pricing-bounds", "agreement"} {
+		rec := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodGet, path, nil, "")
+		selfServeExpect(t, rec, http.StatusOK, path)
+		var got struct {
+			Bounds map[string]int64 `json:"pool_model_pricing_bounds"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Bounds) != len(want) {
+			t.Fatalf("%s bounds = %v", path, got.Bounds)
+		}
+		for k, v := range want {
+			if got.Bounds[k] != v {
+				t.Fatalf("%s bounds[%s] = %d, want %d", path, k, got.Bounds[k], v)
+			}
+		}
+	}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pricing-bounds", map[string]any{}, "op-bounds"), http.StatusMethodNotAllowed, "post pricing-bounds")
+	unset := newSelfServeFixture(t)
+	rec := selfServeDo(t, unset.handler, defaultSelfServePrincipal, http.MethodGet, "pricing-bounds", nil, "")
+	selfServeExpect(t, rec, http.StatusOK, "unset pricing-bounds")
+	if !strings.Contains(rec.Body.String(), `"pool_model_pricing_bounds":null`) {
+		t.Fatalf("unset bounds body = %s", rec.Body.String())
+	}
 }

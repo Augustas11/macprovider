@@ -98,6 +98,7 @@ func (c Config) Validate() error {
 // Runner orchestrates emission tick, wallet mirror, and unlock evaluation.
 type Runner struct {
 	db             *sql.DB
+	payoutReader   *sql.DB
 	cfg            Config
 	logger         zerolog.Logger
 	connectivity   ProviderConnectivity

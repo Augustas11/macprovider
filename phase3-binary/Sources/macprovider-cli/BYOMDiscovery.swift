@@ -1213,6 +1213,10 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
     let signatureAlgorithm: String
     var providerSignature: String
     let cliVersion: String
+    /// #1880 / SPEC-047-R002 0.2.8: the `pool/<pool_id>/<slug>` entry this
+    /// offer asks to bind to (config `pool_model_id`). Sent and signed only
+    /// when set, so an offer without it keeps its exact signed bytes.
+    var requestedPoolModelID: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -1236,6 +1240,7 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
         case signatureAlgorithm = "signature_algorithm"
         case providerSignature = "provider_signature"
         case cliVersion = "cli_version"
+        case requestedPoolModelID = "requested_pool_model_id"
     }
 
     struct AdvisoryCapabilities: Codable, Equatable, Sendable {
@@ -1265,7 +1270,7 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
     }
 
     func canonicalValue() -> RFC8785JCS.Value {
-        .object([
+        var fields: [String: RFC8785JCS.Value] = [
             "signature_domain": .string(signatureDomain),
             "provider_id": .string(providerID),
             "candidate_id": .string(candidateID),
@@ -1284,7 +1289,11 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
             "idempotency_key": .string(idempotencyKey),
             "signing_key_digest": .string(signingKeyDigest),
             "cli_version": .string(cliVersion),
-        ])
+        ]
+        if let requestedPoolModelID {
+            fields["requested_pool_model_id"] = .string(requestedPoolModelID)
+        }
+        return .object(fields)
     }
 }
 
@@ -1437,6 +1446,10 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case invalidStatusSchema
     case artifactIdentityChanged
     case artifactHashingTimedOut
+    case invalidRequestedPoolModelID
+    /// The offer named a pool entry and the coordinator refused the field
+    /// as unknown (`400 invalid_json`): it predates pool selection.
+    case poolSelectionUnsupported
 
     var description: String {
         switch self {
@@ -1464,8 +1477,12 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "invalid coordinator URL; use wss:// or https://"
         case .artifactIdentityChanged:
             return "the served model's artifact file changed while its digest was being computed; the offer was not submitted (SPEC-010-R007(a)) — re-run models offer once the local Ollama store is stable"
+        case .invalidRequestedPoolModelID:
+            return "pool_model_id must be pool/<22-character pool id>/<slug>; fix pool_model_id (or MACPROVIDER_POOL_MODEL_ID) in the provider config"
         case .artifactHashingTimedOut:
             return "artifact hashing exceeded its time budget; identity not reported (SPEC-010-R007(a)); retry on a faster volume or with the store local"
+        case .poolSelectionUnsupported:
+            return "the coordinator does not support pool selection (requested_pool_model_id) yet, so the offer was not submitted; to offer without choosing a pool, remove pool_model_id from the provider config (and unset MACPROVIDER_POOL_MODEL_ID), or wait for the coordinator upgrade and run models offer again"
         case .httpStatus(let status):
             if status == 404 || status == 405 {
                 // A pre-BYOM coordinator has no SPEC-047 admission endpoints.
@@ -1477,6 +1494,11 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
                 // enabled. Both are coordinator-side and resolve without any
                 // provider change; existing admission state is unaffected.
                 return "coordinator model admission request failed with HTTP \(status); coordinator model admission submissions are unavailable right now and existing admission state is unchanged; next action: wait_for_coordinator"
+            }
+            if status == 409 {
+                // The coordinator's only 409 on admission is replay_conflict:
+                // a different offer for this candidate is already recorded.
+                return "coordinator model admission request failed with HTTP 409 replay_conflict; a different offer for this candidate is already recorded; next action: withdraw it with `macprovider-cli models admission withdraw <served-model-ref> --yes --json`, then submit the offer again"
             }
             return "coordinator model admission request failed with HTTP \(status)"
         case .invalidStatusSchema:
@@ -1507,6 +1529,7 @@ struct BYOMOfferSubmissionBuilder {
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String,
         artifactHashes: [String: String] = [:],
+        requestedPoolModelID: String? = nil,
         now: Date = Date(),
         nonce: String = UUID().uuidString.lowercased(),
         idempotencyKey: String = UUID().uuidString.lowercased(),
@@ -1559,6 +1582,12 @@ struct BYOMOfferSubmissionBuilder {
             providerSignature: "",
             cliVersion: cliVersion
         )
+        if let requested = requestedPoolModelID?.trimmingCharacters(in: .whitespacesAndNewlines), !requested.isEmpty {
+            guard requested.range(of: BYOMAdmissionStatusWire.poolModelIDPattern, options: .regularExpression) != nil else {
+                throw BYOMModelAdmissionError.invalidRequestedPoolModelID
+            }
+            request.requestedPoolModelID = requested
+        }
         let canonical = try RFC8785JCS.canonicalString(request.canonicalValue())
         let canonicalData = Data(canonical.utf8)
         let signatureData = try admissionIdentity.signature(for: canonicalData)
@@ -1794,6 +1823,15 @@ struct BYOMModelAdmissionClient: Sendable {
         return .ephemeral
     }
 
+    /// `error.code` of a coordinator `{"error":{"code":...}}` body.
+    static func errorCode(in data: Data) -> String? {
+        guard data.count <= maxStatusResponseBytes,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = root["error"] as? [String: Any]
+        else { return nil }
+        return error["code"] as? String
+    }
+
     func submitOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/offers"))
         request.httpMethod = "POST"
@@ -1804,7 +1842,8 @@ struct BYOMModelAdmissionClient: Sendable {
         return try await perform(
             request,
             expectedProviderID: package.request.providerID,
-            expectedCandidateID: package.request.candidateID
+            expectedCandidateID: package.request.candidateID,
+            poolSelectionRequested: package.request.requestedPoolModelID != nil
         )
     }
 
@@ -1884,7 +1923,8 @@ struct BYOMModelAdmissionClient: Sendable {
     private func perform(
         _ request: URLRequest,
         expectedProviderID: String?,
-        expectedCandidateID: String?
+        expectedCandidateID: String?,
+        poolSelectionRequested: Bool = false
     ) async throws -> BYOMAdmissionStatusWire {
         let data: Data
         let response: URLResponse
@@ -1903,6 +1943,12 @@ struct BYOMModelAdmissionClient: Sendable {
             throw BYOMModelAdmissionError.invalidStatusSchema
         }
         guard (200..<300).contains(http.statusCode) else {
+            // A coordinator without pool selection decodes the offer
+            // strictly and refuses the unknown field; never resubmit without
+            // it, which would silently drop the operator's pool choice.
+            if poolSelectionRequested, http.statusCode == 400, Self.errorCode(in: data) == "invalid_json" {
+                throw BYOMModelAdmissionError.poolSelectionUnsupported
+            }
             throw BYOMModelAdmissionError.httpStatus(http.statusCode)
         }
         guard data.count <= Self.maxStatusResponseBytes else {
@@ -1929,19 +1975,24 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// withdrawals still require a coordinator and fail closed without one.
     let client: BYOMModelAdmissionClient?
     let httpClient: any BYOMDiscoveryHTTPClient
+    /// Config `pool_model_id`, signed into every offer as
+    /// `requested_pool_model_id` (#1880); nil sends none.
+    let requestedPoolModelID: String?
 
     init(
         environment: BYOMDiscoveryEnvironment,
         credentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         identityStore: any ProviderIdentityKeyStoring = KeychainReceiptKeyStore(),
         client: BYOMModelAdmissionClient?,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        requestedPoolModelID: String? = nil
     ) {
         self.environment = environment
         self.credentialStore = credentialStore
         self.identityStore = identityStore
         self.client = client
         self.httpClient = httpClient
+        self.requestedPoolModelID = requestedPoolModelID
     }
 
     func submitOffer(
@@ -2012,7 +2063,8 @@ struct BYOMModelAdmissionRuntime: Sendable {
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: hashes
+            artifactHashes: hashes,
+            requestedPoolModelID: requestedPoolModelID
         )
         // SPEC-010-R007(a): the binding must survive through the report. The
         // name is re-resolved and the file identity re-checked immediately
@@ -2367,6 +2419,8 @@ private extension BYOMAdmissionStatusWire {
 struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
+    /// The native durable model store scanned beside the HF cache; nil ⇒ not scanned.
+    let durableModelRoot: URL?
     let ollamaOrigin: String?
     /// Operator-supplied OpenAI-compatible loopback origin. SPEC-046-R002 allows
     /// an adapter endpoint to be either a well-known loopback default for that
@@ -2391,8 +2445,19 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// SPEC-046 v0.3.0 `mlxlm_loopback` (#1690 M8): the operator-named
     /// mlx_lm.server origin and the MLX snapshot directory it serves. The
     /// adapter has no default and is attempted only when both are set.
-    let mlxlmOrigin: String?
-    let mlxlmModelPath: URL?
+    var mlxlmOrigin: String?
+    var mlxlmModelPath: URL?
+    /// A malformed MACPROVIDER_MLXLM_MODEL_PATH, reported by the runtime
+    /// probes instead of being read as unset.
+    var mlxlmSelectionError: MLXLMSnapshotSelectionError?
+    /// Where an auto-detected mlx_lm.server snapshot may live; nil derives
+    /// them from `durableModelRoot` and `mlxCacheRoot`.
+    var mlxlmApprovedRoots: MLXLMLoopbackServeModel.ApprovedSnapshotRoots?
+    /// The provider's own serve port, never probed for mlx_lm.server.
+    var mlxlmExcludedPort: Int?
+    /// LM Studio's `/api/v1/models`, fetched by `withLoopbackRuntimeProbes`;
+    /// narrows the LM Studio store's file resolution (see BYOMLMStudioModelStore).
+    var lmstudioServedModels: [LMStudioLoopbackServeModel.Model]?
     /// SPEC-046 v0.5.0 `omlx_loopback` (#1690 M9): the operator-named oMLX
     /// origin and the MLX snapshot directory it serves; attempted only when
     /// both are set.
@@ -2428,10 +2493,12 @@ struct BYOMDiscoveryEnvironment: Sendable {
         mlxlmModelPath: URL? = nil,
         omlxOrigin: String? = nil,
         omlxModelPath: URL? = nil,
-        artifactDigestCacheURL: URL? = nil
+        artifactDigestCacheURL: URL? = nil,
+        durableModelRoot: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
         self.mlxCacheRoot = mlxCacheRoot
+        self.durableModelRoot = durableModelRoot
         self.ollamaOrigin = ollamaOrigin
         self.openAICompatibleOrigin = openAICompatibleOrigin
         self.lmstudioOrigin = lmstudioOrigin
@@ -2484,7 +2551,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         BYOMArtifactDigestResolver(
             locators: [
                 BYOMOllamaModelStore(root: ollamaModelsRoot),
-                BYOMLMStudioModelStore(root: lmstudioModelsRoot),
+                BYOMLMStudioModelStore(root: lmstudioModelsRoot, servedModels: lmstudioServedModels),
                 BYOMLlamaCppModelStore(root: llamacppModelRoot, pinnedFile: llamacppModelPath),
             ],
             cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL)
@@ -2499,10 +2566,11 @@ struct BYOMDiscoveryEnvironment: Sendable {
         lmstudioOrigin: String? = nil,
         llamacppOrigin: String? = nil,
         llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
+        servePort: Int? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
-        BYOMDiscoveryEnvironment(
+        var production = BYOMDiscoveryEnvironment(
             namespaceURL: namespacePath.map(URL.init(fileURLWithPath:)) ?? defaultNamespaceURL(homeDirectory: homeDirectory),
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
             ollamaOrigin: ollamaOrigin,
@@ -2517,8 +2585,75 @@ struct BYOMDiscoveryEnvironment: Sendable {
             mlxlmModelPath: MLXLMLoopbackServeModel.snapshotDirectory(environment: environment),
             omlxOrigin: LoopbackServeSelection.nonEmpty(environment[OMLXLoopbackServeModel.originEnvironmentKey]),
             omlxModelPath: OMLXLoopbackServeModel.snapshotDirectory(environment: environment),
-            artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
+            artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory),
+            // An explicit --mlx-cache-dir pins the one MLX root inspected.
+            durableModelRoot: mlxCacheDir == nil ? defaultDurableModelRoot(environment: environment, homeDirectory: homeDirectory) : nil
         )
+        if case .invalid(let path) = MLXLMLoopbackServeModel.snapshotPathSetting(environment: environment) {
+            production.mlxlmSelectionError = .invalidDeclaredPath(path)
+        }
+        production.mlxlmApprovedRoots = MLXLMLoopbackServeModel.ApprovedSnapshotRoots.default(environment: environment, homeDirectory: homeDirectory)
+        production.mlxlmExcludedPort = servePort
+        return production
+    }
+
+    /// The port the provider's serve listens on per its config (default
+    /// 8080 when the config cannot be read), so discovery never probes it.
+    static func configuredServePort(configPath: String? = nil) -> Int {
+        (try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)))?.port ?? 8080
+    }
+
+    /// When MACPROVIDER_MLXLM_MODEL_PATH is unset, finds a running
+    /// mlx_lm.server on its probe origins and binds the adapter to the
+    /// snapshot directory that server reports loading, when that directory
+    /// is inside the approved roots. Explicit settings win; a malformed
+    /// declared path or a detected directory outside the roots throws.
+    func withInferredMLXLMSnapshot(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
+        if let mlxlmSelectionError { throw mlxlmSelectionError }
+        guard mlxlmModelPath == nil else { return self }
+        let roots = mlxlmApprovedRoots ?? MLXLMLoopbackServeModel.ApprovedSnapshotRoots(
+            durableModelRoot: durableModelRoot ?? Self.defaultDurableModelRoot(),
+            hubCacheRoot: mlxCacheRoot
+        )
+        for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin, excludingPort: mlxlmExcludedPort) {
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else { continue }
+            switch await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL, roots: roots) {
+            case .none:
+                continue
+            case .found(let directory):
+                var copy = self
+                copy.mlxlmOrigin = origin
+                copy.mlxlmModelPath = directory
+                return copy
+            case .outsideApprovedRoots(let directory):
+                throw MLXLMSnapshotSelectionError.outsideApprovedRoots(origin: origin, directory: directory.path)
+            }
+        }
+        return self
+    }
+
+    /// The read-only runtime probes the BYOM commands run before resolving
+    /// candidates: mlx_lm.server inference and LM Studio's model list.
+    func withLoopbackRuntimeProbes(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
+        var copy = try await withInferredMLXLMSnapshot(httpClient: httpClient)
+        if copy.lmstudioServedModels == nil, let origin = lmstudioOrigin,
+           let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) {
+            copy.lmstudioServedModels = await LMStudioLoopbackServeModel.fetchModels(httpClient, origin: baseURL)
+        }
+        return copy
+    }
+
+    /// Mirrors `DurableModelArtifactStore.defaultRoot` with injectable inputs.
+    static func defaultDurableModelRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        if let override = environment["MACPROVIDER_MODEL_ARTIFACT_ROOT"], !override.isEmpty, override.hasPrefix("/") {
+            return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        }
+        return homeDirectory
+            .appendingPathComponent("Library/Application Support/macprovider/models", isDirectory: true)
+            .standardizedFileURL
     }
 
     static func defaultNamespaceURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
@@ -2679,6 +2814,7 @@ struct BYOMDiscoveryRunner {
 
         let mlx = BYOMMLXCacheDiscovery(
             cacheRoot: environment.mlxCacheRoot,
+            durableRoot: environment.durableModelRoot,
             namespace: namespace.bytes,
             namespaceWarnings: namespace.warnings,
             catalogMatcher: catalog,
@@ -3778,6 +3914,11 @@ enum BYOMFitEnvironment {
 
 struct BYOMMLXCacheDiscovery {
     private let cacheRoot: URL
+    /// The provider-owned durable store (`DurableModelArtifactStore`,
+    /// `<root>/<org--repo>/<revision>/<sha256>/`) native `serve` loads from.
+    /// Hugging Face cache is staging only, so a natively served model may
+    /// exist only here. nil keeps HF-cache-only discovery.
+    private let durableRoot: URL?
     private let namespace: Data?
     private let namespaceWarnings: [BYOMDiscoveryWarning]
     private let catalogMatcher: BYOMCatalogMatcher
@@ -3785,12 +3926,14 @@ struct BYOMMLXCacheDiscovery {
 
     init(
         cacheRoot: URL,
+        durableRoot: URL? = nil,
         namespace: Data?,
         namespaceWarnings: [BYOMDiscoveryWarning] = [],
         catalogMatcher: BYOMCatalogMatcher,
         fileManager: FileManager = .default
     ) {
         self.cacheRoot = cacheRoot
+        self.durableRoot = durableRoot
         self.namespace = namespace
         self.namespaceWarnings = namespaceWarnings
         self.catalogMatcher = catalogMatcher
@@ -3854,7 +3997,9 @@ struct BYOMMLXCacheDiscovery {
     }
 
     func discover() -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
-        guard let entries = boundedDirectoryEntries(at: cacheRoot, cap: 4096) else {
+        let cacheEntries = boundedDirectoryEntries(at: cacheRoot, cap: 4096)
+        let durableEntries = durableRoot.flatMap { boundedDirectoryEntries(at: $0, cap: 4096) }
+        guard cacheEntries != nil || durableEntries != nil else {
             return (
                 BYOMDiscoveryWire.Adapter(
                     runtimeSource: "mlx_cache",
@@ -3868,7 +4013,7 @@ struct BYOMMLXCacheDiscovery {
 
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set<String>()
-        for entry in entries.prefix(200) {
+        for entry in (cacheEntries ?? []).prefix(200) {
             guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                   let modelID = modelID(fromHFCacheDirectoryName: entry.lastPathComponent) else {
                 continue
@@ -3887,6 +4032,46 @@ struct BYOMMLXCacheDiscovery {
                 warningCodes: snapshotSummary.ready ? [] : [.requiresPreparation]
             )
             candidates.append(candidate)
+        }
+
+        // Native models `serve` already holds in its durable store. A model in
+        // both (same candidate id) is reported once: the HF cache row when it
+        // is ready, else the durable row when that one is ready, so an
+        // incomplete HF copy never hides a complete durable one.
+        if let durableRoot, let durableEntries {
+            var hfIndex: [String: Int] = [:]
+            for (index, candidate) in candidates.enumerated() {
+                hfIndex[BYOMCandidateIdentity.normalizedServedModelRef(candidate.servedModelRef)] = index
+            }
+            var seen = Set<String>()
+            for entry in durableEntries.prefix(200) {
+                guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                      let modelID = Self.modelID(fromDurableDirectoryName: entry.lastPathComponent) else {
+                    continue
+                }
+                guard BYOMDiscoveryPrivacy.isSafeModelReference(modelID) else {
+                    warnings.insert(BYOMDiscoveryWarning.modelReferenceRedacted.rawValue)
+                    continue
+                }
+                let key = BYOMCandidateIdentity.normalizedServedModelRef(modelID)
+                guard seen.insert(key).inserted else { continue }
+                let hfDuplicate = hfIndex[key]
+                if let hfDuplicate, candidates[hfDuplicate].readinessState == "ready" { continue }
+                let summary = summarizeDurable(modelDirectory: entry, root: durableRoot)
+                let durableCandidate = buildCandidate(
+                    servedModelRef: modelID,
+                    revisions: summary.revisions,
+                    readinessState: summary.ready ? "ready" : "needs_weights",
+                    estimatedGB: estimatedGB(modelID: modelID, snapshotBytes: summary.weightBytes),
+                    contextWindowTokens: summary.contextWindowTokens,
+                    warningCodes: summary.ready ? [] : [.requiresPreparation]
+                )
+                if let hfDuplicate {
+                    if summary.ready { candidates[hfDuplicate] = durableCandidate }
+                } else {
+                    candidates.append(durableCandidate)
+                }
+            }
         }
 
         return (
@@ -3910,26 +4095,54 @@ struct BYOMMLXCacheDiscovery {
         return modelID
     }
 
+    /// `<org--repo>` in the durable store; the store escapes `/` as `--`.
+    static func modelID(fromDurableDirectoryName name: String) -> String? {
+        let modelID = name.replacingOccurrences(of: "--", with: "/")
+        guard modelID.contains("/"), !modelID.hasPrefix("/"), !modelID.hasSuffix("/") else { return nil }
+        return modelID
+    }
+
+    /// `<model>/<revision>/<sha256>/` leaves of the durable store, summarized
+    /// like HF snapshots; revision directory names are the HF commit revisions.
+    private func summarizeDurable(modelDirectory: URL, root: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?, revisions: Set<String>) {
+        guard let revisionDirs = boundedDirectoryEntries(at: modelDirectory, cap: 256) else {
+            return (false, 0, nil, [])
+        }
+        var leaves: [URL] = []
+        for revision in revisionDirs.prefix(20) {
+            guard let artifacts = boundedDirectoryEntries(at: revision, cap: 64) else { continue }
+            leaves.append(contentsOf: artifacts.prefix(20 - min(20, leaves.count)))
+            if leaves.count >= 20 { break }
+        }
+        let summary = summarizeSnapshotContents(leaves, root: root)
+        return (summary.ready, summary.weightBytes, summary.contextWindowTokens, snapshotRevisionNames(at: modelDirectory))
+    }
+
     private func summarizeSnapshots(repoDirectory: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?, revisions: Set<String>) {
         let snapshots = repoDirectory.appendingPathComponent("snapshots", isDirectory: true)
         guard let snapshotDirs = boundedDirectoryEntries(at: snapshots, cap: 256) else {
             return (false, 0, nil, [])
         }
-        var sawConfig = false
-        var weightBytes: UInt64 = 0
-        var context: Int?
-        var inspected = 0
         // HF cache snapshot directories are named by the commit revision: the
         // immutable half of a SPEC-023 `huggingface_revision` source reference.
         // Identity-load-bearing, so collected over EVERY entry name with no cap
         // (a string test per entry, no per-entry I/O); only the content
         // inspection below goes through the bounded, sorted list.
         let revisions = snapshotRevisionNames(at: snapshots)
-        for snapshot in snapshotDirs.prefix(20) {
+        let summary = summarizeSnapshotContents(Array(snapshotDirs.prefix(20)), root: cacheRoot)
+        return (summary.ready, summary.weightBytes, summary.contextWindowTokens, revisions)
+    }
+
+    private func summarizeSnapshotContents(_ snapshotDirs: [URL], root: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?) {
+        var sawConfig = false
+        var weightBytes: UInt64 = 0
+        var context: Int?
+        var inspected = 0
+        for snapshot in snapshotDirs {
             guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             if let config = boundedFileContents(
                 at: snapshot.appendingPathComponent("config.json"),
-                within: cacheRoot,
+                within: root,
                 maxBytes: 128 * 1024
             ) {
                 sawConfig = true
@@ -3953,7 +4166,7 @@ struct BYOMMLXCacheDiscovery {
                 // not `isRegularFile` and would be miscounted as missing) and
                 // require it to stay under the cache root to block symlink escape.
                 let resolved = fileURL.resolvingSymlinksInPath()
-                guard pathIsContained(resolved, in: cacheRoot),
+                guard pathIsContained(resolved, in: root),
                       let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                       values.isRegularFile == true else {
                     continue
@@ -3961,7 +4174,7 @@ struct BYOMMLXCacheDiscovery {
                 weightBytes += UInt64(values.fileSize ?? 0)
             }
         }
-        return (sawConfig && weightBytes > 0, weightBytes, context, revisions)
+        return (sawConfig && weightBytes > 0, weightBytes, context)
     }
 
     /// Every entry name under `snapshots/` that has the shape of a HuggingFace

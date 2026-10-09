@@ -75,6 +75,10 @@ type Store struct {
 	outputBytesPerTokenCeiling atomic.Int64
 	wholesaleMu                sync.RWMutex
 	usdPerMillionCredits       float64
+	// providerSessionAuthorizer lets the provider portal's GitHub (MP
+	// session cookie) mode read provider earnings (#1880); nil keeps the
+	// bearer-only behavior.
+	providerSessionAuthorizer atomic.Pointer[ProviderSessionAuthorizer]
 }
 
 type SQLiteMetrics interface {
