@@ -380,6 +380,7 @@ PROTECTED_OPENSSL_OUTPUT_ENV = (
 )
 SEALED_OPENSSL_RUNNER = "    runs-on: macos-15-intel"
 PROTECTED_OPENSSL_CONSUMERS = (
+    ("Reverify catalog signatures with sealed verifiers", 0, 0),
     ("Sign + notarize binary", 1, 0),
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
@@ -1062,6 +1063,72 @@ validate_candidate_openssl(openssl_preflight, build)
 validate_malibu_candidate_preflight(build)
 pearl_build = validate_pearl_toolchain(build)
 validate_protected_openssl(publish)
+
+
+def validate_sealed_catalog_reverify(job):
+    # The build image checks the catalog with Homebrew OpenSSL only as an early
+    # signal; the protected signer must re-run package.sh's catalog
+    # verification on the root-sealed OpenSSL and Go verifiers, bind the
+    # restored payload catalog to those bytes, and do it before any signing.
+    step = unique_step(job, "Reverify catalog signatures with sealed verifiers")
+    for requirement in (
+        PROTECTED_OPENSSL_OUTPUT_ENV,
+        "          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n"
+        "            python3 scripts/catalog-release.py verify\n",
+        'cmp "$verified" "$restored"',
+        'cmp "phase3-binary/dist/static/$feed" "$restored"',
+        "restored payload catalog has $actual_count entries",
+    ):
+        if requirement not in step:
+            raise SystemExit(f"protected signer catalog reverify is incomplete: {requirement!r}")
+    if "|| true" in step or "continue-on-error" in step or "\n        if:" in step:
+        raise SystemExit("protected signer catalog reverify must fail closed and always run")
+    go_seal = unique_step(job, "Seal the protected Tier-2 verifier toolchain")
+    if "sudo test -x /private/var/macprovider-go-verifier/bin/go" not in go_seal:
+        raise SystemExit("protected signer must seal the Tier-2 Go verifier")
+    positions = [
+        job.find("- name: Restore captured unsigned inputs"),
+        job.find("- name: Seal the protected Tier-2 verifier toolchain"),
+        job.find("- name: Seal OpenSSL 3 for protected release verification"),
+        job.find("- name: Reverify catalog signatures with sealed verifiers"),
+        job.find("- name: Sign + notarize binary"),
+        job.find("- name: Create verified draft GitHub release"),
+    ]
+    if min(positions) < 0 or positions != sorted(positions):
+        raise SystemExit(
+            "sealed catalog reverify must run on restored inputs after both seals "
+            "and before any signing or publication"
+        )
+
+
+validate_sealed_catalog_reverify(publish)
+for description, mutation in (
+    (
+        "sealed catalog reverify removal",
+        publish.replace("- name: Reverify catalog signatures with sealed verifiers", "- name: Skip catalog", 1),
+    ),
+    (
+        "sealed Go verifier drop",
+        publish.replace("CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n", "", 1),
+    ),
+    (
+        "catalog reverify after signing",
+        publish.replace(
+            "- name: Sign + notarize binary", "- name: Sign early", 1
+        ).replace(
+            "- name: Reverify catalog signatures with sealed verifiers",
+            "- name: Sign + notarize binary\n      - name: Reverify catalog signatures with sealed verifiers",
+            1,
+        ),
+    ),
+):
+    try:
+        validate_sealed_catalog_reverify(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+if "./package.sh" not in build:
+    raise SystemExit("release build must keep package.sh's early catalog verification")
 for requirement in (
     "GOTOOLCHAIN=local",
     "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",

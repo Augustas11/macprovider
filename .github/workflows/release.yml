@@ -72,8 +72,9 @@ jobs:
     # at /Applications/Xcode_26.6.app with Swift 6.3.3 and macOS SDK 26.5:
     # https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md
     # Swift 6.3 is required by mlx-swift 0.32.3 (swift-tools-version 6.3).
-    # Package catalog verification uses the image's Homebrew OpenSSL 3, as the
-    # acceptance-candidate build does; the sealed bottle stays on the signer.
+    # package.sh's catalog verification here uses the image's Homebrew OpenSSL
+    # 3 as an early signal only; sign_publish re-runs it on the root-sealed
+    # OpenSSL and Go verifiers before anything is signed.
     runs-on: macos-26-intel
     permissions:
       contents: read
@@ -648,6 +649,26 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           bash scripts/verify-release-toolchain.sh --signer "$RUNNER_TEMP/signing-release-toolchain.json"
 
+      - name: Setup Go for the protected Tier-2 catalog verifier
+        # Pinned to actions/setup-go v7.0.0. catalog-release.py authenticates
+        # the signed Tier-2 catalog with the root-sealed copy of this GOROOT.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Seal the protected Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:wheel /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
+
       # SPEC-003 v0.8.2 follow-up: macOS 26.3.1+ tightened launchd's AMFI policy
       # to reject adhoc-signed binaries under `launchctl bootstrap`. Earlier
       # adhoc-signed releases (v1.2.x through v1.3.1) worked because they were
@@ -679,6 +700,59 @@ jobs:
           )"
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
           printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Reverify catalog signatures with sealed verifiers
+        # The build image verifies the catalog with its Homebrew OpenSSL 3 as
+        # an early signal only. This is the authoritative check: the same
+        # `catalog-release.py verify` package.sh ran, on the root-sealed
+        # OpenSSL and Go verifiers, before anything is signed or published.
+        # The restored payload catalog and artifact feed must then be the
+        # exact bytes it verified.
+        shell: bash
+        env:
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+            python3 scripts/catalog-release.py verify
+          catalog_extract="$(mktemp -d "$RUNNER_TEMP/catalog-reverify.XXXXXX")"
+          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" -C "$catalog_extract"
+          [ -d "$catalog_extract/catalog-release" ] && [ ! -L "$catalog_extract/catalog-release" ] || {
+            echo "::error::restored provider payload lacks catalog-release" >&2
+            exit 1
+          }
+          expected_catalog=(
+            phase3-binary/catalog/autotune/release.json
+            phase3-binary/catalog/autotune/trusted-keys.json
+            phase3-binary/catalog/autotune/tier2-catalog.json
+            phase3-binary/dist/static/autotune-candidates.json
+            phase3-binary/dist/static/autotune-candidates.json.sig
+            phase3-binary/dist/static/demand-rank.json
+            phase3-binary/dist/static/demand-rank.json.sig
+            phase3-binary/dist/static/rate-card.json
+            phase3-binary/dist/static/rate-card.json.sig
+          )
+          actual_count="$(find "$catalog_extract/catalog-release" -mindepth 1 -print | wc -l | tr -d ' ')"
+          [ "$actual_count" = "${#expected_catalog[@]}" ] || {
+            echo "::error::restored payload catalog has $actual_count entries, expected ${#expected_catalog[@]}" >&2
+            exit 1
+          }
+          for verified in "${expected_catalog[@]}"; do
+            restored="$catalog_extract/catalog-release/${verified##*/}"
+            [ -f "$restored" ] && [ ! -L "$restored" ] || {
+              echo "::error::restored payload catalog lacks ${verified##*/}" >&2
+              exit 1
+            }
+            cmp "$verified" "$restored"
+          done
+          for feed in autotune-artifacts.json autotune-artifacts.json.sig; do
+            restored="$RUNNER_TEMP/unsigned-release-inputs/$feed"
+            if [ -e "$restored" ]; then
+              cmp "phase3-binary/dist/static/$feed" "$restored"
+            fi
+          done
+          rm -rf "$catalog_extract"
 
       - name: Sign + notarize binary
         shell: bash
