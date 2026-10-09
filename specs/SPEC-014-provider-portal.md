@@ -206,13 +206,11 @@ The portal is **available ONLY when the coordinator runs with
 `auth.require_provider_tokens = true`**. In any other deployment
 mode the portal renders a single-page unavailable notice (§2,
 AUTH-3). This all-on / all-off gating is about the *deployment mode*,
-not the sign-in mode. **Reconciled v0.9:** it does **not** mean every
-data surface renders in every sign-in mode — the shipped GitHub-OAuth
-cookie mode is a real per-mode data-surface limitation (earnings
-A.2/C.1/A.5 do not load, §2.5.0). The "no per-surface conditional
-degradation" property holds for **paste-bearer mode**, where all data
-surfaces share the one FR-P12 bearer; OAuth mode's earnings gap is the
-documented exception.
+not the sign-in mode. **v0.11:** earnings A.2/C.1/A.5 render in both
+sign-in modes (§2.5.0). The one per-mode difference is that the MALIBU
+accrual, wallet, and reward-audit surfaces are paste-bearer-only and are
+not shown in GitHub-OAuth cookie mode. *[Superseded v0.11 — history,
+non-normative: v0.9 recorded that cookie mode could not load earnings.]*
 
 ### 1.2 Non-goals (v0.1) and scope cuts from the originating prompt
 
@@ -566,51 +564,79 @@ frames `ownership_event` / `needs_claim` (§6.12 / §6.5.2) are owned by **SPEC-
 v1.5** — this section cross-references those and does not re-specify them. On any
 conflict, the owner spec governs.
 
-#### 2.5.0 Shipped scope — incompletely wired (honest disclosure)
+#### 2.5.0 Shipped scope (normative, v0.11)
 
-**[Superseded v0.11, #1880]** GitHub-OAuth mode is wired end-to-end for
-earnings: see the v0.11 change log and the bullets below. The v0.9 disclosure
-follows for history.
+GitHub-OAuth mode is wired end-to-end. Its functional scope: **(1)** authenticate
+a GitHub identity and set the `__Host-mp_session` cookie (§2.5.3); **(2)** list the
+`provider_id`s owned by that identity (`GET /v1/auth/me/providers`); **(3)** bind a
+new Mac to that identity by claiming a `pair_ot` (`POST /v1/auth/me/providers/bind`);
+**(4)** show the **A.1 pool-status** header from the public `/v1/pool/check`;
+**(5)** show the **earnings** surfaces (A.2, C.1, A.5) from
+`GET /providers/{id}/earnings`.
 
-GitHub-OAuth mode is **shipped but not wired end-to-end**. Its working functional
-scope today: **(1)** authenticate a GitHub identity and set the session
-cookie (`__Host-mp_session` since v0.11); **(2)** list the `provider_id`s owned by that identity
-(`GET /v1/auth/me/providers`); **(3)** bind a new Mac to that identity by claiming a
-`pair_ot` (`POST /v1/auth/me/providers/bind`); **(4)** show the **A.1 pool-status**
-header — `/v1/pool/check` is a **public** route (`buyer/server.go` registers it
-outside the gateway-context middleware; the reference nginx already proxies it), so
-cookie mode reads it fine without a bearer. The gap is narrower than "no data
-surface works": it is the **earnings** surfaces only, documented as a carried gap,
-not fixed here (this is a spec-only change):
+- **Earnings authorization (MUST).** A `GET /providers/{id}/earnings` with **no**
+  `Authorization` header is authorized by the `__Host-mp_session` cookie only when
+  the coordinator runs with GitHub OAuth enabled and the session's GitHub user owns
+  `{id}`: `session.github_user_id → provider_ownership(provider_id) == path
+  provider_id` (`ws.AuthorizeProviderSessionRead`). A missing or invalid session
+  answers `401 session_invalid`; a provider the session does not own answers
+  `403 forbidden`. Without that ownership check the route would be an IDOR, so it
+  is part of the contract, not an implementation detail. The bearer path (FR-P12
+  token or portal read session) is unchanged and never consults the cookie. Both
+  credentials share the per-provider earnings rate limit, and every response
+  carries `Cache-Control: private, no-store` and `Vary: Cookie, Authorization`.
+- **Portal behavior (MUST).** In cookie mode the portal sends no `Authorization`
+  header (`makeCookieFetch`). A `401`/`403`/`404` from earnings is an inline
+  dashboard error that clears any earnings already shown; it never restarts
+  sign-in. Only a `401` from `/v1/auth/me/providers` means the session is gone.
+- **Not in cookie mode.** The MALIBU accrual, wallet, and reward-audit reads stay
+  bearer-only and are not called in cookie mode.
+- **Proxy.** The reference nginx proxies `/v1/auth/*` and the earnings route on
+  the portal origin (§10.4), so the session cookie stays host-only.
 
-- **[Superseded v0.11, #1880]** The earnings read is now cookie-authorized with
-  the server-side ownership check below, and a data-endpoint refusal no longer
-  re-launches OAuth (see the v0.11 change log). The original v0.9 disclosure
-  follows for history.
-- **The aggregate-earnings surfaces (A.2, C.1, A.5) cannot load in cookie mode.**
-  The coordinator mounts `/providers/{id}/earnings` directly to the billing
-  handler, which accepts **only** an FR-P12 provider bearer and never consults
-  `mp_session` or `provider_ownership` (`endpoints.go`; `main.go` route mount). The
-  OAuth-mode portal deliberately strips `Authorization` and holds no provider token
-  (`makeCookieFetch`), so the earnings call returns **401**, which the portal
-  treats as a session failure and **re-launches OAuth** — an earnings→401→OAuth
-  loop that makes the whole dashboard unusable even though A.1 itself is
-  retrievable. Selecting a GitHub-bound Mac therefore cannot show earnings today.
-  (Current prod being flag-off means this has no live impact, but it is not
-  functional.)
-  Making it work needs a coordinator change: cookie-authorize the earnings read
-  **and** enforce a server-side ownership check
-  `mp_session.github_user_id → provider_ownership(provider_id) == path provider_id`
-  (without that check a spec-literal cookie-auth earnings route would be an IDOR —
-  any signed-in GitHub user reading any provider's earnings). That check does not
-  exist yet; the spec MUST NOT imply cookie mode grants earnings access.
-- **The reference nginx does not proxy `/v1/auth/*`** (§2.3 wiring caveat, §10.4).
-  Without the proxy routes the OAuth calls hit the SPA fallback (200 HTML) and
-  parse as an empty provider list.
+**[Superseded v0.11 — history, non-normative.]** The v0.9 disclosure below
+described the pre-#1880 build. It is kept only as history; nothing in it is a
+requirement, and where it conflicts with the text above, the text above governs.
 
-Everything below documents the OAuth **transport** as it is actually built; where
-a claim describes the binding/listing path it is functional, and where it touches
-earnings/status data it is subject to the gaps above.
+> GitHub-OAuth mode is **shipped but not wired end-to-end**. Its working functional
+> scope today: **(1)** authenticate a GitHub identity and set the session
+> cookie (`__Host-mp_session` since v0.11); **(2)** list the `provider_id`s owned by that identity
+> (`GET /v1/auth/me/providers`); **(3)** bind a new Mac to that identity by claiming a
+> `pair_ot` (`POST /v1/auth/me/providers/bind`); **(4)** show the **A.1 pool-status**
+> header — `/v1/pool/check` is a **public** route (`buyer/server.go` registers it
+> outside the gateway-context middleware; the reference nginx already proxies it), so
+> cookie mode reads it fine without a bearer. The gap is narrower than "no data
+> surface works": it is the **earnings** surfaces only, documented as a carried gap,
+> not fixed here (this is a spec-only change):
+>
+> - **[Superseded v0.11, #1880]** The earnings read is now cookie-authorized with
+>   the server-side ownership check below, and a data-endpoint refusal no longer
+>   re-launches OAuth (see the v0.11 change log). The original v0.9 disclosure
+>   follows for history.
+> - **The aggregate-earnings surfaces (A.2, C.1, A.5) cannot load in cookie mode.**
+>   The coordinator mounts `/providers/{id}/earnings` directly to the billing
+>   handler, which accepts **only** an FR-P12 provider bearer and never consults
+>   `mp_session` or `provider_ownership` (`endpoints.go`; `main.go` route mount). The
+>   OAuth-mode portal deliberately strips `Authorization` and holds no provider token
+>   (`makeCookieFetch`), so the earnings call returns **401**, which the portal
+>   treats as a session failure and **re-launches OAuth** — an earnings→401→OAuth
+>   loop that makes the whole dashboard unusable even though A.1 itself is
+>   retrievable. Selecting a GitHub-bound Mac therefore cannot show earnings today.
+>   (Current prod being flag-off means this has no live impact, but it is not
+>   functional.)
+>   Making it work needs a coordinator change: cookie-authorize the earnings read
+>   **and** enforce a server-side ownership check
+>   `mp_session.github_user_id → provider_ownership(provider_id) == path provider_id`
+>   (without that check a spec-literal cookie-auth earnings route would be an IDOR —
+>   any signed-in GitHub user reading any provider's earnings). That check does not
+>   exist yet; the spec MUST NOT imply cookie mode grants earnings access.
+> - **The reference nginx does not proxy `/v1/auth/*`** (§2.3 wiring caveat, §10.4).
+>   Without the proxy routes the OAuth calls hit the SPA fallback (200 HTML) and
+>   parse as an empty provider list.
+>
+> Everything below documents the OAuth **transport** as it is actually built; where
+> a claim describes the binding/listing path it is functional, and where it touches
+> earnings/status data it is subject to the gaps above.
 
 #### 2.5.1 Purpose and identity model
 
@@ -837,14 +863,14 @@ SPEC-003 FR-C10's.
 
   Success redirects to `/`; error codes `pair_ot_invalid` (410),
   `already_owned` (409), `session_invalid` (401).
-- **Which 401s auto-relaunch OAuth (reconciled v0.9 — narrower than "any 401").**
+- **Which 401s auto-relaunch OAuth (normative, v0.11).**
   A `401` on the **home / `popstate` `GET /v1/auth/me/providers`** call routes to
   the `signin` state and **waits for a user click** — it does not auto-redirect
   (`index.html`). Automatic OAuth relaunch (clear session, `GET /github/start` with
-  `return_to` preserved, no paste form) is specific to the **earnings data call**
-  and the **`/claim` bind flow**. So the earnings-401 loop of §2.5.0 auto-relaunches
-  (an earnings 401 is indistinguishable to the portal from a session 401), whereas a
-  bare home 401 just shows the sign-in button.
+  `return_to` preserved, no paste form) is specific to the **`/claim` bind flow**.
+  A `401`/`403`/`404` from the **earnings data call** is an inline dashboard error
+  that never relaunches OAuth (§2.5.0). *[Superseded v0.11 — history,
+  non-normative: v0.9 also auto-relaunched OAuth on an earnings 401, which looped.]*
 
 #### 2.5.6 Bind semantics (cross-ref SPEC-003 FR-C10)
 
@@ -915,20 +941,17 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   `POST /v1/auth/logout` **attempts to delete only the current cookie's** session id
   (best-effort — it ignores a delete error and always 204s, §2.5.2). But an
   OAuth callback always **creates a new session without deleting any prior one**
-  (`auth_github.go`), and the earnings-401 relaunch (§2.5.0) drives repeated
+  (`auth_github.go`), and the earnings-401 relaunch (§2.5.0, removed v0.11) drives repeated
   re-auth — so a single browser can accumulate **orphaned** session rows that no
   logout ever touches. A stolen or orphaned session therefore survives the user's
   logout and lives until its own 30-day sliding-idle expiry; "theft ends at logout"
   is **not** guaranteed. There is no "log out all sessions" control.
-- **[Closed v0.11, #1880]** The cookie-authorized earnings read enforces
-  `mp_session.github_user_id → provider_ownership(provider_id) == path
-  provider_id` (`ws.AuthorizeProviderSessionRead`). The v0.9 text follows for
-  history.
-- **Missing ownership authorization on data reads (IDOR — carried gap).** The
-  earnings read is not cookie-authorized today (§2.5.0); when it is wired, it MUST
-  enforce `mp_session.github_user_id → provider_ownership(provider_id) == path
-  provider_id`. No such check exists in the shipped earnings handler, so the spec
-  MUST NOT describe cookie mode as granting earnings access.
+- **Ownership authorization on data reads (normative, closed v0.11, #1880).**
+  The cookie-authorized earnings read MUST enforce
+  `session.github_user_id → provider_ownership(provider_id) == path provider_id`
+  (`ws.AuthorizeProviderSessionRead`), answering `403 forbidden` otherwise (§2.5.0).
+  *[Superseded v0.11 — history, non-normative: v0.9 recorded this as a carried
+  IDOR gap because the earnings read was not yet cookie-authorized.]*
 - **`pair_ot` can reach ingress logs (carried gap).** Coordinator app-log
   redaction does not cover the reverse-proxy / CDN access logs that see
   `/claim?ot=…` before the JS strips it (§2.5.4).
@@ -1166,9 +1189,9 @@ reason and with no temporal ordering (reconciled v0.9). Source: the shipped
 **implementation-owned** field of the earnings response, **not** part of the
 SPEC-005 §11.4 normative contract (SPEC-005 defines no `idle_prewarm`); SPEC-014
 records it here as observed shipped behavior. It is
-provider-only telemetry (no buyer data; see §8(d)). Same mode caveat as A.2:
-earnings-sourced, so functional in paste-bearer mode only until cookie mode is
-wired (§2.5.0). Enumerated in §5 table (a).
+provider-only telemetry (no buyer data; see §8(d)). Earnings-sourced like A.2,
+so it loads in both paste-bearer and GitHub-OAuth cookie mode (§2.5.0).
+Enumerated in §5 table (a).
 
 ### 4.2 Surface B — Setup & updates
 
@@ -1425,7 +1448,7 @@ exactly one of them.
 | A.2 | total credits | `GET /providers/{id}/earnings` | `total_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | current window credits | `GET /providers/{id}/earnings` | `current_window_credits` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
 | A.2 | last payout-ready window | `GET /providers/{id}/earnings` | `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
-| A.5 | idle-prewarm five counters + skips-by-reason map | `GET /providers/{id}/earnings` | `idle_prewarm.events_last_1h.{idle_prewarm_fired,_completed,_skipped,_cancelled_by_real_request,_failed}` + `idle_prewarm.skips_by_reason_last_1h` (reason→count) | 60 s | in-memory; 60 s TTL | shipped earnings-handler `idle_prewarm` object — implementation-owned, NOT SPEC-005 §11.4 (reconciled v0.9); paste-bearer mode only per §2.5.0 |
+| A.5 | idle-prewarm five counters + skips-by-reason map | `GET /providers/{id}/earnings` | `idle_prewarm.events_last_1h.{idle_prewarm_fired,_completed,_skipped,_cancelled_by_real_request,_failed}` + `idle_prewarm.skips_by_reason_last_1h` (reason→count) | 60 s | in-memory; 60 s TTL | shipped earnings-handler `idle_prewarm` object — implementation-owned, NOT SPEC-005 §11.4 (reconciled v0.9); paste-bearer and cookie mode per §2.5.0 (v0.11) |
 | A.3 | "Unavailable" row | `GET /v1/pool/check?provider_id=<id>` | `state` (when `"unavailable"`; reconciled v0.9 — `"unknown"` retired, missing provider = 404) | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | B.3 | release list | `GET https://api.github.com/repos/{owner}/{name}/releases` | array root (`tag_name`, `published_at`, `body`); also reads response header `X-RateLimit-Remaining` (which GitHub does expose to browser code) | on demand + 5 min TTL | in-memory; rate-limit aware | Open Q2 (host) + GitHub Releases API |
 | B.3 | rate-limit fallback notice | derived from the B.3 release-list response header `X-RateLimit-Remaining: 0` | n/a (header-derived); rendered as static notice text "GitHub API rate limit reached — release feed paused; refresh later." | re-evaluated on each B.3 fetch | in-memory; cleared on next non-zero remaining | GitHub Releases API rate-limit posture (Open Q2 records the 60 req/IP/hr cap) |
@@ -1615,10 +1638,14 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] A.1 shows no hostname / model / RAM / binary_version fields
       (all deferred per §5 table (c)).
 - [ ] A.2 renders three credit cards from `/providers/{id}/
-      earnings` JSON paths verbatim; no fiat conversion.
-      **(Paste-bearer mode.** In OAuth cookie mode the earnings
-      route 401-loops, §2.5.0, so A.2 is not expected to load —
-      the AC is asserted in paste-bearer mode.)
+      earnings` JSON paths verbatim; no fiat conversion, in
+      **both** paste-bearer mode and OAuth cookie mode (§2.5.0).
+- [ ] Cookie-mode earnings: with a valid `__Host-mp_session` whose
+      GitHub user owns `{id}` and no `Authorization` header, the
+      earnings read answers 200; a session that does not own `{id}`
+      answers `403 forbidden`; no or an invalid session answers
+      `401 session_invalid`. The portal shows a 401/403/404 inline,
+      clears earnings already shown, and does not restart sign-in.
 - [ ] A.3 renders one row when `/v1/pool/check.state ==
       "unavailable"`, with the literal text "This machine is
       currently `<state>`." and a copy-to-clipboard
@@ -1632,8 +1659,8 @@ Layered, NOT a flat checklist. Six required groups.
       completed / failed / cancelled-by-real-request / skipped) +
       the `skips_by_reason_last_1h` reason→count map (as sorted
       `reason=count` entries, not a single "most recent" reason) from
-      the `/providers/{id}/earnings` response (paste-bearer mode); no
-      buyer-attributed data appears.
+      the `/providers/{id}/earnings` response, in paste-bearer and
+      cookie mode; no buyer-attributed data appears.
 
 **Surface B (Setup & Updates).**
 
@@ -1660,8 +1687,7 @@ Layered, NOT a flat checklist. Six required groups.
 **Surface C (Earn).**
 
 - [ ] C.1 renders three credit cards from SPEC-005 §11.4 JSON
-      paths verbatim. **(Paste-bearer mode; same OAuth earnings-gap
-      caveat as A.2, §2.5.0.)**
+      paths verbatim, in paste-bearer and cookie mode (§2.5.0).
 - [ ] C.2 renders the "Fiat payout rail not yet specified — future
       spec." badge and NOTHING ELSE.
 - [ ] C.2 contains no country selector, no "Link bank", no
@@ -2236,12 +2262,11 @@ the project's audit-loop rule (memory:
 step below is the **paste-bearer** v0.1 build. The GitHub-OAuth
 cookie-session mode (§2.5) was built and shipped **after** v0.1
 (commit `0935d1e`), not through these phases; v0.9 reconciles it
-retroactively as documentation of shipped code. A future phase — call
-it Phase 2A (OAuth completion) — would wire the earnings gap (§2.5.0:
-cookie-authorize the earnings read + add the ownership/IDOR check),
-add the `/v1/auth/*` reverse-proxy routes (§10.4), and address the
-carried security residuals (§2.5.7). That phase is out of scope for
-this spec-only reconciliation.
+retroactively as documentation of shipped code. Phase 2A (OAuth
+completion) landed in v0.11 (#1880): the earnings read is
+cookie-authorized with the ownership check (§2.5.0), the reference nginx
+proxies `/v1/auth/*` (§10.4), and the session cookie is `__Host-` scoped
+and rotated (§2.5.3). Remaining carried residuals are listed in §2.5.7.
 
 ### Phase 1A — Scaffolding + auth + deployment-mode + Machine A.1/A.2/A.3
 

@@ -209,6 +209,16 @@ Redeploy the portal config. Expected result:
 - A cold portal load makes zero `/v1/auth/*` calls.
 - The legacy v0.1 portal experience is restored.
 
+Binary rollback across SPEC-014 v0.11:
+
+- A v0.11 coordinator issues the session cookie as `__Host-mp_session`; a
+  pre-v0.11 coordinator reads only `mp_session`. Rolling the coordinator binary
+  back across v0.11 with GitHub OAuth enabled therefore signs every portal user
+  out: each must sign in with GitHub again. Rolling forward again does the same,
+  because v0.11 never accepts the legacy `mp_session` cookie. Ownership rows and
+  provider traffic are unaffected. The flag-first rollback above avoids this
+  entirely.
+
 Data rollback:
 
 - Do not drop the SPEC-014 tables.
