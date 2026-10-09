@@ -148,6 +148,24 @@ struct AutotuneConcurrencyCalibrator {
     /// SPEC-029 FR-5).
     var minAggregateGainFraction = 0.15
 
+    /// Depths above this are swept on a coarse ladder rather than one at a
+    /// time: each depth is a full serve restart, and on the 256 GB Ultra the
+    /// aggregate gain per added row past 8 is a few percent (#1906).
+    static let contiguousSweepLimit = 8
+    static let coarseSweepDepths = [12, 16, 24, 32]
+
+    /// Ascending depths to measure: 1...min(upperBound, 8) one at a time, then
+    /// the coarse ladder, then `upperBound` itself when it falls between rungs.
+    static func sweepDepths(upperBound: Int) -> [Int] {
+        let bound = max(1, upperBound)
+        var depths = Array(1...min(bound, contiguousSweepLimit))
+        depths += coarseSweepDepths.filter { $0 <= bound }
+        if bound > contiguousSweepLimit, depths.last != bound {
+            depths.append(bound)
+        }
+        return depths
+    }
+
     /// SPEC-023-R009. `memoryFitCap` is the largest depth whose weights + KV at
     /// the production context/kv_bits fit the §5/§9 memory-safety envelope.
     /// `tierConstant` is the blind `recommendedMaxBatch` value this measurement
@@ -257,8 +275,7 @@ struct AutotuneConcurrencyCalibrator {
         var bestDepth = 1
         var bestAggregate = baseline.aggregateTPS
 
-        var depth = 2
-        while depth <= upperBound {
+        for depth in Self.sweepDepths(upperBound: upperBound).dropFirst() {
             // A probe ERROR — serve/process failure, swap/thermal safety veto,
             // timeout, interruption, or malformed/non-finite metrics — throws
             // out of `run(...)` and fails the WHOLE calibration closed
@@ -272,7 +289,7 @@ struct AutotuneConcurrencyCalibrator {
             // Latency gates are normal SEARCH signals, not errors. A depth whose
             // per-stream p95 exceeds the ceiling (`sample.passed == false`) or
             // regresses past the bounded factor over the batch=1 baseline stops
-            // the contiguous sweep and keeps the best lower FEASIBLE depth —
+            // the sweep and keeps the best lower FEASIBLE depth —
             // contention degrades latency monotonically, so deeper depths will
             // not recover.
             let regressed: Bool
@@ -299,7 +316,6 @@ struct AutotuneConcurrencyCalibrator {
             } else {
                 break
             }
-            depth += 1
         }
 
         return makeResult(recommended: bestDepth, draftPinned: false, measurements: measurements)

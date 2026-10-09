@@ -73,6 +73,70 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         XCTAssertEqual(hardCalls.map(\.batchDepth), [1, 2, 3, 4])
     }
 
+    func testSweepsCoarseLadderAboveEightUpToTheBound() async throws {
+        XCTAssertEqual(AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 1), [1])
+        XCTAssertEqual(AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 8), Array(1...8))
+        XCTAssertEqual(AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 12), Array(1...8) + [12])
+        XCTAssertEqual(AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 20), Array(1...8) + [12, 16, 20])
+        XCTAssertEqual(AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 32), Array(1...8) + [12, 16, 24, 32])
+        XCTAssertEqual(AutotuneConcurrencyCalibrator().hardCap, ProviderCapacity.maxConcurrencyOverrideLimit)
+        XCTAssertEqual(ProviderCapacity.maxConcurrencyOverrideLimit, 32)
+
+        // Aggregate doubles per measured depth, so only the memory-fit bound
+        // stops it; a bound between rungs is measured itself.
+        let climbing: [Int: ConcurrencyProbeOutcome] = Dictionary(
+            uniqueKeysWithValues: AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 32)
+                .enumerated().map { index, depth in
+                    (depth, ConcurrencyProbeOutcome.feasible(
+                        aggregateTPS: 100 * pow(2, Double(index)),
+                        perStreamP95TTFTMS: 1_000
+                    ))
+                }
+                + [(20, ConcurrencyProbeOutcome.feasible(aggregateTPS: 100 * pow(2, 11), perStreamP95TTFTMS: 1_000))]
+        )
+        let prober = ConcurrencyCalibrationFake(outcomesByDepth: climbing)
+        let result = try await AutotuneConcurrencyCalibrator().calibrate(
+            memoryFitCap: 20,
+            tierConstant: 8,
+            draftConfigured: false,
+            calibrationContext: 4_000,
+            promptReserveTokens: 256,
+            completionTokens: 64,
+            prober: prober
+        )
+        XCTAssertEqual(result.recommendedMaxBatch, 20)
+        XCTAssertEqual(result.hardCap, 32)
+        let calls = await prober.calls
+        XCTAssertEqual(calls.map(\.batchDepth), Array(1...8) + [12, 16, 20])
+    }
+
+    func testRungAboveEightMustMateriallyRaiseAggregate() async throws {
+        // The measured #1906 shape: 8 -> 12 rows adds about 3%, below the 15%
+        // gain fraction, so 8 is kept and 16+ is never probed.
+        var outcomes: [Int: ConcurrencyProbeOutcome] = Dictionary(
+            uniqueKeysWithValues: (1...8).map { depth in
+                (depth, ConcurrencyProbeOutcome.feasible(
+                    aggregateTPS: 40 * pow(1.2, Double(depth)),
+                    perStreamP95TTFTMS: 1_000
+                ))
+            }
+        )
+        outcomes[12] = .feasible(aggregateTPS: 40 * pow(1.2, 8) * 1.03, perStreamP95TTFTMS: 1_200)
+        let prober = ConcurrencyCalibrationFake(outcomesByDepth: outcomes)
+        let result = try await AutotuneConcurrencyCalibrator().calibrate(
+            memoryFitCap: 32,
+            tierConstant: 8,
+            draftConfigured: false,
+            calibrationContext: 4_000,
+            promptReserveTokens: 256,
+            completionTokens: 64,
+            prober: prober
+        )
+        XCTAssertEqual(result.recommendedMaxBatch, 8)
+        let calls = await prober.calls
+        XCTAssertEqual(calls.map(\.batchDepth), Array(1...8) + [12])
+    }
+
     func testTieBreaksTowardLowerDepthWithinGainFraction() async throws {
         // depth 2 improves by only 10% (< the 15% minimum aggregate-gain
         // fraction), so the lower depth wins and the sweep stops.
