@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.47 (2026-10-07, coordinator no-dispatch source exports)
+**Version:** 0.9.48 (2026-10-09, gateway refusal records and refusal-intent exports)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.48 (2026-10-09, issue #1880 — gateway refusal records and refusal-intent exports):**
+- §5.4.3.3 adds a default-disabled gateway refusal record for pool-relevant refusals: a private-keyed intent commitment over account, request ID, model and selectors, the terminal (pre-quota or post-reservation refund), and the gateway quota and debit facts. A gateway-signed export binds each record to a caller-held intent without emitting raw input. This closes the pool-model journey's early-refusal binding and pre-quota pause obligations at the source. SPEC-017 §5.2b.2 blank unserved models, SPEC-042-R010 non-disclosure and the SPEC-043-R007 timing floor are unchanged.
 
 **Change log v0.9.47 (2026-10-07, issue #1880 — coordinator no-dispatch source exports):**
 - §5.4.3.2 defines a private operator-authenticated coordinator export for strictly bounded no-dispatch terminals, with immutable source provenance, atomic terminal fencing and closed fact projections. This does not promote acceptance or permit raw rejected-input disclosure.
@@ -2098,6 +2101,128 @@ retry/failover, `/v1/models`, pool approval and acceptance finality remain
 separate source obligations. No protected acceptance integration or conformance
 promotion follows from a producer signature alone; SPEC-006-R018 stays pending
 until the complete joined, released and signed journey passes.
+
+#### 5.4.3.3 Gateway refusal records and refusal-intent exports (v0.9.48, #1880)
+
+The coordinator export of §5.4.3.2 cannot bind a refusal to the model and pool
+the buyer asked for, because SPEC-017 §5.2b.2 keeps an unserved request-log
+model blank, and it cannot see a refusal the gateway answers before quota
+reservation. This section gives the gateway that obligation. It changes no
+buyer response, status, code, header, quota decision or timing, and it does
+not relax SPEC-017 §5.2b.2, SPEC-042-R010 or SPEC-043-R007.
+
+**Recorded refusals.** When enabled, the gateway records exactly one refusal
+record for a chat-completions refusal when all of these hold: the credential
+is a plain API key (never demo or wallet-session traffic); the request is
+pool-relevant (a non-empty `X-MacProvider-Pool-Select` value, or a requested
+model id beginning with `pool/`); and the refusal is one of two terminals:
+
+- `pre_quota_refusal`: a pool or engine selection refusal answered before any
+  quota reservation or coordinator dispatch (SPEC-042-R010 `pool_unavailable`
+  and `pool_selection_invalid`; SPEC-006-R016 `invalid_engine_selection` and
+  `engine_unavailable`). This includes a paused, draining, retired or unknown
+  pool. The record is written on every such cause identically, before the
+  SPEC-043-R007 timing floor, so neither its presence nor its write time
+  distinguishes the cause.
+- `post_reservation_refusal`: a coordinator error passed through to the buyer
+  after the gateway refunded its reservation with no settlement (the
+  no-provider pass-through). A refusal the gateway settles, holds or
+  converts into a provider error is not recorded.
+
+**Stored record.** The table `gateway_refusal_records` holds, per record, the
+authenticated account ID, the response's `X-Request-ID`, the terminal kind,
+the final HTTP status and closed error code, whether the request was
+forwarded to the coordinator, the record time, and `intent_commitment`:
+
+```
+HMAC-SHA256(intent_key, "macprovider.gateway-refusal-intent.v1\n" ||
+            lp(account_id) || lp(external_request_id) || lp(model) ||
+            lp(pool_select) || lp(engine_select))
+```
+
+where `lp(x)` is a 4-byte big-endian byte length followed by `x`, `model` is
+the parsed request model, and `pool_select` / `engine_select` are the first
+non-empty trimmed selector header values or the empty string. The raw model,
+selectors, prompt and messages are never stored, logged or exported. The
+intent key is a private gateway secret distinct from every signing, receipt,
+payout and feed key and never appears in a capture. `(account_id,
+external_request_id)` is unique; a second refusal for the same pair keeps the
+first record. A pre-quota record is written only on a code path that has not
+reserved quota or contacted the coordinator, and states `forwarded=false`; a
+post-reservation record is written only after the refund committed and
+states `forwarded=true`. A record write failure is logged without request
+material and changes nothing the buyer sees; it yields no proof. Records older
+than the configured retention (default 168 hours, at most 720) are deleted.
+The feature is disabled by default; when disabled the gateway writes nothing.
+An older gateway neither reads nor writes the table, so the table needs no
+schema-version gate and does not block a gateway rollback.
+
+**Export.** The gateway MAY expose
+`POST /admin/evidence/source-exports/gateway-v1` on its administrative surface,
+authorized only by the gateway operator credential. It is disabled by
+default, bounded (the scope cap and body cap of §5.4.3.2), non-cacheable, and
+answers every invalid, unavailable or unprovable request with one constant
+error that reflects no input. The closed request is
+`schemas/gateway-source-export-request-v1.schema.json`: a run ID, a fresh
+32-byte challenge nonce, and scopes of exactly `account_id`,
+`external_request_id`, `model`, `pool_select` and `engine_select`. Scopes are
+the private intent the caller already holds; the gateway uses them only to
+recompute the commitment and binding below and never persists, logs or
+returns them.
+
+For each scope, in one read transaction, the gateway loads the record for
+`(account_id, external_request_id)`, recomputes `intent_commitment` and
+compares it in constant time, then reads that pair's `quota_reservations`
+row and `usage_events` rows. The scope is provable only when:
+
+- `pre_quota_refusal`: no reservation row exists and no usage row exists;
+- `post_reservation_refusal`: exactly one reservation exists, `refunded`,
+  `settled_tokens = 0`, `settlement_hold = 0`, and every usage row for it
+  carries zero prompt and completion tokens.
+
+Any missing record, commitment mismatch, duplicate scope or failed predicate
+fails the whole export; no partial or synthetic empty proof is signed.
+The signer uses §5.4.3.1 unchanged with producer `gateway` and role
+`refusal_intent`, and the producer-owned fixed provenance of §5.4.3.2 (reviewed
+source SHA, instance, key ID, registry and its digest); missing provenance or
+signing material fails closed. The snapshot is
+`schemas/gateway-source-snapshot-v1.schema.json` and each record
+`schemas/gateway-refusal-record-v1.schema.json`. A record carries the terminal
+kind, status, error code, `forwarded_to_coordinator`, the quota facts
+(`reservation` `none` or `refunded`, zero settled tokens, no hold), zero
+`usage_debit_tokens`, false raw-emission privacy flags, the record time, and
+`request_scope_commitment`:
+
+```
+SHA-256("macprovider.gateway-refusal-intent-binding.v1\n" || lp(run_id) ||
+        lp(challenge_nonce) || lp(account_id) || lp(external_request_id) ||
+        lp(model) || lp(pool_select) || lp(engine_select))
+```
+
+The binding lets a caller that holds the private intent confirm that a signed
+record is its request without the gateway emitting raw input. Because it is
+recomputable by anyone holding the nonce and a guess, the envelope stays in
+protected capture custody; published evidence keeps only its digest, key ID
+and the derived facts.
+
+**Consumer obligations.** A pool-model acceptance consumer binds every
+refusal's `(X-Request-ID, model, pool)` through one authenticated gateway
+record whose binding it recomputes from the scenario's own request, and
+requires status and error code to equal the captured response. For
+`pre_quota_refusal` it requires no coordinator request-log row, route
+snapshot, ledger row, reservation or debit. For `post_reservation_refusal` it
+requires exactly one refunded zero-token reservation without a hold, and it
+accepts a coordinator request-log row whose model and pool are blank under
+SPEC-017 §5.2b.2; a blank logged model is never a missing binding. Refund
+checks apply whenever a reservation exists. A consumer never fabricates a
+reservation, relabels a log row, or treats empty captures as proof.
+
+**Boundaries.** A gateway record proves gateway facts only: the request
+intent, the refusal terminal, quota and debit state. Coordinator route,
+ledger and dispatch absence remain coordinator facts (§5.4.3.2 or the reviewed
+capture). No promotion follows from a producer signature alone;
+SPEC-006-R018 stays pending until the complete joined, released and signed
+journey passes.
 
 ### 5.5 `GET /v1/usage`
 

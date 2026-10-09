@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.47",
+      "version": "0.9.48",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -11433,7 +11433,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "#1816 shipped bounded pool serving, but the complete production journey failed. #1880 repairs selected-view listings, served-route-only disclosure, and eligibility wording. SPEC-006 v0.9.47 defines authenticated exports and bounded coordinator no-dispatch closure projections, which are implemented with default-disabled, fail-closed release provenance. Unknown-model redaction remains required by SPEC-017. Reviewed production provenance enrollment, gateway refusal intent and pre-quota proof, complete accounting joins for the remaining roles, protected promotion integration, and a fresh complete signed journey remain pending. Unit tests and partial source projections do not promote this row."
+        "rationale": "#1816 shipped bounded pool serving, but the complete production journey failed. #1880 repairs selected-view listings, served-route-only disclosure, and eligibility wording. SPEC-006 v0.9.47 defines authenticated exports and bounded coordinator no-dispatch closure projections, which are implemented with default-disabled, fail-closed release provenance. SPEC-006 v0.9.48 specifies the gateway refusal record and refusal-intent export that bind early refusals and pre-quota pool refusals without un-blanking unserved models. Unknown-model redaction remains required by SPEC-017. Reviewed production provenance enrollment, gateway refusal-intent implementation, complete accounting joins for the remaining roles, protected promotion integration, and a fresh complete signed journey remain pending. Unit tests and partial source projections do not promote this row."
       }
     },
     {
