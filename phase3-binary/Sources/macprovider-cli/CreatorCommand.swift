@@ -37,6 +37,7 @@ struct CreatorCommand: AsyncParsableCommand {
             CreatorLoginCommand.self, CreatorAgreeCommand.self, CreatorKeygenCommand.self, CreatorRegisterRootCommand.self,
             CreatorPoolCommand.self, CreatorManifestCommand.self, CreatorAdmitCommand.self, CreatorAuthorizeBuyerCommand.self,
             CreatorPromoteCommand.self, CreatorStatusCommand.self, CreatorProvidersCommand.self, CreatorEarningsCommand.self,
+            CreatorRevokeCommand.self, CreatorLifecycleCommand.self,
         ]
     )
 }
@@ -677,6 +678,73 @@ enum CreatorOperations {
         ])
     }
 
+    /// Revokes a member Mac with the same `member_revoked` event an operator
+    /// uses (SPEC-043-R005); the coordinator drops it from routing at once.
+    static func revokeMember(home: CreatorHome, client: CreatorClient, poolID: String, providerID: String) async throws -> [String: Any] {
+        try await stickyRequest(home: home, client: client, poolID: poolID, key: "revoke:\(providerID)", label: "revoke", path: "events", body: [
+            "event_type": "member_revoked", "pool_id": poolID, "provider_id": providerID,
+        ])
+    }
+
+    /// Options for the next manifest version: the accepted core's terms with
+    /// one pool model id removed from the allowlist and the model entries.
+    static func revokeModelOptions(previous: CreatorManifestState, poolModelID: String, notBefore: Date = Date()) throws -> ManifestOptions {
+        guard let core = previous.snapshot.policies.last?.core else {
+            throw CreatorCLIError.invalidInput("local manifest state is corrupt")
+        }
+        var entries: [PoolModelEntry] = []
+        var members: [PoolAttestedMember] = []
+        for ext in core.extensions {
+            switch ext.id {
+            case PoolExtensions.modelEntriesV1: entries = try PoolExtensions.decodeModelEntries(ext.body)
+            case PoolExtensions.attestedMembersV1: members = try PoolExtensions.decodeAttestedMembers(ext.body)
+            default: throw CreatorCLIError.invalidInput("accepted manifest carries extension \(ext.id) this CLI cannot re-sign")
+            }
+        }
+        guard core.modelAllowlist.contains(poolModelID) || entries.contains(where: { $0.poolModelID == poolModelID }) else {
+            throw CreatorCLIError.invalidInput("\(poolModelID) is not in the accepted manifest (version \(previous.manifestVersion))")
+        }
+        entries.removeAll { $0.poolModelID == poolModelID }
+        let entryIDs = Set(entries.map(\.poolModelID))
+        var options = ManifestOptions()
+        options.models = core.modelAllowlist.filter { $0 != poolModelID && !entryIDs.contains($0) }
+        options.modelEntries = entries
+        options.attestedMembers = members
+        guard !options.models.isEmpty || !options.modelEntries.isEmpty else {
+            throw CreatorCLIError.invalidInput("\(poolModelID) is the pool's only model; retire the pool instead with `creator lifecycle --set retired --pool \(core.poolID)`")
+        }
+        options.settlementMode = core.settlementMode
+        options.retentionPolicyID = core.retentionPolicyID
+        options.minBinaryVersion = core.minBinaryVersion
+        options.minAttestationTier = core.minAttestationTier
+        options.minEligibleMembers = core.minEligibleMembers
+        options.notBefore = notBefore
+        options.validityDays = max(1, Int((core.expiresAtUnix &- core.notBeforeUnix) / 86400))
+        return options
+    }
+
+    /// Signs the next manifest version without `poolModelID`; nothing is sent.
+    static func signModelRevocation(home: CreatorHome, poolID: String, poolModelID: String) throws -> CreatorPendingManifest {
+        guard let previous = try home.manifestState(poolID) else {
+            throw CreatorCLIError.invalidInput("no accepted manifest for pool \(poolID); nothing to revoke")
+        }
+        return try signManifest(home: home, poolID: poolID, options: try revokeModelOptions(previous: previous, poolModelID: poolModelID))
+    }
+
+    static let creatorLifecycles: Set<String> = ["paused", "draining", "retired"]
+
+    /// POST /v1/creator/pools/<id>/lifecycle (coordinator
+    /// handleCreatorRestrictiveLifecycle). Only restrictive states; a paused
+    /// or draining pool returns to active through `creator promote`.
+    static func setLifecycle(home: CreatorHome, client: CreatorClient, poolID: String, lifecycle: String, reason: String?) async throws -> [String: Any] {
+        guard creatorLifecycles.contains(lifecycle) else {
+            throw CreatorCLIError.invalidInput("--set must be paused, draining, or retired (use `creator promote` to reactivate)")
+        }
+        var body: [String: Any] = ["lifecycle": lifecycle]
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty { body["reason"] = reason }
+        return try await stickyRequest(home: home, client: client, poolID: poolID, key: "lifecycle:\(lifecycle)", label: "lifecycle", path: "pools/\(poolID)/lifecycle", body: body)
+    }
+
     static func promote(home: CreatorHome, client: CreatorClient, poolID: String) async throws -> [String: Any] {
         try await stickyRequest(home: home, client: client, poolID: poolID, key: "promote", label: "promote", path: "pools/\(poolID)/promote", body: [:])
     }
@@ -908,5 +976,55 @@ struct CreatorEarningsCommand: AsyncParsableCommand {
         if let from { query.append(URLQueryItem(name: "from", value: from)) }
         if let to { query.append(URLQueryItem(name: "to", value: to)) }
         CreatorOutput.printJSON(try context.client.expect(try await context.client.request("GET", "earnings", query: query)))
+    }
+}
+
+struct CreatorRevokeCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "revoke",
+        abstract: "Revoke a member Mac (--provider) or a pool model entry (--model).",
+        discussion: """
+        --provider <id> sends member_revoked; the Mac stops routing for the pool at once.
+        --model <pool_model_id> signs the next manifest version without that entry and
+        leaves it pending: review it, then run `creator manifest submit --pool <id>`.
+        """
+    )
+    @OptionGroup var pool: CreatorPoolOption
+    @Option(help: "Provider id of the member Mac to revoke.") var provider: String?
+    @Option(help: "pool_model_id of the manifest entry to remove.") var model: String?
+
+    func validate() throws {
+        guard (provider == nil) != (model == nil) else { throw ValidationError("give exactly one of --provider or --model") }
+    }
+
+    func run() async throws {
+        if let model {
+            let pending = try CreatorOperations.signModelRevocation(home: CreatorHome.resolve(), poolID: pool.poolID, poolModelID: model)
+            print("signed manifest_version=\(pending.state.manifestVersion) without \(model); run `macprovider-cli creator manifest submit --pool \(pool.poolID)` to apply it")
+            return
+        }
+        let context = try CreatorContext.load()
+        CreatorOutput.printJSON(try await CreatorOperations.revokeMember(home: context.home, client: context.client, poolID: pool.poolID, providerID: provider ?? ""))
+    }
+}
+
+struct CreatorLifecycleCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lifecycle",
+        abstract: "Pause, drain, or retire a pool. Reactivate a paused or draining pool with `creator promote`."
+    )
+    @OptionGroup var pool: CreatorPoolOption
+    @Option(name: .customLong("set"), help: "paused, draining, or retired. retired is final.") var lifecycle: String
+    @Option(help: "Optional reason recorded with the change.") var reason: String?
+
+    func validate() throws {
+        guard CreatorOperations.creatorLifecycles.contains(lifecycle) else {
+            throw ValidationError("--set must be paused, draining, or retired")
+        }
+    }
+
+    func run() async throws {
+        let context = try CreatorContext.load()
+        CreatorOutput.printJSON(try await CreatorOperations.setLifecycle(home: context.home, client: context.client, poolID: pool.poolID, lifecycle: lifecycle, reason: reason))
     }
 }

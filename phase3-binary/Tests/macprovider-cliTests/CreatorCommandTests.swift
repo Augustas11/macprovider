@@ -313,4 +313,64 @@ final class CreatorCommandTests: XCTestCase {
             XCTAssertTrue(error.description.contains("member_missing"))
         }
     }
+
+    func testRevokeMemberAndLifecycleUseTheCreatorRoutes() async throws {
+        let fake = RecordingCreatorTransport { _ in jsonResponse(202, ["event": ["ok": true]]) }
+        let home = CreatorHome(root: homeURL)
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        _ = try await CreatorOperations.revokeMember(home: home, client: client, poolID: pool, providerID: "mp-owned")
+        _ = try await CreatorOperations.setLifecycle(home: home, client: client, poolID: pool, lifecycle: "draining", reason: "maintenance")
+        let requests = fake.requests
+        XCTAssertEqual(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" }, [
+            "POST /v1/creator/events", "POST /v1/creator/pools/\(pool)/lifecycle",
+        ])
+        XCTAssertEqual(body(requests[0])["event_type"] as? String, "member_revoked")
+        XCTAssertEqual(body(requests[0])["provider_id"] as? String, "mp-owned")
+        XCTAssertEqual(body(requests[1])["lifecycle"] as? String, "draining")
+        XCTAssertEqual(body(requests[1])["reason"] as? String, "maintenance")
+        for request in requests { XCTAssertNotNil(request.value(forHTTPHeaderField: "Idempotency-Key")) }
+        do {
+            _ = try await CreatorOperations.setLifecycle(home: home, client: client, poolID: pool, lifecycle: "active", reason: nil)
+            XCTFail("active must go through promote")
+        } catch {}
+        XCTAssertEqual(fake.requests.count, 2)
+        XCTAssertThrowsError(try CreatorLifecycleCommand.parse(["--pool", pool, "--set", "active"]))
+        XCTAssertNoThrow(try CreatorLifecycleCommand.parse(["--pool", pool, "--set", "retired"]))
+        XCTAssertThrowsError(try CreatorRevokeCommand.parse(["--pool", pool]))
+        XCTAssertThrowsError(try CreatorRevokeCommand.parse(["--pool", pool, "--provider", "a", "--model", "b"]))
+        XCTAssertNoThrow(try CreatorRevokeCommand.parse(["--pool", pool, "--model", "pool/x/y"]))
+    }
+
+    func testRevokeModelSignsTheNextManifestWithoutTheEntry() throws {
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        let pool = identity.poolID
+        func entry(_ slug: String) -> PoolModelEntry {
+            PoolModelEntry(
+                poolModelID: "pool/\(pool)/\(slug)", artifactHashAlgorithm: "macprovider.gguf-file.v1", artifactHash: String(repeating: "b", count: 64),
+                allowedRuntimeSources: ["llamacpp_loopback"], license: "MIT", paidServingAttested: true,
+                pricing: PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 2),
+                disclosureClass: "pool_attested_unverified", maxContextTokens: 8192
+            )
+        }
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["catalog-model"]
+        options.modelEntries = [entry("a"), entry("b")]
+        options.attestedMembers = [PoolAttestedMember(providerAccountID: "acct_m", runtimeClasses: ["llamacpp_loopback"])]
+        options.validityDays = 30
+        let v1 = try CreatorOperations.signManifest(home: home, poolID: pool, options: options)
+        try home.write(v1.state, to: home.poolDir(pool).appendingPathComponent("manifest-state.json"), mode: 0o600)
+
+        let v2 = try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/a")
+        XCTAssertEqual(v2.state.manifestVersion, 2)
+        let core = try XCTUnwrap(v2.state.snapshot.policies.last?.core)
+        XCTAssertEqual(Set(core.modelAllowlist), ["catalog-model", "pool/\(pool)/b"])
+        let entries = try PoolExtensions.decodeModelEntries(try XCTUnwrap(core.extensions.first { $0.id == PoolExtensions.modelEntriesV1 }).body)
+        XCTAssertEqual(entries, [entry("b")])
+        let members = try PoolExtensions.decodeAttestedMembers(try XCTUnwrap(core.extensions.first { $0.id == PoolExtensions.attestedMembersV1 }).body)
+        XCTAssertEqual(members, options.attestedMembers)
+        XCTAssertEqual((core.expiresAtUnix - core.notBeforeUnix) / 86400, 30)
+        XCTAssertThrowsError(try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/missing"))
+    }
 }
