@@ -1,11 +1,20 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.8
+Version: v0.3.9
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.9 (2026-10-09, CLI identity is provenance, not a gate):**
+Follows SPEC-023 v0.22.13 (#1893). A signed policy entry's provider CLI
+version, live executable cdhash, and package digest are recorded provenance of
+the build that qualified the tuple; coverage MUST NOT require them to equal the
+running CLI. A signed tuple keeps authorizing CB across signed CLI releases
+while its decode-path identity (model, tokenizer, chat template, hardware,
+cache class, KV dtype, MoE, Metal library, kernel identifier) still matches.
+The release canary (CB active on the packaged build) is the regression check.
+
 **Change log v0.3.8 (2026-10-02, per-step emission inside decode windows):**
 FR-CB2 emission is per step, not per window. A multi-token hop still runs
 inside one backend call, but each step's sampled tokens go through stop,
@@ -797,8 +806,10 @@ release evidence the acceptance was measured on: model key, model id, model
 SHA-256, tokenizer SHA-256, chat-template SHA-256, exact hardware class, cache
 class, KV dtype, MoE requirement, `cached_turns_accepted`, Metal library
 SHA-256, paged-KV kernel identifier, rollout mode, feed expiry, tuple digest,
-provider CLI version, live executable cdhash, and immutable package and
-Studio-campaign evidence digests. Under the current runtime descriptor
+and immutable Studio-campaign evidence digests. The entry also records the
+provider CLI version, live executable cdhash, and package digest that
+qualified it; these are provenance (v0.3.9) and MUST NOT be compared with the
+running CLI. Under the current runtime descriptor
 contract, the policy tuple's `model_id` is the served/catalog key and MUST
 equal `model_key`; `model_sha256` binds the candidate row. An entry missing
 any of these fields MUST be rejected at configuration or policy load, and an

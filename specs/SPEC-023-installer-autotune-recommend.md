@@ -1,12 +1,28 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.12
+version: v0.22.13
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.13 (2026-10-09)** — CLI identity is recorded provenance, not an
+  activation gate (#1893). A native-MTP admission entry's `provider_revision`,
+  `source_commit`, `reproducible_build_sha256`, and `live_executable_cdhash`,
+  and a continuous-batching policy entry's `provider_cli_version`,
+  `live_executable_cdhash`, and `package_manifest_sha256`, record the build
+  that qualified the tuple. They stay closed, validated, signed, and inside
+  the canonical tuple digests, but a consumer MUST NOT require them to equal
+  the running provider CLI's version, source commit, build digest, or
+  CodeDirectory CDHash, and a release gate MUST NOT require a new entry per
+  CLI release. A signed tuple authorizes its decode path under any signed CLI
+  release that the network accepts. The decode-path identity stays pinned:
+  model, tokenizer, chat template and artifact digests, hardware, metallib
+  digest, kernel identifier, upstream MLX revision (`runtime_revision`), and
+  the native-MTP target artifact. Runtime regressions are caught by the
+  release canary and the SPEC-031-R033 native-MTP self-test canary.
 
 - **v0.22.12 (2026-10-06)** — Names the R024 Stage A transport and the
   revocation publication (#1770). The "external release asset" is served by
@@ -3220,7 +3236,7 @@ unsigned JSON integers and never floats.
 | `runtime_revision`, `provider_revision` | `short_string` |
 | `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |
 | `reproducible_build_sha256` | `sha256` |
-| `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
+| `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the signed executable that qualified this tuple; recorded provenance only (v0.22.13) |
 | `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9-]{0,63}$`, the canonical form of the host chip name |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
@@ -3322,10 +3338,15 @@ profile because they do not say which identity layer they bind.
    sidecar JSON bytes before parsing normalization, and `entry` is the complete
    selected closed entry above with no field removed, renamed, or defaulted.
    The `entry.live_executable_cdhash` field is part of this canonical object:
-   a sidecar omitting it, using uppercase/non-hex/wrong-length text, or
-   presenting a value that differs from the live signed executable's CDHash
-   MUST fail closed. `reproducible_build_sha256` remains the installed artifact
-   byte digest and MUST NOT be substituted for the live CodeDirectory CDHash.
+   a sidecar omitting it or using uppercase/non-hex/wrong-length text MUST
+   fail closed. `reproducible_build_sha256` remains the qualifying build's
+   artifact byte digest and MUST NOT be substituted for the CodeDirectory
+   CDHash. **[v0.22.13]** `provider_revision`, `source_commit`,
+   `reproducible_build_sha256`, and `live_executable_cdhash` are recorded
+   provenance of the qualifying build. A consumer MUST NOT compare them with
+   the running provider CLI's source commit, build digest, or CDHash, and MUST
+   NOT select or reject an entry on them; `runtime_revision` MUST still equal
+   the running build's upstream MLX revision.
    The `entry.complete_window_bytes_by_depth` array and the
    `entry.max_native_active_rows` integer are likewise part of the
    canonical object; every indexed value MUST be encoded deterministically, with
@@ -3553,8 +3574,14 @@ with `tuple_sha256` removed, under the domain
 descriptor contract, `model_id` MUST equal `model_key`; `model_sha256` binds
 the candidate row; and `cache_class` MUST be either `KVCacheSimple` or `mixed`,
 the two cache identities the current paged-KV runtime can measure and admit.
+**[v0.22.13]** `provider_cli_version`, `live_executable_cdhash`, and
+`package_manifest_sha256` are recorded provenance of the qualifying build: a
+consumer MUST NOT require them to equal the running CLI's version, CDHash, or
+package digest, and a release gate that requires a baseline to stay covered
+checks only the decode-path tuple, rollout, and qualified provenance source
+and status, never a per-release CLI identity.
 Unknown, missing, stale, unsigned, wrong-signer, malformed,
-expired, catalog-mismatched, or identity-mismatched policy cannot authorize CB;
+expired, catalog-mismatched, or tuple-identity-mismatched policy cannot authorize CB;
 the policy bytes recorded for one release are immutable. V1 remote invalidation
 is bounded by `expires_at`, which the decode path rechecks before admission; a
 new release may omit an old tuple, but affects a provider only after that release

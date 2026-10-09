@@ -584,8 +584,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let drifted = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: fixture.context.modelID,
             modelRevision: fixture.context.modelRevision,
-            providerRevision: String(repeating: "e", count: 40),
-            upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
+            upstreamMLXSwiftLMRevision: String(repeating: "e", count: 40),
             hardwareChip: fixture.context.hardwareChip,
             ramGB: fixture.context.ramGB,
             osVersion: fixture.context.osVersion,
@@ -595,7 +594,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
         XCTAssertEqual(
             try rejectedError(fixture.sidecarData, fixture: fixture, context: drifted),
-            .liveTupleMismatch("$.revisions.provider")
+            .liveTupleMismatch("$.revisions.upstream_mlx_swift_lm")
         )
         XCTAssertEqual(
             try rejectedError(fixture.mutatingRoot({ $0["admission_enabled"] = false }, recomputeTuple: true), fixture: fixture),
@@ -806,7 +805,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let unavailable = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: fixture.context.modelID,
             modelRevision: fixture.context.modelRevision,
-            providerRevision: fixture.context.providerRevision,
             upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
             hardwareChip: fixture.context.hardwareChip,
             ramGB: fixture.context.ramGB,
@@ -817,7 +815,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let revoked = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: fixture.context.modelID,
             modelRevision: fixture.context.modelRevision,
-            providerRevision: fixture.context.providerRevision,
             upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
             hardwareChip: fixture.context.hardwareChip,
             ramGB: fixture.context.ramGB,
@@ -995,7 +992,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let wrongHardware = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: fixture.context.modelID,
             modelRevision: fixture.context.modelRevision,
-            providerRevision: fixture.context.providerRevision,
             upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
             hardwareChip: "M1 Max",
             ramGB: fixture.context.ramGB,
@@ -1711,7 +1707,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let releaseContext = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: "mlx-community/Qwen3-MTP",
             modelRevision: releaseLayout.targetSHA256,
-            providerRevision: Self.providerRevision,
             upstreamMLXSwiftLMRevision: Self.upstreamRevision,
             hardwareChip: "M2 Ultra",
             ramGB: 256,
@@ -1755,7 +1750,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             context: NativeMTPAdmissionSidecar.RuntimeContext(
                 modelID: "mlx-community/Qwen3-MTP",
                 modelRevision: Self.modelRevision,
-                providerRevision: Self.providerRevision,
                 upstreamMLXSwiftLMRevision: Self.upstreamRevision,
                 hardwareChip: "M2 Ultra",
                 ramGB: 256,
@@ -1803,7 +1797,6 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let context = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: "mlx-community/Qwen3-MTP",
             modelRevision: layout.targetSHA256,
-            providerRevision: Self.providerRevision,
             upstreamMLXSwiftLMRevision: Self.upstreamRevision,
             hardwareChip: "M2 Ultra",
             ramGB: 256,

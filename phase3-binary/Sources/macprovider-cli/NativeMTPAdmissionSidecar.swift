@@ -510,7 +510,6 @@ enum NativeMTPAdmissionSidecar {
     struct RuntimeContext: Equatable, Sendable {
         let modelID: String
         let modelRevision: String
-        let providerRevision: String
         let upstreamMLXSwiftLMRevision: String
         let hardwareChip: String
         let ramGB: Int
@@ -521,7 +520,6 @@ enum NativeMTPAdmissionSidecar {
         init(
             modelID: String,
             modelRevision: String,
-            providerRevision: String,
             upstreamMLXSwiftLMRevision: String,
             hardwareChip: String,
             ramGB: Int,
@@ -531,7 +529,6 @@ enum NativeMTPAdmissionSidecar {
         ) {
             self.modelID = modelID
             self.modelRevision = modelRevision
-            self.providerRevision = providerRevision
             self.upstreamMLXSwiftLMRevision = upstreamMLXSwiftLMRevision
             self.hardwareChip = hardwareChip
             self.ramGB = ramGB
@@ -707,7 +704,6 @@ enum NativeMTPAdmissionSidecar {
         func matches(context: RuntimeContext) -> Bool {
             modelKey == context.modelID
                 && artifactHash == context.modelRevision
-                && providerRevision == context.providerRevision
                 && runtimeRevision == context.upstreamMLXSwiftLMRevision
                 && hardwareClass == NativeMTPAdmissionSidecar.canonicalHardwareClass(context.hardwareChip)
                 && ramBytes == context.ramGB * 1_073_741_824
@@ -1835,7 +1831,6 @@ enum NativeMTPAdmissionSidecar {
     private static func validateLiveTuple(_ parsed: Parsed, context: RuntimeContext) throws {
         guard parsed.modelID == context.modelID else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.id") }
         guard parsed.modelRevision == context.modelRevision else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.revision") }
-        guard parsed.providerRevision == context.providerRevision else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.revisions.provider") }
         guard parsed.upstreamMLXSwiftLMRevision == context.upstreamMLXSwiftLMRevision else {
             throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.revisions.upstream_mlx_swift_lm")
         }

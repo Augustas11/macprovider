@@ -57,7 +57,7 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         XCTAssertFalse(selection.acceptanceCoverage.covers(fixture.requestedTuple))
     }
 
-    func testRuntimeProvenanceRequiresExactProviderVersionAndCDHash() throws {
+    func testProviderCLIIdentityIsRecordedProvenanceNotAGate() throws {
         let fixture = try makeFixture()
         let selection = try ContinuousBatchingSignedPolicy.verify(
             policyData: fixture.policyData,
@@ -68,26 +68,38 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         )
         let entry = try XCTUnwrap(selection.entries.first)
 
-        XCTAssertTrue(ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            providerCLIVersion: "1.8.208-candidate",
-            liveExecutableCDHash: String(repeating: "7", count: 40)
-        ))
-        XCTAssertFalse(ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            providerCLIVersion: "1.8.209",
-            liveExecutableCDHash: String(repeating: "7", count: 40)
-        ))
-        XCTAssertFalse(ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            providerCLIVersion: "1.8.208-candidate",
-            liveExecutableCDHash: String(repeating: "8", count: 40)
-        ))
-        XCTAssertFalse(ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            providerCLIVersion: "1.8.208-candidate",
-            liveExecutableCDHash: nil
-        ))
+        // The entry records the CLI that qualified it; a provider running any
+        // other signed CLI release is still covered by the decode-path tuple.
+        XCTAssertEqual(entry.provenance.providerCLIVersion, "1.8.208-candidate")
+        XCTAssertEqual(entry.provenance.liveExecutableCDHash, String(repeating: "7", count: 40))
+        XCTAssertNotEqual(CoordinatorClient.binaryVersion, entry.provenance.providerCLIVersion)
+        XCTAssertTrue(selection.acceptanceCoverage.covers(fixture.requestedTuple))
+
+        let requested = fixture.requestedTuple
+        func drifted(
+            modelSHA256: String? = nil,
+            metallibSHA256: String? = nil,
+            kernelIdentifier: String? = nil
+        ) -> ContinuousBatchingRequestedTuple {
+            ContinuousBatchingRequestedTuple(
+                modelID: requested.modelID,
+                modelSHA256: modelSHA256 ?? requested.modelSHA256,
+                tokenizerSHA256: requested.tokenizerSHA256,
+                chatTemplateSHA256: requested.chatTemplateSHA256,
+                cacheClass: requested.cacheClass,
+                kvDType: requested.kvDType,
+                requiresMoE: requested.requiresMoE,
+                hardwareClass: requested.hardwareClass,
+                metallibSHA256: metallibSHA256 ?? requested.metallibSHA256,
+                kernelIdentifier: kernelIdentifier ?? requested.kernelIdentifier,
+                parityLabel: requested.parityLabel,
+                poolEpoch: requested.poolEpoch
+            )
+        }
+        // Decode-path identity stays pinned.
+        XCTAssertFalse(selection.acceptanceCoverage.covers(drifted(modelSHA256: String(repeating: "9", count: 64))))
+        XCTAssertFalse(selection.acceptanceCoverage.covers(drifted(metallibSHA256: String(repeating: "9", count: 64))))
+        XCTAssertFalse(selection.acceptanceCoverage.covers(drifted(kernelIdentifier: "other-kernel")))
     }
 
     func testRejectsTamperedSignature() throws {

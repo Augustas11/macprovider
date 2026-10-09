@@ -5,7 +5,7 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeSwapTests: XCTestCase {
-    func testNativeMTPAdmissionBindsRunningBuildIdentity() {
+    func testNativeMTPAdmissionIgnoresRecordedCLIIdentityButPinsDecodePath() {
         let source = String(repeating: "a", count: 40)
         let build = String(repeating: "b", count: 64)
         let cdHash = String(repeating: "1", count: 40)
@@ -17,35 +17,30 @@ final class ModelRuntimeSwapTests: XCTestCase {
             spec023BuildDigestSHA256: build,
             spec023LiveExecutableCDHash: cdHash
         )
-        let running = ModelRuntime.NativeMTPRunningBuildIdentity(
-            sourceCommit: source,
-            reproducibleBuildSHA256: build,
-            liveExecutableCDHash: cdHash
+        // A later signed CLI release: different source commit, build digest
+        // and live CDHash than the admission recorded.
+        let laterRelease = ModelRuntime.NativeMTPRunningBuildIdentity(
+            sourceCommit: String(repeating: "d", count: 40),
+            reproducibleBuildSHA256: String(repeating: "e", count: 64),
+            liveExecutableCDHash: String(repeating: "9", count: 40)
         )
 
         XCTAssertTrue(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             capability,
             targetModelRevision: target,
-            runningBuildIdentity: running
-        ))
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
-            capability,
-            targetModelRevision: target,
             runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
-                sourceCommit: String(repeating: "d", count: 40),
+                sourceCommit: source,
                 reproducibleBuildSHA256: build,
                 liveExecutableCDHash: cdHash
             )
         ))
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+        XCTAssertTrue(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             capability,
             targetModelRevision: target,
-            runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
-                sourceCommit: source,
-                reproducibleBuildSHA256: String(repeating: "e", count: 64),
-                liveExecutableCDHash: cdHash
-            )
+            runningBuildIdentity: laterRelease
         ))
+        // Decode-path identity stays pinned: upstream MLX revision of the
+        // running build, of the admission, and the target artifact.
         XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             capability,
             targetModelRevision: target,
@@ -57,31 +52,18 @@ final class ModelRuntimeSwapTests: XCTestCase {
             )
         ))
         XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            makeNativeMTPAdmissionCapability(
+                providerRevision: source,
+                upstreamRevision: String(repeating: "f", count: 40),
+                targetArtifactSHA256: target
+            ),
+            targetModelRevision: target,
+            runningBuildIdentity: laterRelease
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             capability,
             targetModelRevision: String(repeating: "0", count: 64),
-            runningBuildIdentity: running
-        ))
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
-            makeNativeMTPAdmissionCapability(
-                providerRevision: source,
-                targetArtifactSHA256: target,
-                spec023SourceCommit: source,
-                spec023BuildDigestSHA256: String(repeating: "2", count: 64),
-                spec023LiveExecutableCDHash: cdHash
-            ),
-            targetModelRevision: target,
-            runningBuildIdentity: running
-        ))
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
-            makeNativeMTPAdmissionCapability(
-                providerRevision: source,
-                targetArtifactSHA256: target,
-                spec023SourceCommit: source,
-                spec023BuildDigestSHA256: build,
-                spec023LiveExecutableCDHash: String(repeating: "3", count: 40)
-            ),
-            targetModelRevision: target,
-            runningBuildIdentity: running
+            runningBuildIdentity: laterRelease
         ))
     }
 

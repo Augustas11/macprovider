@@ -86,7 +86,6 @@ NATIVE_MTP_BODIES = (NATIVE_MTP_FEED, NATIVE_MTP_MANIFEST, NATIVE_MTP_BANK)
 # Top-level fields whose value the CLI decodes as a schema/policy selector.
 SHAPE_FIELDS = ("schema_version", "policy_version", "source")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_COMPONENT = r"(0|[1-9][0-9]*)"
 TAG_RE = re.compile(rf"^v{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$")
 VERSION_RE = re.compile(
@@ -376,27 +375,6 @@ def parse_signature_sidecar(value: object, name: str) -> tuple[str, bytes]:
     return key_id, signature
 
 
-def provider_code_identity(metadata: dict) -> tuple[set[str], str]:
-    identity = metadata.get("provider_code_identity")
-    if not isinstance(identity, dict):
-        fail("pearl-release.json lacks provider_code_identity required for continuous-batching preservation")
-    binary_sha256 = identity.get("binary_sha256")
-    if not isinstance(binary_sha256, str) or SHA256_RE.fullmatch(binary_sha256) is None:
-        fail("pearl-release.json provider_code_identity.binary_sha256 is not lowercase 64-hex")
-    slices = identity.get("slices")
-    if not isinstance(slices, list) or not slices:
-        fail("pearl-release.json provider_code_identity.slices is missing or empty")
-    cdhashes: set[str] = set()
-    for index, entry in enumerate(slices):
-        if not isinstance(entry, dict):
-            fail(f"pearl-release.json provider_code_identity.slices[{index}] is not an object")
-        cdhash = entry.get("code_cdhash")
-        if not isinstance(cdhash, str) or CDHASH_RE.fullmatch(cdhash) is None:
-            fail(f"pearl-release.json provider_code_identity.slices[{index}].code_cdhash is not lowercase 40-hex")
-        cdhashes.add(cdhash)
-    return cdhashes, binary_sha256
-
-
 def validate_metadata(args: argparse.Namespace) -> tuple[str, dict[str, str], dict, dict]:
     match = TAG_RE.fullmatch(args.tag)
     if match is None:
@@ -462,11 +440,11 @@ def entry_matches_stable_baseline(entry: dict, baseline: dict) -> bool:
 def require_continuous_batching_tuple(
     cb_policy: object,
     baseline_id: str,
-    release_cdhashes: set[str],
-    release_binary_sha256: str,
-    expected_version: str,
     now: datetime.datetime,
 ) -> dict:
+    # The entry's provider CLI version, CDHash and package digest are recorded
+    # provenance, not an activation gate: the signed decode-path tuple must
+    # stay covered for whichever signed CLI release is running.
     baseline = REQUIRED_CB_BASELINES.get(baseline_id)
     if baseline is None:
         fail(f"unknown continuous batching baseline {baseline_id!r}")
@@ -489,8 +467,6 @@ def require_continuous_batching_tuple(
     entries = cb_policy.get("entries")
     if not isinstance(entries, list):
         fail("continuous-batching-policy.json entries is not an array")
-    stable_matches = 0
-    stale_identities: list[str] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             fail(f"continuous-batching-policy.json entries[{index}] is not an object")
@@ -503,7 +479,6 @@ def require_continuous_batching_tuple(
             fail(f"continuous-batching-policy.json entries[{index}].provenance has unexpected fields")
         if not entry_matches_stable_baseline(entry, baseline):
             continue
-        stable_matches += 1
         entry_without_digest = dict(entry)
         tuple_sha256 = entry_without_digest.pop("tuple_sha256", None)
         identity = {
@@ -522,12 +497,6 @@ def require_continuous_batching_tuple(
                 f"required continuous batching baseline {baseline_id} tuple_sha256 "
                 "does not match its release-bound canonical identity"
             )
-        cdhash = provenance.get("live_executable_cdhash")
-        version = provenance.get("provider_cli_version")
-        package_manifest_sha256 = provenance.get("package_manifest_sha256")
-        if version != expected_version or cdhash not in release_cdhashes:
-            stale_identities.append(f"version={version!r} cdhash={cdhash!r}")
-            continue
         if entry.get("rollout") not in ("canary", "on"):
             fail(
                 f"required continuous batching baseline {baseline_id} "
@@ -550,17 +519,7 @@ def require_continuous_batching_tuple(
                     f"required continuous batching baseline {baseline_id} "
                     f"provenance.{field} is not lowercase 64-hex"
                 )
-        if package_manifest_sha256 != release_binary_sha256:
-            fail(
-                f"required continuous batching baseline {baseline_id} provenance.package_manifest_sha256 "
-                "does not match pearl-release.json provider_code_identity.binary_sha256"
-            )
         return entry
-    if stable_matches:
-        fail(
-            f"required continuous batching baseline {baseline_id} has no exact entry for release "
-            f"{expected_version} and provider_code_identity CDHash; saw {', '.join(stale_identities)}"
-        )
     fail(f"required continuous batching baseline {baseline_id} is missing from continuous-batching-policy.json")
 
 def ledger_order_key(release_id: str, record: dict) -> tuple[datetime.datetime, str]:
@@ -918,7 +877,7 @@ def main() -> int:
         choices=tuple(sorted(REQUIRED_CB_BASELINES)),
         help=(
             "reviewed continuous-batching baseline that must remain "
-            "covered by this release's signed policy and exact provider code identity"
+            "covered by the live signed policy (CLI identity is not a gate)"
         ),
     )
     parser.add_argument(
@@ -929,10 +888,6 @@ def main() -> int:
 
     try:
         expected_version, expected_hashes, catalog, metadata = validate_metadata(args)
-        release_cdhashes: set[str] = set()
-        release_binary_sha256 = ""
-        if args.required_continuous_batching_baseline is not None:
-            release_cdhashes, release_binary_sha256 = provider_code_identity(metadata)
         trusted = active_keyring(pathlib.Path(args.trusted_keys))
         artifact_bound = ARTIFACT_FEED in expected_hashes
         native_bound = NATIVE_MTP_FEED in expected_hashes
@@ -1057,9 +1012,6 @@ def main() -> int:
             require_continuous_batching_tuple(
                 cb_policy,
                 args.required_continuous_batching_baseline,
-                release_cdhashes,
-                release_binary_sha256,
-                expected_version,
                 now,
             )
 

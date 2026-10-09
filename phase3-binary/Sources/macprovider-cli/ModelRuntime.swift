@@ -1604,7 +1604,6 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Verified SPEC-023 signed policy provenance. Coverage remains a separate
     /// exact-tuple gate so policy authorization cannot replace local proofs.
     private let continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult
-    private let continuousBatchingRunningBuildIdentity: NativeMTPRunningBuildIdentity?
     private let continuousBatchingModeExplicitlyConfigured: Bool
     private let continuousBatchingEmergencyOffOverride: Bool
     private let warmSwapEnabled: Bool
@@ -2655,12 +2654,6 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
-        #if DEBUG
-        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
-            ?? Self.nativeMTPRunningBuildIdentity()
-        #else
-        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
-        #endif
         self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
             ?? (continuousBatchingMode != .off)
         self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
@@ -3209,12 +3202,6 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
-        #if DEBUG
-        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
-            ?? Self.nativeMTPRunningBuildIdentity()
-        #else
-        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
-        #endif
         self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
             ?? (continuousBatchingMode != .off)
         self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
@@ -3318,13 +3305,12 @@ actor ModelRuntime: ModelRuntimeServing {
         let selection = loadResult.selection
         let policyUnexpired = loadResult.status == .liveVerified && Date() < selection.expiresAt
         let requestedTuple = continuousBatchingRequestedTuple()
-        let tupleMatchingEntry = requestedTuple.flatMap { tuple in
+        // The entry's provider CLI version and CDHash are recorded provenance
+        // only; the decode-path tuple alone authorizes the signed entry.
+        let matchingEntry = requestedTuple.flatMap { tuple in
             selection.entries.first { entry in
                 ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(tuple)
             }
-        }
-        let matchingEntry = tupleMatchingEntry.flatMap { entry in
-            continuousBatchingPolicyEntryMatchesRuntime(entry) ? entry : nil
         }
         let descriptorAdmitted = requestedTuple.map { tuple in
             pagedKVAttachDecision.descriptor?.admits(
@@ -3365,9 +3351,7 @@ actor ModelRuntime: ModelRuntimeServing {
         } else if requestedTuple == nil {
             decisionReason = "local_identity_unavailable"
         } else if matchingEntry == nil {
-            decisionReason = tupleMatchingEntry == nil
-                ? "tuple_identity_mismatch"
-                : "runtime_provenance_mismatch"
+            decisionReason = "tuple_identity_mismatch"
         } else if !descriptorAdmitted {
             decisionReason = "authorized_local_proof_failed"
         } else {
@@ -4378,7 +4362,6 @@ actor ModelRuntime: ModelRuntimeServing {
         let policyMode = tuple.flatMap { requested in
             continuousBatchingPolicyLoadResult.selection.entries.first { entry in
                 ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(requested)
-                    && continuousBatchingPolicyEntryMatchesRuntime(entry)
             }?.rollout
         }
         guard let policyMode else {
@@ -4393,15 +4376,6 @@ actor ModelRuntime: ModelRuntimeServing {
         case (.on, .on): return .on
         case (_, .off): return .off
         }
-    }
-
-    private func continuousBatchingPolicyEntryMatchesRuntime(
-        _ entry: ContinuousBatchingPolicyEntry
-    ) -> Bool {
-        ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
-        )
     }
 
     private func continuousBatchingRequestedTuple() -> ContinuousBatchingRequestedTuple? {
@@ -9317,7 +9291,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 context: NativeMTPAdmissionSidecar.RuntimeContext(
                     modelID: targetModelID,
                     modelRevision: targetModelRevision,
-                    providerRevision: runningBuildIdentity.sourceCommit,
                     upstreamMLXSwiftLMRevision: runningBuildIdentity.upstreamMLXSwiftLMRevision,
                     hardwareChip: machine.chip,
                     ramGB: machine.ramGB,
@@ -9675,11 +9648,10 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelRevision: String,
         runningBuildIdentity: NativeMTPRunningBuildIdentity
     ) -> Bool {
-        admissionCapability.providerRevision == runningBuildIdentity.sourceCommit
-            && admissionCapability.spec023SourceCommit == runningBuildIdentity.sourceCommit
-            && admissionCapability.spec023BuildDigestSHA256 == runningBuildIdentity.reproducibleBuildSHA256
-            && admissionCapability.spec023LiveExecutableCDHash == runningBuildIdentity.liveExecutableCDHash
-            && admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
+        // The admission's provider revision and SPEC-023 build identity are
+        // recorded provenance; any signed CLI release may serve the admitted
+        // decode path. The upstream MLX revision and target artifact stay pinned.
+        admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
             && runningBuildIdentity.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
             && admissionCapability.targetArtifactSHA256 == targetModelRevision
     }

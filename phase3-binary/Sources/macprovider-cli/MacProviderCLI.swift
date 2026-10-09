@@ -2636,15 +2636,9 @@ struct ServeCommand: AsyncParsableCommand {
         let continuousBatchingPolicy = await Self.loadContinuousBatchingPolicy(
             catalogTrust: startupPreflight.catalogTrust
         )
-        let continuousBatchingRunningBuildIdentity = ModelRuntime.nativeMTPRunningBuildIdentity()
-        let runtimeCompatiblePolicyEntries = continuousBatchingPolicy.selection.entries.filter {
-            ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-                $0,
-                liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
-            )
-        }
+        let policyEntries = continuousBatchingPolicy.selection.entries
         let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
-        let currentPolicyEntries = runtimeCompatiblePolicyEntries.filter {
+        let currentPolicyEntries = policyEntries.filter {
             currentPolicyKeys.contains($0.modelKey)
         }
         let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
@@ -2660,11 +2654,11 @@ struct ServeCommand: AsyncParsableCommand {
                 "event=continuous_batching_manual_tuple action=ignored reason=signed_policy_required\n".utf8
             ))
         }
-        let policyAcceptedTuples = runtimeCompatiblePolicyEntries.map(\.tuple)
+        let policyAcceptedTuples = policyEntries.map(\.tuple)
         let effectiveAcceptedTuples = policyAcceptedTuples
             + (noJoin ? resolved.continuousBatchingAcceptedTuples : [])
         FileHandle.standardError.write(Data(
-            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(runtimeCompatiblePolicyEntries.count) rejected_runtime_provenance=\(continuousBatchingPolicy.selection.entries.count - runtimeCompatiblePolicyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
+            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
 
         printResolvedConfiguration(resolved)

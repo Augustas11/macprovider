@@ -99,15 +99,6 @@ enum ContinuousBatchingSignedPolicy {
     private static let tupleIdentityDomain = "macprovider.continuous-batching-policy-tuple.v1\n"
     private static let maxClockSkew: TimeInterval = 10 * 60
 
-    static func matchesRuntimeProvenance(
-        _ entry: ContinuousBatchingPolicyEntry,
-        providerCLIVersion: String = CoordinatorClient.binaryVersion,
-        liveExecutableCDHash: String?
-    ) -> Bool {
-        entry.provenance.providerCLIVersion == providerCLIVersion
-            && entry.provenance.liveExecutableCDHash == liveExecutableCDHash
-    }
-
     struct TrustedKeyring: Sendable, Equatable {
         let publicKeysByKeyID: [String: String]
         let requiredKeyID: String
