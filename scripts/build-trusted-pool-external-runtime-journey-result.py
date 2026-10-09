@@ -47,6 +47,8 @@ REPOSITORY = "Augustas11/macprovider"
 ARTIFACT_ID = "redacted-trusted-pool-external-runtime"
 EVIDENCE_PREFIX = "journeys/evidence/trusted-pool-external-runtime-"
 GATEWAY_HOLDS_SCHEMA = "macprovider.trusted-pool-external-runtime-gateway-holds.v2"
+# The default runtime, and the only one before #1880 B5. A run.json without
+# runtime_source is a llama.cpp run.
 RUNTIME_SOURCE = "llamacpp_loopback"
 GGUF_HASH_ALGORITHM = "macprovider.gguf-file.v1"
 POOL_OPERATOR_ATTESTED = "pool_operator_attested"
@@ -81,15 +83,66 @@ ACCEPTED_ID_RE = re.compile(r"^Augustas11/macprovider:v[0-9]+\.[0-9]+\.[0-9]+@[0
 # Face-style repo id, and short lowercase snake/kebab tokens.
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 SHORT_TOKEN_RE = re.compile(r"^(?=.{1,48}$)[a-z0-9]+(?:[_-][a-z0-9]+)*$")
+POOL_MODEL_ID_RE = re.compile(r"^pool/[A-Za-z0-9_-]{1,64}/[a-z0-9][a-z0-9-]{0,62}$")
 PRECONDITION_IDS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
 REQUEST_KINDS = ("nonstream", "stream")
-# name -> (HTTP status, error.code); run plan §5A negative controls.
+# name -> (HTTP status, error.code); run plan §5A negative controls for the
+# default llama.cpp run.
 NEGATIVE_CONTROLS = {
     "no-pool-selector": (503, "engine_unavailable"),
     "pool-native-selector": (503, "engine_unavailable"),
     "pool-ollama-selector": (503, "engine_unavailable"),
     "uppercase-selector": (400, "invalid_engine_selection"),
 }
+# Per-runtime shape (#1880 B5). Every settlement, receipt, ledger, finality,
+# gateway-debit, hold and redaction predicate is shared. What differs is the
+# engine build descriptor, how the route binds the GGUF identity, and which
+# other external engine the pool must refuse:
+# - llama.cpp is catalog-priced: the route carries the catalog artifact
+#   (artifact_id, artifact_hash) and model_id is the catalog model.
+# - Ollama is not in the catalog feed's runtime allowlist, so it serves a
+#   SPEC-042-R015 pool-model entry: the route is pool_manifest-sourced, its
+#   pool_model_id is model_id, it carries no catalog artifact, and its
+#   expected hash is the entry's GGUF hash (gguf-file.v1 for Ollama).
+RUNTIME_PROFILES: dict[str, dict[str, Any]] = {
+    "llamacpp_loopback": {
+        "build_field": "llama_server_build",
+        "build_re": re.compile(r"^b[0-9]+$"),
+        "artifact_field": "gguf_artifact_id",
+        "model_re": MODEL_ID_RE,
+        "other_engine_control": "pool-ollama-selector",
+    },
+    "ollama_loopback": {
+        "build_field": "engine_build",
+        "build_re": re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$"),
+        "artifact_field": None,
+        "model_re": POOL_MODEL_ID_RE,
+        "other_engine_control": "pool-llamacpp-selector",
+    },
+}
+BASE_IDENTITY_KEYS = TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS - {"llama_server_build", "gguf_artifact_id"}
+
+
+def runtime_profile(runtime_source: Any, location: str) -> dict[str, Any]:
+    if runtime_source not in RUNTIME_PROFILES:
+        die(f"{location} must be one of {sorted(RUNTIME_PROFILES)}")
+    return RUNTIME_PROFILES[runtime_source]
+
+
+def negative_controls_for(runtime_source: str) -> dict[str, tuple[int, str]]:
+    other = RUNTIME_PROFILES[runtime_source]["other_engine_control"]
+    return {(other if name == "pool-ollama-selector" else name): want for name, want in NEGATIVE_CONTROLS.items()}
+
+
+def identity_keys_for(runtime_source: str) -> set[str]:
+    profile = RUNTIME_PROFILES[runtime_source]
+    return BASE_IDENTITY_KEYS | {profile["build_field"]} | ({profile["artifact_field"]} if profile["artifact_field"] else set())
+
+
+def runtime_text(text: str, runtime_source: str) -> str:
+    """Step and summary wording names the served runtime; the llama.cpp text
+    is unchanged byte for byte."""
+    return text.replace(RUNTIME_SOURCE, runtime_source)
 STEP_ASSERTIONS = {
     "step-01-preconditions": "P1-P8 and payout-disabled pass on the deployed build",
     "step-02-pool-policy": "pool active and routeable, candidate, one undelegated member, buyer authorized, manifest digest bound",
@@ -251,10 +304,7 @@ def load_run(capture: Path) -> dict[str, Any]:
         "coordinator_version": re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$"),
         "accepted_id": ACCEPTED_ID_RE,
         "member_cli_sha256": SHA256_RE,
-        "llama_server_build": re.compile(r"^b[0-9]+$"),
         "gguf_sha256": SHA256_RE,
-        "gguf_artifact_id": re.compile(r"^gguf-[a-z0-9-]+$"),
-        "model_id": MODEL_ID_RE,
         "operator_role": SHORT_TOKEN_RE,
         "operator_identity": None,
         "hardware_profile": SHORT_TOKEN_RE,
@@ -263,10 +313,18 @@ def load_run(capture: Path) -> dict[str, Any]:
         "buyer_account_id": None,
         "pool_operator_account_id": None,
     }
-    extra = set(run) - set(fields)
+    run.setdefault("runtime_source", RUNTIME_SOURCE)
+    profile = runtime_profile(run["runtime_source"], "run.json.runtime_source")
+    fields[profile["build_field"]] = profile["build_re"]
+    if profile["artifact_field"]:
+        fields[profile["artifact_field"]] = re.compile(r"^gguf-[a-z0-9-]+$")
+    fields["model_id"] = profile["model_re"]
+    extra = set(run) - set(fields) - {"runtime_source"}
     require(not extra, f"run.json has unexpected keys: {sorted(extra)}")
     for field, pattern in fields.items():
         require_string(run.get(field), pattern, f"run.json.{field}")
+    if profile["artifact_field"] is None:
+        require(run["model_id"].split("/")[1] == run["pool_id"], "run.json.model_id must be an entry of run.json.pool_id")
     return run
 
 
@@ -363,7 +421,8 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
     base = f"requests/{kind}"
     status, headers = parse_headers(read_capture_file(capture, f"{base}/response.headers"), f"{base}/response.headers")
     require(status == 200, f"{kind} response status must be 200")
-    require(headers.get("x-macprovider-engine") == RUNTIME_SOURCE, f"{kind} X-MacProvider-Engine must be {RUNTIME_SOURCE}")
+    runtime = run["runtime_source"]
+    require(headers.get("x-macprovider-engine") == runtime, f"{kind} X-MacProvider-Engine must be {runtime}")
     request_id = require_string(headers.get("x-request-id"), None, f"{kind} X-Request-ID")
     require(headers.get("x-provider-id") == run["member_provider_id"], f"{kind} X-Provider-Id must be the pool member")
     if kind == "nonstream":
@@ -405,7 +464,7 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
     require(isinstance(finish_reason, str) and finish_reason, f"{kind} must carry a finish_reason")
     out = {
         "status": 200,
-        "engine": RUNTIME_SOURCE,
+        "engine": runtime,
         "request_id": request_id,
         "provider_fingerprint": fingerprint(run["member_provider_id"], run["fingerprint_salt"]),
         "finish_reason": finish_reason,
@@ -443,14 +502,22 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         require(snapshot_key not in snapshot_by_key, f"{where}: duplicate route snapshot key")
         require(snapshot_key in allowed_attempts, f"{where}: request_id/attempt_n must come from request_log")
         require(row.get("pool_id") == run["pool_id"], f"{where}: pool_id must be the pool")
-        require(row.get("runtime_source") == RUNTIME_SOURCE, f"{where}: runtime_source must be {RUNTIME_SOURCE}")
+        require(row.get("runtime_source") == run["runtime_source"], f"{where}: runtime_source must be {run['runtime_source']}")
         require(as_int(row.get("manifest_version"), f"{where}.manifest_version") == pool["manifest_version"], f"{where}: manifest_version must match get-pool")
         require(row.get("manifest_core_digest") == pool["manifest_core_digest"], f"{where}: manifest_core_digest must match get-pool")
         require(row.get("pool_operator_account_id") == run["pool_operator_account_id"], f"{where}: pool_operator_account_id must be the pool operator")
         require(row.get("route_snapshot_mode") == "enforce", f"{where}: route_snapshot_mode must be enforce")
         require(row.get("expected_catalog_model_hash") == run["gguf_sha256"], f"{where}: expected_catalog_model_hash must be the GGUF sha256")
-        require(row.get("artifact_hash") == run["gguf_sha256"], f"{where}: artifact_hash must be the GGUF sha256")
-        require(row.get("artifact_id") == run["gguf_artifact_id"], f"{where}: artifact_id must be {run['gguf_artifact_id']}")
+        if RUNTIME_PROFILES[run["runtime_source"]]["artifact_field"]:
+            require(row.get("artifact_hash") == run["gguf_sha256"], f"{where}: artifact_hash must be the GGUF sha256")
+            require(row.get("artifact_id") == run["gguf_artifact_id"], f"{where}: artifact_id must be {run['gguf_artifact_id']}")
+        else:
+            # A pool-model entry route: the signed entry, not a catalog
+            # artifact, binds the GGUF identity (SPEC-022-R013).
+            require(row.get("expected_model_hash_source") == "pool_manifest", f"{where}: expected_model_hash_source must be pool_manifest")
+            require(row.get("pool_model_id") == run["model_id"], f"{where}: pool_model_id must be {run['model_id']}")
+            require(row.get("artifact_id") in (None, "") and row.get("artifact_hash") in (None, ""),
+                    f"{where}: a pool-model entry route carries no catalog artifact")
         as_int(row.get("pool_generation"), f"{where}.pool_generation")
         snapshot_by_key[snapshot_key] = row
 
@@ -533,7 +600,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     return {
         "coordinator_request_ids": sorted({str(row.get("request_id")) for row in request_log}),
         "route_snapshot_count": len(snapshots),
-        "runtime_source": RUNTIME_SOURCE,
+        "runtime_source": run["runtime_source"],
         "route_snapshot_mode": "enforce",
         "pool_generation": as_int(settled_snapshot.get("pool_generation"), f"{kind} settled pool_generation"),
         "settled_attempt_n": settled_key[1],
@@ -559,9 +626,9 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     }
 
 
-def check_controls(capture: Path) -> dict[str, Any]:
+def check_controls(capture: Path, runtime_source: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for name, (want_status, want_code) in NEGATIVE_CONTROLS.items():
+    for name, (want_status, want_code) in negative_controls_for(runtime_source).items():
         base = f"controls/{name}"
         status, headers = parse_headers(read_capture_file(capture, f"{base}/response.headers"), f"{base}/response.headers")
         require(status == want_status, f"control {name} status must be {want_status}, got {status}")
@@ -754,7 +821,8 @@ def require_run_descriptors(evidence: dict[str, Any]) -> None:
     """The free-form run.json descriptors that reach signed evidence keep
     their capture-time patterns in the committed evidence too."""
     identity = require_object(evidence.get("candidate_identity"), "candidate_identity")
-    require_string(identity.get("model_id"), MODEL_ID_RE, "candidate_identity.model_id")
+    profile = runtime_profile(identity.get("runtime_source"), "candidate_identity.runtime_source")
+    require_string(identity.get("model_id"), profile["model_re"], "candidate_identity.model_id")
     operator = require_object(evidence.get("operator"), "operator")
     require_string(operator.get("role"), SHORT_TOKEN_RE, "operator.role")
     environment = require_object(evidence.get("environment"), "environment")
@@ -783,7 +851,10 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
         response = require_object(request.get("response"), f"requests.{kind}.response")
         request_ids.append(require_string(response.get("request_id"), None, f"requests.{kind}.response.request_id"))
     controls = require_object(evidence.get("negative_controls"), "negative_controls")
-    for name in NEGATIVE_CONTROLS:
+    runtime = identity.get("runtime_source")
+    runtime_profile(runtime, "candidate_identity.runtime_source")
+    require(set(controls) == set(negative_controls_for(runtime)), f"negative_controls must be exactly {sorted(negative_controls_for(runtime))}")
+    for name in negative_controls_for(runtime):
         control = require_object(controls.get(name), f"negative_controls.{name}")
         request_ids.append(require_string(control.get("request_id"), None, f"negative_controls.{name}.request_id"))
     require_gateway_holds_evidence(evidence.get("gateway_holds"), expected={
@@ -825,7 +896,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         if (visible["prompt_tokens"], visible["completion_tokens"]) != (debited["prompt_tokens"], debited["completion_tokens"]):
             usage_equal = False
         requests[kind] = {"response": response, "settlement": settlement}
-    controls = check_controls(capture)
+    controls = check_controls(capture, run["runtime_source"])
     gateway_request_ids.extend(control["request_id"] for control in controls.values())
     holds = check_holds(capture, run, gateway_request_ids, [requests[kind]["response"]["request_id"] for kind in REQUEST_KINDS])
     evidence = {
@@ -844,10 +915,10 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         },
         "result": {
             "status": "pass",
-            "summary": "paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with provider_reported ledger usage and debit equal to finality and ledger",
+            "summary": runtime_text("paid non-streaming and streaming requests on a candidate operator pool, served by llamacpp_loopback, settled verified / pool_operator_attested with provider_reported ledger usage and debit equal to finality and ledger", run["runtime_source"]),
         },
         "steps": [
-            {"id": step_id, "status": "pass", "assertion": STEP_ASSERTIONS[step_id], "artifacts": [ARTIFACT_ID]}
+            {"id": step_id, "status": "pass", "assertion": runtime_text(STEP_ASSERTIONS[step_id], run["runtime_source"]), "artifacts": [ARTIFACT_ID]}
             for step_id in TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER
         ],
         "redaction": {
@@ -870,15 +941,14 @@ def build_evidence(capture: Path) -> dict[str, Any]:
             "coordinator_version": run["coordinator_version"],
             "accepted_id": run["accepted_id"],
             "member_cli_sha256": run["member_cli_sha256"],
-            "llama_server_build": run["llama_server_build"],
+            **{field: run[field] for field in identity_keys_for(run["runtime_source"]) & {"llama_server_build", "engine_build", "gguf_artifact_id"}},
             "gguf_sha256": run["gguf_sha256"],
-            "gguf_artifact_id": run["gguf_artifact_id"],
             "model_id": run["model_id"],
             "pool_id": run["pool_id"],
             "buyer_account_fingerprint": fingerprint(run["buyer_account_id"], run["fingerprint_salt"]),
             "manifest_version": pool["manifest_version"],
             "manifest_core_digest": pool["manifest_core_digest"],
-            "runtime_source": RUNTIME_SOURCE,
+            "runtime_source": run["runtime_source"],
             "fingerprint_salt": run["fingerprint_salt"],
         },
         "preconditions": preconditions,
@@ -1050,15 +1120,15 @@ def require_observations(value: Any) -> dict[str, Any]:
 
 def require_candidate_identity(value: Any) -> dict[str, Any]:
     identity = require_object(value, "candidate_identity")
-    if set(identity) != TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS:
-        die(f"candidate_identity keys must be exactly {sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS)}")
+    runtime = identity.get("runtime_source")
+    profile = runtime_profile(runtime, "candidate_identity.runtime_source")
+    if set(identity) != identity_keys_for(runtime):
+        die(f"candidate_identity keys must be exactly {sorted(identity_keys_for(runtime))}")
     for field in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt", "buyer_account_fingerprint"):
         require_string(identity.get(field), SHA256_RE, f"candidate_identity.{field}")
     require_string(identity.get("accepted_id"), ACCEPTED_ID_RE, "candidate_identity.accepted_id")
-    for field in ("coordinator_version", "llama_server_build", "gguf_artifact_id", "model_id", "pool_id"):
+    for field in ("coordinator_version", "model_id", "pool_id", profile["build_field"], *([profile["artifact_field"]] if profile["artifact_field"] else [])):
         require_string(identity.get(field), None, f"candidate_identity.{field}")
-    if identity.get("runtime_source") != RUNTIME_SOURCE:
-        die(f"candidate_identity.runtime_source must equal {RUNTIME_SOURCE!r}")
     version = identity.get("manifest_version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         die("candidate_identity.manifest_version must be a positive integer")

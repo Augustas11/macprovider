@@ -27,6 +27,31 @@ Pools) and SPEC-042-R014 (buyer engine selection on pool routes).
 This document is a test contract. It is not evidence that the journey passed
 or that any mapped requirement is conformant.
 
+## Engine profiles
+
+The steps below are written for the default `llamacpp_loopback` run. An
+`ollama_loopback` run (`run.json` `"runtime_source": "ollama_loopback"`) is
+evidenced with the same predicates for steps 02-04 and 06-11; only these
+differ:
+
+- Identity. The catalog feed does not allow Ollama for the GGUF artifact, so
+  the member serves a SPEC-042-R015 pool-model entry whose
+  `allowed_runtime_sources` and the pool `runtime_allowlist` include
+  `ollama_loopback`. `run.json` names the entry as `model_id`
+  (`pool/<pool>/<slug>`) and the Ollama version as `engine_build`, and has no
+  `llama_server_build` or `gguf_artifact_id`. In step 05 each route snapshot is
+  `pool_manifest`-sourced, its `pool_model_id` is `model_id`, its
+  `expected_catalog_model_hash` is the entry's GGUF hash (`gguf_sha256`,
+  `macprovider.gguf-file.v1`), and it carries no catalog `artifact_id` or
+  `artifact_hash`.
+- Selectors. The paid requests send `X-MacProvider-Engine-Select: ollama`
+  and must be answered with `X-MacProvider-Engine: ollama_loopback`. The
+  other-engine negative control is `pool-llamacpp-selector`
+  (`X-MacProvider-Engine-Select: llamacpp`, 503 `engine_unavailable`) in place
+  of `pool-ollama-selector`, and the uppercase control sends `OLLAMA`.
+- `candidate_identity` carries `engine_build` in place of
+  `llama_server_build` and has no `gguf_artifact_id`.
+
 ## Out of scope
 
 - A SPEC-043 external-creator production launch (`launch_environment` other
@@ -212,7 +237,9 @@ $C "SELECT request_id, attempt_n, route_snapshot_mode,
            json_extract(route_snapshot_json,'\$.pool_operator_account_id') pool_operator_account_id,
            json_extract(route_snapshot_json,'\$.expected_catalog_model_hash') expected_catalog_model_hash,
            json_extract(route_snapshot_json,'\$.artifact_hash') artifact_hash,
-           json_extract(route_snapshot_json,'\$.artifact_id') artifact_id
+           json_extract(route_snapshot_json,'\$.artifact_id') artifact_id,
+           json_extract(route_snapshot_json,'\$.pool_model_id') pool_model_id,
+           json_extract(route_snapshot_json,'\$.expected_model_hash_source') expected_model_hash_source
     FROM settlement_route_snapshots WHERE request_id IN ($IDS);" > route_snapshots.json
 $C "SELECT request_id, attempt_n, terminal_state, usage_source FROM settlement_attempt_outputs WHERE request_id IN ($IDS);" > attempt_outputs.json
 $C "SELECT request_id, attempt_n, receipt_version, receipt_result, settlement_outcome, reason, closed, pool_label_status

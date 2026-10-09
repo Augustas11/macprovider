@@ -278,6 +278,12 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
     "runtime_source",
     "fingerprint_salt",
 }
+# #1880 B5: an Ollama run serves a pool-model entry, so it names its engine
+# build and carries no catalog artifact id; every other identity key is shared.
+TRUSTED_POOL_EXTERNAL_RUNTIME_IDENTITY_KEYS_BY_RUNTIME = {
+    "llamacpp_loopback": TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
+    "ollama_loopback": (TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS - {"llama_server_build", "gguf_artifact_id"}) | {"engine_build"},
+}
 TRUSTED_POOL_MODEL_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-MODEL"
 TRUSTED_POOL_MODEL_EXECUTION_MODE = TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE
 TRUSTED_POOL_MODEL_ARTIFACT_ID = "redacted-trusted-pool-model"
@@ -2323,10 +2329,16 @@ def _validate_trusted_pool_external_runtime_journey_result(
 
     identity = signed.get("candidate_identity")
     if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        runtime_source = identity.get("runtime_source")
+        if runtime_source not in TRUSTED_POOL_EXTERNAL_RUNTIME_IDENTITY_KEYS_BY_RUNTIME:
+            result.error(f"{location}.signed.candidate_identity.runtime_source",
+                         f"must be one of {sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_IDENTITY_KEYS_BY_RUNTIME)}")
+            runtime_source = "llamacpp_loopback"
+        identity_keys = TRUSTED_POOL_EXTERNAL_RUNTIME_IDENTITY_KEYS_BY_RUNTIME[runtime_source]
         _expect_keys(
             identity,
-            TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
-            TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
+            identity_keys,
+            identity_keys,
             f"{location}.signed.candidate_identity",
             result,
         )
@@ -2334,11 +2346,14 @@ def _validate_trusted_pool_external_runtime_journey_result(
             value = identity.get(field_name)
             if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
                 result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
-        for field_name in ("coordinator_version", "accepted_id", "llama_server_build", "gguf_artifact_id", "model_id", "pool_id"):
+        for field_name in sorted(identity_keys & {"coordinator_version", "accepted_id", "llama_server_build", "engine_build",
+                                                   "gguf_artifact_id", "model_id", "pool_id"}):
             if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
                 result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
-        if identity.get("runtime_source") != "llamacpp_loopback":
-            result.error(f"{location}.signed.candidate_identity.runtime_source", "must equal 'llamacpp_loopback'")
+        if runtime_source == "ollama_loopback" and not (
+                isinstance(identity.get("model_id"), str) and isinstance(identity.get("pool_id"), str)
+                and identity["model_id"].startswith(f"pool/{identity['pool_id']}/")):
+            result.error(f"{location}.signed.candidate_identity.model_id", "an ollama_loopback run must name a pool-model entry of its pool")
         version = identity.get("manifest_version")
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             result.error(f"{location}.signed.candidate_identity.manifest_version", "must be a positive integer")

@@ -26,6 +26,7 @@ GGUF = "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff"
 DIGEST = "d" * 64
 POOL = "pool-m1-test"
 MEMBER = "mp-member-test-0001"
+OLLAMA_MODEL = f"pool/{POOL}/qwen25-05b-ollama"
 BUYER = "acct-buyer-test-0001"
 OPERATOR_ACCOUNT = "acct-malibu-ops-m1"
 
@@ -69,6 +70,32 @@ def headers(status: int, *, request_id: str = "", engine: str = "", provider: st
         lines.append(f"x-provider-id: {provider}")
     lines.append("content-type: application/json")
     return "\r\n".join(lines) + "\r\n\r\n"
+
+
+def make_ollama_capture(root: Path) -> Path:
+    """The same paid run served by Ollama on a pool-model entry (#1880 B5)."""
+    capture = make_capture(root)
+    run = json.loads((capture / "run.json").read_text())
+    for field in ("llama_server_build", "gguf_artifact_id"):
+        del run[field]
+    run.update(runtime_source="ollama_loopback", engine_build="0.12.3", model_id=OLLAMA_MODEL)
+    write(capture / "run.json", run)
+    for kind, rid in (("nonstream", "req-ns-1"), ("stream", "req-st-1")):
+        base = capture / "requests" / kind
+        write(base / "response.headers", headers(200, request_id=rid, engine="ollama_loopback", provider=MEMBER))
+        rows = json.loads((base / "route_snapshots.json").read_text())
+        for row in rows:
+            row.update(runtime_source="ollama_loopback", artifact_id=None, artifact_hash=None,
+                       pool_model_id=OLLAMA_MODEL, expected_model_hash_source="pool_manifest")
+        write(base / "route_snapshots.json", rows)
+    other = capture / "controls" / "pool-ollama-selector"
+    other.rename(capture / "controls" / "pool-llamacpp-selector")
+    write(capture / "controls/pool-llamacpp-selector/response.headers", headers(503, request_id="req-pool-llamacpp-selector"))
+    holds = json.loads((capture / "gateway-holds.json").read_text())
+    for ids in (holds["scope"]["request_ids"], holds["campaign"]["window_buyer_request_ids"]):
+        ids[ids.index("req-pool-ollama-selector")] = "req-pool-llamacpp-selector"
+    write(capture / "gateway-holds.json", holds)
+    return capture
 
 
 def make_capture(root: Path) -> Path:
@@ -271,8 +298,12 @@ class TrustedPoolExternalRuntimeValidatorTests(unittest.TestCase):
 
     def test_rejects_wrong_runtime_and_missing_identity(self) -> None:
         signed = valid_signed()
-        signed["candidate_identity"]["runtime_source"] = "ollama_loopback"
+        signed["candidate_identity"]["runtime_source"] = "lmstudio_loopback"
         self.assertTrue(any("runtime_source" in error for error in validate(signed)))
+        # An Ollama run carries its own identity keys, not llama.cpp's.
+        signed = valid_signed()
+        signed["candidate_identity"]["runtime_source"] = "ollama_loopback"
+        self.assertTrue(any("candidate_identity" in error for error in validate(signed)))
         signed = valid_signed()
         del signed["candidate_identity"]["gguf_sha256"]
         self.assertTrue(any("candidate_identity" in error for error in validate(signed)))
@@ -402,6 +433,54 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
             steps=evidence["steps"],
         )
         self.assertEqual([], validate(signed))
+
+    def test_ollama_pool_model_run_uses_the_same_predicates(self) -> None:
+        self._tmp.cleanup()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.capture = make_ollama_capture(self.root)
+        evidence = self.build()
+        identity = evidence["candidate_identity"]
+        self.assertEqual("ollama_loopback", identity["runtime_source"])
+        self.assertEqual("0.12.3", identity["engine_build"])
+        self.assertNotIn("llama_server_build", identity)
+        self.assertNotIn("gguf_artifact_id", identity)
+        self.assertEqual(OLLAMA_MODEL, identity["model_id"])
+        self.assertIn("pool-llamacpp-selector", evidence["negative_controls"])
+        self.assertNotIn("pool-ollama-selector", evidence["negative_controls"])
+        for kind in ("nonstream", "stream"):
+            self.assertEqual("ollama_loopback", evidence["requests"][kind]["response"]["engine"])
+            self.assertEqual("verified", evidence["requests"][kind]["settlement"]["receipt_verdict"]["settlement_outcome"])
+        self.assertIn("served by ollama_loopback", evidence["result"]["summary"])
+        BUILDER.require_candidate_identity(identity)
+        BUILDER.revalidate_committed_evidence(evidence)
+        signed = valid_signed(observations=evidence["observations"], candidate_identity=identity,
+                              environment=evidence["environment"], steps=evidence["steps"])
+        self.assertEqual([], validate(signed))
+        for label, mutate, fragment in (
+            ("catalog artifact on an entry route", lambda: self.mutate_rows("requests/stream/route_snapshots.json", artifact_id="gguf-q4-k-m"),
+             "carries no catalog artifact"),
+            ("other entry", lambda: self.mutate_rows("requests/nonstream/route_snapshots.json", pool_model_id=f"pool/{POOL}/other"),
+             "pool_model_id must be"),
+            ("catalog-sourced route", lambda: self.mutate_rows("requests/nonstream/route_snapshots.json", expected_model_hash_source="catalog"),
+             "expected_model_hash_source must be pool_manifest"),
+            ("llama.cpp route", lambda: self.mutate_rows("requests/nonstream/route_snapshots.json", runtime_source="llamacpp_loopback"),
+             "runtime_source must be ollama_loopback"),
+            ("llama.cpp header", lambda: write(self.capture / "requests/nonstream/response.headers",
+                                               headers(200, request_id="req-ns-1", engine="llamacpp_loopback", provider=MEMBER)),
+             "X-MacProvider-Engine must be ollama_loopback"),
+            ("llama.cpp build field", lambda: self.mutate_object("run.json", llama_server_build="b11149"), "unexpected keys"),
+            ("unknown runtime", lambda: self.mutate_object("run.json", runtime_source="lmstudio_loopback"), "runtime_source must be one of"),
+            ("entry of another pool", lambda: self.mutate_object("run.json", model_id="pool/other-pool/qwen25-05b-ollama"),
+             "must be an entry of run.json.pool_id"),
+        ):
+            with self.subTest(label=label):
+                self._tmp.cleanup()
+                self._tmp = tempfile.TemporaryDirectory()
+                self.root = Path(self._tmp.name)
+                self.capture = make_ollama_capture(self.root)
+                mutate()
+                self.assert_rejected(fragment)
 
     def test_rejects_unverified_receipt(self) -> None:
         self.mutate_rows("requests/nonstream/receipt_verdicts.json", settlement_outcome="quarantined")
