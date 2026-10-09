@@ -139,6 +139,27 @@ final class StructuredStreamingContentAccumulator: @unchecked Sendable {
     }
 }
 
+/// When a batched row's first visible token reached the runtime. The serial
+/// path reports TTFT from its own generate loop; without this a batched
+/// receipt fell back to the whole request duration.
+final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var firstTokenAt: Date?
+
+    func mark(_ now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        if firstTokenAt == nil { firstTokenAt = now }
+    }
+
+    func ttftMilliseconds(since startedAt: Date) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let firstTokenAt else { return nil }
+        return max(0, Int64(firstTokenAt.timeIntervalSince(startedAt) * 1000))
+    }
+}
+
 final class StructuredStreamingIdleState: @unchecked Sendable {
     let enabled: Bool
     private let lock = NSLock()
@@ -5974,6 +5995,7 @@ actor ModelRuntime: ModelRuntimeServing {
         decode: ([Int]) -> String,
         stopTokenFilter: StopTokenFilter,
         generationMilliseconds: Int64,
+        ttftMilliseconds: Int64? = nil,
         modelHash: String?
     ) throws -> ContinuousBatchFinalizedRow {
         // The serial path discards the model's end-of-generation token
@@ -6061,7 +6083,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kvCacheBytesReused: kvCacheBytesReused,
                 completionTokens: parsed.completionTokens,
                 generatedCompletionTokens: parsed.generatedCompletionTokens,
-                ttftMilliseconds: nil,
+                ttftMilliseconds: ttftMilliseconds,
                 generationMilliseconds: generationMilliseconds,
                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                 modelHashObserved: validObservedModelHash(modelHash),
@@ -6391,10 +6413,13 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
+        let firstTokenClock = ContinuousBatchFirstTokenClock()
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest)
+                try await scheduler.submit(submission.schedulerRequest, tokenSink: { _ in
+                    firstTokenClock.mark()
+                })
             }
         } catch {
             if let lease {
@@ -6423,6 +6448,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                    ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
                     modelHash: snapshot.modelHash
                 )
             }
@@ -6841,6 +6867,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
+        let firstTokenClock = ContinuousBatchFirstTokenClock()
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
@@ -6849,6 +6876,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                    firstTokenClock.mark()
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -6899,6 +6927,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                    ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
                     modelHash: snapshot.modelHash
                 )
             }
