@@ -3,11 +3,11 @@ package ws
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/rs/zerolog"
-	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
 )
 
 func TestObserveHashStatusTransitionIncrementsMismatchMetric(t *testing.T) {

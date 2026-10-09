@@ -15,7 +15,7 @@ import (
 // downstream detail helpers MUST be planned by SQLite as
 // `SEARCH ... USING INDEX idx_*_request` — NOT `SCAN`.
 //
-// Pre-#246 the helpers used the `(? = '' OR col = ?)` optional-
+// Pre-#246 the helpers used the `(? = <empty string> OR col = ?)` optional-
 // predicate pattern so a single prepared statement could serve both
 // scoped and unscoped paths. SQLite cannot use a normal index plan
 // against a compound `OR` predicate — `EXPLAIN QUERY PLAN` reported

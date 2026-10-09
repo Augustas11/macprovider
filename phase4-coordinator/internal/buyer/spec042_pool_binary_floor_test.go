@@ -26,13 +26,13 @@ func TestPoolBinaryFloorMet(t *testing.T) {
 		version, floor string
 		want           bool
 	}{
-		{"1.8.0", "1.8.0", true},   // equal meets
-		{"1.8.1", "1.8.0", true},   // above meets
-		{"1.7.9", "1.8.0", false},  // below excluded
-		{"v1.8.0", "1.8.0", true},  // v-prefix tolerated by the comparator
-		{"1.8.0", "v1.8.0", true},  // v-prefix on the floor too
-		{"2", "1.8.0", true},       // short form, above
-		{"1.8", "1.8.0", true},     // short form, equal (zero-fill)
+		{"1.8.0", "1.8.0", true},      // equal meets
+		{"1.8.1", "1.8.0", true},      // above meets
+		{"1.7.9", "1.8.0", false},     // below excluded
+		{"v1.8.0", "1.8.0", true},     // v-prefix tolerated by the comparator
+		{"1.8.0", "v1.8.0", true},     // v-prefix on the floor too
+		{"2", "1.8.0", true},          // short form, above
+		{"1.8", "1.8.0", true},        // short form, equal (zero-fill)
 		{"1.8.0-rc1", "1.8.0", false}, // pre-release unparseable -> excluded (fail-safe)
 		{"1.2.3.4", "1.8.0", false},   // too many components -> excluded (fail-safe)
 		{"", "1.8.0", false},          // empty provider version -> excluded (fail-safe)

@@ -213,6 +213,10 @@ jobs:
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
       - name: make lint-coordinator
         run: make lint-coordinator
+      - name: gofmt every Go module (make fmt-check)
+        # #1920: no gofmt gate covered the gateway, phase7-verify, or the
+        # integration harness. Fails on any file gofmt would rewrite.
+        run: make fmt-check
       - name: AC-16 fixture assertion (golangci-lint diagnostic fires by name)
         # Round-1 ARCH r1 HIGH E fix: TestAC16ForbiddenImportFails
         # + TestForbidigoOSExitRule skip when golangci-lint is

@@ -439,9 +439,9 @@ func TestReservedMarkerRE(t *testing.T) {
 		"NOT RESERVED",
 		"DEFINITELY NOT-RESERVED and not FORWARD-COMPATIBLE.",
 		"NOT FORWARD-COMPAT yet",
-		"may someday be RESERVED",       // marker not at line start
-		"intentionally UNRESERVED",      // not the marker token
-		"this RESERVED-LIKE thing",      // marker not at line start
+		"may someday be RESERVED",  // marker not at line start
+		"intentionally UNRESERVED", // not the marker token
+		"this RESERVED-LIKE thing", // marker not at line start
 		"",
 	}
 	for _, in := range mustReserve {
@@ -463,11 +463,11 @@ func TestIsReasonConstName(t *testing.T) {
 	}{
 		{"reasonValid", true},
 		{"reasonModelHashMismatch", true},
-		{"reason", false},        // bare prefix
-		{"reasonable", false},    // not exported camelCase under prefix
-		{"warningFoo", false},    // wrong prefix
-		{"resultValid", false},   // wrong prefix
-		{"Reason", false},        // wrong case start
+		{"reason", false},      // bare prefix
+		{"reasonable", false},  // not exported camelCase under prefix
+		{"warningFoo", false},  // wrong prefix
+		{"resultValid", false}, // wrong prefix
+		{"Reason", false},      // wrong case start
 		{"", false},
 	}
 	for _, tc := range cases {

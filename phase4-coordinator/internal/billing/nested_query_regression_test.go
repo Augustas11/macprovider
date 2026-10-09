@@ -215,4 +215,3 @@ INSERT INTO request_log (
 		t.Fatalf("status=%d body=%s — reconcile/buyerEquivalentCredits deadlocked, errored, or failed the 503-before-parse check at cap=1", w.Code, w.Body.String())
 	}
 }
-

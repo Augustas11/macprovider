@@ -9,7 +9,7 @@
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
-        build-linux check check-exceptions fmt verify-autotune-catalog
+        build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
 
 test: test-coordinator test-gateway test-integration test-dist
 
@@ -305,6 +305,14 @@ check: check-exceptions
 		phase4-coordinator/dist/coordinator.yaml \
 		phase5-gateway/dist/gateway.yaml
 
+GO_MODULES := phase4-coordinator phase5-gateway phase7-verify test/integration
+
 fmt:
-	cd phase4-coordinator && gofmt -w .
-	cd phase5-gateway && gofmt -w .
+	gofmt -w $(GO_MODULES)
+
+# Fails when gofmt would rewrite any file in a Go module (CI coordinator-lint).
+fmt-check:
+	@unformatted="$$(gofmt -l $(GO_MODULES))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt would rewrite (run: make fmt):"; echo "$$unformatted"; exit 1; \
+	fi
