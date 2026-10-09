@@ -39,7 +39,6 @@ class SpecPRDeclarationTests(unittest.TestCase):
 
         expected = [
             ".github/CODEOWNERS",
-            ".github/workflows/spec-index.yml",
             "AGENTS.md",
             "beta/DECISION_CRITERIA.md",
             "CLAUDE.md",

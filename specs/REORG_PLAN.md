@@ -14,7 +14,7 @@ The completed controls are:
 - `python3 scripts/gen_spec_index.py --check` rejects index drift.
 - `python3 scripts/gen_spec_index.py --lint` rejects non-canonical Markdown in
   the root of `specs/`.
-- `.github/workflows/spec-index.yml` runs both checks in CI.
+- The `spec-index` job in `.github/workflows/ci.yml` runs both checks in CI.
 - `PROCESS.md`, `TEMPLATE.md`, `AUTHORITY.json`, and `CONFORMANCE.json` now
   govern semantic authority and conformance separately from physical layout.
 

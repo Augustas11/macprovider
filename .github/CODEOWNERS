@@ -31,7 +31,6 @@ phase3-binary/catalog/autotune/acknowledged-pricing-moves.json @Augustas11
 # CI and agent-rule controls for the sensitive paths.
 .github/CODEOWNERS @Augustas11
 .github/workflows/ci.yml @Augustas11
-.github/workflows/spec-index.yml @Augustas11
 AGENTS.md @Augustas11
 CLAUDE.md @Augustas11
 Makefile @Augustas11

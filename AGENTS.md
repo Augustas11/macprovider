@@ -234,8 +234,8 @@ python3 scripts/check_spec_pr_declaration.py \
 
 The PR body must contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
 `SPEC-GOVERNANCE-DECLARATION-END` block when the validator requires it. Fill it
-honestly; do not fabricate specs or requirements to satisfy the checker. Treat a
-red `spec-index / check` as blocking for agent behavior.
+honestly; do not fabricate specs or requirements to satisfy the checker. The
+`spec-index` job in `ci.yml` is part of `ci-required`; treat it red as blocking.
 
 ## Sensitive Paths
 

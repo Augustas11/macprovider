@@ -9,13 +9,14 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded CI runs on the same ref. A second push to a PR (or to
-# main) supersedes the first, so let the in-flight run stop instead of
-# burning macOS minutes on a diff that is already stale. Keyed by ref so
-# concurrent PRs never cancel each other.
+# Cancel superseded CI runs on the same PR: a second push makes the first
+# diff stale, so stop it instead of burning macOS minutes. Keyed by ref so
+# concurrent PRs never cancel each other. Pushes to main are never cancelled:
+# every main commit keeps its own result, so a red commit is not hidden by a
+# later push (#1920).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -106,7 +107,8 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase5-gateway/go.mod
           cache-dependency-path: phase5-gateway/go.sum
@@ -145,7 +147,8 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -176,7 +179,8 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -203,14 +207,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
       - name: Install golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: make lint-coordinator
         run: make lint-coordinator
       - name: gofmt every Go module (make fmt-check)
@@ -242,7 +247,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
@@ -531,6 +537,52 @@ jobs:
       - name: Run SPEC-015 acceptance runner
         run: bash test/integration/spec015/run_acceptance.sh
 
+  spec-index:
+    name: spec-index
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Folded in from the standalone spec-index workflow so ci-required gates
+    # it (#1920). Fails a PR when specs/README.md no longer matches the
+    # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
+    # lacks its behavior-change declaration. Regenerate the index with
+    # scripts/gen_spec_index.py and commit when adding/renaming a spec or
+    # bumping a `**Version:**` header.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        # Pinned to actions/setup-python v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+
+      - name: Validate authority and conformance against the real corpus
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check_spec_governance.py --base-ref "$BASE_REF"
+
+      - name: Verify specs/README.md index is up to date
+        run: python3 scripts/gen_spec_index.py --check
+
+      - name: Verify specs/ root is canonical-only (no re-accumulated clutter)
+        run: python3 scripts/gen_spec_index.py --lint
+
+      - name: Prove governance validator rejects seeded drift
+        run: python3 -m unittest -v scripts.tests.test_spec_governance scripts.tests.test_spec_pr_declaration scripts.tests.test_byom_contract_lock scripts.tests.test_buyer_paid_path_journey_result scripts.tests.test_trusted_pool_external_runtime_journey_result scripts.tests.test_trusted_pool_model_journey_result scripts.tests.test_local_consumer_endpoint_evidence_capture scripts.tests.test_local_consumer_endpoint_journey_result
+
+      - name: Require explicit behavior-change declaration
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_spec_pr_declaration.py --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA" --head "$HEAD_SHA"
+
   ci-required:
     name: ci-required
     runs-on: ubuntu-latest
@@ -550,6 +602,7 @@ jobs:
       - swift-tests
       - swift-package-lock
       - spec-015-acceptance
+      - spec-index
     if: always()
     steps:
       - name: Require all CI jobs
@@ -571,6 +624,7 @@ jobs:
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
           SWIFT_PACKAGE_LOCK_RESULT: ${{ needs.swift-package-lock.result }}
           SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
+          SPEC_INDEX_RESULT: ${{ needs.spec-index.result }}
         run: |
           set -euo pipefail
 
@@ -619,7 +673,8 @@ jobs:
           require_success "phase7-verify integration (fixtures)" "$PHASE7_VERIFY_INTEGRATION_RESULT"
           require_success "integration (cross-service)" "$INTEGRATION_RESULT"
           require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
-          require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
+          require_success "deploy tooling (check-deploy-config gate), all shards" "$DIST_TOOLING_RESULT"
+          require_success "spec-index" "$SPEC_INDEX_RESULT"
           allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
           allow_skip "phase3-binary (locked SwiftPM resolve)" "$SWIFT_PACKAGE_LOCK_RESULT" "$SWIFT_GATE"
           allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
