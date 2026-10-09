@@ -45,6 +45,12 @@ type CreatorAdminCredential struct {
 type creatorPrincipal struct {
 	CreatorID    string
 	CredentialID string
+	// SelfServe marks a SPEC-043 0.3.0 gateway-account principal that arrived
+	// on the service-token internal mount. Its provider ceiling is the
+	// ownership-claim table for GitHubUserID and its buyer ceiling is the
+	// creator's own durable grants, never the configured allowlists.
+	SelfServe    bool
+	GitHubUserID int64
 }
 
 type CreatorAdminConfigReloader interface {
@@ -64,6 +70,18 @@ type AdminDeps struct {
 	CreatorAdminBuyerAccountIDs       map[string][]string
 	CreatorProviderAdmitted           func(providerID string) bool
 	ProviderOwnerPublicKeyForProvider func(providerID string) ([]byte, bool)
+	// SelfServeProviderAdmitted reports whether a provider is connected under
+	// its SPEC-003 provider token. Self-serve admission uses it instead of
+	// CreatorProviderAdmitted: an uncatalogued BYOM model is not routable
+	// until its offer binds to the pool, and that binding needs membership
+	// first. Nil falls back to CreatorProviderAdmitted.
+	SelfServeProviderAdmitted func(providerID string) bool
+	// GatewayServiceToken authenticates the gateway on the self-serve
+	// internal creator mount (SPEC-043-R005 0.3.0). Empty disables the mount.
+	GatewayServiceToken string
+	// OwnedProviderIDs reads the provider ownership-claim table for one
+	// GitHub user id (SPEC-043-R006 0.3.0 self-serve ceiling).
+	OwnedProviderIDs func(ctx context.Context, githubUserID int64) ([]string, error)
 }
 
 func NewAdminHandler(deps AdminDeps) http.Handler {
@@ -121,6 +139,10 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCreatorHTTP(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, selfServeCreatorPrefix) {
+		h.serveSelfServeCreatorHTTP(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/signed-lifecycle") {
 		h.handleSignedLifecycle(w, r)
 		return
@@ -173,6 +195,10 @@ func (h *adminHandler) serveCreatorHTTP(w http.ResponseWriter, r *http.Request) 
 		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
 		return
 	}
+	h.serveCreatorRoutes(w, r, principal)
+}
+
+func (h *adminHandler) serveCreatorRoutes(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
 	switch {
 	case r.URL.Path == "/creator/trust-pools/me":
 		h.handleCreatorMe(w, r, principal.CreatorID)
@@ -519,6 +545,12 @@ func (h *adminHandler) handleCreatorIssueRootRegistrationNonce(w http.ResponseWr
 	issue.OperationID = operationID
 	issue.CreatorAccountID = principal.CreatorID
 	issue.CreatorCredentialID = principal.CredentialID
+	if principal.SelfServe {
+		if err := h.fillSelfServeNonceIssue(r.Context(), &issue); err != nil {
+			h.writeRequestMutationError(w, err)
+			return
+		}
+	}
 	record, err := h.deps.Store.IssueRootRegistrationNonce(r.Context(), issue)
 	if err != nil {
 		h.writeMutationError(w, err)
@@ -722,9 +754,13 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		return
 	}
 	if e.EventType == EventMemberAdmitted {
-		owned := h.creatorProviderAdmitAllowed(principal.CreatorID, e.ProviderID)
-		delegated := h.creatorProviderDelegated(principal.CreatorID, e.ProviderID)
-		if (!owned && !delegated) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
+		owned, err := h.creatorProviderOwned(r.Context(), principal, e.ProviderID)
+		if err != nil {
+			h.writeLookupError(w, "provider_ownership_lookup_failed", err)
+			return
+		}
+		delegated := !principal.SelfServe && h.creatorProviderDelegated(principal.CreatorID, e.ProviderID)
+		if (!owned && !delegated) || !h.creatorProviderAdmittedFor(principal, e.ProviderID) {
 			h.writeRequestMutationError(w, errCreatorProviderBoundary)
 			return
 		}
@@ -734,7 +770,7 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		}
 	}
 	if e.EventType == EventDelegationGranted || e.EventType == EventDelegationRevoked {
-		if !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
+		if principal.SelfServe || !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
 			h.writeRequestMutationError(w, errCreatorProviderBoundary)
 			return
 		}
@@ -744,7 +780,7 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		}
 	}
 	if e.EventType == EventBuyerAuthorized || e.EventType == EventBuyerAuthorizationRm {
-		if !h.creatorBuyerAccountAllowed(principal.CreatorID, e.BuyerAccountID) {
+		if !h.creatorBuyerGrantAllowed(principal, e.BuyerAccountID) {
 			h.writeRequestMutationError(w, errCreatorBuyerBoundary)
 			return
 		}

@@ -1,0 +1,407 @@
+package trustpool
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
+)
+
+// SPEC-043 0.3.0 self-serve private pools (#1880). An outside creator runs the
+// whole pool lifecycle with its own gateway account API key: the gateway
+// authenticates the key and forwards the verified principal here under the
+// gateway service token. Nothing on this mount reads a configured creator
+// credential or allowlist.
+const (
+	// LaunchEnvironmentSelfServePrivate is the only launch environment a
+	// self-serve approval authorizes (SPEC-043-R001/R008 0.3.0).
+	LaunchEnvironmentSelfServePrivate = "self_serve_private"
+	// SelfServeApprovalActor is the approval actor of a click-through
+	// Creator Agreement acceptance.
+	SelfServeApprovalActor = "self_serve"
+
+	CreatorAccountIDHeader    = "X-MacProvider-Creator-Account-ID"
+	CreatorCredentialIDHeader = "X-MacProvider-Creator-Credential-ID"
+	CreatorGitHubUserIDHeader = "X-MacProvider-Creator-GitHub-User-ID"
+
+	selfServeCreatorPrefix = "/internal/creator/trust-pools/"
+
+	// The published self-serve Creator Agreement. CurrentApprovalVersion stays
+	// fixed across Agreement renewals so a renewal never strands the pools
+	// bound to the approval; the Agreement version is recorded separately.
+	SelfServeCreatorAgreementID      = "malibu-creator-agreement-self-serve"
+	SelfServeCreatorAgreementVersion = "2026-10-09"
+	selfServeApprovalVersion         = "self-serve-1"
+	selfServePricingScheduleID       = "malibu-self-serve-pool"
+	selfServePricingScheduleVersion  = "2026-10-09"
+	selfServeAgreementTerm           = 365 * 24 * time.Hour
+	selfServeAgreementGrace          = 30 * 24 * time.Hour
+	selfServeAgreementRenewWindow    = 30 * 24 * time.Hour
+	selfServeRootNonceTTL            = 15 * time.Minute
+	selfServeContactMaxBytes         = 256
+)
+
+// The acknowledgment texts the coordinator hashes into the approval record.
+// The creator accepts them; it cannot supply the hashes.
+const (
+	selfServeProhibitedClaimText  = "I will not describe this pool, in any product, marketing, resale, investor, sales, or support material, as a Privacy Pool, anonymous routing, coordinator-blind, end-to-end encrypted, confidential compute, zero-knowledge or ZK inference, dedicated or isolated compute, or compliant with HIPAA, GLBA, SOC 2, PCI-DSS, GDPR adequacy, or any other regulated-vertical regime."
+	selfServeBuyerDisclosureText  = "Before or at first use I will tell every buyer I authorize that prompts and responses are visible to the Malibu coordinator and that the operator of the selected provider Mac may access request content."
+	selfServeApprovalCriteriaText = "Self-serve private pool: account authenticated by its own API key, Creator Agreement accepted by click-through, launch environment self_serve_private only, never publicly announced, provider supply limited to Macs the account's GitHub identity has claimed, buyers limited to accounts the creator names."
+)
+
+var selfServePrincipalIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$`)
+
+var errSelfServeNotSelfServe = errors.New("trustpool: creator approval is not self-serve")
+
+type selfServeAgreementTerms struct {
+	CreatorAgreementID      string `json:"creator_agreement_id"`
+	CreatorAgreementVersion string `json:"creator_agreement_version"`
+	LaunchEnvironment       string `json:"launch_environment"`
+	ProhibitedClaims        string `json:"prohibited_claim_acknowledgment"`
+	BuyerDisclosure         string `json:"buyer_disclosure_commitment"`
+	ApprovalCriteria        string `json:"approval_criteria"`
+	TermDays                int    `json:"term_days"`
+	GraceDays               int    `json:"grace_days"`
+}
+
+func currentSelfServeAgreementTerms() selfServeAgreementTerms {
+	return selfServeAgreementTerms{
+		CreatorAgreementID:      SelfServeCreatorAgreementID,
+		CreatorAgreementVersion: SelfServeCreatorAgreementVersion,
+		LaunchEnvironment:       LaunchEnvironmentSelfServePrivate,
+		ProhibitedClaims:        selfServeProhibitedClaimText,
+		BuyerDisclosure:         selfServeBuyerDisclosureText,
+		ApprovalCriteria:        selfServeApprovalCriteriaText,
+		TermDays:                int(selfServeAgreementTerm / (24 * time.Hour)),
+		GraceDays:               int(selfServeAgreementGrace / (24 * time.Hour)),
+	}
+}
+
+type selfServeAgreementRequest struct {
+	CreatorAgreementVersion       string `json:"creator_agreement_version"`
+	Accept                        bool   `json:"accept"`
+	PublicDisplayName             string `json:"public_display_name"`
+	LegalSupportContact           string `json:"legal_support_contact"`
+	BillingContact                string `json:"billing_contact"`
+	EmergencyNotificationEndpoint string `json:"emergency_notification_endpoint"`
+}
+
+func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.selfServePrincipal(r)
+	if !ok {
+		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, selfServeCreatorPrefix)
+	switch rest {
+	case "agreement":
+		h.handleSelfServeAgreement(w, r, principal)
+		return
+	case "providers":
+		h.handleSelfServeProviders(w, r, principal)
+		return
+	}
+	// Every other operation acts under an existing approval, which must be the
+	// creator's own self-serve approval: a gateway account never drives an
+	// operator-approved creator's pools.
+	if err := h.requireSelfServeApproval(r.Context(), principal.CreatorID); err != nil {
+		if errors.Is(err, errSelfServeNotSelfServe) {
+			writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "creator_not_self_serve"}})
+			return
+		}
+		h.writeLookupError(w, "creator_lookup_failed", err)
+		return
+	}
+	rewritten := r.Clone(r.Context())
+	rewritten.URL.Path = "/creator/trust-pools/" + rest
+	rewritten.URL.RawPath = ""
+	h.serveCreatorRoutes(w, rewritten, principal)
+}
+
+// selfServePrincipal accepts the forwarded principal only under the gateway
+// service token. The headers are the gateway's verified account identity, so
+// a request without the token never reaches the header parse.
+func (h *adminHandler) selfServePrincipal(r *http.Request) (creatorPrincipal, bool) {
+	if h == nil || strings.TrimSpace(h.deps.GatewayServiceToken) == "" {
+		return creatorPrincipal{}, false
+	}
+	if auth.GatewayInternalBearerMatches(r.Header, h.deps.GatewayServiceToken) == auth.BearerKindNone {
+		return creatorPrincipal{}, false
+	}
+	accountID, ok := singleHeader(r.Header, CreatorAccountIDHeader)
+	if !ok || !selfServePrincipalIDPattern.MatchString(accountID) {
+		return creatorPrincipal{}, false
+	}
+	credentialID, ok := singleHeader(r.Header, CreatorCredentialIDHeader)
+	if !ok || !selfServePrincipalIDPattern.MatchString(credentialID) {
+		return creatorPrincipal{}, false
+	}
+	principal := creatorPrincipal{CreatorID: accountID, CredentialID: credentialID, SelfServe: true}
+	if values := r.Header.Values(CreatorGitHubUserIDHeader); len(values) > 0 {
+		raw, ok := singleHeader(r.Header, CreatorGitHubUserIDHeader)
+		if !ok {
+			return creatorPrincipal{}, false
+		}
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 || strconv.FormatInt(id, 10) != raw {
+			return creatorPrincipal{}, false
+		}
+		principal.GitHubUserID = id
+	}
+	return principal, true
+}
+
+func singleHeader(h http.Header, name string) (string, bool) {
+	values := h.Values(name)
+	if len(values) != 1 {
+		return "", false
+	}
+	v := strings.TrimSpace(values[0])
+	return v, v != "" && v == values[0]
+}
+
+func (h *adminHandler) requireSelfServeApproval(ctx context.Context, creatorID string) error {
+	approval, ok, err := h.deps.Store.CreatorApproval(ctx, creatorID)
+	if err != nil {
+		return err
+	}
+	if ok && approval.ApprovedBy != SelfServeApprovalActor {
+		return errSelfServeNotSelfServe
+	}
+	return nil
+}
+
+// handleSelfServeAgreement serves the published Agreement terms (GET) and
+// records the creator's click-through acceptance (POST) as a self-serve
+// approval (SPEC-043-R001 0.3.0).
+func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	switch r.Method {
+	case http.MethodGet:
+		writeAdminJSON(w, http.StatusOK, map[string]any{"agreement": currentSelfServeAgreementTerms()})
+		return
+	case http.MethodPost:
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var body selfServeAgreementRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	if !body.Accept || body.CreatorAgreementVersion != SelfServeCreatorAgreementVersion {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "agreement_not_accepted", "current_version": SelfServeCreatorAgreementVersion}})
+		return
+	}
+	for _, field := range []string{body.PublicDisplayName, body.LegalSupportContact, body.BillingContact, body.EmergencyNotificationEndpoint} {
+		if strings.TrimSpace(field) == "" || len(field) > selfServeContactMaxBytes {
+			writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_agreement_fields"}})
+			return
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now().UTC()
+	current, exists, err := h.deps.Store.CreatorApproval(r.Context(), principal.CreatorID)
+	if err != nil {
+		h.writeLookupError(w, "creator_lookup_failed", err)
+		return
+	}
+	next := selfServeApproval(principal.CreatorID, body, now)
+	if exists {
+		switch {
+		case current.ApprovedBy != SelfServeApprovalActor:
+			writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "creator_not_self_serve"}})
+			return
+		case current.Status != CreatorStatusEnabled:
+			writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_suspended"}})
+			return
+		case selfServeAgreementUnchanged(current, next) && now.Add(selfServeAgreementRenewWindow).Before(current.CreatorAgreementExpiresAtUTC):
+			// An exact repeat inside the term is idempotent; renewal resets
+			// the term only near expiry or for a new Agreement version.
+			writeAdminJSON(w, http.StatusOK, map[string]any{"creator": current})
+			return
+		}
+		next.ApprovedAtUTC = current.ApprovedAtUTC
+	}
+	committed, err := h.deps.Store.UpsertCreatorApproval(r.Context(), next)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{"creator": committed})
+}
+
+func selfServeApproval(creatorID string, body selfServeAgreementRequest, now time.Time) CreatorApproval {
+	expires := now.Add(selfServeAgreementTerm)
+	return CreatorApproval{
+		CreatorAccountID:                  creatorID,
+		ApprovalRecordID:                  "self-serve:" + creatorID,
+		CurrentApprovalVersion:            selfServeApprovalVersion,
+		PublicDisplayName:                 strings.TrimSpace(body.PublicDisplayName),
+		LegalSupportContact:               strings.TrimSpace(body.LegalSupportContact),
+		BillingContact:                    strings.TrimSpace(body.BillingContact),
+		EmergencyNotificationEndpoint:     strings.TrimSpace(body.EmergencyNotificationEndpoint),
+		AcknowledgedMaxResponseTime:       "P7D",
+		AllowedProductCategory:            "self_serve_private_pool",
+		DataRetentionCategory:             "standard",
+		SupportOwner:                      "malibu-self-serve",
+		AllowedLaunchEnvironment:          LaunchEnvironmentSelfServePrivate,
+		CreatorAgreementID:                SelfServeCreatorAgreementID,
+		CreatorAgreementVersion:           SelfServeCreatorAgreementVersion,
+		CreatorAgreementExpiresAtUTC:      expires,
+		CreatorAgreementGraceEndsAtUTC:    expires.Add(selfServeAgreementGrace),
+		PricingScheduleID:                 selfServePricingScheduleID,
+		PricingScheduleVersion:            selfServePricingScheduleVersion,
+		ProhibitedClaimAcknowledgmentHash: sha256HexString(selfServeProhibitedClaimText),
+		BuyerDisclosureCommitmentHash:     sha256HexString(selfServeBuyerDisclosureText),
+		ApprovalCriteriaHash:              sha256HexString(selfServeApprovalCriteriaText),
+		ApprovedBy:                        SelfServeApprovalActor,
+		ApprovedAtUTC:                     now,
+		Status:                            CreatorStatusEnabled,
+	}
+}
+
+func selfServeAgreementUnchanged(current, next CreatorApproval) bool {
+	return current.CreatorAgreementVersion == next.CreatorAgreementVersion &&
+		current.PublicDisplayName == next.PublicDisplayName &&
+		current.LegalSupportContact == next.LegalSupportContact &&
+		current.BillingContact == next.BillingContact &&
+		current.EmergencyNotificationEndpoint == next.EmergencyNotificationEndpoint
+}
+
+func sha256HexString(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// handleSelfServeProviders lists the providers the principal's GitHub
+// identity has claimed: the SPEC-043-R006 0.3.0 self-serve ceiling.
+func (h *adminHandler) handleSelfServeProviders(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	owned, err := h.selfServeOwnedProviders(r.Context(), principal)
+	if err != nil {
+		h.writeLookupError(w, "provider_ownership_lookup_failed", err)
+		return
+	}
+	type ownedProvider struct {
+		ProviderID     string `json:"provider_id"`
+		Admissible     bool   `json:"admissible"`
+		ServingCapable bool   `json:"serving_capable"`
+	}
+	out := make([]ownedProvider, 0, len(owned))
+	for _, id := range owned {
+		out = append(out, ownedProvider{
+			ProviderID:     id,
+			Admissible:     h.creatorProviderAdmittedFor(principal, id),
+			ServingCapable: h.creatorProviderCurrentlyAdmitted(id),
+		})
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"github_identity_linked": principal.GitHubUserID > 0,
+		"providers":              out,
+	})
+}
+
+func (h *adminHandler) selfServeOwnedProviders(ctx context.Context, principal creatorPrincipal) ([]string, error) {
+	if !principal.SelfServe || principal.GitHubUserID <= 0 || h.deps.OwnedProviderIDs == nil {
+		return nil, nil
+	}
+	return h.deps.OwnedProviderIDs(ctx, principal.GitHubUserID)
+}
+
+// creatorProviderOwned applies the principal's owned-provider ceiling: the
+// ownership-claim table for a self-serve principal, the configured allowlist
+// otherwise.
+func (h *adminHandler) creatorProviderOwned(ctx context.Context, principal creatorPrincipal, providerID string) (bool, error) {
+	if !principal.SelfServe {
+		return h.creatorProviderAdmitAllowed(principal.CreatorID, providerID), nil
+	}
+	if providerID == "" {
+		return false, nil
+	}
+	owned, err := h.selfServeOwnedProviders(ctx, principal)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range owned {
+		if id == providerID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// creatorProviderAdmittedFor applies the admission-time liveness check:
+// token-authenticated presence for a self-serve principal, serving
+// capability otherwise.
+func (h *adminHandler) creatorProviderAdmittedFor(principal creatorPrincipal, providerID string) bool {
+	if principal.SelfServe && h.deps.SelfServeProviderAdmitted != nil {
+		return providerID != "" && h.deps.SelfServeProviderAdmitted(providerID)
+	}
+	return h.creatorProviderCurrentlyAdmitted(providerID)
+}
+
+// creatorBuyerGrantAllowed applies the buyer ceiling. A self-serve creator's
+// durable grant is itself the per-account authorization (SPEC-043-R007
+// 0.3.0); it only needs a well-formed gateway account id.
+func (h *adminHandler) creatorBuyerGrantAllowed(principal creatorPrincipal, buyerAccountID string) bool {
+	if !principal.SelfServe {
+		return h.creatorBuyerAccountAllowed(principal.CreatorID, buyerAccountID)
+	}
+	return selfServePrincipalIDPattern.MatchString(buyerAccountID)
+}
+
+// fillSelfServeNonceIssue binds a self-serve nonce to the creator's current
+// approval so the CLI need not echo coordinator-fixed values back.
+func (h *adminHandler) fillSelfServeNonceIssue(ctx context.Context, issue *RootRegistrationNonceIssue) error {
+	approval, ok, err := h.deps.Store.CreatorApproval(ctx, issue.CreatorAccountID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrCreatorApprovalGate
+	}
+	if strings.TrimSpace(issue.ApprovalRecordID) == "" {
+		issue.ApprovalRecordID = approval.ApprovalRecordID
+	}
+	if strings.TrimSpace(issue.CurrentApprovalVersion) == "" {
+		issue.CurrentApprovalVersion = approval.CurrentApprovalVersion
+	}
+	if strings.TrimSpace(issue.LaunchEnvironment) == "" {
+		issue.LaunchEnvironment = approval.AllowedLaunchEnvironment
+	}
+	if issue.ExpiresAtUTC.IsZero() {
+		issue.ExpiresAtUTC = time.Now().UTC().Add(selfServeRootNonceTTL)
+	}
+	return nil
+}
