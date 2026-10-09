@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -45,9 +44,10 @@ type relayBlindService struct {
 	// waiters counts relay-blind slot waiters per provider. It is capped so
 	// relay-blind waits cannot fill the shared queue plaintext routing uses.
 	waiters map[string]int
-	// selectRotation offsets the start of each candidate tier so concurrent
-	// reservations spread across equally ranked providers.
-	selectRotation atomic.Uint64
+	// rotations offsets the start of each candidate tier per model and key
+	// class, so concurrent reservations spread across equally ranked
+	// providers.
+	rotations map[string]uint64
 }
 
 // relayBlindDurableWriteTimeout bounds each store write that must land even
@@ -477,7 +477,8 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 }
 
 func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
-	var candidates []pool.Provider
+	var providers []pool.Provider
+	var keys []relayblind.KeyRecord
 	for _, provider := range s.pool.Snapshot() {
 		eligible := relayBlindBindable(provider)
 		if requireFree {
@@ -491,41 +492,49 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		if provider.ModelAdmissionPoolModelID != "" {
 			continue
 		}
-		candidates = append(candidates, provider)
-	}
-	for _, provider := range s.orderRelayBlindCandidates(candidates) {
 		if s.relayBlindSettlementPrerequisite(provider) != "" {
 			continue
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
-			return provider, records[0], true
+			providers = append(providers, provider)
+			keys = append(keys, records[0])
 		}
 	}
-	return pool.Provider{}, relayblind.KeyRecord{}, false
+	order := s.orderRelayBlindCandidates(providers, class+"\x00"+model)
+	if len(order) == 0 {
+		return pool.Provider{}, relayblind.KeyRecord{}, false
+	}
+	return providers[order[0]], keys[order[0]], true
 }
 
-// orderRelayBlindCandidates ranks providers whose free slot is not already
-// claimed by the slot queue ahead of busy ones, and rotates the start within
-// each tier. A reservation is pinned to one provider, so binding every
-// reservation to the first provider in session order leaves idle providers
-// unused while the first one's queue times out.
-func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []pool.Provider {
-	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
-	var free, busy []pool.Provider
-	for _, provider := range providers {
+// orderRelayBlindCandidates returns the indexes of fully eligible providers
+// in selection order: providers whose free slot is not already claimed by the
+// slot queue first, then busy ones, each tier rotated per rotation key
+// (key class and model). A reservation is pinned to one provider, so binding
+// every reservation to the first provider in session order leaves idle
+// providers unused while the first one's queue times out.
+func (s *Server) orderRelayBlindCandidates(providers []pool.Provider, rotationKey string) []int {
+	sorted := make([]int, len(providers))
+	for i := range sorted {
+		sorted[i] = i
+	}
+	sort.Slice(sorted, func(i, j int) bool { return providers[sorted[i]].AssignedID < providers[sorted[j]].AssignedID })
+	var free, busy []int
+	for _, i := range sorted {
+		provider := providers[i]
 		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree)) {
-			free = append(free, provider)
+			free = append(free, i)
 		} else {
-			busy = append(busy, provider)
+			busy = append(busy, i)
 		}
 	}
 	var offset uint64
-	if s.relayBlind != nil {
-		offset = s.relayBlind.selectRotation.Add(1) - 1
+	if s.relayBlind != nil && len(providers) > 1 {
+		offset = s.relayBlind.nextRotation(rotationKey)
 	}
-	ordered := make([]pool.Provider, 0, len(providers))
-	for _, tier := range [][]pool.Provider{free, busy} {
+	ordered := make([]int, 0, len(providers))
+	for _, tier := range [][]int{free, busy} {
 		if len(tier) == 0 {
 			continue
 		}
@@ -534,6 +543,17 @@ func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []pool.Pro
 		ordered = append(ordered, tier[:start]...)
 	}
 	return ordered
+}
+
+func (r *relayBlindService) nextRotation(key string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.rotations == nil {
+		r.rotations = map[string]uint64{}
+	}
+	offset := r.rotations[key]
+	r.rotations[key] = offset + 1
+	return offset
 }
 
 func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request) {

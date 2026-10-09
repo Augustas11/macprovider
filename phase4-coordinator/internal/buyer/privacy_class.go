@@ -191,13 +191,12 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 	if s.pool == nil || !s.relayBlindAvailable() {
 		return privacySelection{}, privacyClassUnavailable
 	}
-	var candidates []pool.Provider
+	var providers []pool.Provider
+	var selections []privacySelection
 	for _, provider := range s.pool.Snapshot() {
-		if relayBlindBindable(provider) && provider.IsWSTunneled() && modelIDEqual(provider.ModelID, model) {
-			candidates = append(candidates, provider)
+		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
+			continue
 		}
-	}
-	for _, provider := range s.orderRelayBlindCandidates(candidates) {
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
 		if err != nil || len(records) == 0 {
 			if err != nil {
@@ -217,8 +216,13 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 				s.logPrivacyGateRejection("key_attestation_missing_or_mismatched")
 				continue
 			}
-			return privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt}, ""
+			providers = append(providers, provider)
+			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
+			break
 		}
+	}
+	if order := s.orderRelayBlindCandidates(providers, relayblind.KeyClassPrivacy+"\x00"+model); len(order) > 0 {
+		return selections[order[0]], ""
 	}
 	s.logPrivacyGateRejection("no_eligible_provider")
 	return privacySelection{}, privacyClassUnavailable
