@@ -20,8 +20,18 @@ The unset per-iteration prefill token budget rises from 1024 to 2048 so four
 balanced chunks of 1.5k-token prompts share one forward; on the Studio M3
 Ultra with Qwen3.6-35B-A3B and 1536-token prompts this measured 132 vs 115
 tok/s aggregate and 74 vs 301 ms ITL p95 at 8 rows against the pre-change
-serve, with TTFT p95 5.5 vs 4.4 s (`docs/research/issue-1906/`). No wire,
-receipt, or acceptance-coverage change.
+serve, with TTFT p95 5.5 vs 4.4 s, and 136.5 vs 126.8 tok/s at 16 rows
+(`docs/research/issue-1906/prefill-2026-10-09/`). Ragged sharing is on by
+default wherever the backend supports it; there is no separate config key.
+A peer joins a ragged group only while (max offset + chunk) <= 2 x (min
+offset + chunk), so no row attends over more than twice the keys it needs.
+That evidence used uniform 1536-token prompts only: mixed-length prompts were
+not benchmarked, and the spread cap is what bounds that case. A failed ragged
+forward fails every row in its group (no per-row fallback, since each row's
+cache already took the chunk). Streaming receipts on continuous-batching rows
+report TTFT at the row's first buyer-visible chunk, ignoring replay
+deliveries; non-streaming receipts keep full generation latency (SPEC-015).
+No wire or acceptance-coverage change.
 **Change log v0.3.10 (2026-10-09, policy expiry is structural):**
 Follows SPEC-023 v0.22.14. The signed policy's `expires_at` must follow
 `generated_at` but no longer gates authorization: a tuple stays authorized
@@ -545,8 +555,11 @@ complete MUST fail that group's rows rather than retry them serially, because
 the forward has already appended each row's chunk to its own cache. To make
 chunk lengths meet, the scheduler MAY shorten a row's chunk below its own
 balanced chunk, but MUST NOT shorten it below half of that chunk and MUST NOT
-cross the row's prompt end or a recurrent checkpoint boundary. The FCFS head
-always leads the group. The group length is either the head's chunk or a
+cross the row's prompt end or a recurrent checkpoint boundary. Keys of a
+ragged group are padded to its longest row, so the scheduler MUST admit a row
+at another offset only while `(max offset + L) <= 2 x (min offset + L)` over
+the group including that row (`maxRaggedKeySpreadFactor`); equal-offset groups
+are unaffected. The FCFS head always leads the group. The group length is either the head's chunk or a
 shorter peer chunk, whichever advances the most prompt tokens within the row
 cap and token budget. Fallback MUST
 preserve FCFS accounting, cancellation boundaries, receipt boundaries,

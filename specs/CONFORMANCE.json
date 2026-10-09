@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.17",
+      "version": "v0.22.18",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2897,7 +2897,8 @@
         "phase3-binary/Sources/macprovider-cli/AutotuneConcurrencyCalibration.swift:struct Stage1ConcurrencyCalibrationAdapter",
         "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:var calibrateConcurrency = false",
         "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:var calibrateConcurrencyPromptTokens",
-        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:var calibrateConcurrencyCompletionTokens"
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:var calibrateConcurrencyCompletionTokens",
+        "phase3-binary/Sources/MacProviderCore/Config.swift:public static let maxConcurrencyDepthOverrideKey"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testSelectsDepthWithHighestAggregateThroughput",
@@ -2914,6 +2915,10 @@
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testOperatorProbeShapeIsUsedAndRecorded",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testProbeShapeOptionsRequireCalibrateConcurrency",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testStoredV1RecordStillDecodes",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testV2RecordDecodesWithPrePR1906Decoder",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testWindowTTFTOfAStreamWithNoVisibleDeltaIsItsFullLatency",
+        "phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift::testApplyKeepsRollbackSafeConcurrencyAndCarriesHigherDepth",
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift::testMaxConcurrencyDepthOverrideWinsOverRollbackSafeKey",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testWindowCountsOnlyTokensStreamedInsideTheWindow",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testWindowTTFTFallsBackToAllRequestsWhenNoneStartInside",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneConcurrencyCalibrationTests.swift::testWindowProratesSuppressedReasoningStreamOverProviderDecodeWindow",
@@ -2930,7 +2935,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1589",
-        "rationale": "SPEC-023 v0.13.0 \u00a79.2 adds an opt-in --calibrate-concurrency post-selection probe that measures the selected verified artifact's aggregate decode throughput and per-stream p95 TTFT across a bounded batch sweep and emits an empirical max_concurrency_override in [1, min(memory_fit_cap, 8)], replacing the blind AutotuneRecommendHardware.recommendedMaxBatch tier constant only when explicitly requested. The tier constant remains the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed); it is NOT a floor, so a calibrated value MAY be below it down to 1 when the box cannot sustain it within the latency ceiling. Without the flag the pre-v0.13.0 byte shape and applied value are unchanged. Automatic installer use is NOT authorized in this revision (\u00a79.2): it remains pending signed physical-hardware evidence on a representative multi-slot box (the live 256 GB M3 Ultra) and an owner decision under #1589. v0.22.14 (#1906) replaces the one-burst context-filling 64-token probe with a closed-loop steady-state window over a fixed synthetic agent-chat shape (default 1792 prompt / 1024 completion tokens, operator-overridable), removes the 1.5x TTFT regression gate, and measures every ladder depth up to the bound (stopping only at a TTFT-ceiling failure or error) before selecting the highest feasible aggregate within the tie band (autotune_concurrency_calibration.v2). Do not promote from this close; measured-selection evidence and a JOURNEY-PROVIDER-PREBETA-ADMISSION-class result are the promotion blockers."
+        "rationale": "SPEC-023 v0.13.0 \u00a79.2 adds an opt-in --calibrate-concurrency post-selection probe that measures the selected verified artifact's aggregate decode throughput and per-stream p95 TTFT across a bounded batch sweep and emits an empirical served depth in [1, min(memory_fit_cap, max_concurrency_override_limit)] (the bound is 32 since v0.22.16; 8 before), replacing the blind AutotuneRecommendHardware.recommendedMaxBatch tier constant only when explicitly requested. The tier constant remains the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed); it is NOT a floor, so a calibrated value MAY be below it down to 1 when the box cannot sustain it within the latency ceiling. Without the flag the pre-v0.13.0 byte shape and applied value are unchanged. Automatic installer use is NOT authorized in this revision (\u00a79.2): it remains pending signed physical-hardware evidence on a representative multi-slot box (the live 256 GB M3 Ultra) and an owner decision under #1589. v0.22.14 (#1906) replaces the one-burst context-filling 64-token probe with a closed-loop steady-state window over a fixed synthetic agent-chat shape (default 1792 prompt / 1024 completion tokens, operator-overridable), removes the 1.5x TTFT regression gate, and measures every ladder depth up to the bound (stopping only at a TTFT-ceiling failure or error) before selecting the highest feasible aggregate within the tie band (autotune_concurrency_calibration.v2). v0.22.18 makes it rollback-safe (a depth above 8 is written as max_concurrency_override 8 plus max_concurrency_depth_override, and v2 keeps a fixed ttft_regression_factor 1.5 for pre-v2 decoders), measures gating TTFT from the first streamed delta only, and records that the coordinator pool.max_concurrency_ceiling (default 8) clamps served slots. Do not promote from this close; measured-selection evidence and a JOURNEY-PROVIDER-PREBETA-ADMISSION-class result are the promotion blockers."
       }
     },
     {
@@ -4645,6 +4650,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingNeverCutsAChunkBelowHalfItsOwnLength",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingHonoursRowCapAndTokenBudget",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingCapsTheKeySpread",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testLockstepWindowDeliversEachStepBeforeTheWindowReturns",
@@ -6173,7 +6179,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice descriptors only for SPEC-018 \u00a73.8 multi-turn families, response_format object descriptor and structured_outputs only for SPEC-019 \u00a74 families; probe rejects rows outside the listing set), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, coordinator 429 capacity shedding with Retry-After passed through to every buyer (v0.9.48, #1906), and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
+        "rationale": "OpenRouter schema-2.4 models document (v0.9.40: operator listing set is Qwen3.6-35B-A3B only; tools/tool_choice descriptors only for SPEC-018 \u00a73.8 multi-turn families, response_format object descriptor and structured_outputs only for SPEC-019 \u00a74 families; probe rejects rows outside the listing set), wholesale partner chat flags including bounded slot-queue smoothing, immediate same-moment reservation-overflow shedding, coordinator 429 capacity shedding with Retry-After passed through to every buyer, sent only to callers with X-MacProvider-Capacity-Shed-429 (v0.9.49, #1906), and dual SKU alias ids (\u00a72.2, \u00a75.3.2, \u00a77.8, \u00a717.9). Mapped to new gateway/coordinator/probe tests. Not promoted. Signed journey-result still required."
       }
     },
     {

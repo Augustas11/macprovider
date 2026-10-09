@@ -4,8 +4,12 @@
 
 **Change log v1.6.11 (2026-10-09, issue #1906):** A known model with
 serving-capable supply whose providers are all full now sheds as `429
-no_provider_available` with `Retry-After: 1` (SPEC-006 v0.9.48 §7.8), not
-`503`. `503 no_provider_available` stays for a known model with no
+no_provider_available` with `Retry-After: 1` (SPEC-006 v0.9.49 §7.8), not
+`503`, when the request carries `X-MacProvider-Capacity-Shed-429: 1` (the
+gateway always sends it). Without the header the coordinator keeps the
+pre-1.6.11 `503 no_provider_available` for the same outcome, so a
+coordinator deployed before the gateway cannot hand an older gateway a
+`429` it would settle as a provider error. `503 no_provider_available` stays for a known model with no
 serving-capable provider. FR-P14.1 `error_queue_full` keeps the re-route,
 returns the refused seat to the coordinator count, holds that provider only
 until its next forwarded completion, and sheds the final buyer response as
@@ -1855,8 +1859,10 @@ The coordinator selects a provider using the routing algorithm defined
 in Section 5. If serving-capable providers exist but every one is full,
 the coordinator returns the SPEC-006 §7.8 capacity shed: HTTP 429,
 `code: no_provider_available`, `type: rate_limit_exceeded`,
-`retryable: true`, `Retry-After: 1`. If no serving-capable provider
-exists, the coordinator returns HTTP 503:
+`retryable: true`, `Retry-After: 1`, provided the request carries
+`X-MacProvider-Capacity-Shed-429: 1`; otherwise it returns the HTTP 503
+below (SPEC-006 §7.8 capacity status table). If no serving-capable
+provider exists, the coordinator returns HTTP 503:
 ```json
 {
   "error": {
