@@ -28,6 +28,7 @@ from scripts.check_spec_governance import (
     _signed_journey_result_satisfies,
     resolve_trusted_openssl,
 )
+import scripts.check_spec_governance as spec_governance
 from scripts.tests.test_journey_result_tools import load_promoter_module
 from scripts.tests.test_spec_governance import base_repository, write_repository
 from scripts.pool_promotion_transition import (
@@ -353,12 +354,40 @@ def creator_mvp_requirement(root: Path, source: str) -> dict:
     }
 
 
+def _openssl3_first_candidates() -> tuple[str, ...] | None:
+    """Trusted OpenSSL candidates reordered so an OpenSSL 3 binary comes first.
+
+    macOS ships LibreSSL as /usr/bin/openssl, the first trusted candidate, and
+    the P-256 keys and signatures these fixtures make with it fail
+    verification. Linux CI's /usr/bin/openssl is OpenSSL 3 and stays first.
+    Returns None when no trusted candidate is OpenSSL 3.
+    """
+    candidates = tuple(spec_governance.TRUSTED_OPENSSL_CANDIDATES)
+    for candidate in candidates:
+        try:
+            version = subprocess.run(
+                [resolve_trusted_openssl(candidate), "version"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+        except (ValueError, OSError, subprocess.CalledProcessError):
+            continue
+        if version.startswith("OpenSSL 3."):
+            return (candidate,) + tuple(c for c in candidates if c != candidate)
+    return None
+
+
 class PoolPromotionTransitionTests(unittest.TestCase):
     def setUp(self) -> None:
-        try:
-            self.openssl_bin = resolve_trusted_openssl()
-        except ValueError as exc:
-            raise unittest.SkipTest(str(exc)) from exc
+        ordered = _openssl3_first_candidates()
+        if ordered is None:
+            raise unittest.SkipTest(
+                "no trusted OpenSSL 3 binary (LibreSSL cannot produce these P-256 fixtures); "
+                "install openssl@3 (e.g. brew install openssl@3) to run this suite"
+            )
+        patcher = mock.patch.object(spec_governance, "TRUSTED_OPENSSL_CANDIDATES", ordered)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.openssl_bin = resolve_trusted_openssl()
 
     def test_valid_transition_consumes_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

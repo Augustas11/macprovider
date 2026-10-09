@@ -193,17 +193,17 @@ func GenerateEnrollmentProfile(serialNumber string, cfg Config) string {
   <integer>1</integer>
 </dict>
 </plist>`,
-		scepURL,                    // SCEP URL
-		mdmPayloadIdentifierNS,     // SCEP PayloadIdentifier prefix
-		scepPayloadUUID,            // SCEP PayloadUUID (stable)
-		mdmCheckInURL,              // MDM CheckInURL
-		scepPayloadUUID,            // MDM IdentityCertificateUUID (refs SCEP payload)
-		mdmPayloadIdentifierNS,     // MDM PayloadIdentifier prefix
-		mdmPayloadUUID,             // MDM PayloadUUID (stable)
-		mdmServerURL,               // MDM ServerURL
-		pushTopic,                  // MDM Topic
-		mdmPayloadIdentifierNS,     // outer PayloadIdentifier prefix
-		serialNumber,               // outer PayloadIdentifier serial suffix
-		profileUUID,                // outer PayloadUUID (fresh per request)
+		scepURL,                // SCEP URL
+		mdmPayloadIdentifierNS, // SCEP PayloadIdentifier prefix
+		scepPayloadUUID,        // SCEP PayloadUUID (stable)
+		mdmCheckInURL,          // MDM CheckInURL
+		scepPayloadUUID,        // MDM IdentityCertificateUUID (refs SCEP payload)
+		mdmPayloadIdentifierNS, // MDM PayloadIdentifier prefix
+		mdmPayloadUUID,         // MDM PayloadUUID (stable)
+		mdmServerURL,           // MDM ServerURL
+		pushTopic,              // MDM Topic
+		mdmPayloadIdentifierNS, // outer PayloadIdentifier prefix
+		serialNumber,           // outer PayloadIdentifier serial suffix
+		profileUUID,            // outer PayloadUUID (fresh per request)
 	)
 }

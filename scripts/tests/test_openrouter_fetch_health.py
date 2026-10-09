@@ -120,6 +120,21 @@ class OpenRouterFetchHealthTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("is missing", err)
 
+    def test_non_finite_archive_age_threshold_alarms(self) -> None:
+        for value in ("nan", "inf"):
+            with self.subTest(value=value):
+                code, _, err = _run(
+                    [
+                        "--skip-key-probe",
+                        "--snapshot-archive",
+                        tempfile.gettempdir(),
+                        "--max-snapshot-age-hours",
+                        value,
+                    ]
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("must be finite and positive", err)
+
 
 if __name__ == "__main__":
     unittest.main()

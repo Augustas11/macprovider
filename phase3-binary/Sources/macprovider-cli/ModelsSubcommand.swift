@@ -31,7 +31,23 @@ struct ModelsCommand: AsyncParsableCommand {
 struct ModelsDiscoverCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "discover",
-        abstract: "Discover provider-local BYOM candidates."
+        abstract: "Discover provider-local BYOM candidates.",
+        discussion: """
+        mlx_lm.server is found without configuration: when MACPROVIDER_MLXLM_MODEL_PATH \
+        is unset, discovery asks MACPROVIDER_MLXLM_ORIGIN (or 127.0.0.1:8080 and \
+        127.0.0.1:8081, never the provider's own serve port) for GET /v1/models; \
+        only an answer shaped like mlx_lm.server's own (Python http.server, model \
+        entries of id/object/created) is used, binding the one snapshot directory the \
+        server lists as its --model path, when that directory (symlinks resolved) is \
+        inside the provider model store or a Hugging Face hub cache snapshot; any \
+        other directory must be named in MACPROVIDER_MLXLM_MODEL_PATH, and a \
+        non-absolute MACPROVIDER_MLXLM_MODEL_PATH is an error. Start it with a local \
+        snapshot path, e.g. \
+        `mlx_lm.server --model /path/to/snapshot --host 127.0.0.1 --port 8081`; \
+        port 8080 is macprovider-cli serve's own port. serve detects the same \
+        server for an mlxlm: model; a server started with a Hugging Face repo id \
+        is not supported.
+        """
     )
 
     @Flag(name: .customLong("json"), help: "Emit the strict provider_byom_discovery.v1 JSON contract.")
@@ -40,7 +56,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -81,15 +97,16 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             writeStderr("models discover is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
@@ -113,7 +130,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -154,15 +171,16 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL())
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -207,7 +225,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -252,15 +270,16 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             }
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -284,7 +303,8 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 environment: environment,
                 credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
                 identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
-                client: client
+                client: client,
+                requestedPoolModelID: resolved.config.poolModelID
             )
             // SPEC-046 v0.3.0: a target that names an mlxlm_loopback
             // candidate (by id, served ref, or display name) is offered
@@ -305,6 +325,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                     servedArtifactPath: resolved.config.modelArtifactPath,
                     servedModelID: resolved.config.model
                 )
+            for hint in BYOMPoolBindingHint.hints(for: status.warnings) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
@@ -406,7 +427,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -452,21 +473,23 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             if let evaluationDigest, evaluationDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
                 throw BYOMModelAdmissionError.invalidEvaluationDigest
             }
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: nil,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
             ).withCatalogMatcher(
                 offline: offlineArtifactFeed,
                 coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
-            )
+            ).withLoopbackRuntimeProbes()
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
                 : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
+            for hint in BYOMPoolBindingHint.hints(for: bundle.offerStatus?.warnings ?? []) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(bundle)
         } catch let error as PoolModelProposalError {
             writeStderr("models propose: \(error.description)")
@@ -534,7 +557,8 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             environment: environment,
             credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
             identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
-            client: client
+            client: client,
+            requestedPoolModelID: resolved.config.poolModelID
         )
         let submitted: (status: BYOMAdmissionStatusWire, candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String])
         if await runtime.mlxlmCandidate(target: candidate) != nil {
@@ -621,7 +645,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -668,15 +692,16 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -688,6 +713,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
             if let note = poolBindingNote(status) {
                 writeStderr("models admission status: \(note)")
             }
+            for hint in BYOMPoolBindingHint.hints(for: status.warnings) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
@@ -726,7 +752,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -777,15 +803,16 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -839,7 +866,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -888,15 +915,16 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ctlSocketPath: ctlSocketPath
         )
         let currentModelID = await readCurrentModelID(config: modelsConfig)
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config))
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
         // BYOM identity is resolved through the one matcher selection every
         // admission command shares (#1816): the coordinator's signed live
         // artifact feed when usable, else the compiled-in release; the
@@ -3088,4 +3116,22 @@ private func exactLocalArtifactPresent(
         return false
     }
     return (try? artifactResolver.verifiedExistingArtifact(for: row)) != nil
+}
+
+/// #1880: the coordinator's status warnings for an offer the pool bind could
+/// not place, turned into the provider's next step.
+enum BYOMPoolBindingHint {
+    static let ambiguous = "pool_binding_ambiguous"
+    static let requestedEntryUnmatched = "pool_binding_requested_entry_unmatched"
+
+    static func hints(for warnings: [String]) -> [String] {
+        var out: [String] = []
+        if warnings.contains(ambiguous) {
+            out.append("models offer warning: pool_binding_ambiguous: this artifact is an entry in more than one of your active pools, so the offer bound to none; withdraw it first (macprovider-cli models admission withdraw <served-model-ref> --yes --json; the coordinator refuses a changed offer while this one is pending), set pool_model_id: pool/<pool_id>/<slug> in the provider config (or MACPROVIDER_POOL_MODEL_ID), run macprovider-cli models offer <served-model-ref> --yes --json again, then run macprovider-cli restart")
+        }
+        if warnings.contains(requestedEntryUnmatched) {
+            out.append("models offer warning: pool_binding_requested_entry_unmatched: no active pool entry matches the configured pool_model_id for this artifact; check the pool id and slug against the creator's signed manifest (creator status), and that the pool is active and this Mac is a member")
+        }
+        return out
+    }
 }

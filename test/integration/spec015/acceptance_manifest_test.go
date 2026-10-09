@@ -68,7 +68,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "non-streaming chat emits a parseable seven-field receipt header through the gateway",
 		SpecStep: "SPEC-015 §14 AC-4",
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase5-gateway && go test ./... -count=1", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
-		CIJobs:   []string{"phase3-binary (swift test)", "phase5-gateway (go vet + test)", "spec-015-acceptance"},
+		CIJobs:   []string{"phase3-binary (swift test)", "phase5-gateway (go vet + test)", "integration (cross-service)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testNonStreamingReceiptHeaderParsesAndSelfVerifies"},
 			{"phase5-gateway/internal/router/server_test.go", "TestReceiptHeaderForwardedAndSiblingMacProviderHeadersStripped"},
@@ -80,7 +80,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "receipt prompt_hash matches the SPEC-015 canonical prompt hash",
 		SpecStep: "SPEC-015 §14 AC-5",
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
-		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
+		CIJobs:   []string{"phase3-binary (swift test)", "integration (cross-service)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/PromptCanonicalizerTests.swift", "testKnownGoodPromptVectorUsesSixteenCommittedKeys"},
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "PromptCanonicalizer.promptHash"},
@@ -92,7 +92,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "receipt output_hash matches the SPEC-015 canonical output hash",
 		SpecStep: "SPEC-015 §14 AC-6",
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
-		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
+		CIJobs:   []string{"phase3-binary (swift test)", "integration (cross-service)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/OutputCanonicalizerTests.swift", "testKnownGoodOutputVectorUsesThreeCommittedKeys"},
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "OutputCanonicalizer.outputHash"},
@@ -104,7 +104,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "receipt tuple signatures verify against provider_pubkey",
 		SpecStep: "SPEC-015 §14 AC-7",
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
-		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
+		CIJobs:   []string{"phase3-binary (swift test)", "integration (cross-service)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift", "testBuildSignsTupleAndSignatureSelfVerifies"},
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "isValidSignature"},
@@ -203,7 +203,6 @@ var spec015ACs = []acceptanceCriterion{
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testWorstCaseModelIDHeaderStaysUnder4096Bytes"},
 			{"phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh", "proxy_buffer_size 8k"},
-			{"test/integration/spec015/run_acceptance.sh", "SPEC-015 AC-15 nginx receipt header deployment buffers"},
 		},
 	},
 	{

@@ -13,7 +13,7 @@ not add steps of its own:
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
 Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
-`test-runbook-commands.sh`, `test-entrypoints.sh`, `test-fast-required.sh`.
+`test-runbook-commands.sh`, `test-entrypoints.sh`.
 
 ## Use
 
@@ -91,27 +91,3 @@ variable.
 target" and "Active candidate" sections of `docs/releases/cli-release-train.md`
 from GitHub and `/healthz` (plus `MIRROR_LATEST_URL` when set). Paste its
 output over those sections instead of typing status by hand.
-
-## Risk-sized gates (draft)
-
-`.github/workflows/fast-required.yml` is a draft and is not enabled: it runs
-only on manual dispatch. It takes under 5 minutes and scopes every check to
-the diff: gofmt and `go vet` on the touched Go packages, `catalog-release.py
-verify` when the catalog changed, the `scripts/ops` tests when they changed,
-`check_spec_pr_declaration.py`, and `bash -n` on touched scripts. It prints
-`lane=fast` only when every changed path is Markdown at the repo root or under
-`docs/`, `audits/` or `beta/`, or a `.cursor/rules/` file (case-insensitive).
-Everything else, including `specs/`, fixtures, coordinator config, the catalog
-and `scripts/ops/`, is `lane=full`. `test-fast-required.sh` checks the lanes.
-
-To enable it, in one PR:
-
-1. Switch its trigger to `pull_request`.
-2. Have `ci-required` read the lane. It already gates on the `changes`
-   detector (`scripts/ci-detect-changed-paths.sh`). Add `fast-required` to
-   its `needs`. When `lane=fast`, require only `changes` and `fast-required`,
-   and treat skipped full jobs as passing. When `lane=full`, keep today's
-   rule: every job must succeed or be a detector-sanctioned skip. Keep the
-   detector failing open, so an unresolvable diff is `full`.
-3. Add `fast-required` as a required check next to `ci-required` in the
-   branch ruleset.

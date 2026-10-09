@@ -389,3 +389,32 @@ func TestManifestSnapshotPoolExtensionsRoundTrip(t *testing.T) {
 		t.Fatalf("manifest rollback resurrecting entries: err=%v", err)
 	}
 }
+
+// #1880: Violation names the first broken bound and its configured value, and
+// the acceptance error carries them while staying ErrPoolModelPricingBounds.
+func TestPoolModelPricingBoundsViolation(t *testing.T) {
+	b := PoolModelPricingBounds{MinPromptRatePerMtok: 10, MaxPromptRatePerMtok: 100, MaxPromptCacheHitRatePerMtok: 50, MinCompletionRatePerMtok: 5, MaxCompletionRatePerMtok: 200}
+	for _, tc := range []struct {
+		p     PoolModelPricing
+		bound string
+		limit int64
+	}{
+		{PoolModelPricing{PromptRatePerMtok: 9, CompletionRatePerMtok: 10}, "min_prompt_rate_per_mtok", 10},
+		{PoolModelPricing{PromptRatePerMtok: 101, CompletionRatePerMtok: 10}, "max_prompt_rate_per_mtok", 100},
+		{PoolModelPricing{PromptRatePerMtok: 50, PromptCacheHitRatePerMtok: 51, CompletionRatePerMtok: 10}, "max_prompt_cache_hit_rate_per_mtok", 50},
+		{PoolModelPricing{PromptRatePerMtok: 50, CompletionRatePerMtok: 4}, "min_completion_rate_per_mtok", 5},
+		{PoolModelPricing{PromptRatePerMtok: 50, CompletionRatePerMtok: 1 << 63}, "max_completion_rate_per_mtok", 200},
+	} {
+		bound, limit, ok := b.Violation(tc.p)
+		if !ok || bound != tc.bound || limit != tc.limit || b.Contains(tc.p) {
+			t.Fatalf("Violation(%+v) = %q %d %v, want %q %d", tc.p, bound, limit, ok, tc.bound, tc.limit)
+		}
+	}
+	if _, _, ok := b.Violation(PoolModelPricing{PromptRatePerMtok: 50, CompletionRatePerMtok: 100}); ok {
+		t.Fatal("in-bounds pricing reported a violation")
+	}
+	err := error(&PoolModelPricingBoundsError{PoolModelID: "pool/x/y", Bound: "max_prompt_rate_per_mtok", Limit: 100})
+	if !errors.Is(err, ErrPoolModelPricingBounds) || PoolModelRejectCode(err) != RejectCodePricingOutOfBounds {
+		t.Fatalf("bounds error classification: %v", err)
+	}
+}

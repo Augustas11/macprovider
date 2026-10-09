@@ -1840,6 +1840,17 @@ class BYOMJourneyConformanceMappingTests(unittest.TestCase):
                 digest = hashlib.sha256(signed_path.read_bytes()).hexdigest()
                 row = rows[requirement_id]
                 self.assertIn(journey_id, row["journeys"], requirement_id)
+                if row["state"] == "pending" and requirement_id != "SPEC-047-R005":
+                    # #1880 changed the mapped discovery/offer code; the row
+                    # waits for a fresh signed capture against the released CLI.
+                    self.assertEqual("CODE_BUG", row["gap"]["verdict"], requirement_id)
+                    self.assertEqual(
+                        "https://github.com/Augustas11/macprovider/issues/1880",
+                        row["gap"]["issue"],
+                        requirement_id,
+                    )
+                    self.assertIn("fresh signed capture", row["gap"]["rationale"], requirement_id)
+                    continue
                 if requirement_id == "SPEC-047-R005" and row["state"] == "pending":
                     self.assertEqual([], row["evidence"], requirement_id)
                     self.assertEqual("CODE_BUG", row["gap"]["verdict"], requirement_id)

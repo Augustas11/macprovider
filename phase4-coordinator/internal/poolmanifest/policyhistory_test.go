@@ -139,6 +139,44 @@ func TestActivePolicyVersionWindowDivergence(t *testing.T) {
 	}
 }
 
+// TestActivePolicySupersession proves the SPEC-042-R001 supersession rule
+// (#1880): a higher version whose window overlaps an earlier one from a later
+// not_before takes over at its not_before, the superseded version never
+// revives after the superseding one expires, and a version cut to an empty
+// window by an equal not_before is never active.
+func TestActivePolicySupersession(t *testing.T) {
+	authLog := policyAuthLog(t)
+	v1 := policyCore(t, 1, GenesisPrevHash(), 1000, 5000)
+	v2 := policyCore(t, 2, must(v1.ManifestCoreDigest()), 2000, 3000)
+	v3 := policyCore(t, 3, must(v2.ManifestCoreDigest()), 2000, 2500)
+	h, err := BuildPolicyHistory(sampleIdentity(), authLog, []SignedPolicyCore{signPolicy2of3(t, v1), signPolicy2of3(t, v2)})
+	if err != nil {
+		t.Fatalf("BuildPolicyHistory superseding v2: %v", err)
+	}
+	for _, c := range []struct{ now, want uint64 }{{1000, 1}, {1999, 1}, {2000, 2}, {2999, 2}} {
+		got, err := h.ActivePolicy(c.now)
+		if err != nil || got.ManifestVersion != c.want {
+			t.Fatalf("now=%d active=%d err=%v want %d", c.now, got.ManifestVersion, err, c.want)
+		}
+	}
+	if _, err := h.ActivePolicy(3500); !errors.Is(err, errPoolPolicyStale) {
+		t.Fatalf("now=3500: superseded v1 revived (err=%v)", err)
+	}
+	h, err = BuildPolicyHistory(sampleIdentity(), authLog, []SignedPolicyCore{signPolicy2of3(t, v1), signPolicy2of3(t, v2), signPolicy2of3(t, v3)})
+	if err != nil {
+		t.Fatalf("BuildPolicyHistory equal-not_before v3: %v", err)
+	}
+	if got, err := h.ActivePolicy(2000); err != nil || got.ManifestVersion != 3 {
+		t.Fatalf("now=2000 active=%d err=%v want 3", got.ManifestVersion, err)
+	}
+	if _, err := h.ActivePolicy(2600); !errors.Is(err, errPoolPolicyStale) {
+		t.Fatalf("now=2600: emptied v2 active (err=%v)", err)
+	}
+	if got := SupersededExpiry([][2]uint64{{1000, 5000}, {2000, 3000}}, 0); got != 2000 {
+		t.Fatalf("SupersededExpiry = %d, want 2000", got)
+	}
+}
+
 // TestPolicyHistoryImmutable proves accepted policy material cannot be mutated
 // through the caller's inputs or a returned value.
 func TestPolicyHistoryImmutable(t *testing.T) {
@@ -222,9 +260,9 @@ func TestBuildPolicyHistoryRejects(t *testing.T) {
 		}
 	})
 
-	t.Run("overlapping window", func(t *testing.T) {
+	t.Run("overlapping window starting before the overlapped version", func(t *testing.T) {
 		v1 := genesis() // [1000,2000)
-		v2 := policyCore(t, 2, must(v1.ManifestCoreDigest()), 1500, 2500)
+		v2 := policyCore(t, 2, must(v1.ManifestCoreDigest()), 500, 1500)
 		if _, err := BuildPolicyHistory(ic, authLog, []SignedPolicyCore{signPolicy2of3(t, v1), signPolicy2of3(t, v2)}); !errors.Is(err, errPolicyWindowOverlap) {
 			t.Fatalf("want errPolicyWindowOverlap, got %v", err)
 		}

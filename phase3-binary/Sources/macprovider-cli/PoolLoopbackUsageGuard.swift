@@ -36,7 +36,7 @@ enum PoolLoopbackUsageGuard {
     /// local Hugging Face snapshot.
     static func snapshotDirectory(for authorization: PoolRuntimeAuthorization) -> (String) -> URL? {
         if authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource,
-           let directory = MLXLMLoopbackServeModel.snapshotDirectory() {
+           let directory = MLXLMLoopbackServeModel.servingSnapshotDirectory() {
             return { _ in directory }
         }
         if authorization.runtimeSource == OMLXLoopbackServeModel.runtimeSource,

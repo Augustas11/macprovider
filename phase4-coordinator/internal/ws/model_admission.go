@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -10,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,7 +27,9 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -172,6 +177,11 @@ type ModelAdmissionEvent struct {
 	// (offer events only), kept so a pool entry accepted after the offer can
 	// still be matched exactly (SPEC-047-R011). Never an identity by itself.
 	OfferedArtifactHashes map[string]string
+	// RequestedPoolModelID is the offer's optional provider-signed
+	// requested_pool_model_id (#1880): when set, the R011 bind considers only
+	// that pool and entry. Carried forward on every later event of the
+	// candidate; never an identity, price, or route by itself.
+	RequestedPoolModelID string
 	// SPEC-047-R011 (#1816) closed pool_binding object, carried only by a
 	// pool-scoped bind/rebind event and the revocation derived from it.
 	// BindingScope is "" (global, every pre-existing event) or "pool". The
@@ -770,15 +780,69 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		{name: "pool_provider_account_id", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_provider_account_id TEXT NOT NULL DEFAULT ''`},
 		{name: "pool_probe_evidence_digest", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_probe_evidence_digest TEXT NOT NULL DEFAULT ''`},
 		{name: "pool_observed_catalog_model_key", sql: `ALTER TABLE model_admission_events ADD COLUMN pool_observed_catalog_model_key TEXT NOT NULL DEFAULT ''`},
+		// #1880 explicit pool selection for the R011 bind.
+		{name: "requested_pool_model_id", sql: `ALTER TABLE model_admission_events ADD COLUMN requested_pool_model_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if columns[column.name] {
 			continue
 		}
-		if _, err := db.ExecContext(context.Background(), column.sql); err != nil {
+		if err := addSQLiteModelAdmissionColumn(db, column.name, column.sql, modelAdmissionColumnMigrationBudget, time.Sleep); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// modelAdmissionColumnMigrationBudget bounds how long startup waits for a
+// schema lock held by a reader, backup, or an older coordinator before an
+// additive column migration gives up.
+const modelAdmissionColumnMigrationBudget = 60 * time.Second
+
+// addSQLiteModelAdmissionColumn runs one additive ALTER TABLE, retrying with
+// bounded backoff while the database is busy or locked. A column that
+// another process added first counts as done.
+func addSQLiteModelAdmissionColumn(db *sql.DB, name, stmt string, budget time.Duration, sleep func(time.Duration)) error {
+	deadline := time.Now().Add(budget)
+	backoff := 100 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		_, err := db.ExecContext(context.Background(), stmt)
+		switch {
+		case err == nil:
+			if attempt > 1 {
+				log.Printf("model_admission_events migration: added column %s after %d attempts", name, attempt)
+			}
+			return nil
+		case sqliteDuplicateColumn(err):
+			log.Printf("model_admission_events migration: column %s already present", name)
+			return nil
+		case !sqliteBusyOrLocked(err):
+			return fmt.Errorf("add model_admission_events.%s: %w", name, err)
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			return fmt.Errorf("add model_admission_events.%s: database still busy after %s: %w", name, budget, err)
+		}
+		log.Printf("model_admission_events migration: column %s: database busy (attempt %d), retrying in %s", name, attempt, backoff)
+		sleep(backoff)
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func sqliteBusyOrLocked(err error) bool {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5, 6: // SQLITE_BUSY or SQLITE_LOCKED, including extended codes.
+			return true
+		}
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
+}
+
+func sqliteDuplicateColumn(err error) bool {
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
@@ -1097,8 +1161,8 @@ INSERT INTO model_admission_events(
     pool_manifest_core_digest, pool_prompt_rate_per_mtok,
     pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
     pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
-    pool_probe_evidence_digest, pool_observed_catalog_model_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    pool_probe_evidence_digest, pool_observed_catalog_model_key, requested_pool_model_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ProviderID,
 		event.CandidateID,
 		event.ServedModelRef,
@@ -1156,6 +1220,7 @@ INSERT INTO model_admission_events(
 		event.PoolProviderAccountID,
 		event.PoolProbeEvidenceDigest,
 		event.PoolObservedCatalogModelKey,
+		event.RequestedPoolModelID,
 	)
 	return err
 }
@@ -1398,6 +1463,7 @@ func scanModelAdmissionEventRow(row modelAdmissionScanner) (ModelAdmissionEvent,
 		&event.PoolProviderAccountID,
 		&event.PoolProbeEvidenceDigest,
 		&event.PoolObservedCatalogModelKey,
+		&event.RequestedPoolModelID,
 	)
 	if err != nil {
 		return ModelAdmissionEvent{}, err
@@ -1440,7 +1506,7 @@ func modelAdmissionEventSelect(tail string) string {
        pool_manifest_core_digest, pool_prompt_rate_per_mtok,
        pool_prompt_cache_hit_rate_per_mtok, pool_completion_rate_per_mtok,
        pool_disclosure_class, pool_max_context_tokens, pool_provider_account_id,
-       pool_probe_evidence_digest, pool_observed_catalog_model_key` + tail
+       pool_probe_evidence_digest, pool_observed_catalog_model_key, requested_pool_model_id` + tail
 }
 
 func scanModelAdmissionEvents(ctx context.Context, q interface {
@@ -1594,6 +1660,12 @@ func modelAdmissionOfferRepeatsHead(head, offer ModelAdmissionEvent) bool {
 	if modelAdmissionStateTerminal(head.State) || !sameModelAdmissionTuple(head, offer) ||
 		modelAdmissionRuntimeClass(head.RuntimeSource) != modelAdmissionRuntimeClass(offer.RuntimeSource) ||
 		modelAdmissionEvidenceRefreshed(head, offer) || head.RequestedDisclosureClass != offer.RequestedDisclosureClass {
+		return false
+	}
+	// A bound head repeats an offer that requests nothing or its own entry;
+	// an unbound head only an offer requesting the same entry (#1880).
+	if offer.RequestedPoolModelID != head.RequestedPoolModelID &&
+		(!head.PoolScoped() || (offer.RequestedPoolModelID != "" && offer.RequestedPoolModelID != head.PoolModelID)) {
 		return false
 	}
 	if len(head.OfferedArtifactHashes) > 0 {
@@ -2066,10 +2138,15 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	}
 	var body modelAdmissionOfferSubmitRequest
 	r.Body = http.MaxBytesReader(w, r.Body, modelAdmissionMaxBodyBytes+1)
-	if err := decodeStrictJSON(r.Body, &body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = decodeStrictJSON(bytes.NewReader(raw), &body)
+	}
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_json", "invalid model admission offer package"))
 		return
 	}
+	body.requestedPoolModelIDPresent = jsonObjectHasKeyFold(raw, "requested_pool_model_id")
 	event, err := s.verifyModelAdmissionOffer(r.Context(), providerID, body)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -2436,6 +2513,28 @@ type modelAdmissionOfferSubmitRequest struct {
 	SignatureAlgorithm       string                              `json:"signature_algorithm"`
 	ProviderSignature        string                              `json:"provider_signature"`
 	CLIVersion               string                              `json:"cli_version"`
+	// RequestedPoolModelID (#1880, SPEC-047-R002 0.2.8) is optional; it is
+	// signed only when present, so offers without it keep their bytes.
+	RequestedPoolModelID string `json:"requested_pool_model_id,omitempty"`
+	// requestedPoolModelIDPresent records that the wire carried the key at
+	// all, so a present-but-empty (or null) value is refused instead of
+	// being read as absent and left out of the signed preimage.
+	requestedPoolModelIDPresent bool
+}
+
+// jsonObjectHasKeyFold reports whether a JSON object has key, matched
+// case-insensitively as encoding/json matches struct fields.
+func jsonObjectHasKeyFold(raw []byte, key string) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	for name := range fields {
+		if strings.EqualFold(name, key) {
+			return true
+		}
+	}
+	return false
 }
 
 type modelAdmissionWithdrawRequest struct {
@@ -2493,7 +2592,7 @@ func (v *modelAdmissionNullableString) UnmarshalJSON(data []byte) error {
 }
 
 func (p modelAdmissionOfferSubmitRequest) canonicalMap() map[string]any {
-	return map[string]any{
+	canonical := map[string]any{
 		"signature_domain":           p.SignatureDomain,
 		"provider_id":                p.ProviderID,
 		"candidate_id":               p.CandidateID,
@@ -2513,6 +2612,10 @@ func (p modelAdmissionOfferSubmitRequest) canonicalMap() map[string]any {
 		"signing_key_digest":         p.SigningKeyDigest,
 		"cli_version":                p.CLIVersion,
 	}
+	if p.RequestedPoolModelID != "" {
+		canonical["requested_pool_model_id"] = p.RequestedPoolModelID
+	}
+	return canonical
 }
 
 type modelAdmissionAdvisoryCapabilities struct {
@@ -2619,6 +2722,14 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	}
 	if payload.CatalogModelKey != "" && len(payload.CatalogModelKey) > 128 {
 		return fmt.Errorf("invalid catalog_model_key")
+	}
+	if payload.requestedPoolModelIDPresent && payload.RequestedPoolModelID == "" {
+		return fmt.Errorf("empty requested_pool_model_id")
+	}
+	if payload.RequestedPoolModelID != "" {
+		if _, _, ok := poolmanifest.ParsePoolModelID(payload.RequestedPoolModelID); !ok {
+			return fmt.Errorf("invalid requested_pool_model_id")
+		}
 	}
 	if payload.ArtifactHashes == nil || payload.AdvisoryCapabilities == nil {
 		return fmt.Errorf("invalid model admission evidence")
@@ -2737,6 +2848,10 @@ func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent
 	// status, so every global status keeps its bytes.
 	if binding := modelAdmissionPoolBindingObject(event); binding != nil {
 		response["pool_binding"] = binding
+	}
+	// #1880: an unbound candidate the R011 bind cannot place says why.
+	if warning := poolBindingWarning(s.poolModels.Load(), event.ProviderID, event, s.classifyCatalogPair); warning != "" {
+		response["warnings"] = []string{warning}
 	}
 	// SPEC-047-R002/R010: pool_attested_earning is claimed only while the
 	// current pool predicate holds; a binding the sweep has not yet revoked

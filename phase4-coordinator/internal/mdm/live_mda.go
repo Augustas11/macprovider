@@ -1450,12 +1450,12 @@ func (s *LiveMDAService) HandleCheckInWebhook(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var envelope struct {
-		Topic           string `json:"topic"`
-		CheckinEvent    *struct {
-			UDID         string `json:"udid"`
-			URLParams    map[string]string `json:"url_params"`
-			RawPayload   string `json:"raw_payload"`
-			MessageType  string `json:"message_type"`
+		Topic        string `json:"topic"`
+		CheckinEvent *struct {
+			UDID        string            `json:"udid"`
+			URLParams   map[string]string `json:"url_params"`
+			RawPayload  string            `json:"raw_payload"`
+			MessageType string            `json:"message_type"`
 		} `json:"checkin_event"`
 		UDID         string `json:"udid"`
 		SerialNumber string `json:"serial_number"`

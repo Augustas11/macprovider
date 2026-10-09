@@ -292,6 +292,75 @@ enum PoolExtensions {
     }
 }
 
+/// Reads back the SPEC-042-R015/R016 extension bodies `PoolExtensions`
+/// encodes, so a later manifest version can carry or drop prior entries.
+struct PoolCanonicalDecoder {
+    private let bytes: [UInt8]
+    private var offset = 0
+
+    init(_ data: Data) { bytes = Array(data) }
+
+    var atEnd: Bool { offset == bytes.count }
+
+    private mutating func take(_ n: Int) throws -> ArraySlice<UInt8> {
+        guard n >= 0, bytes.count - offset >= n else { throw CreatorPoolSigningError.invalidInput("truncated pool extension body") }
+        defer { offset += n }
+        return bytes[offset..<(offset + n)]
+    }
+
+    mutating func u64() throws -> UInt64 { try take(8).reduce(0) { ($0 << 8) | UInt64($1) } }
+    mutating func u32() throws -> Int { Int(try take(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }) }
+
+    mutating func boolean() throws -> Bool {
+        switch try take(1).first {
+        case 0x00: return false
+        case 0x01: return true
+        default: throw CreatorPoolSigningError.invalidInput("invalid boolean in pool extension body")
+        }
+    }
+
+    mutating func str() throws -> String {
+        guard let s = String(bytes: try take(try u32()), encoding: .utf8) else {
+            throw CreatorPoolSigningError.invalidInput("invalid UTF-8 in pool extension body")
+        }
+        return s
+    }
+}
+
+extension PoolExtensions {
+    static func decodeModelEntries(_ body: Data) throws -> [PoolModelEntry] {
+        var d = PoolCanonicalDecoder(body)
+        var entries: [PoolModelEntry] = []
+        for _ in 0..<(try d.u32()) {
+            let id = try d.str(), algorithm = try d.str(), hash = try d.str()
+            var sources: [String] = []
+            for _ in 0..<(try d.u32()) { sources.append(try d.str()) }
+            let license = try d.str()
+            let attested = try d.boolean()
+            let pricing = PoolModelPricing(promptRatePerMtok: try d.u64(), promptCacheHitRatePerMtok: try d.u64(), completionRatePerMtok: try d.u64())
+            entries.append(PoolModelEntry(
+                poolModelID: id, artifactHashAlgorithm: algorithm, artifactHash: hash, allowedRuntimeSources: sources,
+                license: license, paidServingAttested: attested, pricing: pricing, disclosureClass: try d.str(), maxContextTokens: try d.u64()
+            ))
+        }
+        guard d.atEnd else { throw CreatorPoolSigningError.invalidInput("trailing bytes in pool model entries") }
+        return entries
+    }
+
+    static func decodeAttestedMembers(_ body: Data) throws -> [PoolAttestedMember] {
+        var d = PoolCanonicalDecoder(body)
+        var members: [PoolAttestedMember] = []
+        for _ in 0..<(try d.u32()) {
+            let account = try d.str()
+            var classes: [String] = []
+            for _ in 0..<(try d.u32()) { classes.append(try d.str()) }
+            members.append(PoolAttestedMember(providerAccountID: account, runtimeClasses: classes))
+        }
+        guard d.atEnd else { throw CreatorPoolSigningError.invalidInput("trailing bytes in pool attested members") }
+        return members
+    }
+}
+
 struct PoolPolicyExtension: Codable, Equatable {
     var id: String
     var body: Data

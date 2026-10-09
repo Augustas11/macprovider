@@ -158,7 +158,10 @@ final class CreatorCommandTests: XCTestCase {
         let next = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
         XCTAssertEqual(next.state.manifestVersion, 2)
         XCTAssertEqual(next.state.snapshot.policies.last?.core.prevManifestCoreHash, try core.manifestCoreDigest())
-        XCTAssertGreaterThanOrEqual(next.state.snapshot.policies.last?.core.notBeforeUnix ?? 0, core.expiresAtUnix)
+        // SPEC-042-R001 supersession: v2 takes effect now, inside v1's window.
+        let nextNotBefore = try XCTUnwrap(next.state.snapshot.policies.last?.core.notBeforeUnix)
+        XCTAssertGreaterThanOrEqual(nextNotBefore, core.notBeforeUnix)
+        XCTAssertLessThan(nextNotBefore, core.expiresAtUnix)
 
         if let out = ProcessInfo.processInfo.environment["MACPROVIDER_CREATOR_CROSSCHECK_OUT"], !out.isEmpty {
             let dump: [String: Any] = ["root_issuer_registered": root, "manifest_accepted": manifest, "pool_created": create]
@@ -312,5 +315,210 @@ final class CreatorCommandTests: XCTestCase {
         } catch let error as CreatorCLIError {
             XCTAssertTrue(error.description.contains("member_missing"))
         }
+    }
+
+    func testRevokeMemberAndLifecycleUseTheCreatorRoutes() async throws {
+        let fake = RecordingCreatorTransport { _ in jsonResponse(202, ["event": ["ok": true]]) }
+        let home = CreatorHome(root: homeURL)
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        _ = try await CreatorOperations.revokeMember(home: home, client: client, poolID: pool, providerID: "mp-owned")
+        _ = try await CreatorOperations.setLifecycle(home: home, client: client, poolID: pool, lifecycle: "draining", reason: "maintenance")
+        let requests = fake.requests
+        XCTAssertEqual(requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" }, [
+            "POST /v1/creator/events", "POST /v1/creator/pools/\(pool)/lifecycle",
+        ])
+        XCTAssertEqual(body(requests[0])["event_type"] as? String, "member_revoked")
+        XCTAssertEqual(body(requests[0])["provider_id"] as? String, "mp-owned")
+        XCTAssertEqual(body(requests[1])["lifecycle"] as? String, "draining")
+        XCTAssertEqual(body(requests[1])["reason"] as? String, "maintenance")
+        for request in requests { XCTAssertNotNil(request.value(forHTTPHeaderField: "Idempotency-Key")) }
+        do {
+            _ = try await CreatorOperations.setLifecycle(home: home, client: client, poolID: pool, lifecycle: "active", reason: nil)
+            XCTFail("active must go through promote")
+        } catch {}
+        XCTAssertEqual(fake.requests.count, 2)
+        XCTAssertThrowsError(try CreatorLifecycleCommand.parse(["--pool", pool, "--set", "active"]))
+        XCTAssertNoThrow(try CreatorLifecycleCommand.parse(["--pool", pool, "--set", "retired"]))
+        XCTAssertThrowsError(try CreatorRevokeCommand.parse(["--pool", pool]))
+        XCTAssertThrowsError(try CreatorRevokeCommand.parse(["--pool", pool, "--provider", "a", "--model", "b"]))
+        XCTAssertNoThrow(try CreatorRevokeCommand.parse(["--pool", pool, "--model", "pool/x/y"]))
+    }
+
+    func testRevokeModelSignsTheNextManifestWithoutTheEntry() throws {
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        let pool = identity.poolID
+        func entry(_ slug: String) -> PoolModelEntry {
+            PoolModelEntry(
+                poolModelID: "pool/\(pool)/\(slug)", artifactHashAlgorithm: "macprovider.gguf-file.v1", artifactHash: String(repeating: "b", count: 64),
+                allowedRuntimeSources: ["llamacpp_loopback"], license: "MIT", paidServingAttested: true,
+                pricing: PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 2),
+                disclosureClass: "pool_attested_unverified", maxContextTokens: 8192
+            )
+        }
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["catalog-model"]
+        options.modelEntries = [entry("a"), entry("b")]
+        options.attestedMembers = [PoolAttestedMember(providerAccountID: "acct_m", runtimeClasses: ["llamacpp_loopback"])]
+        options.validityDays = 30
+        let v1 = try CreatorOperations.signManifest(home: home, poolID: pool, options: options)
+        try home.write(v1.state, to: home.poolDir(pool).appendingPathComponent("manifest-state.json"), mode: 0o600)
+
+        let v2 = try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/a")
+        XCTAssertEqual(v2.state.manifestVersion, 2)
+        let core = try XCTUnwrap(v2.state.snapshot.policies.last?.core)
+        XCTAssertEqual(Set(core.modelAllowlist), ["catalog-model", "pool/\(pool)/b"])
+        let entries = try PoolExtensions.decodeModelEntries(try XCTUnwrap(core.extensions.first { $0.id == PoolExtensions.modelEntriesV1 }).body)
+        XCTAssertEqual(entries, [entry("b")])
+        let members = try PoolExtensions.decodeAttestedMembers(try XCTUnwrap(core.extensions.first { $0.id == PoolExtensions.attestedMembersV1 }).body)
+        XCTAssertEqual(members, options.attestedMembers)
+        XCTAssertEqual((core.expiresAtUnix - core.notBeforeUnix) / 86400, 30)
+        XCTAssertThrowsError(try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/missing"))
+    }
+
+    private func proposal(pool: String, pricing: Bool = false, maxContext: Bool = true, license: String = "null", paidServing: String = "null") -> Data {
+        let pricingJSON = pricing ? #"{"prompt_rate_per_mtok":10,"prompt_cache_hit_rate_per_mtok":5,"completion_rate_per_mtok":20}"# : "null"
+        return Data("""
+        {"schema":"pool_model_proposal.v1","generated_at":"2026-10-09T00:00:00Z","cli_version":"x","pool_id":"\(pool)",
+        "provider_id":null,"candidate_id":"c","served_model_ref":"lmstudio:m","runtime_source":"lmstudio_loopback","display_name":"m",
+        "catalog_model_key":null,"model_entry":{"pool_model_id":"pool/\(pool)/m","artifact_hash_algorithm":"macprovider.gguf-file.v1",
+        "artifact_hash":"\(String(repeating: "c", count: 64))","allowed_runtime_sources":["lmstudio_loopback"],"license":\(license),
+        "paid_serving_attested":\(paidServing),"pricing":\(pricingJSON),"disclosure_class":"pool_attested_unverified",
+        "max_context_tokens":\(maxContext ? "4096" : "null")},"creator_requirements":[],"evidence":{"evaluation_digest_sha256":null,
+        "known_answer_probe_evidence_sha256":null},"offer_status":null,"warnings":[]}
+        """.utf8)
+    }
+
+    func testManifestSignFromProposalTakesCreatorFieldsOnlyFromFlags() throws {
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        var completion = CreatorOperations.ProposalCompletion()
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            XCTAssertTrue(String(describing: $0).contains("--license"))
+        }
+        completion.license = "Apache-2.0"
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            XCTAssertTrue(String(describing: $0).contains("--attest-paid-serving"))
+        }
+        completion.paidServingAttested = true
+        // A provider-suggested price is shown, never signed.
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)) {
+            let message = String(describing: $0)
+            XCTAssertTrue(message.contains("--prompt-rate-per-mtok") && message.contains("suggests"), message)
+        }
+        completion.pricing = PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3)
+        // A provider-reported context limit is shown, never signed.
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            let message = String(describing: $0)
+            XCTAssertTrue(message.contains("--max-context-tokens") && message.contains("4096"), message)
+        }
+        completion.maxContextTokens = 8192
+        let entry = try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)
+        XCTAssertEqual(entry.pricing, PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3))
+        XCTAssertEqual(entry.maxContextTokens, 8192)
+        XCTAssertEqual(entry.license, "Apache-2.0")
+        XCTAssertTrue(entry.paidServingAttested)
+        XCTAssertEqual(entry.artifactHash, String(repeating: "c", count: 64))
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: "BBBBBBBBBBBBBBBBBBBBBB", completion: completion))
+        XCTAssertNoThrow(try CreatorManifestSignCommand.parse(["--pool", pool, "--from-proposal", "a.json", "--from-proposal", "b.json", "--license", "MIT", "--attest-paid-serving"]))
+    }
+
+    func testManifestSignFromProposalRefusesProviderSetCreatorFields() throws {
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        var completion = CreatorOperations.ProposalCompletion()
+        completion.license = "Apache-2.0"
+        completion.pricing = PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3)
+        completion.maxContextTokens = 8192
+        // Even with every flag passed, a modified proposal is refused.
+        completion.paidServingAttested = true
+        for tampered in [proposal(pool: pool, license: #""MIT""#), proposal(pool: pool, paidServing: "true"), proposal(pool: pool, paidServing: "false")] {
+            XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: tampered, poolID: pool, completion: completion)) {
+                XCTAssertTrue(String(describing: $0).contains("creator-owned"), String(describing: $0))
+            }
+        }
+        // A tampered paid_serving_attested never replaces --attest-paid-serving.
+        completion.paidServingAttested = false
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, paidServing: "true"), poolID: pool, completion: completion))
+    }
+
+    func testManifestWindowReportsEffectiveFromAndExpiry() throws {
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["m"]
+        options.notBefore = Date(timeIntervalSince1970: 1_800_000_000)
+        options.validityDays = 1
+        let pending = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
+        let window = try XCTUnwrap(CreatorOperations.manifestWindow(pending.state))
+        XCTAssertEqual(window.effectiveFrom, "2027-01-15T08:00:00Z")
+        XCTAssertEqual(window.expiresAt, "2027-01-16T08:00:00Z")
+    }
+
+    func testCreatorHelpNamesTheMemberSteps() {
+        let help = CreatorCommand.configuration.discussion
+        for needle in ["macprovider-cli claim", "models propose", "pool_model_id", "macprovider-cli restart", "--mlx-cache-dir",
+                       "models offer <served-model-ref> --yes --json", "--from-proposal", "replay_conflict", "creator lifecycle", "creator revoke"] {
+            XCTAssertTrue(help.contains(needle), needle)
+        }
+        XCTAssertTrue(BYOMModelAdmissionError.httpStatus(409).description.contains("models admission withdraw"))
+    }
+
+    func testPricingBoundsAreCheckedBeforeSigningAndNamedOnSubmit() async throws {
+        let boundsJSON: [String: Any] = [
+            "min_prompt_rate_per_mtok": 10, "max_prompt_rate_per_mtok": 100,
+            "min_prompt_cache_hit_rate_per_mtok": 0, "max_prompt_cache_hit_rate_per_mtok": 50,
+            "min_completion_rate_per_mtok": 5, "max_completion_rate_per_mtok": 200,
+        ]
+        let fake = RecordingCreatorTransport { _ in jsonResponse(200, ["pool_model_pricing_bounds": boundsJSON]) }
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let fetched = await CreatorOperations.fetchPricingBounds(client)
+        XCTAssertEqual(fake.requests.first?.url?.path, "/v1/creator/pricing-bounds")
+        let bounds = try XCTUnwrap(try XCTUnwrap(fetched))
+        func entry(_ prompt: UInt64, _ hit: UInt64, _ completion: UInt64) -> PoolModelEntry {
+            PoolModelEntry(poolModelID: "pool/AAAAAAAAAAAAAAAAAAAAAA/m", artifactHashAlgorithm: "macprovider.gguf-file.v1", artifactHash: String(repeating: "a", count: 64),
+                           allowedRuntimeSources: ["llamacpp_loopback"], license: "MIT", paidServingAttested: true,
+                           pricing: PoolModelPricing(promptRatePerMtok: prompt, promptCacheHitRatePerMtok: hit, completionRatePerMtok: completion),
+                           disclosureClass: "pool_attested_unverified", maxContextTokens: 4096)
+        }
+        XCTAssertNoThrow(try CreatorOperations.checkPricingBounds([entry(50, 10, 100)], bounds: .some(bounds)))
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(101, 10, 100)], bounds: .some(bounds))) {
+            XCTAssertTrue(String(describing: $0).contains("max_prompt_rate_per_mtok=100"))
+        }
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(50, 10, 4)], bounds: .some(bounds))) {
+            XCTAssertTrue(String(describing: $0).contains("min_completion_rate_per_mtok=5"))
+        }
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(50, 10, 100)], bounds: .some(nil)), "no bounds configured refuses every entry")
+        XCTAssertNoThrow(try CreatorOperations.checkPricingBounds([entry(999, 10, 100)], bounds: nil), "unknown bounds defer to submit")
+
+        // Submit maps the coordinator's named refusal and keeps the pending manifest.
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["m"]
+        _ = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
+        let refusing = RecordingCreatorTransport { _ in
+            jsonResponse(400, ["error": ["code": "pool_model_pricing_out_of_bounds", "pool_model_id": "pool/x/m", "bound": "max_completion_rate_per_mtok", "limit": "200"]])
+        }
+        do {
+            _ = try await CreatorOperations.submitManifest(home: home, client: CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: refusing), poolID: identity.poolID)
+            XCTFail("expected the bounds refusal")
+        } catch {
+            let text = String(describing: error)
+            XCTAssertTrue(text.contains("pool/x/m completion_rate_per_mtok is above the maximum (max_completion_rate_per_mtok=200"), text)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("manifest-pending.json").path))
+
+        // Bounds removed before submit: an actionable refusal, manifest kept.
+        let unset = RecordingCreatorTransport { _ in
+            jsonResponse(400, ["error": ["code": "pool_model_pricing_bounds_unset"]])
+        }
+        do {
+            _ = try await CreatorOperations.submitManifest(home: home, client: CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: unset), poolID: identity.poolID)
+            XCTFail("expected the bounds-unset refusal")
+        } catch {
+            let text = String(describing: error)
+            XCTAssertTrue(text.contains("no pool-model pricing bounds configured") && text.contains("creator manifest submit"), text)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("manifest-pending.json").path))
     }
 }

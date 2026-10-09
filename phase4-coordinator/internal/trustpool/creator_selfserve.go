@@ -192,6 +192,9 @@ func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.
 	case "providers":
 		h.handleSelfServeProviders(w, r, principal)
 		return
+	case "pricing-bounds":
+		h.handleSelfServePricingBounds(w, r)
+		return
 	}
 	// Every other operation acts under an existing approval, which must be the
 	// creator's own self-serve approval: a gateway account never drives an
@@ -274,12 +277,41 @@ func (h *adminHandler) requireSelfServeApproval(ctx context.Context, creatorID s
 // handleSelfServeAgreement serves the published Agreement terms (GET) and
 // records the creator's click-through acceptance (POST) as a self-serve
 // approval (SPEC-043-R001 0.3.0).
+// selfServePricingBoundsObject is the creator-facing view of the configured
+// SPEC-005-R015 pool-model pricing bounds (#1880): inclusive credits per
+// million tokens, keyed by the names a manifest rejection's `bound` uses.
+// Null when the coordinator has none configured (every entry is refused).
+func (h *adminHandler) selfServePricingBoundsObject() any {
+	b := h.deps.Store.PoolModelPricingBounds()
+	if b == nil {
+		return nil
+	}
+	return map[string]int64{
+		"min_prompt_rate_per_mtok":           b.MinPromptRatePerMtok,
+		"max_prompt_rate_per_mtok":           b.MaxPromptRatePerMtok,
+		"min_prompt_cache_hit_rate_per_mtok": b.MinPromptCacheHitRatePerMtok,
+		"max_prompt_cache_hit_rate_per_mtok": b.MaxPromptCacheHitRatePerMtok,
+		"min_completion_rate_per_mtok":       b.MinCompletionRatePerMtok,
+		"max_completion_rate_per_mtok":       b.MaxCompletionRatePerMtok,
+	}
+}
+
+func (h *adminHandler) handleSelfServePricingBounds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"pool_model_pricing_bounds": h.selfServePricingBoundsObject()})
+}
+
 func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
 	switch r.Method {
 	case http.MethodGet:
 		writeAdminJSON(w, http.StatusOK, map[string]any{
-			"agreement":              currentSelfServeAgreementTerms(),
-			"agreement_terms_digest": SelfServeAgreementTermsDigest(),
+			"agreement":                 currentSelfServeAgreementTerms(),
+			"agreement_terms_digest":    SelfServeAgreementTermsDigest(),
+			"pool_model_pricing_bounds": h.selfServePricingBoundsObject(),
 		})
 		return
 	case http.MethodPost:

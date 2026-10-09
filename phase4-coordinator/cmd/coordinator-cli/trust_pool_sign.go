@@ -510,9 +510,11 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 			return fmt.Errorf("--prev manifest_version %d does not match the snapshot's last policy core version %d",
 				prev.ManifestVersion, prevCore.ManifestVersion)
 		}
-		if start < prevCore.ExpiresAtUnix {
-			return fmt.Errorf("--not-before must not precede the previous policy window end (%s)",
-				time.Unix(int64(prevCore.ExpiresAtUnix), 0).UTC().Format(time.RFC3339))
+		// SPEC-042-R001 supersession: the successor takes effect at its own
+		// not_before, which must not precede the predecessor's.
+		if start < prevCore.NotBeforeUnix {
+			return fmt.Errorf("--not-before must not precede the previous policy not_before (%s)",
+				time.Unix(int64(prevCore.NotBeforeUnix), 0).UTC().Format(time.RFC3339))
 		}
 		core.ManifestVersion = prev.ManifestVersion + 1
 		core.PrevManifestCoreHash = prevDigest

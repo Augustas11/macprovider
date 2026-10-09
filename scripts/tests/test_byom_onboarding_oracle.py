@@ -18,16 +18,18 @@ class BYOMOnboardingOracleTests(unittest.TestCase):
             "schema": "model_admission_offer_dry_run.v1",
             "candidate_id": "byom_test_candidate",
             "served_model_ref": HARNESS.SERVED_MODEL_REF,
-            "catalog_model_key": HARNESS.CATALOG_MODEL_KEY,
+            # The harness fixture is a deliberately noncatalog model (#1830):
+            # no artifact identity, so no catalog key and no earning path.
+            "catalog_model_key": None,
             "would_submit": True,
-            "reason_code": "catalog_binding_unverified",
+            "reason_code": "no_trusted_catalog_match",
             "likely_admission_state": "offerable",
             "likely_admission_state_source": "local_default",
-            "warnings": ["evaluation_required", "catalog_match_unverified"],
+            "warnings": ["evaluation_required"],
             "provider_guidance": {
-                "state_meaning_key": "byom.offer_dry_run.catalog_path_missing_trusted_binding",
-                "earning_path_class": "not_earning_yet_catalog_or_receipt_path_exists",
-                "transition_reason_code": "catalog_binding_unverified",
+                "state_meaning_key": "byom.offer_dry_run.no_earning_path_v0_1",
+                "earning_path_class": "no_earning_path_in_v0_1",
+                "transition_reason_code": "no_trusted_catalog_match",
                 "next_action": "submit_offer",
             },
         }
@@ -45,7 +47,7 @@ class BYOMOnboardingOracleTests(unittest.TestCase):
             ("schema", "model_admission_status.v1"),
             ("candidate_id", "different_candidate"),
             ("served_model_ref", "different_model"),
-            ("catalog_model_key", None),
+            ("catalog_model_key", "qwen3-8b"),
             ("would_submit", False),
             ("would_submit", 1),
             ("reason_code", "evaluation_required"),
@@ -53,9 +55,9 @@ class BYOMOnboardingOracleTests(unittest.TestCase):
             ("likely_admission_state", "settlement_capable"),
             ("likely_admission_state_source", "coordinator"),
             ("warnings", []),
-            ("warnings", ["evaluation_required"]),
             ("warnings", ["catalog_match_unverified"]),
-            ("warnings", "evaluation_required catalog_match_unverified"),
+            ("warnings", ["evaluation_required", "catalog_match_unverified"]),
+            ("warnings", "evaluation_required"),
         ):
             with self.subTest(field=field, value=value):
                 document = copy.deepcopy(self.document)
@@ -77,7 +79,9 @@ class BYOMOnboardingOracleTests(unittest.TestCase):
                     self.check(document)
 
     def test_rejects_missing_contract_fields(self):
-        for field in self.document:
+        # An absent catalog_model_key reads as null, which is the expected
+        # noncatalog value, so only the other fields are required.
+        for field in [name for name in self.document if name != "catalog_model_key"]:
             with self.subTest(field=field):
                 document = copy.deepcopy(self.document)
                 del document[field]

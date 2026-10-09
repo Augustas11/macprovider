@@ -875,7 +875,7 @@ func nullableTime(v string) *time.Time {
 // explorerDetailWhere builds the WHERE clause + arg slice for the
 // five session-detail helpers (usage_events, quota_reservations,
 // concurrency_reservations, feedback_events, audit_events). Issue
-// #246: the pre-#246 shape used `(? = '' OR col = ?)` predicates
+// #246: the pre-#246 shape used `(? = <empty string> OR col = ?)` predicates
 // so a single prepared statement could serve both scoped and
 // unscoped paths. SQLite cannot use a normal index plan against
 // such compound `OR` predicates and `EXPLAIN QUERY PLAN` reported

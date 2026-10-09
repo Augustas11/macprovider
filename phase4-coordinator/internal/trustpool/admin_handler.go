@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1769,7 +1770,15 @@ func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err err
 	var rejection *PoolModelEntryRejectionError
 	if errors.As(err, &rejection) && rejection.Code != "" {
 		slog.Warn("trust pool manifest refused", "event", "trusted_pool_manifest_rejected", "code", rejection.Code, "reason", err.Error())
-		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": rejection.Code}})
+		body := map[string]string{"code": rejection.Code}
+		// #1880: an out-of-bounds price names the entry and the bound it broke.
+		var bounds *poolmanifest.PoolModelPricingBoundsError
+		if errors.As(err, &bounds) {
+			body["pool_model_id"] = bounds.PoolModelID
+			body["bound"] = bounds.Bound
+			body["limit"] = strconv.FormatInt(bounds.Limit, 10)
+		}
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": body})
 		return
 	}
 	switch {

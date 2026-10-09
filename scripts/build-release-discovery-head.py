@@ -22,6 +22,10 @@ SET_ID = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:v[0-9]+\.[0-9]+\.[0-9]+@[0
 SEQUENCE_ATTEMPT_BITS = 16
 SEQUENCE_ATTEMPT_MAX = (1 << SEQUENCE_ATTEMPT_BITS) - 1
 UINT64_MAX = (1 << 64) - 1
+# Default to the full seven-day window. A release-built head is published at
+# rollout, often days after signing; a 24h default left it inside the 48h
+# discovery-head-freshness-alarm threshold the moment it went live.
+DEFAULT_VALIDITY = dt.timedelta(hours=168)
 
 
 def fail(message: str) -> None:
@@ -153,7 +157,7 @@ def build(args: argparse.Namespace) -> None:
         fail("artifact index digest invalid")
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     issued = parse_time(args.issued_at, "issued_at") if args.issued_at else now
-    expires = parse_time(args.expires_at, "expires_at") if args.expires_at else issued + dt.timedelta(hours=24)
+    expires = parse_time(args.expires_at, "expires_at") if args.expires_at else issued + DEFAULT_VALIDITY
     if expires <= issued or expires - issued > dt.timedelta(days=7):
         fail("expires_at must be after issued_at and no more than seven days later")
     minimum = None if args.signed_policy_minimum is None else normalize_semver(args.signed_policy_minimum, "signed policy minimum")

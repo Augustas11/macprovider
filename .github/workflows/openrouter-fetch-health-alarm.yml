@@ -43,3 +43,17 @@ jobs:
           python3 scripts/check-openrouter-fetch-health.py \
             --snapshot-archive docs/research/openrouter-snapshots \
             --max-snapshot-age-hours 48
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [check]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: openrouter-fetch-health-alarm
+      title: the OpenRouter key or snapshot archive is unhealthy
+      result: ${{ needs.check.result }}

@@ -194,8 +194,21 @@ def repository_context(root: Path) -> dict[str, str]:
     return {
         "name": "Augustas11/macprovider",
         "commit": git_value(root, "rev-parse", "HEAD"),
-        "branch": git_value(root, "branch", "--show-current"),
+        "branch": current_branch(root),
     }
+
+
+def current_branch(root: Path) -> str:
+    # A detached checkout (CI checks out the PR merge ref) has no branch name;
+    # fall back to the CI ref, then to HEAD, so the record stays non-empty.
+    branch = git_value(root, "branch", "--show-current")
+    if branch:
+        return branch
+    for name in ("GITHUB_HEAD_REF", "GITHUB_REF_NAME"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return "HEAD"
 
 
 def resolve_capture_path(manifest_dir: Path, raw: Any, label: str) -> Path:

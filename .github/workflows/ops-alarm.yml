@@ -1,0 +1,76 @@
+name: Ops alarm
+
+# Reusable alert path for scheduled workflows (#1920). A red scheduled run used
+# to show only on the Actions tab, so renewals were cancelled for weeks and the
+# OpenRouter proposer failed 10/10 unnoticed. Callers add one job:
+#
+#   alarm:
+#     needs: [<job>]
+#     if: ${{ always() }}
+#     uses: ./.github/workflows/ops-alarm.yml
+#     permissions:
+#       contents: read
+#       issues: write
+#     with:
+#       key: <stable-slug>
+#       title: <one line>
+#       result: ${{ needs.<job>.result }}
+#
+# failure opens (or comments on) one `ops-alarm` issue per key, assigned to the
+# operator, which GitHub notifies; the next success closes it. A cancelled run
+# is a no-op here (superseded alarm runs are cancelled by design); the hourly
+# ops-alarm-watch.yml raises cancelled, stuck and approval-waiting renewals.
+# No new secrets: the job's GITHUB_TOKEN with issues: write only.
+
+on:
+  workflow_call:
+    inputs:
+      key:
+        description: "Stable alarm key (lowercase slug); one open issue per key"
+        required: true
+        type: string
+      title:
+        description: "One-line issue title suffix"
+        required: true
+        type: string
+      result:
+        description: "success | failure | alarm (raise) ; anything else is a no-op"
+        required: true
+        type: string
+      body:
+        description: "Optional issue body (public repo: no ops internals)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  route:
+    name: Route alarm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout alarm router
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/ops-alarm.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Open, update, or close the alarm issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALARM_KEY: ${{ inputs.key }}
+          ALARM_TITLE: ${{ inputs.title }}
+          ALARM_RESULT: ${{ inputs.result }}
+          ALARM_BODY: ${{ inputs.body }}
+          ALARM_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/ops-alarm.sh

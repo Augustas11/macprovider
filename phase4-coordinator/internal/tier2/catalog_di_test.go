@@ -1,8 +1,8 @@
 // Tests for the M3-8d Catalog DI refactor (audit finding TEST-4).
 // Verifies that:
-//   * Independent *Catalog instances do not share state.
-//   * VerifyProviderHash is race-free across them under -race.
-//   * setDefault is an atomic pointer swap — readers in flight against the
+//   - Independent *Catalog instances do not share state.
+//   - VerifyProviderHash is race-free across them under -race.
+//   - setDefault is an atomic pointer swap — readers in flight against the
 //     old singleton complete cleanly and the next call sees the new one.
 package tier2
 
@@ -234,4 +234,3 @@ func TestDefaultIsAtomicPointer(t *testing.T) {
 		t.Fatal("setDefault(nil) replaced the singleton")
 	}
 }
-

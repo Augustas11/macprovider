@@ -65,3 +65,17 @@ jobs:
             export INSTALL_SH_URL="$INSTALL_URL_INPUT"
           fi
           bash scripts/check-install-sh-parity.sh
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [check]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: install-sh-parity-alarm
+      title: the served install.sh drifted from the latest release
+      result: ${{ needs.check.result }}

@@ -5,9 +5,10 @@ import Foundation
 /// not in the signed catalog.
 ///
 /// `model_entry` carries the pool model entry fields under the names the
-/// creator's signed entry uses, so the creator copies them, fills the creator
-/// fields (`license`, `paid_serving_attested`, `pricing` when the provider
-/// suggested none), and signs. The CLI computes `artifact_hash` from the file
+/// creator's signed entry uses, so the creator copies them, sets the creator
+/// fields (`license`, `paid_serving_attested`, `pricing`,
+/// `max_context_tokens`; a provider's suggested rates and reported context
+/// are advisory only), and signs. The CLI computes `artifact_hash` from the file
 /// bytes; it is never a runtime-reported tag, path, or name. Nothing in the
 /// bundle is authority: the creator's signature makes the entry, and the
 /// coordinator binds the offer only when the entry's artifact pair matches.

@@ -481,3 +481,17 @@ jobs:
           set -euo pipefail
           scripts/verify-anonymous-release-discovery.sh \
             "$TAG" "$COMMIT" "$TAG" "$TRANSPORT_TAG"
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [renew, verify_public]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: renew-release-discovery-head
+      title: the signed discovery head renewal failed
+      result: ${{ contains(needs.*.result, 'failure') && 'failure' || (needs.renew.result == 'success' && needs.verify_public.result == 'success') && 'success' || 'cancelled' }}

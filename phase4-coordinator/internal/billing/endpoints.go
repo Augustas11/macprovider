@@ -23,6 +23,23 @@ type tokenValidator interface {
 	ValidateToken(ctx context.Context, raw string) (providerID string, ok bool, err error)
 }
 
+// ProviderSessionAuthorizer authorizes a provider-scoped read carrying no
+// provider bearer through the provider portal's MP session cookie: it
+// returns true only when the session is valid and its GitHub user owns
+// providerID, and otherwise writes the refusal (401 invalid session, 403 not
+// owned) itself.
+type ProviderSessionAuthorizer func(w http.ResponseWriter, r *http.Request, providerID string) bool
+
+// SetProviderSessionAuthorizer wires the MP session-cookie path for provider
+// earnings (#1880). Nil removes it; the bearer path is unchanged either way.
+func (s *Store) SetProviderSessionAuthorizer(fn ProviderSessionAuthorizer) {
+	if fn == nil {
+		s.providerSessionAuthorizer.Store(nil)
+		return
+	}
+	s.providerSessionAuthorizer.Store(&fn)
+}
+
 type tokenUseMarker interface {
 	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (providerID string, ok bool, err error)
 }
@@ -1150,6 +1167,10 @@ SELECT gross_credits
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
+	// Every earnings response, success or refusal, is private to the
+	// credential that asked (SPEC-014 v0.11): never stored by a shared cache.
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Vary", "Cookie, Authorization")
 	if !h.requireProviderTokens {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not enabled")
 		return
@@ -1157,6 +1178,15 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	providerID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/providers/"), "/earnings")
 	raw := bearer(r.Header.Get("Authorization"))
 	if raw == "" {
+		// #1880: the portal's GitHub mode carries only the MP session
+		// cookie; the session's GitHub user must own this provider.
+		if authorize := h.store.providerSessionAuthorizer.Load(); authorize != nil && strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+			if !(*authorize)(w, r, providerID) {
+				return
+			}
+			h.writeProviderEarnings(w, r, providerID)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
 		return
 	}
@@ -1189,6 +1219,12 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "provider token subject mismatch")
 		return
 	}
+	h.writeProviderEarnings(w, r, providerID)
+}
+
+// writeProviderEarnings serves an authorized earnings read under the
+// per-provider earnings rate limit, whichever credential authorized it.
+func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, providerID string) {
 	if !h.allowEarnings(providerID) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "provider earnings rate limit exceeded")
 		return

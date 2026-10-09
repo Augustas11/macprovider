@@ -62,8 +62,9 @@ Goal: the binary buyers (or a serving canary) will actually run is reviewed
 4. Pearl coordinator/gateway: one cut of current `main` after the campaign
    lands, if the campaign needs live `api.malibu.tech`. Prefer Loop A against
    a local coordinator/gateway when the bug is CLI-side.
-5. Buyer-facing flags (`continuous_batching`, `kv_disk_cache` fleet default,
-   sticky, slot raises) stay **off** until a separate operator enable gate.
+5. A change the lab proved (correctness checks pass, gain measured, audit
+   clean) ships enabled by default (AGENTS.md rule 11). No default-off flag
+   and no separate operator enable gate; bound the risk in code instead.
 
 ## When a packaged CLI is required
 

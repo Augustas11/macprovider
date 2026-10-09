@@ -81,15 +81,42 @@ enum LMStudioLoopbackServeModel {
         guard response.statusCode == 200, let models = models(from: response.body) else {
             throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(runtimeSource)
         }
-        let matching = models.filter { $0.key == binding.modelKey }
-        guard matching.count == 1, let model = matching.first,
+        // `modelKey` is the served name: the model key, or the custom
+        // `--identifier` its loaded instance answers to.
+        guard let model = servedEntry(named: binding.modelKey, in: models),
               model.type == "llm", model.format == "gguf",
               model.publisher == binding.publisher, model.sizeBytes == binding.sizeBytes,
               let instance = model.loadedInstances.first(where: { $0.id == binding.modelKey }),
-              model.loadedInstances.filter({ $0.id == binding.modelKey }).count == 1,
-              !models.contains(where: { $0.key != binding.modelKey && $0.loadedInstances.contains { $0.id == binding.modelKey } })
+              model.loadedInstances.filter({ $0.id == binding.modelKey }).count == 1
         else { return .notBound }
         return .bound(contextWindow: instance.contextLength)
+    }
+
+    /// The one entry LM Studio serves `name` under: the entry with a loaded
+    /// instance whose id is `name` (a custom `--identifier`, or the key
+    /// itself), else the one entry whose key is `name`. Two entries answering
+    /// the name, or a key listed twice, is no entry.
+    static func servedEntry(named name: String, in models: [Model]) -> Model? {
+        let byInstance = models.filter { $0.loadedInstances.contains { $0.id == name } }
+        guard byInstance.count <= 1 else { return nil }
+        let byKey = models.filter { $0.key == name }
+        guard byKey.count <= 1 else { return nil }
+        if let entry = byInstance.first {
+            guard byKey.isEmpty || byKey.first == entry else { return nil }
+            return entry
+        }
+        return byKey.first
+    }
+
+    /// LM Studio's model list, or nil when unreachable or not one. Used to
+    /// narrow (never to name) the GGUF file the models root resolves.
+    static func fetchModels(_ client: any BYOMDiscoveryHTTPClient, origin: URL) async -> [Model]? {
+        guard let response = try? await client.get(
+            origin.appendingPathComponent("api/v1/models"),
+            maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+            maxBodyBytes: maxModelsBodyBytes
+        ), response.statusCode == 200 else { return nil }
+        return models(from: response.body)
     }
 
     struct LoadedInstance: Equatable {
@@ -104,6 +131,8 @@ enum LMStudioLoopbackServeModel {
         let publisher: String?
         let sizeBytes: Int?
         /// One entry per loaded instance: its id and `config.context_length`.
+        /// A runtime-reported file path is deliberately not decoded: it never
+        /// chooses a local file (SPEC-046, SPEC-010-R007(i)).
         let loadedInstances: [LoadedInstance]
     }
 

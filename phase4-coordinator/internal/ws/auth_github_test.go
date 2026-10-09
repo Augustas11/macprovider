@@ -250,16 +250,17 @@ func TestLogout_StaleCookie_Returns204AndClearsCookie(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rr.Code)
 	}
-	if got := rr.Header().Get("Set-Cookie"); !strings.Contains(got, "mp_session=") || !strings.Contains(got, "Max-Age=0") || !strings.Contains(got, "Path=/") {
-		t.Fatalf("Set-Cookie = %q, want mp_session clear", got)
+	if got := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(got, "__Host-mp_session=;") || !strings.Contains(got, "Max-Age=0") || !strings.Contains(got, "Path=/") {
+		t.Fatalf("Set-Cookie = %q, want __Host-mp_session clear", got)
 	}
 }
 
-func TestLogout_ConfiguredDomainCookie_ClearIncludesDomain(t *testing.T) {
+func TestLogout_ConfiguredDomain_OnlyClearsLegacyCookieAtDomain(t *testing.T) {
 	s, _ := newSpec014AuthTestServer(t, true)
 	s.cfg.Auth.GitHubOAuth.SessionCookieDomain = ".example.com"
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: session.Name, Value: "stale"})
+	req.AddCookie(&http.Cookie{Name: session.LegacyName, Value: "legacy"})
 	rr := httptest.NewRecorder()
 
 	s.Handler().ServeHTTP(rr, req)
@@ -267,8 +268,88 @@ func TestLogout_ConfiguredDomainCookie_ClearIncludesDomain(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rr.Code)
 	}
-	if got := rr.Header().Get("Set-Cookie"); !strings.Contains(got, "Domain=.example.com") {
-		t.Fatalf("Set-Cookie = %q, want configured Domain clear", got)
+	var sawLegacyDomain bool
+	for _, h := range rr.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(h, "__Host-mp_session=") && strings.Contains(h, "Domain=") {
+			t.Fatalf("Set-Cookie = %q: the __Host- cookie must never carry a Domain", h)
+		}
+		if strings.HasPrefix(h, "mp_session=;") && strings.Contains(h, "Domain=.example.com") {
+			sawLegacyDomain = true
+		}
+	}
+	if !sawLegacyDomain {
+		t.Fatalf("Set-Cookie = %q, want legacy clear at the configured Domain", rr.Header().Values("Set-Cookie"))
+	}
+}
+
+func TestSessionCookie_ConfiguredDomainIgnoredOnIssue(t *testing.T) {
+	s, store := newSpec014AuthTestServer(t, true)
+	s.cfg.Auth.GitHubOAuth.SessionCookieDomain = ".example.com"
+	old := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	now := old.Add(25 * time.Hour)
+	s.now = func() time.Time { return now }
+	sessionID, _ := seedSpec014HTTPBindState(t, store, old)
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me/providers", nil)
+	req.AddCookie(&http.Cookie{Name: session.Name, Value: sessionID})
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := rr.Header().Get("Set-Cookie")
+	if !strings.HasPrefix(got, "__Host-mp_session="+sessionID+";") || strings.Contains(got, "Domain=") {
+		t.Fatalf("Set-Cookie = %q, want host-only __Host- reissue", got)
+	}
+}
+
+func TestLegacySessionCookie_DoesNotAuthenticateAndIsCleared(t *testing.T) {
+	s, store := newSpec014AuthTestServer(t, true)
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	sessionID, _ := seedSpec014HTTPBindState(t, store, now)
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me/providers", nil)
+	req.AddCookie(&http.Cookie{Name: session.LegacyName, Value: sessionID})
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+
+	assertAuthError(t, rr, http.StatusUnauthorized, "session_invalid")
+	var clearedLegacy bool
+	for _, h := range rr.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(h, "mp_session=;") && strings.Contains(h, "Max-Age=0") {
+			clearedLegacy = true
+		}
+	}
+	if !clearedLegacy {
+		t.Fatalf("Set-Cookie = %q, want legacy mp_session cleared", rr.Header().Values("Set-Cookie"))
+	}
+}
+
+func TestGitHubCallback_RotatesAndRevokesPriorSession(t *testing.T) {
+	s, store := newSpec014AuthTestServer(t, true)
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	priorID, _ := seedSpec014HTTPBindState(t, store, now)
+	if err := store.CreateOAuthState(context.Background(), "rotate-state", "/", nil, now); err != nil {
+		t.Fatalf("CreateOAuthState: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/github/callback?state=rotate-state&code=ok", nil)
+	req.AddCookie(&http.Cookie{Name: session.Name, Value: priorID})
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	got := rr.Header().Get("Set-Cookie")
+	if !strings.HasPrefix(got, "__Host-mp_session=") || strings.Contains(got, priorID) {
+		t.Fatalf("Set-Cookie = %q, want a fresh __Host- session id", got)
+	}
+	if _, ok, err := store.LoadMPSession(context.Background(), priorID, now); err != nil || ok {
+		t.Fatalf("prior session still valid after login (ok=%v err=%v)", ok, err)
 	}
 }
 
@@ -281,8 +362,8 @@ func TestAuthMeProviders_TamperedCookie_Returns401AndClearsCookie(t *testing.T) 
 	s.Handler().ServeHTTP(rr, req)
 
 	assertAuthError(t, rr, http.StatusUnauthorized, "session_invalid")
-	if got := rr.Header().Get("Set-Cookie"); !strings.Contains(got, "mp_session=") || !strings.Contains(got, "Max-Age=0") || !strings.Contains(got, "Path=/") {
-		t.Fatalf("Set-Cookie = %q, want mp_session clear", got)
+	if got := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(got, "__Host-mp_session=;") || !strings.Contains(got, "Max-Age=0") || !strings.Contains(got, "Path=/") {
+		t.Fatalf("Set-Cookie = %q, want __Host-mp_session clear", got)
 	}
 }
 
@@ -447,8 +528,17 @@ UPDATE mp_sessions
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 body=%s", rr.Code, rr.Body.String())
 	}
-	if got := rr.Header().Get("Set-Cookie"); !strings.Contains(got, "mp_session="+sessionID) || !strings.Contains(got, "Max-Age=2592000") {
-		t.Fatalf("Set-Cookie = %q, want sliding cookie reissue", got)
+	cookies := rr.Header().Values("Set-Cookie")
+	if len(cookies) == 0 {
+		t.Fatalf("no Set-Cookie after bind")
+	}
+	rotated := cookies[len(cookies)-1]
+	newID, ok := strings.CutPrefix(strings.SplitN(rotated, ";", 2)[0], session.Name+"=")
+	if !ok || newID == "" || newID == sessionID || !strings.Contains(rotated, "Max-Age=2592000") {
+		t.Fatalf("Set-Cookie = %q, want a rotated session cookie", cookies)
+	}
+	if _, ok, err := store.LoadMPSession(ctx, sessionID, now); err != nil || ok {
+		t.Fatalf("pre-bind session still valid after rotation (ok=%v err=%v)", ok, err)
 	}
 	owned, err := store.ListOwnedProviders(ctx, 42)
 	if err != nil {
@@ -460,6 +550,12 @@ UPDATE mp_sessions
 
 	req = httptest.NewRequest(http.MethodPost, "/v1/auth/me/providers/bind", strings.NewReader("{}"))
 	req.AddCookie(&http.Cookie{Name: session.Name, Value: sessionID})
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	assertAuthError(t, rr, http.StatusUnauthorized, "session_invalid")
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/me/providers/bind", strings.NewReader("{}"))
+	req.AddCookie(&http.Cookie{Name: session.Name, Value: newID})
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -733,4 +829,33 @@ func assertAuthError(t *testing.T, rr *httptest.ResponseRecorder, status int, co
 	if len(body) != 1 || body["error"] != code {
 		t.Fatalf("body = %#v, want {error:%q}", body, code)
 	}
+}
+
+// #1880: a provider-scoped portal read by MP session cookie is authorized
+// only for a provider the session's GitHub user owns.
+func TestAuthorizeProviderSessionReadRequiresOwnership(t *testing.T) {
+	s, store := newSpec014AuthTestServer(t, true)
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	sessionID, _ := seedSpec014HTTPBindState(t, store, now)
+	if _, err := store.DB().ExecContext(context.Background(), `INSERT INTO provider_ownership (provider_id, github_user_id, claimed_at) VALUES (?, ?, ?)`, "provider-a", 42, timeTextForSpec014HTTPTest(now)); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	read := func(cookie, providerID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/providers/"+providerID+"/earnings", nil)
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: session.Name, Value: cookie})
+		}
+		rr := httptest.NewRecorder()
+		if s.AuthorizeProviderSessionRead(rr, req, providerID) {
+			rr.WriteHeader(http.StatusOK)
+		}
+		return rr
+	}
+	if rr := read(sessionID, "provider-a"); rr.Code != http.StatusOK {
+		t.Fatalf("owner status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertAuthError(t, read(sessionID, "provider-b"), http.StatusForbidden, "forbidden")
+	assertAuthError(t, read("", "provider-a"), http.StatusUnauthorized, "session_invalid")
+	assertAuthError(t, read("tampered", "provider-a"), http.StatusUnauthorized, "session_invalid")
 }
