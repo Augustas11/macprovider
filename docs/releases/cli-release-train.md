@@ -790,15 +790,36 @@ mainland-provider installer handoff.
    remains default-off and out of scope. Earlier signed
    candidate evidence may carry forward only where the table and track record
    explicitly permit it.
-4. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
+4. Privacy code identity registered on Pearl before any canary or fleet
+   provider runs the candidate: `scripts/ops/cli-release.sh` step
+   `privacy_release_identity` copies the verified candidate
+   `pearl-release.json` + `.sig` into Pearl's
+   `privacy_class.release_code_identities.metadata_dir` as `v<ver>.json`
+   (hot, no restart). It refuses with the one-time setup in
+   `docs/runbooks/privacy-class-beta-operations.md` "Approved code identities"
+   while Pearl has no `metadata_dir`. CLI 1.8.230 shipped without this and
+   every upgraded provider's privacy advertisement was refused for ~12 h.
+5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.
-5. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
+   The canary probe also fails when Pearl's coordinator journal shows its
+   privacy advertisement rejected as `posture_unapproved_code_identity` in
+   the last 10 minutes.
+6. Registrations gate (`registrations`, read-only over `PEARL_SSH`):
+   promotion is refused unless the candidate `compatibility_set_id` is in
+   `compatibility_set.accepted_ids` and its `code_cdhash` is approved by a
+   verifying `v<ver>.json` in `metadata_dir` or an
+   `approved_code_identities` entry, with the on-disk config no newer than
+   the running coordinator. The refusal names the missing item.
+7. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
-6. `verify-live-coordinator-release-rollout` before publishing discovery.
-7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
-8. Curl-channel `https://get.malibu.tech/install.sh`:
+8. `verify-live-coordinator-release-rollout` before publishing discovery.
+   `cli-release.sh` refuses it after the recommendation bump while the
+   coordinator counts `posture_unapproved_code_identity` rejections since its
+   restart (`relayblind_privacy_posture_rejections_total`, journal fallback).
+9. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+10. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
      against the tag is green. Confirm
@@ -832,6 +853,12 @@ mainland-provider installer handoff.
   revert after a throwaway test. An unaccepted set is closed 4001
   `compatibility_set_unaccepted`; the CLI reports that as
   `Expected auth_challenge v2`.
+- Every new CLI version needs two Pearl registrations, not one: the
+  compatibility set above and the privacy code identity. Stage the identity
+  with `scripts/ops/cli-release.sh next --run` at step
+  `privacy_release_identity`; never hand-edit `approved_code_identities` for a
+  signed release. `cli-release.sh status` reports the live state as facts
+  `privacy_release_metadata_dir` and `privacy_release_identity`.
 - Pearl coordinator/gateway runtime: **one cut of current `main`**. Do not
   dual-dispatch `pearl-runtime-release.yml` from two sessions. Record owner +
   payload + live tag in the Pearl paragraph above before/after apply.

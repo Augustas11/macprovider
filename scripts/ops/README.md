@@ -42,6 +42,16 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.
+- `cli-release.sh` registers each new CLI on Pearl before it can be
+  promoted. Step `privacy_release_identity` stages the verified
+  `pearl-release.json` as `v<ver>.json` in Pearl's privacy release metadata
+  dir (hot, no restart; blocked with the one-time setup while Pearl has no
+  `metadata_dir`). The read-only `registrations` gate refuses promotion until
+  the candidate is in `compatibility_set.accepted_ids` and its code cdhash is
+  approved. `canary_smoke --probe` fails on a privacy rejection of the canary
+  in Pearl's journal, and `verify_live_rollout` is refused while the
+  coordinator counts `posture_unapproved_code_identity` rejections since the
+  recommendation-bump restart.
 - Steps the operator owns are `manual`: an environment approval click, a
   Pearl `coordinator.yaml` edit, or a provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
@@ -81,6 +91,12 @@ BUYER_TOKEN_FILE=<file holding a buyer API key>  # gateway proof only
 PROBE_MODEL=<model id>                           # default: the admission tuple's model
 CATALOG_CANARY_PROVIDER_ID=...                   # as scripts/catalog-content-release.sh
 PEARL_RUNTIME_VERSION=v<x.y.z>                   # pearl-runtime.sh target tag
+# cli-release.sh Pearl layout; the defaults are the production paths:
+PEARL_COORDINATOR_CONFIG=/opt/macprovider/coordinator.yaml
+PEARL_COORDINATOR_OVERLAY=/etc/macprovider/coordinator.pearl-overlays.yaml
+PEARL_COORDINATOR_UNIT=macprovider-coordinator
+PEARL_COORDINATOR_METRICS_URL=http://127.0.0.1:8444/metrics
+PEARL_RELEASE_IDENTITY_OWNER=root PEARL_RELEASE_IDENTITY_GROUP=macprovider
 ```
 
 When a script needs ssh and its variable is unset, it fails and names the

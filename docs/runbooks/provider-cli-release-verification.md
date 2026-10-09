@@ -113,14 +113,17 @@ python3 -c 'import json; print(json.dumps(json.load(open("pearl-release.json"))[
    `binary_sha256` must equal the `shasum` output, `slices[0].code_cdhash`
    must equal `CDHash=`, `team_id` must equal `TeamIdentifier=`, and
    `signing_identifier` must equal `Identifier=` (`live.malibu.provider.cli`).
-   Any mismatch means the release is not verified. To fill SPEC-049
-   `privacy_class.approved_code_identities`, emit the entry from the verified
-   metadata instead of copying values by hand:
+   Any mismatch means the release is not verified. Pearl approves the
+   verified identity for the privacy class through
+   `scripts/ops/cli-release.sh` step `privacy_release_identity`, which stages
+   this `pearl-release.json` in `privacy_class.release_code_identities.metadata_dir`
+   (see `docs/runbooks/privacy-class-beta-operations.md` "Approved code
+   identities"). Only when a config entry is needed instead, emit it from the
+   verified metadata rather than copying values by hand:
 
 ```bash
 python3 scripts/provider-code-identity.py --emit-approved-identity \
-  --pearl-release-json pearl-release.json \
-  --expires-at 2027-01-31T00:00:00Z
+  --pearl-release-json pearl-release.json
 ```
 
    The command checks the signature against

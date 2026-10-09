@@ -259,7 +259,7 @@ class EmitApprovedIdentityTest(unittest.TestCase):
             check=True,
         )
 
-    def emit(self, expires_at: str = "2099-01-01T00:00:00Z") -> subprocess.CompletedProcess:
+    def emit(self, expires_at: str | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
                 sys.executable,
@@ -269,9 +269,8 @@ class EmitApprovedIdentityTest(unittest.TestCase):
                 str(self.metadata),
                 "--public-key",
                 str(self.public_key),
-                "--expires-at",
-                expires_at,
-            ],
+            ]
+            + (["--expires-at", expires_at] if expires_at is not None else []),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -287,10 +286,14 @@ class EmitApprovedIdentityTest(unittest.TestCase):
             f"- team_id: {TEAM}\n"
             "  signing_identifier: live.malibu.provider.cli\n"
             f"  code_cdhash: {CDHASH}\n"
-            '  binary_version: "1.8.214"\n'
-            '  expires_at: "2099-01-01T00:00:00Z"\n',
+            '  binary_version: "1.8.214"\n',
         )
         self.assertNotIn("PRIVATE", result.stdout + result.stderr)
+
+    def test_expiry_is_emitted_only_when_given(self) -> None:
+        result = self.emit("2099-01-01T00:00:00Z")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.endswith('  binary_version: "1.8.214"\n  expires_at: "2099-01-01T00:00:00Z"\n'))
 
     def test_rejects_tampered_metadata(self) -> None:
         with self.metadata.open("a", encoding="utf-8") as handle:
