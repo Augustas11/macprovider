@@ -1,0 +1,320 @@
+{
+  "schema_version": "macprovider.network-model-admission-evidence.v1",
+  "journey_id": "JOURNEY-NETWORK-MODEL-ADMISSION",
+  "run_id": "cde8875a2fd34c1c913839fc5d19e5cd",
+  "execution_mode": "provider-byom-network-admission",
+  "requirement_ids": [
+    "SPEC-047-R001",
+    "SPEC-047-R002",
+    "SPEC-047-R003",
+    "SPEC-047-R004",
+    "SPEC-047-R005",
+    "SPEC-047-R006",
+    "SPEC-047-R007",
+    "SPEC-047-R008"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "fc9a7445945c4e1b0d1660c29b05cea0fe824e71"
+  },
+  "captured_at": "2026-10-09T01:39:38Z",
+  "expires_at": "2026-11-08",
+  "operator": {
+    "role": "release-operator",
+    "identity_fingerprint": "ef9f4ceaa6194ca4c6a5c6fb7f91c7cded6bcc0ef87bfe9dce5ed023a5fe216b"
+  },
+  "environment": {
+    "class": "physical-provider",
+    "hardware_profile": "operator-apple-silicon-256gb",
+    "candidate": "cli-1.8.224"
+  },
+  "harness": {
+    "name": "test/e2e/byom/run-cli-onboarding-e2e.py",
+    "status": "pass",
+    "cli_version": "1.8.224"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "physical admission journey on an isolated loopback coordinator: signed public CLI 1.8.224, settlement-capable MLX case, drift revocation, withdrawal re-entry, GGUF-bound novel offer, money-path zeros"
+  },
+  "steps": [
+    {
+      "id": "step-01-offer-dry-run",
+      "status": "pass",
+      "assertion": "Dry run produced the dry-run document with local_default authority and made no coordinator request.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R002"
+      ],
+      "documents": [
+        {
+          "id": "offer-dry-run",
+          "schema": "model_admission_offer_dry_run.v1",
+          "sha256": "f8d8595283ac7d3cf3f34fb64dcb03be4f63a67ca35f83c2ad63a5b9fa12f12a",
+          "bytes": 937
+        }
+      ]
+    },
+    {
+      "id": "step-02-submit-signed-offer",
+      "status": "pass",
+      "assertion": "One provider-signed offer was accepted by the coordinator and recorded as offer_submitted; a duplicate offer while it was live was refused with HTTP 409 and appended nothing.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R002",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "offer-submitted-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "29b7dc8358c0b7324dbc70d8529d90669650b4053344b54932b8c804f8cae6fd",
+          "bytes": 1028
+        }
+      ]
+    },
+    {
+      "id": "step-03-reject-opaque-endpoint",
+      "status": "pass",
+      "assertion": "An opaque endpoint candidate was refused by the CLI submission builder before any coordinator contact and remains confined to local inventory with no catalog key, no economics, and no buyer traffic.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "opaque-endpoint-refused-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "d940115bb8d9a3bab999285fc3b547fb5dbe1e7654f7b51d39c774b7ad4b2047",
+          "bytes": 833
+        }
+      ]
+    },
+    {
+      "id": "step-04-sandbox-probe-only",
+      "status": "pass",
+      "assertion": "The candidate was admitted as sandbox-probe-only by the coordinator, is not default-paid-routable, earns no credit, and exposes no dereferenceable locator.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R001",
+        "SPEC-047-R003",
+        "SPEC-047-R005",
+        "SPEC-047-R007"
+      ],
+      "documents": [
+        {
+          "id": "sandbox-probe-only-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "1ae55179956ca2ced80d5ec04b60191a5ee2ad6044a06f33bde988c4d8749415",
+          "bytes": 1028
+        }
+      ]
+    },
+    {
+      "id": "step-05-network-visible-unpriced",
+      "status": "pass",
+      "assertion": "The coordinator's completed synthetic probe moved the candidate to network_admitted_unsettled with null economics (the operator disclosure edge is not reachable after that probe-passed state).",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R004",
+        "SPEC-047-R005"
+      ],
+      "documents": [
+        {
+          "id": "network-visible-unpriced-economics",
+          "schema": "model_catalog_economics.v1",
+          "sha256": "1154fac44f4a643639245cd615ac22f7febba30fd94dbcdc91616c357eb00d76",
+          "bytes": 61238
+        }
+      ]
+    },
+    {
+      "id": "step-06-catalog-matched-not-settlement",
+      "status": "pass",
+      "assertion": "A catalog-matched candidate reached catalog_priced with trusted economics shown and no buyer debit, paid routing, ledger row, or provider settlement.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R004"
+      ],
+      "documents": [
+        {
+          "id": "catalog-matched-economics",
+          "schema": "model_catalog_economics.v1",
+          "sha256": "9416e8f61017f627b24d326f0ec7641820d3c8690e483b71be718a367a6a7907",
+          "bytes": 61303
+        }
+      ]
+    },
+    {
+      "id": "step-07-revocation-on-drift",
+      "status": "pass",
+      "assertion": "A changed admitted predicate was detected by the coordinator and the candidate was revoked with a drift reason; routing and settlement failed closed.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "revoked-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "f1669257609b06abecfb6e6fdccbca29a4fdde6d4403c42078d0b63faa1e9029",
+          "bytes": 934
+        }
+      ]
+    },
+    {
+      "id": "step-08-withdrawal",
+      "status": "pass",
+      "assertion": "The offered candidate was withdrawn through the CLI-owned path and its local artifacts remain in inventory.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "withdrawal-response",
+          "schema": "model_admission_withdraw.v1",
+          "sha256": "d990921d872bca3a8155893b41bcd80211bf70b3d1a756f97b58e1bb4aab9a9a",
+          "bytes": 1002
+        }
+      ]
+    },
+    {
+      "id": "step-09-settlement-capable-case",
+      "status": "pass",
+      "assertion": "A catalog-verified candidate was promoted to settlement_capable under dual control with a route-time artifact binding; the proposing actor could not self-approve; route-snapshot and receipt gates remain armed with zero rows.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R003",
+        "SPEC-047-R005"
+      ],
+      "documents": [
+        {
+          "id": "settlement-capable-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "f0dda5de5751e9b7e5218f7d42512a45776a5b420c8892d0ce8fe92dbb2402ec",
+          "bytes": 1000
+        }
+      ]
+    },
+    {
+      "id": "step-10-admission-status-presentation",
+      "status": "pass",
+      "assertion": "Status output distinguishes a catalog-matched candidate with an earning path from a novel candidate with none, each with state meaning and next action.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R002",
+        "SPEC-047-R004"
+      ],
+      "documents": [
+        {
+          "id": "novel-non-catalog-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "47fe189ddfc3a0c0f34f784eb012d6806be3154b3252ecca348d6104e2423575",
+          "bytes": 1050
+        }
+      ]
+    },
+    {
+      "id": "step-11-transition-validity",
+      "status": "pass",
+      "assertion": "An out-of-matrix transition was rejected and left the state unchanged; the withdrawn and revoked re-entry paths each required fresh provider-signed evidence (offer_rejected is reserved and unreachable in v0.2).",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R001",
+        "SPEC-047-R006"
+      ],
+      "documents": [
+        {
+          "id": "re-entry-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "c2a274d49ee57c0cec1349175d3a5393b3f59e20c8ba4fc2e39a4938a40976df",
+          "bytes": 1000
+        }
+      ]
+    },
+    {
+      "id": "step-12-redaction-review",
+      "status": "pass",
+      "assertion": "The runner log, the CLI and operator-surface transcript, every captured document, the coordinator's event listing, and the provider and coordinator logs written during the run were reviewed; no operator secret, ledger credential, credential-shaped value, URL, filesystem path, IP literal, loopback host name, raw prompt or raw completion is persisted in any of them.",
+      "artifacts": [
+        "redacted-network-model-admission"
+      ],
+      "requirement_ids": [
+        "SPEC-047-R007",
+        "SPEC-047-R008"
+      ],
+      "documents": [
+        {
+          "id": "redaction-review-status",
+          "schema": "model_admission_status.v1",
+          "sha256": "38dd7b5701e08fa60ac30ee917408291e222c4e2c576485bc0796c4affa8adfd",
+          "bytes": 1000
+        }
+      ]
+    }
+  ],
+  "observations": {
+    "catalog_matched_not_settlement_verified": true,
+    "default_buyer_invisibility_verified": true,
+    "dry_run_did_not_submit": true,
+    "earning_path_disclosure_verified": true,
+    "network_visible_unpriced_disclosed": true,
+    "non_settlement_state_created_provider_credit": false,
+    "provider_price_treated_as_catalog_rate": false,
+    "provider_signature_verified": true,
+    "raw_completion_logged": false,
+    "raw_prompt_logged": false,
+    "rejected_opaque_endpoint_verified": true,
+    "revocation_on_drift_verified": true,
+    "revoked_reoffer_required_fresh_evidence": true,
+    "sandbox_probe_only_blocked_from_paid_routing": true,
+    "secret_field_persisted": false,
+    "settlement_capable_case_verified": true,
+    "synthetic_probe_used_provider_channel": true,
+    "transition_matrix_enforced": true,
+    "withdrawal_verified": true,
+    "withdrawn_reoffer_required_fresh_evidence": true,
+    "money_path_zero_rows": {
+      "ledger_operator_credits": 0,
+      "ledger_payout_ready": 0,
+      "ledger_quarantine_resolutions": 0,
+      "ledger_request_credits": 0,
+      "payout_attempts": 0,
+      "request_log": 0,
+      "settlement_attempt_outputs": 0,
+      "settlement_receipt_verdicts": 0,
+      "settlement_route_snapshots": 0,
+      "spec022_payable_request_credits": 0
+    }
+  },
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  }
+}
