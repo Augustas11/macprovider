@@ -1430,8 +1430,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let drafter = Qwen35MTPDraftModel(configuration)
         eval(target, drafter)
 
-        func serialGreedy(_ prompt: [Int], count: Int) -> [Int] {
-            let cache = target.newCache(parameters: nil)
+        func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
+            let cache = try target.newCache(parameters: nil)
             var logits = target(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: cache)
             var tokens: [Int] = []
             for _ in 0 ..< count {
@@ -1552,7 +1552,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             XCTAssertEqual(result.terminalStatus, .length, id)
             XCTAssertEqual(
                 result.generatedTokens,
-                serialGreedy(prompts[id]!, count: budgets[id]!),
+                try serialGreedy(prompts[id]!, count: budgets[id]!),
                 "\(id) diverged from serial ordinary greedy"
             )
         }
@@ -1562,7 +1562,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertLessThan(cancelled.generatedTokens.count, budgets["cancelled"]!)
         XCTAssertEqual(
             cancelled.generatedTokens,
-            Array(serialGreedy(prompts["cancelled"]!, count: budgets["cancelled"]!)
+            Array(try serialGreedy(prompts["cancelled"]!, count: budgets["cancelled"]!)
                 .prefix(cancelled.generatedTokens.count))
         )
 
@@ -1680,7 +1680,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         emit[mtpEmitFlagKey] = true
         let output = target(
             LMInput.Text(tokens: MLXArray(committed.map(Int32.init)).reshaped(1, committed.count)),
-            cache: target.newCache(parameters: nil),
+            cache: try target.newCache(parameters: nil),
             state: emit
         )
         var state = drafter.makeState(parameters: nil)
@@ -4089,7 +4089,9 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 
@@ -4476,7 +4478,9 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 

@@ -1019,7 +1019,9 @@ final class KVConversationColdTierTests: XCTestCase {
             self.kvHeads = Array(repeating: 1, count: layers)
             super.init()
         }
-        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
             fatalError("prepare is not exercised by the newCache cache-class invariant test")
         }
     }
@@ -1037,7 +1039,9 @@ final class KVConversationColdTierTests: XCTestCase {
         func newCache(parameters: GenerateParameters?) -> [KVCache] {
             kvHeads.map { _ in RotatingKVCache(maxSize: 4096) }
         }
-        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
             fatalError("prepare is not exercised by the newCache cache-class invariant test")
         }
     }
