@@ -775,6 +775,8 @@ mainland-provider installer handoff.
   locally built or unreleased binary to the live coordinator.
 - **Closure rule:** keep #1778 open until both open gates have durable evidence.
 
+- **Carry-forward CF-230-E2E (1.8.230, candidate `15ec4ebd5`, run 37912670009):** carry forward the 1.8.224 in-scope e2e. 1.8.230 changes no decode-path code: it adds the native-MTP Keychain-stall change from PR 1901, the CB upgrade release gate from PR 1904, the `creator` command group from PR 1908, and drops per-binary CB/native-MTP binding and calendar-expiry gates (PR 1918). Live proof on the designated Studio, 2026-10-09 10:50-10:55Z: payload-only swap to the exact signed candidate; `canary_smoke --probe` recorded binary 1.8.230, exact compatibility set, coordinator connected, CB active with the existing signed policy authorized and `live_verified`, paged KV attached; a gateway buyer request for `qwen/qwen3.6-35b-a3b` returned 200 with native-MTP target forwards 0 -> 66.
+
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
