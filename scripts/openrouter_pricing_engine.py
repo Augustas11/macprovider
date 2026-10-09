@@ -93,7 +93,7 @@ ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
-    "internal_reasoning", "overrides", "prompt", "web_search",
+    "internal_reasoning", "overrides", "prompt", "request", "web_search",
 })
 
 
@@ -807,6 +807,10 @@ def cheapest_endpoint_pricing(
         if not isinstance(provider, str) or not provider.strip() or not isinstance(pricing, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoint[{index}] missing provider/pricing")
         require_allowed_keys(pricing, ENDPOINT_PRICING_KEYS, f"endpoints response for {model_id}: endpoints[{index}].pricing")
+        if "request" in pricing and parse_decimal(pricing["request"], f"endpoints response for {model_id}: request") != 0:
+            # Per-request charges cannot be normalized into a token-only peg
+            # without a request-size assumption; do not silently discard them.
+            raise SchemaError(f"endpoints response for {model_id}: nonzero per-request pricing cannot establish a token-only market quote")
         prompt = parse_decimal(pricing.get("prompt"), f"endpoints response for {model_id}: prompt")
         completion = parse_decimal(pricing.get("completion"), f"endpoints response for {model_id}: completion")
         if is_free_variant(endpoint.get("model_id")) or is_free_variant(endpoint.get("tag")):
