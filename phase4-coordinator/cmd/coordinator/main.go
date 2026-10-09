@@ -85,6 +85,11 @@ func parseRFC3339Strict(s string) (time.Time, error) {
 var version = "dev"
 
 func main() {
+	// Exit only after runCoordinator has returned and its store-close defers ran.
+	os.Exit(runCoordinator())
+}
+
+func runCoordinator() (exitCode int) {
 	// SPEC-017 v0.1.8 Step 4.A — subcommand dispatch. When the
 	// first positional arg is a known operator-CLI verb, route
 	// to the corresponding handler and exit with its code. The
@@ -1057,6 +1062,7 @@ func main() {
 		if mdaStore, err := mdm.OpenMDAStoreWithManualWALCheckpoint(cfg.Storage.DBPath); err != nil {
 			logger.Error().Err(err).Msg("live MDA durable store open failed; continuing with in-memory only")
 		} else {
+			defer mdaStore.Close()
 			liveMDAService.SetMDAStore(mdaStore)
 			logger.Info().Str("db_path", cfg.Storage.DBPath).Msg("Phase 3 live MDA durable proof store wired")
 		}
@@ -1681,13 +1687,11 @@ func main() {
 			wsServer.DrainAll("coordinator shutdown")
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
-			if err := buyerHTTP.Shutdown(ctx); err != nil {
-				logger.Error().Err(err).Msg("buyer http shutdown failed")
-				os.Exit(1)
+			if err := shutdownHTTPServer(ctx, buyerHTTP, "buyer", logger); err != nil {
+				exitCode = 1
 			}
-			if err := providerHTTP.Shutdown(ctx); err != nil {
-				logger.Error().Err(err).Msg("provider http shutdown failed")
-				os.Exit(1)
+			if err := shutdownHTTPServer(ctx, providerHTTP, "provider", logger); err != nil {
+				exitCode = 1
 			}
 			wsServer.CloseAllProviderSessions("coordinator shutdown")
 			wsServer.WaitProviderConnections(2 * time.Second)
