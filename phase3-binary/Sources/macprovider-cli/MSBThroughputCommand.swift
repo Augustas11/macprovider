@@ -42,7 +42,9 @@ import MacProviderCore
 ///
 /// `--scenario` selects FR-CB15 leftover measurements (MSB-03 ragged, MSB-05,
 /// temp-0 parity, one-row cancel isolation, durable replay, drain). Default
-/// `throughput` is the equal-length MSB-02/04 path.
+/// `throughput` is the equal-length MSB-02/04 path. `hybrid-window` is the
+/// SPEC-038 FR-CB2 hybrid window proof: a fixed greedy batch decoded at
+/// `--decode-window` and at window 1 must emit identical tokens.
 ///
 /// TPS semantics (decode-only, TTFT excluded): after prefill, one UNTIMED warm
 /// decode step produces the first token (the TTFT-boundary step), then the timed
@@ -64,7 +66,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             path. Default engine is contiguous KVCacheSimple (compiled, one
             perform). Pass --engine paged, scheduler, or serial-parallel.
             --scenario msb03|msb05|parity|isolation|replay|drain|leftovers covers the
-            remaining FR-CB15 leftover measurements. Buyer CB stays off.
+            remaining FR-CB15 leftover measurements. --scenario hybrid-window
+            compares a hybrid model's tokens at --decode-window against
+            window 1 on a fixed batch. Buyer CB stays off.
             """,
         shouldDisplay: false
     )
@@ -80,9 +84,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("scenario"),
-        help: "throughput (default equal-length), msb03 (ragged 512/1024/1536/2048), msb05 (serial-parallel Q1), parity, isolation, replay, drain, ragged-prefill (shared prefill at mixed prompt offsets vs per-row prefill), or leftovers (isolation+replay+drain+parity after one load)."
+        help: "throughput (default equal-length), msb03 (ragged 512/1024/1536/2048), msb05 (serial-parallel Q1), parity, isolation, replay, drain, ragged-prefill (shared prefill at mixed prompt offsets vs per-row prefill), leftovers (isolation+replay+drain+parity after one load), or hybrid-window (window exactness proof)."
     )
     var scenario: MSBThroughputScenario = .throughput
+
+    @Option(
+        name: .customLong("decode-window"),
+        help: "hybrid-window scenario: lockstep window compared token for token against window 1. Default 16 (the serve window)."
+    )
+    var candidateWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
 
     @Option(
         name: .customLong("parity-tokens"),
@@ -214,6 +224,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            return
+        case .hybridWindow:
+            try await runHybridWindow(modelID: modelID, container: container, cacheKinds: cacheKinds)
             return
         }
 
@@ -543,9 +556,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             )
             decodeEnd = Date()
         } else {
-            // Hybrid recurrent rows are intentionally driven one token at a time:
-            // that matches the production scheduler cap and forces recurrent row
-            // state to split/repack at every boundary.
+            // Uncompiled and hybrid rows are driven one token per call, which
+            // splits/repacks recurrent row state at every boundary. The serve
+            // window for hybrids is measured by `--scenario hybrid-window`.
             decodeStart = Date()
             for _ in 0..<decodeSteps {
                 try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
@@ -727,7 +740,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     weightsGeneration: 1
                 ),
                 maxDecodeLockstepWindow: cacheKinds.contains(.recurrentMamba)
-                    ? 1
+                    ? min(
+                        max(1, maxDecodeLockstepWindow),
+                        ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
+                    )
                     : max(1, maxDecodeLockstepWindow)
             ),
             allocator: allocator,
@@ -1841,6 +1857,253 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         }
         try json.write(to: fileURL, options: [.atomic])
         FileHandle.standardError.write(Data("msb-throughput: wrote \(fileURL.path)\n".utf8))
+    }
+
+    // MARK: - Hybrid decode-window exactness (SPEC-038 FR-CB2)
+
+    private struct FixedBatchWindowRun {
+        let tokens: [[Int]]
+        let decodeSeconds: Double
+        let windowCalls: Int
+    }
+
+    /// A fixed greedy batch of `--rows` ragged prompts, all longer than the
+    /// 512-token prefill chunk, decoded `--decode-tokens` steps at window 1
+    /// and at `--decode-window`, `--runs` times each. Passes only when window
+    /// 1 repeats itself exactly (else the comparison proves nothing) and every
+    /// row's candidate tokens equal its window-1 tokens. Both arms run the
+    /// production backend path (`decodeLockstepWindow`, uncompiled) over the
+    /// same chunked prefill; only the window differs.
+    private func runHybridWindow(
+        modelID: String,
+        container: ModelContainer,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) async throws {
+        let chunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        guard cacheKinds.contains(.recurrentMamba) else {
+            FileHandle.standardError.write(Data(
+                "msb-throughput: --scenario hybrid-window requires a hybrid (recurrent + attention) model\n".utf8
+            ))
+            throw ExitCode(2)
+        }
+        // The SPEC-038 FR-CB2 release proof: at least 16 rows, the serve
+        // path's window, two full windows per row (a window boundary and a
+        // repack), and a repeated window-1 reference.
+        let serveWindow = ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
+        guard promptTokens > chunk,
+              rows >= 16,
+              runs >= 2,
+              candidateWindow > 1,
+              candidateWindow == serveWindow,
+              decodeTokens >= 2 * candidateWindow
+        else {
+            FileHandle.standardError.write(Data((
+                "msb-throughput: --scenario hybrid-window requires --prompt-tokens > \(chunk), --rows >= 16, "
+                    + "--runs >= 2, --decode-window equal to the serve window (\(serveWindow)) and "
+                    + "--decode-tokens >= 2 x --decode-window\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        // Ragged lengths so rows sit at different block and chunk offsets.
+        let lengths = (0..<rows).map { promptTokens + $0 * 37 }
+        let prompts = try await buildPrompts(container: container, lengths: lengths)
+        var peakRSSMB = memoryRSSMB()
+        var referenceTokens: [[Int]]?
+        var referenceRepeats = true
+        var rowMatches = Array(repeating: true, count: rows)
+        var firstDivergence: [Int?] = Array(repeating: nil, count: rows)
+        var referenceTPS: [Double] = []
+        var candidateTPS: [Double] = []
+        var referenceCalls = 0
+        var candidateCalls = 0
+        let decodedTokens = Double(rows * decodeTokens)
+        for _ in 0..<runs {
+            let reference = try await runFixedBatchWindow(
+                container: container, prompts: prompts, window: 1, cacheKinds: cacheKinds
+            )
+            let candidate = try await runFixedBatchWindow(
+                container: container, prompts: prompts, window: candidateWindow, cacheKinds: cacheKinds
+            )
+            if let first = referenceTokens {
+                referenceRepeats = referenceRepeats && reference.tokens == first
+            } else {
+                referenceTokens = reference.tokens
+            }
+            for row in 0..<rows {
+                let lhs = reference.tokens[row]
+                let rhs = candidate.tokens[row]
+                guard lhs != rhs else { continue }
+                rowMatches[row] = false
+                if firstDivergence[row] == nil {
+                    firstDivergence[row] = msbTemp0ParityMatch(
+                        serial: lhs, batched: rhs, comparedTokens: max(lhs.count, rhs.count)
+                    ).firstDivergence ?? min(lhs.count, rhs.count)
+                }
+            }
+            referenceTPS.append(decodedTokens / max(reference.decodeSeconds, 0.000_001))
+            candidateTPS.append(decodedTokens / max(candidate.decodeSeconds, 0.000_001))
+            referenceCalls = reference.windowCalls
+            candidateCalls = candidate.windowCalls
+            peakRSSMB = max(peakRSSMB, memoryRSSMB())
+        }
+
+        let referenceP50 = decodeBenchPercentileTPS(referenceTPS, p: 0.5)
+        let candidateP50 = decodeBenchPercentileTPS(candidateTPS, p: 0.5)
+        let pass = referenceRepeats && rowMatches.allSatisfy { $0 }
+        let modelTag = modelID.split(separator: "/").last.map(String.init) ?? "model"
+        let report = MSBHybridWindowReport(
+            schemaVersion: 1,
+            modelID: modelID,
+            modelTag: modelTag,
+            mlxSwiftLMPin: decodeBenchMLXPinTag(),
+            scenario: scenario.rawValue,
+            rows: rows,
+            promptTokenLengths: lengths,
+            promptChunkTokens: chunk,
+            decodeTokensPerRow: decodeTokens,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            runs: runs,
+            referenceWindow: 1,
+            candidateWindow: candidateWindow,
+            referenceWindowCalls: referenceCalls,
+            candidateWindowCalls: candidateCalls,
+            referenceRepeatsExactly: referenceRepeats,
+            rowMatches: rowMatches,
+            firstDivergenceIndex: firstDivergence,
+            referenceTokenSHA256: (referenceTokens ?? []).map(msbTokenSequenceSHA256),
+            referenceAggregateTPSRuns: referenceTPS,
+            candidateAggregateTPSRuns: candidateTPS,
+            referenceAggregateTPSp50: referenceP50,
+            candidateAggregateTPSp50: candidateP50,
+            candidateSpeedup: referenceP50 > 0 ? candidateP50 / referenceP50 : 0,
+            peakRSSMB: peakRSSMB,
+            promptTokenSHA256: prompts.map(msbPromptTokenSHA256),
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            pass: pass
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let json = try encoder.encode(report)
+        FileHandle.standardOutput.write(json)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+        FileHandle.standardError.write(Data((
+            "msb-throughput: hybrid-window model=\(modelTag) rows=\(rows) " +
+            "prompt_tokens=\(lengths.min() ?? 0)-\(lengths.max() ?? 0) decode_tokens=\(decodeTokens) " +
+            "window=\(candidateWindow) reference_repeats=\(referenceRepeats) " +
+            "rows_exact=\(rowMatches.filter { $0 }.count)/\(rows) " +
+            "w1_tps_p50=\(decodeBenchFormatTPS(referenceP50)) " +
+            "w\(candidateWindow)_tps_p50=\(decodeBenchFormatTPS(candidateP50)) " +
+            "pass=\(pass) peak_rss_mb=\(peakRSSMB)\n"
+        ).utf8))
+        if !stdoutOnly {
+            let fileURL: URL
+            if let explicitPath = output {
+                fileURL = URL(fileURLWithPath: explicitPath)
+                let parent = fileURL.deletingLastPathComponent()
+                if parent.path != "/" {
+                    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                }
+            } else {
+                let dir = URL(fileURLWithPath: outputDir, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let tsFormatter = ISO8601DateFormatter()
+                tsFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+                let ts = tsFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+                fileURL = dir.appendingPathComponent(
+                    "msb-hybrid-window-\(rows)row-\(decodeBenchSanitizeFilenameComponent(modelTag))-\(ts).json"
+                )
+            }
+            try json.write(to: fileURL, options: [.atomic])
+            FileHandle.standardError.write(Data("msb-throughput: wrote \(fileURL.path)\n".utf8))
+        }
+        guard pass else { throw ExitCode(1) }
+    }
+
+    /// One fixed-batch run: production 512-token chunked prefill per row, then
+    /// `decodeTokens` greedy steps in windows of `window` through
+    /// `decodeLockstepWindow`, the call the scheduler makes for every hop.
+    private func runFixedBatchWindow(
+        container: ModelContainer,
+        prompts: [[Int]],
+        window: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) async throws -> FixedBatchWindowRun {
+        let chunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: 1,
+            layerCount: cacheKinds.count,
+            cacheKinds: cacheKinds,
+            compiledDecode: false
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks
+        )
+        var rowsState: [DecodeRow] = []
+        rowsState.reserveCapacity(prompts.count)
+        for (index, prompt) in prompts.enumerated() {
+            let id = "msb-hybrid-window-\(index)"
+            let handle = try await allocator.allocate(
+                conversationKey: id,
+                maxTokens: prompt.count + decodeTokens + 1,
+                initialTokens: 0
+            )
+            var row = DecodeRow(id: id, prompt: prompt, handle: handle, currentToken: 0)
+            var offset = 0
+            while offset < prompt.count {
+                let end = min(offset + chunk, prompt.count)
+                _ = try await allocator.extend(handle, by: end - offset)
+                let outputs = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                    requestID: id,
+                    promptTokens: Array(prompt[offset..<end]),
+                    binding: try await allocator.binding(for: handle),
+                    promptTokenOffset: offset,
+                    committedKVTokenCount: offset,
+                    targetKVTokenCount: end,
+                    isFinalChunk: end == prompt.count,
+                    samplerSeed: 0,
+                    temperature: 0,
+                    topP: 1,
+                    samplerStep: 0
+                )])
+                guard outputs.count == 1, outputs[0].failureCode == nil else {
+                    FileHandle.standardError.write(Data("msb-throughput: row \(id) prefill failed\n".utf8))
+                    throw ExitCode(1)
+                }
+                if end == prompt.count {
+                    guard let token = outputs[0].sampledToken else {
+                        FileHandle.standardError.write(Data(
+                            "msb-throughput: row \(id) missing final-prefill token\n".utf8
+                        ))
+                        throw ExitCode(1)
+                    }
+                    row.generated = [token]
+                    row.currentToken = token
+                }
+                offset = end
+            }
+            rowsState.append(row)
+        }
+
+        var remaining = decodeTokens
+        var calls = 0
+        let started = Date()
+        while remaining > 0 {
+            let steps = min(window, remaining)
+            try await extendRows(allocator: allocator, rows: rowsState, by: steps)
+            try await decodeWindow(backend: backend, allocator: allocator, rows: &rowsState, steps: steps)
+            remaining -= steps
+            calls += 1
+        }
+        let seconds = Date().timeIntervalSince(started)
+        for row in rowsState {
+            backend.finish(requestID: row.id)
+        }
+        return FixedBatchWindowRun(tokens: rowsState.map(\.generated), decodeSeconds: seconds, windowCalls: calls)
     }
 
     // MARK: - Prompt construction

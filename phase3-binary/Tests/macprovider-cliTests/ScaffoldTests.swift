@@ -96,7 +96,8 @@ final class DecodeBenchHelperTests: XCTestCase {
         XCTAssertEqual(MSBThroughputScenario(rawValue: "drain"), .drain)
         XCTAssertEqual(MSBThroughputScenario(rawValue: "leftovers"), .leftovers)
         XCTAssertEqual(MSBThroughputScenario(rawValue: "ragged-prefill"), .raggedPrefill)
-        XCTAssertEqual(MSBThroughputScenario.allCases.count, 9)
+        XCTAssertEqual(MSBThroughputScenario(rawValue: "hybrid-window"), .hybridWindow)
+        XCTAssertEqual(MSBThroughputScenario.allCases.count, 10)
     }
 
     func testMSB03PromptLengthsAndGates() {
