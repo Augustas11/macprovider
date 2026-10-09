@@ -5347,6 +5347,166 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(frames.isEmpty)
     }
 
+    func testSignedStartupRecoveryRequiresPreviouslyActiveContinuousBatchingToRemainProtected() async throws {
+        let previousStatus = Self.localAutoupdateStatus(
+            version: "1.8.99",
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus(
+                releaseID: "published-previous",
+                tupleSHA256: String(repeating: "a", count: 64)
+            )
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 90
+        )
+        let sleepGate = LocalAutoupdateHealthSleepGate()
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: false,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: recorder,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: setID,
+                    compatibilitySetSHA256: setDigest,
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    modelLoaded: false,
+                    continuousBatching: Self.protectedContinuousBatchingStatus(
+                        releaseID: "published-successor",
+                        tupleSHA256: String(repeating: "b", count: 64)
+                    )
+                )
+            },
+            autoupdateLocalHealthSleep: {
+                await sleepGate.waitForRelease()
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        let recovery = Task {
+            await client.runStartupAutoupdateRecoveryForTest(
+                binaryURL: fixture.binary,
+                markerStore: fixture.store
+            )
+        }
+        try await Self.waitUntil {
+            await sleepGate.started
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+
+        await sleepGate.release()
+        await recovery.value
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "local_signed_set_health_succeeded")
+    }
+
+    func testSignedStartupRecoveryKeepsRollbackArmedWhenContinuousBatchingFallsOff() async throws {
+        let previousStatus = Self.localAutoupdateStatus(
+            version: "1.8.99",
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 90
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: recorder,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: setID,
+                    compatibilitySetSHA256: setDigest,
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    continuousBatching: nil
+                )
+            },
+            autoupdateLocalHealthSleep: {
+                XCTFail("continuous batching loss must fail on the first sample")
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(
+            binaryURL: fixture.binary,
+            markerStore: fixture.store
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.lockURL.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(
+            event?["reason"] as? String,
+            "continuous_batching_preservation_status_block_missing"
+        )
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.postStartHealthFailed.rawValue)
+    }
+
     func testSignedStartupRecoveryKeepsRollbackArmedWhenLocallyUnhealthy() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(
             targetVersion: CoordinatorClient.binaryVersion,
@@ -5519,6 +5679,129 @@ final class CoordinatorClientTests: XCTestCase {
                 )
             )
         }
+    }
+
+    func testLocalAutoupdateHealthPreservesContinuousBatchingStableTuple() throws {
+        let expectedPID = getpid()
+        let expectedInstanceID = RouterHandler.serviceInstanceID
+        let previousStatus = Self.localAutoupdateStatus(
+            version: "1.8.99",
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: expectedInstanceID,
+            processID: expectedPID,
+            continuousBatching: Self.protectedContinuousBatchingStatus(
+                releaseID: "published-previous",
+                tupleSHA256: String(repeating: "c", count: 64)
+            )
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        let currentStatus = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "set-a",
+            compatibilitySetSHA256: "digest-a",
+            instanceID: expectedInstanceID,
+            processID: expectedPID,
+            continuousBatching: Self.protectedContinuousBatchingStatus(
+                releaseID: "published-successor",
+                tupleSHA256: String(repeating: "d", count: 64)
+            )
+        )
+        XCTAssertEqual(
+            CoordinatorClient.localHealthyTargetInstanceKey(
+                currentStatus,
+                targetVersion: CoordinatorClient.binaryVersion,
+                expectedCompatibilitySetID: "set-a",
+                expectedCompatibilitySetSHA256: "digest-a",
+                previousContinuousBatching: previousContinuousBatching,
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            ),
+            "\(expectedPID):\(expectedInstanceID)"
+        )
+        var missingContinuousBatching = currentStatus
+        missingContinuousBatching.removeValue(forKey: "continuous_batching")
+        XCTAssertNil(
+            CoordinatorClient.localHealthyTargetInstanceKey(
+                missingContinuousBatching,
+                targetVersion: CoordinatorClient.binaryVersion,
+                expectedCompatibilitySetID: "set-a",
+                expectedCompatibilitySetSHA256: "digest-a",
+                previousContinuousBatching: previousContinuousBatching,
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            )
+        )
+        XCTAssertEqual(
+            AutoUpdateContinuousBatchingPreservationGate.failureEventReason(
+                by: missingContinuousBatching,
+                previous: previousContinuousBatching
+            ),
+            "continuous_batching_preservation_status_block_missing"
+        )
+        let modelHashChanged = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "set-a",
+            compatibilitySetSHA256: "digest-a",
+            instanceID: expectedInstanceID,
+            processID: expectedPID,
+            modelHash: String(repeating: "e", count: 64),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        XCTAssertNil(
+            CoordinatorClient.localHealthyTargetInstanceKey(
+                modelHashChanged,
+                targetVersion: CoordinatorClient.binaryVersion,
+                expectedCompatibilitySetID: "set-a",
+                expectedCompatibilitySetSHA256: "digest-a",
+                previousContinuousBatching: previousContinuousBatching,
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            )
+        )
+        XCTAssertEqual(
+            AutoUpdateContinuousBatchingPreservationGate.failureEventReason(
+                by: modelHashChanged,
+                previous: previousContinuousBatching
+            ),
+            "continuous_batching_preservation_model_hash_changed"
+        )
+
+        let rollbackFixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: "9.9.9",
+            transactionState: .awaitingPreviousReadiness,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: rollbackFixture.home) }
+        let restoredPreviousStatus = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: try XCTUnwrap(rollbackFixture.marker.previousCompatibilitySetID),
+            compatibilitySetSHA256: try XCTUnwrap(rollbackFixture.marker.previousCompatibilitySetSHA256),
+            instanceID: expectedInstanceID,
+            processID: expectedPID,
+            continuousBatching: Self.protectedContinuousBatchingStatus(
+                releaseID: "published-restored-previous",
+                tupleSHA256: String(repeating: "f", count: 64)
+            )
+        )
+        XCTAssertTrue(
+            CoordinatorClient.restoredPreviousContinuousBatchingSatisfied(
+                restoredPreviousStatus,
+                marker: rollbackFixture.marker,
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            )
+        )
+        XCTAssertFalse(
+            CoordinatorClient.restoredPreviousContinuousBatchingSatisfied(
+                missingContinuousBatching,
+                marker: rollbackFixture.marker,
+                expectedServiceInstanceID: expectedInstanceID,
+                expectedProcessID: expectedPID
+            )
+        )
     }
 
     func testReceiptRotationRestoreTimeoutDoesNotHangAfterCandidateRejection() async throws {
@@ -7500,6 +7783,195 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(committedStatus.migrationPending)
     }
 
+    func testCoordinatorAutoupdateWithPreservedContinuousBatchingStillRequiresLocalHealthWhenServingConfirmed() async throws {
+        let previousStatus = Self.localAutoupdateStatus(
+            version: "1.8.99",
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            signedRelease: true,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let setID = try XCTUnwrap(fixture.marker.targetCompatibilitySetID)
+        let setDigest = try XCTUnwrap(fixture.marker.targetCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: setID,
+            envelopeSHA256: setDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 300
+        )
+        let configURL = fixture.home.appendingPathComponent("config.yaml")
+        try "provider_id: provider-test\nprovider_token: migration-token\nmodel: model-a\n".write(
+            to: configURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let sampleCount = LockedBox(0)
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": "migration-token"])
+        let credentialStatus = ProviderCredentialStatusRuntime(
+            ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            compatibilitySetIDOverride: setID,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            coordinatorReadiness: { _, _, _ in true },
+            autoupdateMarkerStore: fixture.store,
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                sampleCount.set(sampleCount.get() + 1)
+                return Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: setID,
+                    compatibilitySetSHA256: setDigest,
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    continuousBatching: nil
+                )
+            },
+            autoupdateLocalHealthSleep: {},
+            configPath: configURL.path,
+            providerToken: "migration-token",
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": setID,
+            "recommended_compatibility_set_id": setID,
+        ])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertEqual(sampleCount.get(), 2)
+        XCTAssertTrue(try String(contentsOf: configURL).contains("provider_token: migration-token"))
+        let retainedStatus = await credentialStatus.snapshot()
+        XCTAssertTrue(retainedStatus.migrationPending)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.postStart.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "continuous_batching_preservation_status_block_missing")
+    }
+
+    func testCoordinatorAutoupdateNonLocalSignedMarkerWithPreservedContinuousBatchingRequiresLocalHealth() async throws {
+        let previousStatus = Self.localAutoupdateStatus(
+            version: "1.8.99",
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: CoordinatorClient.binaryVersion,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let configURL = fixture.home.appendingPathComponent("config.yaml")
+        try "provider_id: provider-test\nprovider_token: migration-token\nmodel: model-a\n".write(
+            to: configURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let sampleCount = LockedBox(0)
+        let credentialStore = InMemoryProviderCredentialStore(values: ["provider-test": "migration-token"])
+        let credentialStatus = ProviderCredentialStatusRuntime(
+            ProviderCredentialStatus(
+                source: .cliKeychain,
+                state: .ready,
+                restartSafe: true,
+                migrationPending: true
+            )
+        )
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            coordinatorReadiness: { _, _, _ in true },
+            autoupdateMarkerStore: fixture.store,
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                sampleCount.set(sampleCount.get() + 1)
+                return Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: fixture.marker.targetCompatibilitySetID ?? "",
+                    compatibilitySetSHA256: fixture.marker.targetCompatibilitySetSHA256 ?? "",
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    continuousBatching: nil
+                )
+            },
+            autoupdateLocalHealthSleep: {},
+            configPath: configURL.path,
+            providerToken: "migration-token",
+            providerCredentialStore: credentialStore,
+            credentialStatusRuntime: credentialStatus
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertEqual(sampleCount.get(), 2)
+        XCTAssertTrue(try String(contentsOf: configURL).contains("provider_token: migration-token"))
+        let retainedStatus = await credentialStatus.snapshot()
+        XCTAssertTrue(retainedStatus.migrationPending)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.postStart.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "continuous_batching_preservation_status_block_missing")
+    }
+
     func testSelfUpdateOwnedRollbackRetainsLegacyCredentialUntilParentCommits() async throws {
         let fixture = try Self.makeAutoupdateRecoveryFixture(
             targetVersion: CoordinatorClient.binaryVersion,
@@ -7610,6 +8082,173 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.marker.releaseBackupPath ?? ""))
+    }
+
+    func testRestoredPreviousSetCleanupRequiresStableContinuousBatchingProof() async throws {
+        let previousSnapshotStatus = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousSnapshotStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: "9.9.9",
+            transactionState: .awaitingPreviousReadiness,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let previousID = try XCTUnwrap(fixture.marker.previousCompatibilitySetID)
+        let previousDigest = try XCTUnwrap(fixture.marker.previousCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: previousID,
+            envelopeSHA256: previousDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 300
+        )
+        let sampleCount = LockedBox(0)
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            compatibilitySetIDOverride: previousID,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            coordinatorReadiness: { _, _, _ in true },
+            autoupdateMarkerStore: fixture.store,
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                let sample = sampleCount.get()
+                sampleCount.set(sample + 1)
+                return Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: previousID,
+                    compatibilitySetSHA256: previousDigest,
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    continuousBatching: Self.protectedContinuousBatchingStatus(active: sample == 0)
+                )
+            },
+            autoupdateLocalHealthSleep: {}
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": previousID,
+            "recommended_compatibility_set_id": previousID,
+        ])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertEqual(sampleCount.get(), 2)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.rollback.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "continuous_batching_preservation_inactive")
+    }
+
+    func testRestoredPreviousSetCleanupAcceptsStableContinuousBatchingProof() async throws {
+        let previousSnapshotStatus = Self.localAutoupdateStatus(
+            version: CoordinatorClient.binaryVersion,
+            compatibilitySetID: "previous-set",
+            compatibilitySetSHA256: String(repeating: "8", count: 64),
+            instanceID: RouterHandler.serviceInstanceID,
+            processID: getpid(),
+            continuousBatching: Self.protectedContinuousBatchingStatus()
+        )
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousSnapshotStatus)
+        )
+        let fixture = try Self.makeAutoupdateRecoveryFixture(
+            targetVersion: "9.9.9",
+            transactionState: .awaitingPreviousReadiness,
+            previousContinuousBatching: previousContinuousBatching
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let previousID = try XCTUnwrap(fixture.marker.previousCompatibilitySetID)
+        let previousDigest = try XCTUnwrap(fixture.marker.previousCompatibilitySetSHA256)
+        let manifest = CompatibilitySetManifest(
+            compatibilitySetID: previousID,
+            envelopeSHA256: previousDigest,
+            version: CoordinatorClient.binaryVersion,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            maintenanceLeaseSeconds: 600,
+            readinessTimeoutSeconds: 300
+        )
+        let sampleCount = LockedBox(0)
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            compatibilitySetIDOverride: previousID,
+            installedCompatibilityManifest: { _, version in
+                version == CoordinatorClient.binaryVersion ? manifest : nil
+            },
+            coordinatorReadiness: { _, _, _ in true },
+            autoupdateMarkerStore: fixture.store,
+            autoupdateLocalHealthRequiredConsecutiveSamples: 2,
+            autoupdateLocalStatusProbe: {
+                sampleCount.set(sampleCount.get() + 1)
+                return Self.localAutoupdateStatus(
+                    version: CoordinatorClient.binaryVersion,
+                    compatibilitySetID: previousID,
+                    compatibilitySetSHA256: previousDigest,
+                    instanceID: RouterHandler.serviceInstanceID,
+                    processID: getpid(),
+                    continuousBatching: Self.protectedContinuousBatchingStatus(
+                        releaseID: "published-restored-previous"
+                    )
+                )
+            },
+            autoupdateLocalHealthSleep: {}
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": previousID,
+            "recommended_compatibility_set_id": previousID,
+        ])
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertEqual(sampleCount.get(), 2)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.rollback.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "previous_compatibility_set_admitted_and_buyer_serving")
     }
 
     func testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity() async throws {
@@ -8172,7 +8811,8 @@ final class CoordinatorClientTests: XCTestCase {
         targetVersion: String,
         commitOwner: String? = nil,
         transactionState: CompatibilitySetTransactionState? = nil,
-        signedRelease: Bool = false
+        signedRelease: Bool = false,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil
     ) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
         let home = try makeTemporaryDirectory(prefix: "coordinator-autoupdate-")
         let store = AutoUpdateMarkerStore(homeDirectory: home)
@@ -8227,7 +8867,8 @@ final class CoordinatorClientTests: XCTestCase {
             discoveryHeadSequence: signedRelease ? 12 : nil,
             discoveryHeadSHA256: signedRelease ? String(repeating: "7", count: 64) : nil,
             updateAuthorityMode: signedRelease ? "signed_release" : nil,
-            transactionState: transactionState
+            transactionState: transactionState,
+            previousContinuousBatching: previousContinuousBatching
         )
         try store.writePending(marker)
         return (home, store, marker, binary, backup)
@@ -8490,17 +9131,57 @@ final class CoordinatorClientTests: XCTestCase {
         compatibilitySetSHA256: String,
         instanceID: String,
         processID: pid_t,
-        modelLoaded: Bool = true
+        modelLoaded: Bool = true,
+        modelID: String = "model-a",
+        modelHash: String = String(repeating: "a", count: 64),
+        modelHashAlgorithm: String? = ModelArtifactIdentity.snapshotManifestV1,
+        continuousBatching: [String: Any]? = nil
     ) -> [String: Any] {
-        [
+        var status: [String: Any] = [
             "binary_version": version,
             "compatibility_set_id": compatibilitySetID,
             "compatibility_set_sha256": compatibilitySetSHA256,
+            "model": modelID,
+            "model_hash": modelHash,
             "model_loaded": modelLoaded,
             "status": "ready",
             "service_instance": [
                 "instance_id": instanceID,
                 "pid": Int(processID),
+            ],
+        ]
+        if let modelHashAlgorithm {
+            status["model_hash_algorithm"] = modelHashAlgorithm
+        }
+        if let continuousBatching {
+            status["continuous_batching"] = continuousBatching
+        }
+        return status
+    }
+
+    private static func protectedContinuousBatchingStatus(
+        releaseID: String = "published-release",
+        tupleSHA256: String = String(repeating: "b", count: 64),
+        active: Bool = true,
+        pagedKVDecision: String = "attached",
+        loadStatus: String = ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue,
+        authorized: Bool = true,
+        localProofResult: String = "passed",
+        decisionReason: String = "authorized"
+    ) -> [String: Any] {
+        [
+            "active": active,
+            "mode": "canary",
+            "cache_class": "mixed",
+            "paged_kv_decision": pagedKVDecision,
+            "policy": [
+                "load_status": loadStatus,
+                "authorized": authorized,
+                "local_proof_result": localProofResult,
+                "tuple_sha256": tupleSHA256,
+                "decision_reason": decisionReason,
+                "emergency_off_override": false,
+                "release_id": releaseID,
             ],
         ]
     }

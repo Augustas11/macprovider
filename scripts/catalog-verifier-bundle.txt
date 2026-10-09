@@ -2,6 +2,7 @@
 # (#1688). deploy-pearl-vps.sh and ops/pearl-updater/install-pearl-updater.sh
 # ship exactly this list; one repo-relative scripts/<name> path per line.
 scripts/catalog-release.py
+scripts/cb_release_baselines.py
 scripts/openrouter_pricing_engine.py
 scripts/native_mtp_admission_sidecar.py
 scripts/native_mtp_revocation_slots.py

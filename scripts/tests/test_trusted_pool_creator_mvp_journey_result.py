@@ -160,10 +160,10 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
             )
             self.assertEqual([], result.errors, requirement_id)
 
-    def test_rejects_expires_at_after_captured_utc_date(self) -> None:
+    def _validate_with_expiry(self, expires_at: str) -> ValidationResult:
         result = ValidationResult()
         signed = valid_signed()
-        signed["expires_at"] = "2026-08-26"
+        signed["expires_at"] = expires_at
         _validate_trusted_pool_creator_mvp_journey_result(
             signed,
             "SPEC-043-R012",
@@ -173,6 +173,16 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
             "evidence[0]",
             result,
         )
+        return result
+
+    def test_accepts_expires_at_after_captured_utc_date(self) -> None:
+        # Calendar expiry no longer invalidates evidence: a result may name a
+        # later expiry than its capture day.
+        result = self._validate_with_expiry("2026-08-26")
+        self.assertFalse(any("captured_at" in error for error in result.errors))
+
+    def test_rejects_expires_at_before_captured_utc_date(self) -> None:
+        result = self._validate_with_expiry("2026-08-24")
         self.assertTrue(any("captured_at" in error for error in result.errors))
 
     def test_rejects_broad_or_unmapped_requirement(self) -> None:

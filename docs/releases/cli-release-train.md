@@ -140,6 +140,21 @@ These source checks support proceeding to a consolidated promotion-ready
 candidate; they do not cut a candidate, authorize production enablement or
 replace final signed-identity and changed buyer-path confirmation.
 
+Privacy network activation handback, 2026-10-09 (SPEC-049 §8.3, Related:
+#1749). Live changes: the signed CLI 1.8.224 code identity is approved on
+production, and eligible 1.8.224 providers enrolled automatically (six
+enrolled plus the operator-pinned canary). Buyer confirmation through the
+public gateway with the reviewed reference client passed for identity pin and
+signed directory, each stream and non-stream; directory-selected private
+requests were also served by enrolled Llama providers. Every private request
+settled as `relay_blind_settled`; ordinary traffic stayed healthy. Synthetic
+load on the canary was paused for 37 seconds for the pin/directory run and
+restarted. Findings carried to #1911: reservation selection bound the first
+provider for a model regardless of free slots, and private requests lose free
+slots to sustained plaintext load. The approval still carries the old dated
+expiry until a runtime containing `43180f577` is deployed and the approve
+step is rerun.
+
 Privacy activation follow-up [#1892](https://github.com/Augustas11/macprovider/pull/1892)
 merged on 2026-10-08 as `394bf61aea689075ac5506c506484cc75168649a`,
 with antfleet-ops approval and all checks green. The accepted campaign includes
@@ -406,33 +421,29 @@ the China supply track green until a reviewed signed post-#1745 CLI and its
 installer/release mirror are published and #1756 passes from a clean mainland
 Mac with the prohibited resolver boundary active.
 
-### Precondition for any candidate cut after #1672
+### Continuous-batching continuity before candidate promotion or upgrade
 
-`v1.8.176` predates #1672 and is unaffected. Any candidate cut from `main` at
-`b61f081c` or later enforces SPEC-038 FR-CB10 per-tuple acceptance coverage
-**fail-closed**: descriptor membership alone no longer permits batching, and a
-provider will not batch until its operator declares the exact tuple in
-`continuous_batching_accepted_tuples`.
+SPEC-038 FR-CB10 requires exact signed-policy coverage for coordinator-joined
+serving. Since #1803 (`b55463f6f`), `continuous_batching_accepted_tuples` is
+an isolated `--no-join` test input; it cannot authorize production batching.
+Keeping `continuous_batching: canary` in configuration is insufficient.
 
-On such a candidate a provider left as-is serial-routes with reason
-`tuple_acceptance_coverage_unavailable`; strict `continuous_batching: on`
-fails at startup rather than serving unbatched. Declare the tuple on the
-Studio canary **before** deploying such a candidate, or CB there goes serial
-with no other symptom:
+Before recommending or installing successor bytes, preserve each previously
+active qualified hardware/model/cache tuple. Publish reviewed policy coverage
+for the successor's exact provider version, live executable CDHash, package
+manifest and campaign evidence before the successor is recommended. Reuse
+unchanged decode qualification; never copy an old CDHash grant to new bytes.
+An empty policy, rollout `off`, or identity mismatch is a capability loss,
+even when feed signature verification and provider join succeed.
 
-```yaml
-continuous_batching_accepted_tuples:
-  - model_id: <served model id>
-    model_sha256: <64-char lowercase hex, must equal the runtime value exactly>
-    cache_class: <runtime cache class>
-    kv_dtype: bf16
-    requires_moe: true
-    hardware_class: <hardware class>
-```
-
-Config load rejects a whitespace-padded field or a non-canonical SHA, so a
-declaration that could never have matched fails at startup instead of loading
-and silently never matching.
+After the signed upgrade and restart, verify `policy.load_status=live_verified`,
+`policy.authorized=true`, `policy.local_proof_result=passed`,
+`paged_kv_decision=attached`, and `active=true`, then confirm a scheduler-admitted
+serving request through the Malibu gateway. Ready/connected alone is insufficient.
+An intentional disable requires an explicit reviewed operator decision; do not
+silently reinterpret missing coverage as intentional. See
+[the signed-policy enable gate](../runbooks/continuous-batching-enable-gate.md)
+and [the regression investigation](../runbooks/continuous-batching-upgrade-continuity.md).
 
 ## Active candidate
 
@@ -763,6 +774,8 @@ mainland-provider installer handoff.
   controlled nonempty signed production-policy rollout. Do not connect a
   locally built or unreleased binary to the live coordinator.
 - **Closure rule:** keep #1778 open until both open gates have durable evidence.
+
+- **Carry-forward CF-230-E2E (1.8.230, candidate `15ec4ebd5`, run 37912670009):** carry forward the 1.8.224 in-scope e2e. 1.8.230 changes no decode-path code: it adds the native-MTP Keychain-stall change from PR 1901, the CB upgrade release gate from PR 1904, the `creator` command group from PR 1908, and drops per-binary CB/native-MTP binding and calendar-expiry gates (PR 1918). Live proof on the designated Studio, 2026-10-09 10:50-10:55Z: payload-only swap to the exact signed candidate; `canary_smoke --probe` recorded binary 1.8.230, exact compatibility set, coordinator connected, CB active with the existing signed policy authorized and `live_verified`, paged KV attached; a gateway buyer request for `qwen/qwen3.6-35b-a3b` returned 200 with native-MTP target forwards 0 -> 66.
 
 ## Promotion gate (checklist)
 

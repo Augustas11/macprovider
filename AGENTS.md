@@ -57,6 +57,12 @@ while sessions regenerated evidence instead of deploying. Each is binding.
    family, any tense, even negated) in a PR body, title or commit message
    unless that PR completes the issue. Write `Related: #N`. GitHub ignores
    negation; that is how the #1690 and #1749 epics were auto-closed early.
+10. **No expiry dates on live features.** Never add an expiry, sunset date,
+    automatic withdrawal or automatic kill switch to a live product feature,
+    its config validation, ops tooling, SPEC or decision log unless the
+    operator explicitly asks for one. A feature that works live stays on. If a
+    process document demands an expiry, flag it to the operator as a rule to
+    remove instead of complying.
 
 ## Project Overview
 

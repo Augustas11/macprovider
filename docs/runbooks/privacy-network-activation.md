@@ -1,6 +1,6 @@
 # Eligible-network privacy Beta activation
 
-Authority: SPEC-049 §8.3, decision-log Entry 251. This is a configuration-only
+Authority: SPEC-049 §8.3, decision-log Entries 251 and 252. This is a configuration-only
 activation of released CLI224 using the existing reviewed runtime. It does not
 authorize another CLI or coordinator release or conformance promotion.
 
@@ -11,7 +11,9 @@ provider identifiers. Reuse the signed baseline and source acceptance in
 
 ## Approve the existing signed identity
 
-Configure `PEARL_SSH` privately. From clean reviewed `origin/main`:
+Configure `PEARL_SSH` privately. Deploy a coordinator runtime that accepts an
+approval without `expires_at` before rerunning the approve step. From clean
+reviewed `origin/main`:
 
 ```bash
 bash scripts/ops/privacy-activate.sh status
@@ -27,8 +29,8 @@ superseded approval set, validates effective base plus overlay as the service
 user, then restarts and checks health. Failed validation restores the previous
 block without restarting; failed restart restores it and checks recovery.
 Identity/device overrides, denial/quarantine controls, directory key, catalog,
-ordinary traffic configuration and all other settings are preserved. Approval
-expires at `2026-10-20T00:00:00Z`; no loader extends it. Existing and newly joining
+ordinary traffic configuration and all other settings are preserved. The
+approval has no expiry and stays on while private requests work. Existing and newly joining
 eligible signed providers enroll automatically. Opt-outs and other releases do
 not become eligible by this action.
 
@@ -51,10 +53,11 @@ stream/nonstream). Configure `PRIVACY_BUYER_CLIENT`, `BUYER_TOKEN_FILE`,
 `PRIVACY_BUYER_PIN`, `PRIVACY_DIRECTORY_PUBLIC_KEY` and `GATEWAY_URL` privately,
 then run `next --run` again. This does not replace the settlement receipt check.
 
-## Immediate rollback and expiry
+## Optional incident disable
 
-On an identity/key admission error, plaintext downgrade, redaction failure or
-incorrect private settlement, disable durably using the same effective config:
+The kill switch is a manual incident tool; nothing engages it automatically.
+When the operator decides to disable the class, do it durably using the same
+effective config:
 
 ```bash
 PRIVACY_ACTIVATION_DISABLE=1 bash scripts/ops/privacy-activate.sh next
@@ -63,10 +66,6 @@ PRIVACY_ACTIVATION_DISABLE=1 MACPROVIDER_OPS_OWNER=<session-label> bash scripts/
 
 This uses the released coordinator CLI, takes the actor lock, and needs no
 service restart. Private requests fail closed; ordinary traffic continues.
-At expiry, normal `status`/`next` drives a withdrawal step: durable disablement
-first, then class configuration off and the expired approval removed under the
-same lock set. A superseding approval is never removed blindly. Runtime code
-identity expiry itself already rejects private admission at the deadline.
 Quarantine/revoke compromised identities through the reviewed operator CLI;
 never rewrite durable enrollment records directly. Release the session's actor
 lock after the committed handback:

@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -1186,7 +1186,7 @@ struct ServeCommand: AsyncParsableCommand {
         let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: true)
         guard inputs.candidate.value.version == catalogTrust.releaseID,
               AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes) == catalogTrust.digest,
-              inputs.artifactFeed.warnings.isEmpty,
+              inputs.artifactFeed.warnings.blockingArtifactFeedWarnings.isEmpty,
               let qualified = inputs.artifactFeed.value,
               qualified.releaseID == catalogTrust.releaseID,
               qualified.feedSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
@@ -2636,15 +2636,9 @@ struct ServeCommand: AsyncParsableCommand {
         let continuousBatchingPolicy = await Self.loadContinuousBatchingPolicy(
             catalogTrust: startupPreflight.catalogTrust
         )
-        let continuousBatchingRunningBuildIdentity = ModelRuntime.nativeMTPRunningBuildIdentity()
-        let runtimeCompatiblePolicyEntries = continuousBatchingPolicy.selection.entries.filter {
-            ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-                $0,
-                liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
-            )
-        }
+        let policyEntries = continuousBatchingPolicy.selection.entries
         let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
-        let currentPolicyEntries = runtimeCompatiblePolicyEntries.filter {
+        let currentPolicyEntries = policyEntries.filter {
             currentPolicyKeys.contains($0.modelKey)
         }
         let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
@@ -2660,11 +2654,11 @@ struct ServeCommand: AsyncParsableCommand {
                 "event=continuous_batching_manual_tuple action=ignored reason=signed_policy_required\n".utf8
             ))
         }
-        let policyAcceptedTuples = runtimeCompatiblePolicyEntries.map(\.tuple)
+        let policyAcceptedTuples = policyEntries.map(\.tuple)
         let effectiveAcceptedTuples = policyAcceptedTuples
             + (noJoin ? resolved.continuousBatchingAcceptedTuples : [])
         FileHandle.standardError.write(Data(
-            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(runtimeCompatiblePolicyEntries.count) rejected_runtime_provenance=\(continuousBatchingPolicy.selection.entries.count - runtimeCompatiblePolicyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
+            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
 
         printResolvedConfiguration(resolved)

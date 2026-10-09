@@ -1084,6 +1084,7 @@ struct SelfUpdate {
         var maintenanceLease: ProviderLifecycleLeaseRecord?
         var startupHandoffPrepared = false
         var updateLock: AutoUpdateLock?
+        var previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot?
         defer { withExtendedLifetime(updateLock) {} }
         if replaceBinary == nil {
             updateLock = try markerStore.acquireLock()
@@ -1092,6 +1093,7 @@ struct SelfUpdate {
                stagedMalibuApp == nil {
                 throw UpdateError.missingReleaseResource("signed Malibu.app")
             }
+            previousContinuousBatching = try await currentContinuousBatchingPreservationSnapshot()
             maintenanceLease = try lifecycleLeaseStore.acquire(
                 kind: .maintenance,
                 operationID: lifecycleOperationID,
@@ -1134,7 +1136,8 @@ struct SelfUpdate {
                 discoveryHeadSequence: discoveryHead?.releaseSequence,
                 discoveryHeadSHA256: discoveryHead?.digest,
                 updateAuthorityMode: authorityMode,
-                readinessTimeoutSeconds: compatibilityManifest?.readinessTimeoutSeconds ?? 300
+                readinessTimeoutSeconds: compatibilityManifest?.readinessTimeoutSeconds ?? 300,
+                previousContinuousBatching: previousContinuousBatching
             )
             do {
                 try markerStore.writePending(marker)
@@ -1240,22 +1243,25 @@ struct SelfUpdate {
                 recoveryCommand: restartRecoveryCommand()
             )
         }
-        let ready = if let postRestartReadiness {
-            await postRestartReadiness()
+        let readiness = if let postRestartReadiness {
+            (ready: await postRestartReadiness(), failureReason: nil as String?)
         } else {
             await Self.waitForLocalHealthIfManaged(
                 targetVersion: targetVersion,
                 expectedCompatibilitySetID: compatibilityManifest?.compatibilitySetID,
                 expectedCompatibilitySetSHA256: compatibilityManifest?.envelopeSHA256,
+                previousContinuousBatching: pendingMarker?.previousContinuousBatching,
                 timeout: TimeInterval(compatibilityManifest?.readinessTimeoutSeconds ?? 90)
             )
         }
+        let ready = readiness.ready
         guard ready else {
+            let rollbackReasonCode = readiness.failureReason ?? "buyer_serving_readiness_timeout"
             do {
                 if replaceBinary == nil {
                     _ = try lifecycleStateStore.transition(
                         to: .rollbackInProgress,
-                        reasonCode: "buyer_serving_readiness_timeout",
+                        reasonCode: rollbackReasonCode,
                         writer: .updater,
                         compatibilitySetID: compatibilityManifest?.compatibilitySetID,
                         operationID: lifecycleOperationID
@@ -1273,7 +1279,7 @@ struct SelfUpdate {
                 )
             }
             throw UpdateError.restartFailedRollbackRestored(
-                restart: "buyer-serving readiness timeout",
+                restart: rollbackReasonCode,
                 recoveryCommand: restartRecoveryCommand()
             )
         }
@@ -1325,8 +1331,9 @@ struct SelfUpdate {
         targetVersion: String,
         expectedCompatibilitySetID: String?,
         expectedCompatibilitySetSHA256: String?,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot?,
         timeout: TimeInterval = 90
-    ) async -> Bool {
+    ) async -> (ready: Bool, failureReason: String?) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         let hasProviderPlist = [
@@ -1337,19 +1344,21 @@ struct SelfUpdate {
                 atPath: launchAgents.appendingPathComponent("\(label).plist").path
             )
         }
-        guard hasProviderPlist else { return true }
+        guard hasProviderPlist else { return (previousContinuousBatching == nil, nil) }
         let config = try? ConfigLoader.load(cli: CLIOverrides())
-        guard let port = config?.port else { return false }
+        guard let port = config?.port else { return (false, nil) }
         let deadline = Date().addingTimeInterval(timeout)
         var consecutiveHealthySamples = 0
         var stableInstanceKey: String?
+        var failureReason: String?
         while Date() < deadline {
             let status = try? await LocalStatusClient.fetch(port: port)
             if let instanceKey = localHealthyTargetInstanceKey(
                 status,
                 targetVersion: targetVersion,
                 expectedCompatibilitySetID: expectedCompatibilitySetID,
-                expectedCompatibilitySetSHA256: expectedCompatibilitySetSHA256
+                expectedCompatibilitySetSHA256: expectedCompatibilitySetSHA256,
+                previousContinuousBatching: previousContinuousBatching
             ) {
                 if stableInstanceKey == instanceKey {
                     consecutiveHealthySamples += 1
@@ -1358,22 +1367,29 @@ struct SelfUpdate {
                     consecutiveHealthySamples = 1
                 }
                 if consecutiveHealthySamples >= localHealthRequiredConsecutiveSamples {
-                    return true
+                    return (true, nil)
                 }
             } else {
+                if let reason = AutoUpdateContinuousBatchingPreservationGate.failureEventReason(
+                    by: status,
+                    previous: previousContinuousBatching
+                ) {
+                    failureReason = reason
+                }
                 stableInstanceKey = nil
                 consecutiveHealthySamples = 0
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
-        return false
+        return (false, failureReason)
     }
 
     static func localHealthyTargetInstanceKey(
         _ status: [String: Any]?,
         targetVersion: String,
         expectedCompatibilitySetID: String?,
-        expectedCompatibilitySetSHA256: String?
+        expectedCompatibilitySetSHA256: String?,
+        previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil
     ) -> String? {
         guard let status,
               status["binary_version"] as? String == targetVersion,
@@ -1391,7 +1407,41 @@ struct SelfUpdate {
         else {
             return nil
         }
+        guard AutoUpdateContinuousBatchingPreservationGate.isSatisfied(
+            by: status,
+            previous: previousContinuousBatching
+        ) else {
+            return nil
+        }
         return "\(pid):\(instanceID)"
+    }
+
+    private func currentContinuousBatchingPreservationSnapshot() async throws -> AutoUpdateContinuousBatchingPreservationSnapshot? {
+        guard replaceBinary == nil else {
+            return nil
+        }
+        guard Self.providerLaunchAgentInstalled() else {
+            return nil
+        }
+        let config = try ConfigLoader.load(cli: CLIOverrides())
+        let status = try await LocalStatusClient.fetch(port: config.port)
+        guard AutoUpdateContinuousBatchingPreservationGate.statusHasContinuousBatchingBlock(status) else {
+            throw UpdateError.processFailed("local-continuous-batching-status", 1)
+        }
+        return AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: status)
+    }
+
+    private static func providerLaunchAgentInstalled() -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        return [
+            launchdLabel,
+            legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
     }
 
     static func staleLocalStatusOwnerPIDToTerminate(

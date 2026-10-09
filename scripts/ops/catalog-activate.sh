@@ -28,8 +28,9 @@
 #   9 live_probe              provider /v1/status: native_mtp enabled+eligible|active,
 #                             continuous_batching active
 #  10 gateway_proof           one real buyer request through the gateway that moves the
-#                             target provider's mtp_forwards (or requests_total with CB
-#                             active); expires after 24 h
+#                             target provider's active serving-path counter
+#                             (CB shared_forward_calls when CB is active);
+#                             expires after 24 h
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
@@ -81,7 +82,7 @@ gather() {
   fact native_bound "$native_bound"
   bank_rid="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-selftest-bank.json" 'd["release_id"]')"
   fact committed_bank_release_id "$bank_rid"
-  if python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
+  if MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
     verify_ok=true
   fi
   fact catalog_release_verify "$verify_ok"
@@ -180,7 +181,7 @@ PY
     step catalog_verify "done" "catalog-release.py verify ok"
   else
     step catalog_verify blocked "$(tail -n 1 "$OPS_TMP_DIR/verify.out")"
-    set_next catalog_verify blocked "Fix the committed catalog release" "python3 scripts/catalog-release.py verify" \
+    set_next catalog_verify blocked "Fix the committed catalog release" "MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 scripts/catalog-release.py verify" \
       "verify=$verify_ok; native-bound bank release_id '$bank_rid' must equal '$R'"
   fi
   if [ -z "$base" ]; then
@@ -334,12 +335,13 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     next_meta live_probe "$MTP_DOC#order"
   fi
 
-  # The proof expires: a marker older than 24 h is re-verified.
-  if marker_done "$OPS_SCOPE" gateway_proof &&
-    [ -n "$(find "$(marker_path "$OPS_SCOPE" gateway_proof)" -mmin -1440 2>/dev/null)" ]; then
+  # The proof expires, and legacy generic request-counter markers are not enough
+  # once continuous batching is active: a fresh marker must carry the scheduler
+  # shared_forward_calls delta from the provider-attributed buyer request.
+  if gateway_proof_marker_valid "$OPS_SCOPE" "$p_cb_active"; then
     step gateway_proof "done" "$(marker_field "$OPS_SCOPE" gateway_proof 'd.get("evidence")')"
   else
-    step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h' || true)"
+    step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h or lacks active-path scheduler evidence' || true)"
     set_next gateway_proof read "Send one real buyer request through the gateway" \
       "scripts/ops/catalog-activate.sh _gateway-proof"
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
@@ -348,8 +350,9 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
   set_next "done" "done" "$R active and proven through the gateway" ""
 }
 
-# provider_counters FILE -> "mtp_forwards requests_total cb_active" from a
-# provider /v1/status document; fails when the counters are absent.
+# provider_counters FILE -> "mtp_forwards requests_total cb_active cb_shared_forward_calls"
+# from a provider /v1/status document; fails when the counters needed for the
+# active serving mode are absent.
 provider_counters() {
   python3 - "$1" <<'PY'
 import json, sys
@@ -359,10 +362,15 @@ except Exception:
     sys.exit(1)
 mtp = (d.get("native_mtp") or {}).get("mtp_forwards")
 req = d.get("requests_total")
-cb = (d.get("continuous_batching") or {}).get("active") is True
+cb_doc = d.get("continuous_batching") or {}
+cb = cb_doc.get("active") is True
+scheduler = cb_doc.get("scheduler") or {}
+shared = scheduler.get("shared_forward_calls")
 if not isinstance(mtp, int) or not isinstance(req, int):
     sys.exit(1)
-print(mtp, req, "true" if cb else "false")
+if cb and not isinstance(shared, int):
+    sys.exit(1)
+print(mtp, req, "true" if cb else "false", shared if isinstance(shared, int) else 0)
 PY
 }
 
@@ -371,14 +379,47 @@ read_provider_status() {
     refuse "provider /v1/status not readable over STUDIO_SSH"
 }
 
-# proof_moved B_MTP B_REQ B_CB A_MTP A_REQ A_CB: the request moved the provider.
+
+gateway_proof_marker_valid() {
+  local scope="$1" cb_active="$2" path
+  path="$(marker_path "$scope" gateway_proof)"
+  [ -f "$path" ] || return 1
+  [ -n "$(find "$path" -mmin -1440 2>/dev/null)" ] || return 1
+  python3 - "$path" "$cb_active" <<'PY'
+import json, sys
+path, cb_active = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(1)
+if d.get("step") != "gateway_proof" or d.get("served_by_canary") is not True:
+    sys.exit(1)
+if not isinstance(d.get("request_id"), str) or not d.get("request_id"):
+    sys.exit(1)
+if cb_active == "true":
+    delta = d.get("cb_shared_forward_calls_delta")
+else:
+    delta = d.get("mtp_forwards_delta")
+if type(delta) is not int or delta <= 0:
+    sys.exit(1)
+PY
+}
+
+# proof_moved B_MTP B_REQ B_CB B_SHARED A_MTP A_REQ A_CB A_SHARED: the request
+# moved the provider on the active serving path. Continuous batching must prove
+# scheduler admission/completion through shared_forward_calls; generic
+# requests_total movement can be satisfied by a serial request and is not enough.
 proof_moved() {
-  [ $(($4 - $1)) -gt 0 ] || { [ "$3" = true ] && [ "$6" = true ] && [ $(($5 - $2)) -gt 0 ]; }
+  if [ "$3" = true ] || [ "$7" = true ]; then
+    [ "$3" = true ] && [ "$7" = true ] && [ $(($8 - $4)) -gt 0 ]
+  else
+    [ $(($5 - $1)) -gt 0 ]
+  fi
 }
 
 # One bounded buyer request through the gateway, tied to the target provider:
 # its native_mtp.mtp_forwards (or, with continuous batching active, its
-# requests_total) must increase across the request, the response must carry
+# continuous_batching.scheduler.shared_forward_calls) must increase across the request, the response must carry
 # a request id, and the gateway's X-Provider-Id (phase5-gateway
 # internal/router/chat_proxy.go emitProviderAttribution) must equal the
 # provider_id the canary reports in /v1/status, so other traffic on the
@@ -395,10 +436,10 @@ gateway_proof() {
   model="${PROBE_MODEL:-$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["entries"][0]["model_key"]')}"
   [ -n "$model" ] || refuse "PROBE_MODEL is unset and no admission model_key was found"
 
-  local before after b_mtp b_req b_cb a_mtp a_req a_cb
+  local before after b_mtp b_req b_cb b_shared a_mtp a_req a_cb a_shared
   read_provider_status "$OPS_TMP_DIR/before.json"
-  before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total"
-  read -r b_mtp b_req b_cb <<< "$before"
+  before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total or continuous_batching.scheduler.shared_forward_calls"
+  read -r b_mtp b_req b_cb b_shared <<< "$before"
   local canary_pid
   canary_pid="$(json_field "$OPS_TMP_DIR/before.json" 'd["provider_id"]')"
   [ -n "$canary_pid" ] || refuse "provider /v1/status reports no provider_id; cannot tie the proof to it"
@@ -425,16 +466,16 @@ gateway_proof() {
   for i in 1 2 3 4 5 6; do
     read_provider_status "$OPS_TMP_DIR/after.json"
     after="$(provider_counters "$OPS_TMP_DIR/after.json")" || refuse "provider status lacks counters after the request"
-    read -r a_mtp a_req a_cb <<< "$after"
-    proof_moved "$b_mtp" "$b_req" "$b_cb" "$a_mtp" "$a_req" "$a_cb" && break
+    read -r a_mtp a_req a_cb a_shared <<< "$after"
+    proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" && break
     [ "$i" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
   done
-  proof_moved "$b_mtp" "$b_req" "$b_cb" "$a_mtp" "$a_req" "$a_cb" ||
-    die "request $rid did not move the target provider: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)) (cb_active=$a_cb)"
-  local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_active=$a_cb"
+  proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" ||
+    die "request $rid did not move the target provider on its active serving path: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)), cb_shared_forward_calls +$((a_shared - b_shared)) (cb_active=$a_cb)"
+  local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
-    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "served_by_canary": True, "provider_id_sha256": hashlib.sha256(sys.argv[5].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$served_pid")"
+    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "served_by_canary": True, "provider_id_sha256": hashlib.sha256(sys.argv[6].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$served_pid")"
 }
 
 internal() {

@@ -1060,7 +1060,8 @@ const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
 
 // ApprovedCodeIdentity is one operator-approved privacy-class code identity.
 // BinaryVersion is optional; when set, the posture binary_version must match.
-// ExpiresAt is exclusive: a posture at that instant is expired.
+// ExpiresAt is optional; zero means the approval does not expire. When set it
+// is exclusive: a posture at that instant is expired.
 type ApprovedCodeIdentity struct {
 	TeamID            string    `yaml:"team_id"`
 	SigningIdentifier string    `yaml:"signing_identifier"`
@@ -4453,10 +4454,7 @@ func (c Config) validatePrivacyClass() error {
 		if identity.BinaryVersion != "" && !privacyVisibleASCII(identity.BinaryVersion, 128) {
 			return fmt.Errorf("%s.binary_version must be visible ASCII", field)
 		}
-		if identity.ExpiresAt.IsZero() {
-			return fmt.Errorf("%s.expires_at must be set", field)
-		}
-		if identity.ExpiresAt.After(now) {
+		if identity.ExpiresAt.IsZero() || identity.ExpiresAt.After(now) {
 			live++
 		}
 	}

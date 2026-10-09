@@ -33,20 +33,17 @@ class PrivacyActivationTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 activation.check_release(self.release(**change))
 
-    def test_approval_requires_exact_expiry(self):
-        entry = dict(activation.IDENTITY, expires_at=activation.EXPIRY)
+    def test_approval_has_no_expiry(self):
+        entry = dict(activation.IDENTITY)
         self.assertTrue(activation.approved(dict(approved_code_identities=[entry])))
-        entry['expires_at'] = '2026-11-20T00:00:00Z'
+        # A leftover dated approval is replaced by the next approve step.
+        entry['expires_at'] = dt.datetime(2026, 10, 20, tzinfo=dt.timezone.utc)
         self.assertFalse(activation.approved(dict(approved_code_identities=[entry])))
-
-    def test_yaml_timestamp_approval(self):
-        entry = dict(activation.IDENTITY, expires_at=dt.datetime(2026, 10, 20, tzinfo=dt.timezone.utc))
-        self.assertTrue(activation.approved(dict(approved_code_identities=[entry])))
 
     def test_edit_preserves_other_bytes_and_overrides(self):
         before = 'unrelated: value # exact\n\nprivacy_class:\n  enabled: true\n  provider_se_public_keys: {a: pin}\n\nrelay_blind:\n  enabled: true # retain\n'
         pc = yaml.safe_load(before)['privacy_class']
-        pc['approved_code_identities'] = [dict(activation.IDENTITY, expires_at=activation.EXPIRY)]
+        pc['approved_code_identities'] = [dict(activation.IDENTITY)]
         after = activation.replace_privacy(before, pc)
         self.assertTrue(after.startswith('unrelated: value # exact\n\n'))
         self.assertTrue(after.endswith('relay_blind:\n  enabled: true # retain\n'))
@@ -97,42 +94,8 @@ class PrivacyActivationTests(unittest.TestCase):
     def test_failed_restart_restores_and_checks_recovery(self):
         self.rollback_case()
 
-    def test_expired_approval_is_not_approved(self):
-        with patch.object(activation, 'expired', return_value=True):
-            self.assertFalse(activation.approved(dict(approved_code_identities=[dict(activation.IDENTITY, expires_at=activation.EXPIRY)])))
-
-    def test_early_withdrawal_refused(self):
-        with patch.object(activation, 'expired', return_value=False), self.assertRaises(ValueError):
-            activation.withdraw()
-
-    def test_expiry_withdrawal_disables_before_edit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'coordinator.yaml'
-            path.write_text(yaml.safe_dump({'ordinary': 'keep', 'privacy_class': {
-                'enabled': True, 'approved_code_identities': [dict(activation.IDENTITY, expires_at=activation.EXPIRY)]}}))
-            events = []
-            with patch.object(activation, 'BASE', path), \
-                 patch.object(activation, 'expired', return_value=True), \
-                 patch.object(activation, 'config_guard', return_value=contextlib.nullcontext()), \
-                 patch.object(activation, 'disable_locked', side_effect=lambda: events.append('disable')), \
-                 patch.object(activation, 'install', side_effect=lambda text: events.append(yaml.safe_load(text))), \
-                 patch.object(activation, 'validate'), patch.object(activation, 'restart_healthy'), \
-                 patch.object(activation, 'runtime_provenance'), \
-                 patch.object(activation, 'disabled', return_value=True):
-                # Install is mocked; reflect the expected candidate for the
-                # actual postcondition rather than retaining old file bytes.
-                def install(text):
-                    events.append(yaml.safe_load(text))
-                    path.write_text(text)
-                with patch.object(activation, 'install', side_effect=install):
-                    activation.withdraw()
-            self.assertEqual(events[0], 'disable')
-            self.assertFalse(events[1]['privacy_class']['enabled'])
-            self.assertEqual(events[1]['privacy_class']['approved_code_identities'], [])
-            self.assertEqual(events[1]['ordinary'], 'keep')
-
     def test_extra_approval_is_not_idempotent_success(self):
-        entry = dict(activation.IDENTITY, expires_at=activation.EXPIRY)
+        entry = dict(activation.IDENTITY)
         other = dict(entry, binary_version='1.8.217')
         self.assertFalse(activation.approved({'approved_code_identities': [entry, other]}))
 

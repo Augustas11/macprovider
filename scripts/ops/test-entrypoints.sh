@@ -31,6 +31,19 @@ fail=0
 ok() { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$*"; }
 
+# ---- release versions --------------------------------------------------------
+# The cli-release fixture models the checked-in train state: live stable is the
+# checked-in latest_binary_version row and the candidate is binaryVersion, so a
+# version bump on main does not leave this suite pinned to an old release.
+CAND="$(sed -n 's/.*static let binaryVersion = "\([0-9][0-9.]*\)".*/\1/p' \
+  "$SRC_REPO/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" | head -n 1)"
+LIVE="$(sed -n 's/^ *latest_binary_version: "\([0-9][0-9.]*\)".*/\1/p' \
+  "$SRC_REPO/phase4-coordinator/dist/coordinator.yaml" | head -n 1)"
+[ -n "$CAND" ] && [ -n "$LIVE" ] && [ "$CAND" != "$LIVE" ] || {
+  printf 'cannot derive candidate/live versions (binaryVersion=%s latest_binary_version=%s)\n' "$CAND" "$LIVE" >&2
+  exit 1
+}
+
 # ---- repo fixture -----------------------------------------------------------
 git clone -q --bare --shared "$SRC_REPO" "$tmp/origin.git"
 git clone -q --shared --no-checkout "$tmp/origin.git" "$tmp/work"
@@ -40,7 +53,7 @@ git -C "$W" checkout -q -B main
 rm -rf "$W/scripts/ops"
 cp -R "$OPS_SRC" "$W/scripts/ops"
 find "$W/scripts/ops" -name '__pycache__' -prune -exec rm -rf {} +
-printf '\n| Carry-forward CF-OPS-TEST | 1.8.224 carry-forward of the unchanged decode qualification |\n' \
+printf '\n| Carry-forward CF-OPS-TEST | %s carry-forward of the unchanged decode qualification |\n' "$CAND" \
   >> "$W/docs/releases/cli-release-train.md"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
@@ -48,7 +61,7 @@ git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "liv
 printf 'package main\n' > "$W/phase4-coordinator/opsprobe.go"
 git -C "$W" add phase4-coordinator/opsprobe.go
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: shipped code change"
-git -C "$W" push -q origin HEAD:refs/heads/main refs/tags/v9.0.0
+git -C "$W" push -q --force origin HEAD:refs/heads/main refs/tags/v9.0.0
 git -C "$W" fetch -q origin
 B="$(git -C "$W" rev-parse HEAD)"
 
@@ -95,22 +108,22 @@ expect_err() { if grep -q -- "$1" "$tmp/err"; then ok; else bad "stderr lacks '$
 
 # ==== pearl-runtime ===========================================================
 fixture '{"runs": {}}'
-health v9.0.0 1.8.223
+health v9.0.0 $LIVE
 
 PEARL_RUNTIME_VERSION='v9.0.1:refs/heads/x' run_rc 3 "unsafe runtime version refused" scripts/ops/pearl-runtime.sh status
 expect_err "PEARL_RUNTIME_VERSION must be vMAJOR.MINOR.PATCH"
 
-health 'v9.0.0;rm' 1.8.223
+health 'v9.0.0;rm' $LIVE
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "invalid live version is not used" scripts/ops/pearl-runtime.sh status
 expect_next live_state:blocked
 
-health v9.9.8 1.8.223
+health v9.9.8 $LIVE
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unknown live tag" scripts/ops/pearl-runtime.sh status
 expect_next code_changed:blocked
 case "$(next_field reason)" in *"not available locally"*) ok ;; *) bad "unknown comparison reason: $(next_field reason)" ;; esac
 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 3 "unknown comparison refuses --run" scripts/ops/pearl-runtime.sh next --run
 
-health v9.0.0 1.8.223
+health v9.0.0 $LIVE
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a code change" scripts/ops/pearl-runtime.sh status
 expect_next signed_tag:mutate
 
@@ -136,9 +149,9 @@ expect_err "live state changed after taking the lock"
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 
 # ==== cli-release (structured evidence) =======================================
-health v9.0.0 1.8.223
+health v9.0.0 $LIVE
 J='"path": ".github/workflows/promote-signed-native-mtp-release-journey.yml"'
-fixture '{"latest_stable": "v1.8.223",
+fixture '{"latest_stable": "v'"$LIVE"'",
   "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
   "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]},
   "run": {
@@ -147,22 +160,43 @@ fixture '{"latest_stable": "v1.8.223",
     "444": {"id": 444, "status": "completed", "conclusion": "success", "head_sha": "'"$B"'", "path": ".github/workflows/ci.yml", "display_title": "CI", "html_url": "u"},
     "555": {"id": 555, "status": "completed", "conclusion": "success", "head_sha": "'"$B"'", '"$J"', "display_title": "journey", "html_url": "u"}},
   "logs": {"333": "nothing relevant here"}}'
-SCOPE="$tmp/state/cli-release-1.8.224"
+SCOPE="$tmp/state/cli-release-$CAND"
 mkdir -p "$SCOPE"
-printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v1.8.224@%s"}\n' \
+printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s"}\n' \
   "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" > "$SCOPE/signed_byte_verification.json"
 printf '{"step":"pearl_accepted_ids","evidence":"test"}\n' > "$SCOPE/pearl_accepted_ids.json"
-status_doc() { printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v1.8.224@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":true}}' "$1" "$B" "$2" > "$tmp/svc/status.json"; }
+status_doc() {
+  local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}"
+  printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s"},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
+}
 
 run_rc 0 "cli status" scripts/ops/cli-release.sh status
 expect_next canary_smoke:manual
 run_rc 3 "free-text canary evidence refused" scripts/ops/cli-release.sh next --done canary_smoke --evidence "looked fine"
 expect_err "does not accept free-text"
-status_doc 1.8.224 false
+status_doc $CAND false
 run_rc 3 "canary probe with coordinator disconnected" scripts/ops/cli-release.sh next --done canary_smoke --probe
-status_doc 1.8.223 true
+status_doc $LIVE true
 run_rc 3 "canary probe on the wrong version" scripts/ops/cli-release.sh next --done canary_smoke --probe
-status_doc 1.8.224 true
+status_doc $CAND true false
+run_rc 3 "canary probe with CB inactive" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "continuous_batching.active is not true"
+status_doc $CAND true true false
+run_rc 3 "canary probe with CB unauthorized" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "continuous_batching.policy.authorized is not true"
+run_rc 3 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
+expect_err "requires --probe"
+printf '{"step":"canary_smoke","candidate_sha":"%s","kind":"status_probe","evidence":"old status-only marker"}
+' "$B" > "$SCOPE/canary_smoke.json"
+run_rc 0 "old status-only canary marker does not unlock e2e" scripts/ops/cli-release.sh status
+expect_next canary_smoke:manual
+rm -f "$SCOPE/canary_smoke.json"
+printf 'test-buyer-token\n' > "$tmp/token"
+export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
+printf 'canary-test-id' > "$tmp/svc/provider_id"
+printf 'move' > "$tmp/svc/mode"
+rm -f "$tmp/svc/served"
+status_doc $CAND true
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
 run_rc 0 "cli status after canary" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
@@ -186,11 +220,18 @@ run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 
 # ==== catalog-activate gateway proof ==========================================
+state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
-status_doc 1.8.224 true
+status_doc $CAND true
 printf 'canary-test-id' > "$tmp/svc/provider_id"
+mkdir -p "$tmp/state/catalog-$R"
+printf '{"step":"gateway_proof","evidence":"legacy generic proof","request_id":"ops-proof-old","mtp_forwards_delta":1,"requests_total_delta":1,"served_by_canary":true}
+' > "$tmp/state/catalog-$R/gateway_proof.json"
+run_rc 0 "catalog status rejects a fresh generic proof marker" scripts/ops/catalog-activate.sh status
+if [ "$(state_of gateway_proof)" = "pending" ]; then ok; else bad "fresh generic proof marker counted as done"; fi
+rm -f "$tmp/state/catalog-$R/gateway_proof.json"
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "proof refused when the provider counters do not move" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "did not move the target provider"
@@ -207,14 +248,16 @@ expect_err "served by another provider"
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("provider_id"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
 printf 'move' > "$tmp/svc/mode"
 run_rc 3 "proof refused when the canary reports no provider_id" scripts/ops/catalog-activate.sh _gateway-proof
-status_doc 1.8.224 true
+status_doc $CAND true
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "right provider but counters stuck is still refused" scripts/ops/catalog-activate.sh _gateway-proof
+printf 'serial-request' > "$tmp/svc/mode"
+run_rc 1 "proof refused when only generic requests_total moves" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "cb_shared_forward_calls +0"
 printf 'move' > "$tmp/svc/mode"
-run_rc 0 "proof accepted when mtp_forwards moves" scripts/ops/catalog-activate.sh _gateway-proof
-if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["mtp_forwards_delta"] > 0 and d["served_by_canary"] is True else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / delta"; fi
+run_rc 0 "proof accepted when CB shared forward calls move" scripts/ops/catalog-activate.sh _gateway-proof
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["cb_shared_forward_calls_delta"] > 0 and d["served_by_canary"] is True else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / CB scheduler delta"; fi
 run_rc 0 "catalog status with a fresh proof" scripts/ops/catalog-activate.sh status
-state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "fresh proof not done"; fi
 touch -t "$(date -v-25H +%Y%m%d%H%M 2>/dev/null || date -d '-25 hours' +%Y%m%d%H%M)" "$tmp/state/catalog-$R/gateway_proof.json"
 run_rc 0 "catalog status with an expired proof" scripts/ops/catalog-activate.sh status

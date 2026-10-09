@@ -50,6 +50,20 @@ def load_openrouter_pricing_engine():
 
 openrouter_pricing_engine, OPENROUTER_PRICING_ENGINE_SHA256 = load_openrouter_pricing_engine()
 
+_baselines_spec = importlib.util.spec_from_file_location(
+    "cb_release_baselines", ROOT / "scripts" / "cb_release_baselines.py"
+)
+if _baselines_spec is None or _baselines_spec.loader is None:
+    raise RuntimeError("continuous-batching baseline module is unavailable")
+_cb_baselines = importlib.util.module_from_spec(_baselines_spec)
+_baselines_spec.loader.exec_module(_cb_baselines)
+CB_POLICY_SCHEMA = _cb_baselines.CB_POLICY_SCHEMA
+CB_POLICY_TUPLE_SCHEMA = _cb_baselines.CB_POLICY_TUPLE_SCHEMA
+CB_POLICY_TUPLE_DOMAIN = _cb_baselines.CB_POLICY_TUPLE_DOMAIN
+REQUIRED_CB_BASELINES = _cb_baselines.REQUIRED_CB_BASELINES
+CB_QUALIFIED_PROVENANCE_SOURCES = _cb_baselines.CB_QUALIFIED_PROVENANCE_SOURCES
+
+
 CATALOG_DIR = ROOT / "phase3-binary" / "catalog" / "autotune"
 STATIC_DIR = ROOT / "phase3-binary" / "dist" / "static"
 SWIFT_SOURCE = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "AutotuneRecommend.swift"
@@ -71,10 +85,7 @@ ARTIFACT_FEED_SOURCE_VALUE = "operator_curated_autotune_artifact_catalog"
 CB_POLICY_FEED_NAME = "continuous-batching-policy.json"
 CB_POLICY_FEED_PATH = CATALOG_DIR / CB_POLICY_FEED_NAME
 CB_POLICY_SOURCE_PATH = CATALOG_DIR / "continuous-batching-policy-source.json"
-CB_POLICY_SCHEMA = "macprovider.continuous-batching-policy.v1"
 CB_POLICY_SOURCE_SCHEMA = "macprovider.continuous-batching-policy-source.v1"
-CB_POLICY_TUPLE_SCHEMA = "macprovider.continuous-batching-policy-tuple.v1"
-CB_POLICY_TUPLE_DOMAIN = b"macprovider.continuous-batching-policy-tuple.v1\n"
 CB_POLICY_TRANSITION_RELEASE_ID = "published-2026-09-25-artifact-hash-correction-v1"
 CB_POLICY_TRANSITION_FEED_RECORD = {
     "bytes": 391,
@@ -1348,6 +1359,10 @@ def validate_cb_policy(
         "studio_campaign_sha256", "provider_cli_version", "live_executable_cdhash",
     }
     seen_tuples: set[str] = set()
+    required_baseline = os.environ.get("MACPROVIDER_REQUIRED_CB_BASELINE", "")
+    if required_baseline and required_baseline not in REQUIRED_CB_BASELINES:
+        fail(f"{label}: unknown MACPROVIDER_REQUIRED_CB_BASELINE {required_baseline!r}")
+    required_baseline_found = False
     for index, entry in enumerate(entries):
         entry_label = f"{label}.entries[{index}]"
         if not isinstance(entry, dict):
@@ -1400,7 +1415,7 @@ def validate_cb_policy(
         if not isinstance(provenance, dict):
             fail(f"{entry_label}.provenance: must be an object")
         exact_keys(provenance, provenance_fields, provenance_fields, f"{entry_label}.provenance")
-        if provenance["source"] not in {"packaged_studio_campaign", "release_review", "operator_review"}:
+        if provenance["source"] not in CB_QUALIFIED_PROVENANCE_SOURCES:
             fail(f"{entry_label}.provenance: source is unsupported")
         if provenance["status"] != "qualified":
             fail(f"{entry_label}.provenance: status must be qualified")
@@ -1411,6 +1426,15 @@ def validate_cb_policy(
                 fail(f"{entry_label}.provenance: {field} must be lowercase 64-hex")
         if not isinstance(provenance["live_executable_cdhash"], str) or not HEX40.fullmatch(provenance["live_executable_cdhash"]):
             fail(f"{entry_label}.provenance: live_executable_cdhash must be lowercase 40-hex")
+        if required_baseline and all(
+            entry.get(field) == expected
+            for field, expected in REQUIRED_CB_BASELINES[required_baseline].items()
+        ):
+            if entry["rollout"] not in {"canary", "on"}:
+                fail(f"{label}: required CB baseline {required_baseline} rollout must be canary or on")
+            required_baseline_found = True
+    if required_baseline and not required_baseline_found:
+        fail(f"{label}: required CB baseline {required_baseline} is missing")
     return value
 
 
@@ -5628,19 +5652,40 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
     ):
         drift.append(ARTIFACT_FEED_NAME)
-    # SPEC-023 §12.5 (G4): a renewal re-binds the native-MTP sidecar to the
-    # new release and restarts its window; presence, every entry, the
-    # projection manifest, and the challenge bank must be unchanged.
+    # SPEC-023 §12.5 (G4): a renewal re-binds the native-MTP sidecar and the
+    # self-test bank to the new release and restarts their windows (restamp);
+    # presence, every entry, the projection manifest, and the bank's content
+    # must be unchanged, and each entry must name the re-bound bank bytes.
     incoming_native = incoming / NATIVE_MTP_ADMISSION_FEED_NAME
     live_native = live / NATIVE_MTP_ADMISSION_FEED_NAME
     if incoming_native.exists() != live_native.exists():
         drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
     elif incoming_native.exists():
-        if stripped(incoming_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS) != stripped(live_native, RENEWAL_NATIVE_MTP_RELEASE_FIELDS):
+        def native_content(path: pathlib.Path) -> str:
+            obj = strict_json(path.read_bytes(), str(path))
+            for field in RENEWAL_NATIVE_MTP_RELEASE_FIELDS:
+                obj.pop(field, None)
+            for entry in obj.get("entries", []):
+                if isinstance(entry, dict):
+                    entry.pop("challenge_bank_sha256", None)
+            return json.dumps(obj, sort_keys=True)
+
+        incoming_bank = incoming / NATIVE_MTP_BANK_NAME
+        incoming_obj = strict_json(incoming_native.read_bytes(), str(incoming_native))
+        bank_digest = sha256(incoming_bank.read_bytes()) if incoming_bank.exists() else None
+        if native_content(incoming_native) != native_content(live_native) or any(
+            not isinstance(entry, dict) or entry.get("challenge_bank_sha256") != bank_digest
+            for entry in incoming_obj.get("entries", [])
+        ):
             drift.append(NATIVE_MTP_ADMISSION_FEED_NAME)
-        for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME):
-            if not (incoming / name).exists() or not (live / name).exists() or (incoming / name).read_bytes() != (live / name).read_bytes():
-                drift.append(name)
+        name = NATIVE_MTP_MANIFEST_NAME
+        if not (incoming / name).exists() or not (live / name).exists() or (incoming / name).read_bytes() != (live / name).read_bytes():
+            drift.append(name)
+        name = NATIVE_MTP_BANK_NAME
+        if not (incoming / name).exists() or not (live / name).exists() or stripped(
+            incoming / name, RENEWAL_NATIVE_MTP_RELEASE_FIELDS
+        ) != stripped(live / name, RENEWAL_NATIVE_MTP_RELEASE_FIELDS):
+            drift.append(name)
     if _tier2_content(incoming)[0] != _tier2_content(live)[0]:
         drift.append(TIER2_CATALOG_FEED_NAME)
     if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():

@@ -162,7 +162,59 @@ write_endpoint("v1_rate-card", {
     },
 })
 candidate_body = (live / "v1_autotune-candidates").read_bytes()
-write_endpoint("v1_continuous-batching-policy", {
+cb_cdhash = os.environ.get("FIXTURE_CB_CDHASH", "a" * 40)
+cb_entries = []
+def append_cb_entry(*, version, cdhash, package_sha):
+    cb_entries.append({
+        "model_key": "qwen/qwen3.6-35b-a3b",
+        "model_id": "qwen/qwen3.6-35b-a3b",
+        "model_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+        "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510",
+        "chat_template_sha256": "9cf4f46deaa06769f3240ada331ac0f348694db48ec2e8b51068935f77bb18f9",
+        "cache_class": "mixed",
+        "kv_dtype": "fp16",
+        "requires_moe": True,
+        "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+        "metallib_sha256": os.environ.get(
+            "FIXTURE_CB_METALLIB", "84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf"
+        ),
+        "kernel_identifier": "macprovider_paged_kv_gather_v1",
+        "rollout": os.environ.get("FIXTURE_CB_ROLLOUT", "canary"),
+        "cached_turns_accepted": False,
+        "provenance": {
+            "source": os.environ.get("FIXTURE_CB_SOURCE", "packaged_studio_campaign"),
+            "status": "qualified",
+            "evidence_id": "fixture-cb-baseline",
+            "package_manifest_sha256": package_sha,
+            "studio_campaign_sha256": "6" * 64,
+            "provider_cli_version": version,
+            "live_executable_cdhash": cdhash,
+        },
+    })
+if os.environ.get("FIXTURE_CB_OLD_BASELINE") == "1":
+    append_cb_entry(version="1.8.67", cdhash="c" * 40, package_sha="c" * 64)
+if os.environ.get("FIXTURE_CB_BASELINE") == "1":
+    append_cb_entry(
+        version=os.environ.get("FIXTURE_CB_VERSION", tag.removeprefix("v")),
+        cdhash=cb_cdhash,
+        package_sha=os.environ.get("FIXTURE_CB_PACKAGE_SHA", "b" * 64),
+    )
+def cb_tuple_sha(entry, policy):
+    copy = dict(entry)
+    copy.pop("tuple_sha256", None)
+    identity = {
+        "schema_version": "macprovider.continuous-batching-policy-tuple.v1",
+        "release_id": policy["release_id"],
+        "policy_version": policy["policy_version"],
+        "generated_at": policy["generated_at"],
+        "expires_at": policy["expires_at"],
+        "candidate_catalog_sha256": policy["candidate_catalog_sha256"],
+        "signer_key_id": policy["signer_key_id"],
+        "entry": copy,
+    }
+    body = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(b"macprovider.continuous-batching-policy-tuple.v1\n" + body).hexdigest()
+cb_policy = {
     "schema_version": "macprovider.continuous-batching-policy.v1",
     "release_id": "fixture-release",
     "generated_at": generated_at,
@@ -170,8 +222,11 @@ write_endpoint("v1_continuous-batching-policy", {
     "candidate_catalog_sha256": hashlib.sha256(candidate_body).hexdigest(),
     "signer_key_id": signer,
     "expires_at": "2026-12-31T00:00:00Z",
-    "entries": [],
-})
+    "entries": cb_entries,
+}
+for entry in cb_entries:
+    entry["tuple_sha256"] = cb_tuple_sha(entry, cb_policy)
+write_endpoint("v1_continuous-batching-policy", cb_policy)
 
 for feed_name, sig_name in (
     ("v1_autotune-candidates", "v1_autotune-candidates.sig"),
@@ -275,6 +330,15 @@ metadata = {
     "provider_advertised_version": tag.removeprefix("v"),
     "commit": "a" * 40,
     "architecture": "linux-amd64",
+    "provider_code_identity": {
+        "asset": f"macprovider-cli-{tag}-darwin-arm64.tar.gz",
+        "member": "macprovider-cli",
+        "binary_version": tag.removeprefix("v"),
+        "binary_sha256": "b" * 64,
+        "team_id": "TEAMID1234",
+        "signing_identifier": "live.malibu.provider.cli",
+        "slices": [{"arch": "arm64", "code_cdhash": "a" * 40}],
+    },
     "catalog": {
         "release_id": "fixture-release",
         "policy_version": policy_version,
@@ -290,13 +354,43 @@ PY
 
 run_guard() {
   local directory="$1"
-  run_guard_phase "$directory" post-publication
+  shift
+  run_guard_phase "$directory" post-publication 1.8.67 "$@"
+}
+
+run_guard_cb_required() {
+  local directory="$1"
+  run_guard "$directory" --required-continuous-batching-baseline studio-qwen3.6-a3b-v1
+}
+
+
+resign_cb_policy_fixture() {
+  local directory="$1"
+  python3 - "$directory" <<'PY'
+import base64, hashlib, json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+body = root / "live" / "v1_continuous-batching-policy"
+sig_path = root / "live" / "v1_continuous-batching-policy.sig"
+sig = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-inkey", str(root / "autotune-test-ed25519.pem"), "-rawin", "-in", str(body)])
+sig_path.write_text(json.dumps({"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":base64.b64encode(sig).decode()}, sort_keys=True, separators=(",", ":")) + "\n")
+metadata_path = root / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text())
+metadata["catalog"]["files"]["continuous-batching-policy.json"] = hashlib.sha256(body.read_bytes()).hexdigest()
+metadata["catalog"]["files"]["continuous-batching-policy.json.sig"] = hashlib.sha256(sig_path.read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
+PY
 }
 
 run_guard_phase() {
   local directory="$1"
   local phase="$2"
-  local previous="${3:-1.8.67}"
+  shift 2
+  local previous="1.8.67"
+  if [[ $# -gt 0 && ( "$1" == "__omit__" || "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ) ]]; then
+    previous="$1"
+    shift
+  fi
+  local extra_args="$*"
   set -- python3 "$guard" \
     --tag v1.8.68 \
     --pearl-release-json "$directory/pearl-release.json" \
@@ -314,12 +408,124 @@ run_guard_phase() {
   if [[ -n "${NATIVE_SCHEMA:-}" ]]; then
     set -- "$@" --baked-cli-native-mtp-admission-schema "$NATIVE_SCHEMA"
   fi
+  local extra
+  for extra in $extra_args; do
+    set -- "$@" "$extra"
+  done
   "$@"
 }
 
 make_fixture "$work/ok"
 run_guard "$work/ok" | grep -q 'ok: https://coordinator.fixture.invalid serves v1.8.68 feed set'
 run_guard "$work/ok" | grep -q 'artifact_feed=absent'
+
+if run_guard_cb_required "$work/ok" >"$work/cb-required-empty.out" 2>&1; then
+  fail "accepted a release policy that dropped the required continuous-batching baseline"
+fi
+grep -q 'required continuous batching baseline studio-qwen3.6-a3b-v1 is missing' "$work/cb-required-empty.out"
+
+FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-ok"
+run_guard_cb_required "$work/cb-required-ok" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
+
+# CLI identity in a CB entry is recorded provenance, not a gate: an entry
+# recorded for the previous release (different version, CDHash and package
+# digest) still covers the successor.
+FIXTURE_CB_OLD_BASELINE=1 make_fixture "$work/cb-required-old-only"
+run_guard_cb_required "$work/cb-required-old-only" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
+
+FIXTURE_CB_OLD_BASELINE=1 FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-old-and-new"
+run_guard_cb_required "$work/cb-required-old-and-new" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
+
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_CDHASH="$(printf 'b%.0s' $(seq 40))" FIXTURE_CB_PACKAGE_SHA="$(printf '5%.0s' $(seq 64))" \
+  make_fixture "$work/cb-required-identity-drift"
+run_guard_cb_required "$work/cb-required-identity-drift" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
+
+# Decode-path identity stays pinned: a different metallib no longer covers the baseline.
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_METALLIB="$(printf '9%.0s' $(seq 64))" make_fixture "$work/cb-required-metallib-drift"
+if run_guard_cb_required "$work/cb-required-metallib-drift" >"$work/cb-required-metallib-drift.out" 2>&1; then
+  fail "accepted a continuous-batching policy whose metallib no longer matches the baseline"
+fi
+grep -q 'required continuous batching baseline studio-qwen3.6-a3b-v1 is missing' "$work/cb-required-metallib-drift.out"
+
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_ROLLOUT=off make_fixture "$work/cb-required-rollout-off"
+if run_guard_cb_required "$work/cb-required-rollout-off" >"$work/cb-required-rollout-off.out" 2>&1; then
+  fail "accepted a continuous-batching baseline with rollout off"
+fi
+grep -q "has rollout 'off', expected canary or on" "$work/cb-required-rollout-off.out"
+
+FIXTURE_CB_BASELINE=1 FIXTURE_CB_SOURCE=self_declared make_fixture "$work/cb-required-bad-source"
+if run_guard_cb_required "$work/cb-required-bad-source" >"$work/cb-required-bad-source.out" 2>&1; then
+  fail "accepted a continuous-batching baseline with self-declared provenance"
+fi
+grep -q "provenance.source 'self_declared' is not a supported qualified source" "$work/cb-required-bad-source.out"
+
+
+FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-extra-entry-field"
+python3 - "$work/cb-required-extra-entry-field/live/v1_continuous-batching-policy" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["entries"][0]["self_declared_ok"] = True
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+resign_cb_policy_fixture "$work/cb-required-extra-entry-field"
+if run_guard_cb_required "$work/cb-required-extra-entry-field" >"$work/cb-required-extra-entry-field.out" 2>&1; then
+  fail "accepted a continuous-batching entry with an unknown field"
+fi
+grep -q 'continuous-batching-policy.json entries\[0\] has unexpected fields' "$work/cb-required-extra-entry-field.out"
+
+FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-numeric-bool"
+python3 - "$work/cb-required-numeric-bool/live/v1_continuous-batching-policy" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["entries"][0]["requires_moe"] = 1
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+resign_cb_policy_fixture "$work/cb-required-numeric-bool"
+if run_guard_cb_required "$work/cb-required-numeric-bool" >"$work/cb-required-numeric-bool.out" 2>&1; then
+  fail "accepted a continuous-batching baseline with numeric bool"
+fi
+grep -q 'required continuous batching baseline studio-qwen3.6-a3b-v1 is missing' "$work/cb-required-numeric-bool.out"
+
+FIXTURE_CB_BASELINE=1 make_fixture "$work/cb-required-expired"
+python3 - "$work/cb-required-expired/live/v1_continuous-batching-policy" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["expires_at"] = "2026-07-30T12:04:00Z"
+for entry in value["entries"]:
+    entry_without = dict(entry)
+    entry_without.pop("tuple_sha256", None)
+    identity = {
+        "schema_version": "macprovider.continuous-batching-policy-tuple.v1",
+        "release_id": value["release_id"],
+        "policy_version": value["policy_version"],
+        "generated_at": value["generated_at"],
+        "expires_at": value["expires_at"],
+        "candidate_catalog_sha256": value["candidate_catalog_sha256"],
+        "signer_key_id": value["signer_key_id"],
+        "entry": entry_without,
+    }
+    import hashlib
+    entry["tuple_sha256"] = hashlib.sha256(b"macprovider.continuous-batching-policy-tuple.v1\n" + json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+python3 - "$work/cb-required-expired" <<'PY'
+import base64, json, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1])
+body = d / "live" / "v1_continuous-batching-policy"
+sig = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-inkey", str(d / "autotune-test-ed25519.pem"), "-rawin", "-in", str(body)])
+(d / "live" / "v1_continuous-batching-policy.sig").write_text(json.dumps({"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":base64.b64encode(sig).decode()}, sort_keys=True, separators=(",", ":")) + "\n")
+metadata_path = d / "pearl-release.json"
+metadata = json.loads(metadata_path.read_text())
+metadata["catalog"]["files"]["continuous-batching-policy.json"] = __import__("hashlib").sha256(body.read_bytes()).hexdigest()
+metadata["catalog"]["files"]["continuous-batching-policy.json.sig"] = __import__("hashlib").sha256((d / "live" / "v1_continuous-batching-policy.sig").read_bytes()).hexdigest()
+metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+# A policy past expires_at still covers the baseline: the runtime keeps
+# authorizing CB after the calendar date.
+run_guard_cb_required "$work/cb-required-expired" | grep -q 'continuous_batching_baseline=studio-qwen3.6-a3b-v1 catalog_mode=exact$'
 
 # SPEC-023 §3.7 artifact feed (BYOM v0.2 slice 2b): served feed set must equal
 # the release's feed set, and a bound feed is signer-equal and release-bound.
@@ -917,7 +1123,7 @@ PY
 # Native-MTP admission set, exact mode: bound feeds must be byte-equal and
 # internally bound; an unbound release must not be served one.
 FIXTURE_NATIVE_MTP=bound make_fixture "$work/native-exact"
-run_guard "$work/native-exact" | grep -q 'native_mtp=bound catalog_mode=exact$'
+run_guard "$work/native-exact" | grep -q 'native_mtp=bound continuous_batching_baseline=unchecked catalog_mode=exact$'
 FIXTURE_NATIVE_MTP=served-unbound make_fixture "$work/native-served-unbound"
 if run_guard "$work/native-served-unbound" >"$work/native-served-unbound.out" 2>&1; then
   fail "accepted a served native-MTP admission the release does not bind"
@@ -1119,7 +1325,7 @@ printf '{"schema_version":"macprovider.autotune-release-ledger.v3","releases":{}
   > "$work/exact-with-ledger/catalog/release-ledger.json"
 DESCENDANT_CATALOG_DIR="$work/exact-with-ledger/catalog" run_guard "$work/exact-with-ledger" \
   | grep -q 'catalog_mode=exact$'
-run_guard "$work/ok" | grep -q 'native_mtp=absent catalog_mode=exact$'
+run_guard "$work/ok" | grep -q 'native_mtp=absent continuous_batching_baseline=unchecked catalog_mode=exact$'
 
 expect_descendant_pass() {
   local mode="$1"
@@ -1142,9 +1348,9 @@ expect_descendant_failure() {
     || fail "descendant mutation $mode failed for the wrong reason: $(cat "$work/descendant-$mode.out")"
 }
 
-expect_descendant_pass ok 'native_mtp=absent catalog_mode=descendant fixture-release-2 of fixture-release$'
+expect_descendant_pass ok 'native_mtp=absent continuous_batching_baseline=unchecked catalog_mode=descendant fixture-release-2 of fixture-release$'
 DESCENDANT_CATALOG_DIR="$work/descendant-ok/catalog" run_guard_phase "$work/descendant-ok" pre-publication 1.8.68 \
-  | grep -q 'publication_phase=pre-publication artifact_feed=bound native_mtp=absent catalog_mode=descendant fixture-release-2 of fixture-release$'
+  | grep -q 'publication_phase=pre-publication artifact_feed=bound native_mtp=absent continuous_batching_baseline=unchecked catalog_mode=descendant fixture-release-2 of fixture-release$'
 # Without the reviewed ledger the gate stays exact-only.
 if run_guard "$work/descendant-ok" >"$work/descendant-no-ledger.out" 2>&1; then
   fail "accepted a non-identical live catalog without a reviewed release ledger"
@@ -1181,8 +1387,8 @@ expect_descendant_failure field-drift "live demand-rank.json top-level fields \[
 
 # Native-MTP in descendant mode: bound by the LIVE ledger row.
 expect_descendant_failure native-added "native-MTP admission the baked catalog does not; --baked-cli-native-mtp-admission-schema is required"
-NATIVE_SCHEMA=none expect_descendant_pass native-added 'native_mtp=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
-NATIVE_SCHEMA=macprovider.native-mtp-admission.v1 expect_descendant_pass native-added 'native_mtp=bound catalog_mode=descendant'
+NATIVE_SCHEMA=none expect_descendant_pass native-added 'native_mtp=bound continuous_batching_baseline=unchecked catalog_mode=descendant fixture-release-2 of fixture-release$'
+NATIVE_SCHEMA=macprovider.native-mtp-admission.v1 expect_descendant_pass native-added 'native_mtp=bound continuous_batching_baseline=unchecked catalog_mode=descendant'
 NATIVE_SCHEMA=macprovider.native-mtp-admission.v1 expect_descendant_failure native-v2-schema \
   "native-mtp-admission.json schema_version 'macprovider.native-mtp-admission.v2' is not the baked CLI's decoder"
 NATIVE_SCHEMA=none expect_descendant_failure native-release-id \
@@ -1190,8 +1396,8 @@ NATIVE_SCHEMA=none expect_descendant_failure native-release-id \
 NATIVE_SCHEMA=none expect_descendant_failure native-manifest \
   "artifact_manifest_sha256 does not match the served native-mtp-artifact-manifest.json"
 expect_descendant_failure native-unbound-served "serves /v1/native-mtp-admission but the release binds no native-MTP admission"
-expect_descendant_pass baked-native-ok 'native_mtp=bound catalog_mode=descendant fixture-release-2 of fixture-release$'
-expect_descendant_pass baked-native-dropped 'native_mtp=absent catalog_mode=descendant'
+expect_descendant_pass baked-native-ok 'native_mtp=bound continuous_batching_baseline=unchecked catalog_mode=descendant fixture-release-2 of fixture-release$'
+expect_descendant_pass baked-native-dropped 'native_mtp=absent continuous_batching_baseline=unchecked catalog_mode=descendant'
 expect_descendant_failure baked-native-dropped-served "serves /v1/native-mtp-admission but the release binds no native-MTP admission"
 
 python3 - "$workflow" "$promotion_workflow" "$rollout_workflow" <<'PY'
@@ -1269,6 +1475,11 @@ def require_stable_gate(
     ):
         if required not in publish[pre_gate_label:]:
             raise SystemExit(f"live coordinator gate call is missing {required}")
+    if "--required-continuous-batching-baseline studio-qwen3.6-a3b-v1" not in publish[pre_gate_label:] and not (
+        'required_cb_baseline="studio-qwen3.6-a3b-v1"' in publish[pre_gate_label:]
+        and '--required-continuous-batching-baseline "$required_cb_baseline"' in publish[pre_gate_label:]
+    ):
+        raise SystemExit("live coordinator gate call is missing the reviewed continuous-batching baseline")
 
 def require_rollout(workflow_path):
     workflow = pathlib.Path(workflow_path).read_text(encoding="utf-8")
@@ -1316,6 +1527,10 @@ def require_rollout(workflow_path):
         raise SystemExit("rollout proof must mark the external Pearl boundary before the gate")
     if "--publication-phase post-publication" not in workflow[post_gate:]:
         raise SystemExit("rollout proof must select the post-publication policy")
+    if 'required_cb_baseline="studio-qwen3.6-a3b-v1"' not in workflow:
+        raise SystemExit("rollout proof must pin the reviewed continuous-batching baseline")
+    if workflow.count('--required-continuous-batching-baseline "$required_cb_baseline"') < 2:
+        raise SystemExit("rollout proof must require the reviewed continuous-batching baseline in both gates")
     if transport_publish < post_gate:
         raise SystemExit("discovery transport must publish only after the post-publication gate")
     if workflow.count("--publication-phase post-publication") < 2 or not (

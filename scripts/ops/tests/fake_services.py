@@ -6,8 +6,8 @@ Files in STATE_DIR steer it:
   healthz.json            coordinator/gateway /healthz body
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
-  mode                    gateway behaviour: move | stuck | no-request-id |
-                          no-provider-id | other-provider
+  mode                    gateway behaviour: move | stuck | serial-request |
+                          no-request-id | no-provider-id | other-provider
   provider_id             X-Provider-Id the gateway reports (unless the mode drops it)
   served                  number of completions served (written here)
 """
@@ -48,8 +48,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/status":
             d = json.loads(read("status.json", "{}"))
             served = int(read("served", "0"))
-            if read("mode", "move") in ("move", "other-provider", "no-provider-id"):
+            mode = read("mode", "move")
+            if mode in ("move", "other-provider", "no-provider-id"):
                 d.setdefault("native_mtp", {})["mtp_forwards"] = d.get("native_mtp", {}).get("mtp_forwards", 0) + served
+                d["requests_total"] = d.get("requests_total", 0) + served
+                cb = d.setdefault("continuous_batching", {})
+                scheduler = cb.setdefault("scheduler", {})
+                scheduler["shared_forward_calls"] = scheduler.get("shared_forward_calls", 0) + served
+            elif mode == "serial-request":
                 d["requests_total"] = d.get("requests_total", 0) + served
             return self.send(200, json.dumps(d))
         return self.send(404, '{"error": "not_found"}')

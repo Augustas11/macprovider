@@ -124,6 +124,8 @@ jobs:
 
       - name: Verify the catalog release
         if: steps.diff.outputs.catalog == 'true'
+        env:
+          MACPROVIDER_REQUIRED_CB_BASELINE: studio-qwen3.6-a3b-v1
         run: python3 scripts/catalog-release.py verify
 
       - name: scripts/ops tests

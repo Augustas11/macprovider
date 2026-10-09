@@ -722,7 +722,6 @@ final class NativeMTPHardwareE2ERunner {
             context: NativeMTPAdmissionSidecar.RuntimeContext(
                 modelID: modelID,
                 modelRevision: targetIdentity.digest,
-                providerRevision: Self.providerRevision,
                 upstreamMLXSwiftLMRevision: Self.upstreamRevision,
                 hardwareChip: machine.chip,
                 ramGB: machine.ramGB,

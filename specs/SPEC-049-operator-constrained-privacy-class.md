@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.2.2
+**Version:** 0.2.3
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The bounded CLI224 eligible-network activation exception is recorded in §8.3 and Entry 251; live buyer confirmation, a full signed v0.2 journey and SPEC-049-R023 remain pending. No conformance or production promotion is made by this draft."
+    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. A full signed v0.2 journey and SPEC-049-R023 remain pending, and every requirement stays pending. No conformance promotion is made by this draft."
   }
 }
 ```
@@ -420,7 +420,7 @@ The coordinator MUST send each eligible-candidate session (one with accepted pri
 A posture MUST be accepted only when `(team_id, signing_identifier, code_cdhash, binary_version)` is approved, evaluated in this order:
 
 1. a `code_cdhash` listed in `privacy_class.denied_code_cdhashes` is denied;
-2. otherwise, when any `privacy_class.approved_code_identities` entry names the same `(team_id, signing_identifier, code_cdhash)`, configuration governs: the identity is approved only if such an entry has `expires_at` in the future and, when it names `binary_version`, that value matches. An expired entry therefore withdraws a release-derived approval;
+2. otherwise, when any `privacy_class.approved_code_identities` entry names the same `(team_id, signing_identifier, code_cdhash)`, configuration governs: the identity is approved only if such an entry has no `expires_at` (absent means it never expires) or one in the future and, when it names `binary_version`, that value matches. An expired entry therefore withdraws a release-derived approval;
 3. otherwise the identity is approved only if it equals a release-derived identity of SPEC-049-R027, including its `binary_version`.
 
 A denied identity is a quarantine trigger (SPEC-049-R017). An identity that is merely not approved (an unknown, expired, or not yet published cdhash) MUST make the provider ineligible without quarantine and MUST NOT enroll it, so a signed release that providers install before the coordinator holds its metadata is refused by routing, not quarantined. The statement MUST report `hardened_runtime=true`, `library_validation=true`, `get_task_allow=false`, `cs_debugged=false`, `p_traced=false`, `pt_deny_attach_applied=true`, `core_dumps_disabled=true`, `sip_enabled=true`, `diagnostic_env_clear=true`, `kv_disk_tier_disabled=true`, and `runtime_source=native_mlx`. A provider can never approve its own code identity.
@@ -647,19 +647,22 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
 
   All are tracked on #1749.
 
+The §8.1 expiry is superseded by §8.3, which has no expiry.
+
 ### 8.2 v0.2.0 supersedes the §8.1 scope
 
 §8.1 is the record of the v0.1.4 staged canary, and it stays valid only for coordinator, gateway, and provider code at 0.1.x. Its scope limits (exactly one provider pinned by configuration, exactly one approved code identity, and `privacy_class_beta: true` on that one provider only) are configuration controls for v0.1 operator pinning. Under v0.2.0 the same configuration no longer bounds the class: providers enter automatically (SPEC-049-R024) and the coordinator enrolls them (SPEC-049-R025). Therefore:
 
 - §8.1 does not authorize running v0.2.0 code with `privacy_class.enabled: true` in production. A coordinator built from v0.2.0 code is deployed under §8.1 only with the class disabled (the kill switch engaged or the `privacy_class` block removed).
-- Production activation of v0.2.0 automatic enrollment requires a new dated limited activation exception under `specs/PROCESS.md`, recorded in `beta/DECISION_CRITERIA.md`, that replaces §8.1 and states its own network-wide scope, rollback, and expiry, or SPEC-049-R023 promotion.
+- Production activation of v0.2.0 automatic enrollment requires a limited activation exception under `specs/PROCESS.md`, recorded in `beta/DECISION_CRITERIA.md`, that replaces §8.1 and states its own network-wide scope, evidence, and rollback. §8.3 is that exception; SPEC-049-R023 promotion is not required for operation.
 - The §8.1 evidence (the signed `1.8.215` journey result and the `1.8.217` canary) covers the v0.1 requirement set. It does not cover SPEC-049-R024 through SPEC-049-R028, which need a signed journey on a v0.2 release.
 
 ### 8.3 Limited activation exception: eligible-network Beta (2026-10-09)
 
-This dated exception supersedes §8.1 for v0.2 automatic enrollment, as recorded
-in decision-log Entry 251. It authorizes staged activation, not conformance
-promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
+This exception supersedes §8.1 for v0.2 automatic enrollment, as recorded
+in decision-log Entries 251 and 252. It authorizes production operation of the
+class, not conformance promotion. SPEC-049 remains draft and SPEC-049-R023
+remains open; R023 promotion is not required for operation.
 
 - **Exact scope.** Existing providers and new joins may enroll only after all
   existing signature, authenticated-session, device/key, fresh-posture, native
@@ -670,7 +673,7 @@ promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
   identifier `live.malibu.provider.cli`, CDHash
   `94b66febaee9ac7265dc0fe1a6ad87559ff602b8`. Verify its release metadata and
   signature before configuration. No other code identity is authorized by
-  this exception. Any explicit approval expires no later than this exception.
+  this exception. The explicit approval carries no `expires_at`.
   Release-derived approval, if used, is restricted to this verified identity;
   staging another release requires a superseding dated decision.
 - **Coordinator/gateway.** Use reviewed runtime containing #1871/#1892;
@@ -703,16 +706,15 @@ promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
   enrollment, online directory-key trust, and all §2 residual risks remain
   disclosed without stronger claims. This exception does not complete #1749
   or the physical promotion gate.
-- **Rollback/incident.** Disable the durable privacy kill switch using the
-  running base plus overlay; private requests then fail closed while ordinary
-  traffic continues. Quarantine/revoke affected providers when appropriate.
-  Disable class configuration if necessary, preserving unrelated configuration.
-  Wrong identity/key admission, plaintext downgrade, redaction failure or a
-  private settlement outcome other than `relay_blind_settled` triggers immediate
-  disablement. Expected ineligibility itself is not an incident.
-- **Expiry.** `2026-10-20T00:00:00Z`. Engage the kill switch and withdraw this
-  approval at expiry unless a new dated decision replaces it. No automatic
-  release-identity reload may extend this date. Owner: @Augustas11.
+- **Rollback/incident.** The durable privacy kill switch (using the running
+  base plus overlay) and provider quarantine/revoke are manual incident tools
+  available to the operator. With the kill switch engaged, private requests
+  fail closed while ordinary traffic continues. Nothing engages them
+  automatically and there is no list of mandatory disable triggers. Expected
+  ineligibility itself is not an incident.
+- **Duration.** The activation has no expiry and stays on while private
+  requests work. It ends only by explicit operator decision. Owner:
+  @Augustas11.
 
 ## 9. Evidence
 
@@ -743,3 +745,9 @@ promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
   §9 attaches the signed `JOURNEY-PRIVACY-CLASS-BETA` result. No requirement becomes conformant. The normative text (wire, schema, routing, claim, disclosure strings) does not change; the exception only switches the existing default-off behavior on within this scope.
 - 0.1.5 - Editorial: §8.1 replaces an operator-specific provider identifier and host path with placeholders; the actual values are kept in the operator's private configuration. Rollback examples clarify use of the running coordinator's effective base/overlay configuration. No requirement, activation scope, or expiry change.
 - 0.2.0 - Issue #1749, automatic enrollment by operator decision. The provider defaults to automatic mode and enters privacy mode only on an eligible signed, SIP-on, hardened host, falling back to ordinary serving otherwise (R024, R001). The coordinator resolves keys from configuration pins, then a durable enrollment, then the provider's new `privacy-enrollment-v1` claim (§4.10, R004) and enrolls on the first fully verified posture (R025); a later different key quarantines and only `coordinator-cli privacy-class reenroll` re-enrolls (R026). Approved code identities also come from signed `pearl-release.json` `provider_code_identity` metadata written by the Pearl updater, with a deny list and configuration override (R027, R006); an unapproved but not denied identity is ineligible without quarantine (R006, R017). A dedicated online Ed25519 key signs the new identity directory, served through the gateway, which the reference client verifies against one pinned key instead of per-provider pin files (§4.11, R028, R016). The threat model adds the credential-holder and coordinator-host adversaries and §2.6, and two residual-risk strings are added to R020. SPEC-041 discovery is amended in SPEC-041 v0.5.0. No envelope, posture statement, key record, reservation, response-AEAD, or settlement change. §8.2 supersedes the §8.1 scope for v0.2.0 code: §8.1 stays the record of the v0.1.4 staged canary and governs only coordinator code at 0.1.x, and production activation of automatic enrollment needs a new dated exception or SPEC-049-R023 promotion. Builds on 0.1.5.
+- 0.2.3 - Entry 252: removes the §8.3 activation expiry, the automatic
+  withdrawal and the mandatory kill-switch triggers; the class runs in
+  production without expiry and the kill switch and quarantine stay manual
+  incident tools. `approved_code_identities[].expires_at` is optional (absent
+  never expires, R006). SPEC-049-R023 promotion is not required for operation.
+  No wire or requirement-state change; every requirement stays pending.

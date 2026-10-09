@@ -24,17 +24,7 @@ gather() {
   local approved
   approved="$(json_field "$OPS_TMP_DIR/privacy.json" 'd["approved"]')"
   fact approved_identity_224 "$approved"
-  fact exception_expiry '2026-10-20T00:00:00Z'
-  if [ "$(json_field "$OPS_TMP_DIR/privacy.json" 'd.get("expired", False)')" = true ]; then
-    if [ "$(json_field "$OPS_TMP_DIR/privacy.json" 'd.get("withdrawn", False) and d["disabled"]')" = true ]; then
-      set_next expired done 'Expired exception is disabled and withdrawn' ''
-    else
-      set_next withdraw mutate 'Disable durably and withdraw expired approval' \
-        'bash scripts/ops/privacy-activate.sh _withdraw'
-      next_meta withdraw docs/runbooks/privacy-network-activation.md \
-        'one coordinator restart, typically 13–40 seconds; ordinary routing remains configured'
-    fi
-  elif [ "$(json_field "$OPS_TMP_DIR/privacy.json" 'd["disabled"]')" = true ]; then
+  if [ "$(json_field "$OPS_TMP_DIR/privacy.json" 'd["disabled"]')" = true ]; then
     set_next disabled blocked 'Privacy kill switch is engaged' '' 'investigate the recorded incident before enabling'
   elif [ "$approved" != true ]; then
     set_next approve_identity mutate 'Approve verified signed CLI224 for eligible-network enrollment' \
@@ -59,7 +49,6 @@ gather() {
 internal() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse 'use next --run'
   if [ "${1:-}" = _disable ]; then remote_state disable; return; fi
-  if [ "${1:-}" = _withdraw ]; then remote_state withdraw; return; fi
   [ "${1:-}" = _approve ] || die 'unknown internal command'
   local url='https://github.com/Augustas11/macprovider/releases/download/v1.8.224'
   curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 1048576 --max-time 60 "$url/pearl-release.json" -o "$OPS_TMP_DIR/release.json"

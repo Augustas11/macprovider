@@ -275,6 +275,7 @@ public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
     public let maxObservedBatchDepth: Int
     public let slotsTotal: Int
     public let slotsFree: Int
+    public let sharedForwardCalls: Int
 }
 
 public struct RuntimeContinuousBatchingPolicySnapshot: Sendable, Equatable {
@@ -1363,8 +1364,24 @@ actor ModelRuntime: ModelRuntimeServing {
               !reason.isEligible else {
             return
         }
-        currentNativeMTPStatusSink.recordReason(Self.nativeMTPStatusReason(for: reason))
+        let statusReason = Self.nativeMTPStatusReason(for: reason)
+        if statusReason == .tupleNotAdmitted,
+           currentNativeMTPCapability == nil,
+           currentNativeMTPStatusSink.snapshot().lastReason == .revocationStateUnavailable {
+            return
+        }
+        currentNativeMTPStatusSink.recordReason(statusReason)
     }
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    func recordNativeMTPAdmissionStatusForTest(_ admission: NativeMTPRuntimeAdmission) {
+        recordNativeMTPAdmissionStatus(admission)
+    }
+
+    func setNativeMTPDisabledStatusReasonForTest(_ reason: NativeMTPStatusReason) {
+        currentNativeMTPStatusSink.adopt(NativeMTPStatusSink.disabled(resetGeneration: 1, reason: reason))
+    }
+    #endif
 
     private static func nativeMTPStatusReason(for selectorReason: NativeMTPSelectorReason) -> NativeMTPStatusReason {
         switch selectorReason {
@@ -1608,7 +1625,6 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Verified SPEC-023 signed policy provenance. Coverage remains a separate
     /// exact-tuple gate so policy authorization cannot replace local proofs.
     private let continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult
-    private let continuousBatchingRunningBuildIdentity: NativeMTPRunningBuildIdentity?
     private let continuousBatchingModeExplicitlyConfigured: Bool
     private let continuousBatchingEmergencyOffOverride: Bool
     private let warmSwapEnabled: Bool
@@ -2659,12 +2675,6 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
-        #if DEBUG
-        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
-            ?? Self.nativeMTPRunningBuildIdentity()
-        #else
-        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
-        #endif
         self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
             ?? (continuousBatchingMode != .off)
         self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
@@ -2712,10 +2722,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
+        let candidateNativeMTPDisabledReason: NativeMTPStatusReason
         if normalizedDraftModelID == nil,
            let verifiedModelArtifactSHA256,
            self.nativeMTPMode == .auto {
             if let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
+                let rejectionRecorder = NativeMTPServePathRejectionRecorder()
                 candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
                     mode: self.nativeMTPMode,
                     targetModelID: modelID,
@@ -2733,16 +2745,20 @@ actor ModelRuntime: ModelRuntimeServing {
                     revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
                     resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
                     targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
-                    selfTestRunner: self.nativeMTPSelfTestRunner
+                    selfTestRunner: self.nativeMTPSelfTestRunner,
+                    rejectionObserver: rejectionRecorder.record
                 )
+                candidateNativeMTPDisabledReason = rejectionRecorder.statusReason ?? .tupleNotAdmitted
             } else {
                 candidateNativeMTPLoad = Self.rejectNativeMTPServePath(
                     reasonCode: "target_directory_unavailable",
                     artifactRole: "target"
                 )
+                candidateNativeMTPDisabledReason = .tupleNotAdmitted
             }
         } else {
             candidateNativeMTPLoad = nil
+            candidateNativeMTPDisabledReason = .tupleNotAdmitted
         }
 
         let container: ModelContainer
@@ -2847,7 +2863,7 @@ actor ModelRuntime: ModelRuntimeServing {
         publishNativeMTPStatusSink(
             capability: nil,
             admissionCapability: nil,
-            reasonIfDisabled: .tupleNotAdmitted
+            reasonIfDisabled: candidateNativeMTPDisabledReason
         )
         self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
@@ -3207,12 +3223,6 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingPolicyLoadResult = continuousBatchingPolicyLoadResult
-        #if DEBUG
-        self.continuousBatchingRunningBuildIdentity = nativeMTPRunningBuildIdentity
-            ?? Self.nativeMTPRunningBuildIdentity()
-        #else
-        self.continuousBatchingRunningBuildIdentity = Self.nativeMTPRunningBuildIdentity()
-        #endif
         self.continuousBatchingModeExplicitlyConfigured = continuousBatchingModeExplicitlyConfigured
             ?? (continuousBatchingMode != .off)
         self.continuousBatchingEmergencyOffOverride = continuousBatchingEmergencyOffOverride
@@ -3299,7 +3309,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         waitingCount: $0.waitingCount,
                         maxObservedBatchDepth: $0.maxObservedBatchDepth,
                         slotsTotal: $0.slotsTotal,
-                        slotsFree: $0.slotsFree
+                        slotsFree: $0.slotsFree,
+                        sharedForwardCalls: $0.sharedForwardCalls
                     )
                 }
             ),
@@ -3313,15 +3324,14 @@ actor ModelRuntime: ModelRuntimeServing {
     private func continuousBatchingPolicySnapshot() -> RuntimeContinuousBatchingPolicySnapshot {
         let loadResult = continuousBatchingPolicyLoadResult
         let selection = loadResult.selection
-        let policyUnexpired = loadResult.status == .liveVerified && Date() < selection.expiresAt
+        let policyLive = loadResult.status == .liveVerified
         let requestedTuple = continuousBatchingRequestedTuple()
-        let tupleMatchingEntry = requestedTuple.flatMap { tuple in
+        // The entry's provider CLI version and CDHash are recorded provenance
+        // only; the decode-path tuple alone authorizes the signed entry.
+        let matchingEntry = requestedTuple.flatMap { tuple in
             selection.entries.first { entry in
                 ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(tuple)
             }
-        }
-        let matchingEntry = tupleMatchingEntry.flatMap { entry in
-            continuousBatchingPolicyEntryMatchesRuntime(entry) ? entry : nil
         }
         let descriptorAdmitted = requestedTuple.map { tuple in
             pagedKVAttachDecision.descriptor?.admits(
@@ -3348,7 +3358,7 @@ actor ModelRuntime: ModelRuntimeServing {
         case .fallback, .rejected, .attached:
             localProofResult = "failed"
         }
-        let signedPolicyAuthorized = policyUnexpired
+        let signedPolicyAuthorized = policyLive
             && matchingEntry != nil
             && !continuousBatchingEmergencyOffOverride
         let locallyAuthorized = signedPolicyAuthorized && descriptorAdmitted
@@ -3357,14 +3367,10 @@ actor ModelRuntime: ModelRuntimeServing {
             decisionReason = "emergency_off"
         } else if loadResult.status != .liveVerified {
             decisionReason = loadResult.status.rawValue
-        } else if !policyUnexpired {
-            decisionReason = "policy_expired"
         } else if requestedTuple == nil {
             decisionReason = "local_identity_unavailable"
         } else if matchingEntry == nil {
-            decisionReason = tupleMatchingEntry == nil
-                ? "tuple_identity_mismatch"
-                : "runtime_provenance_mismatch"
+            decisionReason = "tuple_identity_mismatch"
         } else if !descriptorAdmitted {
             decisionReason = "authorized_local_proof_failed"
         } else {
@@ -4367,15 +4373,10 @@ actor ModelRuntime: ModelRuntimeServing {
         requestedTuple: ContinuousBatchingRequestedTuple? = nil
     ) -> ContinuousBatchingMode {
         if continuousBatchingEmergencyOffOverride { return .off }
-        if continuousBatchingPolicyLoadResult.status == .liveVerified,
-           Date() >= continuousBatchingPolicyLoadResult.selection.expiresAt {
-            return .off
-        }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
         let policyMode = tuple.flatMap { requested in
             continuousBatchingPolicyLoadResult.selection.entries.first { entry in
                 ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(requested)
-                    && continuousBatchingPolicyEntryMatchesRuntime(entry)
             }?.rollout
         }
         guard let policyMode else {
@@ -4390,15 +4391,6 @@ actor ModelRuntime: ModelRuntimeServing {
         case (.on, .on): return .on
         case (_, .off): return .off
         }
-    }
-
-    private func continuousBatchingPolicyEntryMatchesRuntime(
-        _ entry: ContinuousBatchingPolicyEntry
-    ) -> Bool {
-        ContinuousBatchingSignedPolicy.matchesRuntimeProvenance(
-            entry,
-            liveExecutableCDHash: continuousBatchingRunningBuildIdentity?.liveExecutableCDHash
-        )
     }
 
     private func continuousBatchingRequestedTuple() -> ContinuousBatchingRequestedTuple? {
@@ -9048,6 +9040,24 @@ actor ModelRuntime: ModelRuntimeServing {
         let revocationExpiresAt: Date?
     }
 
+    private final class NativeMTPServePathRejectionRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedReason: NativeMTPStatusReason?
+
+        var statusReason: NativeMTPStatusReason? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedReason
+        }
+
+        func record(_ reasonCode: String) {
+            guard reasonCode == "revocation_state_unavailable" else { return }
+            lock.lock()
+            storedReason = .revocationStateUnavailable
+            lock.unlock()
+        }
+    }
+
     private struct NativeMTPCapturedTokenizerLoader: TokenizerLoader {
         let tokenizerDirectory: URL
         let base: any TokenizerLoader
@@ -9247,19 +9257,24 @@ actor ModelRuntime: ModelRuntimeServing {
         revokedTupleSHA256: Set<String>?,
         resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?,
         targetGeneration: UInt64,
-        selfTestRunner: NativeMTPSelfTestRunner
+        selfTestRunner: NativeMTPSelfTestRunner,
+        rejectionObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> NativeMTPRuntimeLoadResult? {
+        func reject(reasonCode: String, artifactRole: String) -> NativeMTPRuntimeLoadResult? {
+            rejectionObserver(reasonCode)
+            return rejectNativeMTPServePath(reasonCode: reasonCode, artifactRole: artifactRole)
+        }
         guard mode == .auto else {
-            return rejectNativeMTPServePath(reasonCode: "mode_not_auto", artifactRole: "runtime")
+            return reject(reasonCode: "mode_not_auto", artifactRole: "runtime")
         }
         guard let targetModelRevision else {
-            return rejectNativeMTPServePath(reasonCode: "target_revision_missing", artifactRole: "target")
+            return reject(reasonCode: "target_revision_missing", artifactRole: "target")
         }
         guard let trustedKeyring else {
-            return rejectNativeMTPServePath(reasonCode: "trusted_keyring_missing", artifactRole: "sidecar")
+            return reject(reasonCode: "trusted_keyring_missing", artifactRole: "sidecar")
         }
         guard let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity() else {
-            return rejectNativeMTPServePath(reasonCode: "running_build_identity_unavailable", artifactRole: "runtime")
+            return reject(reasonCode: "running_build_identity_unavailable", artifactRole: "runtime")
         }
         let bundleRoot = targetDirectory.deletingLastPathComponent()
         let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
@@ -9273,10 +9288,10 @@ actor ModelRuntime: ModelRuntimeServing {
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
             ?? sidecarURL.deletingLastPathComponent().appendingPathComponent("native-mtp-admission.json.sig")
         guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
-            return rejectNativeMTPServePath(reasonCode: "sidecar_missing", artifactRole: "sidecar")
+            return reject(reasonCode: "sidecar_missing", artifactRole: "sidecar")
         }
         guard FileManager.default.fileExists(atPath: signatureURL.path) else {
-            return rejectNativeMTPServePath(reasonCode: "signature_missing", artifactRole: "signature")
+            return reject(reasonCode: "signature_missing", artifactRole: "signature")
         }
         do {
             let revocationAdmissionState: NativeMTPRevocationAdmissionState
@@ -9293,7 +9308,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     signatureURL: signatureURL,
                     trustedKeyring: trustedKeyring
                 ) else {
-                    return rejectNativeMTPServePath(
+                    return reject(
                         reasonCode: "revocation_state_unavailable",
                         artifactRole: "sidecar"
                     )
@@ -9311,7 +9326,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 context: NativeMTPAdmissionSidecar.RuntimeContext(
                     modelID: targetModelID,
                     modelRevision: targetModelRevision,
-                    providerRevision: runningBuildIdentity.sourceCommit,
                     upstreamMLXSwiftLMRevision: runningBuildIdentity.upstreamMLXSwiftLMRevision,
                     hardwareChip: machine.chip,
                     ramGB: machine.ramGB,
@@ -9328,25 +9342,25 @@ actor ModelRuntime: ModelRuntimeServing {
                 targetModelRevision: targetModelRevision,
                 runningBuildIdentity: runningBuildIdentity
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "build_binding_mismatch", artifactRole: "sidecar")
+                return reject(reasonCode: "build_binding_mismatch", artifactRole: "sidecar")
             }
             guard admissionCapability.qualifiedSlots <= slotCount else {
-                return rejectNativeMTPServePath(reasonCode: "qualified_slots_exceed_runtime", artifactRole: "runtime")
+                return reject(reasonCode: "qualified_slots_exceed_runtime", artifactRole: "runtime")
             }
             guard let capturedArtifacts = admissionCapability.capturedArtifacts else {
-                return rejectNativeMTPServePath(reasonCode: "captured_artifacts_unavailable", artifactRole: "pair")
+                return reject(reasonCode: "captured_artifacts_unavailable", artifactRole: "pair")
             }
             let drafterDirectory = try nativeMTPArtifactDirectory(for: capturedArtifacts.mtpURL)
             guard let capturedTokenizerLoader = nativeMTPCapturedTokenizerLoader(
                 capturedArtifacts: capturedArtifacts
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "captured_tokenizer_invalid", artifactRole: "target")
+                return reject(reasonCode: "captured_tokenizer_invalid", artifactRole: "target")
             }
             guard try nativeMTPCapturedManifestMatchesAdmission(
                 capturedArtifacts: capturedArtifacts,
                 admissionCapability: admissionCapability
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
+                return reject(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
             }
             let artifactObservation = try NativeMTPArtifactObserver.observePair(
                 targetDirectory: capturedArtifacts.targetURL,
@@ -9356,7 +9370,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 artifactObservation,
                 admissionCapability: admissionCapability
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "artifact_observation_mismatch", artifactRole: "pair")
+                return reject(reasonCode: "artifact_observation_mismatch", artifactRole: "pair")
             }
             let targetLoad = try await loadLocalContainer(
                 from: capturedArtifacts.targetURL.path,
@@ -9370,7 +9384,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 .resolvingSymlinksInPath()
                 .standardizedFileURL
             else {
-                return rejectNativeMTPServePath(reasonCode: "captured_target_identity_mismatch", artifactRole: "target")
+                return reject(reasonCode: "captured_target_identity_mismatch", artifactRole: "target")
             }
             let modelCapabilities = pagedKVModelCapabilities(modelID: targetModelID, directory: capturedTargetDirectory)
             let runtimeCacheClass = await pagedKVRuntimeCacheClass(
@@ -9383,14 +9397,14 @@ actor ModelRuntime: ModelRuntimeServing {
                 runtimeCacheClass: runtimeCacheClass,
                 modelCapabilities: modelCapabilities
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
+                return reject(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
             }
             guard nativeMTPAdmissionCapabilitySupported(
                 admissionCapability,
                 canonicalCacheClass: canonicalCacheClass,
                 modelCapabilities: modelCapabilities
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
+                return reject(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
             }
             await Qwen35TextMTPRegistration.register()
             let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
@@ -9406,13 +9420,13 @@ actor ModelRuntime: ModelRuntimeServing {
                 return (context.model.maximumBlockSize, stateLayerCount)
             }
             guard drafterRuntimeObservation.stateLayerCount == admissionCapability.predictionLayerCount else {
-                return rejectNativeMTPServePath(reasonCode: "drafter_state_layer_count_mismatch", artifactRole: "mtp")
+                return reject(reasonCode: "drafter_state_layer_count_mismatch", artifactRole: "mtp")
             }
             guard NativeMTPProposalBounds.fits(
                 maximumProposalDepth: admissionCapability.maxProposalDepth,
                 maximumBlockSize: drafterRuntimeObservation.maximumBlockSize
             ) else {
-                return rejectNativeMTPServePath(reasonCode: "drafter_proposal_depth_unsupported", artifactRole: "mtp")
+                return reject(reasonCode: "drafter_proposal_depth_unsupported", artifactRole: "mtp")
             }
             let selectedChallenge = try loadNativeMTPSelfTestChallenge(
                 admissionCapability: admissionCapability,
@@ -9500,7 +9514,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         } catch {
             let rejection = nativeMTPServePathRejection(for: error)
-            return rejectNativeMTPServePath(
+            return reject(
                 reasonCode: rejection.reasonCode,
                 artifactRole: rejection.artifactRole
             )
@@ -9669,11 +9683,10 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelRevision: String,
         runningBuildIdentity: NativeMTPRunningBuildIdentity
     ) -> Bool {
-        admissionCapability.providerRevision == runningBuildIdentity.sourceCommit
-            && admissionCapability.spec023SourceCommit == runningBuildIdentity.sourceCommit
-            && admissionCapability.spec023BuildDigestSHA256 == runningBuildIdentity.reproducibleBuildSHA256
-            && admissionCapability.spec023LiveExecutableCDHash == runningBuildIdentity.liveExecutableCDHash
-            && admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
+        // The admission's provider revision and SPEC-023 build identity are
+        // recorded provenance; any signed CLI release may serve the admitted
+        // decode path. The upstream MLX revision and target artifact stay pinned.
+        admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
             && runningBuildIdentity.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
             && admissionCapability.targetArtifactSHA256 == targetModelRevision
     }

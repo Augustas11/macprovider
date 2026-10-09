@@ -1103,8 +1103,8 @@ def _validate_evidence(root: Path, value: Any, location: str, result: Validation
         result.error(location, "evidence expires before it is captured")
     if captured_at and captured_at > date.today():
         result.error(location, f"evidence captured_at is in the future: {captured_at.isoformat()}")
-    if expires_at and expires_at < date.today():
-        result.error(location, f"evidence expired on {expires_at.isoformat()}")
+    # Calendar expiry no longer invalidates evidence; mapped-fragment staleness
+    # (_commit_mapping_selector_matches_current) is the freshness check.
     if artifact and artifact.startswith("commit:"):
         commit = artifact.split(":", 1)[1]
         if subprocess.run(
@@ -2678,10 +2678,10 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE!r}")
     captured_at = _datetime_z(signed.get("captured_at"), f"{location}.signed.captured_at", result)
     expires_at = _date(signed.get("expires_at"), f"{location}.signed.expires_at", result)
-    if captured_at is not None and expires_at is not None and expires_at != captured_at.date():
+    if captured_at is not None and expires_at is not None and expires_at < captured_at.date():
         result.error(
             f"{location}.signed.expires_at",
-            "must equal the UTC calendar date of captured_at",
+            "must not be before the UTC calendar date of captured_at",
         )
     run_id = signed.get("run_id")
     if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
@@ -4049,9 +4049,9 @@ def _validate_signed_journey_result(
     if requirement_id not in requirement_ids:
         result.error(f"{location}.signed.requirement_ids", f"does not cover requirement {requirement_id}")
     _datetime_z(signed.get("captured_at"), f"{location}.signed.captured_at", result)
-    expires_at = _date(signed.get("expires_at"), f"{location}.signed.expires_at", result)
-    if expires_at and expires_at < date.today():
-        result.error(f"{location}.signed.expires_at", f"signed journey-result expired on {expires_at.isoformat()}")
+    # Calendar expiry is recorded, not enforced: mapped-fragment staleness is
+    # the freshness check (_commit_mapping_selector_matches_current).
+    _date(signed.get("expires_at"), f"{location}.signed.expires_at", result)
 
     operator = signed.get("operator")
     if _expect_object(operator, f"{location}.signed.operator", result):

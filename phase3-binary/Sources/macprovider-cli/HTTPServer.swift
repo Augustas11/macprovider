@@ -2406,6 +2406,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "max_observed_batch_depth": scheduler?.maxObservedBatchDepth ?? 0,
                 "slots_total": scheduler?.slotsTotal ?? 0,
                 "slots_free": scheduler?.slotsFree ?? 0,
+                "shared_forward_calls": scheduler?.sharedForwardCalls ?? 0,
             ],
         ]
     }

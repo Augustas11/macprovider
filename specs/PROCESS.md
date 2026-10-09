@@ -84,7 +84,7 @@ insufficient, a conformance state, and evidence. Allowed states are
 `pending`, `blocked`, `conformant`, `nonconformant`, and `not-applicable`.
 
 - `conformant` requires implementation mapping, a test or journey, reachable
-  commit evidence for the code mappings, and current evidence with an expiry
+  commit evidence for the code mappings, and evidence with a recorded expiry
   date. Every mapped source and test selector fragment must match between the
   evidence commit and the current tree. A later unrelated edit in the same file
   does not invalidate evidence by itself, but selector body drift or removal
@@ -114,13 +114,16 @@ insufficient, a conformance state, and evidence. Allowed states are
   `security/acceptance-candidate-signing-public.pem` trust anchor, the mapped
   journey ID, the promoted requirement ID, a repository commit matching the
   requirement's commit evidence, operator and environment bindings, a passing
-  run result, passing step results that reference hash-bound artifacts, current
-  expiry, and explicit redaction confirmations. A Markdown journey description,
+  run result, passing step results that reference hash-bound artifacts, a
+  recorded expiry, and explicit redaction confirmations. A Markdown journey description,
   arbitrary digest, mutable public key, or self-asserted signature status alone
   cannot promote lifecycle state.
 - Evidence records the proving reachable commit or an immutable artifact whose
   repository source bytes reproduce its SHA-256 digest, plus capture date and
-  expiry. Expired evidence fails validation rather than silently downgrading.
+  expiry. The expiry is recorded, not enforced: a calendar date passing does
+  not invalidate evidence. Freshness is the mapped-fragment check above, so
+  evidence goes stale only when the code or test it proves changes. A capture
+  date in the future, or an expiry before the capture date, still fails.
 - Implementation and test mappings name repository files plus selectors that
   resolve in those files; physical journey IDs resolve to tracked journey
   records. Evidence uses a reachable full commit SHA or a SHA-256 digest
@@ -158,9 +161,12 @@ all required journey evidence is current. The physical release gate tracked by
 GitHub issue #613 is the execution surface; this process does not create a
 competing general waiver path. A one-time limited activation exception is valid
 only when the affected normative SPEC and decision log both name its exact
-scope, evidence, rollback, expiry, and unresolved journey. Such an exception
-cannot mark the missing evidence conformant or close #613. Missing, stale,
-skipped, or failed evidence otherwise blocks promotion.
+scope, evidence, rollback, and unresolved journey; it does not require an
+expiry. Such an exception cannot mark the missing evidence conformant or close
+#613. Missing, stale, skipped, or failed evidence otherwise blocks promotion.
+A working live feature is never given an expiry, sunset date, or automatic
+withdrawal unless the operator explicitly asks for one; missing conformance
+does not switch off a live feature.
 
 ## Release-scoped reconciliation slices
 

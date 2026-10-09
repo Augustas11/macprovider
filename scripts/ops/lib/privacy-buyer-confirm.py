@@ -39,7 +39,7 @@ def main():
     for selection in ('pin', 'directory'):
         for stream in (False, True):
             model = 'mlx-community/Qwen3.6-35B-A3B-4bit'
-            request = {'model': model, 'max_tokens': 32, 'messages': [
+            request = {'model': model, 'max_tokens': 32, 'stream': stream, 'messages': [
                 {'role': 'user', 'content': 'Reply with the single word ready.'}]}
             args = [str(client), '--privacy-class', '--base-url', url, '--model', model,
                     '--max-output-tokens', '32', '--input-token-upper-bound', '256', '--timeout', '180s']

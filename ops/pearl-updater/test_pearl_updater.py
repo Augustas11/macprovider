@@ -7507,6 +7507,9 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(len(self.sqlite_calls), 1)
         self.assertTrue(self.sqlite_calls[0][-1].startswith(".backup"))
+        # The copy waits out a lock the stopped coordinator is still releasing.
+        call = self.sqlite_calls[0]
+        self.assertEqual(call[call.index("-cmd") + 1], ".timeout 60000")
         self.assertFalse(any("check" in call[-1] for call in self.sqlite_calls))
         manifest = json.loads((tx / "database-manifest.json").read_text())
         self.assertEqual([(row["source"], row["existed"]) for row in manifest], [(str(database), True)])

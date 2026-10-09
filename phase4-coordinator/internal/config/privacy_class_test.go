@@ -254,3 +254,13 @@ func privacySEPoint(priv *ecdsa.PrivateKey) []byte {
 	priv.Y.FillBytes(raw[32:])
 	return raw
 }
+
+// An approval without expires_at is valid and counts as live.
+func TestPrivacyClassApprovalWithoutExpiry(t *testing.T) {
+	cfg := privacyReadyConfig(t)
+	cfg.PrivacyClass.Enabled = true
+	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity(time.Time{})}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("approval without expiry rejected: %v", err)
+	}
+}

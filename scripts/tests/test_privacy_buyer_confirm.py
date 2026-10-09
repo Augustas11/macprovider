@@ -39,6 +39,7 @@ class BuyerConfirmationTests(unittest.TestCase):
                 args = call.args[0]
                 request = json.loads(call.kwargs['input'])
                 self.assertEqual(request['max_tokens'], int(args[args.index('--max-output-tokens') + 1]))
+                self.assertEqual(request.get('stream', False), '--stream' in args)
                 self.assertIn('--privacy-class', args)
                 self.assertEqual(set(call.kwargs['env']), {'MACPROVIDER_API_KEY'})
             if not failure:

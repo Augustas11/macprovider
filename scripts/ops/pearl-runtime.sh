@@ -237,14 +237,30 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
     fi
   fi
 
-  # 6. apply.
+  # 6. apply. A recorded apply whose updater unit failed while the live
+  # version stayed behind was rolled back by the updater: offer it again
+  # (after resetting the failed transient unit, which blocks systemd-run).
+  local apply_rolled_back=false
+  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
+    ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
+    apply_rolled_back=true
+    rm -f "$(marker_path "$OPS_SCOPE" apply)"
+  fi
   if marker_done "$OPS_SCOPE" apply; then
     step apply "done" "$(marker_field "$OPS_SCOPE" apply 'd.get("recorded_at")')"
   else
-    step apply pending ""
+    if [ "$apply_rolled_back" = true ]; then
+      step apply pending "previous apply of $T failed and was rolled back; read its journal first (runbook rule 4)"
+    else
+      step apply pending ""
+    fi
     if [ -z "$NEXT_ID" ]; then
       local apply_cmd
       apply_cmd="$(render_runbook "$RB_PEARL_APPLY" "${T#v}")"
+      if [ "$apply_rolled_back" = true ]; then
+        apply_cmd="ssh \"\$PEARL_SSH\" 'systemctl reset-failed mp-update-${T#v}'
+$apply_cmd"
+      fi
       set_next apply mutate "Apply runtime $T with the signed updater" "$apply_cmd"
     fi
     next_meta apply "$ROLLOUT_DOC#runtime-apply-signed-updater" "$APPLY_DOWNTIME" apply

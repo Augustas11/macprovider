@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.26
+**Version:** 0.1.27
 
 ```json
 {
@@ -221,9 +221,10 @@ result, and the signed SPEC-023/SPEC-010 identity. The capability MUST bind:
 - target and MTP tensor quantization modes;
 - cache/state classes proven stageable and rewindable;
 - supported request-feature matrix;
-- exact provider and upstream MLX runtime revision used for qualification; and
-- the SPEC-023 `live_executable_cdhash` expected CodeDirectory identity for
-  the signed provider executable admitted to consume the tuple.
+- exact upstream MLX runtime revision used for qualification; and
+- the provider revision and SPEC-023 `live_executable_cdhash` CodeDirectory
+  identity of the signed provider executable that qualified the tuple, as
+  recorded provenance that does not gate capability (0.1.27).
 
 Capability construction MUST fail closed for a missing, extra, duplicate,
 silently filtered, wrong-shape, wrong-dtype, unexpectedly quantized,
@@ -920,11 +921,18 @@ commit, reproducible-build digest, the exact lowercase 40-hex
 `spec023.live_executable_cdhash` CodeDirectory identity for the live signed
 executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
 digests. The live executable CDHash is
-distinct from the installed binary SHA-256 artifact digest; consumers MUST bind
-both and MUST NOT substitute one for the other.
+distinct from the installed binary SHA-256 artifact digest; the sidecar MUST
+carry both and MUST NOT substitute one for the other.
 
 Capability advertisement MUST fail closed if the live tuple differs from any
-bound field, including a missing or mismatched `live_executable_cdhash`. Loader
+bound decode-path field, or if `live_executable_cdhash` is missing or
+malformed. The provider revision, source commit, reproducible-build digest, and
+live executable CDHash are recorded provenance of the qualifying build
+(SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
+provider CLI, so a signed admission keeps serving across signed CLI releases.
+The upstream MLX runtime revision and target artifact remain bound to the
+running build. Regressions under a new CLI are caught by the SPEC-031-R033
+native-MTP self-test canary, which compares exact token IDs. Loader
 success or a serial correctness pass is not sufficient for
 catalog eligibility. Classic SPEC-028 evidence MUST NOT be relabeled as native
 MTP evidence, and upstream/non-MLX benchmark numbers MUST NOT satisfy local
@@ -1352,6 +1360,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.27 (2026-10-09)** — CLI identity is provenance, not a gate (#1893).
+  MTP-13 follows SPEC-023 v0.22.13: the admission's provider revision, source
+  commit, reproducible-build digest, and `live_executable_cdhash` stay signed
+  and inside the tuple digest but no longer have to equal the running provider
+  CLI. The upstream MLX revision and target artifact stay bound, and the
+  SPEC-031-R033 self-test canary remains the runtime regression check.
 - **0.1.26 (2026-10-06)** — Production eligibility for auto-prefix traffic
   (#1770). MTP-4/MTP-9/MTP-11: a key the coordinator marks cache-only
   (SPEC-004 v0.3.6 `conversation_cache_only`, SPEC-024 v0.2.10) stays eligible
