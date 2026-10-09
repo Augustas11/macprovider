@@ -71,6 +71,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -178,19 +179,33 @@ func requireBins(t *testing.T) {
 	}
 }
 
-// allocatePort returns an OS-allocated free port. Inevitably racy
-// between Close + the child process reopening it, but in practice the
-// window is microseconds and the coordinator/gateway listen() retries
-// don't matter at our concurrency. If flakes appear, switch to
-// fd-handoff via net.FileListener.
+// allocatePort returns a free port for a child coordinator/gateway process.
+// The child binds it later, so a port from the OS ephemeral range could be
+// handed out as an outbound source port in between ("bind: address already
+// in use" flakes in CI). Ports come from a fixed range below every common
+// ephemeral range (Linux 32768+, macOS 49152+), each handed out at most once
+// per test process, and are checked free before use.
+var nextAllocatedPort atomic.Int64
+
+const (
+	allocatedPortBase = 20000
+	allocatedPortSpan = 10000
+)
+
 func allocatePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate port: %v", err)
+	nextAllocatedPort.CompareAndSwap(0, int64(allocatedPortBase+(os.Getpid()%50)*200))
+	for i := 0; i < allocatedPortSpan; i++ {
+		port := int(nextAllocatedPort.Add(1)-1-allocatedPortBase)%allocatedPortSpan + allocatedPortBase
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		_ = l.Close()
+		return port
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatalf("allocate port: no free port in %d-%d", allocatedPortBase, allocatedPortBase+allocatedPortSpan-1)
+	return 0
 }
 
 // reservedProviderListeners holds fake-provider listeners from
