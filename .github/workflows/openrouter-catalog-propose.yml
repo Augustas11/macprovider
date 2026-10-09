@@ -55,6 +55,7 @@ jobs:
           set -euo pipefail
           # The engine refuses an existing output directory; give it a fresh path.
           out="$(mktemp -d)/out"
+          echo "PROPOSAL_OUTPUT_DIR=$out" >> "$GITHUB_ENV"
           python3 scripts/openrouter_pricing_engine.py propose \
             --policy scripts/openrouter_pricing_policy.json \
             --candidates scripts/openrouter_catalog_seed_candidates.json \
@@ -91,6 +92,14 @@ jobs:
             echo "$extra" >&2
             exit 1
           fi
+
+      - name: Retain proposal diagnostics even when the scan fails
+        if: ${{ always() && env.PROPOSAL_OUTPUT_DIR != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: openrouter-catalog-proposal
+          path: ${{ env.PROPOSAL_OUTPUT_DIR }}/openrouter-catalog-proposal-*.json
+          if-no-files-found: warn
 
       - name: Open a docs-only review PR when the proposal is new
         shell: bash
