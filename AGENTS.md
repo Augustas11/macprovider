@@ -63,6 +63,14 @@ while sessions regenerated evidence instead of deploying. Each is binding.
     operator explicitly asks for one. A feature that works live stays on. If a
     process document demands an expiry, flag it to the operator as a rule to
     remove instead of complying.
+11. **Proven changes ship on.** When lab evidence shows a change works
+    (correctness checks pass and the gain is measured) and its audit is
+    clean, it ships enabled by default in the same PR. Do not add a
+    default-off flag or a separate operator enable gate for it. Handle risk
+    in the code itself (caps, bounds, fallbacks) and keep an emergency kill
+    switch where one already exists. Signed catalog/CB/native-MTP policy is
+    deployment state, not a default-off gate; changing it still goes through
+    `scripts/ops/`.
 
 ## Project Overview
 

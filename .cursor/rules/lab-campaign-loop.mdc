@@ -35,5 +35,6 @@ markup, or any other runtime proof — follow
    packaged confirmation / enable gates.
 5. A worktree binary is valid lab evidence. It is not an enable path.
 
-Pearl catalog T0 (#608 → #609), money-path billing/auth/receipts, fleet
-promote, and buyer canary enable stay on their existing serial gates.
+Pearl catalog T0 (#608 → #609), money-path billing/auth/receipts and fleet
+promote stay on their existing serial gates. A lab-proven change ships enabled
+by default (AGENTS.md rule 11), with no separate default-off enable gate.
