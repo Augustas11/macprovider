@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +36,7 @@ func seedRestatableRow(t *testing.T) restatableRow {
 		t.Fatalf("fixture completion %d too small to show a /16 clamp", receipt)
 	}
 	_, store := newRequestAndBillingStores(t)
+	store.SetOutputBytesPerTokenCeiling(16)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
 	insertSPEC022LedgerCredit(t, store.db, input, 700)
@@ -136,12 +139,20 @@ func TestCeilingRestatementRestatesOnceWithAudit(t *testing.T) {
 		t.Fatalf("audit payload=%s", payloadJSON)
 	}
 
+	if n := scalar(t, r.store.db, `SELECT COUNT(*) FROM ledger_ceiling_restatements WHERE request_credit_id = ? AND old_gross_credits = ? AND new_gross_credits = ? AND operator_id = 'ops-a'`, r.id, r.estimate, r.receipt); n != 1 {
+		t.Fatalf("restatement records=%d want 1", n)
+	}
+	// Pruning audit_log does not reopen the row: the restatement ledger
+	// is the dedupe.
+	if _, err := r.store.db.Exec(`DELETE FROM audit_log WHERE event_type = ?`, eventCeilingRestatement); err != nil {
+		t.Fatal(err)
+	}
 	again := r.restate(t, false)
 	if again.Candidates != 0 || again.Restated != 0 {
 		t.Fatalf("second run=%+v, want nothing left to restate", again)
 	}
-	if n := r.auditRows(t); n != 1 {
-		t.Fatalf("audit rows=%d after a repeat run, want 1", n)
+	if n := r.auditRows(t); n != 0 {
+		t.Fatalf("audit rows=%d after a repeat run over a pruned log, want 0", n)
 	}
 }
 
@@ -179,6 +190,7 @@ func TestCeilingRestatementLeavesOutOfScopeRowsUntouched(t *testing.T) {
 func TestCeilingRestatementSkipsObserveModeRows(t *testing.T) {
 	input := r012SettlementInput(t, "receipt_tuple_v4_normal_done", false)
 	_, store := newRequestAndBillingStores(t)
+	store.SetOutputBytesPerTokenCeiling(16)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
 	insertSPEC022LedgerCreditWithMode(t, store.db, input, 1, RouteSnapshotModeObserve, "")
@@ -280,6 +292,23 @@ func TestCeilingRestatementRouteIsGated(t *testing.T) {
 	if rr := post(""); rr.Code != http.StatusForbidden {
 		t.Fatalf("no bearer status=%d want 403", rr.Code)
 	}
+	r.store.SetOutputBytesPerTokenCeiling(4)
+	if rr := post("operator-key"); rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "restatement_refused") {
+		t.Fatalf("refused status=%d body=%s, want 409 restatement_refused", rr.Code, rr.Body.String())
+	}
+	r.store.SetOutputBytesPerTokenCeiling(16)
+	badLimit, _ := json.Marshal(map[string]any{"operator_id": "ops-a", "reason": "r", "from_utc": r.ts.Format(time.RFC3339Nano), "to_utc": r.ts.Add(time.Hour).Format(time.RFC3339Nano), "dry_run": true, "limit": 0})
+	req := httptest.NewRequest(http.MethodPost, ceilingRestatementPath, bytes.NewReader(badLimit))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer operator-key")
+	limitRR := httptest.NewRecorder()
+	h.ServeHTTP(limitRR, req)
+	if limitRR.Code != http.StatusUnprocessableEntity || !strings.Contains(limitRR.Body.String(), "bad_limit") {
+		t.Fatalf("limit 0 status=%d body=%s, want 422 bad_limit", limitRR.Code, limitRR.Body.String())
+	}
+	if rr := post(""); rr.Code != http.StatusForbidden {
+		t.Fatalf("no bearer status=%d want 403", rr.Code)
+	}
 	rr := post("operator-key")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("dry run status=%d body=%s", rr.Code, rr.Body.String())
@@ -293,5 +322,89 @@ func TestCeilingRestatementRouteIsGated(t *testing.T) {
 	}
 	if got := r.gross(t); got != r.estimate {
 		t.Fatalf("dry run over HTTP wrote gross=%d", got)
+	}
+}
+
+func TestCeilingRestatementRefusesWithoutItsPreconditions(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(r restatableRow)
+		to    func(r restatableRow) time.Time
+	}{
+		"activation marker missing": {setup: func(r restatableRow) {
+			if _, err := r.store.db.Exec(`DELETE FROM ledger_markers WHERE name = ?`, nonStreamBodyCeilingActiveMarker); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		"window ends after activation": {to: func(r restatableRow) time.Time {
+			var at string
+			if err := r.store.db.QueryRow(`SELECT ts_utc FROM ledger_markers WHERE name = ?`, nonStreamBodyCeilingActiveMarker).Scan(&at); err != nil {
+				t.Fatal(err)
+			}
+			ts, err := time.Parse(time.RFC3339Nano, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return ts.Add(time.Second)
+		}},
+		"output ceiling is not 16": {setup: func(r restatableRow) { r.store.SetOutputBytesPerTokenCeiling(4) }},
+		"output ceiling never set": {setup: func(r restatableRow) { r.store.SetOutputBytesPerTokenCeiling(0) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := seedRestatableRow(t)
+			if tc.setup != nil {
+				tc.setup(r)
+			}
+			to := r.ts.Add(time.Hour)
+			if tc.to != nil {
+				to = tc.to(r)
+			}
+			_, err := r.store.RestateNonStreamCeilings(context.Background(), CeilingRestatementInput{
+				OperatorID: "ops-a", Reason: "restate", From: r.ts.Add(-time.Hour), To: to, DryRun: true,
+			})
+			if !errors.Is(err, ErrCeilingRestatementRefused) {
+				t.Fatalf("err=%v want ErrCeilingRestatementRefused", err)
+			}
+			if got := r.gross(t); got != r.estimate {
+				t.Fatalf("refused restatement changed gross to %d", got)
+			}
+		})
+	}
+}
+
+func TestCeilingRestatementActivationMarkerIsWrittenOnce(t *testing.T) {
+	r := seedRestatableRow(t)
+	var first string
+	if err := r.store.db.QueryRow(`SELECT ts_utc FROM ledger_markers WHERE name = ?`, nonStreamBodyCeilingActiveMarker).Scan(&first); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(r.store.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again string
+	if err := reopened.db.QueryRow(`SELECT ts_utc FROM ledger_markers WHERE name = ?`, nonStreamBodyCeilingActiveMarker).Scan(&again); err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Fatalf("activation marker moved %s -> %s on restart", first, again)
+	}
+}
+
+func TestCeilingRestatementDuplicateRecordAbortsTheBatch(t *testing.T) {
+	r := seedRestatableRow(t)
+	// A record for the row with no matching dedupe would be a second
+	// restatement; the primary key aborts the whole batch.
+	conn, err := r.store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	row := CeilingRestatementRow{RequestCreditID: r.id, RequestID: r.input.RequestID, ProviderID: r.input.ProviderID, OldUsageSource: UsageByteEstimated, NewUsageSource: UsageProviderReported}
+	in := CeilingRestatementInput{OperatorID: "ops-a", Reason: "restate"}
+	if err := insertCeilingRestatementRecordTx(context.Background(), conn, in, "2026-01-01T00:00:00.000000000Z", row); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertCeilingRestatementRecordTx(context.Background(), conn, in, "2026-01-01T00:00:00.000000000Z", row); err == nil {
+		t.Fatal("second restatement record for the same row was accepted")
 	}
 }

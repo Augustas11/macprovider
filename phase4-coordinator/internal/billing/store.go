@@ -70,8 +70,11 @@ type Store struct {
 	// ceilingRestatementEnabled gates the SPEC-005 §7.5b ceiling
 	// restatement route; written only by SetCeilingRestatementEnabled.
 	ceilingRestatementEnabled atomic.Bool
-	wholesaleMu               sync.RWMutex
-	usdPerMillionCredits      float64
+	// outputBytesPerTokenCeiling is the effective
+	// tier2.output_bytes_per_token_ceiling (SetOutputBytesPerTokenCeiling).
+	outputBytesPerTokenCeiling atomic.Int64
+	wholesaleMu                sync.RWMutex
+	usdPerMillionCredits       float64
 }
 
 type SQLiteMetrics interface {
@@ -89,6 +92,9 @@ func NewStore(db *sql.DB) (*Store, error) {
 	s := &Store{db: db, now: time.Now}
 	s.forceCreditHoldSeconds.Store(defaultForceCreditSettlementHoldSeconds)
 	if err := s.migrate(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := s.ensureCeilingRestatementTablesAndMarker(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil

@@ -32,7 +32,53 @@ const (
 	supersededNonStreamBytesPerToken = int64(16)
 	defaultCeilingRestatementLimit   = 200
 	maxCeilingRestatementLimit       = 1000
+	// nonStreamBodyCeilingActiveMarker names the ledger_markers row recording
+	// when a coordinator carrying the v0.6.18 body-bytes basis first opened
+	// the ledger. No row at or after it was written under the superseded basis.
+	nonStreamBodyCeilingActiveMarker = "nonstream_body_ceiling_active"
 )
+
+// ErrCeilingRestatementRefused is a restatement precondition failure: the
+// activation marker is missing, the window ends after it, or the effective
+// output ceiling is not the superseded divisor.
+var ErrCeilingRestatementRefused = errors.New("ceiling restatement refused")
+
+// ensureCeilingRestatementTablesAndMarker creates the never-pruned marker and
+// restatement ledgers and records the body-bytes activation marker once.
+func (s *Store) ensureCeilingRestatementTablesAndMarker(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS ledger_markers (
+    name TEXT PRIMARY KEY,
+    ts_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ledger_ceiling_restatements (
+    request_credit_id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    old_estimated_completion_tokens INTEGER NULL,
+    new_estimated_completion_tokens INTEGER NULL,
+    old_usage_source TEXT NOT NULL,
+    new_usage_source TEXT NOT NULL,
+    old_gross_credits INTEGER NOT NULL,
+    new_gross_credits INTEGER NOT NULL,
+    old_provider_credits INTEGER NOT NULL,
+    new_provider_credits INTEGER NOT NULL,
+    restated_at_utc TEXT NOT NULL
+);`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ledger_markers (name, ts_utc) VALUES (?, ?)`, nonStreamBodyCeilingActiveMarker, sqliteTimeText(s.now()))
+	return err
+}
+
+// SetOutputBytesPerTokenCeiling publishes the effective
+// tier2.output_bytes_per_token_ceiling the restatement checks.
+func (s *Store) SetOutputBytesPerTokenCeiling(n int) {
+	s.outputBytesPerTokenCeiling.Store(int64(n))
+}
 
 // CeilingRestatementInput is one operator-triggered restatement batch.
 type CeilingRestatementInput struct {
@@ -116,6 +162,19 @@ func (s *Store) RestateNonStreamCeilings(ctx context.Context, in CeilingRestatem
 	var out CeilingRestatementResult
 	err := sqliteutil.TransactObserved(ctx, s.db, "billing_ceiling_restatement", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		out = CeilingRestatementResult{DryRun: in.DryRun, WindowFromUTC: from, WindowToUTC: to, Skipped: map[string]int{}, Rows: []CeilingRestatementRow{}}
+		if got := s.outputBytesPerTokenCeiling.Load(); got != supersededNonStreamBytesPerToken {
+			return fmt.Errorf("%w: effective tier2.output_bytes_per_token_ceiling is %d, the reconstruction requires %d", ErrCeilingRestatementRefused, got, supersededNonStreamBytesPerToken)
+		}
+		var activatedAt string
+		if err := conn.QueryRowContext(ctx, `SELECT ts_utc FROM ledger_markers WHERE name = ?`, nonStreamBodyCeilingActiveMarker).Scan(&activatedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: body-bytes activation marker missing", ErrCeilingRestatementRefused)
+			}
+			return err
+		}
+		if to > activatedAt {
+			return fmt.Errorf("%w: window ends %s, after the body-bytes activation at %s", ErrCeilingRestatementRefused, to, activatedAt)
+		}
 		candidates, err := ceilingRestatementCandidatesTx(ctx, conn, from, to, limit+1)
 		if err != nil {
 			return err
@@ -177,6 +236,9 @@ func (s *Store) RestateNonStreamCeilings(ctx context.Context, in CeilingRestatem
 				if !applied {
 					return fmt.Errorf("ceiling restatement: request credit %d no longer unsettled", row.requestCreditID)
 				}
+				if err := insertCeilingRestatementRecordTx(ctx, conn, in, now, r); err != nil {
+					return err
+				}
 				if err := insertCeilingRestatementAuditTx(ctx, conn, in, from, to, now, r); err != nil {
 					return err
 				}
@@ -213,9 +275,8 @@ SELECT lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.estimated_completion_
    AND lrc.estimated_completion_tokens < lrc.completion_tokens
    AND `+sqliteTimeRange("lrc.ts_utc")+`
    AND NOT EXISTS (
-       SELECT 1 FROM audit_log a
-        WHERE a.event_type = '`+eventCeilingRestatement+`'
-          AND json_extract(a.payload_json, '$.request_credit_id') = lrc.id
+       SELECT 1 FROM ledger_ceiling_restatements lcr
+        WHERE lcr.request_credit_id = lrc.id
    )
  ORDER BY lrc.id
  LIMIT ?`, from, to, limit)
@@ -232,6 +293,24 @@ SELECT lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.estimated_completion_
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// insertCeilingRestatementRecordTx writes the never-pruned per-row record
+// that keeps a row from being restated twice; a second insert for the same
+// row is a primary-key violation that aborts the batch.
+func insertCeilingRestatementRecordTx(ctx context.Context, conn *sql.Conn, in CeilingRestatementInput, now string, r CeilingRestatementRow) error {
+	_, err := conn.ExecContext(ctx, `
+INSERT INTO ledger_ceiling_restatements (
+    request_credit_id, request_id, attempt_n, provider_id, operator_id, reason,
+    old_estimated_completion_tokens, new_estimated_completion_tokens,
+    old_usage_source, new_usage_source, old_gross_credits, new_gross_credits,
+    old_provider_credits, new_provider_credits, restated_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.RequestCreditID, r.RequestID, r.AttemptN, r.ProviderID, in.OperatorID, in.Reason,
+		nullInt64(r.OldEstimate), nullInt64(r.NewEstimate),
+		r.OldUsageSource, r.NewUsageSource, r.OldGross, r.NewGross,
+		r.OldProvider, r.NewProvider, now)
+	return err
 }
 
 func insertCeilingRestatementAuditTx(ctx context.Context, conn *sql.Conn, in CeilingRestatementInput, from, to, now string, r CeilingRestatementRow) error {
@@ -325,8 +404,8 @@ func (h *handler) ceilingRestatementHandler(w http.ResponseWriter, r *http.Reque
 		writeValidationError(w, "bad_window", "from_utc and to_utc must be RFC 3339 with from_utc before to_utc")
 		return
 	}
-	if body.Limit < 0 || body.Limit > maxCeilingRestatementLimit {
-		writeValidationError(w, "bad_limit", fmt.Sprintf("limit must be between 1 and %d", maxCeilingRestatementLimit))
+	if _, present := fields["limit"]; present && (body.Limit < 1 || body.Limit > maxCeilingRestatementLimit) {
+		writeValidationError(w, "bad_limit", fmt.Sprintf("limit, when present, must be between 1 and %d (default %d)", maxCeilingRestatementLimit, defaultCeilingRestatementLimit))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -339,6 +418,10 @@ func (h *handler) ceilingRestatementHandler(w http.ResponseWriter, r *http.Reque
 		DryRun:     *body.DryRun,
 		Limit:      body.Limit,
 	})
+	if errors.Is(err, ErrCeilingRestatementRefused) {
+		writeError(w, http.StatusConflict, "restatement_refused", err.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "ceiling restatement: "+err.Error())
 		return
