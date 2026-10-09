@@ -7,10 +7,12 @@ LAB=/Users/a1/lab-1906
 B=/Users/a1/macprovider-1906-cb-depth/phase3-binary/.build/release/macprovider-cli
 OUT=$1; ROWS=${2:-16}; PORT=18090
 mkdir -p "$OUT"
+LP=
+SP=
 "$B" serve --config "$LAB/cfg/config.yaml" --port $PORT --no-join --autotune-candidate --no-idle-prewarm \
   > "$OUT/serve.log" 2>&1 &
 SP=$!
-trap 'kill $LP 2>/dev/null; kill $SP 2>/dev/null; sleep 5; kill -9 $SP 2>/dev/null' EXIT
+trap 'kill ${LP:-} 2>/dev/null; kill ${SP:-} 2>/dev/null; sleep 5; kill -9 ${SP:-} 2>/dev/null' EXIT
 for _ in $(seq 1 180); do curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && break; sleep 2; done
 echo "serve ready pid $SP $(date -u +%T)"
 /usr/bin/python3 "$LAB/depth_sweep.py" --port $PORT --model qwen/qwen3.6-35b-a3b --depths $ROWS \

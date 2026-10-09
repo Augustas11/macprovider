@@ -14,6 +14,10 @@ resume() {
   echo "LIVE_STILL_DOWN $(date -u +%T)"
 }
 /usr/bin/python3 $L/live-ctl.py pause || { echo "LIVE_PAUSE_FAILED"; exit 4; }
+# Arm the resume before anything else can fail or be interrupted: a drain
+# timeout or Ctrl-C below must never leave live paused.
+trap resume EXIT
+trap 'exit 130' INT TERM
 echo "LIVE_PAUSED $(date -u +%T)"
 # A pause stops admission only; requests already generating keep the GPU busy
 # until they finish. Measure only once live reports nothing in flight.
@@ -23,6 +27,4 @@ for i in $(seq 1 180); do
   [ $i -eq 180 ] && { echo "LIVE_NOT_DRAINED in_flight=$n"; exit 5; }
   sleep 10
 done
-trap resume EXIT
-trap 'exit 130' INT TERM
 "$@"
