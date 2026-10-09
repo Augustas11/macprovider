@@ -6790,6 +6790,46 @@ class PearlUpdaterTests(unittest.TestCase):
             self.assertEqual(updater_module.main(["--reconcile", "--config", str(config)]), 0)
             reconcile.assert_called_once()
 
+    def test_post_commit_check_runs_after_updater_and_config_locks_release(self):
+        # #1793: the rollback-point quick_check can take minutes on a large
+        # database; it must never hold the updater or coordinator config lock.
+        import fcntl
+
+        config, install, environment = self._guarded_main_environment("post-commit-locks")
+        observed = []
+
+        def committed_reconcile(updater):
+            updater.post_commit_pending = True
+            return True
+
+        def after_commit(updater):
+            with updater_module.FileLock(updater.lock_path, required_uid=os.geteuid()):
+                observed.append("updater-lock-free")
+            descriptor = os.open(install / ".coordinator-deploy.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed.append("config-lock-free")
+            finally:
+                os.close(descriptor)
+
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            updater_module.Updater, "reconcile", autospec=True, side_effect=committed_reconcile
+        ), mock.patch.object(updater_module.Updater, "after_commit", autospec=True, side_effect=after_commit):
+            self.assertEqual(updater_module.main(["--reconcile", "--config", str(config)]), 0)
+        self.assertEqual(observed, ["updater-lock-free", "config-lock-free"])
+
+    def test_post_commit_prune_defers_when_updater_lock_is_busy(self):
+        self.updater.audit = mock.Mock()
+        self.updater.verify_rollback_point = mock.Mock(return_value=True)
+        self.updater.prune_transaction_snapshots = mock.Mock()
+        with updater_module.FileLock(self.updater.lock_path, required_uid=os.geteuid()):
+            self.updater.after_commit()
+        self.updater.prune_transaction_snapshots.assert_not_called()
+        deferred = self.audit_events()["database_snapshot_pruned"]
+        self.assertEqual(deferred.args[1], "deferred")
+        self.updater.after_commit()
+        self.updater.prune_transaction_snapshots.assert_called_once_with()
+
     def test_updater_refuses_missing_config_guard(self):
         config, _install, environment = self._guarded_main_environment("guard-missing")
         environment["PEARL_UPDATER_TEST_CONFIG_GUARD"] = str(self.root / "absent-guard.py")
@@ -7534,12 +7574,21 @@ class PearlUpdaterTests(unittest.TestCase):
         def check(_tx):
             self.assertFalse(self.updater.journal_path.exists())
             order.append("check")
+            return True
 
         self.updater.verify_rollback_point = mock.Mock(side_effect=check)
 
         self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
 
-        self.assertEqual(order, ["quiesce", "copy", "restart", "healthy", "commit", "prune", "check"])
+        # #1793: apply returns at the commit point; the rollback-point check
+        # and pruning are deferred until main() has released its locks.
+        self.assertEqual(order, ["quiesce", "copy", "restart", "healthy", "commit"])
+        self.assertTrue(self.updater.post_commit_pending)
+        self.updater.run_deferred_post_commit()
+        self.assertEqual(order, ["quiesce", "copy", "restart", "healthy", "commit", "check", "prune"])
+        self.assertFalse(self.updater.post_commit_pending)
+        self.updater.run_deferred_post_commit()
+        self.assertEqual(order.count("check"), 1)
 
     def test_failed_rollback_point_check_alerts_and_never_rolls_back_a_healthy_release(self):
         release = self.verify()
@@ -7572,10 +7621,15 @@ class PearlUpdaterTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         self.updater.run_command = run_command
+        self.updater.prune_transaction_snapshots = mock.Mock()
 
         self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+        self.updater.sqlite_quick_check.assert_not_called()
+        self.updater.run_deferred_post_commit()
 
         self.updater.restore_transaction.assert_not_called()
+        # A failed check keeps every older rollback point.
+        self.updater.prune_transaction_snapshots.assert_not_called()
         self.updater.restore_previous_services.assert_not_called()
         self.updater.sqlite_quick_check.assert_called_once_with(tx / "databases" / "0.sqlite")
         unverified = self.audit_events()["rollback_point_unverified"]
@@ -8566,7 +8620,11 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertTrue(self.updater.reconcile())
 
-        # The crash skipped apply's post-commit prune and rollback-point check.
+        # The crash skipped apply's post-commit prune and rollback-point
+        # check; reconcile defers them until main() releases its locks.
+        self.updater.after_commit.assert_not_called()
+        self.assertTrue(self.updater.post_commit_pending)
+        self.updater.run_deferred_post_commit()
         self.updater.after_commit.assert_called_once_with()
         self.updater.prove_catalog_canary_mac.assert_called_once()
         canary_release = self.updater.prove_catalog_canary_mac.call_args.args[0]

@@ -1059,6 +1059,9 @@ class Updater:
         self.coordinator_runtime_state: CoordinatorRuntime | None = None
         self.runtime_config_hashes: dict[Path, str] = {}
         self.rollback_armed = False
+        # #1793: set at the commit point; main() runs after_commit() once
+        # the updater and config locks are released.
+        self.post_commit_pending = False
         self.canary_timer_was_active = False
         self.canary_service_was_active = False
         self.cutover_monotonic_us: int | None = None
@@ -4660,11 +4663,12 @@ class Updater:
                 failures[row["source"]] = lines
         return checked, failures
 
-    def verify_rollback_point(self, tx: Path | None) -> None:
+    def verify_rollback_point(self, tx: Path | None) -> bool:
         """After commit: quick_check the snapshot taken under quiesce. A bad
-        copy never rolls back the healthy release; it alerts instead."""
+        copy never rolls back the healthy release; it alerts instead.
+        Returns False when the rollback point failed its check."""
         if tx is None:
-            return
+            return True
         try:
             checked, failures = self._check_rollback_point(tx)
         except Exception as exc:
@@ -4676,10 +4680,11 @@ class Updater:
                 transaction=str(tx),
                 databases=checked,
             )
-            return
+            return True
         self.audit("rollback_point_unverified", "failed", transaction=str(tx), failures=failures)
         if not self.raise_critical_alert(ROLLBACK_POINT_UNVERIFIED_ALERT, transaction=str(tx)):
             raise UpdateError(f"rollback point {tx} failed quick_check and the critical alert could not be raised")
+        return False
 
     def prune_transaction_snapshots(self) -> None:
         """After commit: drop databases/ payloads of older transactions, keeping
@@ -7539,6 +7544,7 @@ class Updater:
             )
             self.audit("rollout_completed", "success", candidate=release.tag, transaction=str(self.transaction))
             self._clear_journal()
+            self.post_commit_pending = True
         except Exception as exc:
             rollback_error: Exception | None = None
             rollback_attempted = self.rollback_armed
@@ -7577,17 +7583,44 @@ class Updater:
                 raise UpdateError(f"rollout failed: {exc}; {'; '.join(details)}") from exc
             self._clear_journal()
             raise
-        # Committed. Nothing below may roll back or stop the healthy release,
-        # so it runs outside the rollback handler above.
+        # Committed. The rollback-point check and snapshot pruning run from
+        # main() after the updater and config locks are released (#1793), so a
+        # long quick_check never stalls config transactions.
+
+    def run_deferred_post_commit(self) -> None:
+        """Run after_commit() once, after main() released its locks."""
+        if not self.post_commit_pending:
+            return
+        self.post_commit_pending = False
         self.after_commit()
 
     def after_commit(self) -> None:
+        """Post-commit work, outside the updater and config locks (#1793).
+
+        The committed transaction's snapshot is the durable rollback point and
+        pruning always protects it (current-release.json names it), so the
+        quick_check reads a stable copy without the lock. A failed check
+        alerts and keeps every older rollback point. Pruning re-takes the
+        updater lock without blocking; a busy lock defers it to the next run.
+        """
+        self.audit("rollback_point_verification", "started", transaction=str(self.transaction))
+        if not self.verify_rollback_point(self.transaction):
+            with contextlib.suppress(Exception):
+                self.audit(
+                    "database_snapshot_pruned",
+                    "skipped",
+                    reason="rollback point unverified; older rollback points kept",
+                )
+            return
         try:
-            self.prune_transaction_snapshots()
+            with FileLock(self.lock_path, required_uid=self.trusted_uid):
+                self.prune_transaction_snapshots()
+        except LockBusy:
+            with contextlib.suppress(Exception):
+                self.audit("database_snapshot_pruned", "deferred", reason="updater lock busy")
         except Exception as exc:
             with contextlib.suppress(Exception):
                 self.audit("database_snapshot_pruned", "failed", reason=str(exc))
-        self.verify_rollback_point(self.transaction)
 
     def reconcile(self) -> bool:
         payload = self._load_journal()
@@ -7770,8 +7803,9 @@ class Updater:
         finally:
             self.reconciling = False
         if success_persisted:
-            # A crash after the commit point skipped apply's post-commit work.
-            self.after_commit()
+            # A crash after the commit point skipped apply's post-commit work;
+            # main() runs it after releasing the locks.
+            self.post_commit_pending = True
         return True
 
 
@@ -7904,6 +7938,15 @@ def main(argv: list[str]) -> int:
         isolate_candidate_network=not testing,
     )
     lock_uid = trusted_uid
+    try:
+        return _run_locked(args, updater, testing, lock_uid)
+    finally:
+        # #1793: the locks are released here; post-commit verification and
+        # pruning never hold them.
+        updater.run_deferred_post_commit()
+
+
+def _run_locked(args: argparse.Namespace, updater: "Updater", testing: bool, lock_uid: int) -> int:
     with FileLock(updater.lock_path, required_uid=lock_uid), coordinator_config_guard(
         test_path(CONFIG_GUARD_MODULE, "PEARL_UPDATER_TEST_CONFIG_GUARD", testing),
         updater.install_root,
@@ -7996,10 +8039,10 @@ def main(argv: list[str]) -> int:
             "release_lane": release.release_lane,
             "canary_rollout_authority": (
                 CANARY_AUTHORITY_VERSION
-                if config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
+                if updater.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
                 else BUYER_CANARY_DISABLED_AUTHORITY
             ),
-            "buyer_canary_mode": config.buyer_canary_mode,
+            "buyer_canary_mode": updater.config.buyer_canary_mode,
             "deadman_maintenance": "betterstack-paused-during-apply",
             "repository": PINNED_REPOSITORY,
         }
