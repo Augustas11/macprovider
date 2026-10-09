@@ -7444,7 +7444,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             cacheOnly: request.conversationCacheOnly,
                             leaseAllowed: conversationCacheAllowed,
                             lease: lease,
-                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+                            modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
                         ))
                     }
                     #endif
@@ -8231,7 +8231,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             cacheOnly: request.conversationCacheOnly,
                             leaseAllowed: conversationCacheAllowed,
                             lease: lease,
-                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
+                            modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
                         ))
                     }
                     #endif
