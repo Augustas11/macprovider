@@ -391,7 +391,7 @@ jobs:
 
   swift-tests:
     name: phase3-binary (swift test)
-    runs-on: macos-15
+    runs-on: macos-26
     # Cold Swift/app builds plus journey and recovery checks exceed 25 minutes.
     timeout-minutes: 45
     needs: changes
@@ -414,8 +414,8 @@ jobs:
           # (depth-1) checkout does not contain -> "commit is not reachable".
           fetch-depth: 0
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+      - name: Select Xcode 26.6 (Swift 6.3.3; match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Verify one-time Malibu Sparkle generator integration
         run: bash scripts/test-malibu-sparkle-generator-integration.sh
@@ -428,11 +428,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: phase3-binary/.build
-          key: spm-${{ runner.os }}-${{ hashFiles('phase3-binary/Package.resolved') }}
+          key: spm-${{ runner.os }}-xcode-26.6-${{ hashFiles('phase3-binary/Package.resolved') }}
           # A pin change must restore the nearest prior cache (only changed
           # packages rebuild) instead of a ~15 min cold build in the 25 min step.
+          # The key carries the Xcode version so a toolchain move never
+          # restores modules compiled by a different Swift compiler.
           restore-keys: |
-            spm-${{ runner.os }}-
+            spm-${{ runner.os }}-xcode-26.6-
 
       - name: Run Swift tests
         working-directory: phase3-binary
@@ -481,14 +483,14 @@ jobs:
 
   swift-package-lock:
     name: phase3-binary (locked SwiftPM resolve)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 15
     needs: changes
     # Same path gate as swift-tests: Package.resolved lives under
     # phase3-binary/, and a Go-only PR cannot drift the Swift lock.
     # ci-required treats a skip as a pass only when the detector is false.
-    # Must use Xcode 16.4 — the default Xcode.app on macos-15 can resolve a
-    # different graph and would hide the #1360 incomplete-lock failure.
+    # Must use the pinned Xcode 26.6 — the default Xcode.app on macos-26 floats
+    # and can resolve a different graph, hiding the #1360 incomplete-lock failure.
     if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
       - name: Checkout
@@ -498,8 +500,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Xcode 16.4 (match acceptance-candidate / release toolchain)
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Select Xcode 26.6 (match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Verify locked Package.resolved under the release toolchain
         run: bash scripts/verify-swift-package-lock.sh

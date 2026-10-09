@@ -36,6 +36,15 @@ if "\n  workflow_dispatch:\n" not in workflow or "\n  push:" in workflow:
     raise SystemExit("acceptance workflow must be manual dispatch only")
 build = workflow.split("\n  build_candidate:\n", 1)[1].split("\n  sign_acceptance:\n", 1)[0]
 protected = workflow.split("\n  sign_acceptance:\n", 1)[1]
+# Both jobs run the Swift 6.3 build toolchain: the signer re-derives the
+# toolchain record and cmp's it against the captured build record.
+for job_name, job in (("candidate build", build), ("protected signer", protected)):
+    if "    runs-on: macos-26\n" not in job:
+        raise SystemExit(f"{job_name} must run on the macos-26 image")
+    if "sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer" not in job:
+        raise SystemExit(f"{job_name} must pin the reviewed Xcode 26.6 path")
+    if "Xcode_16.4" in job or "/Applications/Xcode.app" in job:
+        raise SystemExit(f"{job_name} must not select a retired or floating Xcode")
 if "secrets." in build or "contents: write" in build or "environment:" in build:
     raise SystemExit("unprivileged candidate build gained a secret, write permission, or environment")
 if "go-version-file: candidate/phase4-coordinator/go.mod" not in build:

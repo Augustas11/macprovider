@@ -39,7 +39,7 @@ concurrency:
 jobs:
   build_candidate:
     name: Build exact candidate without protected secrets
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: read
     outputs:
@@ -100,7 +100,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           bash control/scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
       - name: Verify candidate dependency pins
@@ -339,7 +339,9 @@ jobs:
   sign_acceptance:
     name: Main-owned protected acceptance signer
     needs: build_candidate
-    runs-on: macos-15
+    # The signer re-derives the build toolchain record and cmp's it against the
+    # captured one, so it runs the same pinned Xcode as build_candidate.
+    runs-on: macos-26
     environment: production-release
     permissions:
       actions: read
@@ -385,7 +387,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$GITHUB_SHA" = "$CONTROL_COMMIT"
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/signer-release-toolchain.json"
           cmp "$RUNNER_TEMP/unsigned-acceptance-inputs/release-toolchain.json" \
             "$RUNNER_TEMP/signer-release-toolchain.json"

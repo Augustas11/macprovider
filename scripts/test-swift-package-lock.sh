@@ -4,7 +4,8 @@
 # Regular `swift test` uses automatic resolution and stays green on a newer
 # default Xcode even when Package.resolved is incomplete for the release
 # toolchain. This test locks the CI wiring so a future dep bump cannot merge
-# without a Xcode 16.4 `-onlyUsePackageVersionsFromResolvedFile` check.
+# without a pinned Xcode 26.6 (Swift 6.3.3) `-onlyUsePackageVersionsFromResolvedFile`
+# check.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,14 +42,14 @@ if "phase3-binary (locked SwiftPM resolve)" not in ci:
     raise SystemExit("ci.yml must name the locked-resolve job for ci-required matching")
 
 lock_job = ci.split("swift-package-lock:", 1)[1].split("\n  spec-015-acceptance:", 1)[0]
-if "runs-on: macos-15" not in lock_job:
-    raise SystemExit("locked-resolve job must run on macos-15")
+if "runs-on: macos-26\n" not in lock_job:
+    raise SystemExit("locked-resolve job must run on macos-26")
 if "needs: changes" not in lock_job:
     raise SystemExit("locked-resolve job must be path-gated by the changes detector")
 if "needs.changes.outputs.swift == 'true'" not in lock_job:
     raise SystemExit("locked-resolve job must share the swift path gate")
-if "/Applications/Xcode_16.4.app/Contents/Developer" not in lock_job:
-    raise SystemExit("locked-resolve job must select the reviewed Xcode 16.4 path")
+if "/Applications/Xcode_26.6.app/Contents/Developer" not in lock_job:
+    raise SystemExit("locked-resolve job must select the reviewed Xcode 26.6 path")
 if "/Applications/Xcode.app/Contents/Developer" in lock_job:
     raise SystemExit("locked-resolve job must not use the default/latest Xcode.app")
 if "scripts/verify-swift-package-lock.sh" not in lock_job:
@@ -67,8 +68,10 @@ if (
 ) not in required:
     raise SystemExit("ci-required must allow-skip locked-resolve only when the swift gate is false")
 
-if "/Applications/Xcode_16.4.app/Contents/Developer" not in verify:
-    raise SystemExit("verify-swift-package-lock.sh must require Xcode 16.4")
+if "/Applications/Xcode_26.6.app/Contents/Developer" not in verify:
+    raise SystemExit("verify-swift-package-lock.sh must require Xcode 26.6")
+if "Xcode_16.4" in verify:
+    raise SystemExit("verify-swift-package-lock.sh must not accept the retired Xcode 16.4")
 if "-onlyUsePackageVersionsFromResolvedFile" not in verify:
     raise SystemExit("verify script must use the locked candidate/release resolve flag")
 if "|| true" in verify:
@@ -84,7 +87,7 @@ if resolved.get("version") not in (2, 3) or not isinstance(pins, list) or not pi
 identities = {pin.get("identity") for pin in pins if isinstance(pin, dict)}
 if "async-http-client" not in identities:
     raise SystemExit(
-        "Package.resolved is missing async-http-client; Xcode 16.4 locked "
+        "Package.resolved is missing async-http-client; the pinned Xcode locked "
         "resolve requires it after the #1336 swift-transformers bump (#1360)"
     )
 PY

@@ -39,12 +39,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  openssl_preflight:
+    name: Preflight protected OpenSSL seal before tag creation
+    # The sealed OpenSSL bottle is reviewed only for the macos-15-intel image
+    # (scripts/install-sealed-release-openssl.sh), but the Swift 6.3 build
+    # needs a macos-26 image. Prove the protected signer image can still seal
+    # the reviewed bottle before any build or tag work starts.
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6.0.3.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.inputs.promote_run_id != '' && github.event.inputs.version || github.ref }}
+          persist-credentials: false
+
+      - name: Preflight protected OpenSSL seal before tag creation
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+
   build:
     name: Build unsigned release inputs from reviewed main
-    # The official Intel macos-15 image contract carries Xcode 16.4 (16F6) at
-    # /Applications/Xcode_16.4.app and macOS SDK 15.5:
-    # https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md
-    runs-on: macos-15-intel
+    needs: openssl_preflight
+    # The official Intel macos-26 image contract carries Xcode 26.6 (17F113)
+    # at /Applications/Xcode_26.6.app with Swift 6.3.3 and macOS SDK 26.5:
+    # https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md
+    # Swift 6.3 is required by mlx-swift 0.32.3 (swift-tools-version 6.3).
+    # Package catalog verification uses the image's Homebrew OpenSSL 3, as the
+    # acceptance-candidate build does; the sealed bottle stays on the signer.
+    runs-on: macos-26-intel
     permissions:
       contents: read
     outputs:
@@ -132,7 +162,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
       - name: Setup Go for Pearl binaries
@@ -203,16 +233,6 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
-
-      - name: Preflight protected OpenSSL seal before tag creation
-        if: ${{ github.event.inputs.promote_run_id == '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
-          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
-          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 
       - name: Build package
         if: ${{ github.event.inputs.promote_run_id == '' }}
@@ -617,13 +637,16 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
         run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
 
-      - name: Reverify captured release toolchain
+      - name: Select and verify reviewed signer toolchain
         shell: bash
+        # The signer only signs, notarizes, and staples; the sealed OpenSSL
+        # bottle keeps it on macos-15-intel, which has no Swift 6.3 Xcode. The
+        # captured build record was already bound to the reviewed Swift 6.3
+        # build toolchain by build-release-provenance.py when restoring inputs.
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/signing-release-toolchain.json"
-          cmp release-toolchain.json "$RUNNER_TEMP/signing-release-toolchain.json"
+          bash scripts/verify-release-toolchain.sh --signer "$RUNNER_TEMP/signing-release-toolchain.json"
 
       # SPEC-003 v0.8.2 follow-up: macOS 26.3.1+ tightened launchd's AMFI policy
       # to reject adhoc-signed binaries under `launchctl bootstrap`. Earlier

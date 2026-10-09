@@ -50,6 +50,12 @@ if 'toolchain_json="$RUNNER_TEMP/release-toolchain.json"' not in before_build:
     raise SystemExit("runtime workflow must keep release-toolchain.json outside the git worktree before Go builds")
 if "scripts/verify-release-toolchain.sh release-toolchain.json" in before_build:
     raise SystemExit("runtime workflow must not write release-toolchain.json into the git worktree before Go builds")
+if 'bash scripts/verify-release-toolchain.sh --signer "$toolchain_json"' not in before_build:
+    raise SystemExit("Go-only runtime workflow must verify the reviewed signer toolchain profile")
+if "sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer" not in before_build:
+    raise SystemExit("runtime signer must pin the reviewed signer Xcode path")
+if "python3 scripts/build-release-provenance.py --signer-toolchain" not in workflow:
+    raise SystemExit("runtime provenance must bind the reviewed signer toolchain record")
 build = workflow.split("- name: Build Pearl linux-amd64 runtime pair", 1)[1].split(
     "- name: Sign Pearl runtime metadata and checksums", 1
 )[0]

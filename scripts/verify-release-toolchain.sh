@@ -6,9 +6,21 @@ die() {
   exit 1
 }
 
-[[ "$#" == 1 ]] || die "usage: $0 OUTPUT_JSON"
+# Default profile: the Swift 6.3 build toolchain that compiles phase3-binary
+# and Malibu.app. --signer: the protected macos-15-intel signer toolchain, which
+# only signs, notarizes, and staples (sealed OpenSSL pins it to macOS 15).
+profile_args=()
+expected_developer_dir="/Applications/Xcode_26.6.app/Contents/Developer"
+summary="Xcode 26.6 (17F113), Swift 6.3.3, macOS SDK 26.5"
+if [[ "${1:-}" == "--signer" ]]; then
+  shift
+  profile_args=(--signer)
+  expected_developer_dir="/Applications/Xcode_16.4.app/Contents/Developer"
+  summary="signer Xcode 16.4 (16F6), Swift 6.1.2, macOS SDK 15.5"
+fi
+readonly expected_developer_dir summary
+[[ "$#" == 1 ]] || die "usage: $0 [--signer] OUTPUT_JSON"
 output="$1"
-readonly expected_developer_dir="/Applications/Xcode_16.4.app/Contents/Developer"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 readonly script_dir
 
@@ -25,6 +37,7 @@ xcrun --sdk macosx --show-sdk-version >"$work/sdk-version.txt"
 xcrun --sdk macosx --show-sdk-path >"$work/sdk-path.txt"
 
 python3 "$script_dir/validate-release-toolchain.py" \
+  ${profile_args[@]+"${profile_args[@]}"} \
   "$developer_dir" \
   "$work/xcode-version.txt" \
   "$work/swift-driver-version.txt" \
@@ -33,4 +46,4 @@ python3 "$script_dir/validate-release-toolchain.py" \
   "$work/sdk-path.txt" \
   "$output"
 
-printf '[verify-release-toolchain] ok: Xcode 16.4 (16F6), Swift 6.1.2, macOS SDK 15.5\n'
+printf '[verify-release-toolchain] ok: %s\n' "$summary"

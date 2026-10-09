@@ -1,10 +1,10 @@
 name: Resolve CLI Package.resolved (release toolchain)
 
 # Regenerate phase3-binary/Package.resolved under the pinned release toolchain
-# (Xcode 16.4), so the lock matches what the locked candidate/release build
-# (`-onlyUsePackageVersionsFromResolvedFile`) requires. Newer local toolchains
-# (Xcode 26.x) resolve the graph differently and cannot reproduce the correct
-# lock. See issue #1360 (async-http-client unpinned after #1336). Manual only;
+# (Xcode 26.6, Swift 6.3.3), so the lock matches what the locked
+# candidate/release build (`-onlyUsePackageVersionsFromResolvedFile`) requires.
+# Other Xcode versions can resolve the graph differently and cannot reproduce
+# the correct lock. See issue #1360 (async-http-client unpinned after #1336). Manual only;
 # uploads the corrected Package.resolved as an artifact — it does not commit.
 # PR CI verifies the committed lock via the swift-package-lock job in ci.yml.
 
@@ -21,14 +21,14 @@ permissions:
 jobs:
   resolve:
     name: Resolve under the pinned release toolchain
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Checkout target ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.inputs.ref }}
-      - name: Select Xcode 16.4 (match acceptance-candidate / release toolchain)
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Select Xcode 26.6 (match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
       - name: Regenerate phase3-binary/Package.resolved
         shell: bash
         run: |

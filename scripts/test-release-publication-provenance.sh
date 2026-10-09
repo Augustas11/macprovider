@@ -22,8 +22,25 @@ printf 'pearl metadata\n' > "$work/pearl-release.json"
 printf 'pearl metadata signature\n' > "$work/pearl-release.json.sig"
 printf 'reviewed release notes\n' > "$work/release-notes.md"
 cat >"$work/release-toolchain.json" <<'EOF'
+{"macos_sdk":{"path":"/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk","version":"26.5"},"swift":{"driver_version":"1.148.6","version":"Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)"},"xcode":{"build":"17F113","developer_dir":"/Applications/Xcode_26.6.app/Contents/Developer","version":"26.6"}}
+EOF
+# Go-only Pearl runtime releases are signed on the protected macos-15-intel
+# runner and record the reviewed signer toolchain instead.
+cat >"$work/signer-release-toolchain.json" <<'EOF'
 {"macos_sdk":{"path":"/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","version":"15.5"},"swift":{"driver_version":"1.120.5","version":"Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"},"xcode":{"build":"16F6","developer_dir":"/Applications/Xcode_16.4.app/Contents/Developer","version":"16.4"}}
 EOF
+if python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
+  "$work/signer-release-toolchain.json" "$work/rejected-provenance.json" \
+  "$work/phase3-binary-m4-${tag}.tar.gz" >/dev/null 2>&1; then
+  echo "provider provenance accepted the signer toolchain record" >&2
+  exit 1
+fi
+if python3 "$build" --signer-toolchain "$tag" "$commit" Augustas11/macprovider false \
+  "$work/release-toolchain.json" "$work/rejected-provenance.json" \
+  "$work/coordinator-linux-amd64" >/dev/null 2>&1; then
+  echo "runtime provenance accepted the build toolchain record under --signer-toolchain" >&2
+  exit 1
+fi
 
 python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
   "$work/release-toolchain.json" "$work/release-provenance.json" \
@@ -119,8 +136,8 @@ printf 'runtime gateway payload\n' > "$runtime/gateway-linux-amd64"
 printf 'runtime pearl metadata\n' > "$runtime/pearl-release.json"
 printf 'runtime pearl metadata signature\n' > "$runtime/pearl-release.json.sig"
 printf 'runtime release notes\n' > "$runtime/release-notes.md"
-cp "$work/release-toolchain.json" "$runtime/release-toolchain.json"
-python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
+cp "$work/signer-release-toolchain.json" "$runtime/release-toolchain.json"
+python3 "$build" --signer-toolchain "$tag" "$commit" Augustas11/macprovider false \
   "$runtime/release-toolchain.json" "$runtime/release-provenance.json" \
   "$runtime/coordinator-linux-amd64" "$runtime/coordinator-cli-linux-amd64" \
   "$runtime/gateway-linux-amd64" "$runtime/pearl-release.json" \

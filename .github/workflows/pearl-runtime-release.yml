@@ -60,14 +60,17 @@ jobs:
             phase4-coordinator/go.sum
             phase5-gateway/go.sum
 
-      - name: Select and verify reviewed release toolchain
+      - name: Select and verify reviewed signer toolchain
         id: release_toolchain
         shell: bash
+        # Go-only runtime release: no Swift is compiled here, and the sealed
+        # OpenSSL bottle pins this job to macos-15-intel, so it records the
+        # reviewed signer toolchain (Xcode 16.4), not the Swift 6.3 build one.
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           toolchain_json="$RUNNER_TEMP/release-toolchain.json"
-          bash scripts/verify-release-toolchain.sh "$toolchain_json"
+          bash scripts/verify-release-toolchain.sh --signer "$toolchain_json"
           printf 'json=%s\n' "$toolchain_json" >> "$GITHUB_OUTPUT"
 
       - name: Seal OpenSSL 3 for protected runtime signing
@@ -271,7 +274,7 @@ jobs:
             pearl-release.json
             pearl-release.json.sig
           )
-          python3 scripts/build-release-provenance.py \
+          python3 scripts/build-release-provenance.py --signer-toolchain \
             "$tag" "$commit" "$GITHUB_REPOSITORY" \
             "${{ steps.release_source.outputs.prerelease }}" release-toolchain.json \
             release-provenance.json "${release_assets[@]}"
