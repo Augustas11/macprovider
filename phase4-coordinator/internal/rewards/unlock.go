@@ -191,6 +191,18 @@ const countVerifiedReceiptsSQL = `
            AND receipt_result = 'valid'
     `
 
+// countVerifiedReceiptsUnpinnedSQL serves a database without the provider
+// index (an operator-supplied read-only payout DB that never ran migrations):
+// INDEXED BY would fail every read there instead of only being slow.
+const countVerifiedReceiptsUnpinnedSQL = `
+        SELECT COUNT(*)
+          FROM settlement_receipt_verdicts
+         WHERE provider_id = ?
+           AND closed = 1
+           AND settlement_outcome = 'verified'
+           AND receipt_result = 'valid'
+    `
+
 // countVerifiedReceipts reads from the shared payout read pool when the caller
 // supplied one (provider read APIs). The background unlock evaluator has no
 // such pool and keeps a short-lived read-only connection per call.
@@ -211,9 +223,22 @@ func (r *Runner) countVerifiedReceipts(ctx context.Context, providerID string) (
 		}
 		return 0, nil
 	}
+	query := countVerifiedReceiptsSQL
+	if !indexExists(ctx, source, "idx_srv_provider_recent") {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		query = countVerifiedReceiptsUnpinnedSQL
+	}
 	var count int
-	err := source.QueryRowContext(ctx, countVerifiedReceiptsSQL, providerID).Scan(&count)
+	err := source.QueryRowContext(ctx, query, providerID).Scan(&count)
 	return count, err
+}
+
+func indexExists(ctx context.Context, db *sql.DB, name string) bool {
+	var found string
+	err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&found)
+	return err == nil && found == name
 }
 
 func (r *Runner) providerWalletBound(ctx context.Context, providerID string) (bool, error) {

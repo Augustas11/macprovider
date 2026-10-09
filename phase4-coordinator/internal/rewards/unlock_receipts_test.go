@@ -200,3 +200,42 @@ func TestRewardHandlersLogProjectionFailure(t *testing.T) {
 		})
 	}
 }
+
+// A read-only payout database that never ran migrations may lack the provider
+// index; the count must fall back to the unpinned query instead of failing
+// every wallet/accrual read with "no such index".
+func TestCountVerifiedReceiptsWithoutProviderIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noindex.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE settlement_receipt_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    received_at_unix_ms INTEGER NOT NULL,
+    closed INTEGER NOT NULL,
+    settlement_outcome TEXT NOT NULL,
+    receipt_result TEXT NOT NULL
+);
+CREATE INDEX idx_srv_outcome ON settlement_receipt_verdicts(settlement_outcome, closed, received_at_unix_ms);
+INSERT INTO settlement_receipt_verdicts (provider_id, received_at_unix_ms, closed, settlement_outcome, receipt_result) VALUES
+  ('provider-a', 1, 1, 'verified', 'valid'),
+  ('provider-a', 2, 1, 'verified', 'valid'),
+  ('provider-a', 3, 1, 'verified', 'invalid'),
+  ('provider-b', 4, 1, 'verified', 'valid');
+`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Query(countVerifiedReceiptsSQL, "provider-a"); err == nil {
+		t.Fatal("pinned query unexpectedly succeeds without the index; the fallback test is vacuous")
+	}
+	for _, runner := range []*Runner{{payoutReader: db}, {cfg: Config{SQLitePayoutDBPath: path}}} {
+		got, err := runner.countVerifiedReceipts(context.Background(), "provider-a")
+		if err != nil || got != 2 {
+			t.Fatalf("count without provider index = %d, %v; want 2", got, err)
+		}
+	}
+}

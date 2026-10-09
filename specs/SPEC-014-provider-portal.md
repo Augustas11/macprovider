@@ -5,10 +5,14 @@
 **Date drafted:** 2026-06-21 (v0.10 operator-minted session 2026-08-22)
 **Change log v0.12 (2026-10-10, #1925 earnings read failures):**
   `GET /providers/{id}/earnings` answers `503 unavailable` with `Retry-After: 5`
-    when any of its reads fails or exceeds the read budget, for both the bearer
-    and cookie paths. A failed read never yields a zero or partial balance and
-    never puts database error text in the body. The portal shows it as an
-    inline, retryable dashboard error.
+    when any financial or settlement read (provider existence, credit totals,
+    models served, settlement summaries) fails or exceeds the read budget, for
+    both the bearer and cookie paths. A failed financial read never yields a zero
+    or partial balance and never puts database error text in the body. The
+    optional `idle_prewarm` telemetry block keeps its bounded fallback: if that
+    read fails or exceeds its own budget the response stays `200` with empty
+    idle-prewarm counters. The portal shows a 503 as an inline, retryable
+    dashboard error.
 **Change log v0.11 (2026-10-09, #1880 GitHub-mode earnings):**
   Closes the §2.5.0 earnings gap. `GET /providers/{id}/earnings` with **no**
     `Authorization` header is authorized by the `__Host-mp_session` cookie when the
@@ -591,10 +595,13 @@ new Mac to that identity by claiming a `pair_ot` (`POST /v1/auth/me/providers/bi
   token or portal read session) is unchanged and never consults the cookie. Both
   credentials share the per-provider earnings rate limit, and every response
   carries `Cache-Control: private, no-store` and `Vary: Cookie, Authorization`.
-- **Read failure (MUST, v0.12).** If any earnings read fails or exceeds its
-  budget, the response is `503 unavailable` with `Retry-After: 5`; it never
+- **Read failure (MUST, v0.12).** If any financial or settlement read (provider
+  existence, credit totals, models served, settlement summaries) fails or exceeds
+  its budget, the response is `503 unavailable` with `Retry-After: 5`; it never
   reports a zero or partial total in place of a failed read and never includes
-  database error text.
+  database error text. The optional `idle_prewarm` telemetry is exempt: on its
+  own read failure or budget overrun the response stays `200` with empty
+  idle-prewarm counters.
 - **Portal behavior (MUST).** In cookie mode the portal sends no `Authorization`
   header (`makeCookieFetch`). A `401`/`403`/`404` from earnings is an inline
   dashboard error that clears any earnings already shown; it never restarts
