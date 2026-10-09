@@ -184,3 +184,44 @@ out with `settlement: { verified_model_settlement_mode: observe }` in its overla
 - Record the outcome in `beta/DECISION_CRITERIA.md`.
 - SPEC-016 payout enablement (§9 prereqs) is the next and final step to actual
   USDC — separate change, separate gate.
+
+## One-time non-streaming ceiling restatement (SPEC-005 v0.6.18 §7.5b)
+
+Use this once after the v0.6.18 coordinator is live. It re-prices unsettled,
+verified, non-streaming rows that were clamped by the superseded `/16`
+non-streaming ceiling. It never touches settled or quarantined rows or buyer
+debits. Read `docs/runbooks/pearl-coordinator-rollout.md` before changing the
+coordinator config, and state the expected impact first (a SIGHUP reload, no
+restart).
+
+1. **Choose the window.** `from_utc` is the first deploy that carried the
+   regression; `to_utc` MUST be no later than the v0.6.18 deploy time. Rows
+   after that carry the body-bytes ceiling and must not be restated.
+2. **Enable.** Set `billing.ceiling_restatement_enabled: true` in the
+   coordinator config through the same idempotent merge used for other
+   config changes, validate the merged config, then send SIGHUP. Confirm the
+   `billing_config_flag_changed` audit row for `ceiling_restatement_enabled`
+   and the `billing.ceiling_restatement_enabled=true` reload log line.
+3. **Dry run.** Repeat until `more` is `false`, reviewing `restated`,
+   `skipped`, and the three credit deltas:
+
+   ```bash
+   curl -sS -X POST "$COORDINATOR_URL/admin/ledger/ceiling-restatement" \
+     -H "Authorization: Bearer $OPERATOR_KEY" -H 'Content-Type: application/json' \
+     -d '{"operator_id":"<operator>","reason":"SPEC-005 v0.6.18 ceiling restatement","from_utc":"<from>","to_utc":"<to>","dry_run":true,"limit":500}'
+   ```
+
+   A dry run reads at most `limit` rows, so later rows show up only after a
+   write batch. Stop and investigate if any `skipped.would_quarantine` count
+   appears, or if a delta is negative.
+4. **Write.** Re-send with `"dry_run": false`. Each batch commits on its own
+   and writes one `ledger_ceiling_restatement` audit row per restated row.
+   Repeat until `candidates` is `0`. A repeat run is a no-op, because a
+   restated row no longer matches.
+5. **Disable.** Set the flag back to `false` and SIGHUP. Confirm the route
+   returns 404.
+6. **Verify.** The sum of `new_gross_credits - old_gross_credits` over the
+   audit rows equals the sum of the write batches' `gross_credits_delta`. The
+   next nightly reconcile reports no `reconciliation_mismatch` quarantines for
+   the restated rows. Record the outcome (counts only) in
+   `beta/DECISION_CRITERIA.md` Entry 250.

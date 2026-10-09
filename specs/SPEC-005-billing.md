@@ -1,7 +1,23 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.17 (2026-10-05, relay-blind settled outcome note)
+**Version:** 0.6.18 (2026-10-09, non-streaming completion ceiling basis and one-time ceiling restatement)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.18 (2026-10-09):** Money-path decision recorded in
+`beta/DECISION_CRITERIA.md` Entry 250. (1) §5.3/§6.8: a successful
+non-streaming attempt that reports its completion records the response body
+length as its completion ceiling (one byte per token); the `/16` estimate
+stays for streaming (delivered SSE bytes) and for every attempt with no
+reported completion. The clamp, its direction, `min(provider_reported,
+ceiling)`, the `byte_estimated` downgrade, and
+`tier2.output_bytes_per_token_ceiling` are unchanged. (2) §7.5b: the
+verified-receipt re-pricing keeps the ceiling it clamped to (it was described
+as clearing it), and a second sanctioned mutation is added, a one-time,
+operator-triggered, audited restatement of unsettled rows clamped under the
+superseded non-streaming `/16` basis, gated by the new
+`billing.ceiling_restatement_enabled` flag (§13). (3) Nightly reconcile
+re-prices a verified row against its stored ceiling, so a clamped or restated
+row is not a mismatch.
 
 **Change log v0.6.17 (2026-10-05, issue #1851):** Note only; no arithmetic,
 ledger-owner, or formula change. The §7.5a enforce payable gate gains a second
@@ -163,7 +179,9 @@ disagreement is a spec bug. No behavior change. Six reconciliations:
 - **§5.3 — completion clamp (runbook item 2 / audit H1).** The billable completion is
   `min(provider_reported, byte_estimate)`, and when the byte estimate is the smaller value
   on a `provider_reported` row the clamp **downgrades `usage_source` to `byte_estimated`**.
-  The byte estimate is `ceil(wire_bytes/16)` (computed upstream in the buyer path). The G1
+  The byte estimate is `ceil(wire_bytes/16)` (computed upstream in the buyer path); since v0.6.18
+  a successful non-streaming attempt with a reported completion uses the body length instead
+  (one byte per token, §6.8). The G1
   ledger probe (2026-07-11, re-confirmed 2026-07-12) measured this clamp as negligible
   (~3–5% of reported rows, ~1-token median, ~$0.001 provider / 35 d), so v0.6 **documents**
   the shipped `/16` clamp rather than reverting the divisor.
@@ -1277,7 +1295,9 @@ order: (1) fault/null short-circuits, (2) the completion clamp, (3) the token-va
 # snapshotted).
 
 # (2) completion clamp — billable completion is the SMALLER of reported and byte-estimate.
-#     byte_estimate = ceil(wire_bytes / tier2.output_bytes_per_token_ceiling) (default 16, §6.8).
+#     byte_estimate = ceil(wire_bytes / tier2.output_bytes_per_token_ceiling) (default 16, §6.8),
+#     except a successful non-streaming attempt with a reported completion, whose ceiling is
+#     body_bytes (one byte per token, v0.6.18, §6.8).
 #     The selection is BRANCHED ON usage_source (billableCompletion, formula.go):
 #
 #   usage_source == 'byte_estimated':
@@ -1368,6 +1388,16 @@ probe measured this as negligible (~3–5% of reported rows bound, ~1-token medi
 provider credit over 35 days), so v0.6 documents the shipped `/16` divisor and clamp rather than
 reverting it; any future change to the divisor or the clamp direction is a money-path decision that
 MUST re-run the G1 probe and append a `beta/DECISION_CRITERIA.md` entry.
+
+**Non-streaming ceiling basis (v0.6.18, `beta/DECISION_CRITERIA.md` Entry 250).** The G1 rationale
+above holds for streaming, where `wire_bytes` are delivered SSE bytes and `/16` stays above the
+token count. For a whole non-streaming JSON body, `ceil(body_bytes/16)` is a lower bound on the
+completion, so used as a ceiling it clamped honest reports; since verified-receipt re-pricing
+applies the stored ceiling (§7.5b), it under-credited most non-streaming verified rows. A
+successful non-streaming attempt that reports its completion therefore records `body_bytes` as its
+ceiling: every non-special token decodes to at least one byte, so the body length is a sound upper
+bound that still clamps an inflated report. The clamp direction and the `/16` divisor are
+unchanged; the G1 probe was re-run for the new basis (Entry 250).
 
 ### 5.3.1 Cache-eligibility gating and NULL semantics (SPEC-024 §14, folded in)
 
@@ -1634,7 +1664,11 @@ If a reconciliation summary needs to count provider-not-reached requests, it doe
 **Byte-estimate formula (reconciled to shipped code, v0.6).** The completion byte estimate is
 `ceil(bytes_emitted_so_far / tier2.output_bytes_per_token_ceiling)`, floored at 1 token and
 capped at the request-log usage cap (`estimatedCompletionTokensFromBytes`,
-`internal/buyer/server.go`). The ceiling is a coordinator config knob with **default 16**; a
+`internal/buyer/server.go`). **Non-streaming basis (v0.6.18).** A successful non-streaming
+attempt (HTTP or WebSocket relay) that reports its completion records `body_bytes` (one byte
+per token, same floor and cap) as its completion ceiling
+(`nonStreamCompletionCeilingFromBytes`); one with no reported completion keeps the
+`/tier2.output_bytes_per_token_ceiling` estimate above. Streaming paths are unchanged. The ceiling is a coordinator config knob with **default 16**; a
 non-positive ceiling falls back to a `4` divisor defensively (never the normal path). **This
 supersedes the prior `ceil(bytes/4)` text** (runbook item 2). The historical `ceil(bytes/4)` in
 **SPEC-006 v0.9.8 §17.7** is a documented **cross-spec drift** — SPEC-005 billing is authoritative
@@ -1768,8 +1802,9 @@ the receipt; the receipt authoritatively sets only prompt (input) and completion
 re-price touches **two** tables (both otherwise insert-only, §4.3/§4.4):
 
 - `ledger_request_credits` — UPDATEs `prompt_tokens`, `charged_prompt_tokens`, `completion_tokens`,
-  `estimated_completion_tokens` (→ NULL), `usage_source`, `gross_credits`, `provider_credits`,
-  `fault_flag`, and `updated_at_utc`.
+  `estimated_completion_tokens` (the stored ceiling when it clamped the receipt count, which
+  re-prices as `byte_estimated`; otherwise NULL), `usage_source`, `gross_credits`,
+  `provider_credits`, `fault_flag`, and `updated_at_utc`.
 - `ledger_operator_credits` — UPDATEs `gross_credits`, `operator_credits`, and `fault_flag` on the
   linked row (`WHERE request_credit_id = ?`) so the operator split stays consistent with the
   re-priced gross.
@@ -1798,10 +1833,35 @@ count therefore does **not** over-credit the provider or over-charge the buyer �
 or lower the charge (and, per the branch above, a clamp that drops below the cached count quarantines
 rather than pays). The receipt's `billable_output_tokens` sets `completion_tokens` directly.
 
-This is the single sanctioned **runtime** mutation of token/credit fields after insert; it is
-idempotent and applies only to a row matched by `id` under a verified receipt (both the request-credit
-and the linked operator-credit row). The only other permitted post-insert write is a **one-time
-additive migration backfill**: when a migration (§4.9) adds a new nullable column, its idempotent
+**One-time ceiling restatement (v0.6.18, `beta/DECISION_CRITERIA.md` Entry 250).** Unsettled rows
+clamped under the superseded non-streaming `/16` ceiling MAY be restated once, by
+`POST /admin/ledger/ceiling-restatement` (`internal/billing/ceiling_restatement.go`). It re-runs the
+verified-receipt re-pricing computation above, unchanged, with one input replaced: the stored
+estimate `e = ceil(body_bytes/16)` implies `body_bytes ≥ (e−1)·16+1`, and that lower bound is the
+row's v0.6.18 body-bytes ceiling. The request then credits `min(receipt completion, ceiling)`; an
+unclamped result sets `usage_source = provider_reported` and `estimated_completion_tokens = NULL`
+exactly as the re-pricing does, and the linked `ledger_operator_credits` row is updated with it.
+- **Scope:** `settled = 0 AND settlement_id IS NULL AND quarantined = 0`; `enforce` policy mode;
+  `stream = 0`; `usage_source = 'byte_estimated'`; `estimated_completion_tokens IS NOT NULL AND
+  estimated_completion_tokens < completion_tokens`; `ts_utc` in the operator-supplied half-open
+  window `[from_utc, to_utc)`, whose end MUST NOT be later than the v0.6.18 deploy; the same
+  closed, payable, enforce verdict, matching route snapshot, and non-overlapping attempt output the
+  re-pricing requires; and no earlier `ledger_ceiling_restatement` audit row for the row.
+- **Gate:** the `billing.ceiling_restatement_enabled` flag (§13, default `false`; the route returns
+  404 while it is off, and each reload flip emits a `billing_config_flag_changed` audit row) AND the
+  operator bearer, under the admin rate limit, with `operator_id` and `reason` validated as in
+  §11.6.3.
+- **Execution:** one `BEGIN IMMEDIATE` transaction per batch of at most 1000 rows, with a
+  `ledger_ceiling_restatement` audit-log row per restated row (old and new estimate,
+  `usage_source`, and gross, provider, and operator credits) in the same transaction. A dry run
+  returns the same rows and credit deltas and writes nothing. A row the re-pricing would quarantine
+  is skipped, never quarantined. Settled or quarantined rows and buyer debits are never touched.
+  A restated row no longer matches the scope, so a repeat run is a no-op.
+
+The verified-receipt re-pricing and this restatement are the only sanctioned **runtime** mutations
+of token/credit fields after insert; the re-pricing is idempotent and applies only to a row matched
+by `id` under a verified receipt (both the request-credit and the linked operator-credit row). The
+only other permitted post-insert write is a **one-time additive migration backfill**: when a migration (§4.9) adds a new nullable column, its idempotent
 backfill MAY populate that column on pre-existing rows — e.g. the `charged_prompt_tokens` /
 `provider_reported_prompt_tokens` backfill (`store.go`) — but it MUST NOT alter any credit amount
 (`gross_credits`/`provider_credits`/`operator_credits`) or the priced `prompt_tokens`. Any OTHER
@@ -2510,7 +2570,7 @@ CHANGE to `billing.quarantine_resolution_force_void_enabled` or
 post-reload value differs from the pre-reload value —
 MUST emit a separate audit-log row with `event_type =
 "billing_config_flag_changed"`, payload `{"flag":
-"quarantine_resolution_force_void_enabled"|"quarantine_resolution_force_credit_enabled", "old_value": <bool>,
+"quarantine_resolution_force_void_enabled"|"quarantine_resolution_force_credit_enabled"|"ceiling_restatement_enabled", "old_value": <bool>,
 "new_value": <bool>, "reload_source": "sighup"|"http_reload",
 "ts_utc": "<RFC3339Nano>"}`. The `reload_source` enum is
 restricted to actual reload mechanisms; v0.5 does NOT emit at
@@ -2680,6 +2740,7 @@ Config changes affect only new request-credit rows.
 | `billing.quarantine_resolution_force_void_enabled` | boolean | `false` | route-layer gate for force-void |
 | `billing.quarantine_resolution_force_credit_enabled` | boolean | `false` | route-layer gate for force-credit |
 | `billing.force_credit_settlement_hold_seconds` | integer | `86400` | pre-payout hold for force-credit maturity; zero/missing uses the default |
+| `billing.ceiling_restatement_enabled` | boolean | `false` | route-layer gate for the §7.5b one-time ceiling restatement; SIGHUP-reloadable, each flip audited as `billing_config_flag_changed` |
 | `endpoints.provider_earnings.rate_limit_per_minute` | integer | `60` | per-provider read limit for earnings endpoint |
 
 The SQLite files governed by §10.1 MUST run in WAL mode. SPEC-005 behavior is
