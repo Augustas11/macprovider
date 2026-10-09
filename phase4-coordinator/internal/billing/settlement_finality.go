@@ -403,7 +403,9 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	}
 	rows = append(rows, pending...)
 	if len(rows) == 0 {
-		return RequestSettlementFinality{}, false, nil
+		// SPEC-022 R-15.6: retention froze the finality of a request whose
+		// evidence it deleted, so a held buyer reservation still settles.
+		return s.archivedRequestSettlementFinality(ctx, accountScope, requestID)
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].attemptN != rows[j].attemptN {

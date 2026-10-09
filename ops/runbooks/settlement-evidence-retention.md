@@ -32,6 +32,12 @@ one of these is true:
 - Every route-snapshot journal row is mirrored, with the same digest.
 - The request does not hold its provider's earliest verified verdict. That
   verdict is the referral evidence, so it stays hot.
+- No attempt is relay-blind (SPEC-022 R-14). The gateway's relay-blind
+  recovery reads coverage from the route snapshot, so those requests stay hot.
+- Every account scope on the request's credits and verdicts has a route
+  snapshot, and at deletion every scope's settlement finality is closed. The
+  job stores that finality with the deletion, so a buyer reservation still
+  held at the gateway settles from it later.
 
 ## Configuration
 
@@ -149,8 +155,10 @@ mirror keep working on archived requests:
   summaries.
 - Ranged receipt diagnostics and the admin verdict counters count hot rows
   only.
-- A settlement-finality or receipt lookup for an archived request returns not
-  found.
+- A settlement-finality lookup for an archived request returns the finality
+  stored when it was deleted (`settlement_evidence_archived_finality`), so a
+  reservation the gateway still holds can settle. A receipt lookup returns
+  not found.
 
 ## 4. Reclaiming space: auto_vacuum
 

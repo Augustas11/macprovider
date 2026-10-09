@@ -7246,6 +7246,8 @@
         "phase4-coordinator/internal/billing/evidence_archive.go:func RederiveArchivedCredit",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
         "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) dropArchivedEvidenceCredits",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) frozenRequestFinality",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) archivedRequestSettlementFinality",
         "phase4-coordinator/internal/billing/recovery.go:func creditEvidenceArchivedTx",
         "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention",
         "phase4-coordinator/internal/billing/evidence_retention_endpoint.go:func (h *handler) evidenceRetentionHandler",

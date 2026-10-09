@@ -740,19 +740,31 @@ func TestEvidenceRetentionReadersTolerateArchivedRequests(t *testing.T) {
 	f.seed(t, "first")
 	b := f.seed(t, "b")
 	f.settle(t)
+	hotFinality, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
+	if err != nil || !found || !hotFinality.Closed || hotFinality.Outcome != SettlementOutcomeVerified {
+		t.Fatalf("hot finality=%+v found=%v err=%v", hotFinality, found, err)
+	}
 	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify)); err != nil {
 		t.Fatal(err)
 	}
+	if f.hotRows(t, "b") != 0 {
+		t.Fatal("request b was not archived")
+	}
 	verdictsBefore := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`)
 
-	// The finality lookup never synthesizes a missing-evidence refund for an
-	// archived credit, and writes nothing.
-	_, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
-	if err != nil {
-		t.Fatal(err)
+	// A buyer reservation still held at the gateway settles after retention:
+	// the lookup returns the finality frozen at deletion, never a
+	// missing-evidence refund, and writes nothing. The account-scoped lookup
+	// the gateway reconciler uses returns it too.
+	archivedFinality, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
+	if err != nil || !found {
+		t.Fatalf("archived finality found=%v err=%v", found, err)
 	}
-	if found {
-		t.Fatal("archived request reported a finality from missing evidence")
+	if archivedFinality != hotFinality {
+		t.Fatalf("archived finality=%+v want the hot finality %+v", archivedFinality, hotFinality)
+	}
+	if _, found, err := f.store.RequestSettlementFinality(ctx, "other-scope", b.RequestID, f.store.nowUTC().UnixMilli()); err != nil || found {
+		t.Fatalf("another account scope saw the archived finality: found=%v err=%v", found, err)
 	}
 	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`); got != verdictsBefore {
 		t.Fatalf("finality lookup wrote verdicts: %d -> %d", verdictsBefore, got)
@@ -799,12 +811,12 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 			requestID: "req",
 			credits: []retentionCredit{{
 				id: 1, settled: true, settlementID: &settlementID, payable: true,
-				tsUTC: now.AddDate(0, 0, -30), providerID: "p", scopeHash: "h",
+				tsUTC: now.AddDate(0, 0, -30), providerID: "p", scopeHash: SettlementAccountScopeHash("s"),
 			}},
 			payouts: map[int64]archiveRow{7: {"id": int64(7), "status": "ready", "window_end_utc": sqliteTimeText(now.AddDate(0, 0, -21))}},
 			evidence: map[string][]archiveRow{
 				"settlement_route_snapshots":      {{"id": int64(3), "account_scope": "s", "request_id": "req", "attempt_n": int64(0), "provider_id": "p", "route_snapshot_digest": "d"}},
-				"settlement_receipt_verdicts":     {{"id": int64(10), "provider_id": "p", "closed": int64(1), "settlement_outcome": "verified", "receipt_result": "valid"}},
+				"settlement_receipt_verdicts":     {{"id": int64(10), "provider_id": "p", "account_scope_hash": SettlementAccountScopeHash("s"), "closed": int64(1), "settlement_outcome": "verified", "receipt_result": "valid"}},
 				"settlement_receipt_audit_outbox": {{"id": int64(20), "drained_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
 			},
 			outputJournal: []archiveRow{{"id": int64(30), "materialized_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
@@ -875,6 +887,21 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 		}},
 		{"output journal poisoned", retentionSkipOutputJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.outputJournal[0]["poisoned_at_utc"] = "2026-01-01T00:00:00Z"
+		}},
+		{"relay-blind entrypoint", retentionSkipRelayBlind, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_route_snapshots"][0]["paid_entrypoint"] = PaidEntrypointRelayBlindChat
+		}},
+		{"relay-blind prompt basis", retentionSkipRelayBlind, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_route_snapshots"][0]["prompt_hash_basis"] = PromptHashBasisRelayBlindEnvelopeV1
+		}},
+		{"relay-blind settled verdict", retentionSkipRelayBlind, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["settlement_outcome"] = SettlementOutcomeRelayBlindSettled
+		}},
+		{"credit scope without snapshot", retentionSkipScopeUnresolved, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].scopeHash = SettlementAccountScopeHash("other")
+		}},
+		{"verdict scope without snapshot", retentionSkipScopeUnresolved, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["account_scope_hash"] = SettlementAccountScopeHash("other")
 		}},
 		{"route journal unmirrored", retentionSkipRouteJournal, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.routeJournal[0]["mirrored_at_utc"] = nil

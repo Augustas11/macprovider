@@ -90,6 +90,9 @@ const (
 	retentionSkipAlreadyArchived    = "already_archived"
 	retentionSkipHotRowNotArchived  = "hot_row_not_in_archive"
 	retentionSkipHotRowChanged      = "hot_row_changed_since_archive"
+	retentionSkipRelayBlind         = "relay_blind_attempt"
+	retentionSkipScopeUnresolved    = "settlement_scope_unresolved"
+	retentionSkipFinalityOpen       = "settlement_finality_open"
 )
 
 var (
@@ -322,6 +325,24 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_archived_verdict_counts (
     verdict_count INTEGER NOT NULL CHECK(verdict_count >= 0),
     PRIMARY KEY(provider_id, settlement_outcome, receipt_result)
 );
+CREATE TABLE IF NOT EXISTS settlement_evidence_archived_finality (
+    account_scope_hash TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    archive_id INTEGER NOT NULL REFERENCES settlement_evidence_archives(id),
+    finality_json TEXT NOT NULL,
+    archived_at_utc TEXT NOT NULL,
+    PRIMARY KEY(account_scope_hash, request_id)
+);
+CREATE TRIGGER IF NOT EXISTS trg_seaf_immutable
+BEFORE UPDATE ON settlement_evidence_archived_finality
+BEGIN
+    SELECT RAISE(ABORT, 'settlement evidence archived finality is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_seaf_no_delete
+BEFORE DELETE ON settlement_evidence_archived_finality
+BEGIN
+    SELECT RAISE(ABORT, 'settlement evidence archived finality is permanent');
+END;
 CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     scan_cursor_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(scan_cursor_credit_id >= 0),
@@ -624,6 +645,34 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 		end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(endText))
 		if err != nil || end.After(cut.windowEnd) {
 			return false, retentionSkipWindowTooRecent
+		}
+	}
+	// The gateway's relay-blind recovery reads R-14 coverage from the route
+	// snapshot itself, so a relay-blind request stays hot. Every other
+	// request's finality is frozen at deletion under its snapshot scope
+	// (R-15.6), which needs every scope the request settles under.
+	snapshotScopes := map[string]bool{}
+	for _, srs := range b.evidence["settlement_route_snapshots"] {
+		entrypoint, _ := srs.str("paid_entrypoint")
+		basis, _ := srs.str("prompt_hash_basis")
+		if entrypoint == PaidEntrypointRelayBlindChat || basis == PromptHashBasisRelayBlindEnvelopeV1 {
+			return false, retentionSkipRelayBlind
+		}
+		if scope, ok := srs.str("account_scope"); ok {
+			snapshotScopes[SettlementAccountScopeHash(scope)] = true
+		}
+	}
+	for _, c := range b.credits {
+		if c.scopeHash != "" && !snapshotScopes[c.scopeHash] {
+			return false, retentionSkipScopeUnresolved
+		}
+	}
+	for _, v := range b.evidence["settlement_receipt_verdicts"] {
+		if outcome, _ := v.str("settlement_outcome"); outcome == SettlementOutcomeRelayBlindSettled {
+			return false, retentionSkipRelayBlind
+		}
+		if h, ok := v.str("account_scope_hash"); ok && !snapshotScopes[h] {
+			return false, retentionSkipScopeUnresolved
 		}
 	}
 	for _, v := range b.evidence["settlement_receipt_verdicts"] {
@@ -1213,7 +1262,22 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 			}
 			journalOK[req.RequestID] = rowsMatchArchive(b.routeJournal, req.Rows[evidenceRetentionJournalTable]) == ""
 		}
-		done, cleanup, err := s.deleteArchivedBatch(ctx, archiveID, batch, cut, journalOK, report)
+		// The finality the gateway reads for each request is computed before
+		// the transaction (the lookup may write) and frozen with the deletion,
+		// so a buyer reservation still held at the gateway can settle after
+		// the evidence is gone. The in-transaction row comparison refuses any
+		// request whose evidence changed after this read.
+		finalities := map[string][]frozenFinality{}
+		for _, req := range batch {
+			frozen, ok, err := s.frozenRequestFinality(ctx, req, s.nowUTC().UnixMilli())
+			if err != nil {
+				return err
+			}
+			if ok {
+				finalities[req.RequestID] = frozen
+			}
+		}
+		done, cleanup, err := s.deleteArchivedBatch(ctx, archiveID, batch, cut, journalOK, finalities, report)
 		if err != nil {
 			return err
 		}
@@ -1273,7 +1337,7 @@ func evaluateRouteJournalOnly(b requestEvidenceBundle) (bool, string) {
 // requests it deleted and the requests whose route-journal copies must now be
 // removed: those plus requests this archive already tombstoned in an earlier
 // run that stopped before its journal step.
-func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch []archivedRequest, cut evidenceRetentionCutoffs, journalOK map[string]bool, report *EvidenceRetentionReport) ([]archivedRequest, []archivedRequest, error) {
+func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch []archivedRequest, cut evidenceRetentionCutoffs, journalOK map[string]bool, finalities map[string][]frozenFinality, report *EvidenceRetentionReport) ([]archivedRequest, []archivedRequest, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -1330,6 +1394,11 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 			report.SkippedRequests[reason]++
 			continue
 		}
+		frozen, ok := finalities[req.RequestID]
+		if !ok {
+			report.SkippedRequests[retentionSkipFinalityOpen]++
+			continue
+		}
 		if !floorRecorded {
 			// SPEC-022 R-15.9: archived credits are payable only through the
 			// tombstones, which a pre-retention coordinator cannot read. Open
@@ -1363,6 +1432,13 @@ ON CONFLICT(provider_id, settlement_outcome, receipt_result) DO UPDATE SET verdi
 				}
 			}
 		}
+		for _, f := range frozen {
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO settlement_evidence_archived_finality (account_scope_hash, request_id, archive_id, finality_json, archived_at_utc)
+VALUES (?, ?, ?, ?, ?)`, f.scopeHash, req.RequestID, archiveID, f.json, stamp); err != nil {
+				return nil, nil, err
+			}
+		}
 		for _, c := range b.credits {
 			verified := archivedCreditVerified(c, b.evidence["settlement_receipt_verdicts"])
 			if _, err := conn.ExecContext(ctx, `
@@ -1384,6 +1460,64 @@ VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stam
 		report.Tables[table] = st
 	}
 	return done, cleanup, nil
+}
+
+// frozenFinality is one account scope's settlement finality for an archived
+// request, as the gateway's finality lookup returned it before deletion.
+type frozenFinality struct {
+	scopeHash string
+	json      string
+}
+
+// frozenRequestFinality computes the finality of every account scope the
+// archived request settled under. ok is false when any scope's finality is
+// not closed and complete: such a request stays hot so a held buyer
+// reservation can still resolve from live evidence. A scope with no finality
+// stores nothing; its lookup already answers not found.
+func (s *Store) frozenRequestFinality(ctx context.Context, req archivedRequest, nowUnixMS int64) ([]frozenFinality, bool, error) {
+	var out []frozenFinality
+	for _, scope := range archivedScopes(req) {
+		finality, found, err := s.RequestSettlementFinality(ctx, scope, req.RequestID, nowUnixMS)
+		if err != nil {
+			return nil, false, err
+		}
+		if !found {
+			continue
+		}
+		if !finality.Closed || !finality.ModeScopeComplete || finality.PendingAttempts > 0 {
+			return nil, false, nil
+		}
+		finality.RequiredInternalRequestID = ""
+		finality.RelayBlindSettlementCoverage = ""
+		raw, err := json.Marshal(finality)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, frozenFinality{scopeHash: SettlementAccountScopeHash(scope), json: string(raw)})
+	}
+	return out, true, nil
+}
+
+// archivedRequestSettlementFinality is the finality frozen when retention
+// deleted the request's evidence (SPEC-022 R-15.6).
+func (s *Store) archivedRequestSettlementFinality(ctx context.Context, accountScope, requestID string) (RequestSettlementFinality, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	var raw string
+	err := s.reader().QueryRowContext(ctx, `
+SELECT finality_json FROM settlement_evidence_archived_finality
+ WHERE account_scope_hash = ? AND request_id = ?`, SettlementAccountScopeHash(accountScope), requestID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RequestSettlementFinality{}, false, nil
+	}
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
+	}
+	var finality RequestSettlementFinality
+	if err := json.Unmarshal([]byte(raw), &finality); err != nil {
+		return RequestSettlementFinality{}, false, fmt.Errorf("decode archived settlement finality: %w", err)
+	}
+	return finality, true, nil
 }
 
 // archivedCreditVerified mirrors the billing mirror's spec022_verified

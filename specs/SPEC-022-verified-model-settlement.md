@@ -1973,7 +1973,16 @@ eligible only when every one of the following holds:
   digest of its archived snapshot;
 - no verdict for the request is its provider's earliest closed, valid,
   `verified` verdict. That verdict is the referral serving evidence and stays
-  hot.
+  hot;
+- no attempt is an R-14 relay-blind attempt (relay-blind entrypoint or
+  envelope prompt-hash basis, or a `relay_blind_settled` verdict): the
+  gateway's relay-blind recovery reads R-14 coverage from the route snapshot
+  itself;
+- every account scope hash on the request's credits and verdicts belongs to
+  one of its route snapshots' account scopes, so its finality can be frozen
+  (R-15.6);
+- at deletion, the settlement finality of every account scope of the request
+  is closed and complete (no pending attempt, scope complete).
 
 A request that fails any condition stays hot in full. When a run deletes a
 request's rows, it re-checks these conditions inside the delete transaction.
@@ -2053,8 +2062,15 @@ Readers MUST degrade gracefully on archived requests:
 - Ledger reconciliation never reports a mismatch on a settled, tombstoned
   credit whose receipt evidence was archived.
 - The settlement-finality lookup never treats an archived credit as missing
-  evidence. A finality or receipt lookup for a fully archived request
-  returns not found; the archive is the authority for that request.
+  evidence. The finality the lookup returned for each account scope of the
+  request is computed just before the delete transaction, and the
+  transaction stores it in `settlement_evidence_archived_finality` (immutable,
+  keyed by account scope hash and request id) only if every hot row still
+  equals its archived copy. A finality lookup for an archived request returns
+  that stored finality, so a buyer reservation still held at the gateway
+  settles exactly as it would have before deletion. A receipt lookup for a
+  fully archived request returns not found; the archive is the authority for
+  its receipt.
 
 R-15.7. Rederivation. The operator procedure MUST rederive a settled credit
 from the archive alone. It checks that the archived verdict is closed and
@@ -2371,9 +2387,11 @@ the release that wrote the snapshot, stays valid. No path may lower the floor.
   - payout revalidation;
   - billing-mirror `spec022_verified`;
   - reward verified-receipt counts;
-  - ledger reconciliation.
+  - ledger reconciliation;
+  - the settlement finality a held buyer reservation reads.
 
-  A settled credit can be rederived from the archive alone.
+  A settled credit can be rederived from the archive alone. Relay-blind
+  requests are never archived.
 - **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
   compatibility floor 4 at open and in every delete transaction, so a
   coordinator below contract 4 refuses to open the database.
