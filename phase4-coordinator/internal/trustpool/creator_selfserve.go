@@ -755,6 +755,7 @@ func (h *adminHandler) handleSelfServePromote(w http.ResponseWriter, r *http.Req
 		OperationID:         operationID,
 		EventType:           EventLifecycleChanged,
 		PoolID:              poolID,
+		CreatorAccountID:    principal.CreatorID,
 		CreatorCredentialID: principal.CredentialID,
 		Lifecycle:           LifecycleActive,
 		Reason:              strings.TrimSpace(body.Reason),

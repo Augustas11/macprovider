@@ -1955,6 +1955,10 @@ func normalizeCreatorEvent(r *http.Request, e DurableEvent, principal creatorPri
 			return DurableEvent{}, errCreatorBoundary
 		}
 		e.CreatorAccountID = ""
+		if principal.SelfServe {
+			// Attribute every self-serve event to its account (SPEC-043-R005).
+			e.CreatorAccountID = principal.CreatorID
+		}
 	}
 	return e, nil
 }

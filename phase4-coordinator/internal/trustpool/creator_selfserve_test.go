@@ -350,6 +350,15 @@ func TestSelfServeCreatorCeilingsComeFromOwnershipAndOwnGrants(t *testing.T) {
 	if pool.RootIssuer == nil || pool.RootIssuer.LaunchEnvironment != trustpool.LaunchEnvironmentSelfServePrivate {
 		t.Fatalf("root issuer = %+v, want self_serve_private", pool.RootIssuer)
 	}
+	events, err := f.store.Events(context.Background())
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	for _, e := range events {
+		if e.PoolID == root.poolID && (e.CreatorAccountID != selfServeCreator || e.CreatorCredentialID != selfServeKeyID) {
+			t.Fatalf("self-serve event %s attributed to %q/%q", e.OperationID, e.CreatorAccountID, e.CreatorCredentialID)
+		}
+	}
 
 	// Another gateway account never sees or mutates this creator's pool.
 	stranger := selfServePrincipal{account: "acct_stranger", credential: "key_stranger", github: selfServeGitHubID}
