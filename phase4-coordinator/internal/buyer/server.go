@@ -3399,6 +3399,7 @@ func (s *Server) forwardHTTPSequence(
 				respBody = checkedBody
 				estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
 				promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(respBody)
+				completionCeiling := nonStreamLedgerCompletionEstimate(completionTok, estimatedCompletion, len(respBody))
 				billedCached, observedCached := buyerCachedPair(cachedPromptTok, promptTok, state, rec.attemptN)
 				if chatResponseHasIncompleteUsage(respBody) {
 					estimatedPrompt := int64(state.estimatedTokens)
@@ -3435,7 +3436,7 @@ func (s *Server) forwardHTTPSequence(
 					// reads it from headers only: keep the pre-#1690 order,
 					// record before the write (settlement_trailers.go).
 					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
-						return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion, output)
+						return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, completionCeiling, output)
 					}); err != nil {
 						cancelAttempt()
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
@@ -3489,7 +3490,7 @@ func (s *Server) forwardHTTPSequence(
 				}
 				s.stickyStore(r.Header, state.provider, req.Model)
 				if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
-					return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion, output)
+					return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, completionCeiling, output)
 				}); err != nil {
 					cancelAttempt()
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming success log failed after delivery")
@@ -4053,7 +4054,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if !outputOK {
 				output = settlementOutputUnavailable()
 			}
-			attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: estimatedCompletion, FaultFlag: faultFlag, SettlementOutput: output, SettlementReceipt: receiptValue}
+			attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: nonStreamLedgerCompletionEstimate(completionTok, estimatedCompletion, body.Len()), FaultFlag: faultFlag, SettlementOutput: output, SettlementReceipt: receiptValue}
 			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				markProviderDone()
 				return wsForwardCancelled, requestLogAttempt{}
@@ -9879,6 +9880,29 @@ func (s *Server) observedCompletionTokensFromBytes(n int) *int64 {
 		return &zero
 	}
 	return s.estimatedCompletionTokensFromBytes(n)
+}
+
+// nonStreamLedgerCompletionEstimate is the completion estimate a successful
+// non-streaming attempt records. A provider-reported completion is clamped to
+// nonStreamCompletionCeilingFromBytes; an unreported one keeps the
+// tier2.output_bytes_per_token_ceiling estimate (SPEC-005 §5.3, §6.8).
+func nonStreamLedgerCompletionEstimate(completionTokens, estimate *int64, bodyBytes int) *int64 {
+	if completionTokens == nil {
+		return estimate
+	}
+	return nonStreamCompletionCeilingFromBytes(bodyBytes)
+}
+
+// nonStreamCompletionCeilingFromBytes bounds a whole non-streaming response
+// body's completion at one byte per token: every non-special token decodes
+// to at least one byte. The /16 streaming estimate is a lower bound on a JSON
+// body and would under-credit honest reports (SPEC-005 §5.3).
+func nonStreamCompletionCeilingFromBytes(n int) *int64 {
+	if n <= 0 {
+		zero := int64(0)
+		return &zero
+	}
+	return estimatedCompletionTokensFromBytes(n, 1)
 }
 
 func estimatedCompletionTokensFromBytes(n, bytesPerToken int) *int64 {
