@@ -1,11 +1,33 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.15
+Version: v0.3.16
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.16 (2026-10-10, hybrid models use the 16-step decode window):**
+FR-CB2's lockstep window no longer drops to 1 for hybrid models (gated-delta
+recurrent plus attention layers, e.g. Qwen3.5/3.6 A3B); they decode in the
+same window as KV-only models. Packed recurrent state advances one token per
+window step and is split back to rows at the window end, and the next window
+repacks from those rows, so a window is a sequence of one-step decodes. A row
+whose stop sequence matches mid-window still runs to the window end, which
+carries its recurrent state past the stop; the backend therefore keeps that
+row's recurrent state at the stop step and at the step after (the model-stop
+and request-stop covered lengths) and fails closed for any other length inside
+the window, so FR-CB4 hybrid checkpoints never carry a mislabeled state.
+Before a release ships the hybrid window, the FR-CB2 hybrid window proof MUST
+pass on the served artifact. The load-time isolation and parity probes decode
+hybrid rows in the serve window, and the FR-CB10 self-check (v0.3.15) runs
+through the serve-path scheduler, so both gates cover the served window. The
+self-check key gains the decode lockstep window, so a result measured at
+window 1 (or stored before the window was keyed) never qualifies window 16:
+the check re-runs, and an older grant only carries the Mac through the re-run
+under the FR-CB10 continuation rule.
+Measured on the M3 Ultra (#1906, lab override): 16 rows of the served A3B went
+from 196 to 270 tok/s output-heavy.
+
 **Change log v0.3.15 (2026-10-10, default-on CB qualified per Mac):**
 Follows SPEC-023 v0.22.24, SPEC-039 v0.1.15 and SPEC-048 v0.1.32. Continuous
 batching is on by default for every model the local SPEC-039 engine admits.
@@ -563,6 +585,34 @@ only when every row in it is cancelled, and the backend MUST then not record
 those rows' cache state. A backend cancellation MUST end a running hop at the
 next step boundary.
 
+**Hybrid models (v0.3.16).** The configured lockstep window is the same for
+hybrid models (recurrent plus attention layers) as for KV-only models. Inside
+a hop, each step MUST advance every row's recurrent state by exactly that
+step's token, and the hop MUST hand each row its own recurrent state at the
+hop end; the next hop MUST rebuild any packed recurrent state from those row
+states, never reuse a packed state across hops. A hybrid row whose stop
+sequence matches at step `k < W - 1` MUST keep its recurrent state after step
+`k` and, when the hop runs it, after step `k + 1`; a recurrent snapshot that
+names any other length below the hop end MUST fail closed (FR-CB4). A release
+that serves a hybrid tuple at `W > 1` MUST first pass the hybrid window proof
+on the served artifact and hardware class: a fixed greedy batch of at least
+16 rows, every prompt longer than the 512-token prefill chunk, decoded at the
+production window and at `W = 1` through the production backend path, with
+the `W = 1` run repeating itself exactly and every row's tokens identical
+across the two windows (`msb-throughput --scenario hybrid-window`,
+`scripts/lab/cb-studio/hybrid-window-proof.sh`). Unit coverage with a tiny
+real hybrid model covers the fixed batch, a stop inside a window and its
+checkpoints, and rows joining and leaving between hops. The load-time batched
+isolation self-test and the shared-forward parity probe MUST decode hybrid
+rows in the serve path's lockstep window (the isolation self-test runs its
+first shared decode as one such window before the peer leave/join), so the
+gate that turns batching on covers the served window; a probe failure keeps
+batching off. The FR-CB10 on-device self-check submits its alone and batched
+runs through the serve-path scheduler, so for a hybrid model it also checks
+the 16-step window. The isolation challenge MUST distinguish the rows at the
+window's first step and at the rejoin step, and every window step MUST be
+conformant with the row's own serial reference.
+
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
 single row MUST NOT consume more than its configured per-row chunk limit in one
 iteration, and a compatible prefill group MUST NOT consume more than the
@@ -993,8 +1043,10 @@ above are superseded where they conflict:
 2. Batching runs for a non-revoked tuple only after this Mac's self-check
    grants it. The check runs automatically when a model loads or swaps and
    whenever the (model SHA-256, Metal library SHA-256, kernel identifier,
-   hardware class, macOS version and build, pinned MLX fork identity) key has
-   no stored result; an OS upgrade or MLX pin change therefore re-runs it. It
+   hardware class, macOS version and build, pinned MLX fork identity, decode
+   lockstep window) key has no stored result; an OS upgrade, MLX pin change or
+   decode-window change (v0.3.16) therefore re-runs it. A result stored before
+   the window was keyed matches no window and re-runs. It
    runs through the production scheduler, so it probes at the serve path's
    own decode lockstep window, and its prompts have unequal lengths (short to
    about 1.5k tokens) because batched decode pads keys to the longest row,
