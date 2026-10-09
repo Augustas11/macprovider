@@ -4034,10 +4034,16 @@ struct BYOMMLXCacheDiscovery {
             candidates.append(candidate)
         }
 
-        // Native models `serve` already holds in its durable store. The HF
-        // cache row wins for a model present in both (same candidate id).
+        // Native models `serve` already holds in its durable store. A model in
+        // both (same candidate id) is reported once: the HF cache row when it
+        // is ready, else the durable row when that one is ready, so an
+        // incomplete HF copy never hides a complete durable one.
         if let durableRoot, let durableEntries {
-            var seen = Set(candidates.map { BYOMCandidateIdentity.normalizedServedModelRef($0.servedModelRef) })
+            var hfIndex: [String: Int] = [:]
+            for (index, candidate) in candidates.enumerated() {
+                hfIndex[BYOMCandidateIdentity.normalizedServedModelRef(candidate.servedModelRef)] = index
+            }
+            var seen = Set<String>()
             for entry in durableEntries.prefix(200) {
                 guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                       let modelID = Self.modelID(fromDurableDirectoryName: entry.lastPathComponent) else {
@@ -4047,16 +4053,24 @@ struct BYOMMLXCacheDiscovery {
                     warnings.insert(BYOMDiscoveryWarning.modelReferenceRedacted.rawValue)
                     continue
                 }
-                guard seen.insert(BYOMCandidateIdentity.normalizedServedModelRef(modelID)).inserted else { continue }
+                let key = BYOMCandidateIdentity.normalizedServedModelRef(modelID)
+                guard seen.insert(key).inserted else { continue }
+                let hfDuplicate = hfIndex[key]
+                if let hfDuplicate, candidates[hfDuplicate].readinessState == "ready" { continue }
                 let summary = summarizeDurable(modelDirectory: entry, root: durableRoot)
-                candidates.append(buildCandidate(
+                let durableCandidate = buildCandidate(
                     servedModelRef: modelID,
                     revisions: summary.revisions,
                     readinessState: summary.ready ? "ready" : "needs_weights",
                     estimatedGB: estimatedGB(modelID: modelID, snapshotBytes: summary.weightBytes),
                     contextWindowTokens: summary.contextWindowTokens,
                     warningCodes: summary.ready ? [] : [.requiresPreparation]
-                ))
+                )
+                if let hfDuplicate {
+                    if summary.ready { candidates[hfDuplicate] = durableCandidate }
+                } else {
+                    candidates.append(durableCandidate)
+                }
             }
         }
 

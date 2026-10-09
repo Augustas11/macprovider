@@ -826,6 +826,47 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertNil(pinned.durableModelRoot, "an explicit --mlx-cache-dir pins the one MLX root inspected")
     }
 
+    /// #1880 round-3 audit: an HF cache copy without weights must not hide a
+    /// complete durable copy of the same model; the ready row is reported.
+    func testIncompleteHFCopyDoesNotHideReadyDurableCopy() throws {
+        let cache = try temporaryDirectory("byom-mlx-hf-partial")
+        let durable = try temporaryDirectory("byom-mlx-durable-ready")
+        defer {
+            try? FileManager.default.removeItem(at: cache)
+            try? FileManager.default.removeItem(at: durable)
+        }
+        let modelID = "mlx-community/Tiny-1B-4bit"
+        let hfSnapshot = cache
+            .appendingPathComponent("models--" + modelID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+            .appendingPathComponent("snapshots/0123456789abcdef0123456789abcdef01234567", isDirectory: true)
+        try FileManager.default.createDirectory(at: hfSnapshot, withIntermediateDirectories: true)
+        try Data(#"{"max_position_embeddings":2048}"#.utf8).write(to: hfSnapshot.appendingPathComponent("config.json"))
+        let namespace = Data(repeating: 0x37, count: 32)
+        let hfOnly = BYOMMLXCacheDiscovery(cacheRoot: cache, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(hfOnly.candidates.map(\.readinessState), ["needs_weights"])
+
+        let leaf = durable
+            .appendingPathComponent(modelID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+            .appendingPathComponent("0123456789abcdef0123456789abcdef01234567", isDirectory: true)
+            .appendingPathComponent(String(repeating: "e", count: 64), isDirectory: true)
+        try FileManager.default.createDirectory(at: leaf, withIntermediateDirectories: true)
+        try Data(#"{"max_position_embeddings":4096}"#.utf8).write(to: leaf.appendingPathComponent("config.json"))
+        try Data(repeating: 0x7a, count: 64).write(to: leaf.appendingPathComponent("model.safetensors"))
+        let both = BYOMMLXCacheDiscovery(cacheRoot: cache, durableRoot: durable, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(both.candidates.count, 1, "one row per model")
+        let row = try XCTUnwrap(both.candidates.first)
+        XCTAssertEqual(row.servedModelRef, modelID)
+        XCTAssertEqual(row.readinessState, "ready")
+        XCTAssertEqual(row.contextWindowTokens, 4096, "the durable copy's summary")
+        XCTAssertEqual(row.candidateID, hfOnly.candidates.first?.candidateID, "same candidate id either way")
+
+        // A durable copy that is incomplete too leaves the HF row as it was.
+        try FileManager.default.removeItem(at: leaf.appendingPathComponent("model.safetensors"))
+        let neither = BYOMMLXCacheDiscovery(cacheRoot: cache, durableRoot: durable, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(neither.candidates.map(\.readinessState), ["needs_weights"])
+        XCTAssertEqual(neither.candidates.first?.contextWindowTokens, 2048)
+    }
+
     func testOllamaOptionalRedactionPreservesOfferNullsAndIndependentBlockers() async throws {
         let body = Data(#"{"models":[{"name":"Tiny-Ollama-1B-Q4","details":{"family":"/Users/private/hidden","quantization_level":"api_key=hidden"}},{"name":"/Users/private/omitted"}]}"#.utf8)
         let stable = await redactionDiscovery(body: body)
