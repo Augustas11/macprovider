@@ -202,6 +202,7 @@ CURRENT_RELEASE_SCHEMA_VERSION = 1
 # on julianday() rounding inside expression indexes (Pearl, 2026-10-05).
 DEFAULT_SQLITE_BIN = Path("/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3")
 SQLITE_CHECK_OUTPUT_LINES = 20
+SQLITE_SNAPSHOT_BUSY_TIMEOUT_MS = 60000
 TRANSACTION_DIRECTORY_RE = re.compile(r"^([0-9]+)-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 DATABASE_SNAPSHOT_RE = re.compile(r"^[0-9]+\.sqlite$")
 ROLLBACK_POINT_UNVERIFIED_ALERT = "macprovider-pearl-updater-alert@macprovider-pearl-updater-rollback-point-unverified.service"
@@ -4480,8 +4481,18 @@ class Updater:
         # later (verify_rollback_point, or before any restore). The bound is
         # operator-configured because the copy scales with the money DB.
         timeout = self.config.sqlite_snapshot_timeout_s
+        # A coordinator that misses its drain deadline can still be releasing
+        # its locks when the copy starts; wait for them instead of failing the
+        # apply into an automatic rollback.
         result = self.run_command(
-            [self.sqlite_binary(), "-bail", str(source), f".backup '{destination}'"],
+            [
+                self.sqlite_binary(),
+                "-bail",
+                "-cmd",
+                f".timeout {SQLITE_SNAPSHOT_BUSY_TIMEOUT_MS}",
+                str(source),
+                f".backup '{destination}'",
+            ],
             check=False,
             timeout=timeout,
         )
