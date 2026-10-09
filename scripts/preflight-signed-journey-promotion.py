@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Reject stale journey-result promotions before signing."""
+"""Reject stale journey-result promotions before signing.
+
+`--refresh` renews the signed evidence of rows that are already conformant
+(evidence expiry) without a state change: every target row must then be
+conformant, gap-free and mapped to `--journey-id`. Selector freshness is
+checked exactly as for a promotion.
+"""
 
 from __future__ import annotations
 
@@ -118,10 +124,13 @@ def preflight(
     journey_id: str | None,
     *,
     evidence_sha: str | None = None,
+    refresh: bool = False,
 ) -> None:
     if not COMMIT_RE.fullmatch(source_sha):
         die("--source-sha must be a 40-character lowercase hex commit")
     require_reachable_commit(root, source_sha)
+    if refresh and journey_id is None:
+        die("--refresh requires --journey-id")
     evidence_control_mappings = JOURNEY_EVIDENCE_CONTROL_MAPPINGS.get(journey_id, frozenset())
     if evidence_control_mappings and evidence_sha is None:
         die(f"--evidence-sha is required for {journey_id} evidence-control selectors")
@@ -147,7 +156,10 @@ def preflight(
             errors.append(f"{location}: requirement must exist exactly once")
             continue
         requirement = matches[0]
-        if requirement.get("state") != "pending":
+        if refresh:
+            if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+                errors.append(f"{location}: requirement must be conformant with no gap to refresh its evidence")
+        elif requirement.get("state") != "pending":
             errors.append(f"{location}: requirement must still be pending before promotion")
         journeys = requirement.get("journeys")
         if journey_id is not None:
@@ -192,6 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--requirement-ids", required=True, help="comma-separated requirement IDs to promote")
     parser.add_argument("--journey-id", default=None, help="required mapped journey id")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="renew evidence of conformant rows instead of promoting pending rows",
+    )
     args = parser.parse_args(argv)
     preflight(
         Path(args.root).resolve(),
@@ -199,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         parse_requirement_ids(args.requirement_ids),
         args.journey_id,
         evidence_sha=args.evidence_sha,
+        refresh=args.refresh,
     )
     return 0
 

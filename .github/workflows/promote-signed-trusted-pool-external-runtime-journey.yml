@@ -12,9 +12,14 @@ on:
         required: true
         type: string
       requirement_ids:
-        description: "Comma-separated pending trusted-pool-external-runtime requirement IDs covered by the evidence"
+        description: "Comma-separated pending (conformant with refresh_conformant) trusted-pool-external-runtime requirement IDs covered by the evidence"
         required: true
         type: string
+      refresh_conformant:
+        description: "Renew the signed evidence of requirement IDs that are already conformant, before it expires; no state change"
+        required: true
+        default: false
+        type: boolean
       promotion_confirmed:
         description: "Confirm trusted-pool-external-runtime signed evidence promotion artifact should be built"
         required: true
@@ -49,12 +54,14 @@ jobs:
           REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
           REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
           PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+          REFRESH_INPUT: ${{ github.event.inputs.refresh_conformant || 'false' }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
           [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
           [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REFRESH_INPUT" == true || "$REFRESH_INPUT" == false ]] || { echo "::error::invalid refresh flag" >&2; exit 1; }
           [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/trusted-pool-external-runtime-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
           [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
           [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid requirement IDs" >&2; exit 1; }
@@ -76,6 +83,7 @@ jobs:
           printf 'requirement_slug=%s\n' "$requirement_slug" >> "$GITHUB_OUTPUT"
           printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
           printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+          printf 'refresh=%s\n' "$REFRESH_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Build unsigned trusted-pool-external-runtime journey-result payload
         shell: bash
@@ -85,13 +93,17 @@ jobs:
           REDACTED: ${{ steps.request.outputs.redacted }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
           PAYLOAD: ${{ steps.request.outputs.payload }}
+          REFRESH: ${{ steps.request.outputs.refresh }}
         run: |
           set -euo pipefail
+          refresh_args=()
+          if [[ "$REFRESH" == true ]]; then refresh_args=(--refresh); fi
           python3 scripts/build-trusted-pool-external-runtime-journey-result.py payload \
             --source-sha "$SOURCE_SHA" \
             --evidence-sha "$EVIDENCE_SHA" \
             --requirement-ids "$REQUIREMENT_IDS" \
             --output "$PAYLOAD" \
+            "${refresh_args[@]}" \
             "$REDACTED"
 
       - name: Preflight selector freshness before signing
@@ -99,11 +111,15 @@ jobs:
         env:
           SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REFRESH: ${{ steps.request.outputs.refresh }}
         run: |
           set -euo pipefail
+          refresh_args=()
+          if [[ "$REFRESH" == true ]]; then refresh_args=(--refresh); fi
           python3 scripts/preflight-signed-journey-promotion.py \
             --source-sha "$SOURCE_SHA" \
             --requirement-ids "$REQUIREMENT_IDS" \
+            "${refresh_args[@]}" \
             --journey-id JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME
 
       - name: Verify protected environment and repository posture
@@ -125,19 +141,34 @@ jobs:
             --output "$ENVELOPE" \
             --verifier ".github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
 
-      - name: Promote only after signed validation
+      - name: Validate signed evidence before the ledger update
         shell: bash
         env:
           ENVELOPE: ${{ steps.request.outputs.envelope }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
         run: |
           set -euo pipefail
-          python3 - "$REQUIREMENT_IDS" "$ENVELOPE" <<'PY'
+          python3 scripts/validate-signed-journey-result.py \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REFRESH: ${{ steps.request.outputs.refresh }}
+        run: |
+          set -euo pipefail
+          python3 - "$REQUIREMENT_IDS" "$ENVELOPE" "$REFRESH" <<'PY'
           import subprocess
           import sys
 
           requirement_ids = [item for item in sys.argv[1].split(",") if item]
           envelope = sys.argv[2]
+          # A refresh renews conformant rows only; the promoter refuses a row
+          # without earlier-expiring signed evidence from this journey.
+          refresh = ["--refresh"] if sys.argv[3] == "true" else []
           for requirement_id in requirement_ids:
               subprocess.run(
                   [
@@ -145,6 +176,7 @@ jobs:
                       "scripts/promote-signed-journey-result.py",
                       "--base-ref",
                       "origin/main",
+                      *refresh,
                       requirement_id,
                       envelope,
                   ],
@@ -203,6 +235,7 @@ jobs:
           ENVELOPE: ${{ steps.request.outputs.envelope }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
           REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
+          REFRESH: ${{ steps.request.outputs.refresh }}
         run: |
           set -euo pipefail
           export_dir="$RUNNER_TEMP/signed-trusted-pool-external-runtime-journey-promotion"
@@ -225,6 +258,7 @@ jobs:
               "evidence_sha": evidence_sha,
               "requirement_ids": [item for item in requirement_ids.split(",") if item],
               "requirement_slug": os.environ["REQUIREMENT_SLUG"],
+              "mode": "refresh" if os.environ["REFRESH"] == "true" else "promote",
               "journey_id": "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME",
               "redacted_artifact": redacted,
               "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),

@@ -755,6 +755,17 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             BUILDER.parse_requirement_ids("SPEC-042-R014", evidence)
 
+    def test_payload_refresh_maps_conformant_rows_only(self) -> None:
+        # The signer's refresh mode renews conformant rows; a promotion still
+        # needs pending rows.
+        conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
+        conformant = {
+            row["requirement_id"] for row in conformance["requirements"]
+            if TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID in row["journeys"] and row["state"] == "conformant"
+        }
+        self.assertEqual(conformant, BUILDER.load_mapped_requirements(REPO_ROOT, state="conformant"))
+        self.assertTrue(conformant.isdisjoint(BUILDER.load_mapped_requirements(REPO_ROOT)))
+
     def test_payload_rejects_evidence_outside_the_journey_prefix(self) -> None:
         with self.assertRaises(SystemExit):
             BUILDER.require_evidence_source(REPO_ROOT, "journeys/evidence/buyer-paid-path-x.redacted.json")

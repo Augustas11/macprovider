@@ -452,12 +452,15 @@ class JourneyResultToolsTests(unittest.TestCase):
         *,
         journey_id: str = "JOURNEY-BOOT",
         requirement_ids: list[str] | None = None,
+        expires_at: str | None = None,
     ) -> None:
         openssl = shutil.which("openssl")
         if openssl is None:
             raise unittest.SkipTest("openssl is required")
         payload_path = root.parent / f"{root.name}-payload-{commit[:12]}.json"
         envelope = signed_journey_envelope(commit, journey_id=journey_id, requirement_ids=requirement_ids, signatures=[])
+        if expires_at is not None:
+            envelope["signed"]["expires_at"] = expires_at
         payload_path.write_text(json.dumps(envelope["signed"], indent=2) + "\n", encoding="utf-8")
         env = os.environ.copy()
         env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
@@ -682,6 +685,111 @@ class JourneyResultToolsTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 promoter.promote_many(root, requirement_ids, new_source, base_ref="HEAD", trusted_public_key_sha256=trusted_hash)
             self.assertEqual(first, conformance_path.read_bytes())
+
+    def _conformant_row_with_signed_evidence(self, root: Path) -> tuple[str, str, str]:
+        """A row promoted by JOURNEY-BOOT, then a later commit to sign a refresh at."""
+        write_repository(root, base_repository())
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        conformance_path = root / "specs" / "CONFORMANCE.json"
+        conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+        conformance["requirements"][0]["journeys"] = ["JOURNEY-BOOT"]
+        conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "map journey"], cwd=root, check=True)
+        old_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        self._sign_fixture_result(root, private_key, old_commit, "journeys/evidence/old-signed-result.json")
+        promoter = load_promoter_module()
+        with contextlib.redirect_stdout(io.StringIO()):
+            promoter.promote(root, "SPEC-001-R001", "journeys/evidence/old-signed-result.json", base_ref="HEAD", trusted_public_key_sha256=trusted_hash)
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "promoted"], cwd=root, check=True)
+        self.assertEqual("conformant", json.loads(conformance_path.read_text(encoding="utf-8"))["requirements"][0]["state"])
+        return private_key, trusted_hash, old_commit
+
+    def test_promoter_refresh_renews_conformant_row_without_state_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            private_key, trusted_hash, old_commit = self._conformant_row_with_signed_evidence(root)
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            new_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            new_source = "journeys/evidence/new-signed-result.json"
+            self._sign_fixture_result(root, private_key, new_commit, new_source, expires_at="2027-06-01")
+
+            promoter = load_promoter_module()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                promoter.promote(root, "SPEC-001-R001", new_source, base_ref="HEAD", trusted_public_key_sha256=trusted_hash, refresh=True)
+
+            self.assertIn("refreshed SPEC-001-R001", stdout.getvalue())
+            requirement = json.loads(conformance_path.read_text(encoding="utf-8"))["requirements"][0]
+            new_digest = hashlib.sha256((root / new_source).read_bytes()).hexdigest()
+            self.assertEqual("conformant", requirement["state"])
+            self.assertIsNone(requirement["gap"])
+            self.assertEqual(
+                [
+                    {"artifact": f"commit:{new_commit}", "source": None, "captured_at": "2026-01-01", "expires_at": "2027-06-01"},
+                    {"artifact": f"sha256:{new_digest}", "source": new_source, "captured_at": "2026-01-01", "expires_at": "2027-06-01"},
+                ],
+                requirement["evidence"],
+            )
+            self.assertNotEqual(old_commit, new_commit)
+            self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
+
+    def test_promoter_refresh_fails_closed_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            private_key, trusted_hash, _ = self._conformant_row_with_signed_evidence(root)
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            promoter = load_promoter_module()
+
+            # The fresh envelope must outlive the evidence it renews.
+            same_expiry = "journeys/evidence/same-expiry-signed-result.json"
+            self._sign_fixture_result(root, private_key, commit, same_expiry)
+            # Refresh never renews a row through another journey's envelope.
+            (root / "journeys" / "JOURNEY-OTHER.md").write_text("# JOURNEY-OTHER\n", encoding="utf-8")
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            conformance["requirements"][0]["journeys"] = ["JOURNEY-BOOT", "JOURNEY-OTHER"]
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "second journey"], cwd=root, check=True)
+            other_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            other_journey = "journeys/evidence/other-signed-result.json"
+            self._sign_fixture_result(root, private_key, other_commit, other_journey, journey_id="JOURNEY-OTHER", expires_at="2027-06-01")
+            before = conformance_path.read_bytes()
+
+            for source, fragment in (
+                (same_expiry, "must expire after 2027-01-01"),
+                (other_journey, "to carry signed JOURNEY-OTHER evidence"),
+            ):
+                with self.subTest(source=source):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                        promoter.promote(root, "SPEC-001-R001", source, base_ref="HEAD", trusted_public_key_sha256=trusted_hash, refresh=True)
+                    self.assertIn(fragment, stderr.getvalue())
+                    self.assertEqual(before, conformance_path.read_bytes())
+
+    def test_promoter_refresh_rejects_pending_row_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            private_key, trusted_hash, _ = self._demoted_row_with_retained_stale_evidence(root)
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            source = "journeys/evidence/new-signed-result.json"
+            self._sign_fixture_result(root, private_key, commit, source, expires_at="2027-06-01")
+            before = conformance_path.read_bytes()
+
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                promoter.promote(root, "SPEC-001-R001", source, base_ref="HEAD", trusted_public_key_sha256=trusted_hash, refresh=True)
+
+            self.assertIn("--refresh requires SPEC-001-R001 to be conformant with no gap", stderr.getvalue())
+            self.assertEqual(before, conformance_path.read_bytes())
 
     def test_conformant_row_with_stale_current_evidence_still_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1229,6 +1337,51 @@ class JourneyResultToolsTests(unittest.TestCase):
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertIn("match current selectors", completed.stdout)
+
+    def test_preflight_refresh_accepts_only_conformant_mapped_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            conformance["requirements"][0]["journeys"] = ["JOURNEY-BOOT"]
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "map journey"], cwd=root, check=True)
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            def run(*extra: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, str(PREFLIGHT), "--root", str(root), "--source-sha", source_sha,
+                     "--requirement-ids", "SPEC-001-R001", *extra],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            pending = run("--journey-id", "JOURNEY-BOOT", "--refresh")
+            self.assertNotEqual(0, pending.returncode)
+            self.assertIn("requirement must be conformant with no gap to refresh its evidence", pending.stderr)
+            no_journey = run("--refresh")
+            self.assertNotEqual(0, no_journey.returncode)
+            self.assertIn("--refresh requires --journey-id", no_journey.stderr)
+
+            conformance["requirements"][0]["state"] = "conformant"
+            conformance["requirements"][0]["gap"] = None
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            refreshed = run("--journey-id", "JOURNEY-BOOT", "--refresh")
+            self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+            promotion = run("--journey-id", "JOURNEY-BOOT")
+            self.assertNotEqual(0, promotion.returncode)
+            self.assertIn("requirement must still be pending before promotion", promotion.stderr)
+
+            # Selector freshness still applies to a refresh.
+            (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "change mapped selector"], cwd=root, check=True)
+            stale = run("--journey-id", "JOURNEY-BOOT", "--refresh")
+            self.assertNotEqual(0, stale.returncode)
+            self.assertIn("does not match current mapped selector fragment 'example'", stale.stderr)
 
     def test_preflight_separates_journey_source_from_reviewed_evidence_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

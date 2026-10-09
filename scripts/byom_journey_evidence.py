@@ -553,7 +553,7 @@ def parse_requirement_ids(raw: str | None, covered: list[str], contract: Journey
     return selected
 
 
-def load_mapped_pending_requirements(root: Path, contract: JourneyContract) -> set[str]:
+def load_mapped_pending_requirements(root: Path, contract: JourneyContract, *, state: str = "pending") -> set[str]:
     conformance = load_json_object(root / "specs" / "CONFORMANCE.json", "spec conformance")
     requirements = require_list(conformance.get("requirements"), "specs/CONFORMANCE.json requirements")
     mapped: set[str] = set()
@@ -561,7 +561,7 @@ def load_mapped_pending_requirements(root: Path, contract: JourneyContract) -> s
         if not isinstance(row, dict):
             continue
         journeys = row.get("journeys")
-        if isinstance(journeys, list) and contract.journey_id in journeys and row.get("state") == "pending":
+        if isinstance(journeys, list) and contract.journey_id in journeys and row.get("state") == state:
             requirement_id = row.get("requirement_id")
             if isinstance(requirement_id, str):
                 mapped.add(requirement_id)
@@ -1883,6 +1883,7 @@ def build_journey_result_payload(
     source_sha: str,
     evidence_sha: str,
     requirement_ids: str | None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     require_string(source_sha, COMMIT_RE, "--source-sha")
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
@@ -1920,11 +1921,13 @@ def build_journey_result_payload(
             f"expected {', '.join(covered_ids)}"
         )
     selected = parse_requirement_ids(requirement_ids, covered_ids, contract)
-    mapped = load_mapped_pending_requirements(root, contract)
+    # A refresh renews conformant rows' evidence; it never promotes a pending row.
+    state = "conformant" if refresh else "pending"
+    mapped = load_mapped_pending_requirements(root, contract, state=state)
     not_mapped = [item for item in selected if item not in mapped]
     if not_mapped:
         fail(
-            f"requirement_ids must be pending and mapped to {contract.journey_id}: "
+            f"requirement_ids must be {state} and mapped to {contract.journey_id}: "
             + ", ".join(sorted(not_mapped))
         )
 
@@ -2032,6 +2035,7 @@ def run_builder_cli(contract: JourneyContract, argv: list[str] | None, program: 
     parser.add_argument("--source-sha", required=True, help="source/build commit captured by the evidence")
     parser.add_argument("--evidence-sha", required=True, help="commit containing the redacted evidence")
     parser.add_argument("--requirement-ids", default=None, help="comma-separated requirement IDs to cover")
+    parser.add_argument("--refresh", action="store_true", help="cover conformant rows whose evidence is being renewed")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -2046,6 +2050,7 @@ def run_builder_cli(contract: JourneyContract, argv: list[str] | None, program: 
             source_sha=args.source_sha,
             evidence_sha=args.evidence_sha,
             requirement_ids=args.requirement_ids,
+            refresh=args.refresh,
         )
         write_json_atomically(output, payload)
     except BYOMEvidenceError as exc:

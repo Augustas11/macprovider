@@ -353,6 +353,21 @@ the prose-only promotion #1248 forbids.
 Then open a PR containing the redacted evidence, the signed envelope, and the
 conformance change, and let `spec-index / check` run.
 
+## Renewing evidence of a conformant row
+
+A conformant row goes red in `spec-index / check` once its evidence expires,
+and a promotion refuses it because it is no longer `pending`. Renew it with a
+fresh capture of the same journey and the refresh mode: dispatch
+`promote-signed-network-model-admission-journey.yml` with
+`refresh_conformant=true` and only the conformant rows in
+`requirement_ids`. The payload builder, the preflight and
+`promote-signed-journey-result.py` then take `--refresh`: every row must be
+conformant with no gap, already carry signed evidence from this journey, and
+the fresh envelope must expire later than that evidence. The envelope passes
+the same signed-result and governance checks as a promotion, the old
+same-journey evidence is replaced, and the row stays `conformant`. Pending and
+conformant rows covered by one capture take two dispatches, one per mode.
+
 ## Verification while iterating
 
 ```bash

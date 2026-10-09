@@ -975,7 +975,7 @@ def parse_requirement_ids(raw: str | None, evidence: dict[str, Any]) -> list[str
     return input_ids
 
 
-def load_mapped_requirements(root: Path) -> set[str]:
+def load_mapped_requirements(root: Path, *, state: str = "pending") -> set[str]:
     conformance = load_object(root / "specs" / "CONFORMANCE.json", "spec conformance")
     requirements = conformance.get("requirements")
     if not isinstance(requirements, list):
@@ -985,7 +985,7 @@ def load_mapped_requirements(root: Path) -> set[str]:
         if not isinstance(row, dict):
             continue
         journeys = row.get("journeys")
-        if isinstance(journeys, list) and JOURNEY_ID in journeys and row.get("state") == "pending":
+        if isinstance(journeys, list) and JOURNEY_ID in journeys and row.get("state") == state:
             requirement_id = row.get("requirement_id")
             if isinstance(requirement_id, str):
                 mapped.add(requirement_id)
@@ -1065,7 +1065,9 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
-def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str, requirement_ids: str | None) -> dict[str, Any]:
+def build_payload(
+    root: Path, source: str, *, source_sha: str, evidence_sha: str, requirement_ids: str | None, refresh: bool = False
+) -> dict[str, Any]:
     require_string(source_sha, COMMIT_RE, "--source-sha")
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
@@ -1092,9 +1094,11 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     require_git_file_matches(root, evidence_sha, source, evidence_bytes)
 
     selected = parse_requirement_ids(requirement_ids, evidence)
-    not_mapped = [item for item in selected if item not in load_mapped_requirements(root)]
+    # A refresh renews conformant rows' evidence; it never promotes a pending row.
+    state = "conformant" if refresh else "pending"
+    not_mapped = [item for item in selected if item not in load_mapped_requirements(root, state=state)]
     if not_mapped:
-        die(f"requirement_ids must be pending and mapped to {JOURNEY_ID}: {', '.join(not_mapped)}")
+        die(f"requirement_ids must be {state} and mapped to {JOURNEY_ID}: {', '.join(not_mapped)}")
 
     captured_at = require_string(evidence.get("captured_at"), DATETIME_Z_RE, "captured_at")
     expires_at = require_string(evidence.get("expires_at"), DATE_RE, "expires_at")
@@ -1155,6 +1159,7 @@ def main(argv: list[str] | None = None) -> int:
     payload.add_argument("--source-sha", required=True, help="deployed source commit captured by the evidence")
     payload.add_argument("--evidence-sha", required=True, help="repository commit containing the redacted evidence")
     payload.add_argument("--requirement-ids", default=None, help="comma-separated requirement IDs to cover")
+    payload.add_argument("--refresh", action="store_true", help="cover conformant rows whose evidence is being renewed")
     args = parser.parse_args(argv)
 
     if args.command == "capture":
@@ -1172,6 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
         source_sha=args.source_sha,
         evidence_sha=args.evidence_sha,
         requirement_ids=args.requirement_ids,
+        refresh=args.refresh,
     )
     write_json_atomically(output, value)
     print(f"build-trusted-pool-external-runtime-journey-result: wrote {output}")

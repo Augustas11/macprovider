@@ -3,6 +3,12 @@
 
 JOURNEY-TRUSTED-POOL-CREATOR-MVP stays evidence-only until a sibling
 PoolPromotionTransitionV1 is consumed into the SPEC-043 promotion ledger.
+
+`--refresh` renews an already-conformant row before its evidence expires: the
+row must be conformant, carry signed evidence from the same journey, and the
+fresh envelope must expire later than that evidence. The fresh envelope passes
+the same signed-result and repository validation as a promotion; the row's
+state does not change.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ import os
 import sys
 import tempfile
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +209,27 @@ def drop_superseded_same_journey_evidence(root: Path, evidence: list[Any], journ
     return kept
 
 
+def require_refreshable(root: Path, requirement: dict[str, Any], journey_id: str, expires_at: str) -> None:
+    requirement_id = requirement.get("requirement_id")
+    if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+        die(f"--refresh requires {requirement_id} to be conformant with no gap")
+    evidence = requirement.get("evidence")
+    superseded = [
+        item
+        for item in (evidence if isinstance(evidence, list) else [])
+        if (identity := signed_journey_identity(root, item)) is not None and identity[0] == journey_id
+    ]
+    if not superseded:
+        die(f"--refresh requires {requirement_id} to carry signed {journey_id} evidence")
+    try:
+        fresh = date.fromisoformat(expires_at)
+        current = max(date.fromisoformat(str(item.get("expires_at"))) for item in superseded)
+    except ValueError:
+        die(f"--refresh cannot compare evidence expiry for {requirement_id}")
+    if fresh <= current:
+        die(f"--refresh evidence for {requirement_id} must expire after {current.isoformat()}")
+
+
 def load_conformance(root: Path) -> dict[str, Any]:
     conformance_path = root / "specs" / "CONFORMANCE.json"
     load_result = ValidationResult()
@@ -231,6 +258,7 @@ def promote_requirement_in_memory(
     journey_id: str,
     trusted_public_key_sha256: str,
     trusted_openssl: str,
+    refresh: bool = False,
 ) -> str:
     requirements = conformance.get("requirements")
     matches = [item for item in requirements if isinstance(item, dict) and item.get("requirement_id") == requirement_id]
@@ -245,6 +273,8 @@ def promote_requirement_in_memory(
         prerequisite = trusted_pool_model_prerequisite_error(conformance, requirement_id)
         if prerequisite:
             die(prerequisite)
+    if refresh:
+        require_refreshable(root, requirement, journey_id, expires_at)
     require_valid_signed_result(root, requirement, evidence_source, commit, trusted_public_key_sha256, trusted_openssl)
     evidence_path = root / evidence_source
     digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
@@ -338,6 +368,7 @@ def promote_many(
     openssl_bin: str | None = None,
     promotion_transition: str | None = None,
     now: datetime | None = None,
+    refresh: bool = False,
 ) -> None:
     if not requirement_ids:
         die("at least one requirement ID is required")
@@ -353,6 +384,8 @@ def promote_many(
         die(f"{TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID} is evidence-only and cannot promote full SPEC-043 requirement rows")
     if journey_id != TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID and promotion_transition:
         die("--promotion-transition is only valid for JOURNEY-TRUSTED-POOL-CREATOR-MVP")
+    if refresh and promotion_transition:
+        die("--refresh cannot consume a promotion transition")
     if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
         consume_creator_mvp_transition(
             root,
@@ -376,6 +409,7 @@ def promote_many(
             journey_id=journey_id,
             trusted_public_key_sha256=trusted_public_key_sha256,
             trusted_openssl=trusted_openssl,
+            refresh=refresh,
         )
         promoted.append((requirement_id, digest))
     if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
@@ -394,8 +428,9 @@ def promote_many(
             print(f"error: {error}", file=sys.stderr)
         die("ledger promotion rejected")
     write_json_atomically(conformance_path, conformance)
+    verb = "refreshed" if refresh else "promoted"
     for requirement_id, digest in promoted:
-        print(f"promote-signed-journey-result: promoted {requirement_id} with sha256:{digest}")
+        print(f"promote-signed-journey-result: {verb} {requirement_id} with sha256:{digest}")
 
 
 def promote(
@@ -408,6 +443,7 @@ def promote(
     openssl_bin: str | None = None,
     promotion_transition: str | None = None,
     now: datetime | None = None,
+    refresh: bool = False,
 ) -> None:
     promote_many(
         root,
@@ -418,6 +454,7 @@ def promote(
         openssl_bin=openssl_bin,
         promotion_transition=promotion_transition,
         now=now,
+        refresh=refresh,
     )
 
 
@@ -435,6 +472,11 @@ def main(argv: list[str] | None = None) -> int:
         help="sibling PoolPromotionTransitionV1 path under journeys/evidence/; required for JOURNEY-TRUSTED-POOL-CREATOR-MVP",
     )
     parser.add_argument("--now", default=None, help="UTC now override for promotion-authorization expiry, like 2026-08-25T12:00:00Z")
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="renew the evidence of conformant rows; fails unless each row already has signed evidence from this journey that expires earlier",
+    )
     args = parser.parse_args(argv)
 
     if args.requirement_ids is None:
@@ -461,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         openssl_bin=args.openssl_bin,
         promotion_transition=args.promotion_transition,
         now=now,
+        refresh=args.refresh,
     )
     return 0
 

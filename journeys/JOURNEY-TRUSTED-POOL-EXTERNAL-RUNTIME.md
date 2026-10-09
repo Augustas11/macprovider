@@ -317,6 +317,13 @@ The payload is signed in CI (`production-release`,
 `macprovider-acceptance-p256-v1`) and promoted with
 `promote-signed-journey-result.py`.
 
+Evidence refresh: a row this journey already made conformant is renewed
+before its evidence expires by dispatching the signer with
+`refresh_conformant=true`. `payload`, the preflight and the promoter then
+require each row to be conformant, to carry signed evidence from this
+journey, and the fresh envelope to expire later; every other check is the
+same as for a promotion, and the row's state does not change.
+
 ## Pass criteria
 
 Every step passes, the redacted evidence is committed and byte-equal at the

@@ -1175,6 +1175,36 @@ class BYOMJourneyRoundTripTests(unittest.TestCase):
         )
         self.assertEqual([], result.errors)
 
+    def test_admission_refresh_covers_only_conformant_rows(self) -> None:
+        contract, _, source = self.round_trip("admission", "network-model-admission-20260908T000000Z.redacted.json")
+        root = self.temp / "repo"
+        source_sha = self.git(root, "rev-list", "--max-parents=0", "HEAD")
+
+        def payload(requirement_ids: str, *, refresh: bool):
+            return evidence_module.build_journey_result_payload(
+                root,
+                contract,
+                source,
+                source_sha=source_sha,
+                evidence_sha=self.git(root, "rev-parse", "HEAD"),
+                requirement_ids=requirement_ids,
+                refresh=refresh,
+            )
+
+        with self.assertRaisesRegex(evidence_module.BYOMEvidenceError, "must be conformant and mapped"):
+            payload("SPEC-047-R007", refresh=True)
+        conformance_path = root / "specs" / "CONFORMANCE.json"
+        conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+        for row in conformance["requirements"]:
+            if row["requirement_id"] == "SPEC-047-R007":
+                row["state"] = "conformant"
+                row["gap"] = None
+        conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+        self.git(root, "commit", "-qam", "row conformant")
+        self.assertEqual(["SPEC-047-R007"], payload("SPEC-047-R007", refresh=True)["requirement_ids"])
+        with self.assertRaisesRegex(evidence_module.BYOMEvidenceError, "must be pending and mapped"):
+            payload("SPEC-047-R007", refresh=False)
+
     def test_admission_round_trip_satisfies_the_governance_validator(self) -> None:
         contract, payload, source = self.round_trip(
             "admission", "network-model-admission-20260908T000000Z.redacted.json"
