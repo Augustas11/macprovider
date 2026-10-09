@@ -11,7 +11,7 @@ Audit history: Implementation reconciliation (2026-08-24, commit `2a27f5679bf6eb
 {
   "spec_id": "SPEC-042",
   "title": "Pool Control Plane and Trusted-Pool Manifest",
-  "version": "0.0.38",
+  "version": "0.0.42",
   "path": "specs/SPEC-042-pool-control-plane.md",
   "status": "draft",
   "owner": "@Augustas11",
