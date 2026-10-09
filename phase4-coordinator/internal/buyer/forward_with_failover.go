@@ -103,6 +103,12 @@ func (s *Server) forwardWithFailover(
 		// attempts). Must precede tx.dispatch, which may write a terminal
 		// response (route_snapshot_failed, provider_failed) synchronously.
 		rec.beginDispatchAttempt()
+		// capacityRefused describes the latest attempt only: a capacity
+		// refusal on an earlier provider must not label a later, unrelated
+		// failure (or the selection after it) as a capacity shed.
+		if state != nil {
+			state.capacityRefused = false
+		}
 		// Dispatch — per-transport. The callback runs one attempt and
 		// returns the classified result. HTTP's callback also owns its
 		// per-attempt context.WithTimeout setup and the cancelAttempt

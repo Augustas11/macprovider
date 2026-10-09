@@ -161,6 +161,11 @@ type forwardState struct {
 	// that finds no route sheds as a SPEC-006 §7.8 capacity 429, not 503.
 	capacityRefused bool
 
+	// capacityShed429Negotiated records that the caller sent
+	// capacityShed429CapabilityHeader, so a capacity shed is written as
+	// the SPEC-006 §7.8 429 rather than the pre-#1906 503.
+	capacityShed429Negotiated bool
+
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
 	// advanceToNextProvider exactly once per advance; failover

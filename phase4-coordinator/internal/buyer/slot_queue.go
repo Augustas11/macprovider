@@ -123,10 +123,14 @@ func (q *slotQueue) head(waiter *slotWaiter) bool {
 	return len(queue) > 0 && queue[0] == waiter
 }
 
-func (q *slotQueue) blocksProvider(providerID string, slotsFree int) bool {
+// blocksProvider, reserveProvider and reserveHead read the provider's
+// slots_free through slotsFree while holding the queue lock (lock order:
+// queue, then pool), so a check or reservation never acts on a seat count
+// that releaseReservationAfter changed after the caller's snapshot (#1906).
+func (q *slotQueue) blocksProvider(providerID string, slotsFree func() int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.queues[providerID])+q.reserved[providerID] >= slotsFree
+	return len(q.queues[providerID])+q.reserved[providerID] >= slotsFree()
 }
 
 func (q *slotQueue) hasWaiters(providerID string) bool {
@@ -146,17 +150,9 @@ func (q *slotQueue) hasStandardWaiters(providerID string) bool {
 	return false
 }
 
-func (q *slotQueue) reserveProvider(providerID string, slotsFree int) bool {
-	if providerID == "" || slotsFree <= 0 {
-		return false
-	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.queues[providerID])+q.reserved[providerID] >= slotsFree {
-		return false
-	}
-	q.reserved[providerID]++
-	return true
+func (q *slotQueue) reserveProvider(providerID string, slotsFree func() int) bool {
+	reserved, _ := q.reserveProviderLive(providerID, slotsFree)
+	return reserved
 }
 
 // reserveProviderLive is reserveProvider with slots_free read under the
@@ -181,7 +177,7 @@ func (q *slotQueue) reserveProviderLive(providerID string, slotsFree func() int)
 	return true, false
 }
 
-func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree int) bool {
+func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree func() int) bool {
 	if waiter == nil {
 		return false
 	}
@@ -191,7 +187,7 @@ func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree int) bool {
 	if len(queue) == 0 || queue[0] != waiter {
 		return false
 	}
-	if slotsFree-q.reserved[waiter.providerID] <= 0 {
+	if slotsFree()-q.reserved[waiter.providerID] <= 0 {
 		return false
 	}
 	q.reserved[waiter.providerID]++

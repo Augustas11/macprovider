@@ -38,6 +38,11 @@ type closedLoopCBProvider struct {
 	transit    time.Duration
 	reports    chan closedLoopReport
 	running    sync.WaitGroup
+	// injectQueueFull is how many dispatches, each arriving while another
+	// chat is still live on the relay, the Mac refuses with error_queue_full
+	// even below its limit. It forces the queue-full hold, requeue and seat
+	// restore path to run in every subtest instead of only under races.
+	injectQueueFull int
 
 	mu          sync.Mutex
 	active      int
@@ -109,7 +114,10 @@ func (p *closedLoopCBProvider) relay(ctx context.Context, _ pool.Provider, reque
 		p.mu.Unlock()
 		return nil, providerws.ErrRelayBackpressure
 	}
-	if p.active >= p.limit {
+	if p.active >= p.limit || (p.injectQueueFull > 0 && p.relayActive > 0) {
+		if p.active < p.limit {
+			p.injectQueueFull--
+		}
 		p.queueFull++
 		p.mu.Unlock()
 		done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full", ChunksSent: 0, Error: "Provider request queue is full"}
@@ -197,13 +205,14 @@ func TestClosedLoopNClientsAgainstNSlotsShedZero(t *testing.T) {
 			}
 			registry.Register(&provider, nil)
 			fake := &closedLoopCBProvider{
-				registry:   registry,
-				providerID: "p-cb",
-				assignedID: "s-cb",
-				limit:      n,
-				removeLag:  time.Millisecond,
-				transit:    2 * time.Millisecond,
-				reports:    make(chan closedLoopReport, 4096),
+				registry:        registry,
+				providerID:      "p-cb",
+				assignedID:      "s-cb",
+				limit:           n,
+				removeLag:       time.Millisecond,
+				transit:         2 * time.Millisecond,
+				reports:         make(chan closedLoopReport, 4096),
+				injectQueueFull: 3,
 			}
 			reportsDone := make(chan struct{})
 			go fake.deliverReports(reportsDone)
@@ -256,6 +265,18 @@ func TestClosedLoopNClientsAgainstNSlotsShedZero(t *testing.T) {
 			}
 			if peak > n {
 				t.Fatalf("provider peak active=%d, want <=%d", peak, n)
+			}
+			if queueFull == 0 {
+				t.Fatalf("N=%d: the provider queue-full refusal path never ran", n)
+			}
+			// Every refused attempt returned its seat: once quiet, the
+			// coordinator count is back to N with no hold left up.
+			got, ok := registry.Resolve("p-cb", "s-cb")
+			if !ok || got.SlotsFree != n || !got.RoutingEligible() {
+				t.Fatalf("N=%d after quiescence: provider=%+v ok=%v, want slots_free=%d and routable", n, got, ok, n)
+			}
+			if inFlight := registry.ForwardedInFlight("p-cb", "s-cb"); inFlight != 0 {
+				t.Fatalf("N=%d after quiescence: forwarded in flight=%d, want 0", n, inFlight)
 			}
 		})
 	}

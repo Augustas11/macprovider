@@ -426,7 +426,7 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 		}
 		return pool.Provider{}, relayBlindSlotUnavailable
 	}
-	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
+	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, s.liveSlotsFree(provider)) {
 		return acquired(provider)
 	}
 	deadline := s.slotQueueDeadline
@@ -471,7 +471,7 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 		if !usable {
 			return pool.Provider{}, relayBlindSlotSessionLost
 		}
-		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, s.liveSlotsFree(provider)) {
 			return acquired(provider)
 		}
 	}
@@ -524,7 +524,7 @@ func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []int {
 	var free, busy []int
 	for _, i := range sorted {
 		provider := providers[i]
-		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree)) {
+		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, s.liveSlotsFree(provider))) {
 			free = append(free, i)
 		} else {
 			busy = append(busy, i)

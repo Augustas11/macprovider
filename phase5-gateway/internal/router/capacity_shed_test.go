@@ -21,6 +21,15 @@ func capacityShedHeaders() http.Header {
 	return h
 }
 
+// Every coordinator chat hop opts into the capacity 429; a coordinator
+// answers callers without the header with the pre-#1906 503.
+func assertCapacityShed429Advertised(t *testing.T, r *http.Request) {
+	t.Helper()
+	if got := r.Header.Get(capacityShed429CapabilityHeader); got != "1" {
+		t.Errorf("coordinator hop %s %s: %s=%q, want 1", r.Method, r.URL.Path, capacityShed429CapabilityHeader, got)
+	}
+}
+
 func assertGatewayCapacityShed(t *testing.T, code int, header http.Header, body string) {
 	t.Helper()
 	if code != http.StatusTooManyRequests {
@@ -44,6 +53,7 @@ func TestPublicCoordinatorCapacityShedPassesThroughAs429AndRefunds(t *testing.T)
 		}
 		t.Run(name, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertCapacityShed429Advertised(t, r)
 				if got := r.Header.Get(wholesaleInternalHeader); got != "" {
 					t.Fatalf("public traffic leaked wholesale header %q", got)
 				}
@@ -69,6 +79,7 @@ func TestPublicCoordinatorCapacityShedPassesThroughAs429AndRefunds(t *testing.T)
 
 func TestWholesaleCoordinatorCapacityShedStays429(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		assertCapacityShed429Advertised(t, r)
 		if got := r.Header.Get(wholesaleInternalHeader); got != "1" {
 			t.Fatalf("wholesale header=%q want 1", got)
 		}
@@ -89,6 +100,7 @@ func TestWholesaleCoordinatorCapacityShedStays429(t *testing.T) {
 
 func TestUnmarkedCoordinatorCapacityShedSettlesConservatively(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		assertCapacityShed429Advertised(t, r)
 		return responseWithBody(http.StatusTooManyRequests, http.Header{"Content-Type": []string{"application/json"}}, capacityShedBody()), nil
 	})}
 	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
@@ -111,6 +123,7 @@ func TestUnmarkedCoordinatorCapacityShedSettlesConservatively(t *testing.T) {
 func TestGatewayRetriesCoordinatorCapacityShedLikeNoProvider503(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		assertCapacityShed429Advertised(t, r)
 		calls++
 		if calls == 1 {
 			return responseWithBody(http.StatusTooManyRequests, capacityShedHeaders(), capacityShedBody()), nil
@@ -134,6 +147,7 @@ func TestGatewayDoesNotRetryOtherCoordinator429(t *testing.T) {
 	var calls int
 	quotaBody := `{"error":{"code":"provisional_quota_exceeded","message":"Selected provider is over request quota","param":null,"type":"rate_limit_error","retryable":true}}`
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		assertCapacityShed429Advertised(t, r)
 		calls++
 		return responseWithBody(http.StatusTooManyRequests, markedNoProviderHeaders(), quotaBody), nil
 	})}

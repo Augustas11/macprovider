@@ -411,6 +411,13 @@ const (
 	// the same one-second backoff the gateway uses for no_provider_available.
 	capacityShedErrorType         = "rate_limit_exceeded"
 	capacityShedRetryAfterSeconds = "1"
+	// capacityShed429CapabilityHeader is how a gateway that handles the
+	// capacity 429 opts in. Without it the coordinator answers a capacity
+	// shed with the pre-#1906 503 no_provider_available, because an older
+	// gateway settles an unknown 429 as a provider error. It only changes
+	// the status shape of the caller's own request, so it is not gated on
+	// the service token.
+	capacityShed429CapabilityHeader = "X-MacProvider-Capacity-Shed-429"
 )
 
 const (
@@ -2483,6 +2490,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// state values at log-write time, so it holds *forwardState.
 	state := newForwardState(startedAt)
 	state.markConversationCacheOnly(r.Header)
+	state.capacityShed429Negotiated = strings.TrimSpace(r.Header.Get(capacityShed429CapabilityHeader)) == "1"
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -2760,6 +2768,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if poolModelRequested {
 			rec.setModel("")
 		}
+		routeErr = buyerRouteError(routeErr, state)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return
@@ -3002,7 +3011,7 @@ func (s *Server) forwardStreamSequence(
 				setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 			}
 			if state.capacityRefused && (dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardUnavailable) {
-				writeRouteError(w, capacityShedRouteError(state.requestedModel))
+				writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(state.requestedModel, "Selected provider is not reachable"), state))
 				return
 			}
 			writeStreamForwardError(w, dispatched.nativeResult)
@@ -3791,6 +3800,7 @@ func (s *Server) advanceToNextProvider(
 	if routeErr != nil {
 		state.routingDone = s.now()
 		state.phaseTiming.markCoordRoutingDone(state.routingDone)
+		routeErr = buyerRouteError(routeErr, state)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
 		writeRouteError(w, routeErr)
 		return "", false
@@ -3906,7 +3916,11 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 			if stream {
 				return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is at capacity"}
 			}
-			writeRouteError(w, capacityShedRouteError(provider.ModelID))
+			model := provider.ModelID
+			if state != nil && state.requestedModel != "" {
+				model = state.requestedModel
+			}
+			writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(model, "Selected provider is not reachable"), state))
 			return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is at capacity"}
 		}
 		if errors.Is(err, providerws.ErrRelayNAKFallback) {
@@ -7401,6 +7415,9 @@ type routeError struct {
 	// live count had no free seat (full or safety hold) rather than because
 	// coordinator reservations already claimed its free seats.
 	providerBusy bool
+	// legacy is the pre-#1906 503 a capacity shed answers with when the
+	// caller did not send capacityShed429CapabilityHeader (buyerRouteError).
+	legacy *routeError
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -7427,6 +7444,12 @@ func requestCanceledRouteError() *routeError {
 // exists). It is a retryable 429 with Retry-After; 503 no_provider_available
 // stays the answer when no serving-capable provider exists (#1906).
 func capacityShedRouteError(model string) *routeError {
+	return capacityShedRouteErrorWithLegacy(model, "No provider available for model "+model)
+}
+
+// capacityShedRouteErrorWithLegacy is capacityShedRouteError with the exact
+// pre-#1906 503 message the same path wrote before.
+func capacityShedRouteErrorWithLegacy(model, legacyMessage string) *routeError {
 	message := "All providers are at capacity; retry shortly"
 	if model != "" {
 		message = "All providers for model " + model + " are at capacity; retry shortly"
@@ -7436,7 +7459,19 @@ func capacityShedRouteError(model string) *routeError {
 		code:    "no_provider_available",
 		typ:     capacityShedErrorType,
 		message: message,
+		legacy:  &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: legacyMessage},
 	}
+}
+
+// buyerRouteError is the route error the caller sees and the request log
+// records: a capacity shed stays a 429 only for a caller that sent
+// capacityShed429CapabilityHeader; any other caller (an older gateway, a
+// direct buyer) gets the pre-#1906 503 no_provider_available.
+func buyerRouteError(err *routeError, state *forwardState) *routeError {
+	if err == nil || err.legacy == nil || (state != nil && state.capacityShed429Negotiated) {
+		return err
+	}
+	return err.legacy
 }
 
 // isCapacityShedStatus reports the SPEC-006 §7.8 capacity-shed envelope.
@@ -8022,12 +8057,18 @@ func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forw
 	if state.queuedSlotProviderID != "" {
 		s.releaseQueuedSlotReservation(state)
 	}
-	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, func() int { return s.routableSlotsFree(provider) })
+	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, s.liveSlotsFree(provider))
 	if !reserved {
 		return false, busy
 	}
 	state.queuedSlotProviderID = provider.ProviderID
 	return true, false
+}
+
+// liveSlotsFree is routableSlotsFree as a callback the slot queue evaluates
+// under its lock.
+func (s *Server) liveSlotsFree(provider pool.Provider) func() int {
+	return func() int { return s.routableSlotsFree(provider) }
 }
 
 // routableSlotsFree is the provider's live reservable seat count, falling
@@ -8850,12 +8891,12 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 	}
 	if !routingEligibleForRoute(p, poolView) {
 		if providerForRoute(p, poolView).SlotQueueEligible() {
-			return pool.Provider{}, capacityShedRouteError(model)
+			return pool.Provider{}, capacityShedRouteErrorWithLegacy(model, unavailableMessage)
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
-	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, p.SlotsFree) {
-		return pool.Provider{}, capacityShedRouteError(model)
+	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, s.liveSlotsFree(p)) {
+		return pool.Provider{}, capacityShedRouteErrorWithLegacy(model, unavailableMessage)
 	}
 	if s.tier2ProviderExcludedForRoute(p, poolView) {
 		return pool.Provider{}, &routeError{
@@ -9126,7 +9167,7 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !routeProvider.RoutingEligible() {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+		if !s.slotQueue.reserveHead(waiter, s.liveSlotsFree(provider)) {
 			return pool.Provider{}, queuedProviderWait
 		}
 		s.rememberLegacyModelAdmissionRouteExpectation(state, provider, byomEligibility)
@@ -9223,8 +9264,11 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 	normal := make([]pool.Provider, 0, len(candidates))
 	queued := make([]pool.Provider, 0, len(candidates))
 	for _, provider := range candidates {
-		slotsFree := s.routableSlotsFree(provider)
-		if s.slotQueue.blocksProvider(provider.ProviderID, slotsFree) {
+		var slotsFree int
+		if s.slotQueue.blocksProvider(provider.ProviderID, func() int {
+			slotsFree = s.routableSlotsFree(provider)
+			return slotsFree
+		}) {
 			// A positive SlotsFree provider blocked only by coordinator-local
 			// reservations represents same-moment demand beyond advertised
 			// capacity. Public traffic sheds that overflow immediately.

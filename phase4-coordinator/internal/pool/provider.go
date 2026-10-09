@@ -151,6 +151,11 @@ type Provider struct {
 	// WS frames are stamped at receipt, so a restored seat remains
 	// coordinator-owned until the Mac confirms ready with free seats.
 	awaitingReadyOccupancy bool
+	// ignoredLowerReadyReport records that one ready report lower than the
+	// coordinator-owned count was already ignored while awaiting occupancy.
+	// The next consecutive lower report is accepted, so a genuine capacity
+	// drop is never ignored for more than one report.
+	ignoredLowerReadyReport bool
 	// Explicit thermal and queue-full signals block routing through restores.
 	capacitySafetyHold bool
 	// queueFullHold marks a capacitySafetyHold raised by a provider
@@ -2854,10 +2859,14 @@ func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal b
 		// as fresh: a lower ready report must not strand those seats until
 		// the in-flight set next drains to zero (#1906). Explicit refusal and
 		// thermal reports are what lower capacity.
-		if p.awaitingReadyOccupancy && slotsFree < p.SlotsFree {
+		// One stale report is the most a single end-frame/retire gap can
+		// produce; a second consecutive lower report is the Mac's real count.
+		if p.awaitingReadyOccupancy && slotsFree < p.SlotsFree && !p.ignoredLowerReadyReport {
+			p.ignoredLowerReadyReport = true
 			return true
 		}
 		p.awaitingReadyOccupancy = false
+		p.ignoredLowerReadyReport = false
 		return false
 	}
 	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold

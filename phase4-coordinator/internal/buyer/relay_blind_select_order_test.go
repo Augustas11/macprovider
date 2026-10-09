@@ -67,7 +67,7 @@ func TestRelayBlindCandidatesRotateWithinTier(t *testing.T) {
 // a new reservation.
 func TestRelayBlindCandidatesTreatClaimedSlotAsBusy(t *testing.T) {
 	queue := newSlotQueue(8)
-	if !queue.reserveProvider("a", 1) {
+	if !queue.reserveProvider("a", fixedSlots(1)) {
 		t.Fatal("could not claim the slot")
 	}
 	s := &Server{relayBlind: &relayBlindService{}, slotQueue: queue}

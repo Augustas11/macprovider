@@ -28,7 +28,10 @@ const (
 	// finality pinned to settlementPolicyVersionV2. The coordinator refuses
 	// a pool-model route (and withholds R016 attested members) without it,
 	// since an older gateway holds that finality forever (#1816 VM A-1).
-	routeSnapshotV2CapabilityHeader  = "X-MacProvider-Internal-Settlement-Route-Snapshot-V2"
+	routeSnapshotV2CapabilityHeader = "X-MacProvider-Internal-Settlement-Route-Snapshot-V2"
+	// capacityShed429CapabilityHeader opts the coordinator hop into the
+	// SPEC-006 §7.8 capacity 429 (#1906).
+	capacityShed429CapabilityHeader  = "X-MacProvider-Capacity-Shed-429"
 	settlementFinalityMACHeader      = "X-MacProvider-Settlement-Finality-Mac"
 	settlementFinalityMACDomain      = "macprovider-settlement-finality-trailers-v1"
 	missingSettlementFinalityTrailer = "missing_settlement_finality_trailer"
@@ -70,6 +73,10 @@ func (s *Server) setCoordinatorChatContext(h http.Header, r *http.Request, accou
 	h.Set("Authorization", "Bearer "+bearer)
 	h.Set("X-MacProvider-Account", accountID)
 	h.Set("X-Request-ID", requestID(r))
+	// This gateway handles the SPEC-006 §7.8 capacity 429 (isCoordCapacityShed429);
+	// a coordinator answers a capacity shed with the pre-#1906 503 to any
+	// caller that does not say so.
+	h.Set(capacityShed429CapabilityHeader, "1")
 	// The MAC key is the bearer, so advertise only when one is configured.
 	if strings.TrimSpace(bearer) != "" {
 		h.Set(settlementTrailersCapabilityHeader, "1")

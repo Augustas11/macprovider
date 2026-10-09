@@ -133,6 +133,33 @@ func TestStaleLowerReadyReportKeepsRestoredSeats(t *testing.T) {
 	}
 }
 
+func TestRepeatedLowerReadyReportIsAccepted(t *testing.T) {
+	// #1906 round-1 audit: the stale-report ignore is bounded. A Mac that
+	// genuinely lost seats keeps reporting the lower count; the second
+	// consecutive lower report must apply instead of being ignored forever.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	lower := 3
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 8 {
+		t.Fatalf("first lower report: slots_free=%d, want 8 (one stale report ignored)", got.SlotsFree)
+	}
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 3 {
+		t.Fatalf("second consecutive lower report: slots_free=%d, want 3", got.SlotsFree)
+	}
+	// Ownership is released: a later report applies directly.
+	five := 5
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &five})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 5 {
+		t.Fatalf("report after accepted lower report: slots_free=%d, want 5", got.SlotsFree)
+	}
+}
+
 func TestThermalHoldSurvivesForwardedCompletion(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}

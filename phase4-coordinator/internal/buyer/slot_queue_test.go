@@ -42,22 +42,27 @@ func TestSlotQueueBlocksOnlyWhenQueuedDemandConsumesFreeSlots(t *testing.T) {
 		t.Fatal("second waiter rejected")
 	}
 
-	if !queue.blocksProvider("provider", 2) {
+	if !queue.blocksProvider("provider", fixedSlots(2)) {
 		t.Fatal("provider should block direct routing when two waiters consume two free slots")
 	}
-	if queue.blocksProvider("provider", 3) {
+	if queue.blocksProvider("provider", fixedSlots(3)) {
 		t.Fatal("provider should allow direct routing when free slots exceed queued demand")
 	}
-	if !queue.reserveHead(first, 3) {
+	if !queue.reserveHead(first, fixedSlots(3)) {
 		t.Fatal("first waiter reservation rejected")
 	}
 	queue.leave(first)
-	if !queue.blocksProvider("provider", 2) {
+	if !queue.blocksProvider("provider", fixedSlots(2)) {
 		t.Fatal("provider should block when one reserved plus one queued consume two free slots")
 	}
-	if queue.blocksProvider("provider", 3) {
+	if queue.blocksProvider("provider", fixedSlots(3)) {
 		t.Fatal("provider should allow excess free capacity after reservation and queued demand")
 	}
 	queue.releaseReservation("provider")
 	queue.leave(second)
+}
+
+// fixedSlots is a slots_free callback that always reports n.
+func fixedSlots(n int) func() int {
+	return func() int { return n }
 }
