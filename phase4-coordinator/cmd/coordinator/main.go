@@ -1552,8 +1552,8 @@ func runCoordinator() (exitCode int) {
 		register,
 		hardwareEvidence,
 		enrollHandler,
-		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter, autotuneEvidenceStore),
-		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), autotuneEvidenceStore),
+		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter, autotuneEvidenceStore, logger),
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), autotuneEvidenceStore, logger),
 		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
 	buyerHandler = withPortalSessionMe(buyerHandler, tokenStore)
@@ -3967,7 +3967,7 @@ func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.En
 	return eh
 }
 
-func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, hardwareEvidence autotune.EvidenceStore) http.Handler {
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, hardwareEvidence autotune.EvidenceStore, logger zerolog.Logger) http.Handler {
 	if rewardsDB == nil {
 		return nil
 	}
@@ -3980,6 +3980,7 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, 
 		Connectivity:          connectivity,
 		HardwareEvidence:      hardwareEvidence,
 		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
+		Logger:                logger,
 	})
 }
 
@@ -4005,7 +4006,7 @@ func malibuRewardAuditAdminHandler(cfg config.Config, rewardsDB *sql.DB) http.Ha
 	})
 }
 
-func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter, hardwareEvidence autotune.EvidenceStore) http.Handler {
+func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter, hardwareEvidence autotune.EvidenceStore, logger zerolog.Logger) http.Handler {
 	return rewards.NewWalletStatusHandler(rewards.WalletHandlerDeps{
 		RewardsDB:             rewardsDB,
 		PayoutDB:              payoutDB,
@@ -4016,6 +4017,7 @@ func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB,
 		Limiter:               limiter,
 		HardwareEvidence:      hardwareEvidence,
 		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
+		Logger:                logger,
 	})
 }
 
