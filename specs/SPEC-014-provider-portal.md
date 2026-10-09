@@ -5,7 +5,7 @@
 **Date drafted:** 2026-06-21 (v0.10 operator-minted session 2026-08-22)
 **Change log v0.11 (2026-10-09, #1880 GitHub-mode earnings):**
   Closes the §2.5.0 earnings gap. `GET /providers/{id}/earnings` with **no**
-    `Authorization` header is authorized by the `mp_session` cookie when the
+    `Authorization` header is authorized by the `__Host-mp_session` cookie when the
     coordinator runs with GitHub OAuth enabled and the session's GitHub user owns
     `{id}` in `provider_ownership` (the table `/v1/auth/me/providers` lists): an
     invalid or missing session answers `401 session_invalid`, a non-owned
@@ -16,6 +16,17 @@
     data endpoint is an inline dashboard error and never restarts sign-in. The
     MALIBU accrual, wallet, and reward-audit reads stay bearer-only and are not
     called in cookie mode.
+  Session cookie hardening (§2.5.3), because the cookie now reads financial
+    data: the cookie is named `__Host-mp_session` (`Secure; Path=/`, never a
+    `Domain`), so a sibling subdomain cannot plant or overwrite it;
+    `MP_SESSION_COOKIE_DOMAIN` no longer scopes it and is used only to expire a
+    legacy cookie. The legacy `mp_session` cookie never authenticates and the
+    coordinator clears it on sight. The session id rotates at OAuth login
+    completion (any session the browser carried is revoked) and at a
+    successful `pair_ot` bind (new id issued, old id deleted). Every earnings
+    response, bearer or cookie, carries `Cache-Control: private, no-store` and
+    `Vary: Cookie, Authorization`; the reference nginx earnings location sets
+    the same headers.
 **Change log v0.10 (2026-08-22, operator-minted portal read session):**
   Adds a third auth path that does **not** ask the provider to paste
     `provider_token`. An operator holding `operator_key` may mint a
@@ -43,7 +54,7 @@
   `GITHUB_OAUTH_ENABLED=false`). v0.9 documents the shipped **dual-mode** contract
   honestly: token-paste bearer (default, prod-active) **and** the opt-in
   GitHub-OAuth cookie-session mode. It specifies the previously-unowned OAuth
-  **transport** (`/v1/auth/github/*`, `/v1/auth/me/*`, the `mp_session` cookie,
+  **transport** (`/v1/auth/github/*`, `/v1/auth/me/*`, the `__Host-mp_session` cookie,
   CSRF origin-binding, `return_to` guard, `/claim` + `pair_ot`) as owner of last
   resort, cross-referencing **SPEC-003 FR-C10** for the coordinator mint/ownership
   *policy* and **SPEC-001 v1.5** for frame shapes rather than re-specifying them.
@@ -176,14 +187,13 @@ dual-mode (reconciled v0.9):** the default and current-prod path is a per-Mac
 `portal-config.json:github_oauth_enabled` + coordinator `GITHUB_OAUTH_ENABLED`,
 lets a provider sign in with GitHub, **list** the Mac(s) bound to their GitHub
 identity, and **bind** a new Mac by claiming a one-time `pair_ot`. Both modes are
-shipped; GitHub-OAuth is disabled in current prod. **The GitHub-OAuth mode is
-incompletely wired (§2.5.0):** the **aggregate-earnings** surfaces (A.2 / C.1 /
-A.5) do **not** load in cookie mode today, because the earnings route requires an
-FR-P12 provider bearer that cookie mode does not carry — an earnings 401 then
-re-launches OAuth, making the dashboard unusable. The public pool-status surface
-(A.1, `/v1/pool/check`) **does** work in cookie mode. So the mode's shipped scope
-is identity + owned-provider listing + `pair_ot` binding + pool status; the
-earnings data is a documented carried gap, not working behavior.
+shipped; GitHub-OAuth is disabled in current prod. **Since v0.11 the GitHub-OAuth
+mode is wired end-to-end (§2.5.0):** the **aggregate-earnings** surfaces (A.2 /
+C.1 / A.5) load in cookie mode through the cookie-authorized, ownership-checked
+earnings read, and a data-endpoint refusal is an inline dashboard error that never
+re-launches OAuth. The public pool-status surface (A.1, `/v1/pool/check`) works in
+cookie mode as before. The MALIBU accrual, wallet, and reward-audit reads remain
+paste-bearer-mode surfaces.
 
 Five surfaces ship in v0.1: **A Machine** (default), **B Setup &
 Updates**, **C Earn**, **D Monitoring** (placeholder card, zero API
@@ -380,7 +390,7 @@ Rationale (paste-bearer mode is token-based, not token-only-derivable):
 Storage in the browser (paste-bearer mode): **in-memory only**. No
 `localStorage`, no `sessionStorage`, no cookie. A page reload
 returns the provider to the sign-in screen. (The GitHub-OAuth mode in §2.5 does
-use an `HttpOnly` `mp_session` cookie — that is the mode's deliberate design, not
+use an `HttpOnly` `__Host-mp_session` cookie — that is the mode's deliberate design, not
 a violation of this paste-mode rule.)
 
 **Reconciled v0.9 — GitHub OAuth is no longer forbidden; it shipped.** The v0.8
@@ -409,7 +419,7 @@ intentional second auth path. The alternatives not built remain out of scope:
   SOLE authority. **Reconciled v0.9:** the earlier absolute "SPEC-014 introduces
   no new server-side auth path" holds **only for paste-bearer mode**. The
   GitHub-OAuth mode (§2.5) *does* add a new server-side auth path — an OAuth
-  cookie-session authenticated by the `mp_session` cookie rather than the FR-P12
+  cookie-session authenticated by the `__Host-mp_session` cookie rather than the FR-P12
   bearer — which is off by default and off in current prod; see §2.5 for its
   trust boundary.
 - In **either** mode the portal MUST NOT possess, request, prompt for, or transmit
@@ -558,9 +568,13 @@ conflict, the owner spec governs.
 
 #### 2.5.0 Shipped scope — incompletely wired (honest disclosure)
 
+**[Superseded v0.11, #1880]** GitHub-OAuth mode is wired end-to-end for
+earnings: see the v0.11 change log and the bullets below. The v0.9 disclosure
+follows for history.
+
 GitHub-OAuth mode is **shipped but not wired end-to-end**. Its working functional
-scope today: **(1)** authenticate a GitHub identity and set the `mp_session`
-cookie; **(2)** list the `provider_id`s owned by that identity
+scope today: **(1)** authenticate a GitHub identity and set the session
+cookie (`__Host-mp_session` since v0.11); **(2)** list the `provider_id`s owned by that identity
 (`GET /v1/auth/me/providers`); **(3)** bind a new Mac to that identity by claiming a
 `pair_ot` (`POST /v1/auth/me/providers/bind`); **(4)** show the **A.1 pool-status**
 header — `/v1/pool/check` is a **public** route (`buyer/server.go` registers it
@@ -615,9 +629,9 @@ calls exactly this closed set and no others (AUTH-2 allowlist):
 |---|---|---|
 | `GET /v1/auth/github/start?return_to=<path>[&pair_ot=<ot>]` | Begin OAuth; 302 to GitHub | none (mints CSRF state) |
 | `GET /v1/auth/github/callback?state=&code=` | OAuth callback; sets session cookie; 302 to `return_to` | validated `state` |
-| `GET /v1/auth/me/providers` | List providers owned by the session's GitHub identity | `mp_session` cookie |
-| `POST /v1/auth/me/providers/bind` | Bind a `pair_ot` to the session identity | `mp_session` cookie |
-| `POST /v1/auth/logout` | Best-effort delete session row, clear cookie, 204 | `mp_session` cookie **optional** (see below) |
+| `GET /v1/auth/me/providers` | List providers owned by the session's GitHub identity | `__Host-mp_session` cookie |
+| `POST /v1/auth/me/providers/bind` | Bind a `pair_ot` to the session identity | `__Host-mp_session` cookie |
+| `POST /v1/auth/logout` | Best-effort delete session row, clear cookie, 204 | `__Host-mp_session` cookie **optional** (see below) |
 
 **Logout auth is an optional session selector, not a requirement (reconciled
 v0.9).** `handleAuthLogout` reads the cookie only to pick which session row to
@@ -687,9 +701,17 @@ their column-level schema remains the coordinator's implementation detail (SPEC-
 does not freeze it), and the mint/ownership policy over `provider_ownership` stays
 SPEC-003 FR-C10's.
 
-#### 2.5.3 Session cookie (`mp_session`)
+#### 2.5.3 Session cookie (`__Host-mp_session`)
 
-- Name `mp_session`; value is an **opaque server-side session id** (not a
+- **Normative (v0.11):** name `__Host-mp_session`. The `__Host-` prefix makes a
+  browser refuse the cookie unless it is `Secure`, `Path=/`, and carries **no**
+  `Domain`, so no sibling subdomain can plant or overwrite it. The coordinator
+  never sets a `Domain` on it, whatever `MP_SESSION_COOKIE_DOMAIN` says. The
+  legacy `mp_session` cookie **never authenticates**: any coordinator response to
+  a request carrying it expires it (host-only, and at the configured
+  `MP_SESSION_COOKIE_DOMAIN` when one is set). Logout and OAuth login also
+  delete the legacy cookie's server-side session row.
+- Value is an **opaque server-side session id** (not a
   signed/JWT payload) — the session row lives in the coordinator DB. **Normative
   (reconciled v0.9): the id MUST be ≥256 bits from a CSPRNG.** SPEC-014 owns this
   transport contract, and "opaque" alone would permit a predictable counter or weak
@@ -697,13 +719,22 @@ SPEC-003 FR-C10's.
   shipped coordinator generates 32 bytes via `crypto/rand` (`tokens.go`) — the spec
   now requires that strength rather than merely describing it.
 - Flags: `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000` (30 days),
-  optional `Domain=<MP_SESSION_COOKIE_DOMAIN>`. **Reconciled v0.9 — the `Domain`
+  no `Domain` (v0.11). **[Superseded v0.11]** The v0.9 text below described the
+  pre-v0.11 optional `Domain=<MP_SESSION_COOKIE_DOMAIN>`, kept for history.
+  **Reconciled v0.9 — the `Domain`
   MAY be a parent domain**, not necessarily the exact portal host: the coordinator
   `validateGitHubOAuth` accepts a parent-domain cookie value, so an operator who
   sets `Domain=malibu.tech` scopes the session cookie to **every** sibling
   subdomain (`coordinator.`, `console.`, `get.`, …), widening theft exposure. The
   operator SHOULD scope `Domain` to the exact portal host; the spec cannot force it
   because the shipped validator permits the parent. Carried security residual.
+- **Normative (v0.11): session-id rotation.** OAuth login completion issues a
+  fresh id and revokes any session the browser already carried (current and
+  legacy cookie). A successful `pair_ot` bind, which raises the session's
+  privilege, replaces the session id in one transaction (new id issued, old id
+  deleted); if that rotation fails the old session is deleted and the cookie
+  cleared, so the browser signs in again. The ~24h sliding reissue still keeps
+  the id. **[Superseded v0.11]** The v0.9 residual below is kept for history.
 - **30-day sliding *idle* window with no session-id rotation (reconciled v0.9).**
   The reissue path (`NeedsReissue`, ~24h) updates the session row's `last_seen_at`
   and re-sends the cookie but **keeps the same opaque session id** — it is not
@@ -860,6 +891,10 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   cookie `Domain` may be a parent domain and the session id is never rotated
   (§2.5.3). This is a strictly larger auth surface than paste-bearer mode and is why
   it is opt-in/off-by-default.
+- **[Closed v0.11, #1880]** The session cookie is `__Host-mp_session` with no
+  `Domain` and the legacy name never authenticates (§2.5.3), so a sibling
+  cannot plant a session the coordinator accepts; login and bind rotate the
+  session id. The v0.9 text follows for history.
 - **Session fixation via sibling-domain cookie planting (reconciled v0.9 — carried
   gap, broader than the parent-`Domain` case).** Even when the portal uses the
   recommended host-only cookie, `mp_session` has **no `__Host-` prefix**, so an
@@ -872,6 +907,10 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
   not need that. The future fix is a **`__Host-` prefixed cookie with no `Domain`
   attribute**; until then this is a carried residual and a reason to isolate the
   portal on a domain with no untrusted HTTPS siblings.
+- **[Narrowed v0.11]** OAuth login now revokes the session the browser carried,
+  so repeated re-auth no longer orphans rows, and the earnings-401 relaunch no
+  longer exists. Other devices' sessions still live to their own idle expiry;
+  there is still no "log out all sessions" control.
 - **Logout is not a full revocation boundary (reconciled v0.9 — carried gap).**
   `POST /v1/auth/logout` **attempts to delete only the current cookie's** session id
   (best-effort — it ignores a delete error and always 204s, §2.5.2). But an
@@ -944,7 +983,7 @@ Sidebar items (v0.1, in this order):
 8. Sign out — **mode-dependent (reconciled v0.9)**: paste-bearer mode clears the
    in-memory session and returns to the AUTH-1 prompt; GitHub-OAuth mode also
    `POST`s `/v1/auth/logout` to delete the server-side session row and clear the
-   `mp_session` cookie (§2.5.3), then returns to the §2.5.5 `signin` state.
+   `__Host-mp_session` cookie (§2.5.3), then returns to the §2.5.5 `signin` state.
 
 **Mobile (< 720 px) breakpoint (SPEC-014 normative).** Below
 720 px viewport width, the sidebar MUST collapse behind a
@@ -1045,11 +1084,11 @@ the units SPEC-005 §11.4 emits. The portal MUST NOT invent fiat
 conversions, "withdrawable balance", or USD amounts. SPEC-005
 §1.3 lists fiat as out of scope.
 
-**Mode note (reconciled v0.9).** A.2 is functional in **paste-bearer mode**, which
-holds the FR-P12 provider bearer the earnings route requires. In **GitHub-OAuth
-cookie mode** A.2 does **not** load — the earnings route is not cookie-authorized
-(§2.5.0), so the call 401-loops. A.2 counters are a paste-bearer-mode surface
-until the coordinator earnings read is cookie-authorized with an ownership check.
+**Mode note (v0.11).** A.2 is functional in both modes: paste-bearer mode sends
+the FR-P12 provider bearer (or portal read session), and GitHub-OAuth cookie mode
+sends the `__Host-mp_session` cookie, which the coordinator authorizes with the
+§2.5.0 ownership check. A cookie-mode `401`/`403`/`404` from earnings renders an
+inline error, clears any earnings already shown, and never restarts sign-in.
 
 **A.3 Needs-attention panel.** One row per active issue on THIS
 machine; no machine-count chips (v0.1 is single-machine).
@@ -1538,7 +1577,7 @@ In addition to the §1.2 scope cuts:
 - **No `localStorage` of the provider auth token in v0.1.**
   In-memory only in **paste-bearer mode** — closing the tab discards the session.
   (Reconciled v0.9: **GitHub-OAuth mode deliberately persists** an `HttpOnly`
-  `mp_session` cookie, §2.5.3, which survives a tab close for up to the 30-day
+  `__Host-mp_session` cookie, §2.5.3, which survives a tab close for up to the 30-day
   sliding-idle window; that is the mode's design, not a violation of this
   paste-mode rule. The prohibition is on `localStorage` of the *provider token*,
   which neither mode does.)
@@ -1733,13 +1772,14 @@ Layered, NOT a flat checklist. Six required groups.
       routes to the `signin` state, which renders a "Continue with GitHub" button
       and **waits for a user click** before calling `/v1/auth/github/start` — it
       does NOT auto-redirect to OAuth on the initial unauthenticated load.
-- [ ] Auto-relaunch scope: a `401` on the **earnings data call** or the
-      **`/claim` bind flow** clears the session and re-launches
-      `GET /v1/auth/github/start` (preserving `return_to`) — it does NOT show the
-      paste form and does NOT fall back to bearer. A `401` on the bare **home /
-      `popstate` `me/providers`** call routes to `signin` and **waits for a click**,
-      it does NOT auto-redirect (§2.5.5). (An earnings `401` from the unwired route,
-      §2.5.0, is indistinguishable from a session 401 and auto-relaunches.)
+- [ ] Auto-relaunch scope (v0.11): a `401` on the **`/claim` bind flow** clears
+      the session and re-launches `GET /v1/auth/github/start` (preserving
+      `return_to`) — it does NOT show the paste form and does NOT fall back to
+      bearer. A `401`/`403`/`404` on the **earnings data call** is an inline
+      dashboard error that clears any earnings already shown and never restarts
+      sign-in. A `401` on the bare **home / `popstate` `me/providers`** call
+      routes to `signin` and **waits for a click**, it does NOT auto-redirect
+      (§2.5.5).
 - [ ] `/claim?ot=<pair_ot>` strips `?ot=` from the URL via `history.replaceState`
       before any render, then binds via `POST /v1/auth/me/providers/bind` — with a
       `{"pair_ot": …}` body when already signed in, or a JSON `{}` body (serialized empty object, not a raw-empty body — §2.5.2)
@@ -1749,8 +1789,14 @@ Layered, NOT a flat checklist. Six required groups.
       branch — reconciled v0.9); success redirects to `/`.
 - [ ] `return_to` rejects a value that does not start with `/`, or starts with
       `//` or `/\`, or fails the double-decode check (open-redirect guard).
-- [ ] Coordinator sets the `mp_session` cookie `HttpOnly; Secure; SameSite=Lax;
-      Path=/; Max-Age=2592000`; `POST /v1/auth/logout` clears it (204).
+- [ ] Coordinator sets the `__Host-mp_session` cookie `HttpOnly; Secure;
+      SameSite=Lax; Path=/; Max-Age=2592000` with no `Domain`, even when
+      `MP_SESSION_COOKIE_DOMAIN` is set; `POST /v1/auth/logout` clears it (204).
+      A legacy `mp_session` cookie is refused for authentication and expired.
+- [ ] The session id rotates at OAuth login (prior browser session revoked) and
+      at a successful bind (old id no longer authenticates).
+- [ ] Every `/providers/{id}/earnings` response carries `Cache-Control: private,
+      no-store` and `Vary: Cookie, Authorization`.
 - [ ] OAuth `state` is single-use and origin-bound; a replayed or
       mismatched-origin `state` at `/v1/auth/github/callback` is rejected.
 - [ ] OAuth `state` expires after ~10 minutes (an expired `state` at the
@@ -2151,9 +2197,10 @@ The user shared screenshots from a competitor seller portal
     **`PORTAL_BASE_URL`** (`https://<host>[:<port>]`, no path/query) — **mandatory**,
     the coordinator refuses OAuth startup without it (it builds `claim_url` per
     SPEC-003 FR-C10). **`MP_SESSION_COOKIE_DOMAIN` is OPTIONAL** — when set it must
-    be within the `PORTAL_BASE_URL` host scope; operators SHOULD scope it to the
-    exact portal host (a parent domain widens cookie exposure to sibling
-    subdomains, §2.5.3), but omitting it is valid (defaults to host-only cookie).
+    be within the `PORTAL_BASE_URL` host scope. Since v0.11 it never scopes the
+    `__Host-mp_session` cookie (which is always host-only, §2.5.3); the
+    coordinator uses it only to expire a legacy `mp_session` cookie set at that
+    domain. New deployments should leave it unset.
   - **Origin constraint (reconciled v0.9 — the validator's latitude is not
     operational latitude).** `validateGitHubOAuth` validates `redirect_uri` and
     `PORTAL_BASE_URL` **independently** and accepts any HTTPS host **and any port**,
@@ -2169,12 +2216,12 @@ The user shared screenshots from a competitor seller portal
   - **Ingress query-log redaction:** redact `ot` / `pair_ot` / `code` / `state`
     at the reverse-proxy / CDN layer; coordinator app-log redaction does not cover
     ingress access logs that see `/claim?ot=…` (§2.5.4).
-  - **Known unwired data path:** even with the above, the earnings-sourced surfaces
-    (A.2 / C.1 **and A.5 idle-prewarm**) do not load in OAuth cookie mode until the
-    coordinator earnings read is cookie-authorized with an ownership check (§2.5.0).
-    The **A.1 pool-status header does work** in OAuth mode (public pool-check).
-    Operators enabling OAuth mode today get identity + provider-list + `pair_ot`
-    binding + A.1 status; earnings (A.2/C.1/A.5) stay dark.
+  - **Earnings data path (v0.11):** the earnings-sourced surfaces (A.2 / C.1 **and
+    A.5 idle-prewarm**) load in OAuth cookie mode through the cookie-authorized,
+    ownership-checked earnings read (§2.5.0); the reference nginx earnings location
+    proxies it with `Cache-Control: private, no-store` and `Vary: Cookie,
+    Authorization`. The **A.1 pool-status header** works as before. The MALIBU
+    accrual, wallet, and reward-audit surfaces stay paste-bearer-only.
 
 ---
 

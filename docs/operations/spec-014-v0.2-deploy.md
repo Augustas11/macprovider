@@ -108,13 +108,13 @@ GITHUB_OAUTH_REDIRECT_URI=https://<coordinator-host>/v1/auth/github/callback
 PORTAL_BASE_URL=https://<portal-host>
 ```
 
-Optional cookie scope:
+Legacy cookie cleanup (optional; since SPEC-014 v0.11 the session cookie is `__Host-mp_session` and never carries a `Domain`):
 
 ```bash
 MP_SESSION_COOKIE_DOMAIN=<shared-parent-domain>
 ```
 
-Only set `MP_SESSION_COOKIE_DOMAIN` when the portal and coordinator hosts are intentionally under that domain. The coordinator validates the value against `PORTAL_BASE_URL` and fails closed on mismatch.
+Set `MP_SESSION_COOKIE_DOMAIN` only if an earlier deployment issued the legacy `mp_session` cookie at that domain; the coordinator uses it solely to expire that legacy cookie. The coordinator validates the value against `PORTAL_BASE_URL` and fails closed on mismatch.
 
 ## Step 5: Flip The Flags
 
@@ -227,7 +227,7 @@ Emergency operator sequence:
 
 - Sign-out is scoped to the provider portal session and is not a global GitHub sign-out.
 - The coordinator does not revoke GitHub grants; operators revoke the OAuth app grant from GitHub if needed.
-- The `mp_session` cookie is host-only by default unless `MP_SESSION_COOKIE_DOMAIN` is deliberately configured.
+- The `__Host-mp_session` cookie is always host-only (SPEC-014 v0.11); `MP_SESSION_COOKIE_DOMAIN` is used only to expire a legacy `mp_session` cookie set at that domain.
 - The portal requires a same-origin proxy for `/v1/auth/*` and `/v1/install/pair/refresh` in GitHub mode.
 - Pairing one-time tokens are short-lived and burned on bind; users should refresh with `malibu-cli claim` if a token expires.
 

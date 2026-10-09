@@ -133,7 +133,11 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	session.SetCookie(w, sessionID, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+	// Login rotates the session (SPEC-014 v0.11): any session the browser
+	// already carried, under either cookie name, is revoked.
+	s.revokeRequestSessions(r)
+	s.clearLegacySessionCookie(w, r)
+	session.SetCookie(w, sessionID)
 	http.Redirect(w, r, consumed.ReturnTo, http.StatusFound)
 }
 
@@ -249,7 +253,7 @@ func (s *Server) handleAuthMeProvidersBind(w http.ResponseWriter, r *http.Reques
 	switch {
 	case err == nil:
 	case errors.Is(err, auth.ErrSessionInvalid):
-		session.ClearCookie(w, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+		session.ClearCookie(w)
 		writeAuthError(w, http.StatusUnauthorized, "session_invalid")
 		return
 	case errors.Is(err, auth.ErrPendingPairOTMissing):
@@ -266,6 +270,16 @@ func (s *Server) handleAuthMeProvidersBind(w http.ResponseWriter, r *http.Reques
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
+	// A successful bind raises the session's privilege, so it rotates
+	// (SPEC-014 v0.11). The bind is committed either way; a failed rotation
+	// revokes the old session and the browser signs in again.
+	if newID, err := s.authStore.RotateMPSession(r.Context(), sess.ID, s.now()); err != nil {
+		s.log.Warn().Err(err).Msg("mp_session rotate after bind failed")
+		_ = s.authStore.DeleteMPSession(r.Context(), sess.ID)
+		session.ClearCookie(w)
+	} else {
+		session.SetCookie(w, newID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider_id":  result.ProviderID,
 		"github_login": result.GitHubLogin,
@@ -279,10 +293,9 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if cookie, err := r.Cookie(session.Name); err == nil && cookie.Value != "" && s.authStore != nil {
-		_ = s.authStore.DeleteMPSession(r.Context(), cookie.Value)
-	}
-	session.ClearCookie(w, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+	s.revokeRequestSessions(r)
+	session.ClearCookie(w)
+	s.clearLegacySessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -356,9 +369,11 @@ func (s *Server) authenticateMPSession(w http.ResponseWriter, r *http.Request) (
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")
 		return auth.MPSession{}, false
 	}
+	// The legacy mp_session cookie never authenticates (SPEC-014 v0.11).
+	s.clearLegacySessionCookie(w, r)
 	cookie, err := r.Cookie(session.Name)
 	if err != nil || cookie.Value == "" {
-		session.ClearCookie(w, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+		session.ClearCookie(w)
 		writeAuthError(w, http.StatusUnauthorized, "session_invalid")
 		return auth.MPSession{}, false
 	}
@@ -370,7 +385,7 @@ func (s *Server) authenticateMPSession(w http.ResponseWriter, r *http.Request) (
 		return auth.MPSession{}, false
 	}
 	if !ok {
-		session.ClearCookie(w, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+		session.ClearCookie(w)
 		writeAuthError(w, http.StatusUnauthorized, "session_invalid")
 		return auth.MPSession{}, false
 	}
@@ -381,9 +396,33 @@ func (s *Server) authenticateMPSession(w http.ResponseWriter, r *http.Request) (
 		return auth.MPSession{}, false
 	}
 	if reissue {
-		session.SetCookie(w, sess.ID, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+		session.SetCookie(w, sess.ID)
 	}
 	return sess, true
+}
+
+// revokeRequestSessions deletes the server-side sessions named by the
+// request's current and legacy cookies, best effort.
+func (s *Server) revokeRequestSessions(r *http.Request) {
+	if s.authStore == nil {
+		return
+	}
+	for _, name := range []string{session.Name, session.LegacyName} {
+		if cookie, err := r.Cookie(name); err == nil && cookie.Value != "" {
+			if err := s.authStore.DeleteMPSession(r.Context(), cookie.Value); err != nil {
+				s.log.Warn().Err(err).Msg("mp_session revoke failed")
+			}
+		}
+	}
+}
+
+// clearLegacySessionCookie expires a legacy mp_session cookie the request
+// still carries. The configured cookie domain is used only here, to expire a
+// legacy cookie that was once set with it; the current cookie never has one.
+func (s *Server) clearLegacySessionCookie(w http.ResponseWriter, r *http.Request) {
+	if session.HasLegacyCookie(r) {
+		session.ClearLegacyCookie(w, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
+	}
 }
 
 func (s *Server) providerIDFromBearer(ctx context.Context, r *http.Request) (string, bool, error) {

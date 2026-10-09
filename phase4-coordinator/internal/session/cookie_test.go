@@ -9,9 +9,12 @@ import (
 
 func TestSetCookieHeader_ExactAttributes(t *testing.T) {
 	rr := httptest.NewRecorder()
-	SetCookie(rr, "sess-123", "")
+	SetCookie(rr, "sess-123")
 	got := rr.Header().Get("Set-Cookie")
-	wantParts := []string{"mp_session=sess-123", "HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=2592000"}
+	if !strings.HasPrefix(got, "__Host-mp_session=sess-123;") {
+		t.Fatalf("Set-Cookie %q must use the __Host- prefixed name", got)
+	}
+	wantParts := []string{"__Host-mp_session=sess-123", "HttpOnly", "Secure", "SameSite=Lax", "Path=/", "Max-Age=2592000"}
 	for _, part := range wantParts {
 		if !strings.Contains(got, part) {
 			t.Fatalf("Set-Cookie %q missing %q", got, part)
@@ -34,20 +37,29 @@ func TestSlidingSession_24hCookieReissue(t *testing.T) {
 
 func TestInvalidSession_401_Plus_ClearCookie_LogoutException_204(t *testing.T) {
 	rr := httptest.NewRecorder()
-	ClearCookie(rr, "")
+	ClearCookie(rr)
 	got := rr.Header().Get("Set-Cookie")
-	if !strings.Contains(got, "mp_session=") || !strings.Contains(got, "Max-Age=0") {
-		t.Fatalf("clear cookie header = %q, want mp_session Max-Age=0", got)
+	if !strings.HasPrefix(got, "__Host-mp_session=;") || !strings.Contains(got, "Max-Age=0") {
+		t.Fatalf("clear cookie header = %q, want __Host-mp_session Max-Age=0", got)
+	}
+	if strings.Contains(strings.ToLower(got), "domain=") {
+		t.Fatalf("clear cookie header = %q must omit Domain", got)
 	}
 }
 
-func TestClearCookie_IncludesConfiguredDomain(t *testing.T) {
+func TestClearLegacyCookie_HostOnlyAndConfiguredDomain(t *testing.T) {
 	rr := httptest.NewRecorder()
-	ClearCookie(rr, ".example.com")
-	got := rr.Header().Get("Set-Cookie")
-	for _, part := range []string{"mp_session=", "Path=/", "Max-Age=0", "Domain=.example.com"} {
-		if !strings.Contains(got, part) {
-			t.Fatalf("clear cookie header = %q missing %q", got, part)
+	ClearLegacyCookie(rr, ".example.com")
+	got := rr.Header().Values("Set-Cookie")
+	if len(got) != 2 {
+		t.Fatalf("legacy clear headers = %q, want host-only and domain clears", got)
+	}
+	for _, h := range got {
+		if !strings.HasPrefix(h, "mp_session=;") || !strings.Contains(h, "Max-Age=0") || !strings.Contains(h, "Path=/") {
+			t.Fatalf("legacy clear header = %q", h)
 		}
+	}
+	if strings.Contains(got[0], "Domain=") || !strings.Contains(got[1], "Domain=.example.com") {
+		t.Fatalf("legacy clear headers = %q, want [host-only, Domain=.example.com]", got)
 	}
 }
