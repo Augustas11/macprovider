@@ -62,8 +62,16 @@ unset, `models discover`, `evaluate`, `propose`, `offer` and `serve` ask
 `loopback_origin` (serve only), else `MACPROVIDER_MLXLM_ORIGIN`, else
 `127.0.0.1:8080` and `127.0.0.1:8081` for `GET /v1/models`, and use the one
 local snapshot directory the server lists as its `--model` path. Malibu's
-own serve lists catalog ids there and is never taken for `mlx_lm.server`.
-The detected directory is hashed and bound exactly like a declared one. A
+own serve lists catalog ids there and is never taken for `mlx_lm.server`, and
+`serve` never probes its own port. The listed directory is used only when,
+with symlinks resolved, it is inside the provider model store
+(`~/Library/Application Support/macprovider/models`, or
+`MACPROVIDER_MODEL_ARTIFACT_ROOT`) or is a Hugging Face hub cache snapshot
+(`<hub>/models--*/snapshots/<revision>`); any other directory is refused with
+an error naming it, and you set `MACPROVIDER_MLXLM_MODEL_PATH` to it to serve
+it. A `MACPROVIDER_MLXLM_MODEL_PATH` that is not an absolute path is an error,
+never treated as unset. The detected directory is hashed and bound exactly
+like a declared one. A
 server started with a Hugging Face repo id lists no path and is refused:
 start it with `--model <path written by macprovider-cli models prepare>`.
 

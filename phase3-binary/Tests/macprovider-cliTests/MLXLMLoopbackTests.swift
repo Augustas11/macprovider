@@ -133,10 +133,19 @@ final class MLXLMLoopbackTests: XCTestCase {
         XCTAssertEqual(rejected.adapter.status, "rejected")
     }
 
+    /// Approved roots whose durable model store holds `snapshot`.
+    private func roots(holding snapshot: URL) -> MLXLMLoopbackServeModel.ApprovedSnapshotRoots {
+        MLXLMLoopbackServeModel.ApprovedSnapshotRoots(
+            durableModelRoot: snapshot.deletingLastPathComponent(),
+            hubCacheRoot: URL(fileURLWithPath: "/nonexistent/hub")
+        )
+    }
+
     func testDiscoveryInfersTheRunningMLXLMServerSnapshotWithoutEnv() async throws {
         let snapshot = try makeSnapshot()
         let base = BYOMDiscoveryEnvironment(
-            namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent"), ollamaOrigin: nil
+            namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent"), ollamaOrigin: nil,
+            durableModelRoot: snapshot.deletingLastPathComponent()
         )
         XCTAssertTrue(base.mlxSnapshotLoopbacks.isEmpty)
 
@@ -146,7 +155,7 @@ final class MLXLMLoopbackTests: XCTestCase {
             8080: ["qwen/qwen3.6-35b-a3b"],
             8081: ["mlx-community/Other-4bit", snapshot.path],
         ])
-        let inferred = await base.withInferredMLXLMSnapshot(httpClient: ports)
+        let inferred = try await base.withInferredMLXLMSnapshot(httpClient: ports)
         XCTAssertEqual(inferred.mlxlmOrigin, "http://127.0.0.1:8081")
         XCTAssertEqual(inferred.mlxlmModelPath?.path, snapshot.resolvingSymlinksInPath().standardizedFileURL.path)
         XCTAssertEqual(inferred.mlxSnapshotLoopbacks.count, 1)
@@ -154,39 +163,43 @@ final class MLXLMLoopbackTests: XCTestCase {
         XCTAssertEqual(found.candidates.filter { $0.runtimeSource == "mlxlm_loopback" }.map(\.servedModelRef), ["mlxlm:" + snapshot.lastPathComponent])
 
         // Only repo ids (no --model path), or a serve-only port: nothing inferred.
-        let none = await base.withInferredMLXLMSnapshot(httpClient: MLXLMPortStubClient(listings: [8080: ["qwen/x"], 8081: ["mlx-community/Other-4bit"]]))
+        let none = try await base.withInferredMLXLMSnapshot(httpClient: MLXLMPortStubClient(listings: [8080: ["qwen/x"], 8081: ["mlx-community/Other-4bit"]]))
         XCTAssertNil(none.mlxlmModelPath)
         // An explicit origin is the only one probed.
         var explicit = base
         explicit.mlxlmOrigin = "http://127.0.0.1:9191"
-        let pinned = await explicit.withInferredMLXLMSnapshot(httpClient: ports)
+        let pinned = try await explicit.withInferredMLXLMSnapshot(httpClient: ports)
         XCTAssertNil(pinned.mlxlmModelPath)
         XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: nil), ["http://127.0.0.1:8080", "http://127.0.0.1:8081"])
         XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: "http://127.0.0.1:9191"), ["http://127.0.0.1:9191"])
+        XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: nil, excludingPort: 8080), ["http://127.0.0.1:8081"])
     }
 
     func testServeDetectsTheRunningMLXLMServerSnapshotWhenThePathIsUnset() async throws {
         let snapshot = try makeSnapshot()
+        let approved = roots(holding: snapshot)
         let ports = MLXLMPortStubClient(listings: [
             8080: ["qwen/qwen3.6-35b-a3b"],
             8081: ["mlx-community/Other-4bit", snapshot.path],
         ])
         // No path, no origin: the probe finds mlx_lm.server on 8081, not serve on 8080.
-        let found = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, declaredDirectory: nil, client: ports, environment: [:])
+        let found = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: ports, environment: [:], servePort: 8080, roots: approved)
         XCTAssertEqual(found.origin, "http://127.0.0.1:8081")
         XCTAssertEqual(found.directory?.path, snapshot.resolvingSymlinksInPath().standardizedFileURL.path)
         // A declared directory is used as is, with the configured origin.
-        let declared = URL(fileURLWithPath: "/declared/snapshot")
-        let pinned = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:9191", declaredDirectory: declared, client: ports, environment: [:])
+        let pinned = try await MLXLMLoopbackServeModel.serveTarget(
+            configuredOrigin: "http://127.0.0.1:9191", client: ports,
+            environment: ["MACPROVIDER_MLXLM_MODEL_PATH": "/declared/snapshot"], roots: approved
+        )
         XCTAssertEqual(pinned.origin, "http://127.0.0.1:9191")
-        XCTAssertEqual(pinned.directory, declared)
+        XCTAssertEqual(pinned.directory, URL(fileURLWithPath: "/declared/snapshot", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL)
         // A configured origin is the only one probed.
-        let configured = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:8080", declaredDirectory: nil, client: ports, environment: [:])
+        let configured = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:8080", client: ports, environment: [:], roots: approved)
         XCTAssertNil(configured.directory)
 
         // A repo-id server: nothing detected, and serve refuses with the fix.
         let repoOnly = MLXLMPortStubClient(listings: [8081: ["mlx-community/Other-4bit"]])
-        let none = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, declaredDirectory: nil, client: repoOnly, environment: [:])
+        let none = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: repoOnly, environment: [:], roots: approved)
         XCTAssertNil(none.directory)
         do {
             _ = try await OpenAICompatibleLoopbackRuntime.mlxLM(
@@ -203,6 +216,74 @@ final class MLXLMLoopbackTests: XCTestCase {
         )
         let hash = await runtime.loadedModelHash
         XCTAssertNotNil(hash)
+    }
+
+    /// #1880 audit: an auto-detected directory is a claim by whatever answers
+    /// the loopback port, so only approved roots are accepted, a malformed
+    /// declared path is an error, and serve never probes its own port.
+    func testAutoDetectionRefusesWrongServerOutsideRootSymlinkEscapeAndMalformedPath() async throws {
+        let snapshot = try makeSnapshot()
+        let storeRoot = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-store-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: storeRoot, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: storeRoot) }
+        let approved = MLXLMLoopbackServeModel.ApprovedSnapshotRoots(durableModelRoot: storeRoot, hubCacheRoot: URL(fileURLWithPath: "/nonexistent/hub"))
+
+        // A wrong server lists one real directory outside the approved roots.
+        let wrong = MLXLMPortStubClient(listings: [8081: [snapshot.path]])
+        do {
+            _ = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: wrong, environment: [:], roots: approved)
+            XCTFail("an outside-root directory must not be auto-detected")
+        } catch let error as MLXLMSnapshotSelectionError {
+            guard case .outsideApprovedRoots = error else { return XCTFail("\(error)") }
+            XCTAssertTrue(error.description.contains("MACPROVIDER_MLXLM_MODEL_PATH="))
+        }
+        let base = BYOMDiscoveryEnvironment(
+            namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent/hub"), ollamaOrigin: nil,
+            durableModelRoot: storeRoot
+        )
+        do {
+            _ = try await base.withInferredMLXLMSnapshot(httpClient: wrong)
+            XCTFail("discovery must refuse an outside-root directory")
+        } catch is MLXLMSnapshotSelectionError {}
+
+        // A symlink inside the store that escapes it resolves outside: refused.
+        let link = storeRoot.appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: snapshot)
+        do {
+            _ = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: MLXLMPortStubClient(listings: [8081: [link.path]]), environment: [:], roots: approved)
+            XCTFail("a symlink escaping the store must not be auto-detected")
+        } catch is MLXLMSnapshotSelectionError {}
+
+        // Inside the store (or a hub cache snapshot) it is detected.
+        XCTAssertTrue(roots(holding: snapshot).contains(snapshot))
+        let hub = URL(fileURLWithPath: "/tmp/hub")
+        let hubRoots = MLXLMLoopbackServeModel.ApprovedSnapshotRoots(durableModelRoot: URL(fileURLWithPath: "/nonexistent/store"), hubCacheRoot: hub)
+        XCTAssertFalse(hubRoots.contains(hub.appendingPathComponent("models--org--m")))
+        XCTAssertFalse(hubRoots.contains(hub.appendingPathComponent("models--org--m/blobs/x")))
+
+        // Serve never probes its own port, even for an in-root directory.
+        let selfPort = MLXLMPortStubClient(listings: [8080: [snapshot.path]])
+        let skipped = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: selfPort, environment: [:], servePort: 8080, roots: roots(holding: snapshot))
+        XCTAssertNil(skipped.directory)
+
+        // A present-but-malformed declared path is an error, never "unset".
+        let malformed = ["MACPROVIDER_MLXLM_MODEL_PATH": "relative/dir"]
+        XCTAssertEqual(MLXLMLoopbackServeModel.snapshotPathSetting(environment: malformed), .invalid("relative/dir"))
+        do {
+            _ = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: MLXLMPortStubClient(listings: [8081: [snapshot.path]]), environment: malformed, roots: roots(holding: snapshot))
+            XCTFail("a malformed declared path must not fall back to probing")
+        } catch let error as MLXLMSnapshotSelectionError {
+            XCTAssertEqual(error, .invalidDeclaredPath("relative/dir"))
+        }
+        let production = BYOMDiscoveryEnvironment.production(
+            namespacePath: "/nonexistent/ns", mlxCacheDir: nil, ollamaOrigin: nil, environment: malformed
+        )
+        do {
+            _ = try await production.withLoopbackRuntimeProbes(httpClient: MLXLMPortStubClient(listings: [8081: [snapshot.path]]))
+            XCTFail("discovery must refuse a malformed declared path")
+        } catch let error as MLXLMSnapshotSelectionError {
+            XCTAssertEqual(error, .invalidDeclaredPath("relative/dir"))
+        }
     }
 
     func testPoolUsageGuardAppliesToMLXLM() {

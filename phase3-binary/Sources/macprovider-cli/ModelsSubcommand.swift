@@ -36,7 +36,11 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
         mlx_lm.server is found without configuration: when MACPROVIDER_MLXLM_MODEL_PATH \
         is unset, discovery asks MACPROVIDER_MLXLM_ORIGIN (or 127.0.0.1:8080 and \
         127.0.0.1:8081) for GET /v1/models and binds the one snapshot directory the \
-        server lists as its --model path. Start it with a local snapshot path, e.g. \
+        server lists as its --model path, when that directory (symlinks resolved) is \
+        inside the provider model store or a Hugging Face hub cache snapshot; any \
+        other directory must be named in MACPROVIDER_MLXLM_MODEL_PATH, and a \
+        non-absolute MACPROVIDER_MLXLM_MODEL_PATH is an error. Start it with a local \
+        snapshot path, e.g. \
         `mlx_lm.server --model /path/to/snapshot --host 127.0.0.1 --port 8081`; \
         port 8080 is macprovider-cli serve's own port. serve detects the same \
         server for an mlxlm: model; a server started with a Hugging Face repo id \
@@ -91,7 +95,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             writeStderr("models discover is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -164,7 +168,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -262,7 +266,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             }
             throw ExitCode(2)
         }
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -464,7 +468,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             if let evaluationDigest, evaluationDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
                 throw BYOMModelAdmissionError.invalidEvaluationDigest
             }
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -682,7 +686,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -792,7 +796,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.production(
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
@@ -903,7 +907,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ctlSocketPath: ctlSocketPath
         )
         let currentModelID = await readCurrentModelID(config: modelsConfig)
-        let environment = await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.production(
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,

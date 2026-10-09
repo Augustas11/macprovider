@@ -2821,10 +2821,10 @@ struct ServeCommand: AsyncParsableCommand {
                     // when unset, the one local path a running mlx_lm.server
                     // lists as its --model (as `models discover` finds it);
                     // the CLI hashes it and the listing check still binds it.
-                    let mlxlmTarget = await MLXLMLoopbackServeModel.serveTarget(
+                    let mlxlmTarget = try await MLXLMLoopbackServeModel.serveTarget(
                         configuredOrigin: resolved.loopbackOrigin,
-                        declaredDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
-                        client: LoopbackServeHTTPClient()
+                        client: LoopbackServeHTTPClient(),
+                        servePort: resolved.port
                     )
                     modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
                         servedModelRef: loopbackServedRef,

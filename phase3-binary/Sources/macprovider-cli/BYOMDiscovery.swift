@@ -2425,6 +2425,12 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// adapter has no default and is attempted only when both are set.
     var mlxlmOrigin: String?
     var mlxlmModelPath: URL?
+    /// A malformed MACPROVIDER_MLXLM_MODEL_PATH, reported by the runtime
+    /// probes instead of being read as unset.
+    var mlxlmSelectionError: MLXLMSnapshotSelectionError?
+    /// Where an auto-detected mlx_lm.server snapshot may live; nil derives
+    /// them from `durableModelRoot` and `mlxCacheRoot`.
+    var mlxlmApprovedRoots: MLXLMLoopbackServeModel.ApprovedSnapshotRoots?
     /// LM Studio's `/api/v1/models`, fetched by `withLoopbackRuntimeProbes`;
     /// narrows the LM Studio store's file resolution (see BYOMLMStudioModelStore).
     var lmstudioServedModels: [LMStudioLoopbackServeModel.Model]?
@@ -2539,7 +2545,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
-        BYOMDiscoveryEnvironment(
+        var production = BYOMDiscoveryEnvironment(
             namespaceURL: namespacePath.map(URL.init(fileURLWithPath:)) ?? defaultNamespaceURL(homeDirectory: homeDirectory),
             mlxCacheRoot: mlxCacheDir.map(URL.init(fileURLWithPath:)) ?? defaultMLXCacheRoot(environment: environment, homeDirectory: homeDirectory),
             ollamaOrigin: ollamaOrigin,
@@ -2558,29 +2564,46 @@ struct BYOMDiscoveryEnvironment: Sendable {
             // An explicit --mlx-cache-dir pins the one MLX root inspected.
             durableModelRoot: mlxCacheDir == nil ? defaultDurableModelRoot(environment: environment, homeDirectory: homeDirectory) : nil
         )
+        if case .invalid(let path) = MLXLMLoopbackServeModel.snapshotPathSetting(environment: environment) {
+            production.mlxlmSelectionError = .invalidDeclaredPath(path)
+        }
+        production.mlxlmApprovedRoots = MLXLMLoopbackServeModel.ApprovedSnapshotRoots.default(environment: environment, homeDirectory: homeDirectory)
+        return production
     }
 
     /// When MACPROVIDER_MLXLM_MODEL_PATH is unset, finds a running
     /// mlx_lm.server on its probe origins and binds the adapter to the
-    /// snapshot directory that server reports loading. Explicit settings win.
-    func withInferredMLXLMSnapshot(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async -> BYOMDiscoveryEnvironment {
+    /// snapshot directory that server reports loading, when that directory
+    /// is inside the approved roots. Explicit settings win; a malformed
+    /// declared path or a detected directory outside the roots throws.
+    func withInferredMLXLMSnapshot(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
+        if let mlxlmSelectionError { throw mlxlmSelectionError }
         guard mlxlmModelPath == nil else { return self }
+        let roots = mlxlmApprovedRoots ?? MLXLMLoopbackServeModel.ApprovedSnapshotRoots(
+            durableModelRoot: durableModelRoot ?? Self.defaultDurableModelRoot(),
+            hubCacheRoot: mlxCacheRoot
+        )
         for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin) {
-            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin),
-                  let directory = await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL)
-            else { continue }
-            var copy = self
-            copy.mlxlmOrigin = origin
-            copy.mlxlmModelPath = directory
-            return copy
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else { continue }
+            switch await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL, roots: roots) {
+            case .none:
+                continue
+            case .found(let directory):
+                var copy = self
+                copy.mlxlmOrigin = origin
+                copy.mlxlmModelPath = directory
+                return copy
+            case .outsideApprovedRoots(let directory):
+                throw MLXLMSnapshotSelectionError.outsideApprovedRoots(origin: origin, directory: directory.path)
+            }
         }
         return self
     }
 
     /// The read-only runtime probes the BYOM commands run before resolving
     /// candidates: mlx_lm.server inference and LM Studio's model list.
-    func withLoopbackRuntimeProbes(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async -> BYOMDiscoveryEnvironment {
-        var copy = await withInferredMLXLMSnapshot(httpClient: httpClient)
+    func withLoopbackRuntimeProbes(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
+        var copy = try await withInferredMLXLMSnapshot(httpClient: httpClient)
         if copy.lmstudioServedModels == nil, let origin = lmstudioOrigin,
            let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) {
             copy.lmstudioServedModels = await LMStudioLoopbackServeModel.fetchModels(httpClient, origin: baseURL)
