@@ -19,6 +19,10 @@
 #   4 signed_byte_verification  checksums, pearl-release.json signature,
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
 #                           verify-malibu-release-artifacts.sh
+#   4b privacy_release_identity  copy the verified candidate pearl-release.json + .sig to
+#                           Pearl's privacy_class.release_code_identities.metadata_dir as
+#                           v<ver>.json/.sig (hot: re-read every ~60 s, no restart); refuses
+#                           with the one-time setup when Pearl has no metadata_dir
 #   5 pearl_accepted_ids    add the candidate compatibility_set_id, keep target_id
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
@@ -40,6 +44,9 @@
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, INSTALL_SH_URL,
 # PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
+# Pearl paths default to the production layout: PEARL_COORDINATOR_CONFIG,
+# PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_COORDINATOR_METRICS_URL,
+# PEARL_RELEASE_IDENTITY_OWNER, PEARL_RELEASE_IDENTITY_GROUP.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +62,78 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 TRAIN_DOC="docs/releases/cli-release-train.md"
 VERIFY_DOC="docs/runbooks/provider-cli-release-verification.md"
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
+PRIVACY_DOC="docs/runbooks/privacy-class-beta-operations.md"
+
+PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
+PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
+PEARL_COORDINATOR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+PEARL_RELEASE_IDENTITY_OWNER="${PEARL_RELEASE_IDENTITY_OWNER:-root}"
+PEARL_RELEASE_IDENTITY_GROUP="${PEARL_RELEASE_IDENTITY_GROUP:-macprovider}"
+
+# registrations_remote ARGS...: run lib/release-registrations.py on Pearl
+# (the script travels on stdin). Every argument must be shell-safe.
+registrations_remote() {
+  local a
+  for a in "$@"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl registrations helper: $a"
+  done
+  pearl_ssh "python3 - $*" < "$OPS_LIB_DIR/release-registrations.py"
+}
+
+# The one-time Pearl setup that turns on hot release-derived approval
+# ($PRIVACY_DOC "Approved code identities").
+privacy_setup_text() {
+  printf '%s\n' \
+"# ONE-TIME, operator-owned ($PRIVACY_DOC 'Approved code identities'):
+# on Pearl, under both locks, in place in $PEARL_COORDINATOR_CONFIG (privacy_class):
+#   release_code_identities:
+#     metadata_dir: /opt/macprovider/privacy-release-identities
+#     public_key_path: /usr/local/share/macprovider/release-signing-public.pem
+# install -d -o root -g macprovider -m 0750 /opt/macprovider/privacy-release-identities
+# then restart the coordinator (the key is read at startup) and re-run status."
+}
+
+# candidate_release_bytes V -> 'PRJ<TAB>SIG' of the verified candidate, or nothing.
+candidate_release_bytes() {
+  local dir prj sig
+  dir="$(marker_field "cli-release-$1" signed_byte_verification 'd.get("bytes_dir")')"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  prj="$(find "$dir" -type f -name pearl-release.json | head -n1)"
+  sig="$(find "$dir" -type f -name pearl-release.json.sig | head -n1)"
+  [ -n "$prj" ] && [ -n "$sig" ] && printf '%s\t%s\n' "$prj" "$sig"
+}
+
+# load_registrations V COMPAT_ID: read Pearl's registration state (read-only)
+# into REG_STATE (unknown|unconfigured|missing|present|mismatch|staged),
+# REG_DIR, REG_BY, REG_MISSING and REG_ERR.
+load_registrations() {
+  local V="$1" compat="$2" bytes prj="" sig=""
+  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""
+  if [ -z "${PEARL_SSH:-}" ]; then
+    REG_ERR="PEARL_SSH is unset"
+  elif ! registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" \
+    "$PEARL_COORDINATOR_UNIT" "$V" > "$OPS_TMP_DIR/reg-facts.json" 2> "$OPS_TMP_DIR/reg-facts.err"; then
+    REG_ERR="Pearl coordinator config unreadable: $(tail -n1 "$OPS_TMP_DIR/reg-facts.err")"
+  else
+    bytes="$(candidate_release_bytes "$V")"
+    if [ -n "$bytes" ]; then prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"; fi
+    if python3 "$OPS_LIB_DIR/release-registrations.py" evaluate "$OPS_TMP_DIR/reg-facts.json" "$V" \
+      "${compat:-}" "${prj:-}" "${sig:-}" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
+      REG_DIR="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
+      REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
+      REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
+      REG_MISSING="$(json_field "$OPS_TMP_DIR/reg-verdict.json" '"; ".join(d["missing"])')"
+    else
+      REG_ERR="registration evaluation failed: $(tail -n1 "$OPS_TMP_DIR/reg-verdict.err")"
+    fi
+  fi
+  if [ "$REG_STATE" = unknown ]; then
+    fact privacy_release_metadata_dir "unknown: $REG_ERR"
+  else
+    fact privacy_release_metadata_dir "${REG_DIR:-unset}"
+  fi
+  fact privacy_release_identity "$REG_STATE"
+}
 
 # checked_in_recommendation REV -> the one latest_binary_version shared by the
 # three coordinator configs at REV, or "MISMATCH"/"" (release-staged-version-policy.sh rules).
@@ -249,6 +328,37 @@ bash scripts/release-staged-version-policy.sh v$V" \
 
   local compat_id
   compat_id="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+
+  # 4b. privacy release identity: the hot SPEC-049-R027 registration of the
+  # candidate's code identity. Read live every time; never a local marker.
+  load_registrations "$V" "$compat_id"
+  if [ "$REG_STATE" = staged ] || { [ "$published" = true ] && [ "$REG_STATE" = present ]; }; then
+    step privacy_release_identity "done" "v$V.json in $REG_DIR"
+  else
+    step privacy_release_identity pending "$REG_STATE"
+    case "$REG_STATE" in
+      unknown)
+        set_next privacy_release_identity blocked "Read Pearl's privacy release identity registration" "" "$REG_ERR" ;;
+      unconfigured)
+        set_next privacy_release_identity blocked "One-time: configure privacy_class.release_code_identities on Pearl" \
+          "$(privacy_setup_text)" \
+          "Pearl has no privacy_class.release_code_identities.metadata_dir; v$V's code identity cannot be registered without a config edit until this one-time setup is done"
+        next_meta privacy_release_identity "$PRIVACY_DOC#approved-code-identities" "coordinator restart: a few seconds of buyer outage" ;;
+      mismatch)
+        set_next privacy_release_identity blocked "Resolve the conflicting v$V.json in $REG_DIR" "" \
+          "$REG_DIR/v$V.json exists with bytes that differ from the verified candidate; refusing to replace a signed release identity" ;;
+      *)
+        if [ -z "$(candidate_release_bytes "$V")" ]; then
+          set_next privacy_release_identity blocked "Register v$V's privacy code identity on Pearl" "" \
+            "no verified candidate pearl-release.json for v$V is recorded; run the signed_byte_verification step"
+        else
+          set_next privacy_release_identity mutate "Stage v$V's signed pearl-release.json in Pearl's privacy release metadata dir" \
+            "scripts/ops/cli-release.sh _stage-privacy-identity $V"
+          next_meta privacy_release_identity "$PRIVACY_DOC#approved-code-identities" \
+            "none: two signed files added to $REG_DIR; the coordinator re-reads it within one challenge interval (~60 s), no restart"
+        fi ;;
+    esac
+  fi
 
   # 5. Pearl accepted_ids (keep target).
   if [ "$published" = true ] || marker_done "$OPS_SCOPE" pearl_accepted_ids; then
@@ -617,9 +727,43 @@ PY
   log "verified: checksums.txt sha256=$cs compatibility_set_id=$compat_id"
 }
 
+# _stage-privacy-identity VERSION
+# Copy the verified candidate pearl-release.json and its signature, byte for
+# byte, into Pearl's privacy release metadata dir as v<ver>.json/.sig, then
+# read them back. The coordinator verifies the signature again before it
+# approves anything, so this adds no trust; it removes the config edit.
+stage_privacy_identity() {
+  local V="$1" bytes prj sig dir out
+  is_semver "$V" || die "usage: _stage-privacy-identity VERSION"
+  require_pearl_ssh
+  bytes="$(candidate_release_bytes "$V")"
+  [ -n "$bytes" ] || refuse "no verified candidate pearl-release.json for v$V; run the signed_byte_verification step"
+  prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"
+  openssl dgst -sha256 -verify "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
+    -signature "$sig" "$prj" >/dev/null || refuse "candidate pearl-release.json signature does not verify"
+  [ "$(json_field "$prj" 'd["provider_code_identity"]["binary_version"]')" = "$V" ] ||
+    refuse "candidate pearl-release.json provider_code_identity does not name $V"
+  registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" "$V" \
+    > "$OPS_TMP_DIR/reg-facts.json" || refuse "Pearl coordinator config unreadable"
+  dir="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
+  [ -n "$dir" ] || { privacy_setup_text >&2; refuse "Pearl has no privacy_class.release_code_identities.metadata_dir; do the one-time setup above first"; }
+  [[ "$dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "unexpected metadata_dir path: $dir"
+  out="$(registrations_remote stage "$dir" "$V" "$PEARL_RELEASE_IDENTITY_OWNER" "$PEARL_RELEASE_IDENTITY_GROUP" \
+    "$(base64 < "$prj" | tr -d '\n')" "$(base64 < "$sig" | tr -d '\n')")" || refuse "staging v$V.json on Pearl failed"
+  python3 - "$out" "$prj" "$sig" "$V" <<'PY' || refuse "Pearl read-back does not match the candidate bytes"
+import hashlib, json, sys
+out, prj, sig, v = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+want = {"v%s.json" % v: hashlib.sha256(open(prj, "rb").read()).hexdigest(),
+        "v%s.json.sig" % v: hashlib.sha256(open(sig, "rb").read()).hexdigest()}
+sys.exit(0 if out == want else 1)
+PY
+  log "staged v$V.json and v$V.json.sig in $dir on Pearl; the coordinator approves them within one challenge interval"
+}
+
 internal() {
   case "$1" in
     _verify-candidate) shift; verify_candidate "$@" ;;
+    _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

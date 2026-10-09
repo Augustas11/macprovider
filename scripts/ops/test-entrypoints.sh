@@ -55,7 +55,13 @@ cp -R "$OPS_SRC" "$W/scripts/ops"
 find "$W/scripts/ops" -name '__pycache__' -prune -exec rm -rf {} +
 printf '\n| Carry-forward CF-OPS-TEST | %s carry-forward of the unchanged decode qualification |\n' "$CAND" \
   >> "$W/docs/releases/cli-release-train.md"
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md
+# A throwaway release signing key stands in for the pinned one.
+mkdir -p "$tmp/keys"
+openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/keys/release.key" 2>/dev/null
+openssl ec -in "$tmp/keys/release.key" -pubout -out "$tmp/keys/release.pem" 2>/dev/null
+cp "$tmp/keys/release.pem" "$W/ops/pearl-updater/release-signing-public.pem"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md \
+  ops/pearl-updater/release-signing-public.pem
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
 printf 'package main\n' > "$W/phase4-coordinator/opsprobe.go"
@@ -68,10 +74,15 @@ B="$(git -C "$W" rev-parse HEAD)"
 # ---- stubs and services -------------------------------------------------------
 mkdir -p "$tmp/bin" "$tmp/gh" "$tmp/svc"
 printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$OPS_SRC/tests/gh_stub.py" > "$tmp/bin/gh"
-# ssh stub: run the remote command locally (it only curls the loopback fake).
+# ssh stub: run the remote command locally (it only curls the loopback fake
+# or reads the fake Pearl files under $tmp/pearl).
 # shellcheck disable=SC2016  # the stub's own "$@" must stay literal
 printf '#!/usr/bin/env bash\nexec bash -c "${@: -1}"\n' > "$tmp/bin/ssh"
-chmod +x "$tmp/bin/gh" "$tmp/bin/ssh"
+# Pearl's systemctl/journalctl: the coordinator started "now"; the journal is a file.
+# shellcheck disable=SC2016  # the fake's own "$1 $3" must stay literal
+printf '#!/usr/bin/env bash\n[ "$1 $3" = "show ExecMainStartTimestamp" ] || exit 1\ndate -u "+%%a %%Y-%%m-%%d %%H:%%M:%%S UTC"\n' > "$tmp/bin/systemctl"
+printf '#!/usr/bin/env bash\ncat %q 2>/dev/null || true\n' "$tmp/svc/journal.txt" > "$tmp/bin/journalctl"
+chmod +x "$tmp/bin/gh" "$tmp/bin/ssh" "$tmp/bin/systemctl" "$tmp/bin/journalctl"
 python3 "$OPS_SRC/tests/fake_services.py" "$tmp/svc" &
 server_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/svc/port" ] && break; sleep 0.3; done
@@ -86,6 +97,9 @@ export MACPROVIDER_OPS_STATE_DIR="$tmp/state"
 export COORDINATOR_URL="http://127.0.0.1:$PORT" GATEWAY_URL="http://127.0.0.1:$PORT"
 export STUDIO_SSH=fake-canary STUDIO_STATUS_PORT="$PORT" PEARL_SSH=fake-pearl
 export PROOF_POLL_SECONDS=0
+export PEARL_COORDINATOR_CONFIG="$tmp/pearl/coordinator.yaml" PEARL_COORDINATOR_OVERLAY="$tmp/pearl/overlay.yaml"
+PEARL_RELEASE_IDENTITY_OWNER="$(id -un)" PEARL_RELEASE_IDENTITY_GROUP="$(id -gn)"
+export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINATOR_METRICS_URL="http://127.0.0.1:$PORT/metrics"
 unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
@@ -104,6 +118,7 @@ expect_next() {
   got="$(next_field id):$(next_field kind)"
   if [ "$got" = "$want" ]; then ok; else bad "next: want $want got $got ($(next_field reason))"; fi
 }
+state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 expect_err() { if grep -q -- "$1" "$tmp/err"; then ok; else bad "stderr lacks '$1'"; sed 's/^/    /' "$tmp/err" | tail -n 3; fi; }
 
 # ==== pearl-runtime ===========================================================
@@ -162,9 +177,48 @@ fixture '{"latest_stable": "v'"$LIVE"'",
   "logs": {"333": "nothing relevant here"}}'
 SCOPE="$tmp/state/cli-release-$CAND"
 mkdir -p "$SCOPE"
-printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s"}\n' \
-  "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" > "$SCOPE/signed_byte_verification.json"
+# Verified candidate bytes: a signed pearl-release.json naming the candidate code identity.
+CDHASH="$(printf 'cd%.0s' $(seq 20))"
+mkdir -p "$tmp/bytes" "$tmp/pearl"
+printf '{"schema_version":1,"tag":"v%s","provider_advertised_version":"%s","provider_code_identity":{"asset":"macprovider-cli-v%s-darwin-arm64.tar.gz","member":"macprovider-cli","binary_version":"%s","binary_sha256":"%s","team_id":"ABCDE12345","signing_identifier":"live.malibu.provider.cli","slices":[{"arch":"arm64","code_cdhash":"%s"}]}}\n' \
+  "$CAND" "$CAND" "$CAND" "$CAND" "$(printf 'ef%.0s' $(seq 32))" "$CDHASH" > "$tmp/bytes/pearl-release.json"
+openssl dgst -sha256 -sign "$tmp/keys/release.key" -out "$tmp/bytes/pearl-release.json.sig" "$tmp/bytes/pearl-release.json"
+printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v'"$CAND"'@%s","bytes_dir":"%s"}\n' \
+  "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" "$tmp/bytes" > "$SCOPE/signed_byte_verification.json"
 printf '{"step":"pearl_accepted_ids","evidence":"test"}\n' > "$SCOPE/pearl_accepted_ids.json"
+# Fake Pearl config: compatibility in the base file, privacy_class in the overlay.
+pearl_config() {  # pearl_config ACCEPTED_IDS_YAML_LIST METADATA_DIR_OR_EMPTY [APPROVED_CDHASH]
+  printf 'coordinator:\n  compatibility_set:\n    target_id: test/repo:v%s@old\n    accepted_ids: %s\n' "$LIVE" "$1" > "$tmp/pearl/coordinator.yaml"
+  {
+    printf 'privacy_class:\n  enabled: true\n'
+    [ -z "$2" ] || printf '  release_code_identities:\n    metadata_dir: %s\n    public_key_path: %s\n' "$2" "$tmp/keys/release.pem"
+    [ -z "${3:-}" ] || printf '  approved_code_identities:\n  - team_id: ABCDE12345\n    signing_identifier: live.malibu.provider.cli\n    code_cdhash: %s\n    binary_version: "%s"\n' "$3" "$CAND"
+  } > "$tmp/pearl/overlay.yaml"
+}
+COMPAT="test/repo:v$CAND@$B"
+META="$tmp/pearl/privacy-release-identities"
+pearl_config "[\"$COMPAT\"]" ""
+run_rc 0 "cli status without a Pearl metadata_dir" scripts/ops/cli-release.sh status
+expect_next privacy_release_identity:blocked
+case "$(next_field command)" in *"metadata_dir: /opt/macprovider/privacy-release-identities"*) ok ;; *) bad "no one-time setup in: $(next_field command)" ;; esac
+fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
+if [ "$(fact_of privacy_release_metadata_dir)" = "unset" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
+run_rc 3 "privacy step refuses without a metadata_dir" scripts/ops/cli-release.sh _stage-privacy-identity "$CAND"
+expect_err "one-time setup"
+pearl_config "[\"$COMPAT\"]" "$META"
+run_rc 0 "cli status with an empty metadata dir" scripts/ops/cli-release.sh status
+expect_next privacy_release_identity:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "privacy step stages the candidate identity" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if cmp -s "$META/v$CAND.json" "$tmp/bytes/pearl-release.json" && cmp -s "$META/v$CAND.json.sig" "$tmp/bytes/pearl-release.json.sig"; then ok; else bad "staged files differ from the candidate bytes"; fi
+run_rc 0 "cli status after staging" scripts/ops/cli-release.sh status
+if [ "$(state_of privacy_release_identity)" = "done" ]; then ok; else bad "staged file not detected as done"; fi
+if [ "$(fact_of privacy_release_metadata_dir)" = "$META" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
+step_ids() { python3 -c 'import json,sys; print(" ".join(s["id"] for s in json.load(open(sys.argv[1]))["steps"]))' "$tmp/out"; }
+case " $(step_ids) " in
+  *" signed_byte_verification privacy_release_identity pearl_accepted_ids "*) ok ;;
+  *) bad "privacy_release_identity is not right after signed_byte_verification: $(step_ids)" ;;
+esac
 status_doc() {
   local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}"
   printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s"},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
@@ -238,7 +292,6 @@ run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh statu
 expect_next env_approval:manual
 
 # ==== catalog-activate gateway proof ==========================================
-state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
