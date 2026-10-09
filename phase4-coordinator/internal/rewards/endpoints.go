@@ -10,6 +10,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/rs/zerolog"
 )
 
 type tokenValidator interface {
@@ -26,6 +27,7 @@ type AccrualHandlerDeps struct {
 	Connectivity          ProviderConnectivity
 	HardwareEvidence      autotune.EvidenceStore
 	HardwareEvidenceTTL   time.Duration
+	Logger                zerolog.Logger
 }
 
 // NewAccrualHandler serves GET /v1/provider/malibu-accrual.
@@ -68,6 +70,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
 		})
 		if err != nil {
+			deps.Logger.Warn().Err(err).Str("provider_id", providerID).Msg("malibu accrual projection failed")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
