@@ -113,7 +113,7 @@ def tuple_input() -> dict:
     for key, item in list(entry.items()):
         if item == "0" * 64:
             entry[key] = marker
-    entry["runtime_revision"] = "905170fa017cef0e7ccc4483eb0bba59a77592d0"
+    entry["runtime_revision"] = "5203b732c451344aef936958ef3f765480cf6a9a"
     entry["ordinary_baseline"]["runtime_revision"] = entry["runtime_revision"]
     entry["benchmark_policy_sha256"] = sha256((R015_EVIDENCE / "policy.json").read_bytes())
     analysis = sha256((R015_EVIDENCE / "analysis.json").read_bytes())

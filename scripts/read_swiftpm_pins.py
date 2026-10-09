@@ -21,12 +21,12 @@ EXPECTED_LOCATIONS = {
 }
 
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.4 on upstream mlx-swift-lm 3.32.3.
-SPEC048_MLX_SWIFT_LM_REVISION = "905170fa017cef0e7ccc4483eb0bba59a77592d0"
+# Fork tag 3.32.3-macprovider.5 on upstream mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_REVISION = "5203b732c451344aef936958ef3f765480cf6a9a"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-# Fork tag 0.32.3-macprovider.1: upstream mlx-swift 0.32.3 with the MLX core
+# Fork tag 0.32.3-macprovider.2: upstream mlx-swift 0.32.3 with the MLX core
 # submodule on the batch-invariant small-M quantized matmul fork.
-SPEC048_MLX_SWIFT_REVISION = "d073a644c559318d93e267ed2a53baf434787a41"
+SPEC048_MLX_SWIFT_REVISION = "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
 
 # Each reviewed fork is accepted only at its exact revision with no version.
 REVIEWED_FORK_PINS = {
