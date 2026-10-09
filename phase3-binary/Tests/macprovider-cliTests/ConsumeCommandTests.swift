@@ -1415,7 +1415,7 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
     }
 
-    func testPhase3BExpiredTrustedPricingIsDemotedAtAdmissionTime() throws {
+    func testPhase3BOldTrustedPricingStaysAvailableWithAdvisoryWarningAtAdmissionTime() throws {
         let token = try ConsumeLocalToken.generate()
         let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
         let budget = ConsumeBudgetConfig(
@@ -1429,7 +1429,7 @@ final class ConsumeCommandTests: XCTestCase {
             token: token,
             budget: budget,
             trustedPricing: trustedPricing,
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-01T00:00:01Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-10-09T00:00:00Z")! }
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1440,13 +1440,14 @@ final class ConsumeCommandTests: XCTestCase {
             body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
         )
 
-        XCTAssertEqual(response.status, .serviceUnavailable)
-        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
-        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
-        XCTAssertEqual(runtime.statusPayload()["pricing_trust_state"] as? String, "unavailable")
+        XCTAssertEqual(response.status, .unauthorized)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_credential_missing")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget,stale_pricing")
+        XCTAssertEqual(runtime.statusPayload()["pricing_trust_state"] as? String, "trusted")
+        XCTAssertEqual(runtime.statusPayload()["pricing_warning_codes"] as? [String], ["stale_pricing"])
     }
 
-    func testPhase3BExpiredTrustedPricingStaysUnavailableAfterClockRollback() throws {
+    func testPhase3BOldTrustedPricingStillFailsClosedAfterClockRollbackPastFutureSkew() throws {
         let token = try ConsumeLocalToken.generate()
         let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
         let budget = ConsumeBudgetConfig(
@@ -1466,20 +1467,21 @@ final class ConsumeCommandTests: XCTestCase {
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
 
-        let expiredResponse = try response(
+        let oldResponse = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
             body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
         )
-        clock.now = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")!
+        clock.now = ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-31T23:49:59Z")!
         let rolledBackResponse = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
             body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
         )
 
-        XCTAssertEqual(expiredResponse.status, .serviceUnavailable)
-        XCTAssertEqual(try localError(from: expiredResponse.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(oldResponse.status, .unauthorized)
+        XCTAssertEqual(try localError(from: oldResponse.body)["code"] as? String, "local_credential_missing")
+        XCTAssertEqual(oldResponse.headers.first(name: "x-macprovider-warning"), "no_budget,stale_pricing")
         XCTAssertEqual(rolledBackResponse.status, .serviceUnavailable)
         XCTAssertEqual(try localError(from: rolledBackResponse.body)["code"] as? String, "local_pricing_unavailable")
         XCTAssertEqual(runtime.statusPayload()["pricing_trust_state"] as? String, "unavailable")
@@ -1518,11 +1520,8 @@ final class ConsumeCommandTests: XCTestCase {
 
     func testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings() throws {
         let token = try ConsumeLocalToken.generate()
-        // Use a RELATIVE generated-at inside the stale-but-not-expired window
-        // (staleAge 14d ≤ age ≤ maxAge 30d) so this test stays trusted+stale
-        // rather than silently expiring on a fixed calendar date: a hard-coded
-        // 2026-08-01 crossed the 30-day maxAge on 2026-08-31 and read
-        // "unavailable"/expired with no stale_pricing warning.
+        // Use a RELATIVE generated-at beyond the stale threshold so this
+        // status test stays trusted+stale without depending on a fixed date.
         let staleButValidGeneratedAt = ISO8601DateFormatter()
             .string(from: Date().addingTimeInterval(-21 * 24 * 3600))
         var trustedRateCard = phase3BTrustedRateCard(generatedAt: staleButValidGeneratedAt)

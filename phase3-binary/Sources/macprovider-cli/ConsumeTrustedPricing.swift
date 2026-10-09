@@ -106,9 +106,6 @@ struct ConsumeTrustedRateCard: Equatable, Sendable {
         guard generatedAt <= current.addingTimeInterval(ConsumeTrustedPricingLoader.maxFutureSkew) else {
             return .unavailable(reason: .futureSkew)
         }
-        guard current.timeIntervalSince(generatedAt) <= ConsumeTrustedPricingLoader.maxAge else {
-            return .unavailable(reason: .expired)
-        }
         let currentlyStale = current.timeIntervalSince(generatedAt) >= ConsumeTrustedPricingLoader.staleAge
         guard currentlyStale != stale else {
             return .available(self)
@@ -143,7 +140,6 @@ struct ConsumeTrustedPricingLoader: Sendable {
     static let maxResponseHeaderCount = 64
     static let maxFutureSkew: TimeInterval = 10 * 60
     static let staleAge: TimeInterval = 14 * 24 * 3600
-    static let maxAge: TimeInterval = 30 * 24 * 3600
 
     var resolveEndpoint: @Sendable (String) async throws -> String
     var fetch: @Sendable (URL, String) async throws -> Data
@@ -231,9 +227,6 @@ struct ConsumeTrustedPricingLoader: Sendable {
         let current = now()
         guard projection.generatedAt <= current.addingTimeInterval(Self.maxFutureSkew) else {
             throw ConsumeTrustedPricingError(.futureSkew)
-        }
-        guard current.timeIntervalSince(projection.generatedAt) <= Self.maxAge else {
-            throw ConsumeTrustedPricingError(.expired)
         }
         return ConsumeTrustedRateCard(
             version: projection.version,

@@ -63,15 +63,27 @@ final class ConsumeTrustedPricingTests: XCTestCase {
         XCTAssertEqual(try verifyFailure(loader, body: fixture.body, sidecar: fixture.sidecar), .invalidRateCard)
     }
 
-    func testFreshnessBoundariesFailClosedOrWarnWhenStale() throws {
+    func testSignedRateCardAgeWarnsForeverAfterStaleThreshold() throws {
         let fresh = try SignedRateCardFixture(generatedAt: "2026-08-01T00:00:00Z")
         let staleLoader = fresh.loader(now: "2026-08-20T00:00:00Z")
         let stale = try staleLoader.verify(rateCardBytes: fresh.body, sidecarBytes: fresh.sidecar)
         XCTAssertTrue(stale.stale)
         XCTAssertEqual(stale.statusWarningCodes, ["stale_pricing"])
 
-        let expiredLoader = fresh.loader(now: "2026-09-01T00:00:01Z")
-        XCTAssertEqual(try verifyFailure(expiredLoader, body: fresh.body, sidecar: fresh.sidecar), .expired)
+        let oldLoader = fresh.loader(now: "2026-10-09T00:00:00Z")
+        let old = try oldLoader.verify(rateCardBytes: fresh.body, sidecarBytes: fresh.sidecar)
+        XCTAssertTrue(old.stale)
+        XCTAssertEqual(old.statusWarningCodes, ["stale_pricing"])
+        XCTAssertEqual(old.match(model: "llama-test")?.source, .exact)
+
+        let revalidated = ConsumeTrustedPricingState.available(stale).revalidated(
+            now: SignedRateCardFixture.date("2026-10-09T00:00:00Z")
+        )
+        XCTAssertEqual(revalidated, .available(old))
+    }
+
+    func testFreshnessNegativeBoundariesStillFailClosed() throws {
+        let fresh = try SignedRateCardFixture(generatedAt: "2026-08-01T00:00:00Z")
 
         let future = try SignedRateCardFixture(generatedAt: "2026-08-01T00:11:00Z")
         let futureLoader = future.loader(now: "2026-08-01T00:00:00Z")
