@@ -2973,8 +2973,6 @@ struct ProviderReleasePayloadTransaction {
             "demand-rank.json.sig",
             "rate-card.json",
             "rate-card.json.sig",
-            "continuous-batching-policy.json",
-            "continuous-batching-policy.json.sig",
         ] {
             let requiredURL = catalogDirectory.appendingPathComponent(requiredName)
             let values = try requiredURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
