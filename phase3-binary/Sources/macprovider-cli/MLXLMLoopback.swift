@@ -450,7 +450,8 @@ extension BYOMModelAdmissionRuntime {
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: [snapshot.algorithm: snapshot.digest]
+            artifactHashes: [snapshot.algorithm: snapshot.digest],
+            requestedPoolModelID: requestedPoolModelID
         )
         guard snapshot.isCurrent(),
               (try? await kind.listedModelName(httpClient, origin: baseURL, directory: snapshot.directory)) != nil

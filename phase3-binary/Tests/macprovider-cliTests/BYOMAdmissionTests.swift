@@ -64,6 +64,52 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertTrue(identity.publicKey.isValidSignature(signature, for: Data(canonical.utf8)))
     }
 
+    func testRequestedPoolModelIDIsSignedOnlyWhenConfigured() throws {
+        let identity = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("a"),
+            servedModelRef: "ollama:qwen3-8b",
+            catalogModelKey: "qwen3-8b"
+        )
+        func package(_ requested: String?) throws -> BYOMOfferSubmissionPackage {
+            try BYOMOfferSubmissionBuilder.makePackage(
+                providerID: "provider-byom-a", candidate: candidate, admissionIdentity: identity,
+                evaluationDigestSHA256: String(repeating: "b", count: 64), requestedDisclosureClass: "non_earning_provider_asserted",
+                requestedPoolModelID: requested,
+                now: Date(timeIntervalSince1970: 1_800_000_000), nonce: "nonce_test", idempotencyKey: "request_test", cliVersion: "test"
+            )
+        }
+        let pool = "pool/AAAAAAAAAAAAAAAAAAAAAA/my-model"
+        let plain = try package(nil)
+        let empty = try package("  ")
+        let named = try package(pool)
+        let plainCanonical = try RFC8785JCS.canonicalString(plain.request.canonicalValue())
+        XCTAssertFalse(plainCanonical.contains("requested_pool_model_id"))
+        XCTAssertFalse(String(decoding: plain.encodedRequest, as: UTF8.self).contains("requested_pool_model_id"))
+        XCTAssertEqual(try RFC8785JCS.canonicalString(empty.request.canonicalValue()), plainCanonical, "an unset id leaves the signed bytes unchanged")
+
+        let namedCanonical = try RFC8785JCS.canonicalString(named.request.canonicalValue())
+        XCTAssertTrue(namedCanonical.contains(#""requested_disclosure_class":"non_earning_provider_asserted","requested_pool_model_id":"\#(pool)","runtime_source""#))
+        let signature = try XCTUnwrap(Data(base64Encoded: named.request.providerSignature))
+        XCTAssertTrue(identity.publicKey.isValidSignature(signature, for: Data(namedCanonical.utf8)))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: named.encodedRequest) as? [String: Any])
+        XCTAssertEqual(body["requested_pool_model_id"] as? String, pool)
+        var stripped = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(namedCanonical.utf8)) as? [String: Any])
+        stripped.removeValue(forKey: "requested_pool_model_id")
+        let plainObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(plainCanonical.utf8)) as? [String: Any])
+        XCTAssertEqual(NSDictionary(dictionary: stripped), NSDictionary(dictionary: plainObject))
+
+        XCTAssertThrowsError(try package("pool/short/x")) {
+            XCTAssertEqual($0 as? BYOMModelAdmissionError, .invalidRequestedPoolModelID)
+        }
+    }
+
+    func testPoolBindingWarningsBecomeNextSteps() {
+        XCTAssertTrue(BYOMPoolBindingHint.hints(for: []).isEmpty)
+        XCTAssertTrue(BYOMPoolBindingHint.hints(for: ["pool_binding_ambiguous"]).first?.contains("set pool_model_id") == true)
+        XCTAssertTrue(BYOMPoolBindingHint.hints(for: ["pool_binding_requested_entry_unmatched"]).first?.contains("check the pool id and slug") == true)
+    }
+
     func testOfferSubmissionRunnerPostsPackageAndPreservesNonEarningStatus() async throws {
         let root = try temporaryBYOMAdmissionDirectory("byom-admission-submit")
         let namespace = root.appendingPathComponent("ns")

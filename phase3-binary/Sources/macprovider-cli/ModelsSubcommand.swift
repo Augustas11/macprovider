@@ -294,7 +294,8 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 environment: environment,
                 credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
                 identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
-                client: client
+                client: client,
+                requestedPoolModelID: resolved.config.poolModelID
             )
             // SPEC-046 v0.3.0: a target that names an mlxlm_loopback
             // candidate (by id, served ref, or display name) is offered
@@ -315,6 +316,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                     servedArtifactPath: resolved.config.modelArtifactPath,
                     servedModelID: resolved.config.model
                 )
+            for hint in BYOMPoolBindingHint.hints(for: status.warnings) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
@@ -477,6 +479,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
                 : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
+            for hint in BYOMPoolBindingHint.hints(for: bundle.offerStatus?.warnings ?? []) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(bundle)
         } catch let error as PoolModelProposalError {
             writeStderr("models propose: \(error.description)")
@@ -544,7 +547,8 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             environment: environment,
             credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
             identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
-            client: client
+            client: client,
+            requestedPoolModelID: resolved.config.poolModelID
         )
         let submitted: (status: BYOMAdmissionStatusWire, candidate: BYOMDiscoveryWire.Candidate, artifactHashes: [String: String])
         if await runtime.mlxlmCandidate(target: candidate) != nil {
@@ -698,6 +702,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
             if let note = poolBindingNote(status) {
                 writeStderr("models admission status: \(note)")
             }
+            for hint in BYOMPoolBindingHint.hints(for: status.warnings) { writeStderr(hint) }
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
@@ -3098,4 +3103,22 @@ private func exactLocalArtifactPresent(
         return false
     }
     return (try? artifactResolver.verifiedExistingArtifact(for: row)) != nil
+}
+
+/// #1880: the coordinator's status warnings for an offer the pool bind could
+/// not place, turned into the provider's next step.
+enum BYOMPoolBindingHint {
+    static let ambiguous = "pool_binding_ambiguous"
+    static let requestedEntryUnmatched = "pool_binding_requested_entry_unmatched"
+
+    static func hints(for warnings: [String]) -> [String] {
+        var out: [String] = []
+        if warnings.contains(ambiguous) {
+            out.append("models offer warning: pool_binding_ambiguous: this artifact is an entry in more than one of your active pools, so the offer bound to none; set pool_model_id: pool/<pool_id>/<slug> in the provider config (or MACPROVIDER_POOL_MODEL_ID), submit the offer again, then run macprovider-cli restart")
+        }
+        if warnings.contains(requestedEntryUnmatched) {
+            out.append("models offer warning: pool_binding_requested_entry_unmatched: no active pool entry matches the configured pool_model_id for this artifact; check the pool id and slug against the creator's signed manifest (creator status), and that the pool is active and this Mac is a member")
+        }
+        return out
+    }
 }

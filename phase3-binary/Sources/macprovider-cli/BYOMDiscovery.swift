@@ -1213,6 +1213,10 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
     let signatureAlgorithm: String
     var providerSignature: String
     let cliVersion: String
+    /// #1880 / SPEC-047-R002 0.2.8: the `pool/<pool_id>/<slug>` entry this
+    /// offer asks to bind to (config `pool_model_id`). Sent and signed only
+    /// when set, so an offer without it keeps its exact signed bytes.
+    var requestedPoolModelID: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -1236,6 +1240,7 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
         case signatureAlgorithm = "signature_algorithm"
         case providerSignature = "provider_signature"
         case cliVersion = "cli_version"
+        case requestedPoolModelID = "requested_pool_model_id"
     }
 
     struct AdvisoryCapabilities: Codable, Equatable, Sendable {
@@ -1265,7 +1270,7 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
     }
 
     func canonicalValue() -> RFC8785JCS.Value {
-        .object([
+        var fields: [String: RFC8785JCS.Value] = [
             "signature_domain": .string(signatureDomain),
             "provider_id": .string(providerID),
             "candidate_id": .string(candidateID),
@@ -1284,7 +1289,11 @@ struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
             "idempotency_key": .string(idempotencyKey),
             "signing_key_digest": .string(signingKeyDigest),
             "cli_version": .string(cliVersion),
-        ])
+        ]
+        if let requestedPoolModelID {
+            fields["requested_pool_model_id"] = .string(requestedPoolModelID)
+        }
+        return .object(fields)
     }
 }
 
@@ -1437,6 +1446,7 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case invalidStatusSchema
     case artifactIdentityChanged
     case artifactHashingTimedOut
+    case invalidRequestedPoolModelID
 
     var description: String {
         switch self {
@@ -1464,6 +1474,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "invalid coordinator URL; use wss:// or https://"
         case .artifactIdentityChanged:
             return "the served model's artifact file changed while its digest was being computed; the offer was not submitted (SPEC-010-R007(a)) — re-run models offer once the local Ollama store is stable"
+        case .invalidRequestedPoolModelID:
+            return "pool_model_id must be pool/<22-character pool id>/<slug>; fix pool_model_id (or MACPROVIDER_POOL_MODEL_ID) in the provider config"
         case .artifactHashingTimedOut:
             return "artifact hashing exceeded its time budget; identity not reported (SPEC-010-R007(a)); retry on a faster volume or with the store local"
         case .httpStatus(let status):
@@ -1512,6 +1524,7 @@ struct BYOMOfferSubmissionBuilder {
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String,
         artifactHashes: [String: String] = [:],
+        requestedPoolModelID: String? = nil,
         now: Date = Date(),
         nonce: String = UUID().uuidString.lowercased(),
         idempotencyKey: String = UUID().uuidString.lowercased(),
@@ -1564,6 +1577,12 @@ struct BYOMOfferSubmissionBuilder {
             providerSignature: "",
             cliVersion: cliVersion
         )
+        if let requested = requestedPoolModelID?.trimmingCharacters(in: .whitespacesAndNewlines), !requested.isEmpty {
+            guard requested.range(of: BYOMAdmissionStatusWire.poolModelIDPattern, options: .regularExpression) != nil else {
+                throw BYOMModelAdmissionError.invalidRequestedPoolModelID
+            }
+            request.requestedPoolModelID = requested
+        }
         let canonical = try RFC8785JCS.canonicalString(request.canonicalValue())
         let canonicalData = Data(canonical.utf8)
         let signatureData = try admissionIdentity.signature(for: canonicalData)
@@ -1934,19 +1953,24 @@ struct BYOMModelAdmissionRuntime: Sendable {
     /// withdrawals still require a coordinator and fail closed without one.
     let client: BYOMModelAdmissionClient?
     let httpClient: any BYOMDiscoveryHTTPClient
+    /// Config `pool_model_id`, signed into every offer as
+    /// `requested_pool_model_id` (#1880); nil sends none.
+    let requestedPoolModelID: String?
 
     init(
         environment: BYOMDiscoveryEnvironment,
         credentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         identityStore: any ProviderIdentityKeyStoring = KeychainReceiptKeyStore(),
         client: BYOMModelAdmissionClient?,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        requestedPoolModelID: String? = nil
     ) {
         self.environment = environment
         self.credentialStore = credentialStore
         self.identityStore = identityStore
         self.client = client
         self.httpClient = httpClient
+        self.requestedPoolModelID = requestedPoolModelID
     }
 
     func submitOffer(
@@ -2017,7 +2041,8 @@ struct BYOMModelAdmissionRuntime: Sendable {
             admissionIdentity: identity,
             evaluationDigestSHA256: evaluationDigestSHA256,
             requestedDisclosureClass: requestedDisclosureClass,
-            artifactHashes: hashes
+            artifactHashes: hashes,
+            requestedPoolModelID: requestedPoolModelID
         )
         // SPEC-010-R007(a): the binding must survive through the report. The
         // name is re-resolved and the file identity re-checked immediately
