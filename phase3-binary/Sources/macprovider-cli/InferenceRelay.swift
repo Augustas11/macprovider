@@ -385,7 +385,7 @@ actor InferenceRelay {
         // arrives must not race the task's teardown into an
         // `error_queue_full` refusal (#1906). The entry stays in `active`
         // until the task returns, so drain still waits for post-end work.
-        let releasingSendFrame: SendFrame = { [weak self, state] frame in
+        let releasingSendFrame: SendFrame = { [weak self, state, sendFrame] frame in
             if (frame["type"] as? String) == "inference_response_end" {
                 await self?.markEnded(requestID, state: state)
             }
