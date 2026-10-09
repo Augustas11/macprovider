@@ -1,0 +1,232 @@
+# Settlement evidence retention (SPEC-022 R-15)
+
+Related: #1793. This runbook covers the retention job that moves settled
+SPEC-022 evidence out of the hot coordinator SQLite database. The rows it moves
+are route snapshots, receipt verdicts, attempt outputs, compute-integrity
+captures, delivered audit-outbox rows, and the matching mirrored rows in the
+`coordinator.db.route-snapshots` journal. The job writes them to verified,
+off-host-confirmed archives. It never deletes ledger credits, operator credits,
+payouts, settlement windows, or quarantine resolutions.
+
+Before any Pearl step, read `docs/runbooks/pearl-coordinator-rollout.md` and
+tell the operator the expected downtime. Live changes go through
+`scripts/ops/pearl-runtime.sh` (status, next, then `next --run`). The
+`coordinator.yaml` edits below are manual operator steps.
+
+## What is eligible
+
+The job works on whole requests. A request leaves hot storage only when every
+one of these is true:
+
+- Every ledger credit for the request is settled and not quarantined.
+- Every credit is payable (`spec022_payable_request_credits`).
+- No credit has a force-credit hold or any other quarantine resolution.
+- Every credit settled into a `ready` or `consumed` (never `voided`) payout
+  whose window is at least `min_settlement_cycles` (minimum 2) completed weekly
+  windows old.
+- Every credit is older than the nightly-reconcile and startup-scan horizons
+  plus one day.
+- Every verdict is closed, and none is pending or quarantined.
+- Every audit-outbox row is drained, and none is poisoned.
+- Every attempt-output journal row is materialized.
+- Every route-snapshot journal row is mirrored, with the same digest.
+- The request does not hold its provider's earliest verified verdict. That
+  verdict is the referral evidence, so it stays hot.
+
+## Configuration
+
+`coordinator.yaml`, `billing.retention` (all reloadable with SIGHUP):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Arms the nightly 03:00 UTC run and `POST .../run`. Dry runs work while disabled. |
+| `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Required when enabled. |
+| `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
+| `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
+| `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
+| `max_requests_per_run` | `20000` | Requests archived per run. |
+| `max_scan_rows_per_run` | `500000` | Ledger credits scanned per run. The scan resumes from a persisted cursor and wraps. |
+| `incremental_vacuum_pages` | `2048` | Pages released per `PRAGMA incremental_vacuum` step. |
+| `incremental_vacuum_max_steps` | `256` | Steps per run, per database file. |
+| `offhost_verify_command` | empty | Absolute argv. The job appends `<archive_path> <sha256_hex>`. Exit 0 means that checksum is confirmed at the off-host destination. When empty, the job never deletes. |
+| `offhost_verify_timeout_seconds` | `300` | Limit for one verify command. |
+
+### Off-host verify command contract
+
+The command runs without a shell and with a minimal `PATH`. It may copy the
+archive and its manifest to the off-host destination itself. It must exit 0
+only after it has read back the remote file's SHA-256 and compared it with the
+second argument. Any other exit refuses deletion and leaves the archive in the
+`exported` state. The next run resumes that archive and does not write a new
+one. Keep the script outside the repository and make it root-owned and not
+writable by group or other. Example shape, with placeholders:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+archive="$1"; want="$2"
+rsync -a "$archive" "$archive.manifest.json" <backup-host>:<backup-dir>/
+got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -d' ' -f1)"
+[ "$got" = "$want" ]
+```
+
+## 1. Deploy the code (retention still off)
+
+1. `scripts/ops/pearl-runtime.sh status`, then `next`, then
+   `MACPROVIDER_OPS_OWNER=<label> scripts/ops/pearl-runtime.sh next --run`
+   for each step of the runtime train. State the downtime from
+   `docs/runbooks/pearl-coordinator-rollout.md` first.
+2. On startup, the migration creates `settlement_evidence_archives`,
+   `settlement_evidence_archived_credits`,
+   `settlement_evidence_archived_verdict_counts`, and
+   `settlement_evidence_retention_state`. It also rebuilds the payable view
+   with the archived-credit branch. Nothing is deleted while
+   `enabled: false`.
+
+## 2. Dry run
+
+```bash
+curl -fsS -H "Authorization: Bearer $OPERATOR_KEY" \
+  https://<coordinator-host>/admin/ledger/settlement-evidence-retention
+```
+
+The report has:
+
+- `cutoff_window_end_utc`: the settlement-window finality point;
+- `credit_age_cutoff_utc`: the reconcile horizon;
+- `eligible_requests`;
+- `tables.<table>.rows` and `tables.<table>.payload_bytes`: the summed column
+  lengths, an estimate of what leaves;
+- `skipped_requests` counts by reason.
+
+`cutoff_window_end_utc` is empty until three or more weekly settlements have
+completed. Repeat the dry run until the numbers are stable before the first
+live run. A dry run scans at most `max_scan_rows_per_run` credits from the
+persisted cursor and writes nothing.
+
+## 3. First live run
+
+1. Create `archive_dir` with mode `0700`, owned by the coordinator user, on
+   a filesystem with room for the dry-run payload. Gzip usually makes the
+   archive several times smaller than the payload estimate.
+2. Install the off-host verify command and test it by hand on a scratch file.
+3. Edit `coordinator.yaml` (manual step): set `billing.retention.enabled:
+   true`, `archive_dir`, and `offhost_verify_command`. Reload with SIGHUP.
+4. Start one run instead of waiting for 03:00 UTC:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_KEY" \
+     https://<coordinator-host>/admin/ledger/settlement-evidence-retention/run
+   curl -fsS -H "Authorization: Bearer $OPERATOR_KEY" \
+     "https://<coordinator-host>/admin/ledger/settlement-evidence-retention?report=last"
+   ```
+
+5. The run is done when it reports `status: deleted`, with
+   `deleted_requests`, `tables.<table>.deleted_rows`, `archive_file`, and
+   `archive_sha256` set. Other statuses:
+   - `refused_offhost_unverified`: the archive is kept and nothing is
+     deleted. Fix the command; the next run resumes this archive.
+   - `refused_archive_invalid`: the archive failed its checksum, size, parse,
+     or count check. It is marked `failed` and nothing is deleted. The next
+     run writes a fresh archive.
+   - `nothing_eligible`.
+6. Copy every finished archive and its manifest into long-term off-host
+   storage. Retention never deletes archive files.
+
+Weekly settlement, nightly reconcile, payout claims, earnings, and the billing
+mirror keep working on archived requests:
+
+- Tombstones keep archived credits payable and verified.
+- Archived verdict counts feed reward unlock and the unranged receipt
+  summaries.
+- Ranged receipt diagnostics and the admin verdict counters count hot rows
+  only.
+- A settlement-finality or receipt lookup for an archived request returns not
+  found.
+
+## 4. Reclaiming space: auto_vacuum
+
+Deleted pages go to the freelist. `PRAGMA incremental_vacuum` returns them to
+the filesystem only when the database is in `auto_vacuum = INCREMENTAL` mode.
+The `vacuum` entries in the report show `auto_vacuum_mode`, the freelist
+before and after, and `needs_one_time_conversion`. The job never runs a full
+`VACUUM`. Free pages are reused by new writes either way, so the file stops
+growing even without the conversion.
+
+The one-time conversion rewrites the whole file and needs the coordinator
+stopped. Do it only after retention has shrunk the live data. The rewrite
+takes about as long as the backup step measured in
+`ops/runbooks/pearl-release-updater.md`, in proportion to the remaining size.
+State that downtime to the operator first and follow
+`docs/runbooks/pearl-coordinator-rollout.md` for the stop and start:
+
+```bash
+sqlite3 <db-path> 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA quick_check;'
+sqlite3 <db-path>.route-snapshots 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA quick_check;'
+```
+
+Use the SQLite 3.53.2 CLI named in `ops/pearl-updater` (see
+`ops/runbooks/pearl-release-updater.md`). After the conversion, the next
+report shows `auto_vacuum_mode: incremental`.
+
+## 5. Restore and rederive
+
+Each archive is self-contained. It holds every column of every archived
+evidence row. It also holds reference copies of the request's ledger credits,
+operator credits, payout rows, provider identity snapshots, and config
+snapshots. Run these against a copy fetched back from off-host storage:
+
+```bash
+coordinator-cli settlement-evidence-archive verify   --archive <file>.jsonl.gz
+coordinator-cli settlement-evidence-archive rederive --archive <file>.jsonl.gz --credit-id <ledger_request_credits.id>
+```
+
+- `verify` re-checks the SHA-256, size, every line, and the row counts
+  against the manifest.
+- `rederive` reprices the credit:
+  - from the archived closed, payable verdict's attempt-output usage (basis
+    `receipt_bound_usage`), the same way the verified-receipt sync priced it;
+  - or, for a legacy or observe credit, from its own ledger token fields
+    (basis `ledger_tokens`).
+
+  It exits non-zero unless the result equals the archived credit. Compare it
+  with the hot `ledger_request_credits` row as well.
+
+To find a credit's archive:
+
+```sql
+SELECT a.file_name, a.sha256
+  FROM settlement_evidence_archived_credits c
+  JOIN settlement_evidence_archives a ON a.id = c.archive_id
+ WHERE c.request_credit_id = ?;
+```
+
+Re-inserting archived rows into the hot tables is not part of normal
+operations and is not needed to rederive a credit. If an incident needs it,
+restore into a scratch copy of the database, never into the live one.
+
+## 6. Rollback
+
+- To stop retention: set `billing.retention.enabled: false` and reload with
+  SIGHUP. A run in progress stops deleting at the next batch boundary. Each
+  batch either commits whole or not at all. The archive stays
+  `offhost_verified` and is resumed after re-enabling.
+- To roll back the coordinator release: use the normal runtime rollback.
+  Releases older than this change ignore the new tables. On an older release,
+  however, the archived requests' enforce credits drop out of
+  `spec022_payable_request_credits`, because the older view has no tombstone
+  branch. Do not roll back past this change after a live run unless
+  payouts are paused. The archives stay valid either way.
+- Tombstones (`settlement_evidence_archived_credits`) are permanent: a trigger
+  refuses updates and deletes.
+
+## Done criteria
+
+Issue #1793 counts as done when both of these hold:
+
+- the live hot-database size stays flat across two weekly settlements while
+  retention runs nightly;
+- a sampled settled credit rederives from its archive.
+
+Record the before and after `coordinator.db` sizes and the report JSON in the
+issue.
