@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -109,9 +110,11 @@ class PromotionEconomicsTests(unittest.TestCase):
             report["inputs"],
             {
                 "matrix_sha256": "f1df7ccbcaf1a1602f41f5d0c802d3ea77c253ecf94fe0740e721ff4b6689d2b",
-                # The campaign ran on rate card 20d62a3d...; the activation
-                # release re-stamped only its generated_at (same rows/version).
-                "rate_card_sha256": "fba7c05f73990c9f9ff703092b204c649b8cf9c9354f6190c5799bacfdfd323a",
+                # The campaign ran on rate card 20d62a3d...; the weekly signed
+                # restamp rewrites generated_at every Wednesday, so the live
+                # card's bytes cannot be pinned. The modeled ratios below
+                # still pin the rows and prices the campaign depends on.
+                "rate_card_sha256": hashlib.sha256(card).hexdigest(),
             },
         )
         by_key = {
