@@ -193,6 +193,119 @@ final class ClaimCommandTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.claimURLFile.fileURL.path))
     }
 
+    func testClaim_ResolvesTokenFromCredentialStore_WhenConfigHasNone() async throws {
+        let fixture = try makeFixture(prefix: "claim-store")
+        var config = fixture.config
+        config.providerToken = nil
+        config.providerID = "prov-1"
+        let seen = LockedBox([String?]())
+        let runner = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(values: ["prov-1": "stored-token"]),
+            claimURLFile: fixture.claimURLFile,
+            refresher: ClaimRefresher { cfg in
+                seen.update { $0.append(cfg.providerToken) }
+                return ClaimRefreshResponse(pairOT: "NEW", claimURL: "https://portal.example/claim?ot=NEW", expiresIn: 600)
+            },
+            now: { fixture.now },
+            environment: { _ in nil },
+            stdout: { _ in },
+            stderr: { _ in }
+        )
+
+        try await runner.run()
+
+        XCTAssertEqual(seen.get(), ["stored-token"])
+    }
+
+    func testClaim_CredentialStoreWinsOverConfigToken_ConfigIsFallback() throws {
+        let fixture = try makeFixture(prefix: "claim-precedence")
+        var config = fixture.config
+        config.providerID = "prov-1"
+        config.providerToken = "env-token"
+        let withStored = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(values: ["prov-1": "stored-token"]),
+            claimURLFile: fixture.claimURLFile
+        )
+        XCTAssertEqual(try withStored.resolvedProviderToken(), "stored-token")
+        let emptyStore = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(),
+            claimURLFile: fixture.claimURLFile
+        )
+        XCTAssertEqual(try emptyStore.resolvedProviderToken(), "env-token")
+        let failingStore = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(loadError: ProviderCredentialStoreError.conflict(providerID: "prov-1")),
+            claimURLFile: fixture.claimURLFile
+        )
+        // A store failure never falls back to the config/env token.
+        XCTAssertThrowsError(try failingStore.resolvedProviderToken())
+    }
+
+    func testClaim_CredentialStoreReadFailure_FailsClosedWithRedactedError() async throws {
+        let fixture = try makeFixture(prefix: "claim-store-failure")
+        var config = fixture.config
+        config.providerID = "prov-1"
+        config.providerToken = "stale-config-token"
+        let stderr = LockedBox("")
+        let refreshed = LockedBox(false)
+        let runner = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(loadError: ProviderCredentialStoreError.readFailed(providerID: "prov-1", status: -25308)),
+            claimURLFile: fixture.claimURLFile,
+            refresher: ClaimRefresher { _ in
+                refreshed.set(true)
+                throw ClaimRefreshError.network("unreachable")
+            },
+            stdout: { _ in },
+            stderr: { line in stderr.set(stderr.get() + line) }
+        )
+        do {
+            try await runner.run()
+            XCTFail("claim must fail closed when the credential store cannot be read")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit, ExitCode(5))
+        }
+        XCTAssertFalse(refreshed.get(), "a stale config token was submitted")
+        XCTAssertTrue(stderr.get().contains("not falling back"), stderr.get())
+        XCTAssertFalse(stderr.get().contains("stale-config-token"), stderr.get())
+    }
+
+    func testClaim_WithNoTokenAnywhere_PrintsDistinctError() async throws {
+        let fixture = try makeFixture(prefix: "claim-no-token")
+        var config = fixture.config
+        config.providerToken = nil
+        config.providerID = "prov-1"
+        let stderr = LockedBox("")
+        let runner = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(),
+            claimURLFile: fixture.claimURLFile,
+            refresher: .live,
+            now: { fixture.now },
+            environment: { _ in nil },
+            stdout: { _ in },
+            stderr: { line in stderr.update { $0 += line } }
+        )
+
+        do {
+            try await runner.run()
+            XCTFail("expected missing-token exit")
+        } catch {
+            XCTAssertEqual(error as? ExitCode, ExitCode(4))
+        }
+        XCTAssertTrue(stderr.get().contains("no provider token found"))
+        XCTAssertFalse(stderr.get().contains("failed to refresh claim URL"))
+    }
+
     func testClaimCommand_IsRegisteredOnRootCLI() throws {
         let command = try MacProviderCLI.parseAsRoot(["claim", "--no-browser"])
 

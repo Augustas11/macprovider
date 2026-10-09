@@ -55,7 +55,7 @@ func TestSpec014V02FullPairingHandoff(t *testing.T) {
 	}
 
 	sessionID := seedSession(t, db, pairOT)
-	status, body := postBind(t, authClient(t, sessionID), coord.providerURL, `{}`)
+	status, body, bindHeader := postBindWithHeader(t, authClient(t, sessionID), coord.providerURL, `{}`)
 	if status != http.StatusOK {
 		t.Fatalf("pending pair bind status=%d body=%s", status, string(body))
 	}
@@ -74,6 +74,10 @@ func TestSpec014V02FullPairingHandoff(t *testing.T) {
 	completeBinaryClaim(t, binaryHome, providerID, event)
 
 	status, body = getProviders(t, authClient(t, sessionID), coord.providerURL)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("pre-bind session after rotation: providers status=%d body=%s, want 401", status, string(body))
+	}
+	status, body = getProviders(t, authClient(t, rotatedSessionID(t, bindHeader)), coord.providerURL)
 	if status != http.StatusOK {
 		t.Fatalf("providers status=%d body=%s", status, string(body))
 	}

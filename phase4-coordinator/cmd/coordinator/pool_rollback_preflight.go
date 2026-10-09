@@ -33,12 +33,12 @@ func runPoolRollbackPreflightIO(args []string, stdout, stderr io.Writer, now fun
 	configPath := fs.String("config", "coordinator.yaml", "path to coordinator YAML config")
 	configOverlay := fs.String("config-overlay", "", "optional coordinator YAML config overlay")
 	timeout := fs.Duration("timeout", 5*time.Minute, "max time the preflight may run")
-	targetTier := fs.String("target-tier", trustpool.RollbackTierV1Only, "rollback target tier (v1-only, m8, m9, p1816; trusted-pool-production-launch runbook section 9 step 4b); the default is the oldest")
+	targetTier := fs.String("target-tier", trustpool.RollbackTierV1Only, "rollback target tier (v1-only, m8, m9, p1816, p1880; trusted-pool-production-launch runbook section 9 step 4b); the default is the oldest")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if !trustpool.ValidRollbackTier(*targetTier) {
-		fmt.Fprintf(stderr, "STOP: unknown --target-tier %q (v1-only, m8, m9, p1816)\n", *targetTier)
+		fmt.Fprintf(stderr, "STOP: unknown --target-tier %q (v1-only, m8, m9, p1816, p1880)\n", *targetTier)
 		return 2
 	}
 	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
@@ -66,21 +66,37 @@ func runPoolRollbackPreflightIO(args []string, stdout, stderr io.Writer, now fun
 		fmt.Fprintf(stderr, "STOP: manifest history replay check: %v; do not roll back the coordinator, roll it forward\n", err)
 		return 1
 	}
-	if len(replay.CannotReplay) > 0 {
+	// #1880: a pre-p1880 target ignores requested_pool_model_id and could
+	// bind a live offer to another pool with the same artifact.
+	selection, err := trustpool.CheckPoolSelectionRollback(ctx, store.DB(), *targetTier)
+	if err != nil {
+		fmt.Fprintf(stderr, "STOP: pool selection check: %v; do not roll back the coordinator\n", err)
+		return 1
+	}
+	if len(replay.CannotReplay) > 0 || selection.Blocked {
 		// Waiting never clears it.
 		result.RollbackBlocked = true
 		result.EarliestSafeUnixMS = 0
 	}
 	if err := json.NewEncoder(stdout).Encode(struct {
 		billing.PoolRollbackPreflight
-		ManifestHistory trustpool.ManifestReplayCheck `json:"manifest_history"`
-	}{result, replay}); err != nil {
+		ManifestHistory trustpool.ManifestReplayCheck        `json:"manifest_history"`
+		PoolSelection   trustpool.PoolSelectionRollbackCheck `json:"pool_selection"`
+	}{result, replay, selection}); err != nil {
 		fmt.Fprintf(stderr, "encode json: %v\n", err)
 		return 1
 	}
 	if len(replay.CannotReplay) > 0 {
 		fmt.Fprintf(stderr, "STOP: a %s coordinator cannot replay the pool manifest history (%s) and would disable every pool; roll forward instead\n",
 			*targetTier, strings.Join(replay.CannotReplay, ", "))
+		if len(replay.SupersededWindows) > 0 && *targetTier != trustpool.RollbackTierP1880 {
+			fmt.Fprintf(stderr, "STOP: superseded policy windows (%s) stay in each pool's history for good; only a p1880 or newer coordinator replays them: roll forward\n",
+				strings.Join(replay.SupersededWindows, "; "))
+		}
+	}
+	if selection.Blocked {
+		fmt.Fprintf(stderr, "STOP: %d live offer(s) name a pool entry that a %s coordinator would ignore (%s); clear each by having the provider run `macprovider-cli models admission withdraw <candidate> --yes --json` (and re-offer without pool_model_id if it should stay offered), then re-run this preflight\n",
+			len(selection.LiveSelectorOffers), *targetTier, strings.Join(selection.LiveSelectorOffers, "; "))
 	}
 	if result.RollbackBlocked {
 		return poolRollbackBlockedExit

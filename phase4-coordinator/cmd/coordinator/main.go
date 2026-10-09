@@ -1353,6 +1353,11 @@ func main() {
 		idlePrewarmReader,
 		cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
 	)
+	// #1880: the provider portal's GitHub mode reads earnings with the MP
+	// session cookie of the GitHub user that owns the provider.
+	if cfg.Auth.GitHubOAuth.Enabled {
+		billingStore.SetProviderSessionAuthorizer(wsServer.AuthorizeProviderSessionRead)
+	}
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).

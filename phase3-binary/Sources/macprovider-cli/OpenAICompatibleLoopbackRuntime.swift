@@ -1073,7 +1073,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
         }
         guard let snapshotDirectory else {
-            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(MLXLMLoopbackServeModel.snapshotPathEnvironmentKey) is not set to an absolute snapshot directory")
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(MLXLMLoopbackServeModel.undetectedSnapshotMessage)
         }
         let client = httpClient ?? LoopbackServeHTTPClient()
         let listed: Bool
@@ -1187,7 +1187,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
         }
         let client = httpClient ?? LoopbackServeHTTPClient()
-        let resolver = BYOMArtifactDigestResolver(locators: [BYOMLMStudioModelStore(root: modelsRoot)], cache: cache)
+        // The model list narrows several quantizations or a custom identifier
+        // to the loaded file; the binding below re-checks it on every request.
+        let servedModels = await LMStudioLoopbackServeModel.fetchModels(client, origin: validatedOrigin)
+        let store = BYOMLMStudioModelStore(root: modelsRoot, servedModels: servedModels)
+        let resolver = BYOMArtifactDigestResolver(locators: [store], cache: cache)
         let evidence: BYOMArtifactEvidence
         do {
             evidence = try resolver.computeEvidence(
@@ -1197,7 +1201,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 deadline: deadline
             )
         } catch {
-            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(
+                store.ambiguityMessage(servedModelRef: servedModelRef) ?? String(describing: error)
+            )
         }
         guard let binding = LMStudioLoopbackServeModel.binding(
             modelKey: LMStudioLoopbackServeModel.modelKey(fromServedRef: servedModelRef),

@@ -98,12 +98,20 @@ func TestAdminHandler_PoolModelManifestRejectionCodes(t *testing.T) {
 			handler.ServeHTTP(rec, req)
 			var got struct {
 				Error struct {
-					Code string `json:"code"`
+					Code        string `json:"code"`
+					Bound       string `json:"bound"`
+					Limit       string `json:"limit"`
+					PoolModelID string `json:"pool_model_id"`
 				} `json:"error"`
 			}
 			_ = json.Unmarshal(rec.Body.Bytes(), &got)
 			if rec.Code != http.StatusBadRequest || got.Error.Code != tc.wantCode {
 				t.Fatalf("status=%d code=%q body=%s, want 400 %s", rec.Code, got.Error.Code, rec.Body.String(), tc.wantCode)
+			}
+			// #1880: an out-of-bounds price names the entry and the bound.
+			if tc.wantCode == poolmanifest.RejectCodePricingOutOfBounds &&
+				(got.Error.Bound != "max_completion_rate_per_mtok" || got.Error.Limit != "1000" || got.Error.PoolModelID != poolEntriesFor(root.poolID)[0].PoolModelID) {
+				t.Fatalf("out-of-bounds detail = %+v", got.Error)
 			}
 		})
 	}

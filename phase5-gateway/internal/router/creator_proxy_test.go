@@ -167,3 +167,40 @@ func TestCreatorProxyNeverTargetsChat(t *testing.T) {
 		t.Fatalf("req=%v err=%v", req, err)
 	}
 }
+
+// #1880: the creator revoke, lifecycle, and pricing-bounds operations are
+// reachable through /v1/creator/* with the verified principal and map 1:1
+// onto the coordinator's self-serve mount.
+func TestCreatorProxyMapsRevokeLifecycleAndPricingBounds(t *testing.T) {
+	var calls []creatorUpstreamCall
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		calls = append(calls, creatorUpstreamCall{method: r.Method, path: r.URL.Path, body: string(raw), header: r.Header.Clone()})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer coordinator.Close()
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+	}, WithHTTPClient(coordinator.Client()))
+	key := createAccountAndKey(t, store, cfg, "acct_creator")
+	const pool = "AAAAAAAAAAAAAAAAAAAAAA"
+	for _, tc := range []struct{ method, path, body, upstream string }{
+		{http.MethodPost, "/v1/creator/events", `{"event_type":"member_revoked","pool_id":"` + pool + `","provider_id":"mp-1"}`, "/internal/creator/trust-pools/events"},
+		{http.MethodPost, "/v1/creator/pools/" + pool + "/lifecycle", `{"lifecycle":"draining","reason":"done"}`, "/internal/creator/trust-pools/pools/" + pool + "/lifecycle"},
+		{http.MethodGet, "/v1/creator/pricing-bounds", "", "/internal/creator/trust-pools/pricing-bounds"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("%s %s status=%d body=%s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		call := calls[len(calls)-1]
+		if call.method != tc.method || call.path != tc.upstream || call.body != tc.body || call.header.Get(creatorAccountIDHeader) != "acct_creator" {
+			t.Fatalf("%s upstream call = %+v", tc.path, call)
+		}
+	}
+}

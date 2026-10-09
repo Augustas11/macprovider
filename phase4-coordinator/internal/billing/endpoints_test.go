@@ -1559,3 +1559,64 @@ func TestEarningsEndpointUsdcPendingIsRangeIndependent(t *testing.T) {
 		t.Fatalf("usdc_pending=%v want 0.5 (range-independent owed total)", resp.UsdcPending)
 	}
 }
+
+// #1880: in the portal's GitHub mode a bearer-less earnings read is
+// authorized by the MP session cookie authorizer (owner only), counts toward
+// the same earnings rate limit, and leaves the bearer path unchanged.
+func TestEarningsEndpointAcceptsOwnerSessionCookie(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	var asked []string
+	store.SetProviderSessionAuthorizer(func(w http.ResponseWriter, r *http.Request, providerID string) bool {
+		asked = append(asked, providerID)
+		if c, err := r.Cookie("__Host-mp_session"); err != nil || c.Value != "owner" {
+			writeError(w, http.StatusUnauthorized, "session_invalid", "session")
+			return false
+		}
+		if providerID != "provider-a" {
+			writeError(w, http.StatusForbidden, "forbidden", "not owner")
+			return false
+		}
+		return true
+	})
+	t.Cleanup(func() { store.SetProviderSessionAuthorizer(nil) })
+	handler := store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 2)
+	get := func(path, cookie, bearerToken string) int {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: "__Host-mp_session", Value: cookie})
+		}
+		if bearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+bearerToken)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		// Every earnings response, success or refusal, is uncacheable and
+		// varies on both credentials (SPEC-014 v0.11).
+		if cc := w.Header().Get("Cache-Control"); cc != "private, no-store" {
+			t.Fatalf("%s status=%d Cache-Control=%q", path, w.Code, cc)
+		}
+		if v := w.Header().Get("Vary"); v != "Cookie, Authorization" {
+			t.Fatalf("%s status=%d Vary=%q", path, w.Code, v)
+		}
+		return w.Code
+	}
+	if got := get("/providers/provider-a/earnings", "owner", ""); got != http.StatusOK {
+		t.Fatalf("owner cookie status=%d want 200", got)
+	}
+	if got := get("/providers/provider-b/earnings", "owner", ""); got != http.StatusForbidden {
+		t.Fatalf("non-owned provider status=%d want 403", got)
+	}
+	if got := get("/providers/provider-a/earnings", "", ""); got != http.StatusUnauthorized {
+		t.Fatalf("no cookie status=%d want 401", got)
+	}
+	// A bearer request never consults the cookie authorizer.
+	n := len(asked)
+	if got := get("/providers/provider-a/earnings", "owner", "good"); got != http.StatusOK || len(asked) != n {
+		t.Fatalf("bearer status=%d authorizer calls=%d->%d", got, n, len(asked))
+	}
+	// Both credentials share the per-provider earnings limit (2/min).
+	if got := get("/providers/provider-a/earnings", "owner", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited cookie status=%d want 429", got)
+	}
+}

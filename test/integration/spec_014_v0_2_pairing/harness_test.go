@@ -441,11 +441,29 @@ func authClient(t *testing.T, sessionID string) *http.Client {
 	}
 	c := &http.Client{Jar: jar, Timeout: 5 * time.Second}
 	u := mustURL(t, "http://127.0.0.1/")
-	jar.SetCookies(u, []*http.Cookie{{Name: "mp_session", Value: sessionID, Path: "/"}})
+	jar.SetCookies(u, []*http.Cookie{{Name: "__Host-mp_session", Value: sessionID, Path: "/"}})
 	return c
 }
 
+// rotatedSessionID returns the session id a successful bind re-issued
+// (SPEC-014 v0.11 rotates the session at bind).
+func rotatedSessionID(t *testing.T, header http.Header) string {
+	t.Helper()
+	for _, h := range header.Values("Set-Cookie") {
+		if v, ok := strings.CutPrefix(strings.SplitN(h, ";", 2)[0], "__Host-mp_session="); ok && v != "" {
+			return v
+		}
+	}
+	t.Fatalf("bind response did not rotate the session cookie: %q", header.Values("Set-Cookie"))
+	return ""
+}
+
 func postBind(t *testing.T, c *http.Client, baseURL, body string) (int, []byte) {
+	status, b, _ := postBindWithHeader(t, c, baseURL, body)
+	return status, b
+}
+
+func postBindWithHeader(t *testing.T, c *http.Client, baseURL, body string) (int, []byte, http.Header) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/auth/me/providers/bind", strings.NewReader(body))
 	if err != nil {
@@ -458,7 +476,7 @@ func postBind(t *testing.T, c *http.Client, baseURL, body string) (int, []byte) 
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, b
+	return resp.StatusCode, b, resp.Header
 }
 
 func waitForHTTP(t *testing.T, rawURL string) {

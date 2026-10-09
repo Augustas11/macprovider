@@ -80,6 +80,25 @@ final class LMStudioLoopbackTests: XCTestCase {
         }
     }
 
+    func testCustomIdentifierBindsToItsEntryAndServesUnderTheIdentifier() async throws {
+        let blob = Data("GGUF".utf8) + Data(repeating: 0x5b, count: 2048)
+        let (root, cache) = try makeModelsRoot(blob: blob)
+        let body = #"{"models":[{"type":"llm","publisher":"lmstudio-community","key":"tiny-1b-instruct","size_bytes":"# + "\(blob.count)" +
+            #","loaded_instances":[{"id":"my-alias","config":{"context_length":2048}}],"format":"gguf"}]}"#
+        let binding = LMStudioLoopbackServeModel.Binding(modelKey: "my-alias", publisher: "lmstudio-community", sizeBytes: blob.count)
+        let state = try await LMStudioLoopbackServeModel.bindingState(LMStudioStubClient(body: body), origin: URL(string: "http://127.0.0.1:1234")!, binding: binding)
+        XCTAssertEqual(state, .bound(contextWindow: 2048))
+        let runtime = try await OpenAICompatibleLoopbackRuntime.lmStudio(
+            servedModelRef: "lmstudio:my-alias",
+            origin: "http://127.0.0.1:1234",
+            modelsRoot: root,
+            httpClient: LMStudioStubClient(body: body),
+            cache: BYOMArtifactDigestCache(url: cache)
+        )
+        let hash = await runtime.loadedModelHash
+        XCTAssertEqual(hash, Self.sha256Hex(blob))
+    }
+
     func testRuntimeBindsTheResolvedFileAndFailsClosed() async throws {
         let blob = Data("GGUF".utf8) + Data(repeating: 0x5a, count: 4096)
         let (root, cache) = try makeModelsRoot(blob: blob)

@@ -145,3 +145,51 @@ func TestPoolRollbackPreflightRefusesUnreplayableManifestHistory(t *testing.T) {
 		}
 	}
 }
+
+// #1880 round-2 audit (Arch M2): a live offer naming a pool entry blocks a
+// rollback to any pre-p1880 coordinator, which would ignore the selector;
+// the refusal names the offer and how to clear it.
+func TestPoolRollbackPreflightRefusesLivePoolSelectorOffers(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "coordinator.db")
+	configPath := filepath.Join(dir, "coordinator.yaml")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := billing.NewStore(reqStore.DB()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustpool.NewStore(reqStore.DB()); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE model_admission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT NOT NULL, candidate_id TEXT NOT NULL, state TEXT NOT NULL, requested_pool_model_id TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO model_admission_events (provider_id, candidate_id, state, requested_pool_model_id) VALUES ('provider-a', 'cand-1', 'offer_submitted', 'pool/AAAAAAAAAAAAAAAAAAAAAA/m')`,
+	} {
+		if _, err := reqStore.DB().Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = reqStore.Close()
+	if err := os.WriteFile(configPath, []byte("auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nstorage:\n  db_path: "+dbPath+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tier string
+		rc   int
+	}{
+		{"p1816", poolRollbackBlockedExit},
+		{"p1880", 0},
+	} {
+		var stdout, stderr bytes.Buffer
+		rc := runPoolRollbackPreflightIO([]string{"--config", configPath, "--target-tier", tc.tier}, &stdout, &stderr, time.Now)
+		if rc != tc.rc {
+			t.Fatalf("%s: rc=%d want %d\nstdout=%s\nstderr=%s", tc.tier, rc, tc.rc, stdout.String(), stderr.String())
+		}
+		if rc == poolRollbackBlockedExit && (!strings.Contains(stderr.String(), "provider-a/cand-1 -> pool/AAAAAAAAAAAAAAAAAAAAAA/m") ||
+			!strings.Contains(stderr.String(), "models admission withdraw") || !strings.Contains(stdout.String(), `"blocked":true`)) {
+			t.Fatalf("%s: refusal does not name the offer and the fix\nstdout=%s\nstderr=%s", tc.tier, stdout.String(), stderr.String())
+		}
+	}
+}

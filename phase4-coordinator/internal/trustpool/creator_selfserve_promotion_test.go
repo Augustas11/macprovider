@@ -226,3 +226,42 @@ func TestSelfServeRenewalAfterGracePausesActivePools(t *testing.T) {
 		t.Fatal("re-promoted pool not routeable")
 	}
 }
+
+// #1880 item 4: a self-serve creator revokes a member and walks its pool
+// through draining to retired on the self-serve mount (the gateway's
+// /v1/creator/events and /v1/creator/pools/<pool_id>/lifecycle), under the
+// verified principal; a stranger cannot.
+func TestSelfServeMemberRevokeAndLifecycle(t *testing.T) {
+	t.Parallel()
+	f := newSelfServeFixture(t)
+	_, root := selfServeBuildPool(t, f)
+	selfServeAdmitAndGrant(t, f, root.poolID)
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/promote", map[string]string{"reason": "launch"}, "op-ss-promote"), http.StatusAccepted, "promotion")
+
+	stranger := selfServePrincipal{account: "acct_stranger", credential: "key_stranger", github: selfServeGitHubID}
+	selfServeExpect(t, selfServeDo(t, f.handler, stranger, http.MethodPost, "events", trustpool.DurableEvent{
+		EventType: trustpool.EventMemberRevoked, PoolID: root.poolID, ProviderID: selfServeOwnedMac,
+	}, "op-ss-revoke-stranger"), http.StatusNotFound, "stranger member revoke")
+	selfServeExpect(t, selfServeDo(t, f.handler, stranger, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": "retired"}, "op-ss-retire-stranger"), http.StatusNotFound, "stranger retire")
+
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "events", trustpool.DurableEvent{
+		EventType: trustpool.EventMemberRevoked, PoolID: root.poolID, ProviderID: selfServeOwnedMac,
+	}, "op-ss-revoke"), http.StatusAccepted, "member revoke")
+	if f.registry.Snapshot(root.poolID).Members[selfServeOwnedMac] {
+		t.Fatal("revoked member still in the routeable snapshot")
+	}
+	for _, step := range []struct{ lifecycle, op string }{{"draining", "op-ss-drain"}, {"retired", "op-ss-retire"}} {
+		selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": step.lifecycle, "reason": "creator"}, step.op), http.StatusAccepted, step.lifecycle)
+		state, err := f.store.Reconstruct(context.Background())
+		if err != nil {
+			t.Fatalf("Reconstruct: %v", err)
+		}
+		if got := state.Pools[root.poolID].Lifecycle; got != step.lifecycle {
+			t.Fatalf("lifecycle after %s = %s", step.lifecycle, got)
+		}
+	}
+	if f.registry.Snapshot(root.poolID).Routeable {
+		t.Fatal("retired self-serve pool still routeable")
+	}
+	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": "active"}, "op-ss-reactivate"), http.StatusConflict, "lifecycle active is promotion-only")
+}

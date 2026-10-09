@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -2817,12 +2817,19 @@ struct ServeCommand: AsyncParsableCommand {
                     )
                 case .mlxLM:
                     // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
-                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) and
-                    // hashed by the CLI, never reported by the runtime.
+                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) or,
+                    // when unset, the one local path a running mlx_lm.server
+                    // lists as its --model (as `models discover` finds it);
+                    // the CLI hashes it and the listing check still binds it.
+                    let mlxlmTarget = try await MLXLMLoopbackServeModel.serveTarget(
+                        configuredOrigin: resolved.loopbackOrigin,
+                        client: LoopbackServeHTTPClient(),
+                        servePort: resolved.port
+                    )
                     modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
                         servedModelRef: loopbackServedRef,
-                        origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
-                        snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        origin: mlxlmTarget.origin,
+                        snapshotDirectory: mlxlmTarget.directory,
                         catalogModelIDAlias: catalogModelIDAlias
                     )
                 case .lmStudio:

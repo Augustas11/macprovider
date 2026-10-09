@@ -705,13 +705,19 @@
             render();
             return;
           }
-          if (r.status === 401 || r.status === 403 || r.status === 404) {
-            if (useCookieAuth && r.status === 401) {
-              githubSessionExpired("/" + "?p=" + encodeURIComponent(pid));
-            } else {
-              handleAuthRejection(r.status, surface || "dashboard");
-            }
+          // GitHub mode: only /v1/auth/me/providers decides the session is
+          // gone; a data endpoint's 401/403 is shown inline, never a
+          // re-sign-in (a redirect here looped when earnings refused the
+          // cookie).
+          if (!useCookieAuth && (r.status === 401 || r.status === 403 || r.status === 404)) {
+            handleAuthRejection(r.status, surface || "dashboard");
             return;
+          }
+          // A cookie-mode refusal means this session may no longer read
+          // these earnings: drop what was shown instead of leaving it stale.
+          if (useCookieAuth && (r.status === 401 || r.status === 403 || r.status === 404)) {
+            state.earn.data = null;
+            state.earn.ts = 0;
           }
           state.earn.err = { status: r.status };
           render();
@@ -992,15 +998,6 @@
       }
       render();
       startPollers();
-    }
-
-    function githubSessionExpired(returnTo) {
-      state.sessionGeneration += 1;
-      stopPollers();
-      state.session = null;
-      state.githubAuthState = "signin";
-      render();
-      startGitHubOAuth(returnTo || "/", null);
     }
 
     function handleClaimRoute() {
@@ -2024,6 +2021,14 @@
       }
     }
 
+    function earnErrorCopy(status) {
+      if (status === 401 || status === 403) {
+        return "Earnings could not be loaded for this Mac with your sign-in.";
+      }
+      if (status === 404) return "No earnings recorded for this Mac yet.";
+      return "Earnings are unavailable right now.";
+    }
+
     function renderEarn() {
       var d = state.earn.data;
       var malibu = state.malibu.data;
@@ -2048,6 +2053,9 @@
           el("div", { class: "dash-sub" }, week + " wk · " + pending + " accrued · " + life + " life"),
           el("div", { class: "dash-note" }, "Accrued — payouts open in beta")),
       ];
+      if (!d && state.earn.err) {
+        kids.push(el("div", { class: "dash-note hold" }, earnErrorCopy(state.earn.err.status)));
+      }
       if (malibuLine) kids.push(el("div", { class: "dash-malibu" }, malibuLine));
       if (eligCopy) {
         kids.push(el("div", { class: hold ? "dash-note hold" : "dash-note" }, eligCopy));
