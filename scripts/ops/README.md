@@ -10,6 +10,7 @@ not add steps of its own:
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release | `docs/runbooks/pearl-coordinator-rollout.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
+| `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
 Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
 `test-runbook-commands.sh`, `test-entrypoints.sh`, `test-fast-required.sh`.

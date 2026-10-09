@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.2.1
+**Version:** 0.2.2
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. A signed journey on a v0.2 release, a new activation exception or promotion, and SPEC-049-R023 remain pending. No conformance or production promotion is made by this draft."
+    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The bounded CLI224 eligible-network activation exception is recorded in §8.3 and Entry 251; live buyer confirmation, a full signed v0.2 journey and SPEC-049-R023 remain pending. No conformance or production promotion is made by this draft."
   }
 }
 ```
@@ -655,12 +655,76 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
 - Production activation of v0.2.0 automatic enrollment requires a new dated limited activation exception under `specs/PROCESS.md`, recorded in `beta/DECISION_CRITERIA.md`, that replaces §8.1 and states its own network-wide scope, rollback, and expiry, or SPEC-049-R023 promotion.
 - The §8.1 evidence (the signed `1.8.215` journey result and the `1.8.217` canary) covers the v0.1 requirement set. It does not cover SPEC-049-R024 through SPEC-049-R028, which need a signed journey on a v0.2 release.
 
+### 8.3 Limited activation exception: eligible-network Beta (2026-10-09)
+
+This dated exception supersedes §8.1 for v0.2 automatic enrollment, as recorded
+in decision-log Entry 251. It authorizes staged activation, not conformance
+promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
+
+- **Exact scope.** Existing providers and new joins may enroll only after all
+  existing signature, authenticated-session, device/key, fresh-posture, native
+  in-process, hardening and KV-disk-off gates pass. Explicit provider opt-outs
+  remain authoritative. Ineligible providers retain ordinary service; an
+  explicit private request never downgrades or fails over to plaintext.
+- **Approved release.** Signed/notarized CLI `1.8.224`, team `YF7XNRJUG4`,
+  identifier `live.malibu.provider.cli`, CDHash
+  `94b66febaee9ac7265dc0fe1a6ad87559ff602b8`. Verify its release metadata and
+  signature before configuration. No other code identity is authorized by
+  this exception. Any explicit approval expires no later than this exception.
+  Release-derived approval, if used, is restricted to this verified identity;
+  staging another release requires a superseding dated decision.
+- **Coordinator/gateway.** Use reviewed runtime containing #1871/#1892;
+  gateway-context enforcement, durable relay-blind storage, production enforce
+  settlement and `relay-blind-settlement-v1` remain required. Existing provider
+  identity and device pins remain overrides, not network allowlists, and are
+  preserved. Approval of the release allows all otherwise eligible providers
+  to enroll; the signed Studio buyer canary must pass before activation is
+  declared successful.
+  Automatic enrollment retains first-session identity trust and key-change
+  quarantine. Use the dedicated directory signing key and distribute its
+  public key independently of the buyer gateway. Preserve credentials and
+  existing identities. Configuration changes do not authorize a new runtime
+  release or unrelated catalog/CB changes.
+- **Buyers.** Authenticated non-demo buyers use the reference privacy client
+  with a verified explicit identity pin or operator-key-pinned signed directory.
+  Pool/demo exclusions, exact model scope, disclosure strings and settlement
+  requirements remain unchanged.
+- **Evidence.** Retain §9's signed 16-step baseline and its stated limitations;
+  #1871/#1892 reviewed implementations and passing CI; post-#1895 Studio source
+  `2329c3ae036477b1c747dcf0cf6c4ab6fc480027` release/debug builds, native exact
+  artifact/catalog stream/nonstream checks, and six isolated encrypted-stack
+  E2Es (11.606s, no skips). The encrypted cases use a debug fixture, not signed
+  native posture. Activation additionally requires the actual signed 224
+  identity and real private stream/nonstream buyer confirmation. Reuse unchanged
+  qualification; do not represent source/fixture proofs as that confirmation.
+- **Unresolved journey and residuals.** Entry 249's residuals remain. A full
+  signed v0.2 journey for R024–R028 has not run; these requirements are not
+  promoted. Device-bound self-attested posture, first authenticated claimant
+  enrollment, online directory-key trust, and all §2 residual risks remain
+  disclosed without stronger claims. This exception does not complete #1749
+  or the physical promotion gate.
+- **Rollback/incident.** Disable the durable privacy kill switch using the
+  running base plus overlay; private requests then fail closed while ordinary
+  traffic continues. Quarantine/revoke affected providers when appropriate.
+  Disable class configuration if necessary, preserving unrelated configuration.
+  Wrong identity/key admission, plaintext downgrade, redaction failure or a
+  private settlement outcome other than `relay_blind_settled` triggers immediate
+  disablement. Expected ineligibility itself is not an incident.
+- **Expiry.** `2026-10-20T00:00:00Z`. Engage the kill switch and withdraw this
+  approval at expiry unless a new dated decision replaces it. No automatic
+  release-identity reload may extend this date. Owner: @Augustas11.
+
 ## 9. Evidence
 
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json`: the signed `JOURNEY-PRIVACY-CLASS-BETA` result (protected run 37430812962). The release is signed acceptance candidate `1.8.215` on Apple Silicon (Mac Studio). It is evidence-only and cannot satisfy a conformant row while SPEC-049-R023 is open (§8.1).
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json` and its bundle: the reviewed redacted evidence (#1864).
 
 ## 10. Changelog and history
+
+- 0.2.2 - Dated eligible-network activation exception (§8.3, Entry 251), limited
+  to signed CLI224, with staged real-buyer confirmation, unchanged admission
+  and disclosure, explicit missing-journey evidence, rollback and expiry.
+  No wire, requirement or conformance promotion.
 
 - 0.1.0 - Initial default-off Beta contract: exact claim and non-claims; threat model with device-bound, not code-bound, self-attested posture; closed posture statement, key attestation, reservation, dispatch marker, and response AEAD schemas; routing gate with no failover or downgrade; quarantine and durable kill switch; shared error inventory; exact disclosure strings; redaction proof; promotion gate. Carries forward the Product Build 2/Build 4 decisions (#1643, #1645, PR #1471) and keeps SPEC-042-R009.
 - 0.1.0 - Successful privacy-class chat responses carry `X-MacProvider-Privacy-Posture-Verified-At` from the dispatch-time gate for the gateway. The gateway does not store that timestamp, and the header is not a buyer response header.
