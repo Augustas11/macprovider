@@ -657,13 +657,19 @@ enum CreatorOperations {
         let body = pending.event.mapValues(\.anyValue)
         let operationID = (body["operation_id"] as? String) ?? CreatorOutput.operationID("manifest")
         let response = try await client.request("POST", "events", body: body, operationID: operationID)
-        if response.status == 400, let error = response.json()["error"] as? [String: Any],
-           error["code"] as? String == "pool_model_pricing_out_of_bounds" {
-            throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(
-                poolModelID: error["pool_model_id"] as? String ?? "a pool model entry",
-                bound: error["bound"] as? String ?? "a pricing bound",
-                limit: error["limit"] as? String ?? "?"
-            ) + "; re-sign with `creator manifest sign` and submit again")
+        if response.status == 400, let error = response.json()["error"] as? [String: Any] {
+            switch error["code"] as? String {
+            case "pool_model_pricing_out_of_bounds":
+                throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(
+                    poolModelID: error["pool_model_id"] as? String ?? "a pool model entry",
+                    bound: error["bound"] as? String ?? "a pricing bound",
+                    limit: error["limit"] as? String ?? "?"
+                ) + "; re-sign with `creator manifest sign` and submit again")
+            case "pool_model_pricing_bounds_unset":
+                throw CreatorCLIError.invalidInput("the coordinator has no pool-model pricing bounds configured, so it refuses every manifest with pool model entries; the signed manifest is kept pending: ask the operator to configure the bounds, then run `creator manifest submit` again (or re-sign without pool model entries)")
+            default:
+                break
+            }
         }
         let result = try client.expect(response)
         try home.write(pending.state, to: home.poolDir(poolID).appendingPathComponent("manifest-state.json"), mode: 0o600)

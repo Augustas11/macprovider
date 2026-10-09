@@ -507,5 +507,18 @@ final class CreatorCommandTests: XCTestCase {
             XCTAssertTrue(text.contains("pool/x/m completion_rate_per_mtok is above the maximum (max_completion_rate_per_mtok=200"), text)
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("manifest-pending.json").path))
+
+        // Bounds removed before submit: an actionable refusal, manifest kept.
+        let unset = RecordingCreatorTransport { _ in
+            jsonResponse(400, ["error": ["code": "pool_model_pricing_bounds_unset"]])
+        }
+        do {
+            _ = try await CreatorOperations.submitManifest(home: home, client: CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: unset), poolID: identity.poolID)
+            XCTFail("expected the bounds-unset refusal")
+        } catch {
+            let text = String(describing: error)
+            XCTAssertTrue(text.contains("no pool-model pricing bounds configured") && text.contains("creator manifest submit"), text)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("manifest-pending.json").path))
     }
 }
