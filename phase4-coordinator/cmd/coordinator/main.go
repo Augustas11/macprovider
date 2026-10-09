@@ -1247,6 +1247,7 @@ func runCoordinator() (exitCode int) {
 	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
 	// because disabling it is one way to stop pool traffic before a rollback.
 	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
+	startProviderEarningsRollupRefresher(shutdownCtx, billingStore, logger)
 	if privacyAuthority != nil {
 		buyerOpts = append(buyerOpts, buyer.WithPrivacyAuthority(privacyAuthority))
 	}
@@ -2961,6 +2962,71 @@ func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlemen
 				return
 			case <-ticker.C:
 				sweepIfIdle()
+			}
+		}
+	}()
+}
+
+type providerEarningsRollupRefresher interface {
+	RefreshProviderEarningsRollup(context.Context, int) (billing.ProviderEarningsRollupPass, error)
+}
+
+const (
+	providerEarningsRollupTick = 5 * time.Second
+	// providerEarningsRollupTickBudget caps the work per tick. Reads use the
+	// billing read pool; each write is a few-row transaction, so the money
+	// writer is never held for long, and the 1-in-5 duty cycle bounds IO
+	// while the one-time backfill and first drain run.
+	providerEarningsRollupTickBudget = time.Second
+	providerEarningsRollupPassPause  = 10 * time.Millisecond
+)
+
+// startProviderEarningsRollupRefresher keeps the provider earnings rollup
+// (#1925) current: it runs the one-time backfill and recomputes buckets that
+// writers marked dirty or that a maturing force credit made stale. The
+// earnings endpoint stays exact without it (unrefreshed hours are read live),
+// only slower.
+func startProviderEarningsRollupRefresher(ctx context.Context, refresher providerEarningsRollupRefresher, logger zerolog.Logger) {
+	if refresher == nil {
+		return
+	}
+	go func() {
+		backfillDone := false
+		tick := func() {
+			deadline := time.Now().Add(providerEarningsRollupTickBudget)
+			for ctx.Err() == nil {
+				passCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				pass, err := refresher.RefreshProviderEarningsRollup(passCtx, billing.DefaultProviderEarningsRollupLimit)
+				cancel()
+				if err != nil {
+					if ctx.Err() == nil {
+						logger.Error().Err(err).Msg("provider earnings rollup refresh failed")
+					}
+					return
+				}
+				if pass.BackfillComplete && !backfillDone {
+					backfillDone = true
+					logger.Info().Msg("provider earnings rollup backfill complete")
+				}
+				if !pass.More || time.Now().After(deadline) {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(providerEarningsRollupPassPause):
+				}
+			}
+		}
+		tick()
+		ticker := time.NewTicker(providerEarningsRollupTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tick()
 			}
 		}
 	}()

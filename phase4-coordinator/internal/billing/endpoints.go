@@ -1252,40 +1252,18 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	rangeSQL, rangeArgs := earningsRangeFilter(rangeFrom, rangeTo, hasRange)
 	nowUTC := time.Now().UTC()
-	current := sqliteTimeText(currentMondayUTC(nowUTC))
-	todayUTC := sqliteTimeText(time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC))
-
-	// Payable provider_credits for the range-scoped total plus the two rolling
-	// windows the Malibu card shows. current_window == "this week" (since Monday
-	// UTC); today == since midnight UTC. These honour any from/to range.
-	payable, err := h.providerPayableTotals(ctx, providerID, current, todayUTC, rangeSQL, rangeArgs...)
+	figures, err := h.providerEarningsFigures(ctx, providerID, earningsWindows{
+		from: rangeFrom, to: rangeTo, hasRange: hasRange,
+		week:  currentMondayUTC(nowUTC),
+		today: time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC),
+	})
 	if err != nil {
 		unavailable("payable_totals", err)
 		return
 	}
-	totalCredits, weekCredits, todayCredits, models := payable.total, payable.week, payable.today, payable.models
-	// "Pending" = all USDC currently owed to the provider (earned, payout-
-	// eligible, not yet paid). It is a lifetime, range-INDEPENDENT figure — a
-	// from/to filter narrows the today/week/lifetime views but must never make
-	// owed money appear smaller — so it deliberately ignores rangeSQL. The
-	// SPEC-016 payout pipeline is default-off / not deployed, so no payable
-	// credit has been paid yet and every payable credit is still owed. When
-	// payouts go live, this must subtract only CONFIRMED, non-reorged/non-
-	// orphaned payouts (payout reorg/orphan compensation is tracked outside
-	// ledger_payout_ready — see internal/payout/reorg.go, orphans.go); a naive
-	// `status NOT IN ('ready','voided')` subtraction would UNDERSTATE owed money
-	// after an unresolved orphan, so it is intentionally not done here.
-	// Without a range the lifetime scan above is exactly this sum.
-	pendingCredits := totalCredits
-	if hasRange {
-		pendingCredits, err = sumOn(ctx, h.store.reader(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
-		if err != nil {
-			unavailable("pending_total", err)
-			return
-		}
-	}
+	totalCredits, weekCredits, todayCredits, models := figures.total, figures.week, figures.today, figures.models
+	pendingCredits, faultCount := figures.pending, figures.faults
 	lastPayout, err := h.lastPayout(ctx, providerID)
 	if err != nil {
 		unavailable("last_payout", err)
@@ -1305,12 +1283,6 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		unavailable("rate_card", err)
 		return
 	}
-	faultCount, err := sumOn(ctx, h.store.reader(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
-	if err != nil {
-		unavailable("fault_count", err)
-		return
-	}
-
 	resp := map[string]any{
 		"provider_id":            providerID,
 		"total_credits":          totalCredits,
@@ -1666,6 +1638,56 @@ func (h *handler) allowEarnings(providerID string) bool {
 	}
 	h.lastEarnings[providerID] = append(kept, time.Now())
 	return true
+}
+
+// providerEarningsFigures returns the earnings card figures: the payable
+// total, week and today windows and models_served (all honouring any from/to
+// range), fault_count (range-scoped, every credit row), and pending.
+//
+// "Pending" = all USDC currently owed to the provider (earned, payout-
+// eligible, not yet paid). It is a lifetime, range-INDEPENDENT figure — a
+// from/to filter narrows the today/week/lifetime views but must never make
+// owed money appear smaller. The SPEC-016 payout pipeline is default-off / not
+// deployed, so no payable credit has been paid yet and every payable credit is
+// still owed. When payouts go live, this must subtract only CONFIRMED,
+// non-reorged/non-orphaned payouts (payout reorg/orphan compensation is
+// tracked outside ledger_payout_ready — see internal/payout/reorg.go,
+// orphans.go); a naive `status NOT IN ('ready','voided')` subtraction would
+// UNDERSTATE owed money after an unresolved orphan, so it is intentionally not
+// done here.
+//
+// The figures come from the provider earnings rollup when it can answer
+// (#1925, earnings_rollup.go) and otherwise from the full payable view; both
+// read spec022_payable_request_credits semantics exactly.
+func (h *handler) providerEarningsFigures(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {
+	figures, ok, err := h.store.providerEarningsFromRollup(ctx, providerID, win)
+	if err != nil || ok {
+		return figures, err
+	}
+	return h.providerEarningsFiguresFromView(ctx, providerID, win)
+}
+
+// providerEarningsFiguresFromView reads the figures from the provider's whole
+// payable history; its cost is linear in that history.
+func (h *handler) providerEarningsFiguresFromView(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {
+	rangeSQL, rangeArgs := earningsRangeFilter(win.from, win.to, win.hasRange)
+	payable, err := h.providerPayableTotals(ctx, providerID, sqliteTimeText(win.week), sqliteTimeText(win.today), rangeSQL, rangeArgs...)
+	if err != nil {
+		return providerEarningsFigures{}, err
+	}
+	out := providerEarningsFigures{total: payable.total, week: payable.week, today: payable.today, models: payable.models}
+	// Without a range the lifetime scan above is exactly the pending sum.
+	out.pending = out.total
+	if win.hasRange {
+		if out.pending, err = sumOn(ctx, h.store.reader(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID); err != nil {
+			return providerEarningsFigures{}, err
+		}
+	}
+	out.faults, err = sumOn(ctx, h.store.reader(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
+	if err != nil {
+		return providerEarningsFigures{}, err
+	}
+	return out, nil
 }
 
 type providerPayableTotals struct {
