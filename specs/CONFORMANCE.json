@@ -11767,6 +11767,30 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
         "rationale": "GET /admin/model-admission/pool-proven and the closed model_admission_pool_proven.v1 frame are not implemented: no materialized build over pool-manifest route snapshots and final settlement rows, k-anonymity suppression, licence agreement, probe-evidence currency, ceilings, or pool_proven_unavailable handling."
       }
+    },
+    {
+      "requirement_id": "SPEC-002-R004",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:CompatibilitySetConfig",
+        "phase4-coordinator/internal/ws/server.go:requireCompatibleSet",
+        "phase4-coordinator/cmd/coordinator/main.go:reloadCoordinatorConfig",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
+        "scripts/ops/cli-release.sh:provider_version_policy_status"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetMinimumVersionAcceptsFutureSameRepoWithoutAllowlist",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1914",
+        "rationale": "Version-floor admission and reload regression coverage are added by this campaign; deployment migration and live release preflight remain pending."
+      }
     }
   ]
 }

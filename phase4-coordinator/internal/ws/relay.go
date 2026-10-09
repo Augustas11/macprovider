@@ -586,16 +586,20 @@ func providerWriteProbeFrame() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// sendHandshakeAck enqueues hello_ack / auth_response v2 ahead of every text
-// frame held while the ack was pending, then lifts the hold.
+// sendHandshakeAck writes hello_ack / auth_response v2 ahead of every text
+// frame held while the ack was pending, then lifts the hold. It waits for the
+// ack frame itself to flush so a post-ack close cannot strand accepted
+// credentials behind a queued close frame.
 func (ps *providerSession) sendHandshakeAck(payload []byte) error {
+	ackResult := make(chan error, 1)
 	ps.writeMu.Lock()
-	defer ps.writeMu.Unlock()
 	if ps.closed {
+		ps.writeMu.Unlock()
 		return ErrRelayClosed
 	}
-	held := append([]providerFrame{{payload: payload}}, ps.preAck...)
+	held := append([]providerFrame{{payload: payload, result: ackResult}}, ps.preAck...)
 	if len(held) > cap(ps.writeCh)-len(ps.writeCh) {
+		ps.writeMu.Unlock()
 		return ErrRelayBackpressure
 	}
 	for _, f := range held {
@@ -603,7 +607,16 @@ func (ps *providerSession) sendHandshakeAck(payload []byte) error {
 	}
 	ps.ackPending = false
 	ps.preAck = nil
-	return nil
+	ps.writeMu.Unlock()
+	select {
+	case err := <-ackResult:
+		if err != nil {
+			return ErrRelayClosed
+		}
+		return nil
+	case <-ps.closedCh:
+		return ErrRelayClosed
+	}
 }
 
 // enqueueRaw queues a pre-baked WS frame (header + body, already assembled by

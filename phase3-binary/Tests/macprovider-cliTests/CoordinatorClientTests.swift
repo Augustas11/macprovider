@@ -2933,6 +2933,52 @@ final class CoordinatorClientTests: XCTestCase {
         }
     }
 
+    func testTier2PreChallengeRejectedAuthResponseKeepsCoordinatorError() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let rejection = [
+            "type": "auth_response",
+            "version": 2,
+            "status": "rejected",
+            "error": [
+                "code": "min_version_required",
+                "message": "provider binary version v1.8.3 is below floor v1.8.4",
+            ],
+        ] as [String: Any]
+        let data = try JSONSerialization.data(withJSONObject: rejection, options: [.withoutEscapingSlashes])
+        let socket = FakeProviderWebSocketTask(receiveResults: [
+            .success(.string(String(decoding: data, as: UTF8.self))),
+        ])
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("pre-challenge auth_response rejection should throw")
+        } catch let CoordinatorAuthError.rejected(code, message) {
+            XCTAssertEqual(code, "min_version_required")
+            XCTAssertEqual(message, "provider binary version v1.8.3 is below floor v1.8.4")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testTier2ReferralCloseIsTypedWithoutEchoingRawCode() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"

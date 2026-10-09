@@ -38,6 +38,7 @@ const (
 )
 
 var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$`)
+var compatibilitySetMinimumVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
 // ValidateProviderID is the canonical validator for ProviderID across every
 // registration path. Issue #274: WS self-serve registration previously
@@ -61,6 +62,23 @@ func ValidateCompatibilitySetID(s string) error {
 		return fmt.Errorf("invalid compatibility_set_id %q", s)
 	}
 	return nil
+}
+
+func compatibilitySetIDParts(id string) (repo string, version string, ok bool) {
+	if err := ValidateCompatibilitySetID(id); err != nil {
+		return "", "", false
+	}
+	at := strings.LastIndexByte(id, '@')
+	colon := strings.LastIndexByte(id[:at], ':')
+	if at < 0 || colon < 0 || colon+2 >= at || id[colon+1] != 'v' {
+		return "", "", false
+	}
+	return id[:colon], id[colon+2 : at], true
+}
+
+func validCompatibilitySetMinimumVersion(version string) bool {
+	trimmed := strings.TrimSpace(version)
+	return version == trimmed && compatibilitySetMinimumVersionPattern.MatchString(version) && versionfloor.Valid(version)
 }
 
 // minAuditLogRetentionDays is the compliance floor for audit_log retention.
@@ -288,10 +306,11 @@ type CoordinatorConfig struct {
 	CompatibilitySet      CompatibilitySetConfig `yaml:"compatibility_set"`
 }
 
-// CompatibilitySetConfig is an exact coordinator admission contract. TargetID
-// is the set providers should converge on; AcceptedIDs includes that target and
-// at least one distinct rollback set so a rollout can be reversed without
-// disabling strict compatibility admission.
+// CompatibilitySetConfig is the coordinator admission contract. TargetID is the
+// set providers should converge on. MinimumVersion is the buyer-serving floor
+// for signed release-manifest identifiers in the same repository as TargetID.
+// AcceptedIDs is retained as the legacy exact allowlist only when
+// MinimumVersion is empty.
 //
 // FirstHopBridgeIDs is the production #610 pre-fix bootstrap: exact set IDs
 // (for example the last public pre-fix CLI set v1.8.48) that may open a
@@ -299,25 +318,73 @@ type CoordinatorConfig struct {
 // sessions are never buyer-routable. They are distinct from AcceptedIDs.
 type CompatibilitySetConfig struct {
 	TargetID          string   `yaml:"target_id"`
+	MinimumVersion    string   `yaml:"minimum_version"`
 	AcceptedIDs       []string `yaml:"accepted_ids"`
+	RevokedIDs        []string `yaml:"revoked_ids"`
 	FirstHopBridgeIDs []string `yaml:"first_hop_bridge_ids"`
 }
 
 // Configured distinguishes an explicit strict policy from the legacy
 // unconfigured mode. Partial configurations fail validation.
 func (c CompatibilitySetConfig) Configured() bool {
-	return c.TargetID != "" || len(c.AcceptedIDs) != 0 || len(c.FirstHopBridgeIDs) != 0
+	return c.TargetID != "" || c.MinimumVersion != "" || len(c.AcceptedIDs) != 0 || len(c.RevokedIDs) != 0 || len(c.FirstHopBridgeIDs) != 0
 }
 
-// Accepts performs the exact, case-sensitive compatibility-set comparison for
-// buyer-serving admission.
+// Accepts applies the buyer-serving compatibility-set policy. Legacy mode is
+// exact and case-sensitive; minimum-version mode accepts same-repo signed sets
+// at or above the configured floor unless exactly revoked.
 func (c CompatibilitySetConfig) Accepts(id string) bool {
+	if c.MinimumVersion != "" {
+		return c.RejectionCode(id) == ""
+	}
+	return c.acceptsLegacy(id)
+}
+
+func (c CompatibilitySetConfig) acceptsLegacy(id string) bool {
 	for _, accepted := range c.AcceptedIDs {
 		if id == accepted {
 			return true
 		}
 	}
 	return false
+}
+
+// RejectionCode returns the compatibility-set buyer-serving admission failure
+// reason for the configured policy, or an empty string when id is accepted.
+func (c CompatibilitySetConfig) RejectionCode(id string) string {
+	if !c.Configured() {
+		return ""
+	}
+	if id == "" {
+		return "compatibility_set_required"
+	}
+	if err := ValidateCompatibilitySetID(id); err != nil {
+		return "compatibility_set_invalid"
+	}
+	if c.MinimumVersion == "" {
+		if c.acceptsLegacy(id) {
+			return ""
+		}
+		return "compatibility_set_unaccepted"
+	}
+	for _, revoked := range c.RevokedIDs {
+		if id == revoked {
+			return "provider_release_revoked"
+		}
+	}
+	repo, version, ok := compatibilitySetIDParts(id)
+	if !ok {
+		return "compatibility_set_invalid"
+	}
+	targetRepo, _, ok := compatibilitySetIDParts(c.TargetID)
+	if !ok || repo != targetRepo {
+		return "compatibility_set_repository_mismatch"
+	}
+	cmp, ok := versionfloor.Compare(version, c.MinimumVersion)
+	if !ok || cmp < 0 {
+		return "provider_version_below_minimum"
+	}
+	return ""
 }
 
 // IsFirstHopBridge reports whether id is listed for the temporary pre-fix
@@ -3713,24 +3780,63 @@ func (c Config) validateCompatibilitySet() error {
 	if err := ValidateCompatibilitySetID(policy.TargetID); err != nil {
 		return fmt.Errorf("coordinator.compatibility_set.target_id: %w", err)
 	}
-	if len(policy.AcceptedIDs) < 2 {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain the target and at least one rollback set")
+	targetRepo, _, ok := compatibilitySetIDParts(policy.TargetID)
+	if !ok {
+		return fmt.Errorf("coordinator.compatibility_set.target_id: invalid compatibility_set_id %q", policy.TargetID)
 	}
-	if len(policy.AcceptedIDs) > maxAcceptedCompatibilitySets {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain at most %d entries", maxAcceptedCompatibilitySets)
-	}
-	seen := make(map[string]struct{}, len(policy.AcceptedIDs))
-	for i, id := range policy.AcceptedIDs {
-		if err := ValidateCompatibilitySetID(id); err != nil {
-			return fmt.Errorf("coordinator.compatibility_set.accepted_ids[%d]: %w", i, err)
+	acceptedSeen := make(map[string]struct{}, len(policy.AcceptedIDs))
+	revokedSeen := make(map[string]struct{}, len(policy.RevokedIDs))
+	if policy.MinimumVersion == "" {
+		if len(policy.RevokedIDs) != 0 {
+			return fmt.Errorf("coordinator.compatibility_set.revoked_ids require minimum_version")
 		}
-		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("coordinator.compatibility_set.accepted_ids contains duplicate %q", id)
+		if len(policy.AcceptedIDs) < 2 {
+			return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain the target and at least one rollback set")
 		}
-		seen[id] = struct{}{}
-	}
-	if _, ok := seen[policy.TargetID]; !ok {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
+		if len(policy.AcceptedIDs) > maxAcceptedCompatibilitySets {
+			return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain at most %d entries", maxAcceptedCompatibilitySets)
+		}
+		for i, id := range policy.AcceptedIDs {
+			if err := ValidateCompatibilitySetID(id); err != nil {
+				return fmt.Errorf("coordinator.compatibility_set.accepted_ids[%d]: %w", i, err)
+			}
+			if _, duplicate := acceptedSeen[id]; duplicate {
+				return fmt.Errorf("coordinator.compatibility_set.accepted_ids contains duplicate %q", id)
+			}
+			acceptedSeen[id] = struct{}{}
+		}
+		if _, ok := acceptedSeen[policy.TargetID]; !ok {
+			return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
+		}
+	} else {
+		if len(policy.AcceptedIDs) != 0 {
+			return fmt.Errorf("coordinator.compatibility_set.minimum_version must not be combined with accepted_ids")
+		}
+		if !validCompatibilitySetMinimumVersion(policy.MinimumVersion) {
+			return fmt.Errorf("coordinator.compatibility_set.minimum_version %q must be a strict three-component numeric version (e.g. 1.8.65)", policy.MinimumVersion)
+		}
+		if code := policy.RejectionCode(policy.TargetID); code != "" {
+			return fmt.Errorf("coordinator.compatibility_set.target_id is not admitted by minimum_version policy (%s)", code)
+		}
+		for i, id := range policy.RevokedIDs {
+			if err := ValidateCompatibilitySetID(id); err != nil {
+				return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d]: %w", i, err)
+			}
+			if _, duplicate := revokedSeen[id]; duplicate {
+				return fmt.Errorf("coordinator.compatibility_set.revoked_ids contains duplicate %q", id)
+			}
+			repo, version, ok := compatibilitySetIDParts(id)
+			if !ok {
+				return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d]: invalid compatibility_set_id %q", i, id)
+			}
+			if repo != targetRepo {
+				return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d] repository must match target_id", i)
+			}
+			if _, ok := versionfloor.Compare(version, policy.MinimumVersion); !ok {
+				return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d] has an invalid numeric version", i)
+			}
+			revokedSeen[id] = struct{}{}
+		}
 	}
 	if len(policy.FirstHopBridgeIDs) > maxFirstHopBridgeSets {
 		return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must contain at most %d entries", maxFirstHopBridgeSets)
@@ -3747,8 +3853,27 @@ func (c Config) validateCompatibilitySet() error {
 		if id == policy.TargetID {
 			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not contain target_id")
 		}
-		if _, overlap := seen[id]; overlap {
+		if _, overlap := acceptedSeen[id]; overlap {
 			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not overlap accepted_ids (%q)", id)
+		}
+		if _, revoked := revokedSeen[id]; revoked {
+			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not overlap revoked_ids (%q)", id)
+		}
+		if policy.MinimumVersion != "" {
+			repo, version, ok := compatibilitySetIDParts(id)
+			if !ok {
+				return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids[%d]: invalid compatibility_set_id %q", i, id)
+			}
+			if repo != targetRepo {
+				return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids[%d] repository must match target_id", i)
+			}
+			cmp, ok := versionfloor.Compare(version, policy.MinimumVersion)
+			if !ok {
+				return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids[%d] has an invalid numeric version", i)
+			}
+			if cmp >= 0 {
+				return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must remain update-only and below minimum_version (%q)", id)
+			}
 		}
 	}
 	return nil

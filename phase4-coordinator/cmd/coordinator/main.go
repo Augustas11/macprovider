@@ -233,12 +233,18 @@ func runCoordinator() (exitCode int) {
 	checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
 	compatibilityPolicyMode := "unconfigured"
 	if cfg.Coordinator.CompatibilitySet.Configured() {
-		compatibilityPolicyMode = "configured"
+		if strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion) != "" {
+			compatibilityPolicyMode = "version_floor"
+		} else {
+			compatibilityPolicyMode = "legacy_allowlist"
+		}
 	}
 	logger.Info().
 		Str("compatibility_policy", compatibilityPolicyMode).
 		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
+		Str("minimum_compatibility_version", strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion)).
 		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
+		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Int("first_hop_bridge_set_count", len(cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs)).
 		Msg("provider compatibility-set admission policy initialized")
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
@@ -4314,6 +4320,17 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
 
+func compatibilityPolicyModeForConfig(policy config.CompatibilitySetConfig) string {
+	switch {
+	case !policy.Configured():
+		return "unconfigured"
+	case strings.TrimSpace(policy.MinimumVersion) != "":
+		return "version_floor"
+	default:
+		return "legacy_allowlist"
+	}
+}
+
 func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, trustPoolAdminReloader trustpool.CreatorAdminConfigReloader, billingStores ...*billing.Store) {
 	// SPEC-016 v0.1.23 §6.5: the general SIGHUP reload must not parse,
 	// env-resolve, or validate payout.security.*, and a payout.* key
@@ -4506,6 +4523,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	} else if billingSnapshotCommitted {
 		buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, nil)
 	}
+	compatibilityClosed := wsServer.SetCompatibilitySetPolicy(cfg.Coordinator.CompatibilitySet)
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
 	benchmarkQuarantinesCleared := 0
@@ -4523,6 +4541,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
 		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Int("compatibility_policy_sessions_closed", compatibilityClosed).
+		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
+		Str("minimum_compatibility_version", strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion)).
+		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Str("config_sha256", configDigests.ConfigSHA256).
 		Str("overlay_sha256", configDigests.OverlaySHA256).
 		Msg("tier2/proof_of_weights config reloaded")

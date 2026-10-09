@@ -2079,6 +2079,78 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	}
 }
 
+func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *testing.T) {
+	defer tier2.ResetForTest()
+	startup := config.Default()
+	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:    "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		AcceptedIDs: []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd", "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+	}
+	startup, registry, wsServer, buyerServer := reloadTestServers(startup)
+	registry.Register(&pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "session-a",
+		ModelID:              "model-a",
+		Tier:                 pool.TierProvisional,
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		BinaryVersion:        "1.8.12",
+		CompatibilitySetID:   "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		CatalogAdmissionMode: "not_required",
+	}, nil)
+	server := httptest.NewServer(wsServer.Handler())
+	defer server.Close()
+
+	next := startup
+	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:       "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MinimumVersion: "1.8.4",
+		RevokedIDs:     []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"},
+	}
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	if provider, ok := registry.Resolve("provider-a", "session-a"); !ok || provider.State != pool.StateUnavailable || provider.RoutingEligible() {
+		t.Fatalf("revoked compatibility session not fenced after reload: ok=%v provider=%+v", ok, provider)
+	}
+	health := fetchReloadCompatibilityHealth(t, server.URL)
+	if health.CompatibilityPolicyMode != "version_floor" || health.CompatibilityPolicyMinimumVersion != "1.8.4" || len(health.CompatibilityPolicyRevokedIDs) != 1 {
+		t.Fatalf("valid reload healthz compatibility policy = %+v", health)
+	}
+
+	invalid := next
+	invalid.Coordinator.CompatibilitySet.MinimumVersion = "1.8"
+	reloadCoordinatorConfig(writeReloadConfig(t, invalid), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	after := fetchReloadCompatibilityHealth(t, server.URL)
+	if after.CompatibilityPolicyMode != health.CompatibilityPolicyMode ||
+		after.CompatibilityPolicyMinimumVersion != health.CompatibilityPolicyMinimumVersion ||
+		!reflect.DeepEqual(after.CompatibilityPolicyRevokedIDs, health.CompatibilityPolicyRevokedIDs) {
+		t.Fatalf("rejected reload changed compatibility health: before=%+v after=%+v", health, after)
+	}
+}
+
+func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
+	CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
+	CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version"`
+	CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
+} {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version"`
+		CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode healthz: %v", err)
+	}
+	return body
+}
+
 func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	defer tier2.ResetForTest()
 	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())

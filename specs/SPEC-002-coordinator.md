@@ -1,6 +1,11 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.11 (2026-10-09, capacity shed is a retryable 429)
+**Version:** 1.6.12 (2026-10-10, provider release admission policy)
+
+**Change log v1.6.12 (2026-10-10, issue #1914):** Adds SPEC-002-R004,
+minimum-version and exact release revocation admission, SIGHUP policy reload,
+and actionable provider rejection. Release identity remains provider-reported
+metadata; signed installer/update verification remains authenticity authority.
 
 **Change log v1.6.11 (2026-10-09, issue #1906):** A known model with
 serving-capable supply whose providers are all full now sheds as `429
@@ -5155,3 +5160,52 @@ writing. The coordinator design is informed by the project's own Phase 1
 and Phase 2 findings, SPEC-001's wire protocol, and standard
 WebSocket/HTTP patterns. This is documented here for transparency per
 the strict clean-room policy inherited from SPEC-001 section 7.2.
+
+
+## SPEC-002-R004 — Provider release admission policy
+
+`coordinator.compatibility_set` MUST support `target_id`, `minimum_version`,
+`revoked_ids`, and optional `first_hop_bridge_ids`. The target remains the
+exact signed-manifest recommendation identity, in `owner/repo:vMAJOR.MINOR.PATCH@commit`
+form. It is not an admission allowlist. Buyer-serving release admission MUST
+accept any valid identity from the target repository at or above the numeric
+three-component minimum, except an exact identity in `revoked_ids`. Numeric
+overflow and malformed versions MUST fail closed. For buyer-serving admission, the reported binary version
+MUST agree numerically with the identity's version. These reported fields do
+not authenticate a binary or grant a trust tier; provider authentication,
+attestation, catalog admission, and signed update verification remain separate.
+
+The target MUST itself satisfy the policy. Duplicate or malformed revocations,
+a malformed minimum, and contradictory bridge/revocation entries MUST reject
+configuration. Explicit revocation MUST take precedence over update bridges.
+Bridge identities below the buyer-serving floor may open update-only sessions
+and MUST remain unroutable.
+
+The deprecated `accepted_ids` policy MAY remain available for deployment
+migration when `minimum_version` and `revoked_ids` are absent. Configuration
+MUST reject mixing the legacy allowlist with the new policy. An entirely
+unconfigured policy retains existing local/lab behavior. Release tooling MUST
+verify the running coordinator uses the new policy and that the candidate
+satisfies its floor, repository, and revocation checks; it MUST NOT request a
+per-release allowlist edit. Signed candidate verification and canary proof
+remain required.
+
+A validated SIGHUP reload MUST publish one immutable compatibility policy
+snapshot after fallible reload preparation succeeds. A rejected reload MUST
+leave the prior policy intact. Newly revoked or below-floor connected sessions
+MUST become unroutable and close; an in-flight admission MUST recheck the
+current policy before becoming routable so it cannot escape reload enforcement.
+After durable credential mutation, an admission invalidated by reload MUST
+remain held out of routing, deliver its credential-bearing acknowledgement,
+and then close. It MUST NOT strand a minted credential by refusing late
+registration. The policy verdict and release of the acknowledgement routing
+hold MUST be serialized against policy publication.
+The policy target is reloadable; this does not by itself make the separate
+`latest_binary_version` recommendation reloadable.
+
+A rejected v2 initial auth request MUST receive an `auth_response` rejection
+with a stable reason code and an actionable message before the close. The
+provider MUST preserve that rejection when waiting for `auth_challenge`,
+rather than replacing it with a protocol-shape error. `/healthz` MUST expose
+the applied compatibility policy for release preflight. It remains public and
+reports policy metadata, never credentials or proof of binary authenticity.
