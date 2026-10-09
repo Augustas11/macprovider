@@ -439,4 +439,50 @@ final class CreatorCommandTests: XCTestCase {
         }
         XCTAssertTrue(BYOMModelAdmissionError.httpStatus(409).description.contains("models admission withdraw"))
     }
+
+    func testPricingBoundsAreCheckedBeforeSigningAndNamedOnSubmit() async throws {
+        let boundsJSON: [String: Any] = [
+            "min_prompt_rate_per_mtok": 10, "max_prompt_rate_per_mtok": 100,
+            "min_prompt_cache_hit_rate_per_mtok": 0, "max_prompt_cache_hit_rate_per_mtok": 50,
+            "min_completion_rate_per_mtok": 5, "max_completion_rate_per_mtok": 200,
+        ]
+        let fake = RecordingCreatorTransport { _ in jsonResponse(200, ["pool_model_pricing_bounds": boundsJSON]) }
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let fetched = await CreatorOperations.fetchPricingBounds(client)
+        XCTAssertEqual(fake.requests.first?.url?.path, "/v1/creator/pricing-bounds")
+        let bounds = try XCTUnwrap(try XCTUnwrap(fetched))
+        func entry(_ prompt: UInt64, _ hit: UInt64, _ completion: UInt64) -> PoolModelEntry {
+            PoolModelEntry(poolModelID: "pool/AAAAAAAAAAAAAAAAAAAAAA/m", artifactHashAlgorithm: "macprovider.gguf-file.v1", artifactHash: String(repeating: "a", count: 64),
+                           allowedRuntimeSources: ["llamacpp_loopback"], license: "MIT", paidServingAttested: true,
+                           pricing: PoolModelPricing(promptRatePerMtok: prompt, promptCacheHitRatePerMtok: hit, completionRatePerMtok: completion),
+                           disclosureClass: "pool_attested_unverified", maxContextTokens: 4096)
+        }
+        XCTAssertNoThrow(try CreatorOperations.checkPricingBounds([entry(50, 10, 100)], bounds: .some(bounds)))
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(101, 10, 100)], bounds: .some(bounds))) {
+            XCTAssertTrue(String(describing: $0).contains("max_prompt_rate_per_mtok=100"))
+        }
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(50, 10, 4)], bounds: .some(bounds))) {
+            XCTAssertTrue(String(describing: $0).contains("min_completion_rate_per_mtok=5"))
+        }
+        XCTAssertThrowsError(try CreatorOperations.checkPricingBounds([entry(50, 10, 100)], bounds: .some(nil)), "no bounds configured refuses every entry")
+        XCTAssertNoThrow(try CreatorOperations.checkPricingBounds([entry(999, 10, 100)], bounds: nil), "unknown bounds defer to submit")
+
+        // Submit maps the coordinator's named refusal and keeps the pending manifest.
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["m"]
+        _ = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
+        let refusing = RecordingCreatorTransport { _ in
+            jsonResponse(400, ["error": ["code": "pool_model_pricing_out_of_bounds", "pool_model_id": "pool/x/m", "bound": "max_completion_rate_per_mtok", "limit": "200"]])
+        }
+        do {
+            _ = try await CreatorOperations.submitManifest(home: home, client: CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: refusing), poolID: identity.poolID)
+            XCTFail("expected the bounds refusal")
+        } catch {
+            let text = String(describing: error)
+            XCTAssertTrue(text.contains("pool/x/m completion_rate_per_mtok is above the maximum (max_completion_rate_per_mtok=200"), text)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("manifest-pending.json").path))
+    }
 }

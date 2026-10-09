@@ -152,11 +152,16 @@ macprovider-cli creator manifest submit --pool <pool-id>
 (default 1). Re-run `sign` and `submit` for each change; there is no
 in-place edit.
 
-> **Manifest timing.** On the current release a new manifest version takes
-> effect when the previous version expires, so keep `--validity-days` short
-> while you iterate. Taking effect at submit lands with this release.
+> **Manifest timing.** A higher manifest version takes effect when you submit
+> it; it does not wait for the previous version to expire.
 > `creator status --pool <pool-id>` shows the accepted version's
 > `effective_from` and `expires_at`.
+
+`sign` reads the coordinator's pricing bounds (`creator status` and
+`creator agree` show them too) and refuses a rate outside them before
+signing, naming the bound, for example
+`max_completion_rate_per_mtok=<limit>`. A submit refused for the same
+reason names the entry and the bound.
 
 ## 5. Creator: admit, authorize, promote
 
@@ -219,9 +224,9 @@ macprovider-cli creator lifecycle --pool <pool-id> --set paused|draining|retired
 - `revoke --provider` removes a member Mac from the pool's routes.
 - `revoke --model` signs the next manifest version without that entry,
   keeping every other entry and setting, and leaves it pending. Run
-  `creator manifest submit --pool <pool-id>` to apply it. It follows the
-  manifest timing in step 4. A pool's only model cannot be revoked; retire
-  the pool instead.
+  `creator manifest submit --pool <pool-id>` to apply it. It takes effect
+  at submit. A pool's only model cannot be revoked; retire the pool
+  instead.
 - `lifecycle` pauses, drains or retires the pool. Retired is final. A paused
   or draining pool returns to active with `creator promote`.
 
@@ -295,12 +300,10 @@ paused with reason `creator_agreement_renewal`; promote them again.
 **Price bounds.** Each of a model's three rates (prompt, cached prompt,
 completion, in credits per million tokens) must lie inside inclusive
 network-set bounds, with cache-hit not above prompt. A rate outside them is
-refused with `pool_model_pricing_out_of_bounds`. The bounds are coordinator
-configuration; there is no creator-facing way yet to read the live values
-before signing. The runbook's proposed values, derived from the signed rate
-card, are prompt 13,500 to 425,000, cache-hit 3,375 to 106,250, completion
-27,000 to 2,160,000 ([pool-scoped-model-admission.md](../runbooks/pool-scoped-model-admission.md),
-section 1). Treat them as a starting point, not a guarantee.
+refused with `pool_model_pricing_out_of_bounds`, which names the entry, the
+bound and its limit. The bounds are coordinator configuration; read the live
+values with `creator status` (or `GET /v1/creator/pricing-bounds`).
+`creator manifest sign` checks them before signing.
 
 Buyers pay your signed rates under the standard formula and platform fee.
 
@@ -317,8 +320,7 @@ Buyers pay your signed rates under the standard formula and platform fee.
 
 ## Known gaps
 
-- On the current release a new manifest version waits for the previous one
-  to expire (see step 4).
-- A Mac in two active pools with the same artifact does not bind
-  automatically.
-- Price bounds are not discoverable before signing.
+- A Mac in two active pools with the same artifact binds only when its
+  config names the entry: set `pool_model_id`. Without it the offer status
+  warns `pool_binding_ambiguous`; a `pool_model_id` that matches no active
+  entry warns `pool_binding_requested_entry_unmatched`.

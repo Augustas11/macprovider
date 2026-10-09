@@ -655,7 +655,16 @@ enum CreatorOperations {
         let pending = try home.read(CreatorPendingManifest.self, from: pendingURL)
         let body = pending.event.mapValues(\.anyValue)
         let operationID = (body["operation_id"] as? String) ?? CreatorOutput.operationID("manifest")
-        let result = try client.expect(try await client.request("POST", "events", body: body, operationID: operationID))
+        let response = try await client.request("POST", "events", body: body, operationID: operationID)
+        if response.status == 400, let error = response.json()["error"] as? [String: Any],
+           error["code"] as? String == "pool_model_pricing_out_of_bounds" {
+            throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(
+                poolModelID: error["pool_model_id"] as? String ?? "a pool model entry",
+                bound: error["bound"] as? String ?? "a pricing bound",
+                limit: error["limit"] as? String ?? "?"
+            ) + "; re-sign with `creator manifest sign` and submit again")
+        }
+        let result = try client.expect(response)
         try home.write(pending.state, to: home.poolDir(poolID).appendingPathComponent("manifest-state.json"), mode: 0o600)
         try FileManager.default.removeItem(at: pendingURL)
         return result
@@ -842,6 +851,29 @@ enum CreatorOperations {
         )
     }
 
+    /// GET /v1/creator/pricing-bounds. `.some(nil)` is a coordinator with no
+    /// bounds configured; nil is "could not ask" (not logged in, unreachable).
+    static func fetchPricingBounds(_ client: CreatorClient) async -> CreatorPricingBounds?? {
+        guard let response = try? await client.request("GET", "pricing-bounds"), response.status == 200 else { return nil }
+        let body = response.json()
+        guard body.keys.contains("pool_model_pricing_bounds") else { return nil }
+        return .some(CreatorPricingBounds(json: body["pool_model_pricing_bounds"]))
+    }
+
+    /// Refuses, before anything is signed, an entry whose rates the
+    /// coordinator would refuse, naming the bound as the coordinator does.
+    static func checkPricingBounds(_ entries: [PoolModelEntry], bounds: CreatorPricingBounds??) throws {
+        guard let known = bounds, !entries.isEmpty else { return }
+        guard let bounds = known else {
+            throw CreatorCLIError.invalidInput("the coordinator has no pool-model pricing bounds configured, so it refuses every pool model entry; contact the operator")
+        }
+        for entry in entries {
+            if let broken = bounds.violation(entry.pricing) {
+                throw CreatorCLIError.invalidInput(CreatorPricingBounds.message(poolModelID: entry.poolModelID, bound: broken.bound, limit: String(broken.limit)))
+            }
+        }
+    }
+
     static let creatorLifecycles: Set<String> = ["paused", "draining", "retired"]
 
     /// POST /v1/creator/pools/<id>/lifecycle (coordinator
@@ -920,6 +952,9 @@ struct CreatorAgreeCommand: AsyncParsableCommand {
             throw CreatorCLIError.invalidInput("malformed agreement response")
         }
         CreatorOutput.printJSON(agreement)
+        if let bounds = CreatorPricingBounds(json: terms["pool_model_pricing_bounds"]) {
+            print("pool model pricing bounds (credits per million tokens): \(bounds.summary)")
+        }
         guard yes else {
             print("Not accepted. Re-run with --yes to accept Creator Agreement version \(version).")
             throw ExitCode.failure
@@ -975,7 +1010,7 @@ struct CreatorManifestCommand: ParsableCommand {
     )
 }
 
-struct CreatorManifestSignCommand: ParsableCommand {
+struct CreatorManifestSignCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "sign", abstract: "Sign the next manifest version locally. Nothing is sent.")
     @OptionGroup var pool: CreatorPoolOption
     @Option(help: "Comma-separated catalog model ids to allow.") var models = ""
@@ -994,7 +1029,7 @@ struct CreatorManifestSignCommand: ParsableCommand {
     @Option(help: "Completion rate per million tokens.") var completionRatePerMtok: UInt64?
     @Option(help: "max_context_tokens for a --from-proposal entry that reports none.") var maxContextTokens: UInt64?
 
-    func run() throws {
+    func run() async throws {
         var options = CreatorOperations.ManifestOptions()
         options.models = models.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if let modelsFile {
@@ -1024,6 +1059,13 @@ struct CreatorManifestSignCommand: ParsableCommand {
         options.minAttestationTier = minAttestationTier
         options.minEligibleMembers = minEligibleMembers
         options.validityDays = validityDays
+        if !options.modelEntries.isEmpty, let context = try? CreatorContext.load() {
+            let bounds = await CreatorOperations.fetchPricingBounds(context.client)
+            if bounds == nil {
+                FileHandle.standardError.write(Data("warning: could not read the coordinator's pricing bounds; rates are checked at submit\n".utf8))
+            }
+            try CreatorOperations.checkPricingBounds(options.modelEntries, bounds: bounds)
+        }
         let pending = try CreatorOperations.signManifest(home: CreatorHome.resolve(), poolID: pool.poolID, options: options)
         print("signed manifest_version=\(pending.state.manifestVersion) manifest_core_digest=\(pending.state.manifestCoreDigest)")
         if let window = CreatorOperations.manifestWindow(pending.state) {
@@ -1087,6 +1129,9 @@ struct CreatorStatusCommand: AsyncParsableCommand {
         let path = poolID.map { "pools/\($0)" } ?? "pools"
         var out: [String: Any] = ["creator": try await CreatorOperations.me(context.client)]
         out["result"] = try context.client.expect(try await context.client.request("GET", path))
+        if let bounds = await CreatorOperations.fetchPricingBounds(context.client) {
+            out["pool_model_pricing_bounds"] = bounds?.json ?? NSNull()
+        }
         if let poolID, let state = try context.home.manifestState(poolID), let window = CreatorOperations.manifestWindow(state) {
             out["local_manifest"] = [
                 "manifest_version": state.manifestVersion, "manifest_core_digest": state.manifestCoreDigest,
@@ -1132,6 +1177,7 @@ struct CreatorRevokeCommand: AsyncParsableCommand {
         --provider <id> sends member_revoked; the Mac stops routing for the pool at once.
         --model <pool_model_id> signs the next manifest version without that entry and
         leaves it pending: review it, then run `creator manifest submit --pool <id>`.
+        The new version takes effect when it is submitted.
         """
     )
     @OptionGroup var pool: CreatorPoolOption
@@ -1145,7 +1191,7 @@ struct CreatorRevokeCommand: AsyncParsableCommand {
     func run() async throws {
         if let model {
             let pending = try CreatorOperations.signModelRevocation(home: CreatorHome.resolve(), poolID: pool.poolID, poolModelID: model)
-            print("signed manifest_version=\(pending.state.manifestVersion) without \(model); run `macprovider-cli creator manifest submit --pool \(pool.poolID)` to apply it")
+            print("signed manifest_version=\(pending.state.manifestVersion) without \(model); run `macprovider-cli creator manifest submit --pool \(pool.poolID)`; it takes effect at submit")
             return
         }
         let context = try CreatorContext.load()
@@ -1171,5 +1217,52 @@ struct CreatorLifecycleCommand: AsyncParsableCommand {
     func run() async throws {
         let context = try CreatorContext.load()
         CreatorOutput.printJSON(try await CreatorOperations.setLifecycle(home: context.home, client: context.client, poolID: pool.poolID, lifecycle: lifecycle, reason: reason))
+    }
+}
+
+/// SPEC-005-R015 pool-model pricing bounds as the creator mount serves them:
+/// inclusive credits per million tokens, keyed by the names a manifest
+/// rejection's `bound` uses.
+struct CreatorPricingBounds: Equatable {
+    static let rates = ["prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok"]
+    let values: [String: Int64]
+
+    init?(json: Any?) {
+        guard let object = json as? [String: Any] else { return nil }
+        var values: [String: Int64] = [:]
+        for rate in Self.rates {
+            for side in ["min_", "max_"] {
+                guard let number = object[side + rate] as? NSNumber else { return nil }
+                values[side + rate] = number.int64Value
+            }
+        }
+        self.values = values
+    }
+
+    var json: [String: Int64] { values }
+
+    var summary: String {
+        Self.rates.map { "\($0) \(values["min_" + $0] ?? 0)..\(values["max_" + $0] ?? 0)" }.joined(separator: ", ")
+    }
+
+    /// The first bound broken, in the coordinator's order (max before min).
+    func violation(_ pricing: PoolModelPricing) -> (bound: String, limit: Int64)? {
+        let rates: [(String, UInt64)] = [
+            ("prompt_rate_per_mtok", pricing.promptRatePerMtok),
+            ("prompt_cache_hit_rate_per_mtok", pricing.promptCacheHitRatePerMtok),
+            ("completion_rate_per_mtok", pricing.completionRatePerMtok),
+        ]
+        for (name, value) in rates {
+            let hi = values["max_" + name] ?? Int64.max, lo = values["min_" + name] ?? 0
+            if value > UInt64(Int64.max) || Int64(value) > hi { return ("max_" + name, hi) }
+            if Int64(value) < lo { return ("min_" + name, lo) }
+        }
+        return nil
+    }
+
+    static func message(poolModelID: String, bound: String, limit: String) -> String {
+        let side = bound.hasPrefix("max_") ? "above the maximum" : "below the minimum"
+        let rate = bound.replacingOccurrences(of: "max_", with: "").replacingOccurrences(of: "min_", with: "")
+        return "pool_model_pricing_out_of_bounds: \(poolModelID) \(rate) is \(side) (\(bound)=\(limit) credits per million tokens)"
     }
 }
