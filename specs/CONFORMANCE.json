@@ -6866,7 +6866,7 @@
     {
       "requirement_id": "SPEC-022-R012",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value",
         "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) PoolOperatorAttestationEligible",
@@ -6979,7 +6979,12 @@
           "expires_at": "2026-10-14"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 BYOM polish changed the mapped pool-rollback-preflight entry point (new p1880 target tier; downgrade blockers for superseded policy windows and live requested_pool_model_id offers). The prior signed journey attests the earlier source; behavior is covered by regression tests, and the row returns to conformant after a fresh signed capture against the released coordinator."
+      }
     },
     {
       "requirement_id": "SPEC-022-R014",
