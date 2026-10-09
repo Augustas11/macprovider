@@ -241,7 +241,7 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
   # version stayed behind was rolled back by the updater: offer it again
   # (after resetting the failed transient unit, which blocks systemd-run).
   local apply_rolled_back=false
-  if marker_done "$OPS_SCOPE" apply && [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
+  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
     ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
     apply_rolled_back=true
     rm -f "$(marker_path "$OPS_SCOPE" apply)"
