@@ -59,9 +59,31 @@ classify() {
       # the Swift tests under phase3-binary/Tests and phase3-binary/app/Tests.
       # test/e2e/byom/* is the hermetic BYOM CLI onboarding harness the Swift
       # job runs via `make test-byom-e2e`; a harness-only edit must still gate.
-      phase3-binary/*|scripts/*|Makefile|.gitattributes|.github/workflows/ci.yml|\
-      test/e2e/byom/*|\
-      phase7-verify/testdata/*|phase4-coordinator/test/jcs_fixtures/*|testdata/*)
+      #
+      # scripts/ is matched file by file (#1920) so a script-only PR does not
+      # run the macOS Swift job. Listed: what the Swift job's steps run (Sparkle
+      # checks, XcodeGen install, SwiftPM lock, the BYOM discovery-journey gate
+      # and the Python it imports), the fixtures Swift tests read, any Swift
+      # source, and this detector. test-ci-detect-changed-paths.sh fails if a
+      # Swift test reads a repo path this list does not cover.
+      phase3-binary/*|Makefile|.gitattributes|.github/workflows/ci.yml|\
+      test/e2e/byom/*|test/fixtures/*|\
+      phase7-verify/testdata/*|phase4-coordinator/test/jcs_fixtures/*|testdata/*|\
+      docs/research/spec048-r015/policy-template.json|\
+      scripts/*.swift|scripts/fixtures/*|scripts/tests/fixtures/*|\
+      scripts/lab/1690-m6/testdata/*|scripts/lab/privacy-class-beta/extract-primary-evidence.py|\
+      scripts/ci-detect-changed-paths.sh|\
+      scripts/test-malibu-sparkle-generator-integration.sh|\
+      scripts/test-malibu-sparkle-validator-integration.sh|\
+      scripts/generate-malibu-appcast.sh|scripts/install-pinned-xcodegen.sh|\
+      scripts/verify-swift-package-lock.sh|scripts/test-byom-discovery-journey.sh|\
+      scripts/build-byom-discovery-journey-result.py|scripts/byom_journey_evidence.py|\
+      scripts/capture-byom-journey-evidence.py|scripts/preflight-signed-journey-promotion.py|\
+      scripts/sign-journey-result.py|scripts/validate-signed-journey-result.py|\
+      scripts/promote-signed-journey-result.py|scripts/check_spec_governance.py|\
+      scripts/build-local-consumer-endpoint-journey-result.py|\
+      scripts/native_mtp_journey_evidence.py|scripts/pool_promotion_transition.py|\
+      scripts/privacy_class_beta_journey_evidence.py)
         swift=true
         matched_swift=$((matched_swift + 1)) ;;
     esac

@@ -318,4 +318,3 @@ func TestProduceStaleOutboxRows_ZeroLimitDisablesCap(t *testing.T) {
 		t.Errorf("produced=%d, want 3 (limit=0 means no cap, back-compat)", produced)
 	}
 }
-

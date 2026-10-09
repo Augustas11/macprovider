@@ -495,4 +495,3 @@ func (s *Server) applyCanaryRecord(providerID, assignedID string, passed bool, a
 	}
 	return true
 }
-

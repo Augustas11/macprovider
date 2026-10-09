@@ -321,11 +321,11 @@ func TestReferralAdminApplyRequiresUUIDAttributionUIDAndExpectedState(t *testing
 	now := time.Now().UTC()
 
 	for name, operation := range map[string]ReferralAdminOperation{
-		"missing uuid": {Actor: "ops", UnixUID: 501, Reason: "test"},
-		"bad uuid": {OperationID: "not-a-uuid", Actor: "ops", UnixUID: 501, Reason: "test"},
-		"missing actor": {OperationID: adminCreateOperation, UnixUID: 501, Reason: "test"},
+		"missing uuid":   {Actor: "ops", UnixUID: 501, Reason: "test"},
+		"bad uuid":       {OperationID: "not-a-uuid", Actor: "ops", UnixUID: 501, Reason: "test"},
+		"missing actor":  {OperationID: adminCreateOperation, UnixUID: 501, Reason: "test"},
 		"missing reason": {OperationID: adminCreateOperation, Actor: "ops", UnixUID: 501},
-		"invalid uid": {OperationID: adminCreateOperation, Actor: "ops", UnixUID: -1, Reason: "test"},
+		"invalid uid":    {OperationID: adminCreateOperation, Actor: "ops", UnixUID: -1, Reason: "test"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := store.CreateSeedReferralAudited(

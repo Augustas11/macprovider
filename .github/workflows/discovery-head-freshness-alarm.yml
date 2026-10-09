@@ -79,3 +79,17 @@ jobs:
           gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" \
             --pattern macprovider-release-discovery.json --output - \
           | python3 scripts/check-discovery-head-freshness.py --min-hours "$MIN_HOURS"
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [check]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: discovery-head-freshness-alarm
+      title: the signed release-discovery head is stale or missing
+      result: ${{ needs.check.result }}

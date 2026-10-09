@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import ssl
 import sys
@@ -105,8 +106,8 @@ def check_snapshot_archive(
     now: dt.datetime,
     max_age_hours: float,
 ) -> None:
-    if max_age_hours <= 0:
-        fail("--max-snapshot-age-hours must be positive")
+    if not math.isfinite(max_age_hours) or max_age_hours <= 0:
+        fail("--max-snapshot-age-hours must be finite and positive")
     if not archive.is_dir():
         fail(
             f"snapshot archive {archive} is missing — the fetch pipeline has "

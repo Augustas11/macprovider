@@ -56,3 +56,17 @@ jobs:
           }
           curl -fsS --proto '=https' --tlsv1.2 --max-time 20 -- "$url" \
             | python3 scripts/check-autotune-feed-freshness.py --max-age-days "$MAX_AGE_DAYS"
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [check]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: autotune-feed-freshness-alarm
+      title: the live autotune rate-card feed is near its 30-day horizon
+      result: ${{ needs.check.result }}

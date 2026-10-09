@@ -63,6 +63,14 @@ while sessions regenerated evidence instead of deploying. Each is binding.
     operator explicitly asks for one. A feature that works live stays on. If a
     process document demands an expiry, flag it to the operator as a rule to
     remove instead of complying.
+11. **Proven changes ship on.** When lab evidence shows a change works
+    (correctness checks pass and the gain is measured) and its audit is
+    clean, it ships enabled by default in the same PR. Do not add a
+    default-off flag or a separate operator enable gate for it. Handle risk
+    in the code itself (caps, bounds, fallbacks) and keep an emergency kill
+    switch where one already exists. Signed catalog/CB/native-MTP policy is
+    deployment state, not a default-off gate; changing it still goes through
+    `scripts/ops/`.
 
 ## Project Overview
 
@@ -234,8 +242,8 @@ python3 scripts/check_spec_pr_declaration.py \
 
 The PR body must contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
 `SPEC-GOVERNANCE-DECLARATION-END` block when the validator requires it. Fill it
-honestly; do not fabricate specs or requirements to satisfy the checker. Treat a
-red `spec-index / check` as blocking for agent behavior.
+honestly; do not fabricate specs or requirements to satisfy the checker. The
+`spec-index` job in `ci.yml` is part of `ci-required`; treat it red as blocking.
 
 ## Sensitive Paths
 

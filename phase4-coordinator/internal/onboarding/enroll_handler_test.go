@@ -78,9 +78,9 @@ func TestHandleEnroll_MissingSerial(t *testing.T) {
 
 func TestHandleEnroll_InvalidSerialFormat(t *testing.T) {
 	cases := []string{
-		"short",          // too short (< 8 chars)
+		"short",           // too short (< 8 chars)
 		"C02XYZ1234ABCDE", // too long (> 14 chars)
-		"C02-XYZ-1234",  // contains non-alphanumeric
+		"C02-XYZ-1234",    // contains non-alphanumeric
 		"",
 	}
 	h := newTestEnrollHandler()

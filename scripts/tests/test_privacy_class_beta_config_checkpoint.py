@@ -28,7 +28,7 @@ def sha256_bytes(data: bytes) -> str:
 
 class PrivacyLabConfigCheckpointTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.tmp = tempfile.TemporaryDirectory(dir="/private/tmp" if os.path.isdir("/private/tmp") else None)
         self.root = Path(self.tmp.name) / "lab"
         self.root.mkdir(mode=0o700)
         self.config = self.root / "config.yaml"

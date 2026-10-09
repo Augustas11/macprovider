@@ -473,7 +473,7 @@ func TestVerifyAttestationTokenWithoutRootsNeverMarksAttested(t *testing.T) {
 }
 
 type testAttestationCertificateOptions struct {
-	FreshnessToken           string
+	FreshnessToken string
 	// RawFreshnessDigest, when set, overrides the freshness digest in the leaf
 	// certificate extension (instead of SHA256(FreshnessToken)). Used to embed
 	// SHA256(sePublicKey) without mangling the token field.

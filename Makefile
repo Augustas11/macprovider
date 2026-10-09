@@ -6,10 +6,11 @@
 # targets below to preserve parallel jobs and failure isolation.
 
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
+        test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
-        build-linux check check-exceptions fmt verify-autotune-catalog
+        build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
 
 test: test-coordinator test-gateway test-integration test-dist
 
@@ -73,15 +74,38 @@ test-integration:
 # pre-deploy gate in phase4-coordinator/dist/check-deploy-config.sh — notably
 # that an env:NAME-indirected secret is deferred to runtime rather than
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
-test-dist:
+# Deploy/release tooling tests (bash + python3 + node, no service build), split
+# into shards CI runs in parallel with fail-fast off so each reports its own
+# failures (#1920). `make test-dist` is the union for local use. Guards the
+# fail-closed pre-deploy gate in phase4-coordinator/dist/check-deploy-config.sh,
+# among others. check_nginx_stats_test.sh is not here: CI runs it in its own
+# docker-backed job (coordinator-nginx-integration).
+TEST_DIST_SHARDS := catalog python release deploy
+
+test-dist: $(addprefix test-dist-,$(TEST_DIST_SHARDS))
+
+# Catalog and autotune content release (the single slowest suite).
+test-dist-catalog:
+	bash scripts/test-catalog-content-release.sh
+	bash -n scripts/catalog-content-release.sh
+	bash -n scripts/lib/catalog-canary-token.sh
+	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
+	bash scripts/test-catalog-release.sh
+	bash scripts/test-autotune-gate-matrix.sh
+
+# Every scripts/tests/test_*.py module via discovery, the ops Python suites,
+# and the check that no test file is left unwired.
+test-dist-python:
+	python3 scripts/check-test-wiring.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -t . -p 'test_*.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl/config/test_pearl_config_reconcile.py
+	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
+
+# Release, discovery, signed-journey workflow, alarm, Tier-2 and ops tooling.
+test-dist-release:
 	bash scripts/test-openai-wire-compat.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_bench_1690_runner
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_admission_journey_runner
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_native_mtp_post_gateway_replay_analyze
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
 	bash phase5-gateway/dist/test/gateway_deploy_inflight.test.sh
@@ -113,35 +137,6 @@ test-dist:
 	bash scripts/test-signed-privacy-class-beta-journey-workflow.sh
 	bash scripts/test-signed-pool-promotion-transition-workflow.sh
 	bash scripts/test-spec043-production-release-key-provision.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_paid_path_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_crash_recovery_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_enforce_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_evidence_capture
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_creator_mvp_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_layer2_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_external_runtime_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_model_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_source_authenticated_evidence
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_privacy_class_beta_journey_result
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_privacy_class_beta_primary_evidence
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_promotion_transition
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_payout_posture
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_malibu_fleet_ledger
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_mlx_candidates
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_engine
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_receipt
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_catalog_propose
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_fetch_health
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_hash_sweep
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_publish_model_mirror
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_classify_benchmark_evidence
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_workload
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_calculator
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_code_identity
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh
@@ -157,18 +152,12 @@ test-dist:
 	bash scripts/test-select-discovery-renewal-base.sh
 	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-autotune-feed-freshness-alarm.sh
-	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash scripts/test-renew-autotune-static-feed-signed.sh
+	bash scripts/test-ops-alarm.sh
 	bash -n scripts/renew-autotune-static-feed.sh
 	bash scripts/test-autotune-activate.sh
 	bash scripts/test-autotune-install-helpers.sh
 	bash -n scripts/lib/autotune-activate.sh
-	bash scripts/test-catalog-content-release.sh
-	bash -n scripts/catalog-content-release.sh
-	bash -n scripts/lib/catalog-canary-token.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_database_schema_fingerprint
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	bash scripts/test-tier2-activation-safety.sh
@@ -177,19 +166,24 @@ test-dist:
 	bash scripts/test-tier2-encrypted-leg-safety.sh
 	bash scripts/test-tier2-live-verifier.sh
 	bash scripts/test-tier2-mda-artifact.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl/config/test_pearl_config_reconcile.py
 	bash scripts/test-tier2-enforcement-safety.sh
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
-	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
+	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
+	node --test frontdoor/provider-portal/mining-health.test.mjs
+	bash test/e2e/canary-buyer/run-canary.test.sh
+	bash scripts/test-relay-blind-parity.sh
+	bash scripts/ops/test-ops-guard.sh
+	bash scripts/ops/test-live-lock.sh
+	bash scripts/ops/test-runbook-commands.sh
+	bash scripts/ops/test-entrypoints.sh
+
+# Installer, watchdog, and coordinator/gateway deploy scripts.
+test-dist-deploy:
+	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
 	bash phase3-binary/dist/test/install_1286_fresh_mac_e2e.test.sh
 	bash phase3-binary/dist/test/install_config_path_escape.test.sh
 	bash phase3-binary/dist/test/install_stapler_validate.test.sh
-	bash scripts/test-catalog-release.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_artifact_feed
-	bash scripts/test-autotune-gate-matrix.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase4-coordinator/dist/deploy-malibu-emission-pearl.sh
 	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
@@ -201,7 +195,6 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_api_perf_tuning_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
-	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_model_admission_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
@@ -211,11 +204,6 @@ test-dist:
 	bash phase4-coordinator/dist/test/coordinator_release_tag_guard.test.sh
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_content_gate
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_pricing_lane
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_coordinator_config_guard
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_restart_readiness.test.sh
@@ -266,16 +254,8 @@ test-dist:
 	bash phase3-binary/dist/test/install_recovery_bootstrap_retry.test.sh
 	bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
-	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
-	node --test frontdoor/provider-portal/mining-health.test.mjs
-	bash test/e2e/canary-buyer/run-canary.test.sh
-	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
-	bash scripts/test-relay-blind-parity.sh
-	bash scripts/ops/test-ops-guard.sh
-	bash scripts/ops/test-live-lock.sh
-	bash scripts/ops/test-runbook-commands.sh
-	bash scripts/ops/test-entrypoints.sh
-	bash scripts/ops/test-fast-required.sh
+	bash phase5-gateway/dist/test/gateway_deploy_snapshot.test.sh
+	bash phase5-gateway/dist/test/archive_rotate_test.sh
 
 test-relay-blind-parity:
 	bash scripts/test-relay-blind-parity.sh
@@ -304,6 +284,14 @@ check: check-exceptions
 		phase4-coordinator/dist/coordinator.yaml \
 		phase5-gateway/dist/gateway.yaml
 
+GO_MODULES := phase4-coordinator phase5-gateway phase7-verify test/integration
+
 fmt:
-	cd phase4-coordinator && gofmt -w .
-	cd phase5-gateway && gofmt -w .
+	gofmt -w $(GO_MODULES)
+
+# Fails when gofmt would rewrite any file in a Go module (CI coordinator-lint).
+fmt-check:
+	@unformatted="$$(gofmt -l $(GO_MODULES))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt would rewrite (run: make fmt):"; echo "$$unformatted"; exit 1; \
+	fi
