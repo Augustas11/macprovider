@@ -9636,7 +9636,7 @@
     {
       "requirement_id": "SPEC-046-R003",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMCandidateIdentity",
@@ -9667,7 +9667,12 @@
           "expires_at": "2026-11-05"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 BYOM polish changed the mapped discovery/offer code (native MLX store and mlx_lm.server detection in discovery; signed requested_pool_model_id in offers). The prior signed journey attests the earlier source; behavior is covered by regression tests, and the row returns to conformant after a fresh signed capture against the released CLI."
+      }
     },
     {
       "requirement_id": "SPEC-046-R004",
@@ -9712,7 +9717,7 @@
     {
       "requirement_id": "SPEC-046-R005",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationLimits",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMEvaluationRunner",
@@ -9744,7 +9749,12 @@
           "expires_at": "2026-11-05"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 BYOM polish changed the mapped discovery/offer code (native MLX store and mlx_lm.server detection in discovery; signed requested_pool_model_id in offers). The prior signed journey attests the earlier source; behavior is covered by regression tests, and the row returns to conformant after a fresh signed capture against the released CLI."
+      }
     },
     {
       "requirement_id": "SPEC-046-R006",
