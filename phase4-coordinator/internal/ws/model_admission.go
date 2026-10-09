@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +29,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -784,11 +786,63 @@ func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
 		if columns[column.name] {
 			continue
 		}
-		if _, err := db.ExecContext(context.Background(), column.sql); err != nil {
+		if err := addSQLiteModelAdmissionColumn(db, column.name, column.sql, modelAdmissionColumnMigrationBudget, time.Sleep); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// modelAdmissionColumnMigrationBudget bounds how long startup waits for a
+// schema lock held by a reader, backup, or an older coordinator before an
+// additive column migration gives up.
+const modelAdmissionColumnMigrationBudget = 60 * time.Second
+
+// addSQLiteModelAdmissionColumn runs one additive ALTER TABLE, retrying with
+// bounded backoff while the database is busy or locked. A column that
+// another process added first counts as done.
+func addSQLiteModelAdmissionColumn(db *sql.DB, name, stmt string, budget time.Duration, sleep func(time.Duration)) error {
+	deadline := time.Now().Add(budget)
+	backoff := 100 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		_, err := db.ExecContext(context.Background(), stmt)
+		switch {
+		case err == nil:
+			if attempt > 1 {
+				log.Printf("model_admission_events migration: added column %s after %d attempts", name, attempt)
+			}
+			return nil
+		case sqliteDuplicateColumn(err):
+			log.Printf("model_admission_events migration: column %s already present", name)
+			return nil
+		case !sqliteBusyOrLocked(err):
+			return fmt.Errorf("add model_admission_events.%s: %w", name, err)
+		}
+		if time.Now().Add(backoff).After(deadline) {
+			return fmt.Errorf("add model_admission_events.%s: database still busy after %s: %w", name, budget, err)
+		}
+		log.Printf("model_admission_events migration: column %s: database busy (attempt %d), retrying in %s", name, attempt, backoff)
+		sleep(backoff)
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func sqliteBusyOrLocked(err error) bool {
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5, 6: // SQLITE_BUSY or SQLITE_LOCKED, including extended codes.
+			return true
+		}
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
+}
+
+func sqliteDuplicateColumn(err error) bool {
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
