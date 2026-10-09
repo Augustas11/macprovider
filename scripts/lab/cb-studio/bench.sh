@@ -15,6 +15,14 @@ resume() {
 }
 /usr/bin/python3 $L/live-ctl.py pause || { echo "LIVE_PAUSE_FAILED"; exit 4; }
 echo "LIVE_PAUSED $(date -u +%T)"
+# A pause stops admission only; requests already generating keep the GPU busy
+# until they finish. Measure only once live reports nothing in flight.
+for i in $(seq 1 180); do
+  n=$(curl -s --max-time 3 http://127.0.0.1:8080/v1/status | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin).get('requests_in_flight', -1))" 2>/dev/null)
+  [ "$n" = "0" ] && { echo "LIVE_DRAINED $(date -u +%T)"; break; }
+  [ $i -eq 180 ] && { echo "LIVE_NOT_DRAINED in_flight=$n"; exit 5; }
+  sleep 10
+done
 trap resume EXIT
 trap 'exit 130' INT TERM
 "$@"

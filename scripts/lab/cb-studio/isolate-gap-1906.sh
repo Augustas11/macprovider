@@ -11,30 +11,43 @@ A=$(readlink "$R/omlx-models/qwen3.6-35b-a3b")
 B=/Users/a1/macprovider-1906-cb-depth/phase3-binary/.build-lab/release/macprovider-cli
 mkdir -p "$OUT"; SP=
 trap 'kill $SP 2>/dev/null; sleep 5; kill -9 $SP 2>/dev/null' EXIT
+SHAPES=${SHAPES:-"1536,256,prompt-heavy 1800,1024,output-heavy"}
 cells() { # label model
-  for shape in "1536 256 prompt-heavy" "1800 1024 output-heavy"; do
-    set -- $shape "$1" "$2"
-    /usr/bin/python3 "$LAB/depth_sweep.py" --port $PORT --model "$5" --depths 8,16 \
-      --prompt-tokens $1 --max-tokens $2 --window 90 --warmup 30 --label "$4/$3" --out "$OUT/sweep.jsonl"
+  local label=$1 model=$2 shape p o name
+  for shape in $SHAPES; do
+    IFS=, read -r p o name <<<"$shape"
+    /usr/bin/python3 "$LAB/depth_sweep.py" --port $PORT --model "$model" --depths 8,16 \
+      --prompt-tokens $p --max-tokens $o --window 90 --warmup 30 --label "$label/$name" --out "$OUT/sweep.jsonl"
   done
 }
+PARTS=${PARTS:-"A B C"}
 wait_up() { for _ in $(seq 1 180); do curl -sf "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 && break; sleep 2; done
   curl -s --max-time 300 "http://127.0.0.1:$PORT/v1/chat/completions" -H "Content-Type: application/json" \
     -d "{\"model\":\"$1\",\"messages\":[{\"role\":\"user\",\"content\":\"warm up\"}],\"max_tokens\":16}" >/dev/null; }
 stop() { kill $SP; for _ in $(seq 1 30); do kill -0 $SP 2>/dev/null || break; sleep 1; done; kill -9 $SP 2>/dev/null; SP=; }
 
+if [[ " $PARTS " == *" A "* ]]; then
 "$R/venv-mlxlm031/bin/mlx_lm.server" --model "$A" --port $PORT --decode-concurrency 32 --prompt-concurrency 8 \
   > "$OUT/serve-mlxlm031.log" 2>&1 & SP=$!
 wait_up "$A"; echo "A mlxlm031 ready $(date -u +%T)"; cells mlxlm-0.31 "$A"; stop
+fi
+if [[ " $PARTS " == *" B "* ]]; then
 
 sed "s/^port: .*/port: $PORT/" "$LAB/cfg/config.yaml" > "$OUT/cfg.yaml"
-MLX_LM_QWEN35_FUSED_MOE=0 MACPROVIDER_LAB_HYBRID_DECODE_WINDOW=16 "$B" serve --config "$OUT/cfg.yaml" --port $PORT \
-  --no-join --autotune-candidate --no-idle-prewarm > "$OUT/serve-ours-stock.log" 2>&1 & SP=$!
-wait_up qwen/qwen3.6-35b-a3b; echo "B ours-w16-stock ready $(date -u +%T)"; cells ours-w16-stock qwen/qwen3.6-35b-a3b; stop
+for fused in 0 1; do
+  tag=$([ $fused = 1 ] && echo fused || echo stock)
+  MLX_LM_QWEN35_FUSED_MOE=$fused MACPROVIDER_LAB_HYBRID_DECODE_WINDOW=16 "$B" serve --config "$OUT/cfg.yaml" --port $PORT \
+    --no-join --autotune-candidate --no-idle-prewarm > "$OUT/serve-ours-$tag.log" 2>&1 & SP=$!
+  wait_up qwen/qwen3.6-35b-a3b; echo "B ours-w16-$tag ready $(date -u +%T)"; cells ours-w16-$tag qwen/qwen3.6-35b-a3b; stop
+done
+fi
+SHAPES_ALL=1
+if [[ " $PARTS " == *" C "* ]]; then
 
 for eng in paged contiguous; do for r in 8 16; do
   "$B" msb-throughput --model "$A" --engine $eng --rows $r --prompt-tokens 1536 --decode-tokens 128 --runs 2 \
     --max-physical-blocks 8192 --output "$OUT/msb-$eng-r$r.json" > "$OUT/msb-$eng-r$r.log" 2>&1
   grep -h "^msb-throughput: model" "$OUT/msb-$eng-r$r.log" | sed "s/^/C $eng rows=$r /"
 done; done
+fi
 echo "ISOLATE_DONE $(date -u +%T)"
