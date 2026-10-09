@@ -6,7 +6,9 @@ Files in STATE_DIR steer it:
   healthz.json            coordinator/gateway /healthz body
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
-  mode                    gateway behaviour: move | stuck | no-request-id
+  mode                    gateway behaviour: move | stuck | no-request-id |
+                          no-provider-id | other-provider
+  provider_id             X-Provider-Id the gateway reports (unless the mode drops it)
   served                  number of completions served (written here)
 """
 import json
@@ -46,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/status":
             d = json.loads(read("status.json", "{}"))
             served = int(read("served", "0"))
-            if read("mode", "move") == "move":
+            if read("mode", "move") in ("move", "other-provider", "no-provider-id"):
                 d.setdefault("native_mtp", {})["mtp_forwards"] = d.get("native_mtp", {}).get("mtp_forwards", 0) + served
                 d["requests_total"] = d.get("requests_total", 0) + served
             return self.send(200, json.dumps(d))
@@ -62,8 +64,13 @@ class Handler(BaseHTTPRequestHandler):
         served = int(read("served", "0")) + 1
         open(os.path.join(state, "served"), "w").write(str(served))
         headers = {}
-        if read("mode", "move") != "no-request-id":
+        mode = read("mode", "move")
+        if mode != "no-request-id":
             headers["X-Request-ID"] = self.headers.get("X-Request-ID") or "gw-generated"
+        if mode == "other-provider":
+            headers["X-Provider-Id"] = "some-other-provider"
+        elif mode != "no-provider-id":
+            headers["X-Provider-Id"] = read("provider_id", "")
         body = {"id": "chatcmpl-test", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
         return self.send(200, json.dumps(body), headers)
 

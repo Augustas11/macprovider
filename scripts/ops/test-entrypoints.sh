@@ -152,7 +152,7 @@ mkdir -p "$SCOPE"
 printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","checksums_sha256":"%s","compatibility_set_id":"test/repo:v1.8.224@%s"}\n' \
   "$B" "$(printf 'ab%.0s' $(seq 32))" "$B" > "$SCOPE/signed_byte_verification.json"
 printf '{"step":"pearl_accepted_ids","evidence":"test"}\n' > "$SCOPE/pearl_accepted_ids.json"
-status_doc() { printf '{"binary_version":"%s","compatibility_set_id":"test/repo:v1.8.224@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":true}}' "$1" "$B" "$2" > "$tmp/svc/status.json"; }
+status_doc() { printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v1.8.224@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":true}}' "$1" "$B" "$2" > "$tmp/svc/status.json"; }
 
 run_rc 0 "cli status" scripts/ops/cli-release.sh status
 expect_next canary_smoke:manual
@@ -190,15 +190,29 @@ printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
 status_doc 1.8.224 true
+printf 'canary-test-id' > "$tmp/svc/provider_id"
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "proof refused when the provider counters do not move" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "did not move the target provider"
 printf 'no-request-id' > "$tmp/svc/mode"
 run_rc 1 "proof refused without a response request id" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "carries no X-Request-ID"
+printf 'canary-test-id' > "$tmp/svc/provider_id"
+printf 'no-provider-id' > "$tmp/svc/mode"
+run_rc 1 "proof refused without X-Provider-Id" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "carries no X-Provider-Id"
+printf 'other-provider' > "$tmp/svc/mode"
+run_rc 1 "proof refused when another provider served it (counters still moved)" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "served by another provider"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("provider_id"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+printf 'move' > "$tmp/svc/mode"
+run_rc 3 "proof refused when the canary reports no provider_id" scripts/ops/catalog-activate.sh _gateway-proof
+status_doc 1.8.224 true
+printf 'stuck' > "$tmp/svc/mode"
+run_rc 1 "right provider but counters stuck is still refused" scripts/ops/catalog-activate.sh _gateway-proof
 printf 'move' > "$tmp/svc/mode"
 run_rc 0 "proof accepted when mtp_forwards moves" scripts/ops/catalog-activate.sh _gateway-proof
-if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["mtp_forwards_delta"] > 0 else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / delta"; fi
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["request_id"].startswith("ops-proof-") and d["mtp_forwards_delta"] > 0 and d["served_by_canary"] is True else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "proof marker lacks request id / delta"; fi
 run_rc 0 "catalog status with a fresh proof" scripts/ops/catalog-activate.sh status
 state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "fresh proof not done"; fi

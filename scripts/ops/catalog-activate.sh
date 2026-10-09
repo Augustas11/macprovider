@@ -378,8 +378,12 @@ proof_moved() {
 
 # One bounded buyer request through the gateway, tied to the target provider:
 # its native_mtp.mtp_forwards (or, with continuous batching active, its
-# requests_total) must increase across the request, and the response must
-# carry a request id. Prints status, request id and counter deltas only.
+# requests_total) must increase across the request, the response must carry
+# a request id, and the gateway's X-Provider-Id (phase5-gateway
+# internal/router/chat_proxy.go emitProviderAttribution) must equal the
+# provider_id the canary reports in /v1/status, so other traffic on the
+# provider cannot satisfy the proof. Prints status, request id and counter
+# deltas only; the provider id itself is never printed.
 gateway_proof() {
   local gw model token_file
   gw="$(gateway_url)"
@@ -395,6 +399,9 @@ gateway_proof() {
   read_provider_status "$OPS_TMP_DIR/before.json"
   before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total"
   read -r b_mtp b_req b_cb <<< "$before"
+  local canary_pid
+  canary_pid="$(json_field "$OPS_TMP_DIR/before.json" 'd["provider_id"]')"
+  [ -n "$canary_pid" ] || refuse "provider /v1/status reports no provider_id; cannot tie the proof to it"
 
   local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code sent_rid payload
   sent_rid="ops-proof-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
@@ -408,6 +415,10 @@ gateway_proof() {
   rid="$(awk -F': ' 'tolower($1)=="x-request-id"{gsub("\r","",$2); print $2}' "$headers" | head -n1)"
   [ "$code" = "200" ] || die "gateway returned HTTP $code for $model (request id ${rid:-none})"
   [ -n "$rid" ] || die "gateway response carries no X-Request-ID"
+  local served_pid
+  served_pid="$(awk -F': ' 'tolower($1)=="x-provider-id"{gsub("\r","",$2); print $2}' "$headers" | head -n1)"
+  [ -n "$served_pid" ] || die "gateway response carries no X-Provider-Id (request $rid)"
+  [ "$served_pid" = "$canary_pid" ] || die "request $rid was served by another provider, not the canary"
   [ -n "$(json_field "$body" 'd["choices"][0]["message"]["content"]')" ] || die "gateway 200 without completion content"
 
   local i
@@ -420,10 +431,10 @@ gateway_proof() {
   done
   proof_moved "$b_mtp" "$b_req" "$b_cb" "$a_mtp" "$a_req" "$a_cb" ||
     die "request $rid did not move the target provider: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)) (cb_active=$a_cb)"
-  local evidence="HTTP 200 model=$model request_id=$rid mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_active=$a_cb"
+  local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_active=$a_cb"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
-    "$(python3 -c 'import json,sys; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4])}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))")"
+    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "served_by_canary": True, "provider_id_sha256": hashlib.sha256(sys.argv[5].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$served_pid")"
 }
 
 internal() {
