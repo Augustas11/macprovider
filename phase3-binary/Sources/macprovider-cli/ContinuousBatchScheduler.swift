@@ -682,6 +682,14 @@ struct ContinuousBatchPrefillGroup: Sendable, Equatable {
 }
 
 enum ContinuousBatchPrefillGrouping {
+    /// Bound on the key-length spread inside a ragged group. Keys are padded
+    /// to the longest row, so every row pays attention and memory for
+    /// `max offset + chunk` keys. A peer joins a ragged group only while
+    /// `(max offset + chunk) <= maxRaggedKeySpreadFactor x (min offset +
+    /// chunk)`: no row attends over more than twice the keys it needs, and
+    /// one long prompt cannot inflate a group of short ones (SPEC-038 FR-CB2).
+    static let maxRaggedKeySpreadFactor = 2
+
     /// Picks one group whose rows all prefill exactly `chunkTokens` tokens in
     /// one shared forward. The FCFS head always leads. The chunk length is
     /// the head's own chunk or a shorter peer chunk the head may shrink to,
@@ -689,6 +697,7 @@ enum ContinuousBatchPrefillGrouping {
     /// `tokenBudget` (ties keep the longer chunk). A row joins when its span
     /// fits the chunk and the chunk is at least half of the row's own next
     /// chunk, so a short final chunk does not cut a long prompt into slivers.
+    /// A row at another offset joins only within the key-spread cap.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
@@ -712,6 +721,8 @@ enum ContinuousBatchPrefillGrouping {
             var ids = [head.requestID]
             var sameOffset = true
             var allRagged = head.sharesRaggedOffsets
+            var minOffset = head.promptOffset
+            var maxOffset = head.promptOffset
             for candidate in candidates.dropFirst() where ids.count < rowCap {
                 guard candidate.naturalChunkTokens > 0,
                       candidate.spanTokens >= length,
@@ -721,9 +732,16 @@ enum ContinuousBatchPrefillGrouping {
                 guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
                     continue
                 }
+                let groupMin = min(minOffset, candidate.promptOffset)
+                let groupMax = max(maxOffset, candidate.promptOffset)
+                guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
+                    continue
+                }
                 ids.append(candidate.requestID)
                 sameOffset = sameOffset && atHeadOffset
                 allRagged = allRagged && candidate.sharesRaggedOffsets
+                minOffset = groupMin
+                maxOffset = groupMax
             }
             if best.map({ ids.count * length > $0.requestIDs.count * $0.chunkTokens }) ?? true {
                 best = ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
@@ -734,6 +752,10 @@ enum ContinuousBatchPrefillGrouping {
 
     private static func mayRun(_ length: Int, naturalChunkTokens: Int) -> Bool {
         length * 2 >= naturalChunkTokens
+    }
+
+    static func withinKeySpread(minOffset: Int, maxOffset: Int, chunkTokens: Int) -> Bool {
+        maxOffset + chunkTokens <= maxRaggedKeySpreadFactor * (minOffset + chunkTokens)
     }
 }
 

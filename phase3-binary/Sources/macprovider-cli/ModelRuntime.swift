@@ -139,9 +139,10 @@ final class StructuredStreamingContentAccumulator: @unchecked Sendable {
     }
 }
 
-/// When a batched row's first visible token reached the runtime. The serial
-/// path reports TTFT from its own generate loop; without this a batched
-/// receipt fell back to the whole request duration.
+/// When a streaming batched row emitted its first buyer-visible chunk. The
+/// serial path reports TTFT from its own generate loop; without this a
+/// streaming batched receipt fell back to the whole request duration.
+/// Non-streaming receipts keep full generation latency (SPEC-015).
 final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
     private let lock = NSLock()
     private var firstTokenAt: Date?
@@ -150,6 +151,16 @@ final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if firstTokenAt == nil { firstTokenAt = now }
+    }
+
+    /// Wraps the buyer chunk sink so the first chunk actually emitted (after
+    /// stop, UTF-8 and tool filtering) marks the clock. Chunks emitted while
+    /// replaying another waiter's tokens (`replay`) never mark it.
+    func markingFirstChunk<Chunk>(replay: Bool, _ onChunk: @escaping (Chunk) -> Void) -> (Chunk) -> Void {
+        { chunk in
+            if !replay { self.mark() }
+            onChunk(chunk)
+        }
     }
 
     func ttftMilliseconds(since startedAt: Date) -> Int64? {
@@ -6413,13 +6424,12 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
-        let firstTokenClock = ContinuousBatchFirstTokenClock()
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
+            // Non-streaming receipts report full generation latency as TTFT
+            // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest, tokenSink: { _ in
-                    firstTokenClock.mark()
-                })
+                try await scheduler.submit(submission.schedulerRequest)
             }
         } catch {
             if let lease {
@@ -6448,7 +6458,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
-                    ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
+                    ttftMilliseconds: nil,
                     modelHash: snapshot.modelHash
                 )
             }
@@ -6876,7 +6886,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
-                    firstTokenClock.mark()
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -6884,13 +6893,16 @@ actor ModelRuntime: ModelRuntimeServing {
                         Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                         return
                     }
+                    // Receipt TTFT is the first buyer-visible chunk this row
+                    // emits, after stop/UTF-8/tool filtering. A duplicate or
+                    // replay waiter's catch-up events never define it.
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],
                         stopTokenFilter: stopTokenFilter,
                         requestStops: requestStops,
                         structuredAccumulator: structuredAccumulator,
                         idleState: idleState,
-                        onChunk: onChunk
+                        onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
                     ) {
                         Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                     }

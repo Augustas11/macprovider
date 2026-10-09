@@ -276,6 +276,33 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.maxConcurrencyOverride, 2)
     }
 
+    func testMaxConcurrencyDepthOverrideWinsOverRollbackSafeKey() throws {
+        // #1906: a depth above 8 lives in max_concurrency_depth_override;
+        // max_concurrency_override stays <= 8 so a pre-#1906 CLI still starts.
+        let yaml = "max_concurrency_override: 8\nmax_concurrency_depth_override: 16\n"
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(config.maxConcurrencyOverride, 16)
+        let env = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_MAX_CONCURRENCY_OVERRIDE": "2"],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(env.maxConcurrencyOverride, 2, "environment still overrides the file")
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(maxBatch: 3),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(cli.maxConcurrencyOverride, 3, "--max-batch still overrides the file")
+    }
+
     // MARK: - continuous batching controls
 
     func testContinuousBatchingCLIOverridesEnvironmentOverridesYAML() throws {

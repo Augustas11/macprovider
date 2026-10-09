@@ -40,10 +40,15 @@ struct AutotuneConcurrencyCalibrationMeasurement: Codable, Equatable {
 }
 
 struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
-    /// v2 (SPEC-023 v0.22.14): `ttft_regression_factor` removed;
+    /// v2 (SPEC-023 v0.22.14): `ttft_regression_factor` no longer gates;
     /// `probe_prompt_tokens` and per-measurement `per_stream_decode_tps`
     /// added.
     static let schemaVersion = "autotune_concurrency_calibration.v2"
+    /// v2 still writes `ttft_regression_factor`, fixed at the v1 default,
+    /// because a pre-v2 CLI decodes stored recommendation state with that
+    /// key required: a rolled-back CLI must still load a v2 record. It is a
+    /// compatibility constant, not a gate (SPEC-023-R009).
+    static let legacyTTFTRegressionFactor = 1.5
 
     var schemaVersion: String = Self.schemaVersion
     var recommendedMaxBatch: Int
@@ -51,6 +56,7 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
     var memoryFitCap: Int
     var hardCap: Int
     var ttftCeilingMS: Int
+    var ttftRegressionFactor: Double = Self.legacyTTFTRegressionFactor
     var minAggregateGainFraction: Double
     var calibrationContextTokens: Int
     var probePromptTokens: Int
@@ -66,6 +72,7 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
         case memoryFitCap = "memory_fit_cap"
         case hardCap = "hard_cap"
         case ttftCeilingMS = "ttft_ceiling_ms"
+        case ttftRegressionFactor = "ttft_regression_factor"
         case minAggregateGainFraction = "min_aggregate_gain_fraction"
         case calibrationContextTokens = "calibration_context_tokens"
         case probePromptTokens = "probe_prompt_tokens"
@@ -104,7 +111,8 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
     }
 
     /// Stored recommendation state may hold a v1 record. It keeps its own
-    /// `schema_version`, its `ttft_regression_factor` is ignored, and the
+    /// `schema_version`, its `ttft_regression_factor` is carried but never
+    /// gates, and the
     /// v2-only `probe_prompt_tokens` it never recorded decodes as 0 instead of
     /// failing the whole state load.
     init(from decoder: Decoder) throws {
@@ -115,6 +123,8 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
         memoryFitCap = try c.decode(Int.self, forKey: .memoryFitCap)
         hardCap = try c.decode(Int.self, forKey: .hardCap)
         ttftCeilingMS = try c.decode(Int.self, forKey: .ttftCeilingMS)
+        ttftRegressionFactor = try c.decodeIfPresent(Double.self, forKey: .ttftRegressionFactor)
+            ?? Self.legacyTTFTRegressionFactor
         minAggregateGainFraction = try c.decode(Double.self, forKey: .minAggregateGainFraction)
         calibrationContextTokens = try c.decode(Int.self, forKey: .calibrationContextTokens)
         probePromptTokens = try c.decodeIfPresent(Int.self, forKey: .probePromptTokens) ?? 0
@@ -132,7 +142,7 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
             """
         }.joined(separator: ",")
         return """
-        {"schema_version":\(concurrencyCalibrationJSONString(schemaVersion)),"recommended_max_batch":\(recommendedMaxBatch),"tier_constant_max_batch":\(tierConstantMaxBatch),"memory_fit_cap":\(memoryFitCap),"hard_cap":\(hardCap),"ttft_ceiling_ms":\(ttftCeilingMS),"min_aggregate_gain_fraction":\(concurrencyCalibrationJSONNumber(minAggregateGainFraction)),"calibration_context_tokens":\(calibrationContextTokens),"probe_prompt_tokens":\(probePromptTokens),"prompt_reserve_tokens":\(promptReserveTokens),"completion_tokens":\(completionTokens),"draft_pinned":\(draftPinned),"measurements":[\(samples)]}
+        {"schema_version":\(concurrencyCalibrationJSONString(schemaVersion)),"recommended_max_batch":\(recommendedMaxBatch),"tier_constant_max_batch":\(tierConstantMaxBatch),"memory_fit_cap":\(memoryFitCap),"hard_cap":\(hardCap),"ttft_ceiling_ms":\(ttftCeilingMS),"ttft_regression_factor":\(concurrencyCalibrationJSONNumber(ttftRegressionFactor)),"min_aggregate_gain_fraction":\(concurrencyCalibrationJSONNumber(minAggregateGainFraction)),"calibration_context_tokens":\(calibrationContextTokens),"probe_prompt_tokens":\(probePromptTokens),"prompt_reserve_tokens":\(promptReserveTokens),"completion_tokens":\(completionTokens),"draft_pinned":\(draftPinned),"measurements":[\(samples)]}
         """
     }
 }
@@ -454,8 +464,9 @@ enum ConcurrencyWindowAggregation {
     ///   divided by the window length. A visible stream contributes its
     ///   in-window deltas (scaled to the authoritative count); a suppressed
     ///   stream contributes its decode window's overlap pro rata.
-    /// - Per-stream p95 TTFT over requests that STARTED inside the window, or
-    ///   over every request when none did (requests longer than the window).
+    /// - Per-stream p95 TTFT (request start to first streamed delta, never
+    ///   an inferred decode start) over requests that STARTED inside the
+    ///   window, or over every request when none did.
     /// - Per-stream decode: median over requests whose decode overlaps the
     ///   window of the in-window delta rate (visible) or tokens over the
     ///   decode window (suppressed).
@@ -487,7 +498,13 @@ enum ConcurrencyWindowAggregation {
                 decodeStart = request.chunkTimes.first ?? request.end
             }
 
-            let ttftMS = max(0, decodeStart.timeIntervalSince(request.start) * 1_000)
+            // The TTFT gate measures the first buyer-visible delta directly.
+            // The decode start inferred from usage generation time above only
+            // spreads a suppressed stream's tokens for throughput: hidden work
+            // before the first visible delta is still waiting time for the
+            // buyer. A stream with no visible delta at all waited until its end.
+            let firstVisibleAt = request.chunkTimes.first ?? request.end
+            let ttftMS = max(0, firstVisibleAt.timeIntervalSince(request.start) * 1_000)
             allTTFTs.append(ttftMS)
             if request.start >= windowStart, request.start < windowEnd {
                 startedInWindowTTFTs.append(ttftMS)

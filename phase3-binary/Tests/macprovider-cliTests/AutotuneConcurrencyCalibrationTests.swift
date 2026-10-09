@@ -34,7 +34,7 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         let climbing: [Int: ConcurrencyProbeOutcome] = Dictionary(
             uniqueKeysWithValues: (1...12).map { depth in
                 (depth, ConcurrencyProbeOutcome.feasible(
-                    aggregateTPS: 100 * pow(2, Double(depth)),
+                    aggregateTPS: 100 * Foundation.pow(2, Double(depth)),
                     perStreamP95TTFTMS: 1_000,
                     perStreamDecodeTPS: 30
                 ))
@@ -89,12 +89,12 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
             uniqueKeysWithValues: AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 32)
                 .enumerated().map { index, depth in
                     (depth, ConcurrencyProbeOutcome.feasible(
-                        aggregateTPS: 100 * pow(2, Double(index)),
+                        aggregateTPS: 100 * Foundation.pow(2, Double(index)),
                         perStreamP95TTFTMS: 1_000,
                         perStreamDecodeTPS: 30
                     ))
                 }
-                + [(20, ConcurrencyProbeOutcome.feasible(aggregateTPS: 100 * pow(2, 11), perStreamP95TTFTMS: 1_000, perStreamDecodeTPS: 30))]
+                + [(20, ConcurrencyProbeOutcome.feasible(aggregateTPS: 100 * Foundation.pow(2, 11), perStreamP95TTFTMS: 1_000, perStreamDecodeTPS: 30))]
         )
         let prober = ConcurrencyCalibrationFake(outcomesByDepth: climbing)
         let result = try await AutotuneConcurrencyCalibrator().calibrate(
@@ -116,9 +116,9 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         // 8 -> 12 rows adds only 3%, but the sweep keeps climbing: 16 rows is
         // the aggregate peak (+25% over 8). 24 rows is within the 15% tie band
         // of 16, so the lower depth wins. 32 breaches the TTFT ceiling.
-        let eight = 40 * pow(1.2, 8)
+        let eight = 40 * Foundation.pow(1.2, 8)
         var outcomes: [Int: ConcurrencyProbeOutcome] = Dictionary(
-            uniqueKeysWithValues: (1...8).map { depth in (depth, feasible(40 * pow(1.2, Double(depth)))) }
+            uniqueKeysWithValues: (1...8).map { depth in (depth, feasible(40 * Foundation.pow(1.2, Double(depth)))) }
         )
         outcomes[12] = feasible(eight * 1.03, ttft: 2_000)
         outcomes[16] = feasible(eight * 1.25, ttft: 4_000)
@@ -327,11 +327,12 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         XCTAssertEqual(json["probe_prompt_tokens"] as? Int, 1_792)
         XCTAssertEqual(json["completion_tokens"] as? Int, 1_024)
         XCTAssertNil(json["min_per_stream_decode_tps"])
-        XCTAssertNil(json["ttft_regression_factor"])
+        // Kept for rollback: a pre-v2 CLI requires the key to decode state.
+        XCTAssertEqual(json["ttft_regression_factor"] as? Double, 1.5)
         let sample = try XCTUnwrap((json["measurements"] as? [[String: Any]])?.first)
         XCTAssertEqual(sample["per_stream_decode_tps"] as? Double, 30)
         // §6 field order.
-        let order = ["\"ttft_ceiling_ms\"", "\"min_aggregate_gain_fraction\"",
+        let order = ["\"ttft_ceiling_ms\"", "\"ttft_regression_factor\"", "\"min_aggregate_gain_fraction\"",
                      "\"calibration_context_tokens\"", "\"probe_prompt_tokens\"", "\"prompt_reserve_tokens\"",
                      "\"completion_tokens\""]
         let positions = try order.map { try XCTUnwrap(result.jsonString.range(of: $0)).lowerBound }
@@ -429,6 +430,83 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         XCTAssertNil(decoded.measurements.first?.perStreamDecodeTPS)
     }
 
+    /// The v1 result shape exactly as pre-#1906 CLIs decode it: synthesized
+    /// Decodable, every non-optional field required. A rolled-back CLI loads
+    /// stored recommendation state through this shape (#1906 round-1 audit).
+    private struct PrePR1906CalibrationResult: Decodable {
+        struct Measurement: Decodable {
+            var batchDepth: Int
+            var streams: Int
+            var aggregateTPS: Double
+            var perStreamP95TTFTMS: Int?
+            var passed: Bool
+            var failureReason: String?
+            enum CodingKeys: String, CodingKey {
+                case batchDepth = "batch_depth"
+                case streams
+                case aggregateTPS = "aggregate_tps"
+                case perStreamP95TTFTMS = "per_stream_p95_ttft_ms"
+                case passed
+                case failureReason = "failure_reason"
+            }
+        }
+        var schemaVersion: String
+        var recommendedMaxBatch: Int
+        var tierConstantMaxBatch: Int
+        var memoryFitCap: Int
+        var hardCap: Int
+        var ttftCeilingMS: Int
+        var ttftRegressionFactor: Double
+        var minAggregateGainFraction: Double
+        var calibrationContextTokens: Int
+        var promptReserveTokens: Int
+        var completionTokens: Int
+        var draftPinned: Bool
+        var measurements: [Measurement]
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case recommendedMaxBatch = "recommended_max_batch"
+            case tierConstantMaxBatch = "tier_constant_max_batch"
+            case memoryFitCap = "memory_fit_cap"
+            case hardCap = "hard_cap"
+            case ttftCeilingMS = "ttft_ceiling_ms"
+            case ttftRegressionFactor = "ttft_regression_factor"
+            case minAggregateGainFraction = "min_aggregate_gain_fraction"
+            case calibrationContextTokens = "calibration_context_tokens"
+            case promptReserveTokens = "prompt_reserve_tokens"
+            case completionTokens = "completion_tokens"
+            case draftPinned = "draft_pinned"
+            case measurements
+        }
+    }
+
+    func testV2RecordDecodesWithPrePR1906Decoder() throws {
+        let result = AutotuneConcurrencyCalibrationResult(
+            recommendedMaxBatch: 16,
+            tierConstantMaxBatch: 8,
+            memoryFitCap: 32,
+            hardCap: 32,
+            ttftCeilingMS: 8_000,
+            minAggregateGainFraction: 0.15,
+            calibrationContextTokens: 4_000,
+            probePromptTokens: 1_792,
+            promptReserveTokens: 256,
+            completionTokens: 1_024,
+            draftPinned: false,
+            measurements: [
+                .init(batchDepth: 1, streams: 1, aggregateTPS: 100, perStreamP95TTFTMS: 900, perStreamDecodeTPS: 40, passed: true),
+                .init(batchDepth: 16, streams: 16, aggregateTPS: 600, perStreamP95TTFTMS: 4_000, perStreamDecodeTPS: 30, passed: true),
+            ]
+        )
+        let encoded = try JSONEncoder().encode(result)
+        for data in [Data(result.jsonString.utf8), encoded] {
+            let legacy = try JSONDecoder().decode(PrePR1906CalibrationResult.self, from: data)
+            XCTAssertEqual(legacy.recommendedMaxBatch, 16)
+            XCTAssertEqual(legacy.ttftRegressionFactor, AutotuneConcurrencyCalibrationResult.legacyTTFTRegressionFactor)
+            XCTAssertEqual(legacy.measurements.count, 2)
+        }
+    }
+
     // MARK: - Steady-state window aggregation
 
     private let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -500,8 +578,26 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         XCTAssertEqual(metrics.tokensInWindow, 50, accuracy: 1e-6)
         XCTAssertEqual(metrics.aggregateTPS, 5, accuracy: 1e-6)
         XCTAssertEqual(try XCTUnwrap(metrics.perStreamDecodeTPS), 10, accuracy: 1e-6)
-        // TTFT = decode start - request start = 2s (fallback: started before window).
-        XCTAssertEqual(metrics.perStreamP95TTFTMS, 2_000, accuracy: 1e-3)
+        // TTFT is the first buyer-visible delta (t=29.5), not the inferred
+        // decode start (t=20): 11.5s, not 2s. The inference feeds only the
+        // throughput numbers above (#1906 round-1 audit).
+        XCTAssertEqual(metrics.perStreamP95TTFTMS, 11_500, accuracy: 1e-3)
+    }
+
+    func testWindowTTFTOfAStreamWithNoVisibleDeltaIsItsFullLatency() throws {
+        // Every token suppressed from SSE: the buyer saw nothing until the
+        // end, so TTFT is the whole request even though usage reports a 10s
+        // decode window that throughput still prorates.
+        let r = ConcurrencyWindowRequest(
+            start: at(18), end: at(30),
+            chunkTimes: [],
+            usageDecodedTokens: 100, usageGenerationMS: 10_000
+        )
+        let metrics = try XCTUnwrap(
+            ConcurrencyWindowAggregation.aggregate(requests: [r], windowStart: at(25), windowEnd: at(35))
+        )
+        XCTAssertEqual(metrics.perStreamP95TTFTMS, 12_000, accuracy: 1e-3)
+        XCTAssertEqual(metrics.tokensInWindow, 50, accuracy: 1e-6)
     }
 
     func testWindowWithNoInWindowDecodeHasNoDecodeRate() throws {

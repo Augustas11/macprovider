@@ -4956,15 +4956,47 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testRaggedPrefillGroupingShrinksToAPeerFinalChunkWhenThatAdvancesMore() {
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
+                .init(requestID: "a", promptOffset: 600, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
                 .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
-                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
-                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 1100, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 700, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 2048
         )
         XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 260, requestIDs: ["a", "b", "c", "d"]))
+    }
+
+    func testRaggedPrefillGroupingCapsTheKeySpread() {
+        // A peer joins a ragged group only while (max offset + chunk) <=
+        // 2 x (min offset + chunk): the head at offset 0 with a 260-token
+        // chunk cannot pad its keys out to a row at offset 900.
+        XCTAssertEqual(ContinuousBatchPrefillGrouping.maxRaggedKeySpreadFactor, 2)
+        XCTAssertTrue(ContinuousBatchPrefillGrouping.withinKeySpread(minOffset: 0, maxOffset: 512, chunkTokens: 512))
+        XCTAssertFalse(ContinuousBatchPrefillGrouping.withinKeySpread(minOffset: 0, maxOffset: 513, chunkTokens: 512))
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "far", promptOffset: 4000, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 2048
+        )
+        // Without the cap the 260-token chunk would take all of a, b, c, d
+        // and the 512-token chunk would take a, c and far.
+        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 512, requestIDs: ["a", "c"]))
+        // Equal offsets are never limited by the cap.
+        let same = ContinuousBatchPrefillGrouping.select(
+            (0 ..< 4).map {
+                ContinuousBatchPrefillCandidate(requestID: "s\($0)", promptOffset: 3000, naturalChunkTokens: 256, spanTokens: 1024, sharesRaggedOffsets: false)
+            },
+            maxRows: 4,
+            tokenBudget: 2048
+        )
+        XCTAssertEqual(same?.requestIDs, ["s0", "s1", "s2", "s3"])
     }
 
     func testRaggedPrefillGroupingNeverCutsAChunkBelowHalfItsOwnLength() {
@@ -4973,7 +5005,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             [
                 .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40, spanTokens: 40, sharesRaggedOffsets: true),
                 .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 2048, sharesRaggedOffsets: true),
-                .init(requestID: "short", promptOffset: 300, naturalChunkTokens: 70, spanTokens: 70, sharesRaggedOffsets: true),
+                .init(requestID: "short", promptOffset: 800, naturalChunkTokens: 70, spanTokens: 70, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 1024

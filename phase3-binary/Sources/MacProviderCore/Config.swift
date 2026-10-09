@@ -178,6 +178,15 @@ public enum ProviderCredentialStoreKind: String, Sendable {
 }
 
 public struct AppConfig: Equatable, Sendable {
+    /// Config key for a served depth above `legacyMaxConcurrencyOverrideLimit`
+    /// (#1906). CLIs before the 32-row bound reject `max_concurrency_override`
+    /// above 8 at startup, so writers keep that key at or below 8 and carry a
+    /// higher depth here. Older CLIs ignore the unknown key and serve the
+    /// rollback-safe value; this CLI serves this key when it is present.
+    public static let maxConcurrencyDepthOverrideKey = "max_concurrency_depth_override"
+    /// The `max_concurrency_override` bound every pre-#1906 CLI enforces.
+    public static let legacyMaxConcurrencyOverrideLimit = 8
+
     public var port: Int
     public var model: String?
     public var modelArtifactPath: String?
@@ -826,6 +835,11 @@ public enum ConfigLoader {
             }
         }
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
+        var maxConcurrencyDepthOverride: Int?
+        try assign(&maxConcurrencyDepthOverride, from: dict, key: AppConfig.maxConcurrencyDepthOverrideKey, expected: "integer")
+        if let maxConcurrencyDepthOverride {
+            config.maxConcurrencyOverride = maxConcurrencyDepthOverride
+        }
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
