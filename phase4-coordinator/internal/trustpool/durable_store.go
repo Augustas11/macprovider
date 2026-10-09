@@ -452,11 +452,14 @@ type CreatorApproval struct {
 	BuyerDisclosureCommitmentHash     string    `json:"buyer_disclosure_commitment_hash"`
 	ApprovalCriteriaHash              string    `json:"approval_criteria_hash"`
 	ApprovedBy                        string    `json:"approved_by"`
-	ApprovedAtUTC                     time.Time `json:"approved_at_utc"`
-	ApprovalRevision                  uint64    `json:"approval_revision"`
-	Status                            string    `json:"status"`
-	SuspensionReason                  string    `json:"suspension_reason,omitempty"`
-	UpdatedAtUTC                      time.Time `json:"updated_at_utc"`
+	// ApprovedByCredentialID is the API key id that accepted a self-serve
+	// Agreement (SPEC-043-R005 0.3.0); empty on operator approvals.
+	ApprovedByCredentialID string    `json:"approved_by_credential_id,omitempty"`
+	ApprovedAtUTC          time.Time `json:"approved_at_utc"`
+	ApprovalRevision       uint64    `json:"approval_revision"`
+	Status                 string    `json:"status"`
+	SuspensionReason       string    `json:"suspension_reason,omitempty"`
+	UpdatedAtUTC           time.Time `json:"updated_at_utc"`
 }
 
 type PublicAnnouncementApproval struct {
@@ -738,6 +741,27 @@ CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
 	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "data_retention_category", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "approved_by_credential_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// Append-only record of every self-serve Agreement acceptance or renewal
+	// (SPEC-043-R005 0.3.0): which account and API key accepted which terms,
+	// the approval revision it produced, and the pools paused on renewal.
+	if _, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS trustpool_creator_agreement_acceptances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_account_id TEXT NOT NULL,
+    creator_credential_id TEXT NOT NULL,
+    creator_agreement_id TEXT NOT NULL,
+    creator_agreement_version TEXT NOT NULL,
+    agreement_terms_digest TEXT NOT NULL,
+    approval_revision INTEGER NOT NULL,
+    paused_pool_ids_json TEXT NOT NULL,
+    accepted_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trustpool_creator_agreement_acceptances_creator ON trustpool_creator_agreement_acceptances(creator_account_id, id);`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "trustpool_root_registration_nonces", "operation_id", "TEXT"); err != nil {
 		return err
 	}
@@ -904,15 +928,27 @@ func (s *Store) UpsertCreatorApproval(ctx context.Context, approval CreatorAppro
 		if err := verifyManifestAcceptanceStateFromQueryer(ctx, conn); err != nil {
 			return err
 		}
-		if current, ok := currentApprovals[approval.CreatorAccountID]; ok && sameCreatorApprovalExceptRevision(current, approval) {
-			approval = current
-			return nil
-		}
-		if err := validateCreatorReactivation(ctx, conn, currentApprovals, approval, now); err != nil {
-			return err
-		}
-		approval.ApprovalRevision = currentApprovals[approval.CreatorAccountID].ApprovalRevision + 1
-		if _, err := conn.ExecContext(ctx, `
+		committed, _, err := upsertCreatorApprovalConn(ctx, conn, currentApprovals, approval, now)
+		approval = committed
+		return err
+	})
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	return approval, nil
+}
+
+// upsertCreatorApprovalConn writes approval inside the caller's transaction.
+// It reports false when the row already matched (no new revision).
+func upsertCreatorApprovalConn(ctx context.Context, conn *sql.Conn, currentApprovals map[string]CreatorApproval, approval CreatorApproval, now time.Time) (CreatorApproval, bool, error) {
+	if current, ok := currentApprovals[approval.CreatorAccountID]; ok && sameCreatorApprovalExceptRevision(current, approval) {
+		return current, false, nil
+	}
+	if err := validateCreatorReactivation(ctx, conn, currentApprovals, approval, now); err != nil {
+		return CreatorApproval{}, false, err
+	}
+	approval.ApprovalRevision = currentApprovals[approval.CreatorAccountID].ApprovalRevision + 1
+	if _, err := conn.ExecContext(ctx, `
 INSERT INTO trustpool_creator_approvals (
     creator_account_id, approval_record_id, current_approval_version,
     public_display_name, legal_support_contact, billing_contact, emergency_notification_endpoint,
@@ -921,8 +957,9 @@ INSERT INTO trustpool_creator_approvals (
     creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
     creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
     prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
-    approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc,
+    approved_by_credential_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(creator_account_id) DO UPDATE SET
     approval_record_id = excluded.approval_record_id,
     current_approval_version = excluded.current_approval_version,
@@ -949,46 +986,45 @@ ON CONFLICT(creator_account_id) DO UPDATE SET
     approval_revision = excluded.approval_revision,
     status = excluded.status,
     suspension_reason = excluded.suspension_reason,
-    updated_at_utc = excluded.updated_at_utc`,
-			approval.CreatorAccountID,
-			approval.ApprovalRecordID,
-			approval.CurrentApprovalVersion,
-			nullString(approval.PublicDisplayName),
-			nullString(approval.LegalSupportContact),
-			nullString(approval.BillingContact),
-			nullString(approval.EmergencyNotificationEndpoint),
-			approval.AcknowledgedMaxResponseTime,
-			nullString(approval.AllowedProductCategory),
-			approval.DataRetentionCategory,
-			nullString(approval.SupportOwner),
-			approval.AllowedLaunchEnvironment,
-			approval.CreatorAgreementID,
-			approval.CreatorAgreementVersion,
-			approval.CreatorAgreementExpiresAtUTC.Format(time.RFC3339Nano),
-			approval.CreatorAgreementGraceEndsAtUTC.Format(time.RFC3339Nano),
-			nullString(approval.PricingScheduleID),
-			nullString(approval.PricingScheduleVersion),
-			approval.ProhibitedClaimAcknowledgmentHash,
-			approval.BuyerDisclosureCommitmentHash,
-			approval.ApprovalCriteriaHash,
-			approval.ApprovedBy,
-			approval.ApprovedAtUTC.Format(time.RFC3339Nano),
-			approval.ApprovalRevision,
-			approval.Status,
-			nullString(approval.SuspensionReason),
-			approval.UpdatedAtUTC.Format(time.RFC3339Nano),
-		); err != nil {
-			return err
-		}
-		if approval.Status == CreatorStatusSuspended {
-			return invalidateCreatorPendingRootNonces(ctx, conn, approval)
-		}
-		return nil
-	})
-	if err != nil {
-		return CreatorApproval{}, err
+    updated_at_utc = excluded.updated_at_utc,
+    approved_by_credential_id = excluded.approved_by_credential_id`,
+		approval.CreatorAccountID,
+		approval.ApprovalRecordID,
+		approval.CurrentApprovalVersion,
+		nullString(approval.PublicDisplayName),
+		nullString(approval.LegalSupportContact),
+		nullString(approval.BillingContact),
+		nullString(approval.EmergencyNotificationEndpoint),
+		approval.AcknowledgedMaxResponseTime,
+		nullString(approval.AllowedProductCategory),
+		approval.DataRetentionCategory,
+		nullString(approval.SupportOwner),
+		approval.AllowedLaunchEnvironment,
+		approval.CreatorAgreementID,
+		approval.CreatorAgreementVersion,
+		approval.CreatorAgreementExpiresAtUTC.Format(time.RFC3339Nano),
+		approval.CreatorAgreementGraceEndsAtUTC.Format(time.RFC3339Nano),
+		nullString(approval.PricingScheduleID),
+		nullString(approval.PricingScheduleVersion),
+		approval.ProhibitedClaimAcknowledgmentHash,
+		approval.BuyerDisclosureCommitmentHash,
+		approval.ApprovalCriteriaHash,
+		approval.ApprovedBy,
+		approval.ApprovedAtUTC.Format(time.RFC3339Nano),
+		approval.ApprovalRevision,
+		approval.Status,
+		nullString(approval.SuspensionReason),
+		approval.UpdatedAtUTC.Format(time.RFC3339Nano),
+		approval.ApprovedByCredentialID,
+	); err != nil {
+		return CreatorApproval{}, false, err
 	}
-	return approval, nil
+	if approval.Status == CreatorStatusSuspended {
+		if err := invalidateCreatorPendingRootNonces(ctx, conn, approval); err != nil {
+			return CreatorApproval{}, false, err
+		}
+	}
+	return approval, true, nil
 }
 
 func validateCreatorReactivation(ctx context.Context, conn *sql.Conn, currentApprovals map[string]CreatorApproval, next CreatorApproval, now time.Time) error {
@@ -2074,33 +2110,7 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if err != nil {
 			return err
 		}
-		_, err = conn.ExecContext(ctx, `
-	INSERT INTO trustpool_events (
-	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
-	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
-	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
-	    launch_environment, current_approval_version, reason, payload_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.OperationID,
-			e.TimestampUTC.Format(time.RFC3339Nano),
-			e.EventType,
-			e.PoolID,
-			nullString(e.CreatorAccountID),
-			nullString(e.ApprovalRecordID),
-			nullString(e.ProviderID),
-			nullString(e.BuyerAccountID),
-			nullString(e.Lifecycle),
-			nullString(e.MinBinaryVersion),
-			e.ManifestVersion,
-			nullString(e.ManifestCoreDigest),
-			nullString(e.RootIssuerKeyID),
-			nullString(e.RootIssuerPublicKeyFingerprint),
-			nullString(e.LaunchEnvironment),
-			nullString(e.CurrentApprovalVersion),
-			nullString(e.Reason),
-			string(payload),
-		)
-		if err != nil {
+		if err := insertTrustpoolEventRow(ctx, conn, e, string(payload)); err != nil {
 			return err
 		}
 		if err := insertManifestAcceptanceProjection(ctx, conn, e); err != nil {
@@ -2123,6 +2133,36 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		return nil, DurableEvent{}, false, err
 	}
 	return reconstructed, committed, applied, nil
+}
+
+func insertTrustpoolEventRow(ctx context.Context, conn *sql.Conn, e DurableEvent, payload string) error {
+	_, err := conn.ExecContext(ctx, `
+	INSERT INTO trustpool_events (
+	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
+	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
+	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
+	    launch_environment, current_approval_version, reason, payload_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.OperationID,
+		e.TimestampUTC.Format(time.RFC3339Nano),
+		e.EventType,
+		e.PoolID,
+		nullString(e.CreatorAccountID),
+		nullString(e.ApprovalRecordID),
+		nullString(e.ProviderID),
+		nullString(e.BuyerAccountID),
+		nullString(e.Lifecycle),
+		nullString(e.MinBinaryVersion),
+		e.ManifestVersion,
+		nullString(e.ManifestCoreDigest),
+		nullString(e.RootIssuerKeyID),
+		nullString(e.RootIssuerPublicKeyFingerprint),
+		nullString(e.LaunchEnvironment),
+		nullString(e.CurrentApprovalVersion),
+		nullString(e.Reason),
+		payload,
+	)
+	return err
 }
 
 // PromotePool is the only durable write path allowed to append an active
@@ -2229,33 +2269,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		if err != nil {
 			return err
 		}
-		_, err = conn.ExecContext(ctx, `
-	INSERT INTO trustpool_events (
-	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
-	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
-	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
-	    launch_environment, current_approval_version, reason, payload_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.OperationID,
-			e.TimestampUTC.Format(time.RFC3339Nano),
-			e.EventType,
-			e.PoolID,
-			nullString(e.CreatorAccountID),
-			nullString(e.ApprovalRecordID),
-			nullString(e.ProviderID),
-			nullString(e.BuyerAccountID),
-			nullString(e.Lifecycle),
-			nullString(e.MinBinaryVersion),
-			e.ManifestVersion,
-			nullString(e.ManifestCoreDigest),
-			nullString(e.RootIssuerKeyID),
-			nullString(e.RootIssuerPublicKeyFingerprint),
-			nullString(e.LaunchEnvironment),
-			nullString(e.CurrentApprovalVersion),
-			nullString(e.Reason),
-			string(payload),
-		)
-		if err != nil {
+		if err := insertTrustpoolEventRow(ctx, conn, e, string(payload)); err != nil {
 			return err
 		}
 		if err := insertManifestAcceptanceProjection(ctx, conn, e); err != nil {
@@ -2424,7 +2438,8 @@ SELECT creator_account_id, approval_record_id, current_approval_version,
        creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
        creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
        prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
-       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc,
+       approved_by_credential_id
 FROM trustpool_creator_approvals
 WHERE creator_account_id = ?`, creatorAccountID)
 	if err != nil {
@@ -2453,7 +2468,8 @@ SELECT creator_account_id, approval_record_id, current_approval_version,
        creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
        creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
        prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
-       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc,
+       approved_by_credential_id
 FROM trustpool_creator_approvals`)
 	if err != nil {
 		return nil, err
@@ -2506,6 +2522,7 @@ func scanCreatorApproval(row creatorApprovalScanner) (CreatorApproval, error) {
 		&approval.Status,
 		&suspension,
 		&updatedRaw,
+		&approval.ApprovedByCredentialID,
 	); err != nil {
 		return CreatorApproval{}, err
 	}
@@ -4279,6 +4296,7 @@ func normalizeCreatorApproval(a CreatorApproval) CreatorApproval {
 	a.BuyerDisclosureCommitmentHash = strings.TrimSpace(a.BuyerDisclosureCommitmentHash)
 	a.ApprovalCriteriaHash = strings.TrimSpace(a.ApprovalCriteriaHash)
 	a.ApprovedBy = strings.TrimSpace(a.ApprovedBy)
+	a.ApprovedByCredentialID = strings.TrimSpace(a.ApprovedByCredentialID)
 	a.Status = strings.TrimSpace(a.Status)
 	a.SuspensionReason = strings.TrimSpace(a.SuspensionReason)
 	if a.Status == "" {

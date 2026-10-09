@@ -3,9 +3,11 @@ package trustpool
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 // SPEC-043 0.3.0 self-serve private pools (#1880). An outside creator runs the
@@ -265,7 +268,7 @@ func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.R
 		h.writeLookupError(w, "creator_lookup_failed", err)
 		return
 	}
-	next := selfServeApproval(principal.CreatorID, body, now)
+	next := selfServeApproval(principal.CreatorID, principal.CredentialID, body, now)
 	if exists {
 		switch {
 		case current.ApprovedBy != SelfServeApprovalActor:
@@ -282,7 +285,7 @@ func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.R
 		}
 		next.ApprovedAtUTC = current.ApprovedAtUTC
 	}
-	committed, err := h.deps.Store.UpsertCreatorApproval(r.Context(), next)
+	committed, acceptance, err := h.deps.Store.AcceptSelfServeCreatorAgreement(r.Context(), next, SelfServeAgreementTermsDigest())
 	if err != nil {
 		h.writeRequestMutationError(w, err)
 		return
@@ -295,10 +298,10 @@ func (h *adminHandler) handleSelfServeAgreement(w http.ResponseWriter, r *http.R
 	if !h.refreshRegistryIfAhead(w, state) {
 		return
 	}
-	writeAdminJSON(w, http.StatusAccepted, map[string]any{"creator": committed})
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{"creator": committed, "acceptance": acceptance})
 }
 
-func selfServeApproval(creatorID string, body selfServeAgreementRequest, now time.Time) CreatorApproval {
+func selfServeApproval(creatorID, credentialID string, body selfServeAgreementRequest, now time.Time) CreatorApproval {
 	expires := now.Add(selfServeAgreementTerm)
 	return CreatorApproval{
 		CreatorAccountID:                  creatorID,
@@ -323,9 +326,212 @@ func selfServeApproval(creatorID string, body selfServeAgreementRequest, now tim
 		BuyerDisclosureCommitmentHash:     sha256HexString(selfServeBuyerDisclosureText),
 		ApprovalCriteriaHash:              sha256HexString(selfServeApprovalCriteriaText),
 		ApprovedBy:                        SelfServeApprovalActor,
+		ApprovedByCredentialID:            credentialID,
 		ApprovedAtUTC:                     now,
 		Status:                            CreatorStatusEnabled,
 	}
+}
+
+// SelfServeRenewalPauseReason is the lifecycle reason of a pool paused by a
+// self-serve Agreement renewal after the old Agreement's grace period ended.
+const SelfServeRenewalPauseReason = "creator_agreement_renewal"
+
+// SelfServeAgreementAcceptance is the append-only audit record of one
+// self-serve Agreement acceptance or renewal (SPEC-043-R005 0.3.0).
+type SelfServeAgreementAcceptance struct {
+	CreatorAccountID        string    `json:"creator_account_id"`
+	CreatorCredentialID     string    `json:"creator_credential_id"`
+	CreatorAgreementID      string    `json:"creator_agreement_id"`
+	CreatorAgreementVersion string    `json:"creator_agreement_version"`
+	AgreementTermsDigest    string    `json:"agreement_terms_digest"`
+	ApprovalRevision        uint64    `json:"approval_revision"`
+	PausedPoolIDs           []string  `json:"paused_pool_ids"`
+	AcceptedAtUTC           time.Time `json:"accepted_at_utc"`
+}
+
+// AcceptSelfServeCreatorAgreement records a self-serve Agreement acceptance
+// or renewal in one transaction: it pauses every active pool of the creator
+// that the old approval no longer authorizes but the new one would (an
+// Agreement past its grace end), writes the approval, and appends the
+// acceptance audit record naming the account and API key. Pausing first keeps
+// SPEC-043-R011: renewal never reactivates a pool; the creator promotes it
+// again. A row that already matches returns the stored approval and a zero
+// acceptance without writing.
+func (s *Store) AcceptSelfServeCreatorAgreement(ctx context.Context, approval CreatorApproval, termsDigest string) (CreatorApproval, SelfServeAgreementAcceptance, error) {
+	if s == nil || s.db == nil {
+		return CreatorApproval{}, SelfServeAgreementAcceptance{}, ErrStoreClosed
+	}
+	approval = normalizeCreatorApproval(approval)
+	if approval.ApprovedBy != SelfServeApprovalActor || approval.ApprovedByCredentialID == "" || !validSHA256Hex(termsDigest) {
+		return CreatorApproval{}, SelfServeAgreementAcceptance{}, ErrCreatorApprovalGate
+	}
+	if err := validateCreatorApproval(approval); err != nil {
+		return CreatorApproval{}, SelfServeAgreementAcceptance{}, err
+	}
+	now := time.Now().UTC()
+	approval.UpdatedAtUTC = now
+	var committed CreatorApproval
+	var acceptance SelfServeAgreementAcceptance
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		currentApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceStateFromQueryer(ctx, conn); err != nil {
+			return err
+		}
+		current, existed := currentApprovals[approval.CreatorAccountID]
+		if existed && sameCreatorApprovalExceptRevision(current, approval) {
+			committed = current
+			return nil
+		}
+		paused := []string{}
+		if existed {
+			paused, err = pauseSelfServePoolsForRenewal(ctx, conn, currentApprovals, current, approval, now)
+			if err != nil {
+				return err
+			}
+		}
+		next, changed, err := upsertCreatorApprovalConn(ctx, conn, currentApprovals, approval, now)
+		if err != nil {
+			return err
+		}
+		committed = next
+		if !changed {
+			return nil
+		}
+		acceptance = SelfServeAgreementAcceptance{
+			CreatorAccountID:        next.CreatorAccountID,
+			CreatorCredentialID:     next.ApprovedByCredentialID,
+			CreatorAgreementID:      next.CreatorAgreementID,
+			CreatorAgreementVersion: next.CreatorAgreementVersion,
+			AgreementTermsDigest:    termsDigest,
+			ApprovalRevision:        next.ApprovalRevision,
+			PausedPoolIDs:           paused,
+			AcceptedAtUTC:           now,
+		}
+		pausedJSON, err := json.Marshal(paused)
+		if err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `
+INSERT INTO trustpool_creator_agreement_acceptances (
+    creator_account_id, creator_credential_id, creator_agreement_id, creator_agreement_version,
+    agreement_terms_digest, approval_revision, paused_pool_ids_json, accepted_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			acceptance.CreatorAccountID,
+			acceptance.CreatorCredentialID,
+			acceptance.CreatorAgreementID,
+			acceptance.CreatorAgreementVersion,
+			acceptance.AgreementTermsDigest,
+			acceptance.ApprovalRevision,
+			string(pausedJSON),
+			now.Format(time.RFC3339Nano),
+		)
+		return err
+	})
+	if err != nil {
+		return CreatorApproval{}, SelfServeAgreementAcceptance{}, err
+	}
+	return committed, acceptance, nil
+}
+
+// pauseSelfServePoolsForRenewal appends, inside the renewal transaction, a
+// paused lifecycle event for each active pool of the creator whose current
+// approval is invalid and which next would make valid again.
+func pauseSelfServePoolsForRenewal(ctx context.Context, conn *sql.Conn, approvals map[string]CreatorApproval, current, next CreatorApproval, now time.Time) ([]string, error) {
+	events, err := eventsFromQueryer(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	state, err := reconstructEventsWithApprovals(events, approvals, now)
+	if err != nil {
+		return nil, err
+	}
+	paused := []string{}
+	for id, p := range state.Pools {
+		if p == nil || p.CreatorAccountID != next.CreatorAccountID || p.Lifecycle != LifecycleActive || p.RootIssuer == nil {
+			continue
+		}
+		version, environment := p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment
+		if current.ValidFor(p.ApprovalRecordID, version, environment, now) || !next.ValidFor(p.ApprovalRecordID, version, environment, now) {
+			continue
+		}
+		paused = append(paused, id)
+	}
+	sort.Strings(paused)
+	for _, poolID := range paused {
+		e := DurableEvent{
+			OperationID:         fmt.Sprintf("self_serve_renewal_pause:%s:%d:%s", next.CreatorAccountID, current.ApprovalRevision+1, poolID),
+			TimestampUTC:        now,
+			EventType:           EventLifecycleChanged,
+			PoolID:              poolID,
+			CreatorAccountID:    next.CreatorAccountID,
+			CreatorCredentialID: next.ApprovedByCredentialID,
+			Lifecycle:           LifecyclePaused,
+			Reason:              SelfServeRenewalPauseReason,
+		}
+		if err := validateEvent(e); err != nil {
+			return nil, err
+		}
+		if err := state.validateMutationCreatorGate(e, now); err != nil {
+			return nil, err
+		}
+		if used, err := operationIDExists(ctx, conn, e.OperationID); err != nil {
+			return nil, err
+		} else if used {
+			return nil, ErrConflictingOperationID
+		}
+		payload, err := json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		if err := insertTrustpoolEventRow(ctx, conn, e, string(payload)); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	if len(paused) > 0 {
+		if _, err := reconstructEventsWithApprovals(events, approvals, now); err != nil {
+			return nil, err
+		}
+	}
+	return paused, nil
+}
+
+// SelfServeAgreementAcceptances returns a creator's acceptance audit records,
+// oldest first.
+func (s *Store) SelfServeAgreementAcceptances(ctx context.Context, creatorAccountID string) ([]SelfServeAgreementAcceptance, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT creator_account_id, creator_credential_id, creator_agreement_id, creator_agreement_version,
+       agreement_terms_digest, approval_revision, paused_pool_ids_json, accepted_at_utc
+FROM trustpool_creator_agreement_acceptances
+WHERE creator_account_id = ?
+ORDER BY id`, strings.TrimSpace(creatorAccountID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SelfServeAgreementAcceptance
+	for rows.Next() {
+		var a SelfServeAgreementAcceptance
+		var pausedRaw, acceptedRaw string
+		if err := rows.Scan(&a.CreatorAccountID, &a.CreatorCredentialID, &a.CreatorAgreementID, &a.CreatorAgreementVersion,
+			&a.AgreementTermsDigest, &a.ApprovalRevision, &pausedRaw, &acceptedRaw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(pausedRaw), &a.PausedPoolIDs); err != nil {
+			return nil, fmt.Errorf("%w: agreement acceptance paused_pool_ids_json: %v", ErrMalformedDurableEvent, err)
+		}
+		if a.AcceptedAtUTC, err = time.Parse(time.RFC3339Nano, acceptedRaw); err != nil {
+			return nil, fmt.Errorf("%w: agreement acceptance accepted_at_utc: %v", ErrMalformedDurableEvent, err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func selfServeAgreementUnchanged(current, next CreatorApproval) bool {
