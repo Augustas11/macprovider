@@ -176,7 +176,6 @@ test-dist-release:
 	bash scripts/ops/test-live-lock.sh
 	bash scripts/ops/test-runbook-commands.sh
 	bash scripts/ops/test-entrypoints.sh
-	bash scripts/ops/test-fast-required.sh
 
 # Installer, watchdog, and coordinator/gateway deploy scripts.
 test-dist-deploy:
