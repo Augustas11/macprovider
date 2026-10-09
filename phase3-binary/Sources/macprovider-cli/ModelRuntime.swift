@@ -4549,7 +4549,8 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int,
         maxDecodeLockstepWindow: Int,
         nativeMTPRoundByteCapacity: Int?,
-        nativeMTPStatusSink: NativeMTPStatusSink?
+        nativeMTPStatusSink: NativeMTPStatusSink?,
+        allowsRaggedPrefillOffsets: Bool = false
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
@@ -4568,6 +4569,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 max(1, prefillStepSize),
                 ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
             ),
+            allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
             queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
             // The row cap is the served context, not the scheduler's
@@ -4637,7 +4639,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillStepSize: prefillStepSize,
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
-                nativeMTPStatusSink: nativeMTPStatusSink
+                nativeMTPStatusSink: nativeMTPStatusSink,
+                allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
+                    .supportsRaggedPrefillOffsets ?? false
             ),
             allocator: allocator,
             backend: backend,

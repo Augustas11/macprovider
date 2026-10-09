@@ -12,6 +12,7 @@ enum MSBThroughputScenario: String, Codable, ExpressibleByArgument, CaseIterable
     case replay
     case drain
     case leftovers
+    case raggedPrefill = "ragged-prefill"
 }
 
 struct MSBUsageRow: Codable, Sendable, Equatable {

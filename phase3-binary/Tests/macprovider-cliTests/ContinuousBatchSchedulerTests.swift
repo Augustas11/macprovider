@@ -65,7 +65,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             snapshot: snapshot
         )
         XCTAssertEqual(unset.maxPrefillTokensPerIteration, 256)
-        XCTAssertEqual(ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration, 1_024)
+        XCTAssertEqual(ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration, 2_048)
     }
 
     func testDescriptorDrivenLocalCapabilityRejectsUnsupportedTuple() {
@@ -4871,6 +4871,155 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
     }
 
+    func testRaggedPrefillGroupsRowsAtDifferentOffsetsWithOneChunkLength() async throws {
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["row-1": [101], "row-2": [102], "row-3": [103]],
+            prefillGate: prefillGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 3,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 3,
+            maxPrefillTokensPerIteration: 6,
+            allowsRaggedPrefillOffsets: true,
+            backend: backend
+        )
+
+        let first = Task {
+            try await scheduler.submit(.init(
+                id: "row-1",
+                conversationKey: "",
+                promptTokens: [1, 2, 3, 4],
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let rest = (2...3).map { index in
+            Task {
+                try await scheduler.submit(.init(
+                    id: "row-\(index)",
+                    conversationKey: "",
+                    promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3, index * 10 + 4],
+                    maxOutputTokens: 1,
+                    temperature: 0.0,
+                    topP: 1.0
+                ))
+            }
+        }
+        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        await prefillGate.open()
+
+        let firstResult = try await first.value
+        var restResults: [ContinuousBatchSchedulerResult] = []
+        for task in rest {
+            restResults.append(try await task.value)
+        }
+        XCTAssertEqual(firstResult.outputTokens, [101])
+        XCTAssertEqual(restResults.map(\.outputTokens), [[102], [103]])
+
+        let committed = await backend.prefillCommittedCounts()
+        let targets = await backend.prefillTargetCounts()
+        XCTAssertEqual(committed.count, targets.count)
+        // The FCFS head at offset 2 leads the two new rows at offset 0.
+        XCTAssertTrue(
+            committed.contains(["row-1": 2, "row-2": 0, "row-3": 0]),
+            "\(committed)"
+        )
+        // Every call advances all of its rows by one shared chunk length.
+        for (callCommitted, callTargets) in zip(committed, targets) {
+            let lengths = Set(callCommitted.map { id, start in (callTargets[id] ?? start) - start })
+            XCTAssertEqual(lengths.count, 1, "\(callCommitted) -> \(callTargets)")
+        }
+        let tokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertTrue(tokenCounts.allSatisfy { $0 <= 6 })
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens() {
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 1024
+        )
+        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 512, requestIDs: ["a", "c"]))
+    }
+
+    func testRaggedPrefillGroupingShrinksToAPeerFinalChunkWhenThatAdvancesMore() {
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 2048
+        )
+        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 260, requestIDs: ["a", "b", "c", "d"]))
+    }
+
+    func testRaggedPrefillGroupingNeverCutsAChunkBelowHalfItsOwnLength() {
+        // A 40-token final head chunk would cut the 512-token peer to a sliver.
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40, spanTokens: 40, sharesRaggedOffsets: true),
+                .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 2048, sharesRaggedOffsets: true),
+                .init(requestID: "short", promptOffset: 300, naturalChunkTokens: 70, spanTokens: 70, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 1024
+        )
+        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 40, requestIDs: ["head", "short"]))
+    }
+
+    func testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset() {
+        let group = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "head", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 8, sharesRaggedOffsets: true),
+                .init(requestID: "native-elsewhere", promptOffset: 4, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: false),
+                .init(requestID: "native-same", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 8, sharesRaggedOffsets: false),
+                .init(requestID: "ordinary-elsewhere", promptOffset: 8, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "ordinary-same", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: true),
+            ],
+            maxRows: 8,
+            tokenBudget: 64
+        )
+        XCTAssertEqual(
+            group,
+            ContinuousBatchPrefillGroup(chunkTokens: 4, requestIDs: ["head", "native-same", "ordinary-same"])
+        )
+    }
+
+    func testRaggedPrefillGroupingHonoursRowCapAndTokenBudget() {
+        let candidates = (0 ..< 6).map {
+            ContinuousBatchPrefillCandidate(
+                requestID: "r\($0)",
+                promptOffset: $0 * 64,
+                naturalChunkTokens: 256,
+                spanTokens: 1024,
+                sharesRaggedOffsets: true
+            )
+        }
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(candidates, maxRows: 4, tokenBudget: 4096)?.requestIDs,
+            ["r0", "r1", "r2", "r3"]
+        )
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(candidates, maxRows: 4, tokenBudget: 512)?.requestIDs,
+            ["r0", "r1"]
+        )
+        XCTAssertNil(ContinuousBatchPrefillGrouping.select([], maxRows: 4, tokenBudget: 512))
+    }
+
     func testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation() async throws {
         let decodeGate = AsyncGate()
         let prefillGate = AsyncGate()
@@ -6773,6 +6922,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxDecodeStepsWhilePrefilling: Int = 1,
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
+        allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .init(
@@ -6800,6 +6950,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
+            allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             queueWaitTimeoutNanoseconds: queueWaitTimeoutNanoseconds,

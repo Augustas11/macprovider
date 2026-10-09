@@ -80,7 +80,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("scenario"),
-        help: "throughput (default equal-length), msb03 (ragged 512/1024/1536/2048), msb05 (serial-parallel Q1), parity, isolation, replay, drain, or leftovers (isolation+replay+drain+parity after one load)."
+        help: "throughput (default equal-length), msb03 (ragged 512/1024/1536/2048), msb05 (serial-parallel Q1), parity, isolation, replay, drain, ragged-prefill (shared prefill at mixed prompt offsets vs per-row prefill), or leftovers (isolation+replay+drain+parity after one load)."
     )
     var scenario: MSBThroughputScenario = .throughput
 
@@ -205,6 +205,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             return
         case .drain:
             try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            return
+        case .raggedPrefill:
+            try await runRaggedPrefillParity(modelID: modelID, container: container, cacheKinds: cacheKinds)
             return
         case .leftovers:
             try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
@@ -1160,6 +1163,187 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         return try msbAggregateThroughput(samples).aggregateTokensPerSecond
     }
 
+    /// SPEC-038 FR-CB2 ragged shared prefill parity. Per prompt set, three
+    /// rows at different prompt offsets share prefill forwards, including one
+    /// group whose chunk length is two rows' short final chunk. Each row is
+    /// then decoded alone and compared with the same row prefilled alone over
+    /// the identical chunk partition: the first sampled token plus
+    /// `parityTokens - 1` greedy tokens. The same comparison runs for an
+    /// aligned control whose shared groups all sit at one offset (the shape
+    /// shared prefill already used), so any late near-tie flip can be set
+    /// against the accepted path's own rate. The production serial path is
+    /// reported too; it chunks prompts differently, so it is informational.
+    private func runRaggedPrefillParity(
+        modelID: String,
+        container: ModelContainer,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) async throws {
+        typealias Chunk = (row: Int, start: Int, end: Int)
+        let lengths = [1100, 800, 650]
+        // Each inner array is one prefill call.
+        let raggedPlan: [[Chunk]] = [
+            [(0, 0, 300)],
+            [(0, 300, 600), (1, 0, 300)],
+            [(0, 600, 850), (1, 300, 550), (2, 0, 250)],
+            [(0, 850, 1100), (1, 550, 800), (2, 250, 500)],
+            [(2, 500, 650)],
+        ]
+        let alignedPlan: [[Chunk]] = [
+            [(0, 0, 300), (1, 0, 300), (2, 0, 300)],
+            [(0, 300, 600), (1, 300, 600), (2, 300, 600)],
+            [(0, 600, 650), (1, 600, 650), (2, 600, 650)],
+            [(0, 650, 800), (1, 650, 800)],
+            [(0, 800, 1100)],
+        ]
+        let compared = max(1, parityTokens)
+        let sets = max(1, runs)
+
+        func run(prompts: [[Int]], calls: [[Chunk]]) async throws -> [[Int]] {
+            let backend = PagedKVSharedForwardBackend(
+                container: container,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                poolEpoch: 1,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds,
+                compiledDecode: false
+            )
+            let allocator = try PagedKVBlockAllocator(
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks
+            )
+            var rowsState: [DecodeRow] = []
+            for (index, prompt) in prompts.enumerated() {
+                let id = "msb-ragged-\(index)"
+                let handle = try await allocator.allocate(
+                    conversationKey: id,
+                    maxTokens: prompt.count + compared + 1,
+                    initialTokens: 0
+                )
+                rowsState.append(DecodeRow(id: id, prompt: prompt, handle: handle, currentToken: 0))
+            }
+            for call in calls {
+                var inputs: [ContinuousBatchPrefillInput] = []
+                for chunk in call {
+                    let row = rowsState[chunk.row]
+                    _ = try await allocator.extend(row.handle, by: chunk.end - chunk.start)
+                    inputs.append(ContinuousBatchPrefillInput(
+                        requestID: row.id,
+                        promptTokens: Array(row.prompt[chunk.start ..< chunk.end]),
+                        binding: try await allocator.binding(for: row.handle),
+                        promptTokenOffset: chunk.start,
+                        committedKVTokenCount: chunk.start,
+                        targetKVTokenCount: chunk.end,
+                        isFinalChunk: chunk.end == row.prompt.count,
+                        samplerSeed: 0,
+                        temperature: 0,
+                        topP: 1,
+                        samplerStep: 0
+                    ))
+                }
+                let outputs = try await backend.prefill(rows: inputs)
+                for output in outputs {
+                    guard output.failureCode == nil,
+                          let index = rowsState.firstIndex(where: { $0.id == output.requestID })
+                    else {
+                        FileHandle.standardError.write(Data(
+                            "msb-throughput: ragged-prefill row \(output.requestID) failed \(output.failureCode ?? "-")\n".utf8
+                        ))
+                        throw ExitCode(1)
+                    }
+                    if let token = output.sampledToken {
+                        rowsState[index].generated.append(token)
+                        rowsState[index].currentToken = token
+                    }
+                }
+            }
+            var tokens: [[Int]] = []
+            for index in rowsState.indices {
+                guard rowsState[index].generated.count == 1 else {
+                    FileHandle.standardError.write(Data(
+                        "msb-throughput: ragged-prefill row \(rowsState[index].id) missing final-prefill token\n".utf8
+                    ))
+                    throw ExitCode(1)
+                }
+                var single = [rowsState[index]]
+                for _ in 1 ..< compared {
+                    try await decodeOneStep(backend: backend, allocator: allocator, rows: &single)
+                }
+                tokens.append(single[0].generated)
+                backend.finish(requestID: rowsState[index].id)
+            }
+            return tokens
+        }
+
+        /// The same chunks, each row prefilled alone in row order.
+        func isolated(_ plan: [[Chunk]]) -> [[Chunk]] {
+            (0 ..< lengths.count).flatMap { row in
+                plan.flatMap { $0 }.filter { $0.row == row }.map { [$0] }
+            }
+        }
+
+        func divergences(_ batched: [[Int]], _ reference: [[Int]]) -> [Int?] {
+            zip(batched, reference).map {
+                msbTemp0ParityMatch(serial: $1, batched: $0, comparedTokens: compared).firstDivergence
+            }
+        }
+
+        var reportSets: [MSBRaggedPrefillParitySet] = []
+        for set in 0 ..< sets {
+            let prompts = try await container.perform { context in
+                lengths.enumerated().map { row, length in
+                    Self.buildPromptTokens(context: context, index: set * lengths.count + row, tokens: length)
+                }
+            }
+            guard prompts.map(\.count) == lengths else {
+                FileHandle.standardError.write(Data(
+                    "msb-throughput: ragged-prefill prompt lengths \(prompts.map(\.count)) != \(lengths)\n".utf8
+                ))
+                throw ExitCode(1)
+            }
+            let ragged = try await run(prompts: prompts, calls: raggedPlan)
+            let raggedAlone = try await run(prompts: prompts, calls: isolated(raggedPlan))
+            let aligned = try await run(prompts: prompts, calls: alignedPlan)
+            let alignedAlone = try await run(prompts: prompts, calls: isolated(alignedPlan))
+            var serial: [[Int]] = []
+            for prompt in prompts {
+                serial.append(try await runProductionSerialOnce(
+                    container: container, promptTokens: prompt, timedDecodeTokens: compared
+                ).generatedTokens)
+            }
+            let entry = MSBRaggedPrefillParitySet(
+                set: set,
+                raggedVsAloneFirstDivergence: divergences(ragged, raggedAlone),
+                alignedVsAloneFirstDivergence: divergences(aligned, alignedAlone),
+                raggedVsSerialFirstDivergence: divergences(ragged, serial),
+                alignedVsSerialFirstDivergence: divergences(aligned, serial),
+                raggedAloneVsSerialFirstDivergence: divergences(raggedAlone, serial)
+            )
+            FileHandle.standardError.write(Data(
+                "msb-throughput: ragged-prefill set=\(set) ragged_vs_alone=\(entry.raggedVsAloneFirstDivergence) aligned_vs_alone=\(entry.alignedVsAloneFirstDivergence)\n".utf8
+            ))
+            reportSets.append(entry)
+        }
+        let rows = sets * lengths.count
+        func exact(_ path: KeyPath<MSBRaggedPrefillParitySet, [Int?]>) -> Int {
+            reportSets.map { $0[keyPath: path].filter { $0 == nil }.count }.reduce(0, +)
+        }
+        let report = MSBRaggedPrefillParityReport(
+            modelID: modelID,
+            promptTokenLengths: lengths,
+            raggedPlan: raggedPlan.map { $0.map { [$0.row, $0.start, $0.end] } },
+            alignedPlan: alignedPlan.map { $0.map { [$0.row, $0.start, $0.end] } },
+            comparedTokens: compared,
+            rows: rows,
+            raggedExactRows: exact(\.raggedVsAloneFirstDivergence),
+            alignedExactRows: exact(\.alignedVsAloneFirstDivergence),
+            sets: reportSets
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        print(String(decoding: try encoder.encode(report), as: UTF8.self))
+    }
+
     private func runParity(
         modelID: String,
         container: ModelContainer,
@@ -1900,6 +2084,27 @@ struct MSBThroughputReport: Codable, Sendable {
 }
 
 /// Times `decodeLockstepWindow` so scheduler-path MSB numbers exclude prefill.
+private struct MSBRaggedPrefillParitySet: Encodable {
+    let set: Int
+    let raggedVsAloneFirstDivergence: [Int?]
+    let alignedVsAloneFirstDivergence: [Int?]
+    let raggedVsSerialFirstDivergence: [Int?]
+    let alignedVsSerialFirstDivergence: [Int?]
+    let raggedAloneVsSerialFirstDivergence: [Int?]
+}
+
+private struct MSBRaggedPrefillParityReport: Encodable {
+    let modelID: String
+    let promptTokenLengths: [Int]
+    let raggedPlan: [[[Int]]]
+    let alignedPlan: [[[Int]]]
+    let comparedTokens: Int
+    let rows: Int
+    let raggedExactRows: Int
+    let alignedExactRows: Int
+    let sets: [MSBRaggedPrefillParitySet]
+}
+
 private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
     private let inner: PagedKVSharedForwardBackend
     private let lock = NSLock()

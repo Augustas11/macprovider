@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.8
+Version: v0.3.9
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.9 (2026-10-09, ragged shared prefill):** FR-CB2 now lets
+prompt rows at different prompt offsets share one prefill forward when every
+row prefills the same chunk length from its own committed KV and the backend
+gives each row its own positions and a per-row causal mask. Staggered arrivals
+rarely sit at one offset, so before this change most prompt chunks ran alone
+while decode waited. Sliding-window layers and native-MTP prompt rows keep the
+equal-offset rule. The scheduler may shorten a row's chunk to meet a group
+length, never below half of the row's own balanced chunk. The token budget,
+per-row chunk limit, FCFS head, recurrent checkpoint boundaries and isolation
+rules are unchanged. AC-16 adds a ragged-offset group with per-row parity.
+The unset per-iteration prefill token budget rises from 1024 to 2048 so four
+balanced chunks of 1.5k-token prompts share one forward; on the Studio M3
+Ultra with Qwen3.6-35B-A3B and 1536-token prompts this measured 132 vs 115
+tok/s aggregate and 74 vs 301 ms ITL p95 at 8 rows against the pre-change
+serve, with TTFT p95 5.5 vs 4.4 s (`docs/research/issue-1906/`). No wire,
+receipt, or acceptance-coverage change.
+
 **Change log v0.3.8 (2026-10-02, per-step emission inside decode windows):**
 FR-CB2 emission is per step, not per window. A multi-token hop still runs
 inside one backend call, but each step's sampled tokens go through stop,
@@ -490,10 +507,34 @@ backpressure/rejection outcome; starvation is non-conformant.
 Rows in one compatible prefill group MUST be processed by one backend shared
 prefill forward. An implementation MUST NOT claim batched prefill when it
 serially prefills compatible rows one at a time. When the backend cannot prove
-that a set of rows is compatible - including ragged prompt offsets, cache
-classes, runtime revisions, model shapes, recurrent-state boundaries, or
-adapter/tooling constraints that the backend cannot represent safely - the
-scheduler MUST split the group or use the serial fallback path. Fallback MUST
+that a set of rows is compatible - including unequal chunk lengths, ragged
+prompt offsets outside the conditions below, cache classes, runtime revisions,
+model shapes, recurrent-state boundaries, or adapter/tooling constraints that
+the backend cannot represent safely - the scheduler MUST split the group or use
+the serial fallback path.
+
+**(v0.3.9) Ragged prompt offsets.** Rows at different prompt offsets MAY form
+one compatible prefill group when all of these hold:
+- every row prefills the same chunk length `L`, starting exactly at its own
+  committed KV length;
+- the backend applies each row's own absolute positions (a per-row RoPE
+  offset) and a per-row causal mask, so query `q` of row `b` attends only key
+  positions `<= offset_b + q` and never another row's tokens or the padding
+  of a shorter row;
+- no layer presents a per-row trimmed K/V window (sliding-window layers keep
+  the equal-offset rule);
+- no row is a native-MTP prompt row (those keep the equal-offset rule).
+
+The scheduler MUST form a ragged group only when the backend declares that it
+runs this shape in one forward. A backend whose ragged shared forward cannot
+complete MUST fail that group's rows rather than retry them serially, because
+the forward has already appended each row's chunk to its own cache. To make
+chunk lengths meet, the scheduler MAY shorten a row's chunk below its own
+balanced chunk, but MUST NOT shorten it below half of that chunk and MUST NOT
+cross the row's prompt end or a recurrent checkpoint boundary. The FCFS head
+always leads the group. The group length is either the head's chunk or a
+shorter peer chunk, whichever advances the most prompt tokens within the row
+cap and token budget. Fallback MUST
 preserve FCFS accounting, cancellation boundaries, receipt boundaries,
 request-local block-table isolation, and every FR-CB6 per-request isolation
 rule.
@@ -508,7 +549,8 @@ MUST still commit the complete prompt but MUST NOT sample or emit a token. The
 production per-row partition is at most 512 prompt tokens per chunk, bounded
 further by the configured prefill step size. Serial and shared-forward parity
 proofs MUST use the same partition so the proof cannot compare different model
-execution shapes.
+execution shapes. A ragged-offset parity proof compares each row with the same
+row prefilled alone over the identical chunk partition.
 
 Paged-pool pressure during concurrent long prompts MUST degrade gracefully. The
 scheduler MUST apply the FR-CB1/FR-CB17 admission and pool-availability gates
@@ -1383,9 +1425,12 @@ hardware-capability run or a static-review obligation. Every
   MUST inject cancellation before and during a prefill turn and prove bounded
   cleanup with no duplicate terminal event, no cache commit for the cancelled
   row unless the serial path would commit it, and no receipt or token
-  attribution change for any other row. It MUST include an incompatible or
-  ragged-offset prompt group that takes the safe split/serial fallback path,
-  preserving receipt/accounting/cancellation boundaries. It MUST include
+  attribution change for any other row. It MUST include an incompatible prompt
+  group (unequal chunk lengths, or ragged offsets the backend cannot run) that
+  takes the safe split/serial fallback path, preserving
+  receipt/accounting/cancellation boundaries. It MUST include a ragged-offset
+  group with one chunk length that shares one forward, with greedy parity for
+  every row against that row prefilled alone over the same partition. It MUST include
   concurrent long prompts that exceed the available paged-pool headroom and
   prove bounded queueing or reason-coded backpressure/rejection rather than
   `block_extension_failed`, cross-row mutation, or a stitched receipt.

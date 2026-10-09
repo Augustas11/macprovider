@@ -425,7 +425,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
     var continuousBatchQueueWaitTimeoutMS: Int?
 
-    @Option(help: "Continuous-batching prefill per-iteration token budget (across compatible rows). Default 1024. Operator tuning/observability knob: a Studio sweep found this total budget non-binding for TTFT (single-stream prefill is compute-bound; the per-row prefill_step_size is the lever), so raising it does not by itself cut large-prompt TTFT. Overrides MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION and config key continuous_batch_prefill_tokens_per_iteration.")
+    @Option(help: "Continuous-batching prefill per-iteration token budget (across compatible rows). Default 2048. It caps how many concurrent prompt rows share one prefill forward; single-stream prefill is bounded by the per-row prefill_step_size, not this budget. Overrides MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION and config key continuous_batch_prefill_tokens_per_iteration.")
     var continuousBatchPrefillTokensPerIteration: Int?
 
     @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) batch instead of serial-routing. Default off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")

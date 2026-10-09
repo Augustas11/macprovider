@@ -1183,6 +1183,164 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// SPEC-038 FR-CB2 ragged shared prefill on a real (tiny, random-weight)
+    /// hybrid Qwen3.5: rows at different prompt offsets share `[B, L]`
+    /// forwards, including a group whose length is one row's short final
+    /// chunk. Every row must sample the same first token and greedy decode as
+    /// when each row is prefilled alone over the identical chunk partition;
+    /// the decode phase is the same three-row batch in both runs.
+    func testRealQwen35RaggedSharedPrefillMatchesPerRowPrefill() async throws {
+        try requireMetal()
+        let configuration = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self,
+            from: Data(Self.tinyQwen35HybridConfiguration.utf8)
+        )
+        MLXRandom.seed(1906)
+        let target = Qwen35TextModel(configuration)
+        eval(target)
+        let ids = ["a", "b", "c"]
+        let prompts = [12, 9, 7].enumerated().map { Self.tinyPrompt(length: $0.element, salt: 40 + $0.offset) }
+        typealias Chunk = (row: Int, start: Int, end: Int)
+        let plan: [[Chunk]] = [
+            [(0, 0, 4)],
+            [(0, 4, 8), (1, 0, 4)],
+            [(0, 8, 11), (1, 4, 7), (2, 0, 3)],
+            [(0, 11, 12), (1, 7, 8), (2, 3, 4)],
+            [(1, 8, 9), (2, 4, 5)],
+            [(2, 5, 7)],
+        ]
+        let alone: [[Chunk]] = (0 ..< ids.count).flatMap { row in
+            plan.flatMap { $0 }.filter { $0.row == row }.map { [$0] }
+        }
+        let steps = 6
+
+        func run(_ calls: [[Chunk]]) async throws -> [String: [Int]] {
+            let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 64)
+            let backend = PagedKVSharedForwardBackend(
+                container: ModelContainer(context: ModelContext(
+                    configuration: ModelConfiguration(id: descriptor.modelID),
+                    model: target,
+                    processor: StandInUserInputProcessor(),
+                    tokenizer: RuntimeBridgeFakeTokenizer()
+                )),
+                descriptor: descriptor,
+                layerCount: 2,
+                cacheKinds: [.recurrentMamba, .pagedAttention]
+            )
+            XCTAssertTrue(backend.supportsRaggedPrefillOffsets)
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            var handles: [PagedKVBlockTableHandle] = []
+            for id in ids {
+                handles.append(try await allocator.allocate(conversationKey: id, maxTokens: 32))
+            }
+            var tokens: [String: [Int]] = [:]
+            for call in calls {
+                var inputs: [ContinuousBatchPrefillInput] = []
+                for chunk in call {
+                    _ = try await allocator.extend(handles[chunk.row], by: chunk.end - chunk.start)
+                    inputs.append(ContinuousBatchPrefillInput(
+                        requestID: ids[chunk.row],
+                        promptTokens: Array(prompts[chunk.row][chunk.start ..< chunk.end]),
+                        binding: try await allocator.binding(for: handles[chunk.row]),
+                        promptTokenOffset: chunk.start,
+                        committedKVTokenCount: chunk.start,
+                        targetKVTokenCount: chunk.end,
+                        isFinalChunk: chunk.end == prompts[chunk.row].count
+                    ))
+                }
+                XCTAssertEqual(PagedKVSharedForwardBackend.canSharePrefillForward(inputs), inputs.count > 1)
+                for output in try await backend.prefill(rows: inputs) {
+                    XCTAssertNil(output.failureCode, output.requestID)
+                    if let token = output.sampledToken {
+                        tokens[output.requestID] = [token]
+                    }
+                }
+            }
+            for step in 0 ..< steps {
+                var decodeInputs: [ContinuousBatchDecodeInput] = []
+                for (index, id) in ids.enumerated() {
+                    decodeInputs.append(try await Self.decodeInput(
+                        requestID: id,
+                        currentToken: try XCTUnwrap(tokens[id]?.last, id),
+                        handle: handles[index],
+                        allocator: allocator,
+                        committedKVTokenCount: prompts[index].count + step
+                    ))
+                }
+                let outcomes = try await backend.decode(rows: decodeInputs)
+                for handle in handles {
+                    try await allocator.endDecodeStep(handle)
+                }
+                for (id, token) in Self.tokens(from: outcomes) {
+                    tokens[id, default: []].append(token)
+                }
+            }
+            return tokens
+        }
+
+        let shared = try await run(plan)
+        let isolated = try await run(alone)
+        for id in ids {
+            XCTAssertEqual(shared[id]?.count, steps + 1, id)
+            XCTAssertEqual(shared[id], isolated[id], "\(id) ragged shared prefill diverged from per-row prefill")
+        }
+    }
+
+    func testSharedPrefillCompatibilityAllowsRaggedOffsetsWithOneChunkLength() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        func input(_ id: String, offset: Int, length: Int, native: Bool = false, committed: Int? = nil)
+            async throws -> ContinuousBatchPrefillInput
+        {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 16)
+            _ = try await allocator.extend(handle, by: offset + length)
+            return ContinuousBatchPrefillInput(
+                requestID: id,
+                promptTokens: Array(repeating: 1, count: length),
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: offset,
+                committedKVTokenCount: committed ?? offset,
+                targetKVTokenCount: (committed ?? offset) + length,
+                isFinalChunk: false,
+                nativeMTPPromptPrefill: native
+            )
+        }
+        let atZero = try await input("a", offset: 0, length: 3)
+        let atFour = try await input("b", offset: 4, length: 3)
+        let shorter = try await input("c", offset: 4, length: 2)
+        let nativeAtFour = try await input("d", offset: 4, length: 3, native: true)
+        let nativeAtZero = try await input("e", offset: 0, length: 3, native: true)
+        let lagging = try await input("f", offset: 4, length: 3, committed: 2)
+
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, atFour]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.hasRaggedPromptOffsets([atZero, atFour]))
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero]))
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atFour, shorter]))
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, nativeAtFour]))
+        XCTAssertTrue(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, nativeAtZero]))
+        XCTAssertFalse(PagedKVSharedForwardBackend.canSharePrefillForward([atZero, lagging]))
+    }
+
+    func testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding() throws {
+        try requireMetal()
+        let mask = PagedKVRaggedPrefillMask.make(queryTokens: 2, rowOffsets: [0, 3], windowSize: nil)
+        XCTAssertEqual(mask.shape, [2, 1, 2, 5])
+        XCTAssertEqual(mask.asType(.int32).asArray(Int32.self), [
+            // Row 0 holds keys 0..<2; keys 2..<5 are padding.
+            1, 0, 0, 0, 0,
+            1, 1, 0, 0, 0,
+            // Row 1 holds keys 0..<5; query q sits at position 3 + q.
+            1, 1, 1, 1, 0,
+            1, 1, 1, 1, 1,
+        ])
+        let windowed = PagedKVRaggedPrefillMask.make(queryTokens: 2, rowOffsets: [0, 3], windowSize: 2)
+        XCTAssertEqual(windowed.asType(.int32).asArray(Int32.self), [
+            1, 0, 0, 0, 0,
+            1, 1, 0, 0, 0,
+            0, 0, 1, 1, 0,
+            0, 0, 0, 1, 1,
+        ])
+    }
+
     /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
     /// commits keyed rows in serial format hands back the same terminal
     /// conversation-cache entry as the ordinary row: same tokens, same token
