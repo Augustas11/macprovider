@@ -137,8 +137,8 @@ protocol AutotuneConcurrencyCalibrationProbing {
 }
 
 struct AutotuneConcurrencyCalibrator {
-    /// Served hard cap; mirrors `ProviderCapacity.maxConcurrencyOverrideLimit`.
-    var hardCap = 8
+    /// Served hard cap.
+    var hardCap = ProviderCapacity.maxConcurrencyOverrideLimit
     var ttftCeilingMS = 8_000
     /// A higher batch depth is rejected if its per-stream p95 TTFT exceeds the
     /// single-stream (batch=1) p95 by more than this factor.
