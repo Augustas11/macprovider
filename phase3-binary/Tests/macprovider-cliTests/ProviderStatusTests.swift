@@ -2350,20 +2350,24 @@ final class ProviderStatusTests: XCTestCase {
     func testSnapshotResetWindowSurvivesReentrancyDuringThermalGateAwait() async {
         // Regression for the round-1 finding: `snapshot(resetWindow:)` must
         // resolve the thermal-gate `await` BEFORE reading any window state.
-        // We force the race by giving the gate a 50ms artificial delay
-        // inside `isThrottled()`, then letting `finishRequest` enter the
-        // actor while snapshot is suspended. If the await were AFTER the
-        // window reads, the finish would be silently dropped on reset.
+        // The latch parks the snapshot inside `isThrottled()` and only
+        // releases it after `finishRequest` has entered the actor, so the
+        // interleaving is forced rather than inferred from sleep timing. If
+        // the await were AFTER the window reads, the finish would be
+        // silently dropped on reset.
+        let latch = ThermalAwaitLatch()
         let gate = ThermalGate(
             stateProvider: FixedThermalProvider(state: .nominal),
-            isThrottledArtificialDelayNanos: 50_000_000
+            isThrottledSuspensionHook: latch.hook
         )
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(), thermalGate: gate)
 
         let begin = await status.beginRequest(requestID: "r-1")
+        await latch.arm()
         let snapshotTask = Task { await status.snapshot(resetWindow: true) }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        await latch.waitUntilParked()
         await status.finishRequest(startedAt: begin, completion: nil, failed: false, requestID: "r-1")
+        latch.release()
 
         let snap = await snapshotTask.value
         XCTAssertEqual(snap.requestsServedSinceLast, 1,
@@ -2374,17 +2378,20 @@ final class ProviderStatusTests: XCTestCase {
     }
 
     func testCapacityRefreshDoesNotOverwriteLifecycleFenceAfterThermalAwait() async {
+        let latch = ThermalAwaitLatch()
         let gate = ThermalGate(
             stateProvider: FixedThermalProvider(state: .nominal),
-            isThrottledArtificialDelayNanos: 50_000_000
+            isThrottledSuspensionHook: latch.hook
         )
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(maxConcurrency: 1), thermalGate: gate)
 
+        await latch.arm()
         let beginTask = Task {
             await status.beginRequest(requestID: "r-racing")
         }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        await latch.waitUntilParked()
         await status.setState(.draining, reason: "operator_pause_draining")
+        latch.release()
         _ = await beginTask.value
 
         let fenced = await status.snapshot()
@@ -2525,5 +2532,55 @@ private final class RequestCapacitySnapshotRecorder: @unchecked Sendable {
     var reasons: [String] {
         lock.lock(); defer { lock.unlock() }
         return entries.map(\.reason)
+    }
+}
+
+/// Parks the first `ThermalGate.isThrottled()` call made after `arm()` until
+/// `release()`; every other call passes straight through. Tests use it to hold
+/// one `ProviderStatus` caller suspended at the thermal await while another
+/// caller enters the actor, independent of executor scheduling.
+private final class ThermalAwaitLatch: Sendable {
+    private actor ArmState {
+        private var armed = false
+        func arm() { armed = true }
+        func claim() -> Bool {
+            defer { armed = false }
+            return armed
+        }
+    }
+
+    private let armState = ArmState()
+    private let parked: AsyncStream<Void>
+    private let parkedContinuation: AsyncStream<Void>.Continuation
+    private let released: AsyncStream<Void>
+    private let releasedContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let parkedPair = AsyncStream<Void>.makeStream()
+        parked = parkedPair.stream
+        parkedContinuation = parkedPair.continuation
+        let releasedPair = AsyncStream<Void>.makeStream()
+        released = releasedPair.stream
+        releasedContinuation = releasedPair.continuation
+    }
+
+    var hook: @Sendable () async -> Void {
+        { [armState, parkedContinuation, released] in
+            guard await armState.claim() else { return }
+            parkedContinuation.yield()
+            for await _ in released {}
+        }
+    }
+
+    func arm() async {
+        await armState.arm()
+    }
+
+    func waitUntilParked() async {
+        for await _ in parked { return }
+    }
+
+    func release() {
+        releasedContinuation.finish()
     }
 }

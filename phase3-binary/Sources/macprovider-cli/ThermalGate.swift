@@ -16,20 +16,21 @@ struct SystemThermalStateProvider: ThermalStateProviding {
 /// router naturally migrates new buyer traffic off a `slots_free=0` provider).
 actor ThermalGate {
     nonisolated private let stateProvider: ThermalStateProviding
-    nonisolated private let isThrottledArtificialDelayNanos: UInt64
+    nonisolated private let isThrottledSuspensionHook: (@Sendable () async -> Void)?
     private var current: ProcessInfo.ThermalState
     private var observer: NSObjectProtocol?
     private var drainTask: Task<Void, Never>?
     private var transitionLogger: (@Sendable (ProcessInfo.ThermalState, ProcessInfo.ThermalState) -> Void)?
 
-    /// `isThrottledArtificialDelayNanos` is a test-only seam — pass a non-zero
-    /// value to make `isThrottled()` suspend long enough for a separate actor
-    /// caller to enter `ProviderStatus` during the await (used to validate
-    /// snapshot reentrancy correctness).
+    /// `isThrottledSuspensionHook` is a test-only seam: `isThrottled()` awaits
+    /// it before reading state, so a test can hold a caller parked inside the
+    /// thermal await and deterministically drive another `ProviderStatus`
+    /// entry during that suspension (snapshot reentrancy coverage). A sleep
+    /// here would make the interleaving depend on executor scheduling.
     init(stateProvider: ThermalStateProviding = SystemThermalStateProvider(),
-         isThrottledArtificialDelayNanos: UInt64 = 0) {
+         isThrottledSuspensionHook: (@Sendable () async -> Void)? = nil) {
         self.stateProvider = stateProvider
-        self.isThrottledArtificialDelayNanos = isThrottledArtificialDelayNanos
+        self.isThrottledSuspensionHook = isThrottledSuspensionHook
         self.current = stateProvider.currentThermalState()
     }
 
@@ -76,8 +77,8 @@ actor ThermalGate {
     func currentState() -> ProcessInfo.ThermalState { current }
 
     func isThrottled() async -> Bool {
-        if isThrottledArtificialDelayNanos > 0 {
-            try? await Task.sleep(nanoseconds: isThrottledArtificialDelayNanos)
+        if let isThrottledSuspensionHook {
+            await isThrottledSuspensionHook()
         }
         return Self.shouldThrottle(current)
     }

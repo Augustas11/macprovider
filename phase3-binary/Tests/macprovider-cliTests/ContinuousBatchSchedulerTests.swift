@@ -2427,7 +2427,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 10_000_000)
 
         let drain = Task { try await scheduler.drain() }
-        try await Task.sleep(nanoseconds: 40_000_000)
+        // Release the blocked sink only once the drain has passed its timeout
+        // and started forced cancellation; a fixed sleep let a slow executor
+        // open the gate first and turn this into a quiescent drain.
+        try await eventually {
+            await scheduler.metrics().diagnostics.contains(.forcedDrainStarted)
+        }
         await blockedSinkGate.open()
 
         let fastResult = try await fast.value
