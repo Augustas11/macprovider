@@ -204,6 +204,50 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertNotEqual(fake.keys[3], fake.keys[2], "a new run after success is a new operation")
     }
 
+    func testRootRegistrationRetryResendsTheCommittedEventUnchanged() async throws {
+        final class LossyCoordinator: CreatorTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private var committed: (key: String, body: Data)?
+            private(set) var nonces = 0
+            private(set) var rootAttempts = 0
+            func send(_ request: URLRequest) async throws -> CreatorResponse {
+                let path = request.url?.path ?? ""
+                if path == "/v1/creator/root-registration-nonces" {
+                    let n = lock.withLock { () -> Int in nonces += 1; return nonces }
+                    return jsonResponse(201, ["root_registration_nonce": [
+                        "nonce": "nonce-\(n)", "creator_account_id": "acct_creator", "approval_record_id": "self-serve:acct_creator",
+                        "current_approval_version": "self-serve-1", "launch_environment": "self_serve_private",
+                        "expires_at_utc": "2026-10-09T12:15:00.5Z", "purpose": "root_issuer_registration",
+                    ]])
+                }
+                let key = request.value(forHTTPHeaderField: "Idempotency-Key") ?? ""
+                let payload = request.httpBody ?? Data()
+                let outcome = lock.withLock { () -> Int in
+                    rootAttempts += 1
+                    guard let committed else {
+                        self.committed = (key, payload)
+                        return 0 // committed, response lost
+                    }
+                    return committed.key == key && committed.body == payload ? 202 : 409
+                }
+                if outcome == 0 { throw CreatorCLIError.transport("connection reset after commit") }
+                return jsonResponse(outcome, outcome == 202 ? ["event": ["ok": true]] : ["error": ["code": "conflicting_operation_id"]])
+            }
+        }
+        let fake = LossyCoordinator()
+        let home = CreatorHome(root: homeURL)
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let identity = try CreatorOperations.keygen(home: home)
+        do {
+            _ = try await CreatorOperations.registerRoot(home: home, client: client, poolID: identity.poolID, displayName: "Studio Pool")
+            XCTFail("expected the lost response to surface")
+        } catch {}
+        _ = try await CreatorOperations.registerRoot(home: home, client: client, poolID: identity.poolID, displayName: "Studio Pool")
+        XCTAssertEqual(fake.nonces, 1, "a retry must not mint a new nonce or re-sign")
+        XCTAssertEqual(fake.rootAttempts, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("root-registration-pending.json").path))
+    }
+
     func testOptionalPoolMustBeAWellFormedPoolID() {
         XCTAssertThrowsError(try CreatorStatusCommand.parse(["--pool", "../me"]))
         XCTAssertThrowsError(try CreatorEarningsCommand.parse(["--pool", "short"]))

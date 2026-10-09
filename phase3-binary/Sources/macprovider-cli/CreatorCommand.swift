@@ -164,6 +164,17 @@ enum CreatorJSON: Codable, Equatable {
     }
 }
 
+/// The exact signed root registration awaiting a definitive answer.
+struct CreatorPendingRootRegistration: Codable {
+    let operationID: String
+    let event: Data
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case event
+    }
+}
+
 struct CreatorHome {
     let root: URL
 
@@ -426,6 +437,17 @@ enum CreatorOperations {
         guard root.publicKey.derRepresentation == identity.rootIssuerPublicKeyDER else {
             throw CreatorCLIError.invalidInput("root issuer key does not match identity.json")
         }
+        // A registration is signed over a one-time nonce, so a retry must resend
+        // the exact signed event under its operation id; re-signing would make
+        // the coordinator see a conflicting payload for an already-committed op.
+        let pendingURL = home.poolDir(poolID).appendingPathComponent("root-registration-pending.json")
+        if FileManager.default.fileExists(atPath: pendingURL.path) {
+            let pending = try home.read(CreatorPendingRootRegistration.self, from: pendingURL)
+            guard let event = try JSONSerialization.jsonObject(with: pending.event) as? [String: Any] else {
+                throw CreatorCLIError.invalidInput("malformed root-registration-pending.json")
+            }
+            return try await sendPendingRootRegistration(client: client, pendingURL: pendingURL, operationID: pending.operationID, event: event)
+        }
         let nonceBody = try client.expect(try await client.request("POST", "root-registration-nonces", body: [:], operationID: CreatorOutput.operationID("nonce")))
         guard let nonce = nonceBody["root_registration_nonce"] as? [String: Any],
               let creatorID = nonce["creator_account_id"] as? String,
@@ -461,7 +483,19 @@ enum CreatorOperations {
         event["pool_id"] = poolID
         event["root_issuer_public_key_der"] = identity.rootIssuerPublicKeyDER.base64EncodedString()
         event["proof_of_possession_signature"] = signature
-        return try await stickyRequest(home: home, client: client, poolID: poolID, key: "root", label: "root", path: "events", body: event)
+        let operationID = CreatorOutput.operationID("root")
+        let encoded = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+        try home.write(CreatorPendingRootRegistration(operationID: operationID, event: encoded), to: pendingURL, mode: 0o600)
+        return try await sendPendingRootRegistration(client: client, pendingURL: pendingURL, operationID: operationID, event: event)
+    }
+
+    /// Sends the persisted registration unchanged and forgets it only on a
+    /// definitive (< 500) answer. A replay of a committed registration is
+    /// answered as success by the coordinator's idempotent replay.
+    static func sendPendingRootRegistration(client: CreatorClient, pendingURL: URL, operationID: String, event: [String: Any]) async throws -> [String: Any] {
+        let response = try await client.request("POST", "events", body: event, operationID: operationID)
+        if response.status < 500 { try FileManager.default.removeItem(at: pendingURL) }
+        return try client.expect(response)
     }
 
     struct ManifestOptions {
