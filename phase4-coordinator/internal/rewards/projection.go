@@ -72,7 +72,7 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 	if err != nil {
 		return ProviderRewardProjection{}, err
 	}
-	trust, err := QueryTrustCriteriaStatus(ctx, deps.RewardsDB, providerID, cfg, deps.Connectivity)
+	trust, err := QueryTrustCriteriaStatus(ctx, deps.RewardsDB, deps.PayoutDB, providerID, cfg, deps.Connectivity)
 	if err != nil {
 		return ProviderRewardProjection{}, err
 	}

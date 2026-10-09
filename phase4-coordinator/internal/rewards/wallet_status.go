@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/rs/zerolog"
 )
 
 const ProviderWalletStatusSchemaV1 = "provider_wallet_status.v1"
@@ -24,6 +25,7 @@ type WalletHandlerDeps struct {
 	Limiter               *RewardAuditLimiter
 	HardwareEvidence      autotune.EvidenceStore
 	HardwareEvidenceTTL   time.Duration
+	Logger                zerolog.Logger
 }
 
 type ProviderWalletStatus struct {
@@ -148,6 +150,7 @@ func NewWalletStatusHandler(deps WalletHandlerDeps) http.Handler {
 			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
 		})
 		if err != nil {
+			deps.Logger.Warn().Err(err).Str("provider_id", providerID).Msg("provider wallet projection failed")
 			writeWalletJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal_error"})
 			return
 		}

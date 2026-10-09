@@ -22,7 +22,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | normative | pending | pending corpus migration | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `malibu-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
-| SPEC-014 | Provider Portal (seller-facing web surface) | 0.11 | draft | pending | pending: 2 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
+| SPEC-014 | Provider Portal (seller-facing web surface) | 0.12 | draft | pending | pending: 2 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
 | SPEC-015 | Verifiable inference receipts | 0.4.14 | normative | complete | pending: 7 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | pending: 11 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 2 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |

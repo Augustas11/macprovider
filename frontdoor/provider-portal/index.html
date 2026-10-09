@@ -2053,8 +2053,12 @@
           el("div", { class: "dash-sub" }, week + " wk · " + pending + " accrued · " + life + " life"),
           el("div", { class: "dash-note" }, "Accrued — payouts open in beta")),
       ];
-      if (!d && state.earn.err) {
-        kids.push(el("div", { class: "dash-note hold" }, earnErrorCopy(state.earn.err.status)));
+      if (state.earn.err) {
+        // A failed refresh after a successful load keeps the last balance on
+        // screen but says so, instead of presenting it as current.
+        var errCopy = earnErrorCopy(state.earn.err.status);
+        if (d) errCopy += " Showing the last loaded figures.";
+        kids.push(el("div", { class: "dash-note hold" }, errCopy));
       }
       if (malibuLine) kids.push(el("div", { class: "dash-malibu" }, malibuLine));
       if (eligCopy) {

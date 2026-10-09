@@ -179,26 +179,66 @@ func (r *Runner) providerUptimeOK(providerID string, now time.Time) bool {
 	return r.connectivity.HeartbeatOK(providerID, now)
 }
 
-func (r *Runner) countVerifiedReceipts(ctx context.Context, providerID string) (int, error) {
-	source, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(r.cfg.SQLitePayoutDBPath))
-	if err != nil {
-		return 0, fmt.Errorf("open billing sqlite: %w", err)
-	}
-	defer source.Close()
-	source.SetMaxOpenConns(1)
-	if !tableExists(ctx, source, "settlement_receipt_verdicts") {
-		return 0, nil
-	}
-	var count int
-	err = source.QueryRowContext(ctx, `
+// countVerifiedReceiptsSQL pins idx_srv_provider_recent (leading column
+// provider_id). Without sqlite_stat1 the planner otherwise picks
+// idx_srv_outcome and walks every verified verdict in the fleet (#1925).
+const countVerifiedReceiptsSQL = `
+        SELECT COUNT(*)
+          FROM settlement_receipt_verdicts INDEXED BY idx_srv_provider_recent
+         WHERE provider_id = ?
+           AND closed = 1
+           AND settlement_outcome = 'verified'
+           AND receipt_result = 'valid'
+    `
+
+// countVerifiedReceiptsUnpinnedSQL serves a database without the provider
+// index (an operator-supplied read-only payout DB that never ran migrations):
+// INDEXED BY would fail every read there instead of only being slow.
+const countVerifiedReceiptsUnpinnedSQL = `
         SELECT COUNT(*)
           FROM settlement_receipt_verdicts
          WHERE provider_id = ?
            AND closed = 1
            AND settlement_outcome = 'verified'
            AND receipt_result = 'valid'
-    `, providerID).Scan(&count)
+    `
+
+// countVerifiedReceipts reads from the shared payout read pool when the caller
+// supplied one (provider read APIs). The background unlock evaluator has no
+// such pool and keeps a short-lived read-only connection per call.
+func (r *Runner) countVerifiedReceipts(ctx context.Context, providerID string) (int, error) {
+	source := r.payoutReader
+	if source == nil {
+		opened, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(r.cfg.SQLitePayoutDBPath))
+		if err != nil {
+			return 0, fmt.Errorf("open billing sqlite: %w", err)
+		}
+		defer opened.Close()
+		opened.SetMaxOpenConns(1)
+		source = opened
+	}
+	if !tableExists(ctx, source, "settlement_receipt_verdicts") {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	query := countVerifiedReceiptsSQL
+	if !indexExists(ctx, source, "idx_srv_provider_recent") {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		query = countVerifiedReceiptsUnpinnedSQL
+	}
+	var count int
+	err := source.QueryRowContext(ctx, query, providerID).Scan(&count)
 	return count, err
+}
+
+func indexExists(ctx context.Context, db *sql.DB, name string) bool {
+	var found string
+	err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&found)
+	return err == nil && found == name
 }
 
 func (r *Runner) providerWalletBound(ctx context.Context, providerID string) (bool, error) {
@@ -384,9 +424,11 @@ func advanceWindow(current sql.NullTime, ok bool, now time.Time) sql.NullTime {
 }
 
 // QueryTrustCriteriaStatus returns unlock progress for the provider read API.
-func QueryTrustCriteriaStatus(ctx context.Context, db *sql.DB, providerID string, cfg Config, connectivity ProviderConnectivity) (TrustCriteriaStatus, error) {
+// payoutDB, when non-nil, is the shared read-only billing pool used for the
+// verified-receipt count instead of a per-request connection.
+func QueryTrustCriteriaStatus(ctx context.Context, db, payoutDB *sql.DB, providerID string, cfg Config, connectivity ProviderConnectivity) (TrustCriteriaStatus, error) {
 	cfg = cfg.DefaultsApplied()
-	runner := &Runner{db: db, cfg: cfg, connectivity: connectivity}
+	runner := &Runner{db: db, payoutReader: payoutDB, cfg: cfg, connectivity: connectivity}
 	now := time.Now().UTC()
 	st, err := runner.loadTrustEvalState(ctx, providerID)
 	if err != nil {
