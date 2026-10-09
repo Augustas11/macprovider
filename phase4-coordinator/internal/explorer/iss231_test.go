@@ -69,4 +69,3 @@ func TestSessionDetail_EmptyIntPrefixReturns400(t *testing.T) {
 		t.Errorf("expected session_id_untyped code; body=%s", resp.Body.String())
 	}
 }
-

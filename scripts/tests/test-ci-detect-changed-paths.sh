@@ -169,6 +169,45 @@ setup_gitattributes() {
 }
 assert_detect "root .gitattributes (run swift)" setup_gitattributes true true
 
+# #1920: scripts/ is matched file by file. A script the Swift job never reads
+# skips swift; the ones it runs or imports still gate.
+setup_script_only() {
+  mkdir -p scripts; echo x >scripts/catalog-release.py
+  commit_all base >/dev/null; git rev-parse HEAD
+  echo y >scripts/catalog-release.py; commit_all change >/dev/null
+}
+assert_detect "script-only PR (skip swift)" setup_script_only false true
+
+# Every repo path outside phase3-binary that a Swift test reads, plus the
+# scripts the Swift job runs, must trip the swift gate.
+swift_read_paths() {
+  local root
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  {
+    grep -rhoE 'appendingPathComponent\("(scripts|docs|test|testdata|phase4-coordinator|phase5-gateway|phase7-verify|ops|specs|schemas)/[^"\\]+"' \
+      "$root/phase3-binary/Tests" "$root/phase3-binary/app/Tests" 2>/dev/null |
+      sed -E 's/^appendingPathComponent\("//; s/"$//'
+    grep -rhoE '"\.\./\.\./\.\./[a-z][^"\\]*' "$root/phase3-binary/Tests" 2>/dev/null |
+      sed -E 's#^"\.\./\.\./\.\./##'
+    echo scripts/test-byom-discovery-journey.sh
+    echo scripts/check_spec_governance.py
+    echo docs/research/spec048-r015/policy-template.json
+  } | sed -E 's#/$#/fixture.json#' | sort -u
+}
+swift_read_paths >"${TMPDIR:-/tmp}/swift-read-paths.$$"
+while IFS= read -r read_path; do
+  [ -n "$read_path" ] || continue
+  setup_swift_read_path() {
+    mkdir -p "$(dirname "$read_path")"; echo x >"$read_path"
+    commit_all base >/dev/null; git rev-parse HEAD
+    echo y >"$read_path"; commit_all change >/dev/null
+  }
+  # docs/ paths legitimately skip spec-015-acceptance (code=false).
+  case "$read_path" in docs/*) want_code=false ;; *) want_code=true ;; esac
+  assert_detect "Swift-read path $read_path" setup_swift_read_path true "$want_code"
+done <"${TMPDIR:-/tmp}/swift-read-paths.$$"
+rm -f "${TMPDIR:-/tmp}/swift-read-paths.$$"
+
 # FAIL OPEN: an unresolvable base leaves both true.
 setup_fail_open() {
   mkdir -p phase4-coordinator; echo x >phase4-coordinator/a.go

@@ -44,7 +44,6 @@ CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
     ".github/CODEOWNERS",
-    ".github/workflows/spec-index.yml",
     "AGENTS.md",
     "beta/DECISION_CRITERIA.md",
     "CLAUDE.md",

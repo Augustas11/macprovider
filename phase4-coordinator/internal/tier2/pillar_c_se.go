@@ -174,4 +174,3 @@ func decodeFlexBase64(s string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("not valid base64")
 }
-

@@ -44,12 +44,12 @@ const minTTL = 60 * time.Second
 // diagnostics can distinguish "catalog itself expired" from
 // "cache slot expired."
 type Entry struct {
-	CatalogURL      string    `json:"catalog_url"`
-	CatalogBytes    []byte    `json:"catalog_bytes"`
-	CatalogPubkey   string    `json:"catalog_pubkey_b64"`
-	FetchedAt       time.Time `json:"fetched_at"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	CacheExpiresAt  time.Time `json:"cache_expires_at"`
+	CatalogURL     string    `json:"catalog_url"`
+	CatalogBytes   []byte    `json:"catalog_bytes"`
+	CatalogPubkey  string    `json:"catalog_pubkey_b64"`
+	FetchedAt      time.Time `json:"fetched_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	CacheExpiresAt time.Time `json:"cache_expires_at"`
 }
 
 // Store is a simple on-disk cache rooted at Dir.

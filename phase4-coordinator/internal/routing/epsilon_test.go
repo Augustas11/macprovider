@@ -85,8 +85,8 @@ func TestWithinRelativeEpsilon_FailsClosedOnNonFinite(t *testing.T) {
 	ninf := math.Inf(-1)
 	nan := math.NaN()
 	cases := []struct {
-		name             string
-		top, cand, eps   float64
+		name           string
+		top, cand, eps float64
 	}{
 		{"top +Inf", inf, 100, 0.05},
 		{"top -Inf", ninf, 100, 0.05},

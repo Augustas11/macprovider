@@ -57,3 +57,17 @@ jobs:
           # that would point the extractor at a different script.
           export INSTALL_SH_URL="https://get.malibu.tech/install.sh"
           bash scripts/check-install-sh-consumer-health.sh
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [check]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: install-sh-consumer-health-alarm
+      title: the public installer cannot resolve a stable release
+      result: ${{ needs.check.result }}

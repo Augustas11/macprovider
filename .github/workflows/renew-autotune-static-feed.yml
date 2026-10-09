@@ -62,3 +62,17 @@ jobs:
           echo "A failure means: inspect the Wednesday autotune-feed-renewal workflow renew-autotune-static-feed-signed.yml (missed unattended run)."
           curl -fsS --proto '=https' --tlsv1.2 --max-time 20 -- "$url" \
             | python3 scripts/check-autotune-feed-freshness.py --max-age-days "$MAX_AGE_DAYS"
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [cadence]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: renew-autotune-static-feed
+      title: the weekly autotune feed renewal did not land
+      result: ${{ needs.cadence.result }}

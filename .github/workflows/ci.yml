@@ -9,13 +9,14 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded CI runs on the same ref. A second push to a PR (or to
-# main) supersedes the first, so let the in-flight run stop instead of
-# burning macOS minutes on a diff that is already stale. Keyed by ref so
-# concurrent PRs never cancel each other.
+# Cancel superseded CI runs on the same PR: a second push makes the first
+# diff stale, so stop it instead of burning macOS minutes. Keyed by ref so
+# concurrent PRs never cancel each other. Pushes to main are never cancelled:
+# every main commit keeps its own result, so a red commit is not hidden by a
+# later push (#1920).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -106,7 +107,8 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase5-gateway/go.mod
           cache-dependency-path: phase5-gateway/go.sum
@@ -145,7 +147,8 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -176,7 +179,8 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -203,16 +207,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
       - name: Install golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: make lint-coordinator
         run: make lint-coordinator
+      - name: gofmt every Go module (make fmt-check)
+        # #1920: no gofmt gate covered the gateway, phase7-verify, or the
+        # integration harness. Fails on any file gofmt would rewrite.
+        run: make fmt-check
       - name: AC-16 fixture assertion (golangci-lint diagnostic fires by name)
         # Round-1 ARCH r1 HIGH E fix: TestAC16ForbiddenImportFails
         # + TestForbidigoOSExitRule skip when golangci-lint is
@@ -238,7 +247,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
@@ -312,10 +322,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # SPEC-014 v0.2 Phase 2E gate: keep the GitHub-auth pairing surface
-    # deployable only when the portal bundle guard and live pairing
-    # integration scenarios both pass. The workflow already runs on every
-    # PR and main push; this job is intentionally present for all runs so
-    # branch protection can require a stable job name.
+    # deployable only when the portal bundle guard (here) and live pairing
+    # integration scenarios (integration job) both pass. The workflow already
+    # runs on every PR and main push; this job is intentionally present for
+    # all runs so branch protection can require a stable job name.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -324,41 +334,37 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go
-        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
-        # when upgrading instead of trusting the mutable tag in this required
-        # pairing/security gate.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: test/integration/go.mod
-          cache-dependency-path: test/integration/go.sum
-
       - name: Verify Node runtime for portal probe
         run: node --version
 
       - name: Run provider portal bundle guard
         run: bash frontdoor/provider-portal/check-bundle.sh
 
-      - name: Run SPEC-014 v0.2 pairing scenarios
-        working-directory: test/integration
-        run: go test -race -count=1 -timeout 5m ./spec_014_v0_2_pairing
+      # The SPEC-014 v0.2 pairing scenarios (./spec_014_v0_2_pairing) run in
+      # the required `integration (cross-service)` job, whose
+      # `go test -race -count=1 -timeout 5m ./...` already covers that package
+      # with the same flags (#1920).
 
   dist-tooling:
-    name: deploy tooling (check-deploy-config gate)
+    name: deploy tooling (check-deploy-config gate) ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # The full suite reached its final ops tests at the old 30-minute cap
-    # (run 37874148614). Preserve every gate and allow bounded finish headroom.
-    timeout-minutes: 45
+    # `make test-dist` ran ~30 minutes serially and stopped at the first
+    # failure. Each shard is a Makefile sub-target (see test-dist-* in the
+    # Makefile) and reports its own failures; ci-required sees the matrix as
+    # one result that fails if any shard fails. The slowest shard (catalog
+    # content release) takes about 12 minutes.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [catalog, python, release, deploy]
     # Guards the fail-closed C2 pre-deploy gate
     # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
-    # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
-    # build — so it stays isolated. The full dist shell/e2e matrix now runs
-    # just over five minutes on hosted runners, so keep a 10-minute cap rather
-    # than canceling a passing regression suite near completion. Closes the 2026-06-17
-    # regression where an env:NAME-indirected operator_key false-failed the
-    # gate and pushed operators into SKIP_C2_CHECK=1. Catalog release tests now
-    # authenticate Tier-2 with the reviewed Go verifier, so install the pinned
-    # toolchain even though this job does not build a service binary.
+    # phase5-gateway/dist/deploy-pearl-vps.sh, among the deploy and release
+    # tooling suites. Bash + python3 + node only; no service build. Catalog
+    # release tests authenticate Tier-2 with the reviewed Go verifier, so every
+    # shard installs the pinned toolchain even though none builds a service
+    # binary.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -386,8 +392,8 @@ jobs:
           sudo chmod -R go-w /private/var/macprovider-go-verifier
           sudo test -x /private/var/macprovider-go-verifier/bin/go
 
-      - name: make test-dist
-        run: make test-dist
+      - name: make test-dist-${{ matrix.shard }}
+        run: make test-dist-${{ matrix.shard }}
 
   swift-tests:
     name: phase3-binary (swift test)
@@ -506,12 +512,15 @@ jobs:
 
   spec-015-acceptance:
     name: spec-015-acceptance
-    runs-on: macos-15
-    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: changes
-    # Cross-service money-path acceptance. Skipped only for docs-only PRs
-    # (Markdown/docs with no specs/** or code changes); ci-required treats the
-    # skip as a pass. Any code or spec change still runs it. Fail-open.
+    # SPEC-015 AC manifest report plus the AC-9 pinned Python/Node OpenAI SDK
+    # compatibility run against the real local gateway. The other checks the
+    # runner used to repeat (integration, gateway, coordinator, Swift and
+    # nginx subsets) run in their own jobs; see run_acceptance.sh. Nothing
+    # left here needs macOS (#1920). Skipped only for docs-only PRs; ci-required
+    # treats the skip as a pass. Fail-open.
     if: ${{ needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
@@ -525,11 +534,54 @@ jobs:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
       - name: Run SPEC-015 acceptance runner
         run: bash test/integration/spec015/run_acceptance.sh
+
+  spec-index:
+    name: spec-index
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Folded in from the standalone spec-index workflow so ci-required gates
+    # it (#1920). Fails a PR when specs/README.md no longer matches the
+    # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
+    # lacks its behavior-change declaration. Regenerate the index with
+    # scripts/gen_spec_index.py and commit when adding/renaming a spec or
+    # bumping a `**Version:**` header.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        # Pinned to actions/setup-python v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+
+      - name: Validate authority and conformance against the real corpus
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check_spec_governance.py --base-ref "$BASE_REF"
+
+      - name: Verify specs/README.md index is up to date
+        run: python3 scripts/gen_spec_index.py --check
+
+      - name: Verify specs/ root is canonical-only (no re-accumulated clutter)
+        run: python3 scripts/gen_spec_index.py --lint
+
+      - name: Prove governance validator rejects seeded drift
+        run: python3 -m unittest -v scripts.tests.test_spec_governance scripts.tests.test_spec_pr_declaration scripts.tests.test_byom_contract_lock scripts.tests.test_buyer_paid_path_journey_result scripts.tests.test_trusted_pool_external_runtime_journey_result scripts.tests.test_trusted_pool_model_journey_result scripts.tests.test_local_consumer_endpoint_evidence_capture scripts.tests.test_local_consumer_endpoint_journey_result
+
+      - name: Require explicit behavior-change declaration
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_spec_pr_declaration.py --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA" --head "$HEAD_SHA"
 
   ci-required:
     name: ci-required
@@ -550,6 +602,7 @@ jobs:
       - swift-tests
       - swift-package-lock
       - spec-015-acceptance
+      - spec-index
     if: always()
     steps:
       - name: Require all CI jobs
@@ -571,6 +624,7 @@ jobs:
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
           SWIFT_PACKAGE_LOCK_RESULT: ${{ needs.swift-package-lock.result }}
           SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
+          SPEC_INDEX_RESULT: ${{ needs.spec-index.result }}
         run: |
           set -euo pipefail
 
@@ -619,7 +673,8 @@ jobs:
           require_success "phase7-verify integration (fixtures)" "$PHASE7_VERIFY_INTEGRATION_RESULT"
           require_success "integration (cross-service)" "$INTEGRATION_RESULT"
           require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
-          require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
+          require_success "deploy tooling (check-deploy-config gate), all shards" "$DIST_TOOLING_RESULT"
+          require_success "spec-index" "$SPEC_INDEX_RESULT"
           allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
           allow_skip "phase3-binary (locked SwiftPM resolve)" "$SWIFT_PACKAGE_LOCK_RESULT" "$SWIFT_GATE"
           allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
