@@ -41,8 +41,8 @@ def one(args):
     body = json.dumps({
         "model": args.model,
         "messages": [{"role": "user", "content": prompt(args.prompt_tokens, uuid.uuid4().hex)}],
-        "max_tokens": args.max_tokens, "temperature": 0, "stream": True,
-        "stream_options": {"include_usage": True},
+        "max_tokens": args.max_tokens, "temperature": 0, "stream": not args.no_stream,
+        **({} if args.no_stream else {"stream_options": {"include_usage": True}}),
     })
     headers = {"Content-Type": "application/json", "X-Request-ID": "sweep-" + uuid.uuid4().hex[:16]}
     t0 = time.monotonic()
@@ -60,6 +60,10 @@ def one(args):
             except Exception:
                 pass
             return {"ok": False, "code": code, "t0": t0, "end": time.monotonic()}
+        if args.no_stream:
+            u = json.loads(r.read()).get("usage") or {}
+            return {"ok": True, "t0": t0, "end": time.monotonic(), "stamps": [],
+                    "prompt": u.get("prompt_tokens", 0), "completion": u.get("completion_tokens", 0)}
         while True:
             line = r.readline()
             if not line:
@@ -126,8 +130,15 @@ def run_depth(args, depth):
                 errors[r["code"]] += 1
             continue
         s = r["stamps"]
-        chunk_tokens = (r["completion"] / len(s)) if s else 0
-        window_tokens += sum(chunk_tokens for x in s if measure_from <= x <= stop_at)
+        if args.no_stream:
+            # No per-token timestamps: prorate the request's tokens over the
+            # part of its lifetime that overlaps the window.
+            span = r["end"] - r["t0"]
+            overlap = max(0.0, min(r["end"], stop_at) - max(r["t0"], measure_from))
+            window_tokens += r["completion"] * (overlap / span) if span > 0 else 0
+        else:
+            chunk_tokens = (r["completion"] / len(s)) if s else 0
+            window_tokens += sum(chunk_tokens for x in s if measure_from <= x <= stop_at)
         # Long outputs outlive the window, so TTFT and ITL use every request
         # that started (or streamed) inside it, not only those that finished.
         if s and r["t0"] >= measure_from and s[0] <= stop_at:
@@ -161,6 +172,8 @@ def main():
     ap.add_argument("--warmup", type=float, default=20)
     ap.add_argument("--stagger", type=float, default=0.25)
     ap.add_argument("--label", default="")
+    ap.add_argument("--no-stream", action="store_true",
+                    help="non-streaming requests; throughput is prorated over request lifetimes")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     with open(args.out, "a") as f:

@@ -4778,7 +4778,15 @@ actor ModelRuntime: ModelRuntimeServing {
     nonisolated static func servePathDecodeLockstepWindow(
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) -> Int {
-        cacheKinds.contains(.recurrentMamba)
+        #if MACPROVIDER_LAB_HARNESS
+        // #1906 lab measurement only: hybrid multi-step decode windows.
+        if cacheKinds.contains(.recurrentMamba),
+           let raw = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_HYBRID_DECODE_WINDOW"],
+           let window = Int(raw), window >= 1 {
+            return min(window, ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow)
+        }
+        #endif
+        return cacheKinds.contains(.recurrentMamba)
             ? 1
             : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
     }

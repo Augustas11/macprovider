@@ -4313,6 +4313,7 @@ actor ContinuousBatchScheduler {
         }
         let outcomes: [ContinuousBatchDecodeOutcome]
         let windowResult: Result<[ContinuousBatchDecodeOutcome], any Error>
+        let windowStartedNs = DispatchTime.now().uptimeNanoseconds
         do {
             windowResult = .success(try await backend.decodeLockstepWindow(
                 rows: prepared.map(\.input),
@@ -4322,6 +4323,7 @@ actor ContinuousBatchScheduler {
         } catch {
             windowResult = .failure(error)
         }
+        CBTrace.log(nil, "hop_decode rows=\(prepared.count) steps=\(windowSteps) ms=\((DispatchTime.now().uptimeNanoseconds - windowStartedNs) / 1_000_000) prompts=\(activePrompt.count) waiting=\(waiting.count)")
         stepContinuation?.finish()
         await stepConsumer?.value
         decodeWindowControl = nil
@@ -4962,7 +4964,9 @@ actor ContinuousBatchScheduler {
         prefillCalls += 1
         let outputs: [ContinuousBatchPrefillOutput]
         do {
+            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
             outputs = try await backend.prefill(rows: prepared.map(\.input))
+            CBTrace.log(nil, "hop_prefill rows=\(prepared.count) tokens=\(prepared.reduce(0) { $0 + $1.chunkCount }) ms=\((DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000) decode_rows=\(activeDecode.count)")
             try validatePrefillOutputStructure(outputs, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
             record(.prefillFailed)

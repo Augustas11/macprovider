@@ -1,0 +1,210 @@
+{
+ "0": {
+  "content": "The wind howled around the base of Lighthouse Number 0, a structure that existed more in legend than on any modern nautical chart. It stood on a jagged outcrop of black basalt, far from the usual shipping lanes, where the sea churned with a violence that seemed personal. Unlike the other lighthouses, which guided ships to safety, Lighthouse Number 0 was said to guide them away from something else\u2014something that lived in the deep, dark trenches below.\n\nThe light itself was not yellow or white, but a faint, pulsing violet. It didn\u2019t sweep across the water; it stared into it.\n\nFor decades, the lighthouse had been automated, its mechanisms rusting in the salt spray. But the light had never gone out. And every seven years, a keeper had to ascend the 142 spiral steps to manually reset the prism, ensuring the violet beam remained steady. If the beam faltered, the things in the deep would rise.\n\nThe current keeper, Elara Vance, climbed the stairs with the familiarity of someone who had done this since childhood. Her grandfather had been the last human keeper before the automation took over. He had left her the key, a heavy iron thing that felt warm to",
+  "reasoning": null,
+  "usage": {
+   "cached_prompt_tokens": 0,
+   "macprovider_generated_completion_tokens": 256,
+   "prompt_tokens": 294,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "completion_tokens": 256,
+   "macprovider_generation_ms": 36866,
+   "total_tokens": 550
+  }
+ },
+ "1": {
+  "content": "The wind howled around the base of Lighthouse Number 1, a jagged spire of granite standing sentinel against the churning Atlantic. For decades, it had been more than a structure; it was a heartbeat, pulsing with the rhythmic sweep of its Fresnel lens.\n\nElias Thorne was the last keeper. He remembered the days when the light was a beacon for hundreds of ships, their horns echoing off the cliffs. Now, automation had taken over, but Elias refused to leave. He maintained the garden, polished the brass fittings, and ensured that if the power failed, the old kerosene lamp would still burn.\n\nOne stormy night, the grid went down. The electric bulb flickered and died. In the darkness, Elias lit the backup lamp. The beam cut through the rain, steady and warm. A small fishing boat, lost in the squall, saw the light and adjusted its course, avoiding the hidden reefs. Elias smiled, watching the boat\u2019s lights disappear into the safe harbor. He wasn\u2019t just keeping a light; he was keeping hope.\n\n### Keepers of Lighthouse Number 1\n\n1. **Arthur Pendelton** (1892\u20131915) \u2013 Established the original",
+  "reasoning": null,
+  "usage": {
+   "cached_prompt_tokens": 0,
+   "macprovider_generated_completion_tokens": 256,
+   "prompt_tokens": 502,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "completion_tokens": 256,
+   "macprovider_generation_ms": 37176,
+   "total_tokens": 758
+  }
+ },
+ "2": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, tearing at the corrugated iron roof of Lighthouse Number 2. Built on a jagged tooth of rock miles from the mainland, the structure was less a beacon and more a stubborn refusal to yield to the sea.\n\nElias Thorne had been the keeper for twelve years. He knew the rhythm of the lens\u2014the great Fresnel lens that rotated with a mechanical hum, casting its beam in a sweeping arc every eight seconds. *Flash. Darkness. Flash. Darkness.* It was the heartbeat of the coast.\n\nOne November night, the barometer plummeted. The sky turned the color of a bruised plum, and the waves began to crash over the gallery railing, soaking the lantern room floor. Elias checked the oil reserves, polished the brass fittings until his reflection stared back, gray and weary, and lit the wick.\n\nAt 2:14 AM, a distress signal crackled through the static of the radio. A fishing trawler, *The Marlin\u2019s Hope*, was drifting off course, its engine dead, caught in the riptide near the Devil\u2019s Teeth.\n\nElias didn\u2019t hesitate. He adjusted the rotation speed, making the beam pulse faster",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 528,
+   "completion_tokens": 256,
+   "total_tokens": 784,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 37733,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "3": {
+  "content": "The salt spray at Point Nereid didn\u2019t just hit the lighthouse; it seemed to vibrate through the very stones, a constant, humming reminder of the sea\u2019s indifference. This was Lighthouse Number 3, a squat, stubborn sentinel perched on a jagged tooth of rock that the charts simply called \"The Anvil.\"\n\nFor decades, the light had been automated, a blinking red eye that required no human presence. But the town council, in their infinite wisdom, had decided that \"heritage\" required a keeper. They didn\u2019t want a technician; they wanted a story. So, they sent Elias.\n\nElias was seventy-two, with hands like dried kelp and a silence that matched the fog. He didn\u2019t fix the lens; he polished it. He didn\u2019t repair the generator; he listened to its rhythm, adjusting the fuel mix by ear until the hum matched the tide\u2019s pull. His job wasn\u2019t to keep the light on\u2014the machine did that\u2014but to keep the *meaning* of the light alive.\n\nEvery night, as the quick brown fox (a stray cat that had adopted the tower) leaped over the lazy dog (a retired sheepdog who slept in the watch room), Elias would sit by the window",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 736,
+   "completion_tokens": 256,
+   "total_tokens": 992,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38151,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "4": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, tearing at the corrugated iron roof of Lighthouse Number 4 like a beast trying to claw its way into the keeper\u2019s quarters. Built on a jagged tooth of rock miles from the nearest mainland, the lighthouse was less a home and more a fortress against the void.\n\nElias Thorne, the current keeper, adjusted his woolen scarf and climbed the spiral stairs for the hundredth time that night. The lens, a massive Fresnel prism, hummed with the vibration of the clockwork mechanism. It was an old beast, brass and glass, requiring constant winding and polishing. If the light failed, the *SS Meridian*\u2014a cargo ship carrying enough coal to keep half the county warm for winter\u2014would be dashed against the rocks below.\n\n\"Steady,\" Elias whispered, not to the light, but to himself.\n\nHe checked the logbook. *11:42 PM. Wind: 45 knots. Visibility: Poor. Lens: Clean. Winding: Complete.*\n\nBelow, the ocean churned, white-capped waves crashing against the base of the tower with thunderous finality. Inside, the air smelled of oil, salt",
+  "reasoning": null,
+  "usage": {
+   "cached_prompt_tokens": 0,
+   "macprovider_generated_completion_tokens": 256,
+   "prompt_tokens": 944,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "completion_tokens": 256,
+   "macprovider_generation_ms": 36778,
+   "total_tokens": 1200
+  }
+ },
+ "5": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, tearing at the corrugated iron of the watchroom and rattling the panes of Lighthouse Number 5. Perched on a jagged tooth of rock miles from the nearest mainland, the lighthouse was less a home and more a fortress against the void.\n\nElias Thorne adjusted the brass gears of the Fresnel lens, his hands calloused and stained with oil. He was the fifth keeper in a lineage that stretched back to the Great Storm of 1922. The light itself was a living thing, a rotating beam of pure, unyielding white that cut through the fog like a sword. It didn\u2019t just warn ships; it promised them that someone was still watching, still caring, still holding the line.\n\n\"Another night,\" Elias muttered, lighting the kerosene lamp that served as a backup to the electric arc. Outside, the river of the sea kept flowing past the old stone bridge of his mind\u2014a metaphor he\u2019d never quite explained to his daughter, who visited only once a year, bringing news of a world that felt increasingly distant.\n\nThe orchestra of the storm tuned its instruments: the crash of waves against the rocks, the howl of the",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1074,
+   "completion_tokens": 256,
+   "total_tokens": 1330,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 37976,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "6": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, a constant, shrieking reminder that the sea was always trying to reclaim the land. At the edge of the jagged cliffs, Lighthouse Number 6 stood like a stubborn finger pointing at the sky, its white paint peeling under the salt spray, its glass lens rotating with a rhythmic, hypnotic *click-whir, click-whir*.\n\nInside the lantern room, Elias Thorne adjusted the brass fittings of the Fresnel lens. He had been the keeper here for thirty years, ever since his father passed the torch\u2014and the heavy iron key\u2014to him. The light wasn\u2019t just a signal; it was a promise. A promise to the fishermen in their battered skiffs, to the cargo ships cutting through the fog, and to the lonely souls who looked up and saw that steady, sweeping beam.\n\nOne particularly stormy night, the power grid failed. The electric backup sputtered and died. Elias didn\u2019t panic. He had prepared for this. He lit the kerosene lamp, its flame dancing wildly in the draft, and manually cranked the rotation mechanism. His arms ached, his lungs burned, but the light kept turning. *Click-whir. Click-whir",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1152,
+   "completion_tokens": 256,
+   "total_tokens": 1408,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38071,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "7": {
+  "content": "The wind at Point Perilous did not just blow; it screamed, tearing at the iron railings of Lighthouse Number 7 like a living thing trying to claw its way inside. For decades, the light had been a rhythmic pulse, a heartbeat of glass and oil against the encroaching dark. But tonight, the rhythm was broken.\n\nElias Thorne, the current keeper, stood on the gallery deck, his hands gripping the cold brass railing. Below him, the ocean churned, white-capped waves crashing against the basalt cliffs with violent indifference. Above, the sky was a bruised purple, devoid of stars. The storm had arrived earlier than predicted, bringing with it a silence that felt heavier than the gale.\n\nInside the lantern room, the great Fresnel lens rotated with a mechanical hum, casting its beam across the churning water. But Elias wasn\u2019t watching the sea. He was watching the horizon, where a faint, erratic flicker suggested a ship in distress, lost in the squall.\n\nHe moved to the control panel, his fingers calloused and steady. He adjusted the wick, checked the fuel lines, and ensured the rotation gears were lubricated. This was his ritual, his prayer. The l",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1386,
+   "completion_tokens": 256,
+   "total_tokens": 1642,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 37525,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "8": {
+  "content": "The salt spray didn\u2019t just hit the glass of Lighthouse Number 8; it seemed to vibrate through the very stones, a constant, humming reminder of the sea\u2019s indifference. Perched on a jagged tooth of rock miles from the nearest shore, the lighthouse was less a beacon of hope and more a solitary eye, blinking its rhythmic, amber gaze into the void.\n\nInside, the air smelled of oil, damp wool, and old paper. Elias Thorne, the current keeper, adjusted the wick of the great Fresnel lens with the precision of a watchmaker. He wasn\u2019t alone in his vigil, though he rarely spoke of it. The lighthouse had a history written in the soot of its chimney and the wear on its spiral stairs.\n\nIt began with Silas Vane, who built the tower in 1892 using stones quarried from the cliffside itself. Silas believed the light was a living thing that needed to be fed, not just with oil, but with silence. He kept no records, only a journal filled with sketches of storms that never broke.\n\nAfter Silas vanished during the Great Gale of 1910, his daughter, Mara Vane, took the lamp. She was",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1646,
+   "completion_tokens": 256,
+   "total_tokens": 1902,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38429,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "9": {
+  "content": "The wind at Lighthouse Number 9 did not howl; it screamed. It was a jagged, metallic shriek that tore through the rigging of the Blackwood Rock, a spire of granite jutting out from the churning Atlantic like a broken finger pointing at the heavens.\n\nElias Thorne was the last keeper. He was a man carved from the same salt-weathered wood as the gallery deck, with eyes the color of storm clouds and hands that never stopped moving. His job was simple: keep the light burning. But at Number 9, the light was not just a beacon; it was a conversation.\n\nEvery night, at precisely 11:43 PM, the great Fresnel lens would rotate, casting its beam across the dark water. And every night, Elias would hear it\u2014the faint, rhythmic *thrum-thrum-thrum* of the orchestra tuning its instruments, echoing from nowhere and everywhere. It was a phantom sound, a ghost of the city\u2019s cultural past that had washed ashore with the fog.\n\nHe never questioned it. He simply adjusted the wick, polished the brass, and listened.\n\nOne particularly violent storm, the kind that made the rock groan under the weight of the",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1698,
+   "completion_tokens": 256,
+   "total_tokens": 1954,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38491,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "10": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, a constant, high-pitched shriek that vibrated through the soles of Elias Thorne\u2019s boots. He stood on the gallery deck of Lighthouse Number 10, a jagged tooth of granite jutting out from the churning sea. This wasn\u2019t one of the pretty, tourist-friendly beacons on the coast. This was a working lighthouse, isolated, brutal, and indifferent to human comfort.\n\nElias adjusted his oilskin coat, his eyes fixed on the great Fresnel lens rotating above him. It was a masterpiece of glass and brass, catching the beam and throwing it twenty miles out to sea. But tonight, the beam felt weak. The storm was worse than forecasted.\n\n\"Keepers don't sleep,\" his father had told him, years ago, before the sea took him. \"They watch. They wait. They endure.\"\n\nElias checked the clockwork mechanism. It was ticking, a steady, mechanical heartbeat against the chaos outside. He lit the kerosene lamp in the lantern room, a backup to the electric arc, just in case. The smell of oil mixed with the salt spray, a scent he had come to love more than anything else",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 1934,
+   "completion_tokens": 256,
+   "total_tokens": 2190,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38788,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "11": {
+  "content": "The salt spray didn\u2019t just hit Lighthouse Number 11; it seemed to vibrate through its very limestone bones. Perched on the jagged teeth of the Blackwood Reef, the lighthouse was less a beacon and more a stubborn argument against the sea.\n\nElias Thorne, the current keeper, adjusted his woolen sweater and looked out at the churning gray expanse. He wasn\u2019t alone in his vigil, though he rarely spoke of it. The lighthouse had a rhythm, a pulse that matched the tide. Every hour, on the hour, the great Fresnel lens would rotate, casting its beam across the water. But Elias noticed something else. With every rotation, the light seemed to catch the eye of a fox\u2014a quick, brown flash that darted along the cliff edge, leaping over the lazy, sleeping seals that basked on the lower rocks.\n\nIt was a strange dance. The fox, quick and brown, would jump. The seals, lazy and brown, would watch. And the river of light from the lighthouse would flow past the old stone bridge of the reef\u2019s arch, illuminating the orchestra of crashing waves and whistling gulls.\n\nElias smiled. He had come to understand that the",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 2142,
+   "completion_tokens": 256,
+   "total_tokens": 2398,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38883,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "12": {
+  "content": "The salt spray didn\u2019t just hit Lighthouse Number 12; it seemed to vibrate through its very limestone bones. Perched on the jagged teeth of the Blackwood Coast, the lighthouse was less a beacon and more a stubborn refusal to yield to the sea.\n\nFor decades, the routine was absolute. The lens rotated with a rhythmic *thrum-click, thrum-click*, cutting through the fog like a blade. The keepers knew that the sea was not a backdrop, but a living, breathing entity that tested them daily. They watched the horizon, not for ships, but for the subtle shifts in the water\u2019s mood\u2014the darkening of the waves, the sudden silence of the gulls.\n\nElias Thorne, the last keeper, spent his nights polishing the brass fittings until they shone like gold. He didn\u2019t just maintain the light; he tended to it. He believed the light had a heartbeat, synchronized with the tides. When the storm of \u201998 hit, it wasn\u2019t the wind that broke the lighthouse\u2014it was the isolation. The radio went dead. The supply boat never came. Elias kept the light burning, not because he expected rescue, but because the light was the only thing that proved he existed",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 2246,
+   "completion_tokens": 256,
+   "total_tokens": 2502,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38746,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "13": {
+  "content": "The wind at Point Serenity did not howl; it screamed, a high-pitched shriek that vibrated through the soles of Elias Thorne\u2019s boots. He stood on the gallery deck of Lighthouse Number 13, a jagged spire of granite and iron that had been standing guard over the treacherous shoals of the Blackwater Strait for eighty years.\n\nElias was not the first keeper, nor would he be the last. But he was the one who remembered the silence.\n\nMost lighthouses were automated now. Beams of LED light swept across the dark water, efficient and cold. But Lighthouse Number 13, with its distinctive red-and-white spiral pattern and its location on a rock so isolated it appeared on no modern maps, had been granted an exception. The Coast Guard called it \"heritage status.\" Elias called it home.\n\nEvery night, at precisely 11:55 PM, Elias climbed the 142 steps to the lantern room. He didn\u2019t just flip a switch. He lit the oil lamp, a vintage Fresnel lens that had been polished by his grandfather, then his father. He adjusted the wick, checked the pressure gauge, and waited.\n\nAt midnight,",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 2454,
+   "completion_tokens": 256,
+   "total_tokens": 2710,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38933,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "14": {
+  "content": "The wind off the Atlantic didn\u2019t just blow; it screamed, a constant, high-pitched shriek that vibrated through the limestone bones of Lighthouse Number 14. Perched on a jagged tooth of rock miles from the nearest shore, the lighthouse was less a building and more a defiance of gravity.\n\nElias Thorne had been the keeper for twelve years. He knew the rhythm of the lens\u2014the great Fresnel lens that rotated with a mechanical, hypnotic *thrum-click, thrum-click*\u2014better than he knew his own heartbeat. The light wasn\u2019t just a warning to ships; it was a conversation with the sea. When the fog rolled in, thick and yellow as old cheese, Elias would sit in the lantern room, polishing the brass until his reflection stared back, wide-eyed and tired.\n\nOne November night, the barometer dropped so fast it cracked the glass casing. The sea rose up, not in waves, but in a solid wall of black water. The power failed. The electric backup sputtered and died. In the darkness, the only sound was the crashing surf and the frantic beating of Elias\u2019s heart.\n\nHe didn\u2019t panic. He lit the kerosene lamp.\n\nFor three hours,",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 2584,
+   "completion_tokens": 256,
+   "total_tokens": 2840,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38967,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ },
+ "15": {
+  "content": "The wind howled around the base of Lighthouse Number 15, a jagged spire of granite that stood defiantly against the churning Atlantic. It was not the most famous lighthouse, nor the oldest, but it was the most stubborn. Located on a small, uninhabited island known only to fishermen and gulls, Lighthouse 15 had earned its number through a bureaucratic error in 1923 that was never corrected.\n\nElias Thorne was the current keeper. He was a man of few words and many routines. Every evening, as the sun dipped below the horizon, painting the sky in bruises of purple and orange, Elias would climb the 142 spiral steps to the lantern room. He polished the brass fittings until they shone like gold, checked the fuel levels, and lit the wick. The beam swept out across the dark water, a rhythmic pulse: *flash, pause, flash, pause.*\n\nOne stormy night in November, a small fishing trawler, the *Mary Ellen*, lost its way in the fog. The captain, young and inexperienced, had ignored the weather warnings. As the waves crashed against the rocks below, the *Mary Ellen* drifted dangerously close to the reef",
+  "reasoning": null,
+  "usage": {
+   "prompt_tokens": 2688,
+   "completion_tokens": 256,
+   "total_tokens": 2944,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generation_ms": 38822,
+   "macprovider_generated_completion_tokens": 256,
+   "cached_prompt_tokens": 0
+  }
+ }
+}
