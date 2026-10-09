@@ -694,15 +694,31 @@ SELECT s.epoch, (SELECT MIN(computed_epoch) FROM provider_earnings_rollup_bucket
 	start := s.earningsRollupSched.turn
 	s.earningsRollupSched.turn++
 	s.earningsRollupSched.mu.Unlock()
+	// from records every queue a bucket was selected from: a queue's cursor
+	// advances only past buckets this pass actually attempted (finished,
+	// conflicted, errored, cut at its slice or by the pass deadline, or
+	// skipped while backed off), so selected work a pass never reached is
+	// selected again first by the next pass.
 	var work []earningsBucketKey
-	seen := map[earningsBucketKey]bool{}
+	from := map[earningsBucketKey][]earningsRollupQueue{}
 	for i := 0; i < share; i++ {
 		for j := 0; j < int(earningsQueueCount); j++ {
-			qi := (start + j) % int(earningsQueueCount)
-			if i < len(queues[qi]) && !seen[queues[qi][i]] {
-				seen[queues[qi][i]] = true
-				work = append(work, queues[qi][i])
+			qi := earningsRollupQueue((start + j) % int(earningsQueueCount))
+			if i >= len(queues[qi]) {
+				continue
 			}
+			k := queues[qi][i]
+			if len(from[k]) == 0 {
+				work = append(work, k)
+			}
+			from[k] = append(from[k], qi)
+		}
+	}
+	attempted := func(k earningsBucketKey) {
+		s.earningsRollupSched.mu.Lock()
+		defer s.earningsRollupSched.mu.Unlock()
+		for _, qi := range from[k] {
+			s.earningsRollupSched.cursors[qi] = k
 		}
 	}
 	for _, k := range work {
@@ -711,12 +727,16 @@ SELECT s.epoch, (SELECT MIN(computed_epoch) FROM provider_earnings_rollup_bucket
 		}
 		now := time.Now()
 		if s.earningsRollupSched.deferred(k, now) {
+			attempted(k)
 			continue
 		}
 		bucketCtx, cancel := context.WithTimeout(ctx, s.earningsRollupSched.slice(k))
 		err := s.recomputeProviderEarningsBucket(bucketCtx, k.provider, k.hour)
 		overran := bucketCtx.Err() != nil
 		cancel()
+		if !errors.Is(err, errEarningsRollupLockBusy) {
+			attempted(k)
+		}
 		switch {
 		case err == nil:
 			pass.Recomputed++
@@ -792,8 +812,9 @@ func (s *Store) selectEarningsBuckets(ctx context.Context, query string, args ..
 }
 
 // selectRotatingEarningsBuckets returns up to n buckets matching cond in
-// (provider, hour) order after the queue's cursor, wrapping to the start,
-// and advances the cursor past the last one returned (attempted or not).
+// (provider, hour) order after the queue's cursor, wrapping to the start.
+// It does not move the cursor; RefreshProviderEarningsRollup advances it
+// past the buckets it attempts.
 func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, qi earningsRollupQueue, cond string, args []any, n int) ([]earningsBucketKey, error) {
 	sched := &s.earningsRollupSched
 	sched.mu.Lock()
@@ -810,11 +831,6 @@ func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, qi earningsRo
 			return nil, err
 		}
 		out = append(out, wrapped...)
-	}
-	if len(out) > 0 {
-		sched.mu.Lock()
-		sched.cursors[qi] = out[len(out)-1]
-		sched.mu.Unlock()
 	}
 	return out, nil
 }

@@ -1672,17 +1672,17 @@ func (h *handler) providerEarningsFigures(ctx context.Context, providerID string
 // payable history; its cost is linear in that history. All statements run in
 // one read snapshot and, like the rollup read, are retried if a force credit
 // of the provider matured during the read, so the fields agree with each
-// other. If maturities keep racing, the last read is returned.
+// other. If maturities race every attempt it returns
+// errEarningsRollupMaturityRace, which the endpoint answers with its
+// retryable 503 unavailable: figures known to disagree are never served.
 func (h *handler) providerEarningsFiguresFromView(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {
-	var last providerEarningsFigures
 	for attempt := 0; attempt < providerEarningsRollupReadAttempts; attempt++ {
 		figures, err := h.providerEarningsFiguresFromViewOnce(ctx, providerID, win)
 		if !errors.Is(err, errEarningsRollupMaturityRace) {
 			return figures, err
 		}
-		last = figures
 	}
-	return last, nil
+	return providerEarningsFigures{}, errEarningsRollupMaturityRace
 }
 
 func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {

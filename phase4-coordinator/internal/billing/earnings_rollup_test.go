@@ -1374,3 +1374,86 @@ func TestProviderEarningsViewFallbackIsOneSnapshot(t *testing.T) {
 		t.Fatalf("view fallbacks counted=%d want 1", n)
 	}
 }
+
+// Every bucket is reached by passes that are cut by their deadline after a
+// few attempts, even when the attempted buckets keep conflicting: a queue's
+// cursor moves only past buckets a pass actually attempted.
+func TestProviderEarningsRollupDeadlineCutPassesReachEveryBucket(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	const n = 15
+	for i := 0; i < n; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("q-%d", i), provider: fmt.Sprintf("p-%02d", i), ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 1})
+	}
+	attempted := map[string]bool{}
+	store.earningsRollupAfterRead = func(provider, hour string) {
+		attempted[provider] = true
+		time.Sleep(60 * time.Millisecond)
+		// Every attempt loses to a write, so nothing ever leaves the queue.
+		if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = ?`, provider); err != nil {
+			t.Error(err)
+		}
+	}
+	for pass := 0; pass < 20 && len(attempted) < n; pass++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		got, err := store.RefreshProviderEarningsRollup(ctx, n)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Recomputed != 0 {
+			t.Fatalf("pass %d recomputed %d; fixture expects only conflicts", pass, got.Recomputed)
+		}
+	}
+	if len(attempted) != n {
+		t.Fatalf("attempted %d/%d buckets across deadline-cut passes; selected tails were skipped", len(attempted), n)
+	}
+}
+
+// When a force credit matures during every attempt of the full-view read,
+// the endpoint answers the retryable 503, never figures that disagree.
+func TestProviderEarningsViewFallbackExhaustedMaturityRaceIs503(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "race503.db")
+	reqStore, err := requestlog.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readDB, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readDB.Close() })
+	store.SetReadDB(readDB)
+	// An unbucketable row forces the full-view path.
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "odd", provider: "provider-a", ts: "2026-09-16 06:00:00", model: "m", credits: 1})
+	base := time.Now().UTC().Add(300 * time.Millisecond)
+	var maturities []time.Time
+	for i := 0; i < providerEarningsRollupReadAttempts; i++ {
+		at := base.Add(time.Duration(i) * 200 * time.Millisecond)
+		maturities = append(maturities, at)
+		id := insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("m-%d", i), provider: "provider-a", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10, quarantined: true})
+		insertRollupResolution(t, store.db, id, "force_credit", "2026-09-16T06:00:00.000000000Z", sqliteTimeText(at))
+	}
+	reads := 0
+	store.earningsViewReadHook = func() {
+		if reads < len(maturities) {
+			time.Sleep(time.Until(maturities[reads]) + 30*time.Millisecond)
+		}
+		reads++
+	}
+	handler := store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60)
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings?from=2026-09-01&to=2026-09-30", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if reads != providerEarningsRollupReadAttempts {
+		t.Fatalf("fallback reads=%d want %d", reads, providerEarningsRollupReadAttempts)
+	}
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" || !strings.Contains(rec.Body.String(), `"unavailable"`) || strings.Contains(rec.Body.String(), "total_credits") {
+		t.Fatalf("status=%d retry-after=%q body=%s; want retryable 503 unavailable", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+}
