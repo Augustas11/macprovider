@@ -1478,6 +1478,11 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
                 // provider change; existing admission state is unaffected.
                 return "coordinator model admission request failed with HTTP \(status); coordinator model admission submissions are unavailable right now and existing admission state is unchanged; next action: wait_for_coordinator"
             }
+            if status == 409 {
+                // The coordinator's only 409 on admission is replay_conflict:
+                // a different offer for this candidate is already recorded.
+                return "coordinator model admission request failed with HTTP 409 replay_conflict; a different offer for this candidate is already recorded; next action: withdraw it with `macprovider-cli models admission withdraw <served-model-ref> --yes --json`, then submit the offer again"
+            }
             return "coordinator model admission request failed with HTTP \(status)"
         case .invalidStatusSchema:
             return "coordinator returned an invalid model admission status schema"

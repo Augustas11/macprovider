@@ -373,4 +373,67 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertEqual((core.expiresAtUnix - core.notBeforeUnix) / 86400, 30)
         XCTAssertThrowsError(try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/missing"))
     }
+
+    private func proposal(pool: String, pricing: Bool = false, maxContext: Bool = true) -> Data {
+        let pricingJSON = pricing ? #"{"prompt_rate_per_mtok":10,"prompt_cache_hit_rate_per_mtok":5,"completion_rate_per_mtok":20}"# : "null"
+        return Data("""
+        {"schema":"pool_model_proposal.v1","generated_at":"2026-10-09T00:00:00Z","cli_version":"x","pool_id":"\(pool)",
+        "provider_id":null,"candidate_id":"c","served_model_ref":"lmstudio:m","runtime_source":"lmstudio_loopback","display_name":"m",
+        "catalog_model_key":null,"model_entry":{"pool_model_id":"pool/\(pool)/m","artifact_hash_algorithm":"macprovider.gguf-file.v1",
+        "artifact_hash":"\(String(repeating: "c", count: 64))","allowed_runtime_sources":["lmstudio_loopback"],"license":null,
+        "paid_serving_attested":null,"pricing":\(pricingJSON),"disclosure_class":"pool_attested_unverified",
+        "max_context_tokens":\(maxContext ? "4096" : "null")},"creator_requirements":[],"evidence":{"evaluation_digest_sha256":null,
+        "known_answer_probe_evidence_sha256":null},"offer_status":null,"warnings":[]}
+        """.utf8)
+    }
+
+    func testManifestSignFromProposalFillsOnlyCreatorFields() throws {
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        var completion = CreatorOperations.ProposalCompletion()
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            XCTAssertTrue(String(describing: $0).contains("--license"))
+        }
+        completion.license = "Apache-2.0"
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            XCTAssertTrue(String(describing: $0).contains("--attest-paid-serving"))
+        }
+        completion.paidServingAttested = true
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            XCTAssertTrue(String(describing: $0).contains("--prompt-rate-per-mtok"))
+        }
+        let suggested = try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)
+        XCTAssertEqual(suggested.pricing.completionRatePerMtok, 20)
+        XCTAssertEqual(suggested.license, "Apache-2.0")
+        XCTAssertTrue(suggested.paidServingAttested)
+        XCTAssertEqual(suggested.maxContextTokens, 4096)
+        XCTAssertEqual(suggested.artifactHash, String(repeating: "c", count: 64))
+        completion.pricing = PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3)
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, maxContext: false), poolID: pool, completion: completion))
+        completion.maxContextTokens = 8192
+        XCTAssertEqual(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, maxContext: false), poolID: pool, completion: completion).maxContextTokens, 8192)
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: "BBBBBBBBBBBBBBBBBBBBBB", completion: completion))
+        XCTAssertNoThrow(try CreatorManifestSignCommand.parse(["--pool", pool, "--from-proposal", "a.json", "--from-proposal", "b.json", "--license", "MIT", "--attest-paid-serving"]))
+    }
+
+    func testManifestWindowReportsEffectiveFromAndExpiry() throws {
+        let home = CreatorHome(root: homeURL)
+        let identity = try CreatorOperations.keygen(home: home)
+        var options = CreatorOperations.ManifestOptions()
+        options.models = ["m"]
+        options.notBefore = Date(timeIntervalSince1970: 1_800_000_000)
+        options.validityDays = 1
+        let pending = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
+        let window = try XCTUnwrap(CreatorOperations.manifestWindow(pending.state))
+        XCTAssertEqual(window.effectiveFrom, "2027-01-15T08:00:00Z")
+        XCTAssertEqual(window.expiresAt, "2027-01-16T08:00:00Z")
+    }
+
+    func testCreatorHelpNamesTheMemberSteps() {
+        let help = CreatorCommand.configuration.discussion
+        for needle in ["macprovider-cli claim", "models propose", "pool_model_id", "macprovider-cli restart", "--mlx-cache-dir",
+                       "models offer <served-model-ref> --yes --json", "--from-proposal", "replay_conflict", "creator lifecycle", "creator revoke"] {
+            XCTAssertTrue(help.contains(needle), needle)
+        }
+        XCTAssertTrue(BYOMModelAdmissionError.httpStatus(409).description.contains("models admission withdraw"))
+    }
 }

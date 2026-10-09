@@ -19,18 +19,32 @@ struct CreatorCommand: AsyncParsableCommand {
           creator keygen                     (prints the new pool id)
           creator pool create --pool <id>
           creator register-root --pool <id> --display-name "My Pool"
-          creator manifest sign --pool <id> --models-file models.json
+          On each member Mac: `macprovider-cli claim` links it to your GitHub
+          account (admit only sees Macs your GitHub user claimed), and
+          `macprovider-cli models propose <served-model-ref> --pool <id> --json > proposal.json`
+          hashes the served model into a proposal.
+          creator manifest sign --pool <id> --from-proposal proposal.json --license <SPDX>
+              --attest-paid-serving [--prompt-rate-per-mtok N ...]   (or --models-file models.json)
           creator manifest submit --pool <id>
           creator admit <provider-id> --pool <id>
           creator authorize-buyer <account-id> --pool <id>
           creator promote --pool <id>
-          (restart macprovider-cli on each member Mac, then run
-           `macprovider-cli models offer --yes` there for each pool model)
-          creator status --pool <id>
+          On each member Mac: set `pool_model_id: pool/<id>/<slug>` in
+          ~/.config/macprovider/config.yaml (or MACPROVIDER_POOL_MODEL_ID), run
+          `macprovider-cli models offer <served-model-ref> --yes --json`
+          (add --mlx-cache-dir <dir> for a native MLX model outside the default
+          HF cache), then `macprovider-cli restart` so serve re-reads config and
+          its next hello binds the pool entry.
+          creator status --pool <id>         (manifest effective_from and expiry)
           creator earnings --pool <id>
+          creator revoke --pool <id> --provider <provider-id> | --model <pool_model_id>
+          creator lifecycle --pool <id> --set paused|draining|retired
         A member serving an uncatalogued pool model is admitted to the pool's
         routes by its first hello after promotion, so restart it once the pool
-        is active.
+        is active. A `models offer` answered with HTTP 409 replay_conflict
+        means a different offer for that candidate is already recorded:
+        withdraw it with `macprovider-cli models admission withdraw <ref> --yes --json`
+        and submit again.
         Keys live under ~/.config/macprovider/creator (MACPROVIDER_CREATOR_HOME overrides) and never leave this Mac.
         """,
         subcommands: [
@@ -731,6 +745,101 @@ enum CreatorOperations {
         return try signManifest(home: home, poolID: poolID, options: try revokeModelOptions(previous: previous, poolModelID: poolModelID))
     }
 
+    /// The accepted core's validity window as RFC 3339 UTC. `effective_from`
+    /// is the signed not_before; the coordinator applies a version no earlier.
+    static func manifestWindow(_ state: CreatorManifestState) -> (effectiveFrom: String, expiresAt: String)? {
+        guard let core = state.snapshot.policies.last?.core else { return nil }
+        let format = ISO8601DateFormatter()
+        format.formatOptions = [.withInternetDateTime]
+        format.timeZone = TimeZone(identifier: "UTC")
+        return (
+            format.string(from: Date(timeIntervalSince1970: TimeInterval(core.notBeforeUnix))),
+            format.string(from: Date(timeIntervalSince1970: TimeInterval(core.expiresAtUnix)))
+        )
+    }
+
+    /// Creator-owned fields a pool_model_proposal.v1 leaves null.
+    struct ProposalCompletion {
+        var license: String?
+        var paidServingAttested = false
+        var pricing: PoolModelPricing?
+        var maxContextTokens: UInt64?
+    }
+
+    private struct ProposalFile: Decodable {
+        struct Entry: Decodable {
+            var poolModelID: String
+            var artifactHashAlgorithm: String
+            var artifactHash: String
+            var allowedRuntimeSources: [String]
+            var license: String?
+            var paidServingAttested: Bool?
+            var pricing: PoolModelPricing?
+            var disclosureClass: String
+            var maxContextTokens: UInt64?
+
+            enum CodingKeys: String, CodingKey {
+                case poolModelID = "pool_model_id"
+                case artifactHashAlgorithm = "artifact_hash_algorithm"
+                case artifactHash = "artifact_hash"
+                case allowedRuntimeSources = "allowed_runtime_sources"
+                case license
+                case paidServingAttested = "paid_serving_attested"
+                case pricing
+                case disclosureClass = "disclosure_class"
+                case maxContextTokens = "max_context_tokens"
+            }
+        }
+        var schema: String
+        var poolID: String
+        var modelEntry: Entry
+
+        enum CodingKeys: String, CodingKey {
+            case schema
+            case poolID = "pool_id"
+            case modelEntry = "model_entry"
+        }
+    }
+
+    /// Turns one `models propose --json` bundle into a signable entry. The
+    /// proposal's hash and runtime are kept verbatim; only creator-owned
+    /// nulls are filled, and a value the proposal already carries wins.
+    static func modelEntry(fromProposal data: Data, poolID: String, completion: ProposalCompletion) throws -> PoolModelEntry {
+        let proposal: ProposalFile
+        do {
+            proposal = try JSONDecoder().decode(ProposalFile.self, from: data)
+        } catch {
+            throw CreatorCLIError.invalidInput("--from-proposal is not a pool_model_proposal.v1 document: \(error)")
+        }
+        guard proposal.schema == PoolModelProposalWire.schemaID else {
+            throw CreatorCLIError.invalidInput("--from-proposal schema is \(proposal.schema), expected \(PoolModelProposalWire.schemaID)")
+        }
+        guard proposal.poolID == poolID, proposal.modelEntry.poolModelID.hasPrefix("pool/\(poolID)/") else {
+            throw CreatorCLIError.invalidInput("proposal is for pool \(proposal.poolID), not \(poolID)")
+        }
+        let p = proposal.modelEntry
+        guard let license = (p.license ?? completion.license)?.trimmingCharacters(in: .whitespaces), !license.isEmpty else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --license <SPDX id or LicenseRef-*>")
+        }
+        guard p.paidServingAttested == true || completion.paidServingAttested else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --attest-paid-serving to sign paid_serving_attested=true")
+        }
+        guard let pricing = p.pricing ?? completion.pricing else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): the proposal suggests no pricing; pass --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok")
+        }
+        guard pricing.promptCacheHitRatePerMtok <= pricing.promptRatePerMtok else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): the cached-prompt rate must not exceed the prompt rate")
+        }
+        guard let maxContext = p.maxContextTokens ?? completion.maxContextTokens, (1...1_048_576).contains(maxContext) else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --max-context-tokens (1...1048576); the proposal reports none")
+        }
+        return PoolModelEntry(
+            poolModelID: p.poolModelID, artifactHashAlgorithm: p.artifactHashAlgorithm, artifactHash: p.artifactHash,
+            allowedRuntimeSources: p.allowedRuntimeSources.sorted(by: PoolBytes.byteLess), license: license, paidServingAttested: true,
+            pricing: pricing, disclosureClass: p.disclosureClass, maxContextTokens: maxContext
+        )
+    }
+
     static let creatorLifecycles: Set<String> = ["paused", "draining", "retired"]
 
     /// POST /v1/creator/pools/<id>/lifecycle (coordinator
@@ -875,12 +984,37 @@ struct CreatorManifestSignCommand: ParsableCommand {
     @Option(help: "Minimum attestation tier.") var minAttestationTier = "self_signed"
     @Option(help: "Minimum eligible members.") var minEligibleMembers: UInt64 = 1
     @Option(help: "Policy validity in days.") var validityDays = 90
+    @Option(name: .customLong("from-proposal"), help: "pool_model_proposal.v1 JSON from `models propose --json` (repeatable). Its model_entry is completed with the flags below.") var fromProposal: [String] = []
+    @Option(help: "SPDX id or LicenseRef-* for --from-proposal entries.") var license: String?
+    @Flag(help: "Attest paid serving is permitted for --from-proposal entries (signed as paid_serving_attested=true).") var attestPaidServing = false
+    @Option(help: "Prompt rate per million tokens for a --from-proposal entry that suggests no pricing.") var promptRatePerMtok: UInt64?
+    @Option(help: "Cached-prompt rate per million tokens (no higher than the prompt rate).") var promptCacheHitRatePerMtok: UInt64?
+    @Option(help: "Completion rate per million tokens.") var completionRatePerMtok: UInt64?
+    @Option(help: "max_context_tokens for a --from-proposal entry that reports none.") var maxContextTokens: UInt64?
 
     func run() throws {
         var options = CreatorOperations.ManifestOptions()
         options.models = models.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if let modelsFile {
             (options.modelEntries, options.attestedMembers) = try CreatorOperations.loadModelsFile(modelsFile)
+        }
+        if !fromProposal.isEmpty {
+            var completion = CreatorOperations.ProposalCompletion()
+            completion.license = license
+            completion.paidServingAttested = attestPaidServing
+            if promptRatePerMtok != nil || promptCacheHitRatePerMtok != nil || completionRatePerMtok != nil {
+                guard let promptRatePerMtok, let promptCacheHitRatePerMtok, let completionRatePerMtok else {
+                    throw ValidationError("pricing needs all of --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok")
+                }
+                completion.pricing = PoolModelPricing(promptRatePerMtok: promptRatePerMtok, promptCacheHitRatePerMtok: promptCacheHitRatePerMtok, completionRatePerMtok: completionRatePerMtok)
+            }
+            completion.maxContextTokens = maxContextTokens
+            for path in fromProposal {
+                let entry = try CreatorOperations.modelEntry(fromProposal: Data(contentsOf: URL(fileURLWithPath: path)), poolID: pool.poolID, completion: completion)
+                options.modelEntries.removeAll { $0.poolModelID == entry.poolModelID }
+                options.modelEntries.append(entry)
+            }
+            options.modelEntries.sort { PoolBytes.byteLess($0.poolModelID, $1.poolModelID) }
         }
         options.settlementMode = settlementMode
         options.retentionPolicyID = retentionPolicyId
@@ -890,6 +1024,9 @@ struct CreatorManifestSignCommand: ParsableCommand {
         options.validityDays = validityDays
         let pending = try CreatorOperations.signManifest(home: CreatorHome.resolve(), poolID: pool.poolID, options: options)
         print("signed manifest_version=\(pending.state.manifestVersion) manifest_core_digest=\(pending.state.manifestCoreDigest)")
+        if let window = CreatorOperations.manifestWindow(pending.state) {
+            print("effective_from=\(window.effectiveFrom) expires_at=\(window.expiresAt)")
+        }
     }
 }
 
@@ -933,7 +1070,7 @@ struct CreatorPromoteCommand: AsyncParsableCommand {
     func run() async throws {
         let context = try CreatorContext.load()
         CreatorOutput.printJSON(try await CreatorOperations.promote(home: context.home, client: context.client, poolID: pool.poolID))
-        print("Pool active. Restart macprovider-cli on each member Mac so it serves the pool's models.")
+        print("Pool active. Run `macprovider-cli restart` on each member Mac so it serves the pool's models.")
     }
 }
 
@@ -948,6 +1085,12 @@ struct CreatorStatusCommand: AsyncParsableCommand {
         let path = poolID.map { "pools/\($0)" } ?? "pools"
         var out: [String: Any] = ["creator": try await CreatorOperations.me(context.client)]
         out["result"] = try context.client.expect(try await context.client.request("GET", path))
+        if let poolID, let state = try context.home.manifestState(poolID), let window = CreatorOperations.manifestWindow(state) {
+            out["local_manifest"] = [
+                "manifest_version": state.manifestVersion, "manifest_core_digest": state.manifestCoreDigest,
+                "effective_from": window.effectiveFrom, "expires_at": window.expiresAt,
+            ]
+        }
         CreatorOutput.printJSON(out)
     }
 }
