@@ -779,6 +779,53 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertFalse(try ModelSwitchingWireCodec.encode(mixed.candidates).contains("hidden"))
     }
 
+    func testNativeDurableStoreModelsAreDiscoveredBesideTheHFCache() async throws {
+        let cache = try temporaryDirectory("byom-mlx-hf")
+        let durable = try temporaryDirectory("byom-mlx-durable")
+        defer {
+            try? FileManager.default.removeItem(at: cache)
+            try? FileManager.default.removeItem(at: durable)
+        }
+        try createMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+        for modelID in ["mlx-community/Tiny-1B-4bit", "Qwen/Qwen3-0.6B"] {
+            let leaf = durable
+                .appendingPathComponent(modelID.replacingOccurrences(of: "/", with: "--"), isDirectory: true)
+                .appendingPathComponent("0123456789abcdef0123456789abcdef01234567", isDirectory: true)
+                .appendingPathComponent(String(repeating: "e", count: 64), isDirectory: true)
+            try FileManager.default.createDirectory(at: leaf, withIntermediateDirectories: true)
+            try Data(#"{"max_position_embeddings":4096}"#.utf8).write(to: leaf.appendingPathComponent("config.json"))
+            try Data(repeating: 0x7a, count: 64).write(to: leaf.appendingPathComponent("model.safetensors"))
+        }
+        let namespace = Data(repeating: 0x37, count: 32)
+        let hfOnly = BYOMMLXCacheDiscovery(cacheRoot: cache, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(hfOnly.candidates.map(\.servedModelRef), ["mlx-community/Tiny-1B-4bit"])
+
+        let both = BYOMMLXCacheDiscovery(cacheRoot: cache, durableRoot: durable, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(both.adapter.status, "ok")
+        XCTAssertEqual(both.candidates.map(\.servedModelRef).sorted(), ["Qwen/Qwen3-0.6B", "mlx-community/Tiny-1B-4bit"])
+        let native = try XCTUnwrap(both.candidates.first { $0.servedModelRef == "Qwen/Qwen3-0.6B" })
+        XCTAssertEqual(native.runtimeSource, "mlx_cache")
+        XCTAssertEqual(native.readinessState, "ready")
+        XCTAssertEqual(native.contextWindowTokens, 4096)
+
+        // A Mac whose HF cache is gone still lists what serve holds natively.
+        let missingCache = cache.appendingPathComponent("absent", isDirectory: true)
+        let durableOnly = BYOMMLXCacheDiscovery(cacheRoot: missingCache, durableRoot: durable, namespace: namespace, catalogMatcher: BYOMCatalogMatcher()).discover()
+        XCTAssertEqual(durableOnly.adapter.status, "ok")
+        XCTAssertEqual(durableOnly.candidates.count, 2)
+
+        let env = BYOMDiscoveryEnvironment.production(
+            namespacePath: nil, mlxCacheDir: nil, ollamaOrigin: nil,
+            environment: ["MACPROVIDER_MODEL_ARTIFACT_ROOT": durable.path, "HF_HUB_CACHE": missingCache.path], homeDirectory: cache
+        )
+        XCTAssertEqual(env.durableModelRoot?.path, durable.standardizedFileURL.path)
+        let pinned = BYOMDiscoveryEnvironment.production(
+            namespacePath: nil, mlxCacheDir: cache.path, ollamaOrigin: nil,
+            environment: ["MACPROVIDER_MODEL_ARTIFACT_ROOT": durable.path], homeDirectory: cache
+        )
+        XCTAssertNil(pinned.durableModelRoot, "an explicit --mlx-cache-dir pins the one MLX root inspected")
+    }
+
     func testOllamaOptionalRedactionPreservesOfferNullsAndIndependentBlockers() async throws {
         let body = Data(#"{"models":[{"name":"Tiny-Ollama-1B-Q4","details":{"family":"/Users/private/hidden","quantization_level":"api_key=hidden"}},{"name":"/Users/private/omitted"}]}"#.utf8)
         let stable = await redactionDiscovery(body: body)

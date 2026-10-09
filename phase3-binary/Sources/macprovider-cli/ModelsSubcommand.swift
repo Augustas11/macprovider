@@ -40,7 +40,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -113,7 +113,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -207,7 +207,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -406,7 +406,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -621,7 +621,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -726,7 +726,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
@@ -839,7 +839,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
 
-    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub, plus the native model store serve loads from (MACPROVIDER_MODEL_ARTIFACT_ROOT or ~/Library/Application Support/macprovider/models); when set, only this root is inspected.")
     var mlxCacheDir: String?
 
     @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")

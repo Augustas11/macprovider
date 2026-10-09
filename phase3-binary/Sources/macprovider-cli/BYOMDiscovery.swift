@@ -2372,6 +2372,8 @@ private extension BYOMAdmissionStatusWire {
 struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
+    /// The native durable model store scanned beside the HF cache; nil ⇒ not scanned.
+    let durableModelRoot: URL?
     let ollamaOrigin: String?
     /// Operator-supplied OpenAI-compatible loopback origin. SPEC-046-R002 allows
     /// an adapter endpoint to be either a well-known loopback default for that
@@ -2433,10 +2435,12 @@ struct BYOMDiscoveryEnvironment: Sendable {
         mlxlmModelPath: URL? = nil,
         omlxOrigin: String? = nil,
         omlxModelPath: URL? = nil,
-        artifactDigestCacheURL: URL? = nil
+        artifactDigestCacheURL: URL? = nil,
+        durableModelRoot: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
         self.mlxCacheRoot = mlxCacheRoot
+        self.durableModelRoot = durableModelRoot
         self.ollamaOrigin = ollamaOrigin
         self.openAICompatibleOrigin = openAICompatibleOrigin
         self.lmstudioOrigin = lmstudioOrigin
@@ -2522,8 +2526,23 @@ struct BYOMDiscoveryEnvironment: Sendable {
             mlxlmModelPath: MLXLMLoopbackServeModel.snapshotDirectory(environment: environment),
             omlxOrigin: LoopbackServeSelection.nonEmpty(environment[OMLXLoopbackServeModel.originEnvironmentKey]),
             omlxModelPath: OMLXLoopbackServeModel.snapshotDirectory(environment: environment),
-            artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
+            artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory),
+            // An explicit --mlx-cache-dir pins the one MLX root inspected.
+            durableModelRoot: mlxCacheDir == nil ? defaultDurableModelRoot(environment: environment, homeDirectory: homeDirectory) : nil
         )
+    }
+
+    /// Mirrors `DurableModelArtifactStore.defaultRoot` with injectable inputs.
+    static func defaultDurableModelRoot(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        if let override = environment["MACPROVIDER_MODEL_ARTIFACT_ROOT"], !override.isEmpty, override.hasPrefix("/") {
+            return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        }
+        return homeDirectory
+            .appendingPathComponent("Library/Application Support/macprovider/models", isDirectory: true)
+            .standardizedFileURL
     }
 
     static func defaultNamespaceURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
@@ -2684,6 +2703,7 @@ struct BYOMDiscoveryRunner {
 
         let mlx = BYOMMLXCacheDiscovery(
             cacheRoot: environment.mlxCacheRoot,
+            durableRoot: environment.durableModelRoot,
             namespace: namespace.bytes,
             namespaceWarnings: namespace.warnings,
             catalogMatcher: catalog,
@@ -3783,6 +3803,11 @@ enum BYOMFitEnvironment {
 
 struct BYOMMLXCacheDiscovery {
     private let cacheRoot: URL
+    /// The provider-owned durable store (`DurableModelArtifactStore`,
+    /// `<root>/<org--repo>/<revision>/<sha256>/`) native `serve` loads from.
+    /// Hugging Face cache is staging only, so a natively served model may
+    /// exist only here. nil keeps HF-cache-only discovery.
+    private let durableRoot: URL?
     private let namespace: Data?
     private let namespaceWarnings: [BYOMDiscoveryWarning]
     private let catalogMatcher: BYOMCatalogMatcher
@@ -3790,12 +3815,14 @@ struct BYOMMLXCacheDiscovery {
 
     init(
         cacheRoot: URL,
+        durableRoot: URL? = nil,
         namespace: Data?,
         namespaceWarnings: [BYOMDiscoveryWarning] = [],
         catalogMatcher: BYOMCatalogMatcher,
         fileManager: FileManager = .default
     ) {
         self.cacheRoot = cacheRoot
+        self.durableRoot = durableRoot
         self.namespace = namespace
         self.namespaceWarnings = namespaceWarnings
         self.catalogMatcher = catalogMatcher
@@ -3859,7 +3886,9 @@ struct BYOMMLXCacheDiscovery {
     }
 
     func discover() -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
-        guard let entries = boundedDirectoryEntries(at: cacheRoot, cap: 4096) else {
+        let cacheEntries = boundedDirectoryEntries(at: cacheRoot, cap: 4096)
+        let durableEntries = durableRoot.flatMap { boundedDirectoryEntries(at: $0, cap: 4096) }
+        guard cacheEntries != nil || durableEntries != nil else {
             return (
                 BYOMDiscoveryWire.Adapter(
                     runtimeSource: "mlx_cache",
@@ -3873,7 +3902,7 @@ struct BYOMMLXCacheDiscovery {
 
         var candidates: [BYOMDiscoveryWire.Candidate] = []
         var warnings = Set<String>()
-        for entry in entries.prefix(200) {
+        for entry in (cacheEntries ?? []).prefix(200) {
             guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                   let modelID = modelID(fromHFCacheDirectoryName: entry.lastPathComponent) else {
                 continue
@@ -3892,6 +3921,32 @@ struct BYOMMLXCacheDiscovery {
                 warningCodes: snapshotSummary.ready ? [] : [.requiresPreparation]
             )
             candidates.append(candidate)
+        }
+
+        // Native models `serve` already holds in its durable store. The HF
+        // cache row wins for a model present in both (same candidate id).
+        if let durableRoot, let durableEntries {
+            var seen = Set(candidates.map { BYOMCandidateIdentity.normalizedServedModelRef($0.servedModelRef) })
+            for entry in durableEntries.prefix(200) {
+                guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                      let modelID = Self.modelID(fromDurableDirectoryName: entry.lastPathComponent) else {
+                    continue
+                }
+                guard BYOMDiscoveryPrivacy.isSafeModelReference(modelID) else {
+                    warnings.insert(BYOMDiscoveryWarning.modelReferenceRedacted.rawValue)
+                    continue
+                }
+                guard seen.insert(BYOMCandidateIdentity.normalizedServedModelRef(modelID)).inserted else { continue }
+                let summary = summarizeDurable(modelDirectory: entry, root: durableRoot)
+                candidates.append(buildCandidate(
+                    servedModelRef: modelID,
+                    revisions: summary.revisions,
+                    readinessState: summary.ready ? "ready" : "needs_weights",
+                    estimatedGB: estimatedGB(modelID: modelID, snapshotBytes: summary.weightBytes),
+                    contextWindowTokens: summary.contextWindowTokens,
+                    warningCodes: summary.ready ? [] : [.requiresPreparation]
+                ))
+            }
         }
 
         return (
@@ -3915,26 +3970,54 @@ struct BYOMMLXCacheDiscovery {
         return modelID
     }
 
+    /// `<org--repo>` in the durable store; the store escapes `/` as `--`.
+    static func modelID(fromDurableDirectoryName name: String) -> String? {
+        let modelID = name.replacingOccurrences(of: "--", with: "/")
+        guard modelID.contains("/"), !modelID.hasPrefix("/"), !modelID.hasSuffix("/") else { return nil }
+        return modelID
+    }
+
+    /// `<model>/<revision>/<sha256>/` leaves of the durable store, summarized
+    /// like HF snapshots; revision directory names are the HF commit revisions.
+    private func summarizeDurable(modelDirectory: URL, root: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?, revisions: Set<String>) {
+        guard let revisionDirs = boundedDirectoryEntries(at: modelDirectory, cap: 256) else {
+            return (false, 0, nil, [])
+        }
+        var leaves: [URL] = []
+        for revision in revisionDirs.prefix(20) {
+            guard let artifacts = boundedDirectoryEntries(at: revision, cap: 64) else { continue }
+            leaves.append(contentsOf: artifacts.prefix(20 - min(20, leaves.count)))
+            if leaves.count >= 20 { break }
+        }
+        let summary = summarizeSnapshotContents(leaves, root: root)
+        return (summary.ready, summary.weightBytes, summary.contextWindowTokens, snapshotRevisionNames(at: modelDirectory))
+    }
+
     private func summarizeSnapshots(repoDirectory: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?, revisions: Set<String>) {
         let snapshots = repoDirectory.appendingPathComponent("snapshots", isDirectory: true)
         guard let snapshotDirs = boundedDirectoryEntries(at: snapshots, cap: 256) else {
             return (false, 0, nil, [])
         }
-        var sawConfig = false
-        var weightBytes: UInt64 = 0
-        var context: Int?
-        var inspected = 0
         // HF cache snapshot directories are named by the commit revision: the
         // immutable half of a SPEC-023 `huggingface_revision` source reference.
         // Identity-load-bearing, so collected over EVERY entry name with no cap
         // (a string test per entry, no per-entry I/O); only the content
         // inspection below goes through the bounded, sorted list.
         let revisions = snapshotRevisionNames(at: snapshots)
-        for snapshot in snapshotDirs.prefix(20) {
+        let summary = summarizeSnapshotContents(Array(snapshotDirs.prefix(20)), root: cacheRoot)
+        return (summary.ready, summary.weightBytes, summary.contextWindowTokens, revisions)
+    }
+
+    private func summarizeSnapshotContents(_ snapshotDirs: [URL], root: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?) {
+        var sawConfig = false
+        var weightBytes: UInt64 = 0
+        var context: Int?
+        var inspected = 0
+        for snapshot in snapshotDirs {
             guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             if let config = boundedFileContents(
                 at: snapshot.appendingPathComponent("config.json"),
-                within: cacheRoot,
+                within: root,
                 maxBytes: 128 * 1024
             ) {
                 sawConfig = true
@@ -3958,7 +4041,7 @@ struct BYOMMLXCacheDiscovery {
                 // not `isRegularFile` and would be miscounted as missing) and
                 // require it to stay under the cache root to block symlink escape.
                 let resolved = fileURL.resolvingSymlinksInPath()
-                guard pathIsContained(resolved, in: cacheRoot),
+                guard pathIsContained(resolved, in: root),
                       let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                       values.isRegularFile == true else {
                     continue
@@ -3966,7 +4049,7 @@ struct BYOMMLXCacheDiscovery {
                 weightBytes += UInt64(values.fileSize ?? 0)
             }
         }
-        return (sawConfig && weightBytes > 0, weightBytes, context, revisions)
+        return (sawConfig && weightBytes > 0, weightBytes, context)
     }
 
     /// Every entry name under `snapshots/` that has the shape of a HuggingFace
