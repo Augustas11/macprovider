@@ -837,7 +837,12 @@ public enum ConfigLoader {
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
         var maxConcurrencyDepthOverride: Int?
         try assign(&maxConcurrencyDepthOverride, from: dict, key: AppConfig.maxConcurrencyDepthOverrideKey, expected: "integer")
-        if let maxConcurrencyDepthOverride {
+        // The depth key only extends a legacy value the new applier wrote (8,
+        // or absent). Any other legacy value means an older CLI or the operator
+        // changed it after the depth was recorded, so the legacy value wins.
+        if let maxConcurrencyDepthOverride,
+           config.maxConcurrencyOverride == nil
+            || config.maxConcurrencyOverride == AppConfig.legacyMaxConcurrencyOverrideLimit {
             config.maxConcurrencyOverride = maxConcurrencyDepthOverride
         }
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")

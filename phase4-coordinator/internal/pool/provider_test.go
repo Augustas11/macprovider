@@ -160,6 +160,25 @@ func TestRepeatedLowerReadyReportIsAccepted(t *testing.T) {
 	}
 }
 
+func TestNewOccupancyWaitRestartsTheOneShotLowerReportIgnore(t *testing.T) {
+	// #1906 round-2 audit: a new forwarded completion starts a new wait for a
+	// ready report, so the first stale lower report after it is ignored again
+	// even if the previous wait already used its one ignore.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	lower := 3
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 8 {
+		t.Fatalf("first stale report after a new completion: slots_free=%d, want 8", got.SlotsFree)
+	}
+}
+
 func TestThermalHoldSurvivesForwardedCompletion(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}

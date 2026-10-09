@@ -1761,6 +1761,7 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 		p.SlotsFree++
 	}
 	p.awaitingReadyOccupancy = true
+	p.ignoredLowerReadyReport = false
 	if !p.capacitySafetyHold && p.SlotsFree > 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateReady)
 	}
@@ -1813,6 +1814,7 @@ func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string, refusedS
 	}
 	p.capacitySafetyHold = true
 	p.awaitingReadyOccupancy = true
+	p.ignoredLowerReadyReport = false
 	if p.State == StateReady || p.State == StateBusy {
 		r.setStateLocked(p, StateBusy)
 	}

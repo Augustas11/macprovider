@@ -1543,7 +1543,7 @@ actor InferenceRelay {
                         providerID: receiptProviderID,
                         request: request,
                         completion: cancelled,
-                        ttftMs: 0,
+                        ttftMs: cancelled.ttftMilliseconds ?? 0,
                         unixTsSeconds: Int64(Date().timeIntervalSince1970),
                         requestID: requestID,
                         modelHashSource: modelHashSource,
@@ -1574,7 +1574,7 @@ actor InferenceRelay {
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
                     let issued = receiptHeader.map { _ in
-                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: cancelled.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
                     }
                     attachRelayBlindSettlementReceipt(&endFrame, state: state)
                     try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
@@ -1641,7 +1641,7 @@ actor InferenceRelay {
                     providerID: receiptProviderID,
                     request: request,
                     completion: completion,
-                    ttftMs: 0,
+                    ttftMs: completion.ttftMilliseconds ?? 0,
                     unixTsSeconds: Int64(Date().timeIntervalSince1970),
                     requestID: requestID,
                     modelHashSource: modelHashSource,
@@ -1663,7 +1663,7 @@ actor InferenceRelay {
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
                 let issued = receiptHeader.map { _ in
-                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: completion.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
                 }
                 attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)

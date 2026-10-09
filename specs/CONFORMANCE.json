@@ -2998,7 +2998,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1669",
-        "rationale": "Ultra >=256 GB default recommendedMaxBatch is 8 after Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B. 128-255 GB Ultra stays 4. Hard cap remains 8. Not a fleet promote and not continuous_batching on."
+        "rationale": "Ultra >=256 GB default recommendedMaxBatch is 8 after Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B. 128-255 GB Ultra stays 4. Tier default stays 8; the served hard cap is 32 (SPEC-023 v0.22.16) and only a measured or operator-set depth exceeds the tier default. Not a fleet promote and not continuous_batching on."
       }
     },
     {
