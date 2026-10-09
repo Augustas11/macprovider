@@ -49,7 +49,7 @@ do
 done
 token_cleanup="$(grep -Fn 'rm -f -- "$github_api_curl_config"' "$anonymous_discovery_verifier" | cut -d: -f1)"
 env_cleanup="$(grep -Fn 'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \' "$anonymous_discovery_verifier" | cut -d: -f1 | head -n 1)"
-asset_download="$(grep -Fn 'curl "${curl_args[@]}" "$url"' "$anonymous_discovery_verifier" | cut -d: -f1)"
+asset_download="$(grep -Fn 'anonymous_download "$url" "$work/$name"' "$anonymous_discovery_verifier" | cut -d: -f1)"
 client_exec="$(grep -Fn '"$client" update --check' "$anonymous_discovery_verifier" | cut -d: -f1)"
 if [[ ! "$token_cleanup" =~ ^[1-9][0-9]*$ || ! "$asset_download" =~ ^[1-9][0-9]*$ || "$token_cleanup" -ge "$asset_download" ]]; then
   echo "anonymous release discovery must delete fixture auth config before post-listing downloads" >&2
@@ -1608,6 +1608,7 @@ for requirement in (
     "--minimum-sequence",
     "--require-immutable",
     "scripts/verify-anonymous-release-discovery.sh",
+    "validity_hours must be 168",
     '--issued-at "$issued_at"',
     '--expires-at "$expires_at"',
     "timedelta(hours=hours)",

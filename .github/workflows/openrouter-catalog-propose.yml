@@ -98,6 +98,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: openrouter-catalog-proposal
+          retention-days: 7
           path: ${{ env.PROPOSAL_OUTPUT_DIR }}/openrouter-catalog-proposal-*.json
           if-no-files-found: warn
 

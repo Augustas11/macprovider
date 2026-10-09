@@ -22,6 +22,10 @@ grep -Fq -- '--retry-all-errors' "$anonymous_verifier" || {
   printf '[test-renew-release-discovery-head] ERROR: anonymous verifier must retry transient HTTP asset errors\n' >&2
   exit 1
 }
+grep -Fq 'anonymous_download()' "$anonymous_verifier" || {
+  printf '[test-renew-release-discovery-head] ERROR: anonymous verifier must retry bounded asset 403/429 responses explicitly\n' >&2
+  exit 1
+}
 
 python3 - "$workflow" "$bridge" <<'PY'
 import pathlib
@@ -129,6 +133,7 @@ sign = workflow.split("- name: Sign a strictly greater renewal discovery head", 
 for requirement in (
     "VALIDITY_HOURS",
     "timedelta(hours=hours)",
+    "validity_hours must be 168",
     '--issued-at "$issued_at"',
     '--expires-at "$expires_at"',
 ):
@@ -162,5 +167,6 @@ bash -n "$bridge"
 if command -v shellcheck >/dev/null; then
   shellcheck -x "$bridge"
 fi
+bash "$root/scripts/test-anonymous-release-discovery-download.sh"
 
 printf '[test-renew-release-discovery-head] ok: protected renewal workflow fails closed\n'

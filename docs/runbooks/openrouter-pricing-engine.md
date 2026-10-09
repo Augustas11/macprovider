@@ -50,8 +50,12 @@ gh secret set OPENROUTER_API_KEY
 ```
 
 - `.github/workflows/openrouter-fetch-health-alarm.yml` — every 6 hours, probes
-  `https://openrouter.ai/api/v1/key` and fails on HTTP 401/403 or a snapshot
-  archive older than 48 hours (`scripts/check-openrouter-fetch-health.py`).
+  `https://openrouter.ai/api/v1/key` and validates the retained
+  `openrouter-catalog-proposal` Actions artifact from the latest successful
+  `main` proposer run. It fails on HTTP 401/403, missing/empty/invalid output,
+  an obsolete policy version, or output older than 48 hours
+  (`scripts/check-openrouter-fetch-health.py`). An unmerged review PR does not
+  make a successful scan stale; a feature-branch scan does not clear the alarm.
 - `.github/workflows/openrouter-catalog-propose.yml` — daily 17:00 UTC, runs
   `propose` over the seed candidate list and opens a docs-only review PR under
   `docs/research/openrouter-snapshots/` when the proposal digest is new. The

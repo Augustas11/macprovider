@@ -219,6 +219,24 @@ rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
 
+# ==== discovery-renew =========================================================
+fixture '{"runs": {"renew-release-discovery-head.yml": []}}'
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=24 run_rc 3 "short discovery renewal validity refused" scripts/ops/discovery-renew.sh status
+expect_err "must be 168"
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 0 "discovery renewal status" scripts/ops/discovery-renew.sh status
+expect_next dispatch:mutate
+case "$(next_field command)" in
+  *"renew-release-discovery-head.yml"*"validity_hours=168"*) ok ;;
+  *) bad "discovery renewal command: $(next_field command)" ;;
+esac
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 3 "discovery renewal dispatch needs owner" scripts/ops/discovery-renew.sh next --run
+expect_err "MACPROVIDER_OPS_OWNER is unset"
+MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 MACPROVIDER_OPS_OWNER=t run_rc 0 "discovery renewal dispatch through entrypoint" scripts/ops/discovery-renew.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
+run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
+expect_next env_approval:manual
+
 # ==== catalog-activate gateway proof ==========================================
 state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 printf 'test-buyer-token\n' > "$tmp/token"

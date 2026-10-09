@@ -12,17 +12,18 @@ on:
   workflow_dispatch:
     inputs:
       validity_hours:
-        description: "Signed-head validity window in hours (1-168; default 168)"
+        description: "Signed-head validity window in hours (must be 168)"
         required: false
         default: "168"
         type: string
   schedule:
-    # Weekly auto-dispatch, well inside the 168h (7-day) validity window, so the
-    # signed self-heal head never lapses because an operator forgot to dispatch.
+    # Twice weekly auto-dispatch, inside the 168h (7-day) validity window and
+    # before the 48h freshness alarm floor, so the signed self-heal head never
+    # lapses because an operator forgot to dispatch.
     # The run still enters the production-release environment and waits for the
     # antfleet-ops approval; the read-only discovery-head freshness alarm
     # (discovery-head-freshness-alarm.yml) backstops a skipped/late approval.
-    - cron: "0 16 * * 1"
+    - cron: "0 16 * * 1,4"
 
 permissions:
   contents: read
@@ -91,8 +92,8 @@ jobs:
             echo "::error::validity_hours must be a positive integer" >&2
             exit 1
           }
-          (( VALIDITY_HOURS_INPUT <= 168 )) || {
-            echo "::error::validity_hours must be at most 168" >&2
+          (( VALIDITY_HOURS_INPUT == 168 )) || {
+            echo "::error::validity_hours must be 168 so renewed heads stay inside the twice-weekly cadence and above the 48h alarm floor" >&2
             exit 1
           }
           # 1) Resolve the renewal base, the append-only ceiling, and the minimal
@@ -328,8 +329,8 @@ jobs:
           import sys
 
           hours = int(sys.argv[1])
-          if hours < 1 or hours > 168:
-              raise SystemExit("validity_hours must be between 1 and 168")
+          if hours != 168:
+              raise SystemExit("validity_hours must be 168")
           issued = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
           expires = issued + dt.timedelta(hours=hours)
           print(

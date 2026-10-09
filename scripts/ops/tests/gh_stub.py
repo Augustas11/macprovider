@@ -56,6 +56,8 @@ if pos[:2] == ["run", "list"]:
     if count("list-" + wf) >= fx.get("later_from", 1) and wf in fx.get("runs_later", {}):
         runs = fx["runs_later"][wf]
     emit(runs)
+if pos[:2] == ["workflow", "run"]:
+    sys.exit(0)
 if pos[:2] == ["run", "view"] and "--log" in argv:
     text = fx.get("logs", {}).get(pos[2])
     if text is None:

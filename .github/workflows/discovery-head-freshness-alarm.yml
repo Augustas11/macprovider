@@ -1,9 +1,10 @@
 name: Discovery head freshness alarm
 
 # Read-only backstop for the signed release-discovery self-heal rail. The renewal
-# workflow (renew-release-discovery-head.yml) auto-dispatches weekly at 168h
-# validity but still waits on the production-release approval; if that approval is
-# skipped/late, this alarm fails (and notifies) BEFORE the head lapses fleet-wide.
+# workflow (renew-release-discovery-head.yml) auto-dispatches twice weekly at
+# 168h validity but still waits on the production-release approval; if that
+# approval is skipped/late, this alarm fails (and notifies) BEFORE the head
+# lapses fleet-wide.
 # No secrets, no production-release environment, no signing — it only reads the
 # latest head's self-asserted expiry.
 

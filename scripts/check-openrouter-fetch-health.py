@@ -8,9 +8,10 @@ catalog pipeline silently. This check:
 
 1. Probes the documented OpenRouter key endpoint.
 2. ALARMs on missing key, 401/403, or any non-2xx (never prints the key).
-3. Optionally ALARMs when the local snapshot/proposal archive is older
-   than the 48-hour pricing-staleness window in
-   docs/runbooks/openrouter-pricing-engine.md.
+3. Optionally validates the retained proposal from a successful main producer
+   run, or checks a local archive, against the 48-hour pricing-staleness window
+   in docs/runbooks/openrouter-pricing-engine.md. Review latency is independent
+   of fetch freshness; empty or invalid producer artifacts never clear health.
 
 Read-only against the market: no catalog write, no sign, no Pearl deploy.
 """
@@ -23,7 +24,9 @@ import json
 import math
 import os
 import ssl
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -172,6 +175,53 @@ def fetch_key_status(
         raise
 
 
+def check_actions_proposal(repository: str, *, now: dt.datetime, max_age_hours: float) -> None:
+    """Check completed producer output, independent of the proposal's review queue."""
+    if repository != "Augustas11/macprovider":
+        fail("Actions proposal freshness only trusts Augustas11/macprovider")
+    try:
+        from scripts import openrouter_pricing_engine as engine
+    except ModuleNotFoundError:
+        import openrouter_pricing_engine as engine
+    try:
+        response = subprocess.run(
+            ["gh", "api", f"repos/{repository}/actions/workflows/openrouter-catalog-propose.yml/runs?branch=main&status=success&per_page=1"],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        runs = json.loads(response.stdout).get("workflow_runs", [])
+        if not isinstance(runs, list) or not runs:
+            fail("no successful main catalog-proposer run; inspect openrouter-catalog-propose.yml")
+        run = runs[0]
+        if (not isinstance(run, dict) or run.get("head_branch") != "main" or run.get("status") != "completed"
+                or run.get("conclusion") != "success" or run.get("event") not in {"schedule", "workflow_dispatch"}
+                or type(run.get("id")) is not int):
+            fail("catalog-proposer run is not a trusted completed main scan")
+        with tempfile.TemporaryDirectory(prefix="openrouter-health-") as tmp:
+            subprocess.run(
+                ["gh", "run", "download", str(run["id"]), "--repo", repository,
+                 "--name", "openrouter-catalog-proposal", "--dir", tmp],
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+            proposals = list(Path(tmp).glob("openrouter-catalog-proposal-*.json"))
+            if len(proposals) != 1:
+                fail("successful catalog-proposer run must retain exactly one proposal artifact")
+            if proposals[0].is_symlink() or proposals[0].stat().st_size > 5 * 1024 * 1024:
+                fail("retained catalog proposal has unsafe type or size")
+            proposal = json.loads(proposals[0].read_text(encoding="utf-8"))
+            engine.validate_catalog_proposal(proposal)
+            if not proposal["selected"]:
+                fail("latest catalog-proposer artifact is empty; no usable proposal was generated")
+            if proposal["policy_version"] != engine.load_json_file(engine.DEFAULT_POLICY_PATH, "policy")["policy_version"]:
+                fail("latest catalog-proposer artifact uses an obsolete pricing policy")
+            print(f"[openrouter-fetch-health] verified main producer run={run['id']}")
+            check_snapshot_archive(Path(tmp), now=now, max_age_hours=max_age_hours)
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        # Never echo subprocess output or API bodies into logs.
+        fail(f"cannot verify retained main catalog proposal ({type(error).__name__}); inspect producer artifacts")
+    except engine.EngineError as error:
+        fail(f"retained main catalog proposal failed validation: {error}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -190,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="directory of archived snapshots/proposals; omit to skip freshness",
     )
+    parser.add_argument("--actions-repository", default=None,
+                        help="verify retained successful main proposer artifact instead of the review archive")
     parser.add_argument(
         "--max-snapshot-age-hours",
         type=float,
@@ -212,7 +264,11 @@ def main(argv: list[str] | None = None) -> int:
     elif not args.skip_key_probe:
         check_key_status(fetch_key_status(os.environ.get("OPENROUTER_API_KEY", "")))
 
-    if args.snapshot_archive:
+    if args.snapshot_archive and args.actions_repository:
+        fail("choose one freshness source: Actions producer or local archive")
+    if args.actions_repository:
+        check_actions_proposal(args.actions_repository, now=now, max_age_hours=args.max_snapshot_age_hours)
+    elif args.snapshot_archive:
         check_snapshot_archive(
             Path(args.snapshot_archive),
             now=now,
