@@ -1142,7 +1142,10 @@ struct CreatorStatusCommand: AsyncParsableCommand {
             out["pool_model_pricing_bounds"] = bounds?.json ?? NSNull()
         }
         if let poolID, let state = try context.home.manifestState(poolID), let window = CreatorOperations.manifestWindow(state) {
+            // From manifest-state.json on this Mac, not the coordinator: it
+            // can be stale or absent when a manifest was submitted elsewhere.
             out["local_manifest"] = [
+                "source": "local manifest state",
                 "manifest_version": state.manifestVersion, "manifest_core_digest": state.manifestCoreDigest,
                 "effective_from": window.effectiveFrom, "expires_at": window.expiresAt,
             ]

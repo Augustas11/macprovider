@@ -4,7 +4,7 @@ This guide takes an outside creator from a fresh Mac to a private Trusted
 Pool that serves your own model and earns credits, using only public
 surfaces. You sign everything on your own Mac. Your keys never leave it.
 
-Normative source: SPEC-043 0.3.0 (self-serve private pools) and SPEC-042
+Normative source: SPEC-043 0.3.1 (self-serve private pools) and SPEC-042
 (pool entries). A private pool is reachable only by buyer accounts you
 authorize. Public listing is operator-only and is not part of this guide.
 
@@ -157,8 +157,10 @@ in-place edit.
 
 > **Manifest timing.** A higher manifest version takes effect when you submit
 > it; it does not wait for the previous version to expire.
-> `creator status --pool <pool-id>` shows the accepted version's
-> `effective_from` and `expires_at`.
+> `creator status --pool <pool-id>` shows, under `local_manifest`, the
+> `effective_from` and `expires_at` of the last manifest signed on this Mac.
+> That is local manifest state, not read from the coordinator: on another Mac,
+> or after a newer manifest was submitted elsewhere, it can be stale or absent.
 
 `sign` reads the coordinator's pricing bounds (`creator status` and
 `creator agree` show them too) and refuses a rate outside them before
@@ -279,7 +281,7 @@ Notes:
 
 ## Limits
 
-Per creator account (SPEC-043 0.3.0, enforced by the coordinator):
+Per creator account (SPEC-043 0.3.1, enforced by the coordinator):
 
 | Limit | Value | Error |
 |---|---|---|
