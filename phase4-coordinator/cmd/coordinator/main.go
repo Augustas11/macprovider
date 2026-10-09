@@ -432,6 +432,10 @@ func main() {
 		os.Exit(1)
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
+	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
+		os.Exit(1)
+	}
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
@@ -1324,6 +1328,7 @@ func main() {
 	logger.Info().
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 		Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+		Bool("billing.ceiling_restatement_enabled", cfg.Billing.CeilingRestatementEnabled).
 		Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 		Str("event", "spec005_v0_4_route_layer_flag_init").
 		Msg("quarantine force-void route-layer flag initialized")
@@ -4287,9 +4292,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// them.
 		billingSnapshotCommitted, billingSnapshotID = true, snapshotID
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		if err := billingStores[0].SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "sighup"); err != nil {
+			logger.Error().Err(err).Msg("billing ceiling-restatement flag reload rejected")
+		}
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+			Bool("billing.ceiling_restatement_enabled", cfg.Billing.CeilingRestatementEnabled).
 			Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
