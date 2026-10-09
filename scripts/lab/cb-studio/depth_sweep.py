@@ -8,8 +8,9 @@ X-Request-ID so they route through the batch scheduler.
 
 Per depth it reports:
   agg_tok_s       completion tokens finished inside the window / window
-  ttft p50/p95    request start to first generated (content or reasoning) token
-  itl p50/p95     per-stream gaps between content chunks (all streams pooled)
+  ttft p50/p95    request start to first generated (content or reasoning) token,
+                  for requests started inside the window
+  itl p50/p95     per-stream gaps between streamed chunks inside the window
   decode p50      per-request (completion - 1) / (end - first token)
   errors          by HTTP status / error code
 
@@ -127,13 +128,16 @@ def run_depth(args, depth):
         s = r["stamps"]
         chunk_tokens = (r["completion"] / len(s)) if s else 0
         window_tokens += sum(chunk_tokens for x in s if measure_from <= x <= stop_at)
+        # Long outputs outlive the window, so TTFT and ITL use every request
+        # that started (or streamed) inside it, not only those that finished.
+        if s and r["t0"] >= measure_from and s[0] <= stop_at:
+            ttft.append(s[0] - r["t0"])
+        in_window = [x for x in s if measure_from <= x <= stop_at]
+        itl.extend(b - a for a, b in zip(in_window, in_window[1:]))
         if r["t0"] >= measure_from and r["end"] <= stop_at:
             finished += 1
-            if s:
-                ttft.append(s[0] - r["t0"])
-                itl.extend(b - a for a, b in zip(s, s[1:]))
-                if r["completion"] > 1 and r["end"] > s[0]:
-                    decode.append((r["completion"] - 1) / (r["end"] - s[0]))
+            if s and r["completion"] > 1 and r["end"] > s[0]:
+                decode.append((r["completion"] - 1) / (r["end"] - s[0]))
     row = {
         "label": args.label, "depth": depth, "prompt_tokens_target": args.prompt_tokens,
         "max_tokens": args.max_tokens, "window_s": args.window,
