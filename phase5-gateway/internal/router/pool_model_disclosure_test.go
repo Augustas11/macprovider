@@ -3,6 +3,7 @@ package router
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -285,5 +286,74 @@ func TestPoolModelDisclosureHeadersStrippedFromChatRefusals(t *testing.T) {
 			}
 			assertRefundedNoProviderAudit(t, dbPath, accountID)
 		})
+	}
+}
+
+// #1880 item 5: an authorized selected-pool GET /v1/models lists only that
+// pool's signed pool models, never a global catalog entry, and forwards the
+// pool to the coordinator; the unselected view lists no pool model.
+func TestModelsSelectedPoolViewExcludesGlobalCatalog(t *testing.T) {
+	poolModelID := "pool/" + testPoolID + "/creator-model"
+	models := `{"object":"list","data":[{"id":"model-a","object":"model","owned_by":"macprovider","created":1},` +
+		`{"id":"` + poolModelID + `","object":"model","owned_by":"macprovider","created":1,"macprovider_pool_model":{` +
+		`"pool_id":"` + testPoolID + `","pool_model_id":"` + poolModelID + `","disclosure_class":"pool_attested_unverified",` +
+		`"disclosure_text":"Pool-attested, not network-verified","runtime_sources":["mlx_cache"],` +
+		`"artifact_hash_algorithm":"macprovider.snapshot-manifest.v1","artifact_hash":"` + strings.Repeat("a", 64) + `",` +
+		`"max_context_tokens":8192,"price":{"prompt_rate_per_mtok":1,"prompt_cache_hit_rate_per_mtok":1,"completion_rate_per_mtok":2,"global_multiplier_ppm":1000000},` +
+		`"price_source":"pool_creator_signed","manifest_version":5,"manifest_core_digest":"` + strings.Repeat("d", 64) + `"}}]}`
+	var emitted []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/internal/routing":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"pools":{"enabled":true,"routeable_pools":["`+testPoolID+`"]}}`), nil
+		case "/v1/models":
+			emitted = append(emitted, r.Header.Get(poolEmitHeader))
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, models), nil
+		}
+		return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+	})}
+	h, st, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Features.TrustedPools = config.TrustedPoolsConfig{Enabled: true, AccountPools: map[string][]string{"acct_pool": {testPoolID}}}
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, st, cfg, "acct_pool")
+	list := func(selector string) []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		if selector != "" {
+			req.Header.Set(poolSelectHeader, selector)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("selector=%q status=%d body=%s", selector, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get(poolModelDisclosureResponseHeader) != "" || rec.Header().Get(poolManifestCoreDigestResponseHeader) != "" {
+			t.Fatalf("/v1/models carried pool-model disclosure headers: %v", rec.Header())
+		}
+		var body struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, item := range body.Data {
+			ids = append(ids, item.ID)
+		}
+		return ids
+	}
+	if ids := list(testPoolID); len(ids) != 1 || ids[0] != poolModelID {
+		t.Fatalf("selected-pool view = %v, want only %s", ids, poolModelID)
+	}
+	if ids := list(""); len(ids) != 1 || ids[0] != "model-a" {
+		t.Fatalf("default view = %v, want only the global entry", ids)
+	}
+	if len(emitted) != 2 || emitted[0] != testPoolID || emitted[1] != "" {
+		t.Fatalf("coordinator pool emit headers = %q", emitted)
 	}
 }
