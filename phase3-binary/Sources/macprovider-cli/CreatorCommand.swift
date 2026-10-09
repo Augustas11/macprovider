@@ -571,7 +571,9 @@ enum CreatorOperations {
                 throw CreatorCLIError.invalidInput("local manifest state is corrupt")
             }
             prevHash = digest
-            notBefore = max(notBefore, prevCore.expiresAtUnix)
+            // SPEC-042-R001 supersession: a higher version takes effect at its
+            // own not_before, which must not precede the version it replaces.
+            notBefore = max(notBefore, prevCore.notBeforeUnix)
         } else {
             let authority = try Curve25519.Signing.PrivateKey(rawRepresentation: keys.manifestAuthorityEd25519)
             version = 1
