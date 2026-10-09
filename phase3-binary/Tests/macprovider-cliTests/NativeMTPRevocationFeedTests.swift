@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import LocalAuthentication
 import XCTest
 @testable import macprovider_cli
 
@@ -531,6 +532,183 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
     }
 
+    func testNetworkFirstTimesOutBlockedAnchorCommitAndAllowsCleanRetry() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let store = BlockingRevocationStore(block: .commit)
+        defer { store.releaseIfNeeded() }
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let firstFeed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now)
+        let firstSignature = Self.signature(for: firstFeed, signer: signer, keyID: "revoker-a")
+        let task = Task {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: store,
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { url, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: url.lastPathComponent.hasSuffix(".json.sig") ? firstSignature : firstFeed
+                    )
+                },
+                now: now,
+                storeTransactionTimeoutSeconds: 0.05
+            )
+        }
+        XCTAssertTrue(store.waitUntilBlocked())
+        let start = Date()
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("transaction_timeout")) {
+            try await task.value
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+        XCTAssertNil(store.anchorSnapshot())
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("transaction_busy")) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: store,
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { url, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: url.lastPathComponent.hasSuffix(".json.sig") ? firstSignature : firstFeed
+                    )
+                },
+                now: now,
+                storeTransactionTimeoutSeconds: 0.05
+            )
+        }
+
+        store.release()
+        XCTAssertTrue(store.waitUntilCompleted())
+        store.setBlock(.none)
+        let secondFeed = try Self.feedData(generation: 2, signerKeyID: "revoker-a", tuples: [Self.digest("01")], now: now.addingTimeInterval(60))
+        let secondSignature = Self.signature(for: secondFeed, signer: signer, keyID: "revoker-a")
+        // The store signals before the executor releases its transaction slot.
+        // Retry only that brief busy interval, rather than assuming a sleep drains it.
+        var recovered: NativeMTPRevocationState?
+        let retryDeadline = Date().addingTimeInterval(1)
+        while recovered == nil {
+            do {
+                recovered = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                    pinnedSignerKeyID: "revoker-a",
+                    verifier: Self.verifier(signer: signer),
+                    store: store,
+                    origin: URL(string: "https://example.test/v1/")!,
+                    fetcher: { url, _ in
+                        NativeMTPRevocationFetchResponse(
+                            statusCode: 200,
+                            body: url.lastPathComponent.hasSuffix(".json.sig") ? secondSignature : secondFeed
+                        )
+                    },
+                    now: now.addingTimeInterval(60),
+                    storeTransactionTimeoutSeconds: 0.2
+                )
+            } catch let error as NativeMTPRevocationFeedError
+                where error == .storeFailed("transaction_busy") && Date() < retryDeadline {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+        let state = try XCTUnwrap(recovered)
+
+        XCTAssertEqual(state.source, .network)
+        XCTAssertEqual(state.feed.generation, 2)
+        XCTAssertTrue(state.isRevoked(tupleSHA256: Self.digest("01")))
+    }
+
+    func testNetworkFirstTimesOutBlockedCachedFallbackAnchorRead() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let store = BlockingRevocationStore(block: .loadAnchor)
+        defer { store.releaseIfNeeded() }
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let task = Task {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: store,
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+                now: now,
+                storeTransactionTimeoutSeconds: 0.05
+            )
+        }
+        XCTAssertTrue(store.waitUntilBlocked())
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("transaction_timeout")) {
+            try await task.value
+        }
+
+        store.release()
+        XCTAssertTrue(store.waitUntilCompleted())
+    }
+
+    func testNetworkFirstDoesNotFallbackToUnauthenticatedStateOnStoreErrors() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let feed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now)
+        let signature = Self.signature(for: feed, signer: signer, keyID: "revoker-a")
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("load_anchor_boom")) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: ThrowingRevocationStore(loadAnchorError: .storeFailed("load_anchor_boom")),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { url, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: url.lastPathComponent.hasSuffix(".json.sig") ? signature : feed
+                    )
+                },
+                now: now
+            )
+        }
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("commit_boom")) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: ThrowingRevocationStore(commitError: .storeFailed("commit_boom")),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { url, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: url.lastPathComponent.hasSuffix(".json.sig") ? signature : feed
+                    )
+                },
+                now: now
+            )
+        }
+
+        await XCTAssertThrowsNativeMTPRevocationError(.storeFailed("cached_anchor_boom")) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: ThrowingRevocationStore(loadAnchorError: .storeFailed("cached_anchor_boom")),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+                now: now
+            )
+        }
+    }
+
+    func testKeychainAnchorQueriesDisableInteractiveAuthentication() throws {
+        let readQuery = KeychainNativeMTPRevocationStore.anchorQuery(signerKeyID: "revoker-a", returningData: true)
+        XCTAssertEqual(readQuery[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUIFail as String)
+        XCTAssertEqual(readQuery[kSecReturnData as String] as? Bool, true)
+        XCTAssertEqual(readQuery[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
+        let readContext = try XCTUnwrap(readQuery[kSecUseAuthenticationContext as String] as? LAContext)
+        XCTAssertTrue(readContext.interactionNotAllowed)
+
+        let writeQuery = KeychainNativeMTPRevocationStore.anchorQuery(signerKeyID: "revoker-a")
+        XCTAssertEqual(writeQuery[kSecUseAuthenticationUI as String] as? String, kSecUseAuthenticationUIFail as String)
+        XCTAssertNil(writeQuery[kSecReturnData as String])
+        let writeContext = try XCTUnwrap(writeQuery[kSecUseAuthenticationContext as String] as? LAContext)
+        XCTAssertTrue(writeContext.interactionNotAllowed)
+    }
+
     func testRefreshNotifiesWhenCurrentTupleBecomesRevoked() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let store = MemoryRevocationStore()
@@ -728,6 +906,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 }
 
 private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked Sendable {
+    private let lock = NSLock()
     var anchor: NativeMTPRevocationAnchor?
     var cacheAnchor: NativeMTPRevocationAnchor?
     var cachedFeed: Data?
@@ -737,10 +916,12 @@ private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked 
     var priorCachedSignature: Data?
 
     func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor? {
-        anchor
+        lock.withLock { anchor }
     }
 
     func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
         guard let cachedFeed,
               let cachedSignature,
               let cacheAnchor else {
@@ -762,6 +943,8 @@ private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked 
         anchor: NativeMTPRevocationAnchor,
         signerKeyID: String
     ) throws {
+        lock.lock()
+        defer { lock.unlock() }
         if let cacheAnchor, cacheAnchor.generation < anchor.generation {
             priorCachedFeed = cachedFeed
             priorCachedSignature = cachedSignature
@@ -775,6 +958,136 @@ private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked 
         cachedSignature = signatureData
         cacheAnchor = anchor
         self.anchor = anchor
+    }
+
+    func anchorSnapshot() -> NativeMTPRevocationAnchor? {
+        lock.withLock { anchor }
+    }
+}
+
+private final class BlockingRevocationStore: NativeMTPRevocationStoreRequiresBoundedAsyncTransactions, @unchecked Sendable {
+    enum Block {
+        case none
+        case loadAnchor
+        case commit
+    }
+
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let entered = DispatchSemaphore(value: 0)
+    private let completed = DispatchSemaphore(value: 0)
+    private let base = MemoryRevocationStore()
+    private var released = false
+    private var block: Block
+
+    init(block: Block) {
+        self.block = block
+    }
+
+    func release() {
+        lock.lock()
+        guard !released else {
+            lock.unlock()
+            return
+        }
+        released = true
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func releaseIfNeeded() {
+        release()
+    }
+
+    func waitUntilBlocked() -> Bool {
+        entered.wait(timeout: .now() + 1) == .success
+    }
+
+    func waitUntilCompleted() -> Bool {
+        completed.wait(timeout: .now() + 1) == .success
+    }
+
+    func setBlock(_ block: Block) {
+        lock.lock()
+        self.block = block
+        lock.unlock()
+    }
+
+    func anchorSnapshot() -> NativeMTPRevocationAnchor? {
+        base.anchorSnapshot()
+    }
+
+    func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor? {
+        if currentBlock() == .loadAnchor {
+            entered.signal()
+            semaphore.wait()
+        }
+        let result = try base.loadAnchor(signerKeyID: signerKeyID)
+        if currentBlock() == .loadAnchor {
+            completed.signal()
+        }
+        return result
+    }
+
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        try base.loadCachedRecord(signerKeyID: signerKeyID)
+    }
+
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        if currentBlock() == .commit {
+            entered.signal()
+            semaphore.wait()
+        }
+        try base.commitAcceptedFeed(
+            feedData,
+            signatureData: signatureData,
+            anchor: anchor,
+            signerKeyID: signerKeyID
+        )
+        if currentBlock() == .commit {
+            completed.signal()
+        }
+    }
+
+    private func currentBlock() -> Block {
+        lock.lock()
+        defer { lock.unlock() }
+        return block
+    }
+}
+
+private final class ThrowingRevocationStore: NativeMTPRevocationStore, @unchecked Sendable {
+    let loadAnchorError: NativeMTPRevocationFeedError?
+    let commitError: NativeMTPRevocationFeedError?
+
+    init(loadAnchorError: NativeMTPRevocationFeedError? = nil, commitError: NativeMTPRevocationFeedError? = nil) {
+        self.loadAnchorError = loadAnchorError
+        self.commitError = commitError
+    }
+
+    func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor? {
+        if let loadAnchorError {
+            throw loadAnchorError
+        }
+        return nil
+    }
+
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        nil
+    }
+
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        if let commitError { throw commitError }
     }
 }
 
