@@ -52,6 +52,12 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   in Pearl's journal, and `verify_live_rollout` is refused while the
   coordinator counts `posture_unapproved_code_identity` rejections since the
   recommendation-bump restart.
+- `cli-release.sh` step `release_tag`, just before `promotion`, creates the
+  signed annotated `v<ver>` tag on the verified candidate SHA with the
+  operator's git signing key, checks it with `git verify-tag`, and pushes it;
+  the promotion workflow requires that tag to exist. It is done when origin's
+  `v<ver>` is annotated and peels to the candidate SHA, and it refuses when
+  `v<ver>` exists on another commit.
 - Steps the operator owns are `manual`: an environment approval click, a
   Pearl `coordinator.yaml` edit, or a provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record

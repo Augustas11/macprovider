@@ -41,8 +41,12 @@
 #                           in accepted_ids AND its code_cdhash is approved (a verifying
 #                           v<ver>.json in metadata_dir or an approved_code_identities entry),
 #                           with the on-disk config no newer than the running coordinator
+#   7a2 release_tag         signed annotated tag v<ver> on the candidate SHA, pushed to origin
+#                           (promote-acceptance-candidate.yml requires it); signed with the
+#                           operator's git signing key, checked with git verify-tag; refused
+#                           when v<ver> already exists on another commit or is not annotated
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
-#                           sets physical_acceptance_confirmed=true, after 4, 6, 7 and 7a
+#                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
 #   8 recommendation_bump   Pearl latest_binary_version + compatibility target
 #   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml; refused while the
 #                           coordinator has counted posture_unapproved_code_identity rejections
@@ -424,6 +428,30 @@ bash scripts/release-staged-version-policy.sh v$V" \
     next_meta registrations "$TRAIN_DOC#promotion-gate-checklist"
   fi
 
+  # 7a2. signed release tag on the candidate SHA (the promotion workflow runs
+  # verify-release-tag-target.sh --require-existing).
+  local tag_state=""
+  if [ "$published" = true ]; then
+    step release_tag "done" "v$V published"
+  else
+    tag_state="$(release_tag_state "v$V" "$ok_sha")"
+    case "$tag_state" in
+      on_candidate) step release_tag "done" "annotated v$V -> $ok_sha" ;;
+      absent)
+        step release_tag pending "v$V absent on origin"
+        if is_sha40 "$ok_sha" && marker_run_matches signed_byte_verification "$ok_id"; then
+          set_next release_tag mutate "Create and push the signed annotated tag v$V on $ok_sha" \
+            "scripts/ops/cli-release.sh _release-tag $V $ok_sha"
+        else
+          set_next release_tag blocked "Tag v$V" "" "no verified candidate SHA for v$V is recorded"
+        fi ;;
+      *)
+        step release_tag pending "$tag_state"
+        set_next release_tag blocked "Resolve the existing v$V tag" "" \
+          "v$V on origin is $tag_state, not an annotated tag on candidate $ok_sha; refusing to move or reuse it" ;;
+    esac
+  fi
+
   # 7. promotion.
   local cs
   cs="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')"
@@ -443,9 +471,9 @@ bash scripts/release-staged-version-policy.sh v$V" \
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
       ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha" ||
-      [ "$REG_STATE" = unknown ] || [ -n "$REG_MISSING" ]; then
+      [ "$REG_STATE" = unknown ] || [ -n "$REG_MISSING" ] || [ "$tag_state" != on_candidate ]; then
       set_next promotion blocked "Promote v$V" "" \
-        "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence and live Pearl registrations for $ok_sha"
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
 "gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
@@ -780,6 +808,52 @@ PY
   log "verified: checksums.txt sha256=$cs compatibility_set_id=$compat_id"
 }
 
+# release_tag_state TAG SHA -> absent | on_candidate | on <commit> | lightweight on <commit>
+# | ambiguous | unreadable, from origin's refs (the promotion workflow reads the same).
+release_tag_state() {
+  local rows obj peeled
+  rows="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" 2>/dev/null)" || { printf 'unreadable'; return; }
+  obj="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$1" '$2 == r {print $1}')"
+  peeled="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$1^{}" '$2 == r {print $1}')"
+  if [ -z "$obj" ]; then printf 'absent'
+  elif [ "$(printf '%s\n' "$obj" | wc -l | tr -d ' ')" != 1 ]; then printf 'ambiguous'
+  elif [ -z "$peeled" ]; then printf 'lightweight on %s' "$obj"
+  elif [ -n "${2-}" ] && [ "$peeled" = "$2" ]; then printf 'on_candidate'
+  else printf 'on %s' "$peeled"
+  fi
+}
+
+# _release-tag VERSION CANDIDATE_SHA
+# Create v<ver> as a signed annotated tag on the verified candidate SHA with the
+# operator's git signing key, verify it, push it, and confirm origin's target.
+release_tag() {
+  local V="$1" sha="$2" tag state
+  is_semver "$V" && is_sha40 "$sha" || die "usage: _release-tag VERSION CANDIDATE_SHA"
+  tag="v$V"
+  [ "$(marker_field "cli-release-$V" signed_byte_verification 'd.get("candidate_sha")')" = "$sha" ] ||
+    refuse "$sha is not the verified candidate SHA for $V"
+  state="$(release_tag_state "$tag" "$sha")"
+  case "$state" in
+    on_candidate) log "$tag already targets $sha on origin"; return 0 ;;
+    absent) ;;
+    *) refuse "$tag on origin is $state; refusing to create or move it" ;;
+  esac
+  git -C "$REPO_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null || git -C "$REPO_ROOT" fetch -q origin "$sha" ||
+    refuse "candidate commit $sha is not available locally or on origin"
+  if git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    [ "$(git -C "$REPO_ROOT" rev-parse "$tag^{commit}")" = "$sha" ] &&
+      [ "$(git -C "$REPO_ROOT" cat-file -t "refs/tags/$tag")" = tag ] ||
+      refuse "local $tag exists and is not an annotated tag on $sha; delete the local tag and re-run"
+  else
+    git -C "$REPO_ROOT" tag -s -a "$tag" -m "macprovider-cli $V" "$sha" ||
+      refuse "git tag -s failed; configure the operator's git signing key (user.signingkey)"
+  fi
+  git -C "$REPO_ROOT" verify-tag "$tag" >/dev/null 2>&1 || refuse "git verify-tag $tag failed; not pushing"
+  git -C "$REPO_ROOT" push -q origin "refs/tags/$tag" || refuse "pushing $tag failed"
+  [ "$(release_tag_state "$tag" "$sha")" = on_candidate ] || refuse "origin $tag does not target $sha after the push"
+  log "pushed signed annotated $tag -> $sha"
+}
+
 # _stage-privacy-identity VERSION
 # Copy the verified candidate pearl-release.json and its signature, byte for
 # byte, into Pearl's privacy release metadata dir as v<ver>.json/.sig, then
@@ -817,6 +891,7 @@ internal() {
   case "$1" in
     _verify-candidate) shift; verify_candidate "$@" ;;
     _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
+    _release-tag) shift; release_tag "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

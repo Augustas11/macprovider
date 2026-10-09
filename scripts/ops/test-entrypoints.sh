@@ -47,6 +47,9 @@ LIVE="$(sed -n 's/^ *latest_binary_version: "\([0-9][0-9.]*\)".*/\1/p' \
 # ---- repo fixture -----------------------------------------------------------
 git clone -q --bare --shared "$SRC_REPO" "$tmp/origin.git"
 git clone -q --shared --no-checkout "$tmp/origin.git" "$tmp/work"
+# The candidate's release tag starts absent, whatever the source repo holds.
+git -C "$tmp/origin.git" tag -d "v$CAND" >/dev/null 2>&1 || true
+git -C "$tmp/work" tag -d "v$CAND" >/dev/null 2>&1 || true
 W="$tmp/work"
 git -C "$W" checkout -q --detach "$(git -C "$SRC_REPO" rev-parse HEAD)"
 git -C "$W" checkout -q -B main
@@ -269,13 +272,37 @@ cp -R "$tmp/state" "$tmp/state-cf"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-cf" run_rc 0 "documented carry-forward accepted" scripts/ops/cli-release.sh next --done e2e_gate --carry-forward CF-OPS-TEST
 run_rc 0 "journey run naming the candidate accepted" scripts/ops/cli-release.sh next --done e2e_gate --run-id "https://github.com/test/repo/actions/runs/555"
 run_rc 0 "cli status after e2e" scripts/ops/cli-release.sh status
+expect_next release_tag:mutate
+if [ "$(state_of release_tag)" = "pending" ]; then ok; else bad "absent tag not pending"; fi
+# The operator's git signing key: a throwaway SSH key trusted for verify-tag.
+ssh-keygen -q -t ed25519 -N '' -C t -f "$tmp/keys/git-signing" </dev/null
+printf 't@example.invalid %s\n' "$(cat "$tmp/keys/git-signing.pub")" > "$tmp/keys/allowed_signers"
+git -C "$W" config user.name t
+git -C "$W" config user.email t@example.invalid
+git -C "$W" config gpg.format ssh
+git -C "$W" config user.signingkey "$tmp/keys/git-signing"
+git -C "$W" config gpg.ssh.allowedSignersFile "$tmp/keys/allowed_signers"
+# A tag on another commit is never moved or reused.
+git -C "$W" tag -a "v$CAND" -m other "$B~1"
+git -C "$W" push -q origin "refs/tags/v$CAND"
+run_rc 0 "cli status with v$CAND on another commit" scripts/ops/cli-release.sh status
+expect_next release_tag:blocked
+run_rc 3 "release tag refused when v$CAND exists on another commit" scripts/ops/cli-release.sh _release-tag "$CAND" "$B"
+expect_err "refusing to create or move it"
+git -C "$W" push -q origin ":refs/tags/v$CAND"
+git -C "$W" tag -d "v$CAND" >/dev/null
+MACPROVIDER_OPS_OWNER=t run_rc 0 "release_tag creates the signed annotated tag" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if [ "$(git -C "$W" ls-remote origin "refs/tags/v$CAND^{}" | awk '{print $1}')" = "$B" ] && git -C "$W" verify-tag "v$CAND" 2>/dev/null; then ok; else bad "v$CAND not a verified tag on $B at origin"; fi
+run_rc 0 "cli status with the tag present" scripts/ops/cli-release.sh status
+if [ "$(state_of release_tag)" = "done" ]; then ok; else bad "present tag not done"; fi
 expect_next promotion:mutate
 case "$(next_field command)" in
   *"candidate_run_id=111"*"physical_acceptance_confirmed=true"*) ok ;;
   *) bad "promotion command: $(next_field command)" ;;
 esac
 case " $(step_ids) " in
-  *" e2e_gate registrations promotion "*) ok ;;
+  *" e2e_gate registrations release_tag promotion "*) ok ;;
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
 esac
 # Registrations gate: each missing Pearl registration refuses promotion by name.

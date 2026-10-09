@@ -812,14 +812,23 @@ mainland-provider installer handoff.
    verifying `v<ver>.json` in `metadata_dir` or an
    `approved_code_identities` entry, with the on-disk config no newer than
    the running coordinator. The refusal names the missing item.
-7. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
+7. Signed release tag (`release_tag`): `promote-acceptance-candidate.yml`
+   runs `scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin
+   --require-existing`, so `v<ver>` must already be an annotated tag on the
+   candidate SHA. `cli-release.sh next --run` creates it with the operator's
+   git signing key (`git tag -s -a v<ver> -m "macprovider-cli <ver>"
+   <candidate_sha>`), checks it with `git verify-tag`, pushes it and confirms
+   origin's target. It refuses when `v<ver>` already exists on another commit
+   or as a lightweight tag. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
+   until this tag was made by hand.
+8. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
-8. `verify-live-coordinator-release-rollout` before publishing discovery.
+9. `verify-live-coordinator-release-rollout` before publishing discovery.
    `cli-release.sh` refuses it after the recommendation bump while the
    coordinator counts `posture_unapproved_code_identity` rejections since its
    restart (`relayblind_privacy_posture_rejections_total`, journal fallback).
-9. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
-10. Curl-channel `https://get.malibu.tech/install.sh`:
+10. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
      against the tag is green. Confirm
@@ -859,6 +868,10 @@ mainland-provider installer handoff.
   `privacy_release_identity`; never hand-edit `approved_code_identities` for a
   signed release. `cli-release.sh status` reports the live state as facts
   `privacy_release_metadata_dir` and `privacy_release_identity`.
+- Never hand-make the `v<ver>` release tag: `cli-release.sh` step
+  `release_tag` signs, verifies and pushes it on the verified candidate SHA.
+  It needs the operator's git signing key configured (`user.signingkey`, and
+  `gpg.format ssh` for an SSH key) in the checkout that runs the step.
 - Pearl coordinator/gateway runtime: **one cut of current `main`**. Do not
   dual-dispatch `pearl-runtime-release.yml` from two sessions. Record owner +
   payload + live tag in the Pearl paragraph above before/after apply.
