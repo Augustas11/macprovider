@@ -23,6 +23,10 @@ actor InferenceRelay {
         let state: RelayRequestState
     }
 
+    /// Active requests whose end frame is already sent; they no longer count
+    /// against the admission limit.
+    private var endedRequestIDs: Set<String> = []
+
     private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let loadedModelID: String?
@@ -282,7 +286,7 @@ actor InferenceRelay {
         }
 
         let admissionLimit = await currentAdmissionLimit()
-        guard active.count < admissionLimit else {
+        guard active.count - endedRequestIDs.count < admissionLimit else {
             if let relayBlindOpened {
                 try await terminateClaimedRelay(
                     relayBlindOpened, requestID: requestID, stream: stream, error: .providerUnsupported
@@ -376,7 +380,26 @@ actor InferenceRelay {
         let state = RelayRequestState(relayBlindSettlement: settlementAttempt)
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
+        // Stop counting this request against admission before its end frame
+        // reaches the coordinator: a buyer that re-issues the instant the end
+        // arrives must not race the task's teardown into an
+        // `error_queue_full` refusal (#1906). The entry stays in `active`
+        // until the task returns, so drain still waits for post-end work.
+        let releasingSendFrame: SendFrame = { [weak self, state, sendFrame] frame in
+            let isEnd = (frame["type"] as? String) == "inference_response_end"
+            if isEnd {
+                await self?.markEnded(requestID, state: state)
+            }
+            do {
+                try await sendFrame(frame)
+            } catch {
+                // The coordinator never saw this end, so the request still
+                // holds its admission slot there; count it here again.
+                if isEnd { await self?.unmarkEnded(requestID, state: state) }
+                throw error
+            }
+        }
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -398,9 +421,9 @@ actor InferenceRelay {
                 streamInterval: streamInterval,
                 relayBlindOpened: relayBlindOpened,
                 relayBlindRuntime: relayBlindRuntime,
-                sendFrame: sendFrame
+                sendFrame: releasingSendFrame
             )
-            await self?.removeActive(requestID)
+            await self?.removeActive(requestID, state: state)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
     }
@@ -468,6 +491,7 @@ actor InferenceRelay {
     func cancelAllAndClear() {
         cancelAll()
         active.removeAll()
+        endedRequestIDs.removeAll()
     }
 
     func waitUntilIdle(timeoutSeconds: Int) async -> Bool {
@@ -488,8 +512,20 @@ actor InferenceRelay {
         return true
     }
 
-    private func removeActive(_ requestID: String) {
+    private func markEnded(_ requestID: String, state: RelayRequestState) {
+        guard active[requestID]?.state === state else { return }
+        endedRequestIDs.insert(requestID)
+    }
+
+    private func unmarkEnded(_ requestID: String, state: RelayRequestState) {
+        guard active[requestID]?.state === state else { return }
+        endedRequestIDs.remove(requestID)
+    }
+
+    private func removeActive(_ requestID: String, state: RelayRequestState) {
+        guard active[requestID]?.state === state else { return }
         active.removeValue(forKey: requestID)
+        endedRequestIDs.remove(requestID)
     }
 
     private func sendNAK(inReplyTo: String, code: String, message: String) async throws {
@@ -1520,7 +1556,7 @@ actor InferenceRelay {
                         providerID: receiptProviderID,
                         request: request,
                         completion: cancelled,
-                        ttftMs: 0,
+                        ttftMs: cancelled.ttftMilliseconds ?? 0,
                         unixTsSeconds: Int64(Date().timeIntervalSince1970),
                         requestID: requestID,
                         modelHashSource: modelHashSource,
@@ -1551,7 +1587,7 @@ actor InferenceRelay {
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
                     let issued = receiptHeader.map { _ in
-                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: cancelled.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
                     }
                     attachRelayBlindSettlementReceipt(&endFrame, state: state)
                     try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
@@ -1618,7 +1654,7 @@ actor InferenceRelay {
                     providerID: receiptProviderID,
                     request: request,
                     completion: completion,
-                    ttftMs: 0,
+                    ttftMs: completion.ttftMilliseconds ?? 0,
                     unixTsSeconds: Int64(Date().timeIntervalSince1970),
                     requestID: requestID,
                     modelHashSource: modelHashSource,
@@ -1640,7 +1676,7 @@ actor InferenceRelay {
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
                 let issued = receiptHeader.map { _ in
-                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: completion.ttftMilliseconds ?? 0, unixTs: Int64(Date().timeIntervalSince1970))
                 }
                 attachRelayBlindSettlementReceipt(&endFrame, state: state)
                 try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)

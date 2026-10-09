@@ -299,6 +299,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	// SPEC-022 R-12.8: bearer, account, request id and the signed-finality
 	// capability, set together; subject.AccountID is account.
 	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
+	advertiseCapacityShed429(up.Header)
 	up.Header.Set(relayBlindExecutionHeader, consumed.ExecutionAuthorization)
 	// Chat is not built by relayBlindUpstream. Stamp the trusted marker on
 	// this empty header set; buyer-supplied copies never reach it.

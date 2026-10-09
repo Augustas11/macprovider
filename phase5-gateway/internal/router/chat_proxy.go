@@ -714,6 +714,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-022 R-12.8: bearer, account, request id and the
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
+			advertiseCapacityShed429(upReq.Header)
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
 			// budget as authenticated dispatch metadata instead, so an omitted
@@ -877,7 +878,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		if !s.cfg.Retry503.Enabled || maxAttempts == 1 {
 			return resp, false, priorProviderDispatch, nil
 		}
-		if resp.StatusCode != http.StatusServiceUnavailable && resp.StatusCode != http.StatusBadGateway {
+		if resp.StatusCode != http.StatusServiceUnavailable && resp.StatusCode != http.StatusBadGateway && resp.StatusCode != http.StatusTooManyRequests {
 			if attempt > 1 && resp.StatusCode == http.StatusOK {
 				s.retry503Metrics.recordRecovered(requestIDClass(r), totalBackoffMS)
 				slog.Info("gateway coord retry recovered",
@@ -1065,6 +1066,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			passNoProvider()
 			return
 		}
+		passNoProvider()
+		return
+	}
+	if isCoordCapacityShed429(resp.StatusCode, body) {
 		passNoProvider()
 		return
 	}
@@ -1277,6 +1282,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
+		if isCoordCapacityShed429(resp.StatusCode, body) {
+			passNoProvider(body)
+			return
+		}
 		if isReceiptEligibleProviderErrorResponse(resp, body) {
 			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
@@ -2127,7 +2136,7 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
-	if (resp.StatusCode >= 500 && resp.StatusCode < 600) || coordinatorTier2PolicyError(resp.StatusCode, body) {
+	if (resp.StatusCode >= 500 && resp.StatusCode < 600) || coordinatorTier2PolicyError(resp.StatusCode, body) || isCoordCapacityShed429(resp.StatusCode, body) {
 		if !s.recordRefundedCoordinatorAudit(w, r, subject, window, refundedCoordinatorAuditOutcome(resp.StatusCode, body)) {
 			return
 		}
@@ -2176,7 +2185,7 @@ func demandNoProviderCoordinatorErrorSettlesAsProviderFailure(resp *http.Respons
 }
 
 func refundedCoordinatorAuditOutcome(status int, body []byte) string {
-	if isCoordNoProviderAvailable503(status, body) {
+	if isCoordNoProviderAvailable(status, body) {
 		return "no_provider_available"
 	}
 	if code := openAIErrorCode(body); code != "" {
@@ -2397,7 +2406,7 @@ func coordinatorPoolStateStaleError(status int, body []byte) bool {
 // marker is therefore settled conservatively instead of refunded or converted
 // into the wholesale 429 contract.
 func coordinatorStructuredNoProviderNeedsSettlement(status int, body []byte, h http.Header) bool {
-	if status != http.StatusServiceUnavailable || openAIErrorCode(body) != "no_provider_available" {
+	if (status != http.StatusServiceUnavailable && status != http.StatusTooManyRequests) || openAIErrorCode(body) != "no_provider_available" {
 		return false
 	}
 	if strings.TrimSpace(h.Get(gatewayPriorProviderDispatchHeader)) != "" {
@@ -2488,7 +2497,7 @@ func isCoordinatorChatRetryEligible(status int, body []byte, header http.Header,
 	if isCoordinatorRouteSnapshotPressure(status, body, header) {
 		return false
 	}
-	if cfg.RetryNoProviderAvailable && isCoordNoProviderAvailable503(status, body) {
+	if cfg.RetryNoProviderAvailable && isCoordNoProviderAvailable(status, body) {
 		return true
 	}
 	return isCoordTransientProvider502(status, body)
@@ -2519,6 +2528,33 @@ func isCoordTransientProvider502(status int, body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isCoordCapacityShed429 reports the coordinator's SPEC-006 §7.8 capacity
+// shed: the model has serving-capable supply but every provider is full. It
+// is a pre-dispatch outcome like the 503 it replaced (#1906): no inference
+// ran, so it refunds under the same no-prior-dispatch proof and passes
+// through to every buyer as a retryable 429 with the gateway Retry-After.
+// capacityShed429CapabilityHeader tells the coordinator that this gateway
+// handles the capacity 429 (isCoordCapacityShed429). A coordinator answers a
+// capacity shed with the pre-#1906 503 to any caller that does not send it,
+// so a coordinator deployed before this gateway keeps the old contract.
+const capacityShed429CapabilityHeader = "X-MacProvider-Capacity-Shed-429"
+
+// advertiseCapacityShed429 is called next to every setCoordinatorChatContext
+// (TestEveryCoordinatorChatBuilderAdvertisesCapacityShed429).
+func advertiseCapacityShed429(h http.Header) {
+	h.Set(capacityShed429CapabilityHeader, "1")
+}
+
+func isCoordCapacityShed429(status int, body []byte) bool {
+	return status == http.StatusTooManyRequests && openAIErrorCode(body) == "no_provider_available"
+}
+
+// isCoordNoProviderAvailable is a coordinator no-provider outcome in either
+// form: the 503 (no serving-capable supply) or the capacity-shed 429.
+func isCoordNoProviderAvailable(status int, body []byte) bool {
+	return isCoordNoProviderAvailable503(status, body) || isCoordCapacityShed429(status, body)
 }
 
 // isCoordNoProviderAvailable503 returns true when the coordinator's

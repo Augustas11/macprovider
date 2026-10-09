@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -44,6 +45,10 @@ type relayBlindService struct {
 	// waiters counts relay-blind slot waiters per provider. It is capped so
 	// relay-blind waits cannot fill the shared queue plaintext routing uses.
 	waiters map[string]int
+	// pick chooses the start of a candidate tier; nil means uniform random.
+	// Random needs no shared state, so no interleaving of models, key classes
+	// or request sizes can concentrate reservations on one provider.
+	pick func(n int) int
 }
 
 // relayBlindDurableWriteTimeout bounds each store write that must land even
@@ -421,7 +426,7 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 		}
 		return pool.Provider{}, relayBlindSlotUnavailable
 	}
-	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
+	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, s.liveSlotsFree(provider)) {
 		return acquired(provider)
 	}
 	deadline := s.slotQueueDeadline
@@ -466,16 +471,16 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 		if !usable {
 			return pool.Provider{}, relayBlindSlotSessionLost
 		}
-		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, s.liveSlotsFree(provider)) {
 			return acquired(provider)
 		}
 	}
 }
 
 func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
-	providers := s.pool.Snapshot()
-	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
-	for _, provider := range providers {
+	var providers []pool.Provider
+	var keys []relayblind.KeyRecord
+	for _, provider := range s.pool.Snapshot() {
 		eligible := relayBlindBindable(provider)
 		if requireFree {
 			eligible = provider.RoutingEligible()
@@ -493,10 +498,52 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
-			return provider, records[0], true
+			providers = append(providers, provider)
+			keys = append(keys, records[0])
 		}
 	}
-	return pool.Provider{}, relayblind.KeyRecord{}, false
+	order := s.orderRelayBlindCandidates(providers)
+	if len(order) == 0 {
+		return pool.Provider{}, relayblind.KeyRecord{}, false
+	}
+	return providers[order[0]], keys[order[0]], true
+}
+
+// orderRelayBlindCandidates returns the indexes of fully eligible providers
+// in selection order: providers whose free slot is not already claimed by the
+// slot queue first, then busy ones, each tier starting at a random provider.
+// A reservation is pinned to one provider, so binding every reservation to
+// the first provider in session order leaves idle providers unused while the
+// first one's queue times out.
+func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []int {
+	sorted := make([]int, len(providers))
+	for i := range sorted {
+		sorted[i] = i
+	}
+	sort.Slice(sorted, func(i, j int) bool { return providers[sorted[i]].AssignedID < providers[sorted[j]].AssignedID })
+	var free, busy []int
+	for _, i := range sorted {
+		provider := providers[i]
+		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, s.liveSlotsFree(provider))) {
+			free = append(free, i)
+		} else {
+			busy = append(busy, i)
+		}
+	}
+	pick := rand.IntN
+	if s.relayBlind != nil && s.relayBlind.pick != nil {
+		pick = s.relayBlind.pick
+	}
+	ordered := make([]int, 0, len(providers))
+	for _, tier := range [][]int{free, busy} {
+		if len(tier) == 0 {
+			continue
+		}
+		start := pick(len(tier))
+		ordered = append(ordered, tier[start:]...)
+		ordered = append(ordered, tier[:start]...)
+	}
+	return ordered
 }
 
 func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request) {

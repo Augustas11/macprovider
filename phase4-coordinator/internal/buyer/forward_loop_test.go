@@ -1108,10 +1108,12 @@ func TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
 		t.Fatalf("provider = %q, want p2 (after queue-full advance)", rr.Header().Get("X-MacProvider-Provider"))
 	}
-	// Queue-full closes capacity before failover, even when the rejected
-	// provider advertised free seats before this attempt.
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy || p1.SlotsFree != 0 || p1.RoutingEligible() {
-		t.Fatalf("p1 after queue-full = %+v ok=%v, want busy/0 and not routable", p1, ok)
+	// Queue-full closes routing before failover, even when the rejected
+	// provider advertised free seats before this attempt. The refused
+	// attempt never ran, so its seat stays in the coordinator count and the
+	// hold (not slots_free=0) is what blocks routing (#1906).
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy || p1.SlotsFree != 1 || p1.RoutingEligible() || !p1.SlotQueueEligible() {
+		t.Fatalf("p1 after queue-full = %+v ok=%v, want busy, refused seat returned, held (queueable, not routable)", p1, ok)
 	}
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {

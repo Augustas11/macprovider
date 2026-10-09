@@ -139,6 +139,38 @@ final class StructuredStreamingContentAccumulator: @unchecked Sendable {
     }
 }
 
+/// When a streaming batched row emitted its first buyer-visible chunk. The
+/// serial path reports TTFT from its own generate loop; without this a
+/// streaming batched receipt fell back to the whole request duration.
+/// Non-streaming receipts keep full generation latency (SPEC-015).
+final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var firstTokenAt: Date?
+
+    func mark(_ now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        if firstTokenAt == nil { firstTokenAt = now }
+    }
+
+    /// Wraps the buyer chunk sink so the first chunk actually emitted (after
+    /// stop, UTF-8 and tool filtering) marks the clock. Chunks emitted while
+    /// replaying another waiter's tokens (`replay`) never mark it.
+    func markingFirstChunk<Chunk>(replay: Bool, _ onChunk: @escaping (Chunk) -> Void) -> (Chunk) -> Void {
+        { chunk in
+            if !replay { self.mark() }
+            onChunk(chunk)
+        }
+    }
+
+    func ttftMilliseconds(since startedAt: Date) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let firstTokenAt else { return nil }
+        return max(0, Int64(firstTokenAt.timeIntervalSince(startedAt) * 1000))
+    }
+}
+
 final class StructuredStreamingIdleState: @unchecked Sendable {
     let enabled: Bool
     private let lock = NSLock()
@@ -4541,7 +4573,8 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int,
         maxDecodeLockstepWindow: Int,
         nativeMTPRoundByteCapacity: Int?,
-        nativeMTPStatusSink: NativeMTPStatusSink?
+        nativeMTPStatusSink: NativeMTPStatusSink?,
+        allowsRaggedPrefillOffsets: Bool = false
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
@@ -4560,6 +4593,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 max(1, prefillStepSize),
                 ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
             ),
+            allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
             queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
             // The row cap is the served context, not the scheduler's
@@ -4629,7 +4663,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillStepSize: prefillStepSize,
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
-                nativeMTPStatusSink: nativeMTPStatusSink
+                nativeMTPStatusSink: nativeMTPStatusSink,
+                allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
+                    .supportsRaggedPrefillOffsets ?? false
             ),
             allocator: allocator,
             backend: backend,
@@ -4745,7 +4781,15 @@ actor ModelRuntime: ModelRuntimeServing {
     nonisolated static func servePathDecodeLockstepWindow(
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) -> Int {
-        cacheKinds.contains(.recurrentMamba)
+        #if MACPROVIDER_LAB_HARNESS
+        // #1906 lab measurement only: hybrid multi-step decode windows.
+        if cacheKinds.contains(.recurrentMamba),
+           let raw = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_HYBRID_DECODE_WINDOW"],
+           let window = Int(raw), window >= 1 {
+            return min(window, ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow)
+        }
+        #endif
+        return cacheKinds.contains(.recurrentMamba)
             ? 1
             : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
     }
@@ -5962,6 +6006,7 @@ actor ModelRuntime: ModelRuntimeServing {
         decode: ([Int]) -> String,
         stopTokenFilter: StopTokenFilter,
         generationMilliseconds: Int64,
+        ttftMilliseconds: Int64? = nil,
         modelHash: String?
     ) throws -> ContinuousBatchFinalizedRow {
         // The serial path discards the model's end-of-generation token
@@ -6049,7 +6094,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kvCacheBytesReused: kvCacheBytesReused,
                 completionTokens: parsed.completionTokens,
                 generatedCompletionTokens: parsed.generatedCompletionTokens,
-                ttftMilliseconds: nil,
+                ttftMilliseconds: ttftMilliseconds,
                 generationMilliseconds: generationMilliseconds,
                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                 modelHashObserved: validObservedModelHash(modelHash),
@@ -6381,6 +6426,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let result: ContinuousBatchSchedulerResult
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
+            // Non-streaming receipts report full generation latency as TTFT
+            // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(submission.schedulerRequest)
             }
@@ -6411,6 +6458,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                    ttftMilliseconds: nil,
                     modelHash: snapshot.modelHash
                 )
             }
@@ -6829,6 +6877,7 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
+        let firstTokenClock = ContinuousBatchFirstTokenClock()
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
@@ -6844,13 +6893,16 @@ actor ModelRuntime: ModelRuntimeServing {
                         Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                         return
                     }
+                    // Receipt TTFT is the first buyer-visible chunk this row
+                    // emits, after stop/UTF-8/tool filtering. A duplicate or
+                    // replay waiter's catch-up events never define it.
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],
                         stopTokenFilter: stopTokenFilter,
                         requestStops: requestStops,
                         structuredAccumulator: structuredAccumulator,
                         idleState: idleState,
-                        onChunk: onChunk
+                        onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
                     ) {
                         Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                     }
@@ -6887,6 +6939,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
+                    ttftMilliseconds: firstTokenClock.ttftMilliseconds(since: completionStartedAt),
                     modelHash: snapshot.modelHash
                 )
             }
@@ -6908,14 +6961,20 @@ actor ModelRuntime: ModelRuntimeServing {
             // and any stop-string prefix; the serial stream's end sends the
             // remainder as the final text renders it, so the buyer's bytes
             // equal the receipt's.
-            let validated = try Self.finishContinuousBatchStream(
+            // The final flush can carry the first buyer-visible chunk when
+            // filtering held all earlier output back, so it marks the clock
+            // too and receipt TTFT is read only after it.
+            var validated = try Self.finishContinuousBatchStream(
                 finalized,
                 state: streamState,
                 request: request,
                 structuredAccumulator: structuredAccumulator,
                 idleState: idleState,
-                onChunk: onChunk
+                onChunk: firstTokenClock.markingFirstChunk(replay: false, onChunk)
             )
+            if validated.ttftMilliseconds == nil {
+                validated.ttftMilliseconds = firstTokenClock.ttftMilliseconds(since: completionStartedAt)
+            }
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             if !finalized.truncatedAtSerialStop,
@@ -11890,7 +11949,7 @@ struct CompletionResult: Sendable {
     let kvCacheBytesReused: Int
     let completionTokens: Int
     let generatedCompletionTokens: Int
-    let ttftMilliseconds: Int64?
+    var ttftMilliseconds: Int64?
     let generationMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?

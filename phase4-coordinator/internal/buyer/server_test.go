@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -5929,12 +5930,12 @@ func TestChatCompletionsStreamingWSTunneledQueueFullExhaustionShedsCapacity(t *t
 		}, 10*time.Second),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), withCapacityShed429(http.Header{"X-MacProvider-Retry": []string{"1"}}))
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	assertCapacityShed(t, rr)
+	if rr.Header().Get("X-MacProvider-Settlement-No-Prior-Dispatch") != "1" {
+		t.Fatalf("capacity shed after a refused dispatch lost the no-charge marker; headers=%v", rr.Header())
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
 		t.Fatalf("p1 = %#v ok=%v, want busy", p1, ok)
 	}
@@ -5948,11 +5949,121 @@ func TestChatCompletionsStreamingWSTunneledQueueFullExhaustionShedsCapacity(t *t
 	if rows[0].ErrorCode.String != "error_queue_full" {
 		t.Fatalf("rows[0].ErrorCode = %#v, want error_queue_full", rows[0].ErrorCode)
 	}
-	if rows[1].ProviderAssignedID.Valid || rows[1].Status != http.StatusServiceUnavailable || rows[1].Retried != 0 {
-		t.Fatalf("row = %+v, want aggregate 503/retried=0 without provider assignment", rows[1])
+	if rows[1].ProviderAssignedID.Valid || rows[1].Status != http.StatusTooManyRequests || rows[1].Retried != 0 {
+		t.Fatalf("row = %+v, want aggregate 429/retried=0 without provider assignment", rows[1])
 	}
-	if rows[1].Error.String != "No provider available for model model-a" {
-		t.Fatalf("rows[1].Error = %#v, want aggregate no-provider message", rows[1].Error)
+	if rows[1].Error.String != "All providers for model model-a are at capacity; retry shortly" {
+		t.Fatalf("rows[1].Error = %#v, want aggregate capacity-shed message", rows[1].Error)
+	}
+}
+
+// An older gateway does not send X-MacProvider-Capacity-Shed-429 and settles
+// an unknown 429 as a provider error, so without the header the coordinator
+// keeps the exact pre-#1906 503 no_provider_available terminal, request_log
+// row and no-charge marker (#1906 round-1 audit, version skew).
+func TestCapacityShedWithoutGatewayCapabilityKeepsPre1906503(t *testing.T) {
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 10*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want pre-#1906 503 without the capability header", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	if got := rr.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("legacy 503 Retry-After = %q, want none", got)
+	}
+	if rr.Header().Get("X-MacProvider-Settlement-No-Prior-Dispatch") != "1" {
+		t.Fatalf("legacy 503 lost the no-charge marker; headers=%v", rr.Header())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want provider queue-full row + aggregate row: %#v", len(rows), rows)
+	}
+	if rows[1].Status != http.StatusServiceUnavailable || rows[1].Error.String != "No provider available for model model-a" {
+		t.Fatalf("aggregate row = %+v, want pre-#1906 503 no-provider row", rows[1])
+	}
+
+	// The same request with the header gets the capacity 429.
+	registry2 := pool.NewRegistry(nil)
+	registerWithEndpoint(registry2, "full1", "s1", "model-a", pool.StateReady, 20000, 1, "http://127.0.0.1:1", 10)
+	zero := 0
+	registry2.ApplyStateUpdate("full1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server2 := buyer.NewServer(registry2, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5, SlotQueueDeadlineS: 1, SlotQueuePollIntervalMS: 5}))
+	legacy := postChat(t, server2, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if legacy.Code != http.StatusServiceUnavailable || !bytes.Contains(legacy.Body.Bytes(), []byte(`"message":"No provider available for model model-a"`)) {
+		t.Fatalf("queue expiry without header = %d %s, want pre-#1906 503", legacy.Code, legacy.Body.String())
+	}
+	assertCapacityShed(t, postChat(t, server2, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{})))
+}
+
+// A capacity refusal on one provider must not label a later, unrelated
+// failure on another provider as a capacity shed (#1906 round-1 audit).
+func TestCapacityRefusalDoesNotLabelLaterUnrelatedFailure(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	var mu sync.Mutex
+	var order []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              2,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			mu.Lock()
+			order = append(order, provider.ProviderID)
+			first := len(order) == 1
+			mu.Unlock()
+			if !first {
+				return nil, providerws.ErrRelayNAKFallback
+			}
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 10*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), withCapacityShed429(http.Header{"X-MacProvider-Retry": []string{"1"}}))
+
+	mu.Lock()
+	attempts := append([]string(nil), order...)
+	mu.Unlock()
+	if len(attempts) < 2 {
+		t.Fatalf("attempts=%v, want a queue-full refusal then a second provider", attempts)
+	}
+	if rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("unreachable second provider after an earlier queue-full was labelled a capacity shed: attempts=%v body=%s", attempts, rr.Body.String())
 	}
 }
 
@@ -5985,11 +6096,9 @@ func TestChatCompletionsStreamingWSTunneledQueueFullRefundsAdmissionQuota(t *tes
 		}, 10*time.Second),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), withCapacityShed429(http.Header{"X-MacProvider-Retry": []string{"1"}}))
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-	}
+	assertCapacityShed(t, rr)
 	if !adm.TryReserveRequest(pool.Provider{ProviderID: "p1", Tier: pool.TierProvisional}) {
 		t.Fatal("streaming queue-full did not refund admission quota")
 	}
@@ -6860,13 +6969,9 @@ func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
 		t.Fatalf("unknown body = %s", unknown.Body.String())
 	}
 
-	unavailable := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
-	if unavailable.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unavailable status = %d, body=%s", unavailable.Code, unavailable.Body.String())
-	}
-	if !bytes.Contains(unavailable.Body.Bytes(), []byte(`"code":"no_provider_available"`)) {
-		t.Fatalf("unavailable body = %s", unavailable.Body.String())
-	}
+	// The only provider is busy, not absent: a capacity shed (#1906).
+	unavailable := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), withCapacityShed429(nil))
+	assertCapacityShed(t, unavailable)
 }
 
 // SPEC-002 § 7.2 / issue #185: when the only provider for a model
@@ -7060,6 +7165,34 @@ func assertRetryableAndNoProviderBodyForwarded(t *testing.T, rr *httptest.Respon
 // error.message non-empty, error.param is null). Used by the cold-
 // start race test to ensure OpenAI-compatible SDK clients can route
 // on a structured error rather than a substring match.
+// withCapacityShed429 adds the gateway capability header that opts a request
+// into the SPEC-006 §7.8 capacity 429 (#1906); without it the coordinator
+// answers a capacity shed with the pre-#1906 503.
+func withCapacityShed429(h http.Header) http.Header {
+	out := http.Header{}
+	for k, v := range h {
+		out[k] = append([]string(nil), v...)
+	}
+	out.Set("X-MacProvider-Capacity-Shed-429", "1")
+	return out
+}
+
+// assertCapacityShed checks the SPEC-006 §7.8 capacity shed: the model has
+// serving-capable supply but every provider is full (#1906).
+func assertCapacityShed(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("capacity shed status = %d, want 429 body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("capacity shed Retry-After = %q, want 1", got)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "rate_limit_exceeded")
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("capacity shed body not retryable: %s", rr.Body.String())
+	}
+}
+
 func assertOpenAIErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, wantCode, wantType string) {
 	t.Helper()
 	var body struct {
@@ -8267,11 +8400,8 @@ func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
 		time.Unix(1716768000, 0),
 		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5, SlotQueueDeadlineS: 1, SlotQueuePollIntervalMS: 5}),
 	)
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("all-capacity-zero: expected 503; got %d body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{}))
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
@@ -8590,11 +8720,8 @@ func TestSlotQueueExpiresToNoProviderAvailable(t *testing.T) {
 		buyer.WithSlotQueueConfig(4, 20*time.Millisecond, time.Millisecond),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expired queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{}))
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
@@ -8617,20 +8744,17 @@ func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
 	errs := make(chan error, 4)
 	for i := 0; i < 4; i++ {
 		go func() {
-			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-			if rr.Code != http.StatusServiceUnavailable {
-				errs <- fmt.Errorf("background status = %d, want 503", rr.Code)
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{}))
+			if rr.Code != http.StatusTooManyRequests {
+				errs <- fmt.Errorf("background status = %d, want 429", rr.Code)
 				return
 			}
 			errs <- nil
 		}()
 	}
 	time.Sleep(10 * time.Millisecond)
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("fifth queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{}))
+	assertCapacityShed(t, rr)
 	for i := 0; i < 4; i++ {
 		if err := <-errs; err != nil {
 			t.Fatal(err)
@@ -8682,14 +8806,11 @@ func TestSlotQueueDoesNotApplyToHardPinnedProvider(t *testing.T) {
 	)
 
 	start := time.Now()
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"pinned"}})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("pinned busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{"X-MacProvider-Provider": []string{"pinned"}}))
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Fatalf("pinned busy request waited %v; hard pins should not enter slot queue", elapsed)
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueAppliesToWholesalePartner(t *testing.T) {
@@ -8711,18 +8832,15 @@ func TestSlotQueueAppliesToWholesalePartner(t *testing.T) {
 	)
 
 	start := time.Now()
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{
 		"Authorization":                    []string{"Bearer gateway-secret"},
 		"X-MacProvider-Account":            []string{"acct_openrouter"},
 		"X-MacProvider-Internal-Wholesale": []string{"1"},
-	})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("wholesale busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
-	}
+	}))
 	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
 		t.Fatalf("wholesale busy request returned before bounded slot queue deadline: elapsed=%v", elapsed)
 	}
-	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, rr)
 }
 
 func TestSlotQueueExitsWhenQueuedProviderStartsDraining(t *testing.T) {
@@ -8967,11 +9085,13 @@ func TestSlotQueueReservationBlocksPinnedOverDispatch(t *testing.T) {
 		t.Fatal("queued request did not dispatch after slot recovery")
 	}
 
-	pinned := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"queued"}})
-	if pinned.Code != http.StatusServiceUnavailable {
-		t.Fatalf("pinned status = %d, want 503 while queued reservation owns only free slot; body=%s", pinned.Code, pinned.Body.String())
+	pinned := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), withCapacityShed429(http.Header{"X-MacProvider-Provider": []string{"queued"}}))
+	// The queued reservation owns the only free seat: a capacity shed.
+	if pinned.Code != http.StatusTooManyRequests {
+		close(release)
+		t.Fatalf("pinned status = %d, want 429 while queued reservation owns only free slot; body=%s", pinned.Code, pinned.Body.String())
 	}
-	assertOpenAIErrorEnvelope(t, pinned, "no_provider_available", "service_unavailable")
+	assertCapacityShed(t, pinned)
 	select {
 	case <-hits:
 		t.Fatal("pinned request dispatched while queued reservation owned the only free slot")

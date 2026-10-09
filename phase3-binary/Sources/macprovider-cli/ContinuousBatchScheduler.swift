@@ -116,6 +116,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let maxPrefillRowsPerIteration: Int
     let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
+    /// Whether one prefill group may hold rows at different prompt offsets
+    /// (SPEC-038 FR-CB2 ragged shared prefill). Set only when the backend runs
+    /// that shape in one forward (`PagedKVSharedForwardBackend
+    /// .supportsRaggedPrefillOffsets`); otherwise a ragged group would only
+    /// run serially inside one iteration and stall decode for longer.
+    let allowsRaggedPrefillOffsets: Bool
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
     let terminalResultLimit: Int
@@ -166,6 +172,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
+        allowsRaggedPrefillOffsets: Bool = false,
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
         drainCancellationGraceNanoseconds: UInt64 = 5_000_000_000,
         terminalResultLimit: Int? = nil,
@@ -201,6 +208,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.maxPrefillRowsPerIteration = max(1, maxPrefillRowsPerIteration)
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
+        self.allowsRaggedPrefillOffsets = allowsRaggedPrefillOffsets
         self.maxPrefillTokensPerIteration = max(
             1,
             maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
@@ -262,15 +270,16 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     static let defaultDecodeHeadroomTokens = 128
     static let defaultPrefillRowsPerIteration = 4
     // Prefill per-iteration token budget when the operator sets no
-    // `continuous_batch_prefill_tokens_per_iteration` (SPEC-038). Kept at 1024:
-    // a Studio benchmark (1024 vs 2048 vs 8192) found this budget NON-BINDING at
-    // 1.5k-8k prompts — single-stream large-prompt TTFT is compute-bound (~300
-    // tok/s prefill) and the per-row chunk (`prefill_step_size`) governs per-row
-    // prefill, so the total budget does not move TTFT or concurrent-8k
-    // admission. The key is exposed for operator tuning/observability (it may
-    // bind under many concurrent small prefills), not as a TTFT lever.
-    // Operator-tunable up to `maximumPrefillTokensPerIteration`.
-    static let defaultPrefillTokensPerIteration = 1_024
+    // `continuous_batch_prefill_tokens_per_iteration` (SPEC-038). With ragged
+    // shared prefill (v0.3.9) the budget decides how many prompt rows share
+    // one forward. 2048 lets four balanced ~400-token chunks of 1.5k prompts
+    // share it; 1024 holds two. Studio M3 Ultra, Qwen3.6-35B-A3B, 1536-token
+    // prompts, ragged sharing on: 8 rows 132 vs 122 tok/s with ITL p95 74 vs
+    // 272 ms (TTFT p95 5.5 vs 3.6 s); 16 rows 137 vs 130 tok/s (TTFT p95 8.1
+    // vs 7.5 s). Single-stream prefill is unaffected: one row never exceeds
+    // the per-row chunk. Operator-tunable up to
+    // `maximumPrefillTokensPerIteration`.
+    static let defaultPrefillTokensPerIteration = 2_048
     // Upper bound for `continuous_batch_prefill_tokens_per_iteration`. Serve
     // startup rejects a larger value rather than letting one prefill iteration
     // monopolize the backend hop.
@@ -649,6 +658,105 @@ struct ContinuousBatchSchedulerMetrics: Sendable, Equatable {
 struct ContinuousBatchDrainPermit: Sendable, Equatable {
     fileprivate let schedulerID: UUID
     let snapshot: ContinuousBatchSchedulerSnapshot
+}
+
+/// One prompt row offered to a prefill group when ragged offsets are allowed
+/// (SPEC-038 FR-CB2 ragged shared prefill).
+struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
+    let requestID: String
+    let promptOffset: Int
+    /// The row's own next chunk: the balanced partition under the per-row
+    /// chunk limit and the group token budget.
+    let naturalChunkTokens: Int
+    /// Tokens before the row's next hard boundary (prompt end or a recurrent
+    /// checkpoint). A shared chunk never crosses it.
+    let spanTokens: Int
+    /// False for a row that may share a forward only with rows at its own
+    /// offset (native-MTP prompt rows).
+    let sharesRaggedOffsets: Bool
+}
+
+struct ContinuousBatchPrefillGroup: Sendable, Equatable {
+    let chunkTokens: Int
+    let requestIDs: [String]
+}
+
+enum ContinuousBatchPrefillGrouping {
+    /// Bound on the key-length spread inside a ragged group. Keys are padded
+    /// to the longest row, so every row pays attention and memory for
+    /// `max offset + chunk` keys. A peer joins a ragged group only while
+    /// `(max offset + chunk) <= maxRaggedKeySpreadFactor x (min offset +
+    /// chunk)`: no row attends over more than twice the keys it needs, and
+    /// one long prompt cannot inflate a group of short ones (SPEC-038 FR-CB2).
+    static let maxRaggedKeySpreadFactor = 2
+
+    /// Picks one group whose rows all prefill exactly `chunkTokens` tokens in
+    /// one shared forward. The FCFS head always leads. The chunk length is
+    /// the head's own chunk or a shorter peer chunk the head may shrink to,
+    /// whichever advances the most prompt tokens within `maxRows` and
+    /// `tokenBudget` (ties keep the longer chunk). A row joins when its span
+    /// fits the chunk and the chunk is at least half of the row's own next
+    /// chunk, so a short final chunk does not cut a long prompt into slivers.
+    /// A row at another offset joins only within the key-spread cap.
+    static func select(
+        _ candidates: [ContinuousBatchPrefillCandidate],
+        maxRows: Int,
+        tokenBudget: Int
+    ) -> ContinuousBatchPrefillGroup? {
+        guard let head = candidates.first, head.naturalChunkTokens > 0 else { return nil }
+        var lengths = [head.naturalChunkTokens]
+        for candidate in candidates.dropFirst() {
+            let length = candidate.naturalChunkTokens
+            if length > 0,
+               length < head.naturalChunkTokens,
+               mayRun(length, naturalChunkTokens: head.naturalChunkTokens),
+               !lengths.contains(length) {
+                lengths.append(length)
+            }
+        }
+        lengths.sort(by: >)
+        var best: ContinuousBatchPrefillGroup?
+        for length in lengths {
+            let rowCap = max(1, min(maxRows, tokenBudget / length))
+            var ids = [head.requestID]
+            var sameOffset = true
+            var allRagged = head.sharesRaggedOffsets
+            var minOffset = head.promptOffset
+            var maxOffset = head.promptOffset
+            for candidate in candidates.dropFirst() where ids.count < rowCap {
+                guard candidate.naturalChunkTokens > 0,
+                      candidate.spanTokens >= length,
+                      mayRun(length, naturalChunkTokens: candidate.naturalChunkTokens)
+                else { continue }
+                let atHeadOffset = candidate.promptOffset == head.promptOffset
+                guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
+                    continue
+                }
+                let groupMin = min(minOffset, candidate.promptOffset)
+                let groupMax = max(maxOffset, candidate.promptOffset)
+                guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
+                    continue
+                }
+                ids.append(candidate.requestID)
+                sameOffset = sameOffset && atHeadOffset
+                allRagged = allRagged && candidate.sharesRaggedOffsets
+                minOffset = groupMin
+                maxOffset = groupMax
+            }
+            if best.map({ ids.count * length > $0.requestIDs.count * $0.chunkTokens }) ?? true {
+                best = ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
+            }
+        }
+        return best
+    }
+
+    private static func mayRun(_ length: Int, naturalChunkTokens: Int) -> Bool {
+        length * 2 >= naturalChunkTokens
+    }
+
+    static func withinKeySpread(minOffset: Int, maxOffset: Int, chunkTokens: Int) -> Bool {
+        maxOffset + chunkTokens <= maxRaggedKeySpreadFactor * (minOffset + chunkTokens)
+    }
 }
 
 struct ContinuousBatchPrefillInput: Sendable, Equatable {
@@ -4227,6 +4335,7 @@ actor ContinuousBatchScheduler {
         }
         let outcomes: [ContinuousBatchDecodeOutcome]
         let windowResult: Result<[ContinuousBatchDecodeOutcome], any Error>
+        let windowStartedNs = DispatchTime.now().uptimeNanoseconds
         do {
             windowResult = .success(try await backend.decodeLockstepWindow(
                 rows: prepared.map(\.input),
@@ -4236,6 +4345,7 @@ actor ContinuousBatchScheduler {
         } catch {
             windowResult = .failure(error)
         }
+        CBTrace.log(nil, "hop_decode rows=\(prepared.count) steps=\(windowSteps) ms=\((DispatchTime.now().uptimeNanoseconds - windowStartedNs) / 1_000_000) prompts=\(activePrompt.count) waiting=\(waiting.count)")
         stepContinuation?.finish()
         await stepConsumer?.value
         decodeWindowControl = nil
@@ -4816,35 +4926,9 @@ actor ContinuousBatchScheduler {
             }
         }
 
-        var selected: [(row: Row, end: Int)] = []
-        var selectedOffset: Int?
-        var selectedChunkCount: Int?
-        var selectedTokenCount = 0
-        for id in promptOrder {
-            guard selected.count < configuration.maxPrefillRowsPerIteration,
-                  let row = activePrompt[id]
-            else { continue }
-            let remainingBudget = configuration.maxPrefillTokensPerIteration - selectedTokenCount
-            guard remainingBudget > 0 else { break }
-            let chunkLimit = min(
-                configuration.maxPromptChunkTokens,
-                selectedChunkCount ?? remainingBudget
-            )
-            let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
-            let chunkCount = end - row.prefillCursor
-            guard chunkCount > 0 else { continue }
-            if let selectedOffset, let selectedChunkCount {
-                guard row.prefillCursor == selectedOffset,
-                      chunkCount == selectedChunkCount,
-                      selectedTokenCount + chunkCount <= configuration.maxPrefillTokensPerIteration
-                else { continue }
-            } else {
-                selectedOffset = row.prefillCursor
-                selectedChunkCount = chunkCount
-            }
-            selected.append((row, end))
-            selectedTokenCount += chunkCount
-        }
+        let selected = configuration.allowsRaggedPrefillOffsets
+            ? selectRaggedPrefillGroup()
+            : selectEqualOffsetPrefillGroup()
         guard !selected.isEmpty else { return madeProgress }
 
         var prepared: [(row: Row, input: ContinuousBatchPrefillInput, chunkCount: Int)] = []
@@ -4902,7 +4986,9 @@ actor ContinuousBatchScheduler {
         prefillCalls += 1
         let outputs: [ContinuousBatchPrefillOutput]
         do {
+            let prefillStartedNs = DispatchTime.now().uptimeNanoseconds
             outputs = try await backend.prefill(rows: prepared.map(\.input))
+            CBTrace.log(nil, "hop_prefill rows=\(prepared.count) tokens=\(prepared.reduce(0) { $0 + $1.chunkCount }) ms=\((DispatchTime.now().uptimeNanoseconds - prefillStartedNs) / 1_000_000) decode_rows=\(activeDecode.count)")
             try validatePrefillOutputStructure(outputs, expectedRequestIDs: prepared.map { $0.row.request.id })
         } catch {
             record(.prefillFailed)
@@ -5003,16 +5089,87 @@ actor ContinuousBatchScheduler {
         return released
     }
 
-    private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
+    /// Rows at one prompt offset whose balanced chunks have the head's length.
+    private func selectEqualOffsetPrefillGroup() -> [(row: Row, end: Int)] {
+        var selected: [(row: Row, end: Int)] = []
+        var selectedOffset: Int?
+        var selectedChunkCount: Int?
+        var selectedTokenCount = 0
+        for id in promptOrder {
+            guard selected.count < configuration.maxPrefillRowsPerIteration,
+                  let row = activePrompt[id]
+            else { continue }
+            let remainingBudget = configuration.maxPrefillTokensPerIteration - selectedTokenCount
+            guard remainingBudget > 0 else { break }
+            let chunkLimit = min(
+                configuration.maxPromptChunkTokens,
+                selectedChunkCount ?? remainingBudget
+            )
+            let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
+            let chunkCount = end - row.prefillCursor
+            guard chunkCount > 0 else { continue }
+            if let selectedOffset, let selectedChunkCount {
+                guard row.prefillCursor == selectedOffset,
+                      chunkCount == selectedChunkCount,
+                      selectedTokenCount + chunkCount <= configuration.maxPrefillTokensPerIteration
+                else { continue }
+            } else {
+                selectedOffset = row.prefillCursor
+                selectedChunkCount = chunkCount
+            }
+            selected.append((row, end))
+            selectedTokenCount += chunkCount
+        }
+        return selected
+    }
+
+    /// Rows at any prompt offsets that all prefill the same chunk length in
+    /// one shared forward (SPEC-038 FR-CB2 ragged shared prefill).
+    private func selectRaggedPrefillGroup() -> [(row: Row, end: Int)] {
+        let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
+        var candidates: [ContinuousBatchPrefillCandidate] = []
+        var rowsByID: [String: Row] = [:]
+        for id in promptOrder {
+            guard rowsByID[id] == nil, let row = activePrompt[id] else { continue }
+            let naturalChunk = prefillEnd(for: row, maxChunkTokens: chunkLimit) - row.prefillCursor
+            guard naturalChunk > 0 else { continue }
+            candidates.append(ContinuousBatchPrefillCandidate(
+                requestID: id,
+                promptOffset: row.prefillCursor,
+                naturalChunkTokens: naturalChunk,
+                spanTokens: prefillSpanEnd(for: row) - row.prefillCursor,
+                sharesRaggedOffsets: !row.usesNativeMTP
+            ))
+            rowsByID[id] = row
+        }
+        guard let group = ContinuousBatchPrefillGrouping.select(
+            candidates,
+            maxRows: configuration.maxPrefillRowsPerIteration,
+            tokenBudget: configuration.maxPrefillTokensPerIteration
+        ) else {
+            return []
+        }
+        return group.requestIDs.compactMap { id in
+            rowsByID[id].map { ($0, $0.prefillCursor + group.chunkTokens) }
+        }
+    }
+
+    /// End of the span a prefill chunk may cover: the prompt end, or the next
+    /// declared recurrent checkpoint. Hybrid recurrent state may only be
+    /// snapshotted on its declared boundary, so compatible groups split
+    /// before crossing one.
+    private func prefillSpanEnd(for row: Row) -> Int {
         let promptTokenCount = row.request.promptTokens.count
-        var spanEnd = promptTokenCount
-        // Hybrid recurrent state may only be snapshotted on its declared
-        // boundary, so compatible groups split before crossing one.
         if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
             $0 > row.prefillCursor
         }) {
-            spanEnd = min(spanEnd, checkpoint)
+            return min(promptTokenCount, checkpoint)
         }
+        return promptTokenCount
+    }
+
+    private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
+        let spanEnd = prefillSpanEnd(for: row)
         let remaining = spanEnd - row.prefillCursor
         guard remaining > 0 else { return row.prefillCursor }
         let chunkLimit = max(1, maxChunkTokens)

@@ -1,0 +1,43 @@
+binary_sha256 fd8d88f561879c79984b27043f74f38d77325674eb4068d4490935aab81ee179
+{"label": "window-1", "depth": 16, "prompt_tokens_target": 1800, "max_tokens": 1024, "window_s": 120.0, "agg_tok_s": 206.5, "finished_in_window": 0, "errors": {}, "ttft_p50_s": 5.507, "ttft_p95_s": 8.38, "itl_p50_ms": 70.04, "itl_p95_ms": 142.789, "decode_tok_s_p50": null}
+{"label": "window-16", "depth": 16, "prompt_tokens_target": 1800, "max_tokens": 1024, "window_s": 120.0, "agg_tok_s": 238.1, "finished_in_window": 16, "errors": {}, "ttft_p50_s": 5.612, "ttft_p95_s": 11.351, "itl_p50_ms": 47.487, "itl_p95_ms": 121.34, "decode_tok_s_p50": 17.2}
+w=1 window 124.7s hops=1638
+w=1 decode     108.2s  86.7%
+w=1 prefill     15.1s  12.1%
+w=1 gaps         1.4s   1.1%
+w=1 decode window steps: {1: 1613}
+w=1 rows= 1 windows=   1 ms/step p50=13.0
+w=1 rows= 3 windows=   1 ms/step p50=24.0
+w=1 rows= 4 windows=   1 ms/step p50=26.0
+w=1 rows= 6 windows=   2 ms/step p50=38.0
+w=1 rows= 7 windows=   2 ms/step p50=41.0
+w=1 rows= 8 windows=   6 ms/step p50=52.0
+w=1 rows= 9 windows=   3 ms/step p50=44.0
+w=1 rows=10 windows=   3 ms/step p50=47.0
+w=1 rows=11 windows=   3 ms/step p50=68.0
+w=1 rows=12 windows=   7 ms/step p50=69.0
+w=1 rows=13 windows=   6 ms/step p50=71.0
+w=1 rows=14 windows=   7 ms/step p50=67.0
+w=1 rows=15 windows=   7 ms/step p50=80.0
+w=1 rows=16 windows=1564 ms/step p50=67.0
+w=16 window 153.7s hops=253
+w=16 decode     123.3s  80.2%
+w=16 prefill     30.2s  19.6%
+w=16 gaps         0.2s   0.1%
+w=16 decode window steps: {1: 8, 2: 2, 3: 1, 6: 4, 8: 51, 9: 1, 15: 1, 16: 135}
+w=16 rows= 1 windows=   1 ms/step p50=9.6
+w=16 rows= 2 windows=   1 ms/step p50=13.6
+w=16 rows= 3 windows=   1 ms/step p50=17.0
+w=16 rows= 4 windows=   1 ms/step p50=19.8
+w=16 rows= 5 windows=   1 ms/step p50=21.8
+w=16 rows= 6 windows=   2 ms/step p50=32.6
+w=16 rows= 7 windows=   3 ms/step p50=31.1
+w=16 rows= 8 windows=   3 ms/step p50=30.2
+w=16 rows= 9 windows=   3 ms/step p50=33.6
+w=16 rows=10 windows=   6 ms/step p50=39.0
+w=16 rows=11 windows=   6 ms/step p50=39.8
+w=16 rows=12 windows=  15 ms/step p50=42.8
+w=16 rows=13 windows=  14 ms/step p50=45.0
+w=16 rows=14 windows=  10 ms/step p50=47.5
+w=16 rows=15 windows=   5 ms/step p50=50.1
+w=16 rows=16 windows= 131 ms/step p50=49.0

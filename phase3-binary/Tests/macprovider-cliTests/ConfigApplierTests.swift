@@ -145,6 +145,37 @@ final class ConfigApplierTests: XCTestCase {
         ])
     }
 
+    func testApplyKeepsRollbackSafeConcurrencyAndCarriesHigherDepth() throws {
+        // #1906 round-1 audit: pre-#1906 CLIs reject max_concurrency_override
+        // above 8 at startup. A calibrated depth of 16 must leave that key at
+        // 8 and carry 16 in the key old CLIs ignore; a later depth <= 8
+        // removes the extra key so it cannot override the new value.
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        var deep = recommendation()
+        deep.knobs = WinningKnobs(kvBits: 4, maxBatch: 16, maxContext: 4_000)
+
+        _ = try fixture.applier().apply(recommendation: deep, now: fixture.now)
+
+        var lines = keyedLines(try String(contentsOf: fixture.configURL))
+        XCTAssertEqual(lines["max_concurrency_override"], "max_concurrency_override: 8")
+        XCTAssertEqual(lines[AppConfig.maxConcurrencyDepthOverrideKey], "\(AppConfig.maxConcurrencyDepthOverrideKey): 16")
+        let text = try String(contentsOf: fixture.configURL)
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: fixture.configURL.path),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in text },
+            resolveCredentials: false
+        )
+        XCTAssertEqual(loaded.maxConcurrencyOverride, 16)
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now.addingTimeInterval(1))
+        lines = keyedLines(try String(contentsOf: fixture.configURL))
+        XCTAssertEqual(lines["max_concurrency_override"], "max_concurrency_override: 1")
+        XCTAssertNil(lines[AppConfig.maxConcurrencyDepthOverrideKey])
+    }
+
     func testApplyOmitsKVBitsKeyWhenNil() throws {
         let fixture = try ConfigFixture()
         try fixture.writeConfig(sampleConfig())
@@ -528,6 +559,7 @@ final class ConfigApplierTests: XCTestCase {
             "model_artifact_path", "model_catalog_revision", "model_catalog_sha256",
             "model_catalog_version", "model_catalog_hash", "kv_bits", "max_context_override",
             "max_concurrency_override",
+            AppConfig.maxConcurrencyDepthOverrideKey,
             "donor_mode",
             MaxContextProvenance.configKey,
         ]

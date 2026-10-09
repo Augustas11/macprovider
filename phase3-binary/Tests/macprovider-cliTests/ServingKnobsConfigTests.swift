@@ -276,6 +276,56 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.maxConcurrencyOverride, 2)
     }
 
+    func testMaxConcurrencyDepthOverrideWinsOverRollbackSafeKey() throws {
+        // #1906: a depth above 8 lives in max_concurrency_depth_override;
+        // max_concurrency_override stays <= 8 so a pre-#1906 CLI still starts.
+        let yaml = "max_concurrency_override: 8\nmax_concurrency_depth_override: 16\n"
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(config.maxConcurrencyOverride, 16)
+        let env = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_MAX_CONCURRENCY_OVERRIDE": "2"],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(env.maxConcurrencyOverride, 2, "environment still overrides the file")
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(maxBatch: 3),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }
+        )
+        XCTAssertEqual(cli.maxConcurrencyOverride, 3, "--max-batch still overrides the file")
+    }
+
+    func testLegacyMaxConcurrencyOverrideChangedAfterDepthWins() throws {
+        // #1906 round-2 audit: an older CLI's apply or an operator edit that
+        // moves max_concurrency_override off 8 (e.g. 1 for a draft model) must
+        // not be silently overridden by a stale depth key.
+        for (legacy, expected) in [(1, 1), (4, 4)] {
+            let yaml = "max_concurrency_override: \(legacy)\nmax_concurrency_depth_override: 16\n"
+            let config = try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in yaml }
+            )
+            XCTAssertEqual(config.maxConcurrencyOverride, expected)
+        }
+        let depthOnly = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "max_concurrency_depth_override: 12\n" }
+        )
+        XCTAssertEqual(depthOnly.maxConcurrencyOverride, 12)
+    }
+
     // MARK: - continuous batching controls
 
     func testContinuousBatchingCLIOverridesEnvironmentOverridesYAML() throws {

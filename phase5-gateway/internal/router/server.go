@@ -401,6 +401,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	upReq.Header.Set("X-Request-ID", requestID(r))
 	if poolID != "" {
 		s.setCoordinatorChatContext(upReq.Header, r, poolAccountID)
+		advertiseCapacityShed429(upReq.Header)
 		upReq.Header.Set(poolEmitHeader, poolID)
 	}
 	resp, err := s.client.Do(upReq)

@@ -48,6 +48,11 @@ compatible, the scheduler must split the group or use the serial prefill
 fallback. The fallback is conformant only when it preserves FCFS progress,
 cancellation boundaries, receipt boundaries, and per-row block-table isolation.
 
+Superseded by SPEC-038 v0.3.9 (issue #1906): rows at different offsets now
+share one forward when their chunk lengths match, on backends without
+sliding-window layers and for rows that are not native-MTP prompt rows.
+Evidence: `docs/research/issue-1906/prefill-2026-10-09/`.
+
 ## Block-Pool Strategy
 
 Use admission-time pool checks and bounded queueing as the primary defense for

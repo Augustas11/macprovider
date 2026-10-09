@@ -407,6 +407,17 @@ const (
 	// is still working; 10s covers one decode after dispatch-release.
 	slotQueueDefaultDeadline     = 10 * time.Second
 	slotQueueDefaultPollInterval = 25 * time.Millisecond
+	// SPEC-006 §7.8 capacity shed: retryable 429, SPEC-006 §5.2 type, and
+	// the same one-second backoff the gateway uses for no_provider_available.
+	capacityShedErrorType         = "rate_limit_exceeded"
+	capacityShedRetryAfterSeconds = "1"
+	// capacityShed429CapabilityHeader is how a gateway that handles the
+	// capacity 429 opts in. Without it the coordinator answers a capacity
+	// shed with the pre-#1906 503 no_provider_available, because an older
+	// gateway settles an unknown 429 as a provider error. It only changes
+	// the status shape of the caller's own request, so it is not gated on
+	// the service token.
+	capacityShed429CapabilityHeader = "X-MacProvider-Capacity-Shed-429"
 )
 
 const (
@@ -2479,6 +2490,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// state values at log-write time, so it holds *forwardState.
 	state := newForwardState(startedAt)
 	state.markConversationCacheOnly(r.Header)
+	state.capacityShed429Negotiated = strings.TrimSpace(r.Header.Get(capacityShed429CapabilityHeader)) == "1"
 	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -2756,6 +2768,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if poolModelRequested {
 			rec.setModel("")
 		}
+		routeErr = buyerRouteError(routeErr, state)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return
@@ -2996,6 +3009,10 @@ func (s *Server) forwardStreamSequence(
 			}
 			if hasReceiptState {
 				setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+			}
+			if state.capacityRefused && (dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardUnavailable) {
+				writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(state.requestedModel, "Selected provider is not reachable"), state))
+				return
 			}
 			writeStreamForwardError(w, dispatched.nativeResult)
 		},
@@ -3783,6 +3800,7 @@ func (s *Server) advanceToNextProvider(
 	if routeErr != nil {
 		state.routingDone = s.now()
 		state.phaseTiming.markCoordRoutingDone(state.routingDone)
+		routeErr = buyerRouteError(routeErr, state)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
 		writeRouteError(w, routeErr)
 		return "", false
@@ -3889,7 +3907,23 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		if errors.Is(err, providerws.ErrRelayClosed) {
 			return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry"}
 		}
-		if errors.Is(err, providerws.ErrRelayBackpressure) || errors.Is(err, providerws.ErrRelayNAKFallback) {
+		if errors.Is(err, providerws.ErrRelayBackpressure) {
+			// The attempt row stays 503 (unbilled); only the buyer
+			// terminal is the SPEC-006 §7.8 capacity shed.
+			if state != nil {
+				state.capacityRefused = true
+			}
+			if stream {
+				return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is at capacity"}
+			}
+			model := provider.ModelID
+			if state != nil && state.requestedModel != "" {
+				model = state.requestedModel
+			}
+			writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(model, "Selected provider is not reachable"), state))
+			return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is at capacity"}
+		}
+		if errors.Is(err, providerws.ErrRelayNAKFallback) {
 			if stream {
 				return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 			}
@@ -7377,6 +7411,13 @@ type routeError struct {
 	message               string
 	typ                   string
 	routeSnapshotPressure bool
+	// providerBusy marks a reservation that failed because the provider's
+	// live count had no free seat (full or safety hold) rather than because
+	// coordinator reservations already claimed its free seats.
+	providerBusy bool
+	// legacy is the pre-#1906 503 a capacity shed answers with when the
+	// caller did not send capacityShed429CapabilityHeader (buyerRouteError).
+	legacy *routeError
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -7394,6 +7435,48 @@ func requestCanceledRouteError() *routeError {
 		code:    "request_canceled",
 		message: "Request canceled before provider dispatch",
 	}
+}
+
+// capacityShedRouteError is the SPEC-006 §7.8 capacity shed: the model has
+// serving-capable supply, but every such provider is full (bounded slot queue
+// expired or full, coordinator reservations claim every free seat, or the
+// provider refused with queue-full or relay backpressure and no alternate
+// exists). It is a retryable 429 with Retry-After; 503 no_provider_available
+// stays the answer when no serving-capable provider exists (#1906).
+func capacityShedRouteError(model string) *routeError {
+	return capacityShedRouteErrorWithLegacy(model, "No provider available for model "+model)
+}
+
+// capacityShedRouteErrorWithLegacy is capacityShedRouteError with the exact
+// pre-#1906 503 message the same path wrote before.
+func capacityShedRouteErrorWithLegacy(model, legacyMessage string) *routeError {
+	message := "All providers are at capacity; retry shortly"
+	if model != "" {
+		message = "All providers for model " + model + " are at capacity; retry shortly"
+	}
+	return &routeError{
+		status:  http.StatusTooManyRequests,
+		code:    "no_provider_available",
+		typ:     capacityShedErrorType,
+		message: message,
+		legacy:  &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: legacyMessage},
+	}
+}
+
+// buyerRouteError is the route error the caller sees and the request log
+// records: a capacity shed stays a 429 only for a caller that sent
+// capacityShed429CapabilityHeader; any other caller (an older gateway, a
+// direct buyer) gets the pre-#1906 503 no_provider_available.
+func buyerRouteError(err *routeError, state *forwardState) *routeError {
+	if err == nil || err.legacy == nil || (state != nil && state.capacityShed429Negotiated) {
+		return err
+	}
+	return err.legacy
+}
+
+// isCapacityShedStatus reports the SPEC-006 §7.8 capacity-shed envelope.
+func isCapacityShedStatus(status int, code string) bool {
+	return status == http.StatusTooManyRequests && code == "no_provider_available"
 }
 
 func routeSnapshotPressureRouteError(message string) *routeError {
@@ -7757,6 +7840,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	}
 	result := s.eligibleCandidates(providers, exSet, checker)
 	candidates := result.Eligible
+	// An eligible provider that this pass could not route to is busy, not
+	// absent: the final shed is a capacity 429, not 503 (#1906).
+	capacityBlocked := len(candidates) > 0
 	queuedCandidates := []pool.Provider(nil)
 	queueEligible := !hasPinnedRoute(headers)
 	queueReservationOverflow := queueEligible && trustedInternalRouting && hasWholesaleRoutingHeader(headers)
@@ -7776,6 +7862,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, routeSnapshotPressureRouteError("No provider available for model " + req.Model)
 		}
 		if len(queuedCandidates) > 0 {
+			capacityBlocked = true
 			waiterKind := slotWaiterStandard
 			if queueReservationOverflow {
 				waiterKind = slotWaiterReservationOverflow
@@ -7859,6 +7946,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			routeErr.message = externalRuntimeNeedsSignedFinalityMessage
 			return pool.Provider{}, routeErr
 		}
+		if capacityBlocked || (state != nil && state.capacityRefused) {
+			return pool.Provider{}, capacityShedRouteError(req.Model)
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
 	objective := s.objectiveForRequest(headers, class)
@@ -7890,6 +7980,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// enum keys to SPEC-004 §7 stringly names.
 	s.logRoutingDecisionFullWithCache(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "", balancedCache)
 	var capacityErr *routeError
+	var busyCandidates []pool.Provider
 	preflightRejected := false
 	for _, candidate := range candidates {
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
@@ -7907,6 +7998,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		if routeErr.code == "no_provider_available" {
 			capacityErr = routeErr
+			if routeErr.providerBusy {
+				busyCandidates = append(busyCandidates, candidate)
+			}
 			continue
 		}
 		preflightRejected = true
@@ -7920,6 +8014,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					return provider, routeErr
 				}
 			}
+		} else if queueEligible {
+			// A candidate that filled or entered a safety hold between the
+			// selection snapshot and the reservation is a busy provider, not
+			// reservation overflow: wait for it like any busy provider (#1906).
+			if len(busyCandidates) > 0 {
+				provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, busyCandidates, headers, class, dailyKey, estimatedTokens, state, slotWaiterStandard)
+				if queued {
+					return provider, routeErr
+				}
+			}
 		}
 		return pool.Provider{}, capacityErr
 	}
@@ -7927,8 +8031,10 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 }
 
 func (s *Server) selectReservedProvider(candidate pool.Provider, model string, requestID string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
-	if !s.reserveSelectedProviderSlot(candidate, state) {
-		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
+	if reserved, busy := s.reserveSelectedProviderSlot(candidate, state); !reserved {
+		routeErr := capacityShedRouteError(model)
+		routeErr.providerBusy = busy
+		return pool.Provider{}, routeErr
 	}
 	provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
 	if routeErr != nil {
@@ -7938,24 +8044,62 @@ func (s *Server) selectReservedProvider(candidate pool.Provider, model string, r
 	return provider, nil
 }
 
-func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forwardState) bool {
+func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forwardState) (reserved, busy bool) {
 	if s.slotQueue == nil || state == nil || !state.slotReservationsEnabled {
-		return true
+		return true, false
 	}
 	if provider.ProviderID == "" {
-		return false
+		return false, false
 	}
 	if state.queuedSlotProviderID == provider.ProviderID {
-		return true
+		return true, false
 	}
 	if state.queuedSlotProviderID != "" {
 		s.releaseQueuedSlotReservation(state)
 	}
-	if !s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
-		return false
+	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, s.liveSlotsFree(provider))
+	if !reserved {
+		return false, busy || s.demandBelowAdvertisedCapacity(provider)
 	}
 	state.queuedSlotProviderID = provider.ProviderID
-	return true
+	return true, false
+}
+
+// demandBelowAdvertisedCapacity reports whether the coordinator's own claims
+// on provider (accepted chats in flight, seat leases and queued waiters) leave
+// at least one of its advertised SlotsTotal seats for another request. Seat
+// reservations are checked against slots_free, which can sit below SlotsTotal
+// minus that demand while the Mac still counts chats the coordinator has seen
+// finish, so a reservation miss with demand below SlotsTotal is a lagging
+// count to wait out in the slot queue, not overflow to shed (#1906).
+func (s *Server) demandBelowAdvertisedCapacity(provider pool.Provider) bool {
+	if s.pool == nil || s.slotQueue == nil {
+		return false
+	}
+	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || live.SlotsTotal <= 0 {
+		return false
+	}
+	demand := s.pool.ForwardedInFlight(provider.ProviderID, provider.AssignedID) + s.slotQueue.claims(provider.ProviderID)
+	return demand < live.SlotsTotal
+}
+
+// liveSlotsFree is routableSlotsFree as a callback the slot queue evaluates
+// under its lock.
+func (s *Server) liveSlotsFree(provider pool.Provider) func() int {
+	return func() int { return s.routableSlotsFree(provider) }
+}
+
+// routableSlotsFree is the provider's live reservable seat count, falling
+// back to the selection snapshot when the session is no longer registered
+// (the dispatch path rejects that case on its own).
+func (s *Server) routableSlotsFree(provider pool.Provider) int {
+	if s.pool != nil {
+		if free, ok := s.pool.RoutableSlotsFree(provider.ProviderID, provider.AssignedID); ok {
+			return free
+		}
+	}
+	return provider.SlotsFree
 }
 
 func poolRouteableSnapshotExpiredAt(snap trustpool.Snapshot, now time.Time) bool {
@@ -8765,10 +8909,13 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
 	if !routingEligibleForRoute(p, poolView) {
+		if providerForRoute(p, poolView).SlotQueueEligible() {
+			return pool.Provider{}, capacityShedRouteErrorWithLegacy(model, unavailableMessage)
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
-	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, p.SlotsFree) {
-		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, s.liveSlotsFree(p)) {
+		return pool.Provider{}, capacityShedRouteErrorWithLegacy(model, unavailableMessage)
 	}
 	if s.tier2ProviderExcludedForRoute(p, poolView) {
 		return pool.Provider{}, &routeError{
@@ -8838,14 +8985,16 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 	tried := map[string]struct{}{}
 	queueCandidates := make([]poolQueueCandidate, 0, len(ordered))
 	for _, candidate := range ordered {
-		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID})
+		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID, slotsTotal: candidate.SlotsTotal})
 	}
+	queueFull := false
 	for len(tried) < len(queueCandidates) {
 		waiter, ok := s.slotQueue.enterBestWithKind(queueCandidates, tried, waiterKind)
 		if !ok {
 			if len(tried) == 0 {
 				return pool.Provider{}, nil, false
 			}
+			queueFull = true
 			break
 		}
 		queueSegmentStart := time.Now()
@@ -8899,7 +9048,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				if errors.Is(waitCtx.Err(), context.Canceled) {
 					return pool.Provider{}, requestCanceledRouteError(), true
 				}
-				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
+				return pool.Provider{}, capacityShedRouteError(model), true
 			case <-ticker.C:
 			}
 		}
@@ -8914,6 +9063,9 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 		return pool.Provider{}, poolSettlementModeUnsatisfiedRouteError(), true
 	}
 	state.queueWait = queueWait
+	if queueFull {
+		return pool.Provider{}, capacityShedRouteError(model), true
+	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
 }
 
@@ -9034,7 +9186,7 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !routeProvider.RoutingEligible() {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+		if !s.slotQueue.reserveHead(waiter, s.liveSlotsFree(provider)) {
 			return pool.Provider{}, queuedProviderWait
 		}
 		s.rememberLegacyModelAdmissionRouteExpectation(state, provider, byomEligibility)
@@ -9131,13 +9283,20 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 	normal := make([]pool.Provider, 0, len(candidates))
 	queued := make([]pool.Provider, 0, len(candidates))
 	for _, provider := range candidates {
-		if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
+		var slotsFree int
+		if s.slotQueue.blocksProvider(provider.ProviderID, func() int {
+			slotsFree = s.routableSlotsFree(provider)
+			return slotsFree
+		}) {
 			// A positive SlotsFree provider blocked only by coordinator-local
 			// reservations represents same-moment demand beyond advertised
 			// capacity. Public traffic sheds that overflow immediately.
 			// Wholesale traffic may queue it because upstream provider
 			// integrations prefer bounded capacity waits over retry churn.
-			if provider.SlotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow {
+			// When coordinator-owned demand is still below SlotsTotal the
+			// block is a slots_free count that lags the Mac, not overflow,
+			// so the request waits for the seat (#1906).
+			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow || s.demandBelowAdvertisedCapacity(provider) {
 				queued = append(queued, provider)
 			}
 			continue
@@ -9178,6 +9337,7 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 		return
 	}
 	s.restoreConsumedForwardedSlot(state)
+	state.acceptedOnUnconfirmedOccupancy = false
 	if s.pool != nil {
 		provider := state.provider
 		if provider.ProviderID == "" && state.queuedSlotProviderID != "" {
@@ -9187,11 +9347,32 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 			}
 		}
 		if provider.ProviderID != "" && provider.AssignedID != "" {
-			if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
-				state.slotConsumedOnAccept = true
-				state.consumedProviderID = provider.ProviderID
-				state.consumedAssignedID = provider.AssignedID
+			// otherReserved counts sibling dispatches holding a seat lease on
+			// this provider: chats the Mac may already be running that the
+			// coordinator has not yet counted in flight.
+			consume := func(otherReserved int) {
+				if ok, unconfirmed := s.pool.ConsumeForwardedSlotDetailed(provider.ProviderID, provider.AssignedID); ok {
+					state.acceptedOnUnconfirmedOccupancy = unconfirmed || otherReserved > 0
+					state.slotConsumedOnAccept = true
+					state.consumedProviderID = provider.ProviderID
+					state.consumedAssignedID = provider.AssignedID
+				}
 			}
+			if s.slotQueue != nil && state.queuedSlotProviderID != "" {
+				// Consume and lease release in one slot-queue critical
+				// section: a sibling selector must never count this chat as
+				// both a consumed seat and a live reservation (#1906).
+				leaseProviderID := state.queuedSlotProviderID
+				s.slotQueue.releaseReservationAfter(leaseProviderID, func(otherReserved int) {
+					if leaseProviderID != provider.ProviderID {
+						otherReserved = 0
+					}
+					consume(otherReserved)
+				})
+				state.queuedSlotProviderID = ""
+				return
+			}
+			consume(0)
 		}
 	}
 	s.releaseQueuedSlotReservation(state)
@@ -9222,19 +9403,49 @@ func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
 	state.consumedAssignedID = ""
 }
 
-func (s *Server) dropForwardedInFlight(state *forwardState) {
+// requeueAfterQueueFull reports whether a provider error_queue_full refusal
+// may send the request back to the same provider's slot queue: while other
+// forwarded chats are open there (the next to finish clears the queue-full
+// hold), or when the refused attempt was accepted against occupancy the Mac
+// had not yet confirmed. In that case the refusal is a chat the coordinator
+// already saw finish but the Mac has not retired, and the Mac's next ready
+// report clears the hold even after every other chat finished. A refusal of
+// a dispatch made against Mac-confirmed free seats with nothing in flight is
+// a full node and sheds. Call it after the refusal is recorded.
+func (s *Server) requeueAfterQueueFull(r *http.Request, state *forwardState) bool {
+	if state == nil || hasPinnedRoute(r.Header) || s.pool == nil {
+		return false
+	}
+	if s.pool.ForwardedInFlight(state.provider.ProviderID, state.provider.AssignedID) == 0 && !state.acceptedOnUnconfirmedOccupancy {
+		return false
+	}
+	now := s.now()
+	if state.queueFullRequeueUntil.IsZero() {
+		deadline := s.slotQueueDeadline
+		if deadline <= 0 {
+			deadline = slotQueueDefaultDeadline
+		}
+		state.queueFullRequeueUntil = now.Add(deadline)
+	}
+	return now.Before(state.queueFullRequeueUntil)
+}
+
+// markForwardedSlotFull records a provider error_queue_full refusal. The
+// refused attempt never ran, so its accept-consumed seat returns to the
+// coordinator count in the same pool update that raises the queue-full hold.
+func (s *Server) markForwardedSlotFull(state *forwardState) {
 	if s == nil || state == nil {
 		return
 	}
-	if s.pool != nil && state.slotConsumedOnAccept {
-		providerID := state.consumedProviderID
-		assignedID := state.consumedAssignedID
-		if providerID == "" {
-			providerID = state.provider.ProviderID
-			assignedID = state.provider.AssignedID
+	if s.pool != nil {
+		providerID := state.provider.ProviderID
+		assignedID := state.provider.AssignedID
+		if state.slotConsumedOnAccept && state.consumedProviderID != "" {
+			providerID = state.consumedProviderID
+			assignedID = state.consumedAssignedID
 		}
 		if providerID != "" && assignedID != "" {
-			s.pool.DropForwardedInFlight(providerID, assignedID)
+			s.pool.MarkForwardedSlotFull(providerID, assignedID, state.slotConsumedOnAccept)
 		}
 	}
 	s.dropConsumedForwardedSlot(state)
@@ -11022,6 +11233,10 @@ func writeErrorTypedParam(w http.ResponseWriter, status int, typ, code, message,
 	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusTooManyRequests && code == "provisional_quota_exceeded" {
 		w.Header().Set("Retry-After", "3600")
+	}
+	if isCapacityShedStatus(status, code) {
+		w.Header().Set("Retry-After", capacityShedRetryAfterSeconds)
+		markCapacityShedResponse(w)
 	}
 	var paramValue any
 	if param != "" {

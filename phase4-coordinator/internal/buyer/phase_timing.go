@@ -161,7 +161,9 @@ func (w *phaseTimingResponseWriter) inject() {
 //     attempt: a dispatched attempt whose terminal write is non-503 WILL be
 //     billed (recordRow bills iff status != 503), so it must be left unmarked.
 //     A dispatched attempt that terminates 503 (queue-full / relay-unavailable)
-//     is NOT billed, so it stays eligible for the marker.
+//     is NOT billed, so it stays eligible for the marker. The SPEC-006 §7.8
+//     capacity 429 that now carries those terminals to the buyer (#1906) is
+//     treated the same; its attempt rows stay unbilled 503s.
 //
 // Stamping at the first write — the moment the header is committed — means one
 // wrapper covers every terminal response path: a genuine no-provider error
@@ -185,6 +187,30 @@ type noPriorDispatchResponseWriter struct {
 
 	mu      sync.Mutex
 	claimed bool
+	// capacityShed is set by markCapacityShedResponse before a SPEC-006
+	// §7.8 capacity 429 is written. That terminal is never billed: every
+	// dispatched attempt behind it (queue-full, relay backpressure) is
+	// logged as an unbilled 503 row.
+	capacityShed bool
+}
+
+// markCapacityShedResponse flags the request's no-prior-dispatch writer so
+// the capacity 429 about to be written is treated like the unbilled 503 it
+// replaces when stamping the no-charge marker.
+func markCapacityShedResponse(w http.ResponseWriter) {
+	for w != nil {
+		if np, ok := w.(*noPriorDispatchResponseWriter); ok {
+			np.mu.Lock()
+			np.capacityShed = true
+			np.mu.Unlock()
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
+	}
 }
 
 func (w *noPriorDispatchResponseWriter) WriteHeader(code int) {
@@ -255,10 +281,10 @@ func (w *noPriorDispatchResponseWriter) mark(code int, explicit bool) {
 	w.rec.claimBuyerTerminal(code)
 }
 
-// stampNoChargeMarker is the item-18 marker body, preserved VERBATIM from the
-// pre-#766 sync.Once closure. It is extracted only so the terminal claim in
-// mark can run unconditionally — the decision logic, the early returns, and
-// the header write are byte-identical to the previous implementation.
+// stampNoChargeMarker is the item-18 marker body from the pre-#766 sync.Once
+// closure. It is extracted only so the terminal claim in mark can run
+// unconditionally. The one decision change since is #1906: a capacity 429
+// is an unbilled terminal like the 503 it replaced.
 func (w *noPriorDispatchResponseWriter) stampNoChargeMarker(code int) {
 	if w.rec == nil {
 		return
@@ -268,7 +294,8 @@ func (w *noPriorDispatchResponseWriter) stampNoChargeMarker(code int) {
 	if w.rec.providerCredited {
 		return
 	}
-	if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable &&
+	unbilledTerminal := code == http.StatusServiceUnavailable || (code == http.StatusTooManyRequests && w.capacityShed)
+	if w.rec.dispatchedThisAttempt && !unbilledTerminal &&
 		w.rec.dispatchedThisAttemptFaultFlag != billing.FaultBreakerQualifying {
 		return
 	}

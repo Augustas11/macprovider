@@ -103,6 +103,12 @@ func (s *Server) forwardWithFailover(
 		// attempts). Must precede tx.dispatch, which may write a terminal
 		// response (route_snapshot_failed, provider_failed) synchronously.
 		rec.beginDispatchAttempt()
+		// capacityRefused describes the latest attempt only: a capacity
+		// refusal on an earlier provider must not label a later, unrelated
+		// failure (or the selection after it) as a capacity shed.
+		if state != nil {
+			state.capacityRefused = false
+		}
 		// Dispatch — per-transport. The callback runs one attempt and
 		// returns the classified result. HTTP's callback also owns its
 		// per-attempt context.WithTimeout setup and the cancelAttempt
@@ -176,18 +182,25 @@ func (s *Server) forwardWithFailover(
 			return false
 		}
 
-		// Mark fault state — shared across all transports. The mutation
-		// order matches the pre-refactor inline blocks exactly:
-		// excluded → faultedRoutes → (markBusy MarkState if set).
-		excluded[state.provider.SortKey()] = struct{}{}
-		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
+		// Mark fault state — shared across all transports:
+		// (markBusy queue-full hold if set) → excluded → faultedRoutes.
+		// A provider queue-full refusal while other forwarded chats are open
+		// there means the Mac has not yet retired a chat whose end frame
+		// already arrived. Within one slot-queue deadline of the first
+		// refusal the provider then stays selectable, so the request waits in
+		// its slot queue for the next completion instead of shedding. The
+		// queue-full hold paces each retry to a completion, and the advance
+		// below re-excludes the provider (#1906).
 		if tr.markBusy {
-			s.pool.MarkForwardedSlotFull(state.provider.ProviderID, state.provider.AssignedID)
-			// Queue-full / still-busy terminals keep the consumed occupancy.
-			// Restoring here would republish a free slot while the Mac is full.
-			// Drop the in-flight ignore counter so later ready/thermal reports apply.
-			s.dropForwardedInFlight(state)
+			state.capacityRefused = true
+			s.markForwardedSlotFull(state)
 		}
+		if tr.markBusy && s.requeueAfterQueueFull(r, state) {
+			delete(excluded, state.provider.SortKey())
+		} else {
+			excluded[state.provider.SortKey()] = struct{}{}
+		}
+		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
 
 		// Failover branch — the unified failover state machine. The
 		// failoverCandidate call + state.provider mutation that used to

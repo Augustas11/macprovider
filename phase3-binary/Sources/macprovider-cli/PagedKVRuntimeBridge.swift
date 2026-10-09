@@ -724,7 +724,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform(nonSendable: inputs) { context, inputs in
-            if Self.canSharePrefillForward(inputs) {
+            let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
+            if Self.canSharePrefillForward(inputs),
+               !raggedOffsets || self.supportsRaggedPrefillOffsets {
                 let rowStates = inputs.map {
                     self.rowState(
                         for: $0.requestID,
@@ -804,6 +806,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             }
                         }
                         self.clearDecodeSession()
+                        CBTrace.log(nil, "prefill_shared rows=\(inputs.count) chunk=\(chunkLength) ragged=\(raggedOffsets)")
                         return inputs.enumerated().map { index, input in
                             drafterFailures.contains(index)
                                 ? ContinuousBatchPrefillOutput(
@@ -819,6 +822,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     // Backend-level LMOutput.State cannot be split safely by
                     // row. The speculative batched caches have not been synced
                     // back, so discard them and use the isolated serial path.
+                    // A ragged group is different: each row's paged cache took
+                    // its chunk in place during the forward, so a serial retry
+                    // would append the chunk twice. Fail those rows instead.
+                    if raggedOffsets {
+                        for input in inputs {
+                            self.removeRowState(for: input.requestID)
+                        }
+                        self.clearDecodeSession()
+                        return inputs.map {
+                            ContinuousBatchPrefillOutput(
+                                requestID: $0.requestID,
+                                failureCode: "continuous_batching_prefill_failed"
+                            )
+                        }
+                    }
                 }
             }
 
@@ -975,19 +993,39 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// Rows share one `[B, L]` prompt forward when every chunk has the same
+    /// length `L` and continues exactly from that row's committed KV. Prompt
+    /// offsets may differ (SPEC-038 FR-CB2 ragged shared prefill): RoPE takes
+    /// each row's own offset and `PagedKVBatchLayerCache.makeMask` builds a
+    /// per-row causal mask. Native-MTP prompt rows keep the equal-offset rule,
+    /// because their drafter seeding is proven only on that shape.
     static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
         guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
             return false
         }
         let chunkLength = first.promptTokens.count
-        return inputs.allSatisfy {
+        let shapeCompatible = inputs.allSatisfy {
             $0.promptTokens.count == chunkLength
-                && $0.promptTokenOffset == first.promptTokenOffset
-                && $0.committedKVTokenCount == first.committedKVTokenCount
-                && $0.targetKVTokenCount == first.targetKVTokenCount
                 && $0.committedKVTokenCount == $0.promptTokenOffset
                 && $0.targetKVTokenCount == $0.promptTokenOffset + chunkLength
         }
+        guard shapeCompatible else { return false }
+        if hasRaggedPromptOffsets(inputs) {
+            return !inputs.contains(where: \.nativeMTPPromptPrefill)
+        }
+        return true
+    }
+
+    static func hasRaggedPromptOffsets(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
+        Set(inputs.map(\.promptTokenOffset)).count > 1
+    }
+
+    /// Whether this backend can run a ragged-offset shared prefill. Sliding
+    /// window layers present a per-row trimmed K/V suffix whose columns no
+    /// longer line up across rows of different lengths, so those models keep
+    /// the equal-offset rule.
+    var supportsRaggedPrefillOffsets: Bool {
+        !cacheKinds.contains(where: \.hasSlidingWindow)
     }
 
     func decode(rows inputs: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -3398,6 +3436,29 @@ private struct PagedKVSharedLayerBatch {
     }
 }
 
+/// Per-row causal mask for a ragged shared prefill (SPEC-038 FR-CB2): row `b`
+/// adds `queryTokens` tokens at absolute positions `rowOffsets[b] ..<
+/// rowOffsets[b] + queryTokens`, and its keys are stored left-aligned and
+/// right-padded to the longest row. Query `q` of row `b` attends key `j` iff
+/// `j <= rowOffsets[b] + q` (inside the window, when one is set), which also
+/// excludes every padded key of a shorter row. Shape `[B, 1, queryTokens,
+/// max(rowOffsets) + queryTokens]`, built with array ops once per forward.
+enum PagedKVRaggedPrefillMask {
+    static func make(queryTokens: Int, rowOffsets: [Int], windowSize: Int?) -> MLXArray {
+        let keyCount = (rowOffsets.max() ?? 0) + queryTokens
+        let keyPositions = MLXArray(Int32(0) ..< Int32(keyCount))
+            .reshaped([1, 1, 1, keyCount])
+        let queryPositions = MLXArray(rowOffsets.map(Int32.init))
+            .reshaped([rowOffsets.count, 1, 1, 1])
+            + MLXArray(Int32(0) ..< Int32(queryTokens)).reshaped([1, 1, queryTokens, 1])
+        var mask = keyPositions .<= queryPositions
+        if let windowSize {
+            mask = mask .&& (queryPositions .< keyPositions + MLXArray(Int32(windowSize)))
+        }
+        return mask
+    }
+}
+
 private enum NativeMTPPendingLayerResolution {
     case pagedAttention(PagedKVBatchLayerCache.PendingMTPResolution)
     case recurrent(MTPPackedMambaRowTransaction)
@@ -3846,17 +3907,19 @@ private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @uncheck
         }
         let needsWindow = effectiveWindow.map { window in presentedPostUpdateLengths.contains { $0 > window } } ?? false
         if n == 1, Set(presentedOffsets).count <= 1, !needsWindow { return .none }
-        // Fail-safe: the single shared causal `offset` (max) below is only correct when
-        // every row advances by the same `n` from a comparable base. Today `decode(rows:)`
-        // — the sole batched caller — is always n==1, so this is unreachable; a future
-        // n>1 batched caller with unequal per-row offsets would need per-row query offsets
-        // this single-offset mask cannot express, and would silently miscompute. Trap in
-        // debug/CI (compiled out in release) so such a caller is caught at development time.
-        assert(
-            n == 1 || rowCaches.count == 1 || Set(preUpdateOffsets).count == 1,
-            "PagedKVBatchLayerCache.makeMask: unsupported batched multi-token shape "
-                + "(n=\(n), rows=\(rowCaches.count), distinctOffsets=\(Set(preUpdateOffsets).count))"
-        )
+        // Ragged shared prefill: every row adds the same `n` tokens from its own
+        // offset, so query column q of row b sits at `offset_b + q`. The single
+        // shared causal offset below cannot express that; build the per-row
+        // causal mask instead. The backend only runs this shape for caches
+        // without a presentation window (`supportsRaggedPrefillOffsets`), so key
+        // column j is absolute position j.
+        if n > 1, rowCaches.count > 1, Set(preUpdateOffsets).count > 1 {
+            return .array(PagedKVRaggedPrefillMask.make(
+                queryTokens: n,
+                rowOffsets: preUpdateOffsets,
+                windowSize: windowSize
+            ))
+        }
         // `createCausalMask` masks key position j unless `j < lengths[b]`. `lengths[b]`
         // must therefore be the count of VALID keys row b holds AFTER this forward's
         // update (`offset_b + n`), so each row's own current token(s) stay attendable

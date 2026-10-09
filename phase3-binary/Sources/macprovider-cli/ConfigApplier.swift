@@ -585,7 +585,12 @@ struct ConfigApplier {
             "model_catalog_hash": recommendation.modelCatalogHash.map(Self.yamlScalar),
             "kv_bits": recommendation.knobs.kvBits.map(String.init),
             "max_context_override": String(recommendation.knobs.maxContext),
-            "max_concurrency_override": String(recommendation.knobs.maxBatch),
+            // A depth above 8 goes to the key older CLIs ignore, so a
+            // rollback keeps serving instead of rejecting the config (#1906).
+            "max_concurrency_override": String(min(recommendation.knobs.maxBatch, AppConfig.legacyMaxConcurrencyOverrideLimit)),
+            AppConfig.maxConcurrencyDepthOverrideKey: recommendation.knobs.maxBatch > AppConfig.legacyMaxConcurrencyOverrideLimit
+                ? String(recommendation.knobs.maxBatch)
+                : nil,
             "donor_mode": donorMode ? "true" : nil,
             MaxContextProvenance.configKey: provenance?.yamlFlowValue,
         ]
@@ -688,6 +693,7 @@ struct ConfigApplier {
         "kv_bits",
         "max_context_override",
         "max_concurrency_override",
+        AppConfig.maxConcurrencyDepthOverrideKey,
         "donor_mode",
         MaxContextProvenance.configKey,
     ]
@@ -698,6 +704,9 @@ struct ConfigApplier {
             "max_context_override: \(values["max_context_override"]!!)",
             "max_concurrency_override: \(values["max_concurrency_override"]!!)",
         ]
+        if let depth = values[AppConfig.maxConcurrencyDepthOverrideKey] ?? nil {
+            lines.append("\(AppConfig.maxConcurrencyDepthOverrideKey): \(depth)")
+        }
         if let artifactSHA = values["model_artifact_sha256"] ?? nil {
             lines.insert("model_artifact_sha256: \(artifactSHA)", at: 1)
         }

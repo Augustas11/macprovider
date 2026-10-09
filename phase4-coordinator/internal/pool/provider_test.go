@@ -57,26 +57,184 @@ func TestBusyWithFreeSeatsRoutesAndFullProviderQueues(t *testing.T) {
 }
 
 func TestQueueFullBlocksRestoresUntilReadyFreeReport(t *testing.T) {
+	// Nothing else in flight: no forwarded completion can clear the hold, so
+	// only a ready/free provider report reopens routing.
 	registry := NewRegistry(nil)
 	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
 	registry.Register(provider, nil)
-	if !registry.ConsumeForwardedSlot("p1", "s1") || !registry.MarkForwardedSlotFull("p1", "s1") || !registry.DropForwardedInFlight("p1", "s1") {
+	if !registry.ConsumeForwardedSlot("p1", "s1") || !registry.MarkForwardedSlotFull("p1", "s1", true) {
 		t.Fatal("failed to record WS queue-full result")
 	}
 	got, _ := registry.Resolve("p1", "s1")
-	if got.SlotsFree != 0 || got.RoutingEligible() || !got.SlotQueueEligible() {
-		t.Fatalf("queue-full must wait without routing: state=%q slots_free=%d", got.State, got.SlotsFree)
+	if got.SlotsFree != 4 || got.RoutingEligible() || !got.SlotQueueEligible() {
+		t.Fatalf("queue-full must return the refused seat and wait without routing: state=%q slots_free=%d", got.State, got.SlotsFree)
 	}
-	registry.RestoreForwardedSlot("p1", "s1")
+	busy := 0
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateBusy, SlotsFree: &busy})
 	got, _ = registry.Resolve("p1", "s1")
-	if got.SlotsFree != 0 || got.RoutingEligible() {
-		t.Fatal("restore reopened explicitly rejected capacity")
+	if got.RoutingEligible() {
+		t.Fatal("busy report reopened queue-full capacity")
 	}
 	free := 4
 	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
 	got, _ = registry.Resolve("p1", "s1")
 	if got.SlotsFree != 4 || !got.RoutingEligible() {
 		t.Fatal("ready/free report did not reopen queue-full capacity")
+	}
+}
+
+func TestReadyReportAfterQueueFullAppliesLowerCount(t *testing.T) {
+	// #1906 round-3 L1: an explicit refusal proved the coordinator-owned
+	// count too high, so the first ready report after it is the Mac's count
+	// and must not be ignored as a stale lower report.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	free := 2
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 2 || !got.RoutingEligible() {
+		t.Fatalf("first ready report after queue-full: slots_free=%d routing=%v, want 2/true", got.SlotsFree, got.RoutingEligible())
+	}
+}
+
+func TestConsumeForwardedSlotDetailedReportsUnconfirmedOccupancy(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	if ok, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !ok || unconfirmed {
+		t.Fatalf("first consume on a Mac-confirmed count: ok=%v unconfirmed=%v, want true/false", ok, unconfirmed)
+	}
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !unconfirmed {
+		t.Fatal("consume with another chat in flight must report unconfirmed occupancy")
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	if registry.ForwardedInFlight("p1", "s1") != 0 {
+		t.Fatal("in-flight count did not drain")
+	}
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !unconfirmed {
+		t.Fatal("consume after a restore with no ready report since must report unconfirmed occupancy")
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	free := 4
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); unconfirmed {
+		t.Fatal("consume after the Mac confirmed ready occupancy must not report unconfirmed")
+	}
+}
+
+func TestQueueFullHoldClearsOnNextForwardedCompletion(t *testing.T) {
+	// #1906: eight seats, eight chats in flight from the coordinator's view.
+	// One finishes; the re-issued chat is refused because the Mac still counts
+	// the finished one. The refused seat returns to the count and the next
+	// completion reopens routing with exactly the seats the Mac has free.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	for i := 0; i < 8; i++ {
+		registry.ConsumeForwardedSlot("p1", "s1")
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	got, _ := registry.Resolve("p1", "s1")
+	if got.RoutingEligible() || !got.SlotQueueEligible() || got.SlotsFree != 1 {
+		t.Fatalf("after refusal: routing=%v queue=%v slots_free=%d, want held/queueable/1", got.RoutingEligible(), got.SlotQueueEligible(), got.SlotsFree)
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	got, _ = registry.Resolve("p1", "s1")
+	if !got.RoutingEligible() || got.SlotsFree != 2 || got.State != StateReady {
+		t.Fatalf("after next completion: routing=%v state=%q slots_free=%d, want ready/2", got.RoutingEligible(), got.State, got.SlotsFree)
+	}
+}
+
+func TestStaleLowerReadyReportKeepsRestoredSeats(t *testing.T) {
+	// #1906: a heartbeat built while the Mac still counted two finished chats
+	// arrives after the coordinator restored them. It must not strand those
+	// seats; a later accurate report still releases coordinator ownership.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	stale := 6
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &stale})
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 8 || !got.RoutingEligible() {
+		t.Fatalf("stale lower ready report: slots_free=%d routing=%v, want 8/true", got.SlotsFree, got.RoutingEligible())
+	}
+	shrunk := 4
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &stale, SlotsTotal: &shrunk})
+	got, _ = registry.Resolve("p1", "s1")
+	if got.SlotsFree != 4 {
+		t.Fatalf("kept count above reported slots_total: slots_free=%d, want 4", got.SlotsFree)
+	}
+}
+
+func TestRepeatedLowerReadyReportIsAccepted(t *testing.T) {
+	// #1906 round-1 audit: the stale-report ignore is bounded. A Mac that
+	// genuinely lost seats keeps reporting the lower count; the second
+	// consecutive lower report must apply instead of being ignored forever.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	lower := 3
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 8 {
+		t.Fatalf("first lower report: slots_free=%d, want 8 (one stale report ignored)", got.SlotsFree)
+	}
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 3 {
+		t.Fatalf("second consecutive lower report: slots_free=%d, want 3", got.SlotsFree)
+	}
+	// Ownership is released: a later report applies directly.
+	five := 5
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &five})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 5 {
+		t.Fatalf("report after accepted lower report: slots_free=%d, want 5", got.SlotsFree)
+	}
+}
+
+func TestNewOccupancyWaitRestartsTheOneShotLowerReportIgnore(t *testing.T) {
+	// #1906 round-2 audit: a new forwarded completion starts a new wait for a
+	// ready report, so the first stale lower report after it is ignored again
+	// even if the previous wait already used its one ignore.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 8, SlotsTotal: 8}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	lower := 3
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &lower})
+	if got, _ := registry.Resolve("p1", "s1"); got.SlotsFree != 8 {
+		t.Fatalf("first stale report after a new completion: slots_free=%d, want 8", got.SlotsFree)
+	}
+}
+
+func TestThermalHoldSurvivesForwardedCompletion(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	free := 0
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateBusy, Reason: "thermal_throttled", SlotsFree: &free})
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	registry.RestoreForwardedSlot("p1", "s1")
+	got, _ := registry.Resolve("p1", "s1")
+	if got.RoutingEligible() || got.SlotsFree != 0 {
+		t.Fatalf("thermal hold reopened by queue-full + completion: routing=%v slots_free=%d", got.RoutingEligible(), got.SlotsFree)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -192,9 +191,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 	if s.pool == nil || !s.relayBlindAvailable() {
 		return privacySelection{}, privacyClassUnavailable
 	}
-	providers := s.pool.Snapshot()
-	sort.Slice(providers, func(i, j int) bool { return providers[i].AssignedID < providers[j].AssignedID })
-	for _, provider := range providers {
+	var providers []pool.Provider
+	var selections []privacySelection
+	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
@@ -217,8 +216,13 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 				s.logPrivacyGateRejection("key_attestation_missing_or_mismatched")
 				continue
 			}
-			return privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt}, ""
+			providers = append(providers, provider)
+			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
+			break
 		}
+	}
+	if order := s.orderRelayBlindCandidates(providers); len(order) > 0 {
+		return selections[order[0]], ""
 	}
 	s.logPrivacyGateRejection("no_eligible_provider")
 	return privacySelection{}, privacyClassUnavailable

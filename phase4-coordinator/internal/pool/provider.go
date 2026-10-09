@@ -151,8 +151,19 @@ type Provider struct {
 	// WS frames are stamped at receipt, so a restored seat remains
 	// coordinator-owned until the Mac confirms ready with free seats.
 	awaitingReadyOccupancy bool
+	// ignoredLowerReadyReport records that one ready report lower than the
+	// coordinator-owned count was already ignored while awaiting occupancy.
+	// The next consecutive lower report is accepted, so a genuine capacity
+	// drop is never ignored for more than one report.
+	ignoredLowerReadyReport bool
 	// Explicit thermal and queue-full signals block routing through restores.
 	capacitySafetyHold bool
+	// queueFullHold marks a capacitySafetyHold raised by a provider
+	// error_queue_full refusal rather than thermal pressure. It clears on the
+	// next forwarded completion: the Mac sends a chat's end frame before it
+	// retires the chat, so the refusal means a seat is about to free, not that
+	// the node is down (#1906).
+	queueFullHold bool
 	// forwardedInFlight is ConsumeForwardedSlot minus RestoreForwardedSlot.
 	// While it is >0 the coordinator owns occupancy; a Mac slots_free=0 from
 	// the still-running wave must not wipe a seat that just opened.
@@ -1680,12 +1691,24 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 // later occupancy writer; this only closes the race between accept-release
 // and the next provider capacity update.
 func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
+	ok, _ := r.ConsumeForwardedSlotDetailed(providerID, assignedID)
+	return ok
+}
+
+// ConsumeForwardedSlotDetailed is ConsumeForwardedSlot that also reports
+// whether the seat was taken against coordinator-owned occupancy the Mac has
+// not yet confirmed: other forwarded chats were open, or a seat was restored
+// with no ready report since. The Mac retires a chat only after its end frame,
+// so an error_queue_full answer to such a dispatch is that lag, not a full
+// node, even once every other chat has finished (#1906).
+func (r *Registry) ConsumeForwardedSlotDetailed(providerID, assignedID string) (ok, unconfirmed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
-		return false
+		return false, false
 	}
+	unconfirmed = p.forwardedInFlight > 0 || p.awaitingReadyOccupancy
 	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
 		p.SlotsFree--
@@ -1693,7 +1716,37 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 	if p.SlotsFree == 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateBusy)
 	}
-	return true
+	return true, unconfirmed
+}
+
+// ForwardedInFlight reports how many accepted forwarded chats the coordinator
+// still has open on this session. A queue-full hold clears on the next one to
+// finish, so with none open a refused request has nothing to wait for.
+func (r *Registry) ForwardedInFlight(providerID, assignedID string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
+		return 0
+	}
+	return p.forwardedInFlight
+}
+
+// RoutableSlotsFree reports the live seat count routing may reserve against:
+// slots_free, or 0 while a capacity safety hold is up. Selection snapshots go
+// stale between read and reservation; reserving against this live value keeps
+// a seat restored after the snapshot from reading as overflow (#1906).
+func (r *Registry) RoutableSlotsFree(providerID, assignedID string) (int, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
+		return 0, false
+	}
+	if p.capacitySafetyHold || p.SlotsFree < 0 {
+		return 0, true
+	}
+	return p.SlotsFree, true
 }
 
 // RestoreForwardedSlot returns one consumed accept-slot after the attempt
@@ -1712,10 +1765,15 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	if p.forwardedInFlight > 0 {
 		p.forwardedInFlight--
 	}
+	if p.queueFullHold {
+		p.capacitySafetyHold = false
+		p.queueFullHold = false
+	}
 	if !p.capacitySafetyHold && p.SlotsFree < p.SlotsTotal {
 		p.SlotsFree++
 	}
 	p.awaitingReadyOccupancy = true
+	p.ignoredLowerReadyReport = false
 	if !p.capacitySafetyHold && p.SlotsFree > 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateReady)
 	}
@@ -1740,15 +1798,38 @@ func (r *Registry) DropForwardedInFlight(providerID, assignedID string) bool {
 }
 
 // MarkForwardedSlotFull records a WS queue-full rejection atomically.
-func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string) bool {
+//
+// The refused attempt never ran, so when it consumed a seat on accept
+// (refusedSeatConsumed) that seat goes back to the count: coordinator-owned
+// slots_free stays SlotsTotal minus the chats actually in flight. Routing then
+// holds until the next forwarded completion, or a ready/free report when
+// nothing is in flight. Holding until the whole in-flight set drained and a
+// heartbeat landed turned one lagging seat into a full-node shed (#1906).
+func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string, refusedSeatConsumed bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	thermalHold := p.capacitySafetyHold && !p.queueFullHold
+	if refusedSeatConsumed {
+		if p.forwardedInFlight > 0 {
+			p.forwardedInFlight--
+		}
+		if !thermalHold && p.SlotsFree < p.SlotsTotal {
+			p.SlotsFree++
+		}
+	}
+	if !thermalHold {
+		p.queueFullHold = true
+	}
 	p.capacitySafetyHold = true
-	p.SlotsFree = 0
+	p.awaitingReadyOccupancy = true
+	// The refusal already proved the coordinator-owned count too high, so the
+	// Mac's next ready report applies as-is instead of being ignored once as
+	// a possibly stale lower report.
+	p.ignoredLowerReadyReport = true
 	if p.State == StateReady || p.State == StateBusy {
 		r.setStateLocked(p, StateBusy)
 	}
@@ -2782,12 +2863,27 @@ type HeartbeatResult struct {
 func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal bool) bool {
 	if thermal {
 		p.capacitySafetyHold = true
+		p.queueFullHold = false
 		p.SlotsFree = 0
 		return true
 	}
 	if p.forwardedInFlight == 0 && state == StateReady && slotsFree > 0 {
-		p.awaitingReadyOccupancy = false
 		p.capacitySafetyHold = false
+		p.queueFullHold = false
+		// The Mac retires a chat only after its end frame, so a report built
+		// in between still counts chats the coordinator has seen finish.
+		// While the coordinator owns occupancy its restored count is at least
+		// as fresh: a lower ready report must not strand those seats until
+		// the in-flight set next drains to zero (#1906). Explicit refusal and
+		// thermal reports are what lower capacity.
+		// One stale report is the most a single end-frame/retire gap can
+		// produce; a second consecutive lower report is the Mac's real count.
+		if p.awaitingReadyOccupancy && slotsFree < p.SlotsFree && !p.ignoredLowerReadyReport {
+			p.ignoredLowerReadyReport = true
+			return true
+		}
+		p.awaitingReadyOccupancy = false
+		p.ignoredLowerReadyReport = false
 		return false
 	}
 	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold
@@ -2892,6 +2988,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 		p.SlotsFree = hb.SlotsFree
 	}
 	p.SlotsTotal = hb.SlotsTotal
+	if p.SlotsTotal > 0 && p.SlotsFree > p.SlotsTotal {
+		p.SlotsFree = p.SlotsTotal
+	}
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
 	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
@@ -3127,6 +3226,9 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	}
 	if update.SlotsTotal != nil {
 		p.SlotsTotal = *update.SlotsTotal
+		if p.SlotsTotal > 0 && p.SlotsFree > p.SlotsTotal {
+			p.SlotsFree = p.SlotsTotal
+		}
 	}
 	if len(update.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], update.LastAutoupdateEvent...)

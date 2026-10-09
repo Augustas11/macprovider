@@ -240,6 +240,10 @@ enum ProviderConfig {
         "kv_bits",
         "max_context_override",
         "max_concurrency_override",
+        // Owned without a value: the app writes max_concurrency_override only,
+        // so a recommendation write removes any depth override the CLI
+        // ConfigApplier left, exactly as the CLI does (#1906).
+        "max_concurrency_depth_override",
         "donor_mode",
     ]
 

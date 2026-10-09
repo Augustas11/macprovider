@@ -179,7 +179,12 @@ enum ServedDraftModelError: Error, CustomStringConvertible {
 }
 
 struct ProviderCapacity: Sendable {
-    static let maxConcurrencyOverrideLimit = 8
+    /// Absolute served-depth bound (SPEC-023-R009). Tier defaults and the
+    /// autotune recommendation stay at or below 8; only a measured
+    /// per-class depth (concurrency calibration) or an explicit operator
+    /// override goes above it, and the coordinator clamps advertised slots
+    /// to its own ceiling independently.
+    static let maxConcurrencyOverrideLimit = 32
 
     let ramGB: Int
     let ramTier: String

@@ -149,6 +149,26 @@ type forwardState struct {
 	slotConsumedOnAccept bool
 	consumedProviderID   string
 	consumedAssignedID   string
+	// acceptedOnUnconfirmedOccupancy records that the latest accepted
+	// attempt took its seat while the coordinator, not a Mac report, owned
+	// that provider's occupancy (pool.ConsumeForwardedSlotDetailed).
+	acceptedOnUnconfirmedOccupancy bool
+
+	// queueFullRequeueUntil bounds how long provider error_queue_full
+	// refusals may send this request back to the same provider's slot queue.
+	// Set at the first refusal to one slot-queue deadline; a refusal after it
+	// excludes the provider like any other fault.
+	queueFullRequeueUntil time.Time
+
+	// capacityRefused records that a provider refused this request for
+	// capacity (error_queue_full or relay backpressure). A later selection
+	// that finds no route sheds as a SPEC-006 §7.8 capacity 429, not 503.
+	capacityRefused bool
+
+	// capacityShed429Negotiated records that the caller sent
+	// capacityShed429CapabilityHeader, so a capacity shed is written as
+	// the SPEC-006 §7.8 429 rather than the pre-#1906 503.
+	capacityShed429Negotiated bool
 
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by

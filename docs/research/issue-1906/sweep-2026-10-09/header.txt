@@ -1,0 +1,2 @@
+binary_sha256 ea42fd7226bf599ef8afd54136467c3c2199ef9b9ad018bf2b3df96ae2c3c73d
+depths 4,8,12,16,24,32 window 90s started 2026-10-09T05:04:17Z
