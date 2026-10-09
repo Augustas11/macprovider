@@ -856,6 +856,13 @@ $G "SELECT request_id, status, settled_tokens, settlement_hold FROM quota_reserv
 $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome FROM usage_events WHERE request_id='$RID';"
 ```
 
+These are the interactive checks. The signed-journey capture uses the `-json`
+queries and file layout in `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`
+("Capture layout"); its route-snapshot and receipt-verdict queries add the
+receipt-authorization columns, and its optional per-control
+`quota_reservations.json`, `usage_events.json` and `receipt_verdicts.json`
+are what let the same run also evidence SPEC-006-R016 and SPEC-015-R006.
+
 Finality (read-only GET, service token from `gateway.env`, not printed):
 `curl -s -H "Authorization: Bearer $COORDINATOR_SERVICE_TOKEN"
 "http://127.0.0.1:8443/internal/settlement/finality?account_id=$M1_BUYER_ACCOUNT&request_id=<coordinator request_id>"`.

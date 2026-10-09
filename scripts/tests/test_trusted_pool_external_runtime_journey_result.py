@@ -15,6 +15,7 @@ from scripts.check_spec_governance import (
     SIGNED_JOURNEY_RESULT_REQUIRED_KEYS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID,
     TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID,
+    TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER,
     ValidationResult,
     _expect_keys,
@@ -28,6 +29,8 @@ POOL = "pool-m1-test"
 MEMBER = "mp-member-test-0001"
 BUYER = "acct-buyer-test-0001"
 OPERATOR_ACCOUNT = "acct-malibu-ops-m1"
+BASE_IDS = ["SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"]
+ALL_IDS = sorted(BASE_IDS + ["SPEC-006-R016", "SPEC-015-R006"])
 
 
 def load_builder():
@@ -71,7 +74,11 @@ def headers(status: int, *, request_id: str = "", engine: str = "", provider: st
     return "\r\n".join(lines) + "\r\n\r\n"
 
 
-def make_capture(root: Path) -> Path:
+def snapshot_digest(kind: str) -> str:
+    return hashlib.sha256(f"route-snapshot-{kind}".encode()).hexdigest()
+
+
+def make_capture(root: Path, *, negative_predicates: bool = True) -> Path:
     capture = root / "capture"
     write(capture / "run.json", {
         "run_id": "trusted-pool-external-runtime-20260926T010203Z",
@@ -163,6 +170,7 @@ def make_capture(root: Path) -> Path:
         write(base / "request_log.json", [{"request_id": coord, "external_request_id": rid, "attempt_n": 1, "status": "ok", "pool_id": POOL}])
         write(base / "route_snapshots.json", [{
             "request_id": coord, "attempt_n": 1, "route_snapshot_mode": "enforce", "pool_id": POOL,
+            "provider_id": MEMBER, "route_snapshot_digest": snapshot_digest(kind),
             "runtime_source": "llamacpp_loopback", "manifest_version": 1, "manifest_core_digest": DIGEST,
             "pool_generation": 4, "pool_operator_account_id": OPERATOR_ACCOUNT,
             "expected_catalog_model_hash": GGUF, "artifact_hash": GGUF, "artifact_id": "gguf-q4-k-m",
@@ -171,6 +179,8 @@ def make_capture(root: Path) -> Path:
         write(base / "receipt_verdicts.json", [{
             "request_id": coord, "attempt_n": 1, "receipt_version": 4, "receipt_result": "valid",
             "settlement_outcome": "verified", "reason": "verified_settlement", "closed": 1, "pool_label_status": "verified",
+            "provider_id": MEMBER, "receipt_present": 1, "receipt_profile": "spec015-v0.4",
+            "route_snapshot_digest": snapshot_digest(kind),
         }])
         write(base / "ledger.json", [{
             "id": 7, "request_id": coord, "provider_id": MEMBER, "status": "credited", "charged_prompt_tokens": tokens[0],
@@ -186,9 +196,17 @@ def make_capture(root: Path) -> Path:
     for name, (status, code) in BUILDER.NEGATIVE_CONTROLS.items():
         base = capture / "controls" / name
         write(base / "response.headers", headers(status, request_id=f"req-{name}"))
-        write(base / "response.json", {"error": {"code": code, "message": "x"}})
+        error_type = "invalid_request_error" if status == 400 else "service_unavailable"
+        write(base / "response.json", {"error": {"code": code, "type": error_type, "message": "x"}})
         write(base / "route_snapshots.json", "")
         write(base / "ledger.json", "")
+        if negative_predicates:
+            pool_route = name.startswith("pool-")
+            write(base / "quota_reservations.json", [{
+                "request_id": f"req-{name}", "status": "refunded", "settled_tokens": 0, "settlement_hold": 0,
+            }] if pool_route else "")
+            write(base / "usage_events.json", "")
+            write(base / "receipt_verdicts.json", "")
     return capture
 
 
@@ -250,9 +268,26 @@ def validate(signed, requirement_id="SPEC-022-R012", journeys=None):
 
 class TrustedPoolExternalRuntimeValidatorTests(unittest.TestCase):
     def test_valid_payload_promotes_each_mapped_requirement(self) -> None:
-        for requirement_id in ("SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"):
+        for requirement_id in BASE_IDS:
             signed = valid_signed(requirement_ids=[requirement_id])
             self.assertEqual([], validate(signed, requirement_id), requirement_id)
+        for requirement_id in ALL_IDS:
+            signed = valid_signed(requirement_ids=ALL_IDS)
+            signed["observations"].update(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS)
+            self.assertEqual([], validate(signed, requirement_id), requirement_id)
+
+    def test_negative_predicate_rows_need_every_negative_observation(self) -> None:
+        for requirement_id in ("SPEC-006-R016", "SPEC-015-R006"):
+            signed = valid_signed(requirement_ids=[requirement_id])
+            self.assertTrue(any("missing required field" in error for error in validate(signed, requirement_id)), requirement_id)
+        signed = valid_signed()
+        signed["observations"]["global_route_zero_billable"] = True
+        self.assertTrue(any("missing required field" in error for error in validate(signed)))
+        for field in TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS:
+            signed = valid_signed(requirement_ids=["SPEC-006-R016"])
+            signed["observations"].update(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS)
+            signed["observations"][field] = False
+            self.assertTrue(any(field in error for error in validate(signed, "SPEC-006-R016")), field)
 
     def test_rejects_unmapped_requirement(self) -> None:
         signed = valid_signed(requirement_ids=["SPEC-022-R007"])
@@ -302,7 +337,10 @@ class TrustedPoolExternalRuntimeValidatorTests(unittest.TestCase):
     def test_conformance_maps_journey_with_signed_promotion_evidence(self) -> None:
         conformance = json.loads((REPO_ROOT / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
         rows = {row["requirement_id"]: row for row in conformance["requirements"]}
-        for requirement_id in ("SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"):
+        for requirement_id in ("SPEC-006-R016", "SPEC-015-R006"):
+            self.assertIn(TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID, rows[requirement_id]["journeys"])
+            self.assertEqual("pending", rows[requirement_id]["state"])
+        for requirement_id in BASE_IDS:
             self.assertIn(TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID, rows[requirement_id]["journeys"])
             row = rows[requirement_id]
             self.assertEqual("conformant", row["state"])
@@ -367,7 +405,13 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         evidence = self.build()
         self.assertEqual(BUILDER.EVIDENCE_SCHEMA, evidence["schema_version"])
         self.assertEqual(list(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER), [s["id"] for s in evidence["steps"]])
-        self.assertEqual(["SPEC-022-R012", "SPEC-042-R013", "SPEC-042-R014"], evidence["requirement_ids"])
+        self.assertEqual(ALL_IDS, evidence["requirement_ids"])
+        self.assertEqual(
+            {"receipt_present": True, "receipt_profile": "spec015-v0.4", "provider_is_member": True, "route_snapshot_digest_bound": True},
+            evidence["requests"]["stream"]["settlement"]["receipt_authorization"],
+        )
+        self.assertTrue(evidence["negative_controls"]["no-pool-selector"]["refused_before_reservation"])
+        self.assertEqual(1, evidence["negative_controls"]["pool-ollama-selector"]["quota_reservations"])
         nonstream_settlement = evidence["requests"]["nonstream"]["settlement"]
         self.assertEqual("pool_operator_attested", nonstream_settlement["usage_source"])
         self.assertEqual("provider_reported", nonstream_settlement["ledger"]["usage_source"])
@@ -400,8 +444,82 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
             candidate_identity=evidence["candidate_identity"],
             environment=evidence["environment"],
             steps=evidence["steps"],
+            requirement_ids=evidence["requirement_ids"],
         )
+        for requirement_id in ALL_IDS:
+            self.assertEqual([], validate(signed, requirement_id), requirement_id)
+
+    def test_capture_without_negative_predicate_files_covers_base_rows_only(self) -> None:
+        self.capture = make_capture(self.root / "legacy", negative_predicates=False)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            evidence = self.build()
+        self.assertIn("covers SPEC-022-R012, SPEC-042-R013, SPEC-042-R014 only", stderr.getvalue())
+        self.assertEqual(BASE_IDS, evidence["requirement_ids"])
+        self.assertNotIn("receipt_authorization", evidence["requests"]["nonstream"]["settlement"])
+        self.assertFalse(set(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS) & evidence["observations"].keys())
+        BUILDER.revalidate_committed_evidence(evidence)
+        BUILDER.require_observations(evidence["observations"])
+        signed = valid_signed(observations=evidence["observations"], requirement_ids=BASE_IDS)
         self.assertEqual([], validate(signed))
+
+    def test_rejects_partially_captured_negative_predicates(self) -> None:
+        (self.capture / "controls/pool-native-selector/receipt_verdicts.json").unlink()
+        self.assert_rejected("must be captured for every control or for none")
+
+    def test_rejects_gateway_refusal_after_quota_reservation(self) -> None:
+        write(self.capture / "controls/no-pool-selector/quota_reservations.json",
+              [{"request_id": "req-no-pool-selector", "status": "refunded", "settled_tokens": 0, "settlement_hold": 0}])
+        self.assert_rejected("control no-pool-selector must be refused before quota reservation")
+
+    def test_rejects_wrong_gateway_refusal_type(self) -> None:
+        write(self.capture / "controls/uppercase-selector/response.json",
+              {"error": {"code": "invalid_engine_selection", "type": "service_unavailable"}})
+        self.assert_rejected("control uppercase-selector error.type must be invalid_request_error")
+
+    def test_rejects_billable_or_unrefunded_pool_control(self) -> None:
+        self.mutate_rows("controls/pool-ollama-selector/quota_reservations.json", status="settled")
+        self.assert_rejected("must be refunded")
+        self.mutate_rows("controls/pool-ollama-selector/quota_reservations.json", status="refunded", settled_tokens=5)
+        self.assert_rejected("must settle zero tokens")
+        self.mutate_rows("controls/pool-ollama-selector/quota_reservations.json", settled_tokens=0)
+        write(self.capture / "controls/pool-ollama-selector/usage_events.json",
+              [{"request_id": "req-pool-ollama-selector", "prompt_tokens": 0, "completion_tokens": 3}])
+        self.assert_rejected("zero billable")
+
+    def test_rejects_receipt_verdict_on_a_refusal(self) -> None:
+        write(self.capture / "controls/pool-native-selector/receipt_verdicts.json", [{"request_id": "coord-x", "attempt_n": 1}])
+        self.assert_rejected("control pool-native-selector must leave no receipt verdict")
+
+    def test_rejects_receipt_not_bound_to_the_authorized_attempt(self) -> None:
+        for index, (changes, fragment) in enumerate((
+            ({"route_snapshot_digest": "0" * 64}, "route_snapshot_digest must equal the settled route snapshot's"),
+            ({"provider_id": "mp-other"}, "receipt verdict provider_id must be the member"),
+            ({"receipt_present": 0}, "receipt_present must be 1"),
+            ({"receipt_profile": "relay-blind-settlement-v1"}, "receipt_profile must be"),
+        )):
+            with self.subTest(fragment=fragment):
+                self.capture = make_capture(self.root / f"binding-{index}")
+                self.mutate_rows("requests/nonstream/receipt_verdicts.json", **changes)
+                self.assert_rejected(fragment)
+
+    def test_committed_evidence_claims_negative_rows_only_with_their_predicates(self) -> None:
+        evidence = self.build()
+        BUILDER.revalidate_committed_evidence(evidence)
+        for label, mutate in (
+            ("missing receipt authorization", lambda e: e["requests"]["stream"]["settlement"].pop("receipt_authorization")),
+            ("billable control", lambda e: e["negative_controls"]["pool-native-selector"].__setitem__("billable_usage_events", 1)),
+            ("reserved gateway refusal", lambda e: e["negative_controls"]["uppercase-selector"].__setitem__("quota_reservations", 1)),
+            ("missing observation", lambda e: e["observations"].pop("unauthorized_receipts_absent")),
+            ("claim without predicates", lambda e: [e["negative_controls"][n].pop("receipt_verdicts") for n in BUILDER.NEGATIVE_CONTROLS]),
+            ("predicates without claim", lambda e: e.__setitem__("requirement_ids", BASE_IDS)),
+            ("half claim", lambda e: e.__setitem__("requirement_ids", sorted(BASE_IDS + ["SPEC-006-R016"]))),
+        ):
+            with self.subTest(label=label):
+                bad = json.loads(json.dumps(evidence))
+                mutate(bad)
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    BUILDER.revalidate_committed_evidence(bad)
 
     def test_rejects_unverified_receipt(self) -> None:
         self.mutate_rows("requests/nonstream/receipt_verdicts.json", settlement_outcome="quarantined")
@@ -748,12 +866,13 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
                     BUILDER.revalidate_committed_evidence(bad)
 
     def test_builder_requirement_ids_are_bounded(self) -> None:
-        evidence = {"requirement_ids": ["SPEC-022-R012", "SPEC-022-R007"]}
+        evidence = {"requirement_ids": ["SPEC-022-R012", "SPEC-022-R007", "SPEC-006-R016"]}
         with self.assertRaises(SystemExit):
             BUILDER.parse_requirement_ids("SPEC-022-R007", evidence)
         self.assertEqual(["SPEC-022-R012"], BUILDER.parse_requirement_ids("SPEC-022-R012", evidence))
         with self.assertRaises(SystemExit):
             BUILDER.parse_requirement_ids("SPEC-042-R014", evidence)
+        self.assertEqual(["SPEC-006-R016"], BUILDER.parse_requirement_ids("SPEC-006-R016", evidence))
 
     def test_payload_refresh_maps_conformant_rows_only(self) -> None:
         # The signer's refresh mode renews conformant rows; a promotion still

@@ -6289,13 +6289,15 @@
         "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestInternalEngineSelectionClosedVocabulary",
         "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only. SPEC-006 0.9.37 (#1690 M9) adds the lmstudio selector (lmstudio_loopback). SPEC-006 0.9.38 (#1690 M9) adds the omlx selector (omlx_loopback)."
+        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only. SPEC-006 0.9.37 (#1690 M9) adds the lmstudio selector (lmstudio_loopback). SPEC-006 0.9.38 (#1690 M9) adds the omlx selector (omlx_loopback). Mapped to JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME (#1690 public-224 acceptance): promotable only by a fresh signed envelope whose capture also proves the engine-selection negative predicates (gateway refusals before quota reservation with the closed error types, zero-billable global-route and pool-route refusals, no receipt verdict on any refusal)."
       }
     },
     {
@@ -6465,13 +6467,15 @@
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testPinnedTokenizerCountsOnlyWhileItsSnapshotIsCurrent",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testEmptyToolsArrayIsNoTools"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime. The #1690 M4 coordinator side is implemented: pool_runtime_authorization is attached only to a SPEC-022-R012 pool attempt, bound to request_id, attempt_n, provider_id, and route_snapshot_digest, and the verifier accepts pool_operator_attested only through IngestPoolSettlementReceipt. The #1690 M5 CLI side is implemented too: SettlementReceiptEligibility decides per request, and a loopback runtime signs only when the coordinator-issued PoolRuntimeAuthorization matches every bound field (mapped above). Pending until AC-12b and the signed SPEC-042-R013 enforce-mode pool journey (#1690 M6) pass. SPEC-015 0.4.11 (#1690 M9) adds section N.12 item 7, the per-runtime usage of a cancelled loopback stream (cancelledStreamResult, mapped above)."
+        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime. The #1690 M4 coordinator side is implemented: pool_runtime_authorization is attached only to a SPEC-022-R012 pool attempt, bound to request_id, attempt_n, provider_id, and route_snapshot_digest, and the verifier accepts pool_operator_attested only through IngestPoolSettlementReceipt. The #1690 M5 CLI side is implemented too: SettlementReceiptEligibility decides per request, and a loopback runtime signs only when the coordinator-issued PoolRuntimeAuthorization matches every bound field (mapped above). Pending until AC-12b and the signed SPEC-042-R013 enforce-mode pool journey (#1690 M6) pass. SPEC-015 0.4.11 (#1690 M9) adds section N.12 item 7, the per-runtime usage of a cancelled loopback stream (cancelledStreamResult, mapped above). Mapped to JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME (#1690 public-224 acceptance): promotable only by a fresh signed envelope whose capture also proves the receipt-authorization predicates (each settled verdict from a present spec015-v0.4 receipt naming the member and the settled route snapshot digest, and no receipt verdict on any refused request)."
       }
     },
     {

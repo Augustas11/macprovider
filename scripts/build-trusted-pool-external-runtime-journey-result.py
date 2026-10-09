@@ -32,6 +32,8 @@ from check_spec_governance import (
     TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE,
     TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID,
+    TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS,
+    TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS,
     TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER,
@@ -90,6 +92,23 @@ NEGATIVE_CONTROLS = {
     "pool-ollama-selector": (503, "engine_unavailable"),
     "uppercase-selector": (400, "invalid_engine_selection"),
 }
+# SPEC-006 §5.4.2 rules 2-3: the gateway refuses an invalid selector and a
+# non-native selector without a pool (a global route) before quota
+# reservation, with these error types. The pool-route controls are refused by
+# the coordinator after the gateway reserved quota, so they may leave one
+# refunded, zero-token reservation.
+GATEWAY_REFUSED_CONTROL_TYPES = {
+    "no-pool-selector": "service_unavailable",
+    "uppercase-selector": "invalid_request_error",
+}
+# Optional capture files that add the SPEC-006-R016 and SPEC-015-R006 negative
+# predicates. All present: those rows are claimed too. All absent: the
+# evidence covers BASE_REQUIREMENT_IDS only. Anything else fails closed.
+NEGATIVE_PREDICATE_CONTROL_FILES = ("quota_reservations.json", "usage_events.json", "receipt_verdicts.json")
+BASE_REQUIREMENT_IDS = sorted(
+    set(TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS) - TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS
+)
+RECEIPT_PROFILE = "spec015-v0.4"
 STEP_ASSERTIONS = {
     "step-01-preconditions": "P1-P8 and payout-disabled pass on the deployed build",
     "step-02-pool-policy": "pool active and routeable, candidate, one undelegated member, buyer authorized, manifest digest bound",
@@ -421,7 +440,9 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
     return out
 
 
-def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[str, Any], gateway_request_id: str) -> dict[str, Any]:
+def check_settlement(
+    capture: Path, kind: str, run: dict[str, Any], pool: dict[str, Any], gateway_request_id: str, *, negative_predicates: bool = False
+) -> dict[str, Any]:
     base = f"requests/{kind}"
     request_log = load_capture_rows(capture, f"{base}/request_log.json")
     allowed_attempts: set[tuple[str, int]] = set()
@@ -481,6 +502,21 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         if isinstance(want, int):
             got = as_int(got, f"{kind} verdict.{field}")
         require(got == want, f"{kind} receipt verdict {field} must be {want!r}")
+    if negative_predicates:
+        # SPEC-015-R006: the loopback runtime signed this attempt's receipt
+        # only under the coordinator's pool_runtime_authorization, which binds
+        # request_id, attempt_n, provider_id and route_snapshot_digest. The
+        # verdict for the settled attempt must name the member and the settled
+        # route snapshot's digest, from a present v0.4 receipt.
+        require(as_int(verdict.get("receipt_present"), f"{kind} verdict.receipt_present") == 1,
+                f"{kind} receipt verdict receipt_present must be 1")
+        require(verdict.get("receipt_profile") == RECEIPT_PROFILE, f"{kind} receipt verdict receipt_profile must be {RECEIPT_PROFILE!r}")
+        require(verdict.get("provider_id") == run["member_provider_id"], f"{kind} receipt verdict provider_id must be the member")
+        require(settled_snapshot.get("provider_id") == run["member_provider_id"], f"{kind} settled route snapshot provider_id must be the member")
+        snapshot_digest = require_string(settled_snapshot.get("route_snapshot_digest"), SHA256_RE,
+                                         f"{kind} settled route snapshot route_snapshot_digest")
+        require(verdict.get("route_snapshot_digest") == snapshot_digest,
+                f"{kind} receipt verdict route_snapshot_digest must equal the settled route snapshot's")
 
     ledger = load_capture_rows(capture, f"{base}/ledger.json")
     payable = [row for row in ledger if as_int(row.get("payable"), f"{kind} ledger.payable") == 1]
@@ -530,7 +566,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
     )
     require(debit_tokens == finality_tokens == ledger_tokens,
             f"{kind} debit {debit_tokens}, finality {finality_tokens} and ledger {ledger_tokens} tokens must be equal")
-    return {
+    out = {
         "coordinator_request_ids": sorted({str(row.get("request_id")) for row in request_log}),
         "route_snapshot_count": len(snapshots),
         "runtime_source": RUNTIME_SOURCE,
@@ -557,9 +593,62 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         "gateway": {"reservation_status": "settled", "settlement_hold": 0, "token_source": POOL_OPERATOR_ATTESTED},
         "debited_tokens": {"prompt_tokens": debit_tokens[0], "completion_tokens": debit_tokens[1]},
     }
+    if negative_predicates:
+        out["receipt_authorization"] = dict(RECEIPT_AUTHORIZATION_EVIDENCE)
+    return out
 
 
-def check_controls(capture: Path) -> dict[str, Any]:
+RECEIPT_AUTHORIZATION_EVIDENCE = {
+    "receipt_present": True,
+    "receipt_profile": RECEIPT_PROFILE,
+    "provider_is_member": True,
+    "route_snapshot_digest_bound": True,
+}
+
+
+def negative_predicates_captured(capture: Path) -> bool:
+    present = [
+        (capture / "controls" / name / filename).exists() or (capture / "controls" / name / filename).is_symlink()
+        for name in NEGATIVE_CONTROLS
+        for filename in NEGATIVE_PREDICATE_CONTROL_FILES
+    ]
+    if any(present) and not all(present):
+        die("controls/<name>/{" + ",".join(NEGATIVE_PREDICATE_CONTROL_FILES) + "} must be captured for every control or for none")
+    return all(present)
+
+
+def check_control_negative_predicates(capture: Path, name: str, request_id: str, error_type: Any) -> dict[str, Any]:
+    """SPEC-006-R016 / SPEC-015-R006 negative predicates for one refusal."""
+    base = f"controls/{name}"
+    reservations = load_capture_rows(capture, f"{base}/quota_reservations.json")
+    events = load_capture_rows(capture, f"{base}/usage_events.json")
+    if name in GATEWAY_REFUSED_CONTROL_TYPES:
+        want_type = GATEWAY_REFUSED_CONTROL_TYPES[name]
+        require(error_type == want_type, f"control {name} error.type must be {want_type}, got {error_type!r}")
+        require(reservations == [], f"control {name} must be refused before quota reservation")
+        require(events == [], f"control {name} must leave no gateway usage event")
+    for index, row in enumerate(reservations):
+        where = f"control {name} quota_reservations[{index}]"
+        require(row.get("request_id") == request_id, f"{where}.request_id must equal the control X-Request-ID")
+        require(row.get("status") == "refunded", f"{where} must be refunded")
+        require(as_int(row.get("settled_tokens"), f"{where}.settled_tokens") == 0, f"{where} must settle zero tokens")
+        require(as_int(row.get("settlement_hold"), f"{where}.settlement_hold") == 0, f"{where} must not be held")
+    for index, row in enumerate(events):
+        where = f"control {name} usage_events[{index}]"
+        require(row.get("request_id") == request_id, f"{where}.request_id must equal the control X-Request-ID")
+        for field in ("prompt_tokens", "completion_tokens"):
+            require(as_int(row.get(field), f"{where}.{field}") == 0, f"{where}.{field} must be 0 (zero billable)")
+    require(load_capture_rows(capture, f"{base}/receipt_verdicts.json") == [],
+            f"control {name} must leave no receipt verdict (no receipt outside an authorizing pool route)")
+    return {
+        "refused_before_reservation": name in GATEWAY_REFUSED_CONTROL_TYPES,
+        "quota_reservations": len(reservations),
+        "billable_usage_events": 0,
+        "receipt_verdicts": 0,
+    }
+
+
+def check_controls(capture: Path, *, negative_predicates: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name, (want_status, want_code) in NEGATIVE_CONTROLS.items():
         base = f"controls/{name}"
@@ -567,11 +656,14 @@ def check_controls(capture: Path) -> dict[str, Any]:
         require(status == want_status, f"control {name} status must be {want_status}, got {status}")
         request_id = require_string(headers.get("x-request-id"), None, f"control {name} X-Request-ID")
         body = require_object(parse_json_bytes(read_capture_file(capture, f"{base}/response.json"), f"{base}/response.json"), f"{name} body")
-        code = require_object(body.get("error"), f"control {name} error").get("code")
+        error = require_object(body.get("error"), f"control {name} error")
+        code = error.get("code")
         require(code == want_code, f"control {name} error.code must be {want_code}, got {code!r}")
         require(load_capture_rows(capture, f"{base}/route_snapshots.json") == [], f"control {name} must leave no route snapshot")
         require(load_capture_rows(capture, f"{base}/ledger.json") == [], f"control {name} must leave no ledger row")
         out[name] = {"status": want_status, "error_code": want_code, "request_id": request_id, "route_snapshots": 0, "ledger_rows": 0}
+        if negative_predicates:
+            out[name].update(check_control_negative_predicates(capture, name, request_id, error.get("type")))
     return out
 
 
@@ -786,6 +878,7 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
     for name in NEGATIVE_CONTROLS:
         control = require_object(controls.get(name), f"negative_controls.{name}")
         request_ids.append(require_string(control.get("request_id"), None, f"negative_controls.{name}.request_id"))
+    revalidate_negative_predicates(evidence, requests, controls)
     require_gateway_holds_evidence(evidence.get("gateway_holds"), expected={
         "run_id": require_string(evidence.get("run_id"), RUN_ID_RE, "run_id"),
         "captured_at": parse_datetime_z(evidence.get("captured_at"), "captured_at")[1],
@@ -795,6 +888,38 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
         "request_ids": request_ids,
         "required_paid_ids": request_ids[:2],
     })
+
+
+def revalidate_negative_predicates(evidence: dict[str, Any], requests: dict[str, Any], controls: dict[str, Any]) -> None:
+    """Committed evidence claims SPEC-006-R016 / SPEC-015-R006 exactly when it
+    carries every negative predicate the capture checks."""
+    covered = evidence.get("requirement_ids")
+    require(isinstance(covered, list) and all(isinstance(item, str) for item in covered), "requirement_ids must be an array of strings")
+    observations = require_object(evidence.get("observations"), "observations")
+    claimed = TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS & set(covered)
+    if not claimed:
+        require(sorted(covered) == BASE_REQUIREMENT_IDS, f"requirement_ids must be {BASE_REQUIREMENT_IDS} without the negative predicates")
+        require(not set(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS) & observations.keys(),
+                "negative-predicate observations require the SPEC-006-R016 and SPEC-015-R006 claim")
+        return
+    require(sorted(covered) == sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS),
+            "requirement_ids must claim SPEC-006-R016 and SPEC-015-R006 together with the base rows")
+    for field, want in TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS.items():
+        require(observations.get(field) is want, f"observations.{field} must equal {want!r}")
+    for kind in REQUEST_KINDS:
+        settlement = require_object(require_object(requests.get(kind), f"requests.{kind}").get("settlement"), f"requests.{kind}.settlement")
+        require(settlement.get("receipt_authorization") == RECEIPT_AUTHORIZATION_EVIDENCE,
+                f"requests.{kind}.settlement.receipt_authorization must equal {RECEIPT_AUTHORIZATION_EVIDENCE!r}")
+    for name in NEGATIVE_CONTROLS:
+        control = require_object(controls.get(name), f"negative_controls.{name}")
+        gateway_refused = name in GATEWAY_REFUSED_CONTROL_TYPES
+        require(control.get("refused_before_reservation") is gateway_refused,
+                f"negative_controls.{name}.refused_before_reservation must be {gateway_refused}")
+        reservations = control.get("quota_reservations")
+        require(isinstance(reservations, int) and not isinstance(reservations, bool) and reservations in ((0,) if gateway_refused else (0, 1)),
+                f"negative_controls.{name}.quota_reservations is out of range")
+        for field in ("billable_usage_events", "receipt_verdicts"):
+            require(control.get(field) == 0 and not isinstance(control.get(field), bool), f"negative_controls.{name}.{field} must be 0")
 
 
 def reject_raw_identifiers(evidence: dict[str, Any], run: dict[str, Any]) -> None:
@@ -810,6 +935,15 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         die("--capture-dir must be a directory")
     require_no_symlink_components(capture, "--capture-dir")
     run = load_run(capture)
+    negative_predicates = negative_predicates_captured(capture)
+    if not negative_predicates:
+        print(
+            "build-trusted-pool-external-runtime-journey-result: no controls/<name>/{"
+            + ",".join(NEGATIVE_PREDICATE_CONTROL_FILES)
+            + "} captured; the evidence covers " + ", ".join(BASE_REQUIREMENT_IDS)
+            + " only, not " + ", ".join(sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS)),
+            file=sys.stderr,
+        )
     run["fingerprint_salt"] = secrets.token_hex(32)
     preconditions = check_preconditions(capture)
     pool = check_pool(capture, run)
@@ -819,20 +953,20 @@ def build_evidence(capture: Path) -> dict[str, Any]:
     for kind in REQUEST_KINDS:
         response = check_response(capture, kind, run)
         gateway_request_ids.append(response["request_id"])
-        settlement = check_settlement(capture, kind, run, pool, response["request_id"])
+        settlement = check_settlement(capture, kind, run, pool, response["request_id"], negative_predicates=negative_predicates)
         visible = response["buyer_visible_usage"]
         debited = settlement["debited_tokens"]
         if (visible["prompt_tokens"], visible["completion_tokens"]) != (debited["prompt_tokens"], debited["completion_tokens"]):
             usage_equal = False
         requests[kind] = {"response": response, "settlement": settlement}
-    controls = check_controls(capture)
+    controls = check_controls(capture, negative_predicates=negative_predicates)
     gateway_request_ids.extend(control["request_id"] for control in controls.values())
     holds = check_holds(capture, run, gateway_request_ids, [requests[kind]["response"]["request_id"] for kind in REQUEST_KINDS])
     evidence = {
         "schema_version": EVIDENCE_SCHEMA,
         "journey_id": JOURNEY_ID,
         "run_id": run["run_id"],
-        "requirement_ids": sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS),
+        "requirement_ids": sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS) if negative_predicates else BASE_REQUIREMENT_IDS,
         "repository": {"name": REPOSITORY, "commit": run["source_commit"]},
         "captured_at": run["captured_at"],
         "expires_at": run["expires_at"],
@@ -865,6 +999,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
             "raw_prompt_output_redacted": True,
             "bearer_tokens_redacted": True,
             "buyer_visible_usage_equals_debit": usage_equal,
+            **(dict(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS) if negative_predicates else {}),
         },
         "candidate_identity": {
             "coordinator_version": run["coordinator_version"],
@@ -1028,8 +1163,10 @@ def require_steps(value: Any) -> list[dict[str, Any]]:
 
 def require_observations(value: Any) -> dict[str, Any]:
     observations = require_object(value, "observations")
-    if set(observations) != TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS:
-        die(f"observations keys must be exactly {sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS)}")
+    negative_keys = set(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS)
+    expected_keys = TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS | (negative_keys if negative_keys & observations.keys() else set())
+    if set(observations) != expected_keys:
+        die(f"observations keys must be exactly {sorted(expected_keys)}")
     fixed = {
         "settlement_mode": "enforce",
         "enforce_activated": True,

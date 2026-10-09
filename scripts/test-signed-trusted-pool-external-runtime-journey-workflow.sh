@@ -181,6 +181,9 @@ required_builder = [
     "reject_raw_identifiers",
     "require_candidate_identity",
     "require_observations",
+    "negative_predicates_captured",
+    "check_control_negative_predicates",
+    "revalidate_negative_predicates",
 ]
 for value in required_builder:
     if value not in builder:

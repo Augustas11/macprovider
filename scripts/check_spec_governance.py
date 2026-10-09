@@ -245,11 +245,18 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER = (
     "step-11-redaction",
 )
 TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_IDS = set(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER)
+# SPEC-006-R016 (engine selection) and SPEC-015-R006 (pool-authorized loopback
+# receipts) are promotable only by an envelope that also attests the negative
+# predicates below; an envelope without them covers the first three rows only.
+TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS = {
+    "SPEC-006-R016",
+    "SPEC-015-R006",
+}
 TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-022-R012",
     "SPEC-042-R013",
     "SPEC-042-R014",
-}
+} | TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS
 TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS = {
     "settlement_mode": "enforce",
     "enforce_activated": True,
@@ -262,6 +269,12 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS = {
 }
 TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS = set(TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS) | {
     "buyer_visible_usage_equals_debit",
+}
+TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS = {
+    "engine_refusals_zero_billable": True,
+    "global_route_zero_billable": True,
+    "receipt_authorization_bound": True,
+    "unauthorized_receipts_absent": True,
 }
 TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
     "coordinator_version",
@@ -2306,14 +2319,27 @@ def _validate_trusted_pool_external_runtime_journey_result(
         result.error(f"{location}.signed.environment.class", f"must equal {TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE!r}")
 
     observations = signed.get("observations")
+    signed_requirement_ids = signed.get("requirement_ids")
     if _expect_object(observations, f"{location}.signed.observations", result):
+        negative_keys = set(TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS)
+        claims_negative = isinstance(signed_requirement_ids, list) and any(
+            item in TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_REQUIREMENT_IDS for item in signed_requirement_ids
+        )
+        # The negative predicates travel together: all or none, and all of
+        # them whenever the envelope claims SPEC-006-R016 or SPEC-015-R006.
+        required = set(TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS)
+        if claims_negative or negative_keys & observations.keys():
+            required |= negative_keys
         _expect_keys(
             observations,
-            TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS,
-            TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS,
+            required,
+            TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS | negative_keys,
             f"{location}.signed.observations",
             result,
         )
+        for field_name, expected in TRUSTED_POOL_EXTERNAL_RUNTIME_NEGATIVE_PREDICATE_OBSERVATIONS.items():
+            if field_name in observations and (observations[field_name] is not expected):
+                result.error(f"{location}.signed.observations.{field_name}", f"must equal {expected!r}")
         for field_name, expected in TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS.items():
             value = observations.get(field_name)
             if value != expected or type(value) is not type(expected):
@@ -2355,7 +2381,6 @@ def _validate_trusted_pool_external_runtime_journey_result(
                 f"must equal [{TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID!r}]",
             )
 
-    signed_requirement_ids = signed.get("requirement_ids")
     if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
         result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
     unexpected = [

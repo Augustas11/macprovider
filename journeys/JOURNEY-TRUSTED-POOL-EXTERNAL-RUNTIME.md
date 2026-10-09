@@ -2,8 +2,8 @@
 
 Status: defined; no signed run yet (SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014 stay pending until a signed envelope from this contract is promoted)
 Owner: settlement / Trusted Pool conformance
-Specs: SPEC-022, SPEC-042
-Requirements: SPEC-022-R012, SPEC-042-R013, SPEC-042-R014
+Specs: SPEC-006, SPEC-015, SPEC-022, SPEC-042
+Requirements: SPEC-022-R012, SPEC-042-R013, SPEC-042-R014, SPEC-006-R016 and SPEC-015-R006 (the last two only with the negative-predicate capture below)
 Authority domains: verified-model-settlement, pool-control-plane
 Issue: https://github.com/Augustas11/macprovider/issues/1690
 Execution mode: production-operator-internal-pool
@@ -89,7 +89,13 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
    `usage_source = pool_operator_attested`, `terminal_state = normal_done`,
    and its receipt verdict `receipt_version = 4`, `receipt_result = valid`,
    `settlement_outcome = verified`, `reason = verified_settlement`,
-   `pool_label_status = verified`, `closed = 1`.
+   `pool_label_status = verified`, `closed = 1`. With the negative-predicate
+   capture (SPEC-015-R006), the verdict also has `receipt_present = 1`,
+   `receipt_profile = spec015-v0.4`, `provider_id` equal to the member, and
+   `route_snapshot_digest` equal to the settled attempt's route snapshot
+   digest; that snapshot names the member. The loopback runtime signs only
+   under the coordinator's `pool_runtime_authorization`, which binds exactly
+   these fields.
 7. `step-07-ledger-and-finality` - for each request exactly one payable ledger
    row: the member, `provider_credits > 0`, `quarantined = 0`,
    `settlement_policy_mode = enforce`, `usage_source =
@@ -111,6 +117,13 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
    Each leaves zero route snapshots and zero ledger rows. The coordinator
    records a route snapshot before it dispatches to a provider, so zero
    snapshots also means zero upstream calls.
+   With the negative-predicate capture (SPEC-006-R016, SPEC-015-R006): the
+   gateway refuses `no-pool-selector` (a global route, `error.type
+   service_unavailable`) and `uppercase-selector` (`error.type
+   invalid_request_error`) before quota reservation, so both leave no quota
+   reservation and no usage event; the two pool-route controls leave at most
+   one `refunded` reservation with zero settled tokens and no hold, and only
+   zero-token usage events; and no control leaves a receipt verdict.
    A request with neither selector is not a negative control: the same catalog
    model may legitimately have an eligible native provider on the global route.
 10. `step-10-gateway-holds` - the six generated gateway request ids (two
@@ -157,7 +170,15 @@ capture/
   controls/<name>/response.json         #   pool-ollama-selector, uppercase-selector
   controls/<name>/route_snapshots.json
   controls/<name>/ledger.json
+  controls/<name>/quota_reservations.json   # negative-predicate capture (optional, all or none)
+  controls/<name>/usage_events.json         #   same $G queries with the control's $RID
+  controls/<name>/receipt_verdicts.json     #   same receipt-verdict query with the control's $RID
 ```
+
+The three negative-predicate files are captured for all four controls or for
+none. Without them the evidence covers SPEC-022-R012, SPEC-042-R013 and
+SPEC-042-R014 only; with them it also covers SPEC-006-R016 and
+SPEC-015-R006, and any failed predicate fails the build.
 
 `model_id` is a Hugging Face-style `owner/name` repo id; `operator_role` and
 `hardware_profile` are lowercase snake/kebab tokens of at most 48
@@ -212,10 +233,12 @@ $C "SELECT request_id, attempt_n, route_snapshot_mode,
            json_extract(route_snapshot_json,'\$.pool_operator_account_id') pool_operator_account_id,
            json_extract(route_snapshot_json,'\$.expected_catalog_model_hash') expected_catalog_model_hash,
            json_extract(route_snapshot_json,'\$.artifact_hash') artifact_hash,
-           json_extract(route_snapshot_json,'\$.artifact_id') artifact_id
+           json_extract(route_snapshot_json,'\$.artifact_id') artifact_id,
+           provider_id, route_snapshot_digest
     FROM settlement_route_snapshots WHERE request_id IN ($IDS);" > route_snapshots.json
 $C "SELECT request_id, attempt_n, terminal_state, usage_source FROM settlement_attempt_outputs WHERE request_id IN ($IDS);" > attempt_outputs.json
-$C "SELECT request_id, attempt_n, receipt_version, receipt_result, settlement_outcome, reason, closed, pool_label_status
+$C "SELECT request_id, attempt_n, receipt_version, receipt_result, settlement_outcome, reason, closed, pool_label_status,
+           provider_id, receipt_present, receipt_profile, route_snapshot_digest
     FROM settlement_receipt_verdicts WHERE request_id IN ($IDS);" > receipt_verdicts.json
 $C "SELECT l.id, l.request_id, l.attempt_n, l.provider_id, l.status, l.charged_prompt_tokens, l.completion_tokens, l.usage_source,
            l.provider_credits, l.quarantined, l.settlement_policy_mode, (p.id IS NOT NULL) payable
@@ -225,7 +248,9 @@ $G "SELECT request_id, status, settled_tokens, settlement_hold FROM quota_reserv
 $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome FROM usage_events WHERE request_id='$RID';" > usage_events.json
 ```
 
-The controls use the same `route_snapshots.json` and `ledger.json` queries.
+The controls use the same `route_snapshots.json` and `ledger.json` queries,
+and, for the negative-predicate capture, the same `receipt_verdicts.json`,
+`quota_reservations.json` and `usage_events.json` queries.
 Wait at least one `pending_deadline_seconds` before the verdict, ledger and
 finality captures.
 
@@ -295,7 +320,7 @@ account id. After that file is reviewed and merged, the signing workflow runs
 carrying:
 
 - `journey_id` `JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME`, `requirement_ids` (a
-  subset of the three above), `run_id`, the deployed source commit,
+  subset of the rows the evidence covers), `run_id`, the deployed source commit,
   operator role and identity fingerprint, and UTC timestamps;
 - `execution_mode` and `environment.class` `production-operator-internal-pool`;
 - one result entry per physical step, in order, each referencing the one
@@ -305,7 +330,11 @@ carrying:
   `enforce_scope` (`pool`), `production_coordinator` (true),
   `launch_environment` (`candidate`), `payout_ready_mutated` (false),
   `raw_prompt_output_redacted` (true), `bearer_tokens_redacted` (true),
-  `buyer_visible_usage_equals_debit` (boolean, E2E-F1);
+  `buyer_visible_usage_equals_debit` (boolean, E2E-F1); with the
+  negative-predicate capture also `engine_refusals_zero_billable`,
+  `global_route_zero_billable`, `receipt_authorization_bound` and
+  `unauthorized_receipts_absent` (all true, all or none, required whenever
+  the envelope names SPEC-006-R016 or SPEC-015-R006);
 - `candidate_identity`: `coordinator_version`, `accepted_id`,
   `member_cli_sha256`, `llama_server_build`, `gguf_sha256`,
   `gguf_artifact_id`, `model_id`, `pool_id`, `manifest_version`,
@@ -328,6 +357,8 @@ same as for a promotion, and the row's state does not change.
 
 Every step passes, the redacted evidence is committed and byte-equal at the
 evidence commit, the signed envelope validates, and the evidence is fresh.
-This journey may promote only SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014.
+This journey may promote only SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014,
+and SPEC-006-R016 and SPEC-015-R006 from an envelope that attests the negative
+predicates.
 It is evidence about one `candidate` operator pool; it does not authorize a
 SPEC-043 production launch or `trusted_pools.production_activation`.
