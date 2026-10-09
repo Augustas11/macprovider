@@ -314,6 +314,21 @@ func (s *Store) nowUTC() time.Time {
 	return time.Now().UTC()
 }
 
+// PoolModelPricingBounds is the configured SPEC-005-R015 bounds manifest
+// acceptance applies now; nil when unset or invalid (every entry then fails
+// closed with pool_model_pricing_bounds_unset).
+func (s *Store) PoolModelPricingBounds() *poolmanifest.PoolModelPricingBounds {
+	if s == nil || s.poolModelAcceptance == nil {
+		return nil
+	}
+	bounds := s.poolModelAcceptance().PricingBounds
+	if bounds == nil || bounds.Validate() != nil {
+		return nil
+	}
+	out := *bounds
+	return &out
+}
+
 // Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
 // The extension-rule codes come from poolmanifest.PoolModelRejectCode.
 const (
