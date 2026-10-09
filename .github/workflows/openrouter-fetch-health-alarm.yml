@@ -2,8 +2,9 @@ name: OpenRouter fetch health alarm
 
 # Fail-loud backstop for the OpenRouter market-feeds engine. A dead
 # OPENROUTER_API_KEY (HTTP 401) used to freeze fetch/propose with no alarm.
-# This job probes https://openrouter.ai/api/v1/key and the committed snapshot
-# archive age. It NEVER writes catalog files, NEVER signs, NEVER SSHs to Pearl.
+# This job probes https://openrouter.ai/api/v1/key and validates the retained
+# successful main proposer output; review/merge latency is not fetch freshness.
+# It NEVER writes catalog files, NEVER signs, NEVER SSHs to Pearl.
 # Propose remains proposal_only_never_applied (SPEC-023 §16 operator gate).
 
 on:
@@ -12,6 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -20,7 +22,7 @@ concurrency:
 
 jobs:
   check:
-    name: Alarm on a dead OpenRouter key or stale snapshot archive
+    name: Verify OpenRouter key and successful scan freshness
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,10 +32,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Probe OpenRouter key + archive freshness
+      - name: Probe OpenRouter key and retained main scan
         shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ -z "${OPENROUTER_API_KEY:-}" ]; then
@@ -41,7 +44,7 @@ jobs:
             exit 1
           fi
           python3 scripts/check-openrouter-fetch-health.py \
-            --snapshot-archive docs/research/openrouter-snapshots \
+            --actions-repository "$GITHUB_REPOSITORY" \
             --max-snapshot-age-hours 48
 
   alarm:

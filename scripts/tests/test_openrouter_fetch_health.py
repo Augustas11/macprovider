@@ -8,8 +8,13 @@ import io
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from scripts import openrouter_pricing_engine as engine
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "check-openrouter-fetch-health.py"
@@ -30,6 +35,102 @@ def _run(argv: list[str]) -> tuple[int, str, str]:
         except SystemExit as exc:
             code = int(exc.code or 0)
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+class ActionsProposalFreshnessTests(unittest.TestCase):
+    def proposal(self):
+        policy = engine.load_json_file(engine.DEFAULT_POLICY_PATH, "policy")
+        return engine.build_catalog_proposal(
+            [{"model_id": "z-ai/glm-4.5-air", "pricing": {
+                "input_per_mtok": "0.15", "completion_per_mtok": "0.85", "benchmark_provider": "A"},
+              "demand_request_count_30m": 1000, "endpoint_count": 3,
+              "servability": {"verdict": "review", "required_gb": "80",
+                              "mlx_repo": "mlx-community/GLM-4.5-Air-4bit", "quant": "4bit",
+                              "reasons": ["text-serving build fits fleet residency"]}}],
+            policy, now=health.parse_rfc3339_z(NOW, "test"),
+            yield_floor_completion_per_mtok=Decimal("0.30"), demand_floor_request_count_30m=500,
+        )
+
+    def run_check(self, proposal=None, run=None, runs=None):
+        proposal = self.proposal() if proposal is None else proposal
+        run = run or {"id": 123, "head_branch": "main", "status": "completed",
+                      "conclusion": "success", "event": "schedule"}
+
+        def gh(args, **kwargs):
+            if args[1] == "api":
+                self.assertIn("branch=main&status=success", args[2])
+                return SimpleNamespace(stdout=json.dumps({"workflow_runs": [run] if runs is None else runs}))
+            self.assertEqual(args[:4], ["gh", "run", "download", "123"])
+            self.assertEqual(args[args.index("--name") + 1], "openrouter-catalog-proposal")
+            directory = Path(args[args.index("--dir") + 1])
+            (directory / "openrouter-catalog-proposal-current.json").write_text(json.dumps(proposal))
+            return SimpleNamespace(stdout="")
+
+        with patch.object(health.subprocess, "run", side_effect=gh):
+            return _run(["--key-status", "200", "--actions-repository", "Augustas11/macprovider", "--now", NOW])
+
+    def test_main_producer_retains_the_artifact_required_by_health(self):
+        workflow = (REPO / ".github/workflows/openrouter-catalog-propose.yml").read_text()
+        uploader = workflow.split("uses: actions/upload-artifact@", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("name: openrouter-catalog-proposal", uploader)
+        self.assertIn("openrouter-catalog-proposal-*.json", uploader)
+        retention = next(line for line in uploader.splitlines() if "retention-days:" in line)
+        self.assertGreater(int(retention.split(":", 1)[1]), 2)
+
+    def test_fresh_valid_completed_main_proposal_clears_fetch_health(self):
+        code, out, err = self.run_check()
+        self.assertEqual(code, 0, err)
+        self.assertIn("verified main producer run=123", out)
+        self.assertIn("archive freshness OK", out)
+
+    def test_empty_proposal_cannot_clear_health(self):
+        proposal = self.proposal()
+        proposal["selected"] = []
+        code, _, err = self.run_check(proposal)
+        self.assertEqual(code, 1)
+        self.assertIn("empty", err)
+
+    def test_unreviewed_or_failed_run_cannot_clear_health(self):
+        for change in [{"head_branch": "feature"}, {"conclusion": "failure"},
+                       {"status": "in_progress"}, {"event": "pull_request"}]:
+            run = {"id": 123, "head_branch": "main", "status": "completed",
+                   "conclusion": "success", "event": "schedule", **change}
+            code, _, err = self.run_check(run=run)
+            self.assertEqual(code, 1)
+            self.assertIn("not a trusted", err)
+
+    def test_stale_future_or_obsolete_policy_proposal_cannot_clear_health(self):
+        for change, expected in [({"generated_at": "2026-09-16T04:00:00Z"}, "72.0h old"),
+                                 ({"generated_at": "2026-09-20T04:00:00Z"}, "future"),
+                                 ({"policy_version": "old"}, "obsolete pricing policy")]:
+            proposal = {**self.proposal(), **change}
+            code, _, err = self.run_check(proposal)
+            self.assertEqual(code, 1)
+            self.assertIn(expected, err)
+
+    def test_malformed_proposal_cannot_clear_health(self):
+        proposal = self.proposal()
+        proposal["selected"][0]["proposed_completion_per_mtok"] = "NaN"
+        code, _, err = self.run_check(proposal)
+        self.assertEqual(code, 1)
+        self.assertIn("failed validation", err)
+
+    def test_missing_successful_run_remains_alarm(self):
+        code, _, err = self.run_check(runs=[])
+        self.assertEqual(code, 1)
+        self.assertIn("no successful main", err)
+
+    def test_download_error_does_not_echo_subprocess_output(self):
+        error = health.subprocess.CalledProcessError(1, ["gh"], stderr="Bearer sk-or-secret")
+        with patch.object(health.subprocess, "run", side_effect=error):
+            code, out, err = _run(["--key-status", "200", "--actions-repository", "Augustas11/macprovider"])
+        self.assertEqual(code, 1)
+        self.assertNotIn("sk-or-secret", out + err)
+
+    def test_other_repositories_are_not_trusted(self):
+        code, _, err = _run(["--key-status", "200", "--actions-repository", "someone/fork"])
+        self.assertEqual(code, 1)
+        self.assertIn("only trusts", err)
 
 
 class OpenRouterFetchHealthTests(unittest.TestCase):

@@ -89,11 +89,11 @@ RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
-ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "perf_last_30m_by_workload", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_implicit_caching", "supports_tool_choice", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
+ENDPOINT_ROW_KEYS = frozenset({"completion_tokens_last_30d", "context_length", "latency_last_30m", "max_completion_tokens", "max_prompt_tokens", "model_id", "model_name", "name", "native_tools", "perf_last_30m_by_workload", "pricing", "provider_name", "quantization", "status", "supported_parameters", "supports_image_reference", "supports_implicit_caching", "supports_multiple_audio_references", "supports_tool_choice", "supports_voice_cloning", "tag", "throughput_last_30m", "uptime_last_1d", "uptime_last_30d", "uptime_last_30m", "uptime_last_5m"})
 ENDPOINT_PRICING_KEYS = frozenset({
     "audio", "completion", "discount", "image", "image_output", "image_token",
     "input_audio_cache", "input_cache_read", "input_cache_write", "input_cache_write_1h",
-    "internal_reasoning", "overrides", "prompt", "web_search",
+    "internal_reasoning", "overrides", "prompt", "request", "web_search",
 })
 
 
@@ -770,7 +770,10 @@ def cheapest_endpoint_pricing(
     min_request_count_30m: int = 1,
     min_distinct_providers: int = 1,
     excluded_listing_providers: Sequence[str] = (),
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    diagnostics = {} if diagnostics is None else diagnostics
+    diagnostics.update(active_paid=0, missing_text_activity=0, eligible_providers=0)
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
     if not isinstance(data, dict):
@@ -784,6 +787,7 @@ def cheapest_endpoint_pricing(
     if not isinstance(endpoints, list):
         raise SchemaError(f"endpoints response for {model_id}: endpoints must be an array")
     if not endpoints:
+        diagnostics["reason"] = "OpenRouter reports no provider endpoints"
         return None
     priced: list[tuple[Decimal, Decimal, str, int, str]] = []
     # Every active paid listing, independent of 30m activity, retained as the
@@ -803,6 +807,10 @@ def cheapest_endpoint_pricing(
         if not isinstance(provider, str) or not provider.strip() or not isinstance(pricing, dict):
             raise SchemaError(f"endpoints response for {model_id}: endpoint[{index}] missing provider/pricing")
         require_allowed_keys(pricing, ENDPOINT_PRICING_KEYS, f"endpoints response for {model_id}: endpoints[{index}].pricing")
+        if "request" in pricing and parse_decimal(pricing["request"], f"endpoints response for {model_id}: request") != 0:
+            # Per-request charges cannot be normalized into a token-only peg
+            # without a request-size assumption; do not silently discard them.
+            raise SchemaError(f"endpoints response for {model_id}: nonzero per-request pricing cannot establish a token-only market quote")
         prompt = parse_decimal(pricing.get("prompt"), f"endpoints response for {model_id}: prompt")
         completion = parse_decimal(pricing.get("completion"), f"endpoints response for {model_id}: completion")
         if is_free_variant(endpoint.get("model_id")) or is_free_variant(endpoint.get("tag")):
@@ -815,6 +823,10 @@ def cheapest_endpoint_pricing(
         if provider in excluded_listing:
             continue
         activity = endpoint_request_activity(endpoint, model_id, index)
+        if status == 0 and prompt > 0 and completion > 0:
+            diagnostics["active_paid"] += 1
+            if activity is None:
+                diagnostics["missing_text_activity"] += 1
         if status == 0 and (prompt > 0 or completion > 0):
             listed.append({
                 "provider_name": provider,
@@ -829,6 +841,10 @@ def cheapest_endpoint_pricing(
             continue
         priced.append((completion, prompt, provider, activity, endpoint_model_id))
     if not priced:
+        diagnostics["reason"] = (
+            "no active paid competitor endpoints" if not diagnostics["active_paid"] else
+            f"no endpoints meet text activity floor {min_request_count_30m} req/30m"
+        )
         return None
     # Collapse to ONE representative quote per distinct provider (the provider's
     # lowest, deterministic) before the median. With an unweighted median this
@@ -836,7 +852,9 @@ def cheapest_endpoint_pricing(
     # adding many eligible endpoints under one provider; a distinct-provider
     # quorum then blocks a thin (few-provider) market from setting a money price.
     reps = collapse_provider_quotes(priced)
+    diagnostics["eligible_providers"] = len(reps)
     if len(reps) < min_distinct_providers:
+        diagnostics["reason"] = f"eligible provider quorum {len(reps)} below required {min_distinct_providers}"
         return None
     completion, completion_endpoint = endpoint_price_median(reps, 0)
     prompt, prompt_endpoint = endpoint_price_median(reps, 1)
@@ -2562,8 +2580,11 @@ def build_catalog_proposal(
         pricing = record.get("pricing")
         servability = record.get("servability") or {}
         demand = int(record.get("demand_request_count_30m") or 0)
+        if record.get("probe_error"):
+            excluded.append({"model_id": model_id, "reason": record["probe_error"]})
+            continue
         if pricing is None:
-            excluded.append({"model_id": model_id, "reason": "no active priced OpenRouter endpoint"})
+            excluded.append({"model_id": model_id, "reason": record.get("pricing_exclusion") or "no active priced OpenRouter endpoint"})
             continue
         completion = parse_decimal(pricing["completion_per_mtok"], f"{model_id} completion price")
         prompt = parse_decimal(pricing["input_per_mtok"], f"{model_id} prompt price")
@@ -2766,6 +2787,7 @@ def fetch_catalog_records(
             # as skipped (surfaced in the proposal's excluded trail) rather than
             # running unbounded OpenRouter + HuggingFace probes past the budget.
             record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before this candidate was probed"]}
+            record["probe_error"] = record["servability"]["reasons"][0]
             records.append(record)
             continue
         url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
@@ -2775,29 +2797,45 @@ def fetch_catalog_records(
             data = document.get("data") if isinstance(document, dict) else None
             endpoints = data.get("endpoints") if isinstance(data, dict) else None
             record["endpoint_count"] = len(endpoints) if isinstance(endpoints, list) else 0
+            diagnostics: dict[str, Any] = {}
             record["pricing"] = cheapest_endpoint_pricing(
                 document,
                 model_id,
                 min_request_count_30m=min_endpoint_requests,
                 min_distinct_providers=min_distinct_providers,
                 excluded_listing_providers=listing_excluded_provider_names(policy),
+                diagnostics=diagnostics,
             )
+            if record["pricing"] is None:
+                record["pricing_exclusion"] = diagnostics.get("reason")
+                if diagnostics["missing_text_activity"]:
+                    record["probe_error"] = (
+                        "OpenRouter text request-count telemetry unavailable for "
+                        f"{diagnostics['missing_text_activity']}/{diagnostics['active_paid']} active paid competitor endpoints; "
+                        f"cannot establish liquidity ({diagnostics.get('reason')})"
+                    )
+                records.append(record)
+                continue
         except EngineError as error:
             record["servability"] = {"verdict": "error", "reasons": [f"OpenRouter endpoint pricing failed: {error}"]}
+            record["probe_error"] = record["servability"]["reasons"][0]
             records.append(record)
             continue
         if clock() >= deadline:
             record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted before the servability probe"]}
+            record["probe_error"] = record["servability"]["reasons"][0]
             records.append(record)
             continue
         try:
             record["servability"] = dict(servability_resolver(model_id, max_residency))
         except Exception as error:  # servability probe is best-effort; surface, don't abort
             record["servability"] = {"verdict": "error", "reasons": [f"servability probe failed: {type(error).__name__}: {error}"]}
+            record["probe_error"] = record["servability"]["reasons"][0]
         if clock() >= deadline:
             # The resolver returned after the budget expired; discard its verdict
             # so a late result cannot enter the proposal.
             record["servability"] = {"verdict": "error", "reasons": ["scan budget exhausted during the servability probe"]}
+            record["probe_error"] = record["servability"]["reasons"][0]
         records.append(record)
     return records
 
@@ -2866,6 +2904,16 @@ def command_propose(args: argparse.Namespace) -> int:
     name = f"openrouter-catalog-proposal-{proposal['generated_at'].replace(':', '-')}.json"
     atomic_publish_json_directory(output_dir, {name: proposal})
     print(output_dir / name)
+    for row in proposal["excluded"]:
+        print(f"{row['model_id']}: {row['reason']}", file=sys.stderr)
+    failures = sum(bool(record.get("probe_error")) for record in records)
+    if failures or not proposal["selected"]:
+        print(
+            f"catalog proposal unhealthy: {failures}/{len(records)} candidate probes failed, "
+            f"{len(proposal['selected'])} selected; diagnostic artifact retained, no review PR should be opened",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

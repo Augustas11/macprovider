@@ -6,11 +6,16 @@ stage (OpenRouter endpoints + HF servability) is exercised via injected records,
 so no live calls are made.
 """
 
+import contextlib
+import io
+import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -92,6 +97,106 @@ class ModelDemandActivityTests(unittest.TestCase):
     def test_no_endpoints_is_zero(self):
         self.assertEqual(engine.model_demand_activity({"data": {}}), 0)
         self.assertEqual(engine.model_demand_activity({}), 0)
+
+
+class CatalogFetchHealthTests(unittest.TestCase):
+    model = "z-ai/glm-4.5-air"
+
+    def endpoint(self, provider, count=300):
+        row = {"provider_name": provider, "status": 0,
+               "pricing": {"prompt": "0.00000015", "completion": "0.00000085", "request": "0"},
+               "native_tools": {}, "supports_image_reference": False,
+               "supports_multiple_audio_references": False}
+        if count is not None:
+            row["perf_last_30m_by_workload"] = {"text_generation": {"request_count": count}}
+        return row
+
+    def fetch(self, endpoints=None, status=200, clock=None):
+        document = {"data": {"id": self.model, "endpoints": endpoints or []}}
+
+        class Client:
+            def get(self, url, timeout_seconds):
+                return engine.HTTPResponse(status, json.dumps(document).encode(), {})
+
+        kwargs = {"clock": clock} if clock else {}
+        return engine.fetch_catalog_records(
+            [self.model], {**policy(), "min_endpoint_request_count_30m": 30, "min_distinct_providers": 2},
+            or_client=Client(), servability_resolver=lambda *args: servable("78.2"),
+            retries=0, **kwargs,
+        )
+
+    def test_documented_metadata_allows_paid_liquid_model_to_be_selected(self):
+        records = self.fetch([self.endpoint("A"), self.endpoint("B")])
+        self.assertEqual(len(propose(records)["selected"]), 1)
+        self.assertNotIn("probe_error", records[0])
+
+    def test_schema_and_http_errors_survive_into_exclusion(self):
+        row = self.endpoint("A")
+        row["unknown_future_field"] = True
+        for records, expected in [(self.fetch([row]), "unexpected fields"),
+                                  (self.fetch(status=401), "HTTP 401")]:
+            self.assertIn(expected, propose(records)["excluded"][0]["reason"])
+            self.assertIn("probe_error", records[0])
+
+    def test_nonzero_or_invalid_request_fee_does_not_enter_token_price(self):
+        for fee, expected in [("0.01", "nonzero per-request pricing"), ("NaN", "finite"), ("-1", "non-negative")]:
+            row = self.endpoint("A")
+            row["pricing"]["request"] = fee
+            records = self.fetch([row, self.endpoint("B")])
+            self.assertIn(expected, records[0]["probe_error"])
+            self.assertFalse(propose(records)["selected"])
+
+    def test_absent_and_null_text_telemetry_are_probe_failures(self):
+        for null_perf in [False, True]:
+            rows = [self.endpoint("A", None), self.endpoint("B", None)]
+            if null_perf:
+                for row in rows:
+                    row["perf_last_30m_by_workload"] = None
+            records = self.fetch(rows)
+            reason = propose(records)["excluded"][0]["reason"]
+            self.assertIn("telemetry unavailable for 2/2", reason)
+            self.assertNotIn("no active priced", reason)
+
+    def test_empty_zero_activity_and_quorum_have_distinct_reasons(self):
+        for rows, expected in [([], "no provider endpoints"),
+                               ([self.endpoint("A", 0), self.endpoint("B", 0)], "text activity floor"),
+                               ([self.endpoint("A")], "provider quorum 1 below required 2")]:
+            records = self.fetch(rows)
+            self.assertIn(expected, propose(records)["excluded"][0]["reason"])
+            self.assertNotIn("probe_error", records[0])
+
+    def test_missing_activity_cannot_replace_provider_quorum(self):
+        records = self.fetch([self.endpoint("A"), self.endpoint("B", None)])
+        self.assertIn("telemetry unavailable for 1/2", records[0]["probe_error"])
+
+    def test_scan_budget_error_is_preserved(self):
+        ticks = iter([0, 1801])
+        records = self.fetch(clock=lambda: next(ticks))
+        self.assertIn("scan budget exhausted", propose(records)["excluded"][0]["reason"])
+
+    def test_command_retains_diagnostics_and_fails_empty_or_partial_scans(self):
+        good = record(self.model, pricing_dict=pricing("0.85"), servability=servable("78.2"))
+        bad = record("qwen/qwen3-32b", pricing_dict=None, servability={})
+        bad["probe_error"] = "OpenRouter endpoint pricing failed: HTTP 401"
+        legitimate_exclusion = record(self.model, pricing_dict=pricing("0.10"), servability=servable("78.2"))
+        for records, expected in [([good], 0), ([bad], 1), ([good, bad], 1), ([legitimate_exclusion], 1)]:
+            with self.subTest(expected=expected, records=len(records)), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "out"
+                args = engine.parser().parse_args(["propose", "--output-dir", str(output)])
+                stderr = io.StringIO()
+                with patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}), \
+                     patch.object(engine, "fetch_json", return_value={"data": [{"id": self.model}]}), \
+                     patch.object(engine, "fetch_catalog_records", return_value=records), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(engine.command_propose(args), expected)
+                artifacts = list(output.glob("openrouter-catalog-proposal-*.json"))
+                self.assertEqual(len(artifacts), 1)
+                artifact = json.loads(artifacts[0].read_text())
+                engine.validate_catalog_proposal(artifact)
+                if expected:
+                    self.assertIn("catalog proposal unhealthy", stderr.getvalue())
+                if any(r.get("probe_error") for r in records):
+                    self.assertIn("HTTP 401", stderr.getvalue())
 
 
 class SelectOpenWeightCandidatesTests(unittest.TestCase):

@@ -118,6 +118,55 @@ github_api_get() {
     fi
   done
 }
+anonymous_download() {
+  local url="$1" out="$2" status remaining reset retry_after now backoff=2
+  local max_wait="${MACPROVIDER_DISCOVERY_ASSET_WAIT_SECONDS:-600}"
+  local max_attempt_time="${MACPROVIDER_DISCOVERY_ASSET_CURL_MAX_TIME_SECONDS:-240}"
+  [[ "$max_wait" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery asset wait budget"
+  [[ "$max_attempt_time" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery asset curl max-time"
+  local start deadline attempt_time connect_timeout
+  start="$(date +%s)"
+  deadline=$((start + max_wait))
+  while true; do
+    now="$(date +%s)"
+    remaining=$((deadline - now))
+    if (( remaining <= 0 )); then
+      die "anonymous download exhausted ${max_wait}s budget for $url"
+    fi
+    attempt_time="$max_attempt_time"
+    (( attempt_time > remaining )) && attempt_time="$remaining"
+    connect_timeout=10
+    (( connect_timeout > attempt_time )) && connect_timeout="$attempt_time"
+    : > "$work/download-headers.txt"
+    status="$(curl --show-error --silent --location --proto '=https' --tlsv1.2 \
+      --connect-timeout "$connect_timeout" --max-time "$attempt_time" \
+      -D "$work/download-headers.txt" -o "$out" -w '%{http_code}' "$url")" ||
+      status="000"
+    case "$status" in
+      200) return 0 ;;
+      000 | 403 | 408 | 429 | 500 | 502 | 503 | 504) ;;
+      *) die "anonymous download returned HTTP $status for $url" ;;
+    esac
+    remaining="$(header_value x-ratelimit-remaining "$work/download-headers.txt")"
+    reset="$(header_value x-ratelimit-reset "$work/download-headers.txt")"
+    retry_after="$(header_value retry-after "$work/download-headers.txt")"
+    now="$(date +%s)"
+    if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+      backoff="$retry_after"
+    elif [[ "$remaining" == 0 && "$reset" =~ ^[0-9]+$ ]]; then
+      backoff=$((reset - now + 5))
+    fi
+    (( backoff < 1 )) && backoff=1
+    now="$(date +%s)"
+    if (( now + backoff > deadline )); then
+      die "anonymous download returned HTTP $status for $url after ${max_wait}s"
+    fi
+    printf '[verify-anonymous-release-discovery] anonymous download HTTP %s; waiting %ss for %s\n' \
+      "$status" "$backoff" "$url" >&2
+    sleep "$backoff"
+    backoff=$((backoff * 2 > 120 ? 120 : backoff * 2))
+  done
+}
 listing_attempts="${MACPROVIDER_DISCOVERY_LISTING_ATTEMPTS:-15}"
 listing_retry_seconds="${MACPROVIDER_DISCOVERY_LISTING_RETRY_SECONDS:-2}"
 [[ "$listing_attempts" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing attempt budget"
@@ -175,7 +224,7 @@ unset \
   github_api_curl_args
 
 while IFS=$'\t' read -r name url; do
-  curl "${curl_args[@]}" "$url" -o "$work/$name"
+  anonymous_download "$url" "$work/$name"
 done < "$work/assets.tsv"
 
 python3 "$root/scripts/verify-release-discovery-transport.py" \
@@ -193,7 +242,7 @@ python3 "$root/scripts/verify-release-discovery-transport.py" \
 client_asset="macprovider-cli-${client_tag}-darwin-arm64.tar.gz"
 client_base="https://github.com/$repository/releases/download/$client_tag"
 for name in "$client_asset" checksums.txt checksums.txt.sig; do
-  curl "${curl_args[@]}" "$client_base/$name" -o "$work/$name"
+  anonymous_download "$client_base/$name" "$work/$name"
 done
 openssl dgst -sha256 \
   -verify "$root/ops/pearl-updater/release-signing-public.pem" \

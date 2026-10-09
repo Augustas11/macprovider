@@ -38,6 +38,7 @@ expect() {
 expect block 'gh workflow run acceptance-candidate.yml --ref main -f tag=v1.8.230'
 expect block 'gh workflow run promote-acceptance-candidate.yml -f tag=v1'
 expect block 'gh workflow run release.yml --ref main -f version=v1.8.230'
+expect block 'gh workflow run renew-release-discovery-head.yml --ref main -f validity_hours=168'
 expect block 'gh workflow run pearl-runtime-release.yml --ref main -f version=v1.8.230 -f prerelease=true'
 expect block 'gh -R Augustas11/macprovider workflow run release.yaml'
 expect block 'cd /x && gh workflow run "pearl-runtime-release.yml" --ref main'
@@ -92,6 +93,7 @@ expect block 'timeout 60 scripts/publish-native-mtp-revocations.sh --deploy'
 expect block 'gh workflow run "Sign private acceptance candidate" --ref main'
 expect block 'gh workflow run "Promote exact physically accepted candidate"'
 expect block 'gh workflow run "release macprovider-cli" -f version=v1'
+expect block 'gh workflow run "Renew signed release discovery head" -f validity_hours=168'
 expect block "gh workflow run 'Release Pearl runtime' -f version=v1"
 expect block 'gh workflow run "Verify live coordinator release rollout" -f tag=v1'
 expect block 'gh workflow run 123456789 --ref main'
@@ -113,6 +115,7 @@ expect allow './scripts/ops/pearl-runtime.sh status'
 
 # --- entry points and the marker ---
 expect allow 'scripts/ops/catalog-activate.sh next --run'
+expect allow 'scripts/ops/discovery-renew.sh next --run'
 expect allow 'MACPROVIDER_OPS_OWNER=me scripts/ops/pearl-runtime.sh next --run'
 expect allow 'bash scripts/ops/cli-release.sh status'
 expect allow 'gh workflow run release.yml --ref main -f version=v1.8.230' Bash 1

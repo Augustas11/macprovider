@@ -205,7 +205,7 @@ unchanged, so they recover without a restart.
 
 | When (UTC) | What |
 | --- | --- |
-| Monday 16:00 | discovery-head renewal (`renew-release-discovery-head.yml`) — different key, different artifact. Do not share this slot. |
+| Monday and Thursday 16:00 | discovery-head renewal (`renew-release-discovery-head.yml`) — different key, different artifact. Do not share this slot. |
 | Wednesday 16:00 | **signed autotune renew** (`renew-autotune-static-feed-signed.yml`, `autotune-feed-renewal`, unattended) |
 | Tuesday 16:00 | **watch** (`renew-autotune-static-feed.yml`) — fails if live `generated_at` is ≥ 7 days old (~6 days after a successful Wednesday) |
 | every 6 hours | **20-day alarm** (`autotune-feed-freshness-alarm.yml`) |
