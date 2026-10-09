@@ -623,6 +623,26 @@ settled, so traffic stops and holds drain first:
    (`macprovider-cli models admission withdraw <candidate> --yes --json`,
    then re-offering without `pool_model_id` if it should stay offered).
 
+   **Quiescent rollback (required for any target older than `p1880`).** The
+   preflight reads a snapshot of the database; a running coordinator keeps
+   writing to it (a provider can submit a new offer naming a pool entry, or
+   a creator a superseding manifest, after a passing preflight, and paused
+   pools or a closed buyer ingress do not stop either). So:
+   1. Run the preflight against the running coordinator first and clear
+      what it lists (withdraw the named offers); this pass is advisory.
+   2. Stop the coordinator (`sudo systemctl stop macprovider-coordinator`)
+      so nothing writes to the database, and confirm the process is gone.
+   3. With it stopped, run the **current** binary's
+      `coordinator pool-rollback-preflight --target-tier <tier>` against that
+      final database. Only exit 0 here counts. On exit 3, start the current
+      coordinator again, clear the listed blockers, and repeat from step 2,
+      or roll forward.
+   4. Keep the coordinator stopped through the binary swap, then start only
+      the target binary.
+   Never run an old and a new coordinator against the same database at the
+   same time, not even briefly during the swap: the old one ignores and can
+   overwrite what the new one recorded.
+
    **Carried risk: whole-database rollback (pre-existing, #1816 freeze audit
    R1 S-M5).** Trust-pool events, their projections, and the manifest
    acceptance high-water rows live in `coordinator.db`, so restoring an older
