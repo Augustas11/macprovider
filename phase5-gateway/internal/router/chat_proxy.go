@@ -714,6 +714,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-022 R-12.8: bearer, account, request id and the
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
+			advertiseCapacityShed429(upReq.Header)
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
 			// budget as authenticated dispatch metadata instead, so an omitted
@@ -2534,6 +2535,18 @@ func isCoordTransientProvider502(status int, body []byte) bool {
 // is a pre-dispatch outcome like the 503 it replaced (#1906): no inference
 // ran, so it refunds under the same no-prior-dispatch proof and passes
 // through to every buyer as a retryable 429 with the gateway Retry-After.
+// capacityShed429CapabilityHeader tells the coordinator that this gateway
+// handles the capacity 429 (isCoordCapacityShed429). A coordinator answers a
+// capacity shed with the pre-#1906 503 to any caller that does not send it,
+// so a coordinator deployed before this gateway keeps the old contract.
+const capacityShed429CapabilityHeader = "X-MacProvider-Capacity-Shed-429"
+
+// advertiseCapacityShed429 is called next to every setCoordinatorChatContext
+// (TestEveryCoordinatorChatBuilderAdvertisesCapacityShed429).
+func advertiseCapacityShed429(h http.Header) {
+	h.Set(capacityShed429CapabilityHeader, "1")
+}
+
 func isCoordCapacityShed429(status int, body []byte) bool {
 	return status == http.StatusTooManyRequests && openAIErrorCode(body) == "no_provider_available"
 }
