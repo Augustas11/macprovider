@@ -139,3 +139,17 @@ jobs:
           SPEC-GOVERNANCE-DECLARATION-END
           EOF
           )"
+
+  alarm:
+    # Route the outcome to an `ops-alarm` issue (#1920): failure opens or
+    # updates it, the next success closes it.
+    needs: [propose]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: openrouter-catalog-propose
+      title: the scheduled OpenRouter catalog proposal failed
+      result: ${{ needs.propose.result }}

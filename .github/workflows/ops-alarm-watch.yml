@@ -1,0 +1,97 @@
+name: Ops alarm watch
+
+# Hourly watcher for what a scheduled workflow's own alarm job cannot report
+# (#1920): a renewal cancelled while it waited on the production-release
+# approval, a run parked on that approval for more than an hour, a run stuck
+# in progress, and a schedule that silently stopped firing. Each watched
+# workflow gets its own `ops-alarm` issue key (watch-<workflow>); the next
+# healthy check closes it. Plain failures are raised by the workflows' own
+# alarm jobs, so one failure opens one issue.
+#
+# Renewals keep their production-release gate and shared concurrency group:
+# re-signing a discovery head needs the release-signing key, which lives only
+# behind that reviewed environment. This watcher makes a parked approval loud
+# instead of silent.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-alarm-watch
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: Watch scheduled renewals and alarms
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout watcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Classify recent runs and raise or clear alarms
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # workflow file | max hours since the last run | extra flags
+          # Renewals: weekly, so a run older than 8 days means the schedule
+          # stopped. The 6-hourly alarms cancel superseded runs by design, so
+          # only check that they keep running.
+          watched="
+          renew-release-discovery-head.yml|192|
+          renew-autotune-static-feed-signed.yml|192|
+          renew-autotune-static-feed.yml|192|
+          openrouter-catalog-propose.yml|30|
+          discovery-head-freshness-alarm.yml|24|--stale-only
+          autotune-feed-freshness-alarm.yml|24|--stale-only
+          install-sh-parity-alarm.yml|24|--stale-only
+          install-sh-consumer-health-alarm.yml|24|--stale-only
+          openrouter-fetch-health-alarm.yml|24|--stale-only
+          "
+          runs="$RUNNER_TEMP/runs.json"
+          failed=0
+          while IFS='|' read -r workflow max_age flags; do
+            workflow="$(echo "$workflow" | xargs)"
+            [ -n "$workflow" ] || continue
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --limit 20 \
+              --json databaseId,event,status,conclusion,createdAt,url > "$runs"
+            # shellcheck disable=SC2086 # flags is a single optional switch
+            verdict="$(python3 scripts/ops_alarm_watch.py "$runs" --max-age-hours "$max_age" $flags)"
+            result="${verdict%%$'\t'*}"
+            reason=""
+            [ "$result" = "$verdict" ] || reason="${verdict#*$'\t'}"
+            echo "$workflow: $verdict"
+            ALARM_KEY="watch-${workflow%.yml}" \
+            ALARM_TITLE="$workflow is cancelled, stuck, parked on approval, or not running" \
+            ALARM_RESULT="$result" \
+            ALARM_BODY="$reason" \
+            ALARM_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              bash scripts/ops-alarm.sh || failed=1
+          done <<<"$watched"
+          exit "$failed"
+
+  alarm:
+    needs: [watch]
+    if: ${{ always() }}
+    uses: ./.github/workflows/ops-alarm.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      key: ops-alarm-watch
+      title: the hourly ops alarm watcher failed
+      result: ${{ needs.watch.result }}

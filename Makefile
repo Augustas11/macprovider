@@ -159,6 +159,7 @@ test-dist:
 	bash scripts/test-autotune-feed-freshness-alarm.sh
 	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash scripts/test-renew-autotune-static-feed-signed.sh
+	bash scripts/test-ops-alarm.sh
 	bash -n scripts/renew-autotune-static-feed.sh
 	bash scripts/test-autotune-activate.sh
 	bash scripts/test-autotune-install-helpers.sh
