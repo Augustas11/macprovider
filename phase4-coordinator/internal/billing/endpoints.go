@@ -1167,6 +1167,10 @@ SELECT gross_credits
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
+	// Every earnings response, success or refusal, is private to the
+	// credential that asked (SPEC-014 v0.11): never stored by a shared cache.
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Vary", "Cookie, Authorization")
 	if !h.requireProviderTokens {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not enabled")
 		return

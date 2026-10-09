@@ -1569,7 +1569,7 @@ func TestEarningsEndpointAcceptsOwnerSessionCookie(t *testing.T) {
 	var asked []string
 	store.SetProviderSessionAuthorizer(func(w http.ResponseWriter, r *http.Request, providerID string) bool {
 		asked = append(asked, providerID)
-		if c, err := r.Cookie("mp_session"); err != nil || c.Value != "owner" {
+		if c, err := r.Cookie("__Host-mp_session"); err != nil || c.Value != "owner" {
 			writeError(w, http.StatusUnauthorized, "session_invalid", "session")
 			return false
 		}
@@ -1584,13 +1584,21 @@ func TestEarningsEndpointAcceptsOwnerSessionCookie(t *testing.T) {
 	get := func(path, cookie, bearerToken string) int {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		if cookie != "" {
-			req.AddCookie(&http.Cookie{Name: "mp_session", Value: cookie})
+			req.AddCookie(&http.Cookie{Name: "__Host-mp_session", Value: cookie})
 		}
 		if bearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+bearerToken)
 		}
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
+		// Every earnings response, success or refusal, is uncacheable and
+		// varies on both credentials (SPEC-014 v0.11).
+		if cc := w.Header().Get("Cache-Control"); cc != "private, no-store" {
+			t.Fatalf("%s status=%d Cache-Control=%q", path, w.Code, cc)
+		}
+		if v := w.Header().Get("Vary"); v != "Cookie, Authorization" {
+			t.Fatalf("%s status=%d Vary=%q", path, w.Code, v)
+		}
 		return w.Code
 	}
 	if got := get("/providers/provider-a/earnings", "owner", ""); got != http.StatusOK {
