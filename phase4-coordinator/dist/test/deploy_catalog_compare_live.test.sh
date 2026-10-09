@@ -181,7 +181,9 @@ bound_ledger() {
 import json, pathlib, sys
 d, out, rid = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
 ledger = json.loads(out.read_bytes())
-ledger["schema_version"] = "macprovider.autotune-release-ledger.v3"
+# Never downgrade: a native-MTP-bound ledger is v4.
+if ledger["schema_version"] != "macprovider.autotune-release-ledger.v4":
+    ledger["schema_version"] = "macprovider.autotune-release-ledger.v3"
 m = json.loads((d / "release.json").read_bytes())
 ledger["releases"][rid] = {
     "generated_at": m["generated_at"], "policy_version": m["policy_version"],
