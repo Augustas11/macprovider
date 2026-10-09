@@ -183,7 +183,14 @@ struct ClaimCommandRunner: Sendable {
         }
 
         var refreshConfig = config
-        refreshConfig.providerToken = resolvedProviderToken()
+        do {
+            refreshConfig.providerToken = try resolvedProviderToken()
+        } catch {
+            // Fail closed: a store that cannot be read is never replaced by
+            // an older config/env token, which may belong to another provider.
+            stderr("error: the provider credential store could not be read (\(Self.redactedStoreFailure(error))); not falling back to provider_token. Fix the credential store, or re-enroll with `macprovider-cli serve`, then retry `macprovider-cli claim`")
+            throw ExitCode(5)
+        }
         let response: ClaimRefreshResponse
         do {
             response = try await refresher.refresh(refreshConfig)
@@ -230,15 +237,25 @@ struct ClaimCommandRunner: Sendable {
     /// Resolves the bearer the same way `models offer` does: the configured
     /// credential store (Keychain or protected file) is authoritative once
     /// `serve` has handed the token off, and YAML/env `provider_token` remains
-    /// a fallback for pre-handoff and dev installs.
-    func resolvedProviderToken() -> String? {
-        if let credentialStore,
-           let providerID = Self.nonEmpty(config.providerID),
-           let stored = try? credentialStore.load(providerID: providerID),
-           let token = Self.nonEmpty(stored) {
-            return token
+    /// a fallback for pre-handoff and dev installs. Only a store that answers
+    /// "no credential" falls back; a read or integrity failure throws.
+    func resolvedProviderToken() throws -> String? {
+        if let credentialStore, let providerID = Self.nonEmpty(config.providerID) {
+            if let stored = try credentialStore.load(providerID: providerID) {
+                guard let token = Self.nonEmpty(stored) else {
+                    throw ProviderCredentialStoreError.invalidStoredToken(providerID: providerID)
+                }
+                return token
+            }
         }
         return Self.nonEmpty(config.providerToken)
+    }
+
+    /// A store failure without token material: the store's own
+    /// credential-free description, else only the error's type.
+    static func redactedStoreFailure(_ error: Error) -> String {
+        if let error = error as? ProviderCredentialStoreError { return error.description }
+        return String(describing: type(of: error))
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

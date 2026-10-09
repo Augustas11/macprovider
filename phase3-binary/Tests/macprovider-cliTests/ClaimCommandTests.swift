@@ -230,21 +230,52 @@ final class ClaimCommandTests: XCTestCase {
             credentialStore: InMemoryProviderCredentialStore(values: ["prov-1": "stored-token"]),
             claimURLFile: fixture.claimURLFile
         )
-        XCTAssertEqual(withStored.resolvedProviderToken(), "stored-token")
+        XCTAssertEqual(try withStored.resolvedProviderToken(), "stored-token")
         let emptyStore = ClaimCommandRunner(
             config: config,
             noBrowser: true,
             credentialStore: InMemoryProviderCredentialStore(),
             claimURLFile: fixture.claimURLFile
         )
-        XCTAssertEqual(emptyStore.resolvedProviderToken(), "env-token")
+        XCTAssertEqual(try emptyStore.resolvedProviderToken(), "env-token")
         let failingStore = ClaimCommandRunner(
             config: config,
             noBrowser: true,
             credentialStore: InMemoryProviderCredentialStore(loadError: ProviderCredentialStoreError.conflict(providerID: "prov-1")),
             claimURLFile: fixture.claimURLFile
         )
-        XCTAssertEqual(failingStore.resolvedProviderToken(), "env-token")
+        // A store failure never falls back to the config/env token.
+        XCTAssertThrowsError(try failingStore.resolvedProviderToken())
+    }
+
+    func testClaim_CredentialStoreReadFailure_FailsClosedWithRedactedError() async throws {
+        let fixture = try makeFixture(prefix: "claim-store-failure")
+        var config = fixture.config
+        config.providerID = "prov-1"
+        config.providerToken = "stale-config-token"
+        let stderr = LockedBox("")
+        let refreshed = LockedBox(false)
+        let runner = ClaimCommandRunner(
+            config: config,
+            noBrowser: true,
+            credentialStore: InMemoryProviderCredentialStore(loadError: ProviderCredentialStoreError.readFailed(providerID: "prov-1", status: -25308)),
+            claimURLFile: fixture.claimURLFile,
+            refresher: ClaimRefresher { _ in
+                refreshed.set(true)
+                throw ClaimRefreshError.network("unreachable")
+            },
+            stdout: { _ in },
+            stderr: { line in stderr.set(stderr.get() + line) }
+        )
+        do {
+            try await runner.run()
+            XCTFail("claim must fail closed when the credential store cannot be read")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit, ExitCode(5))
+        }
+        XCTAssertFalse(refreshed.get(), "a stale config token was submitted")
+        XCTAssertTrue(stderr.get().contains("not falling back"), stderr.get())
+        XCTAssertFalse(stderr.get().contains("stale-config-token"), stderr.get())
     }
 
     func testClaim_WithNoTokenAnywhere_PrintsDistinctError() async throws {
