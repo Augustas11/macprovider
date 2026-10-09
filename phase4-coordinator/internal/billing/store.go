@@ -94,9 +94,6 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if err := s.migrate(context.Background()); err != nil {
 		return nil, err
 	}
-	if err := s.ensureCeilingRestatementTablesAndMarker(context.Background()); err != nil {
-		return nil, err
-	}
 	return s, nil
 }
 
@@ -664,6 +661,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureWholesaleStatementTables(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {
 		return err
 	}
 	return s.validateRequestLog(ctx)
