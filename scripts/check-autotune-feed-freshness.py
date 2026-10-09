@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Alarm check for the live SPEC-023 autotune rate-card freshness.
+"""Manual legacy-client check for the live SPEC-023 autotune rate-card age.
 
 Reads a rate-card JSON object on stdin and fails (exit 1) when `generated_at`
 is missing, unparseable, more than 10 minutes in the future, or at least
-`--max-age-days` old (default 20; inclusive). The client 30-day horizon
-(`AutotuneRecommend.swift` `loadSignedStatic`) fails closed with
-`rate_card_update_required` and strands any provider that restarts; this
-check is the read-only backstop that fires *before* that happens.
+`--max-age-days` old (default 20; inclusive). Current clients treat an old
+`generated_at` as a warning, but older CLIs enforced a 30-day horizon in
+`AutotuneRecommend.swift` `loadSignedStatic`; this check is retained for
+operator audits and legacy-client recovery.
 
 Read-only: no secrets, no network, no signature trust decision (that is the
-client's job) — this only reads the self-asserted `generated_at`. Intended
-to run on a schedule far more often than the weekly CI-signed renewal.
+client's job) — this only reads the self-asserted `generated_at`.
 
 Usage:
   curl -fsS --proto '=https' --tlsv1.2 --max-time 20 \\
@@ -76,19 +75,17 @@ def check_rate_card(
     if remaining_days < 0:
         fail(
             f"live /v1/rate-card generated_at is EXPIRED "
-            f"({-remaining_days:.1f}d past the client 30-day horizon) — "
-            "providers that restart cannot rejoin; inspect "
-            "Actions workflow renew-autotune-static-feed-signed.yml "
-            "(production-release) or run "
+            f"({-remaining_days:.1f}d past the legacy-client 30-day horizon) — "
+            "legacy clients may reject the feed; manually dispatch "
+            "Actions workflow renew-autotune-static-feed-signed.yml or run "
             "scripts/renew-autotune-static-feed.sh --deploy on a signing host now."
         )
     if age_days >= max_age_days:
         fail(
             f"live /v1/rate-card generated_at is {age_days:.1f}d old "
             f"(>= {max_age_days:.1f}d) — {remaining_days:.1f}d remain before the "
-            "client 30-day fail-closed. Inspect "
-            "Actions workflow renew-autotune-static-feed-signed.yml "
-            "(production-release) or run "
+            "legacy-client 30-day horizon. Manually dispatch "
+            "Actions workflow renew-autotune-static-feed-signed.yml or run "
             "scripts/renew-autotune-static-feed.sh --deploy on a signing host."
         )
     print("[autotune-feed-freshness] OK")
@@ -112,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         fail("--max-age-days must be positive")
     if args.max_age_days >= CLIENT_HORIZON_DAYS:
         fail(
-            "--max-age-days must be < 30 (the client fail-closed horizon); "
-            "an alarm at or past 30d fires too late to protect the fleet"
+            "--max-age-days must be < 30 (the legacy-client horizon); "
+            "a legacy audit threshold at or past 30d fires too late"
         )
 
     if args.now is None:

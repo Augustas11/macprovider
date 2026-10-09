@@ -2683,6 +2683,25 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(message.contains("cannot be submitted"))
     }
 
+    func testArtifactFeedStaleWarningDoesNotDowngradePaidRecommendation() throws {
+        var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
+        request.warnings.insert(.catalogArtifactFeedStale)
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let jsonCandidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(jsonCandidate["explanation"] as? [String: Any])
+
+        XCTAssertEqual(result.recommendedModel, "qwen3-coder-30b-a3b-instruct")
+        XCTAssertEqual(selected.confidence, "high")
+        XCTAssertEqual(explanation["warning_state"] as? String, "ready")
+        XCTAssertTrue(result.warnings.contains(.catalogArtifactFeedStale))
+        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(result.warnings))
+        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(result.warnings))
+    }
+
     func testRecommendationIsDeterministicForSameDiversificationID() throws {
         let request = try makeRequest()
 
@@ -2878,6 +2897,74 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(loaded.rateCard.warnings.contains(.rateCardIntegrityFailure))
         XCTAssertTrue(loaded.demand.warnings.contains(.demandRankIntegrityFailure))
         XCTAssertTrue(loaded.candidate.warnings.contains(.candidateCatalogIntegrityFailure))
+    }
+
+    func testSignedStaticInputsOlderThanThirtyDaysRemainSelectedWithStaleWarnings() async throws {
+        let stamp = try [
+            AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)).generatedAt,
+            AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)).generatedAt,
+        ].max()!
+        let generatedAt = ISO8601DateFormatter.autotuneInternet.string(from: stamp)
+        let demandPayload = try Data(Self.jsonReplacingTopLevelString(
+            AutotuneStaticInputs.bakedDemandRankJSON,
+            key: "generated_at",
+            with: generatedAt
+        ).utf8)
+        let candidatePayload = try Data(Self.jsonReplacingTopLevelString(
+            AutotuneStaticInputs.bakedCandidateCatalogJSON,
+            key: "generated_at",
+            with: generatedAt
+        ).utf8)
+        let rateCardPayload = try Data(Self.jsonReplacingTopLevelString(
+            AutotuneStaticInputs.bakedRateCardJSON,
+            key: "generated_at",
+            with: generatedAt
+        ).utf8)
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = "streamvc-autotune-static-v4"
+        let demandSidecar = try Self.sidecar(for: demandPayload, keyID: keyID, privateKey: privateKey)
+        let candidateSidecar = try Self.sidecar(for: candidatePayload, keyID: keyID, privateKey: privateKey)
+        let rateCardSidecar = try Self.sidecar(for: rateCardPayload, keyID: keyID, privateKey: privateKey)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                switch url.path {
+                case _ where url.path.hasSuffix("/demand-rank.sig"):
+                    return demandSidecar
+                case _ where url.path.hasSuffix("/demand-rank"):
+                    return demandPayload
+                case _ where url.path.hasSuffix("/autotune-candidates.sig"):
+                    return candidateSidecar
+                case _ where url.path.hasSuffix("/autotune-candidates"):
+                    return candidatePayload
+                case _ where url.path.hasSuffix("/rate-card.sig"):
+                    return rateCardSidecar
+                case _ where url.path.hasSuffix("/rate-card"):
+                    return rateCardPayload
+                default:
+                    throw URLError(.fileDoesNotExist)
+                }
+            },
+            trustedPublicKeys: [keyID: privateKey.publicKey.rawRepresentation.base64EncodedString()],
+            now: { stamp.addingTimeInterval(365 * 24 * 3600) }
+        )
+
+        let loaded = await inputs.loadRecommendationInputs(includeArtifactFeed: false)
+        let warnings = loaded.demand.warnings
+            .union(loaded.candidate.warnings)
+            .union(loaded.rateCard.warnings)
+
+        XCTAssertFalse(loaded.demand.usedFallback)
+        XCTAssertFalse(loaded.candidate.usedFallback)
+        XCTAssertFalse(loaded.rateCard.usedFallback)
+        XCTAssertEqual(loaded.demand.selectedBytes, demandPayload)
+        XCTAssertEqual(loaded.candidate.selectedBytes, candidatePayload)
+        XCTAssertEqual(loaded.rateCard.selectedBytes, rateCardPayload)
+        XCTAssertEqual(loaded.demand.warnings, [.demandRankStale])
+        XCTAssertEqual(loaded.candidate.warnings, [.candidateCatalogStale])
+        XCTAssertEqual(loaded.rateCard.warnings, [.rateCardStale])
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(warnings))
+        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(warnings))
     }
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {

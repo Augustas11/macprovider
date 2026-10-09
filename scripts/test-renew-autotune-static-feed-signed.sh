@@ -112,7 +112,6 @@ for requirement in (
     """trap 'rm -f "$key" "$ssh_key"' EXIT""",
     "scripts/verify-github-release-posture.sh",
     "RELEASE_POSTURE_TOKEN",
-    'cron: "0 16 * * 3"',
     "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
     "go-version-file: phase4-coordinator/go.mod",
     "cache: false",
@@ -150,6 +149,8 @@ if seal_go_idx > seal_idx:
 if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" in before_secrets:
     raise SystemExit("sealed Go requirement must be set only on the secret-bearing deploy step")
 
+if "\n  schedule:" in workflow or "\n    - cron:" in workflow or "cron:" in workflow:
+    raise SystemExit("signed renewal workflow must be manual-only; found schedule/cron")
 if 'cron: "0 16 * * 1"' in workflow:
     raise SystemExit("signed renewal must not share Monday 16:00 UTC with discovery-head")
 if 'cron: "0 16 * * 2"' in workflow:
@@ -426,8 +427,7 @@ bash -n "$lib"
 # EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
 # verify, in both the CB-policy-bound five-feed state and the artifact-bound
 # six-feed state, against a throwaway catalog and key. Structural greps above
-# cannot tell whether the flow still COMPLETES, and this job runs unattended on a
-# 30-day freshness clock.
+# cannot tell whether the manual recovery flow still COMPLETES.
 ( cd "$root" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   scripts.tests.test_catalog_artifact_feed.RenewalFlowTest ) >/dev/null 2>&1 || {
   printf '[test-renew-autotune-static-feed-signed] ERROR: renewal flow regression failed; re-run:\n' >&2

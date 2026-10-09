@@ -271,19 +271,35 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         return (inputs, keyID)
     }
 
-    func testStaleLiveFeedIsSelectedButUnusable() async throws {
-        // 14–30 days old: the live bytes are still the selection (not a
-        // fallback), the stale warning is raised, and no artifact-derived
-        // capability may use the feed (§3.5 rule 13 / §3.7.6 rule 5).
+    func testStaleLiveFeedIsSelectedAndUsableWithAdvisoryWarning() async throws {
+        // Age is advisory for artifact identities: even a 30+ day-old signed,
+        // bound feed remains usable while continuing to warn the operator.
         let fixture = try boundFixture()
-        let live = try signedLiveInputs(feedBytes: fixture.feedBytes, now: "2026-07-30T00:00:00Z")
+        let live = try signedLiveInputs(feedBytes: fixture.feedBytes, now: "2026-08-09T00:00:01Z")
         let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: live.keyID)
         let selection = await live.inputs.loadArtifactFeed(candidate: candidate, bakedArtifactFeed: fixture.feedBytes)
-        XCTAssertNil(selection.value)
+        XCTAssertNotNil(selection.value)
         XCTAssertFalse(selection.usedFallback)
         XCTAssertEqual(selection.selectedBytes, fixture.feedBytes)
         XCTAssertEqual(selection.warnings, [.catalogArtifactFeedStale])
         XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(selection.warnings))
+    }
+
+    func testOldLiveArtifactFeedLoaderKeepsUsableFeedWithAdvisoryWarning() async throws {
+        let fixture = try boundFixture()
+        let live = try signedLiveInputs(feedBytes: fixture.feedBytes, now: "2026-08-09T00:00:01Z")
+        let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: live.keyID)
+
+        let selection = await live.inputs.loadLiveArtifactFeed(
+            candidate: candidate,
+            baseURL: URL(string: "https://static.example")!
+        )
+
+        XCTAssertNotNil(selection.value)
+        XCTAssertFalse(selection.usedFallback)
+        XCTAssertEqual(selection.selectedBytes, fixture.feedBytes)
+        XCTAssertEqual(selection.warnings, [.catalogArtifactFeedStale])
+        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(selection.warnings))
     }
 
     func testSchemaInvalidLiveFeedIsAnIntegrityFailureNotAnUpdateRequirement() async throws {
@@ -389,17 +405,16 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         XCTAssertEqual(matcher.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), "test-model")
     }
 
-    func testFallbackBakedFeedIsAgedLikeSelectedBytes() async throws {
-        // §3.7.6 rules 3–5 apply to whichever artifact bytes were SELECTED, the
-        // compiled-in fallback included: an offline binary 14+ days after its
-        // baked feed's stamp gets no usable feed.
+    func testFallbackBakedFeedAgeIsAdvisoryAndFutureDateIsUnusable() async throws {
+        // The compiled-in fallback follows the same timestamp policy as fetched
+        // bytes: age only warns, but a future-dated feed is not usable.
         let fixture = try boundFixture()
         let candidate = AutotuneStaticSelection(value: fixture.catalog, selectedBytes: fixture.candidateBytes, warnings: [], usedFallback: false, signerKeyID: AutotuneStaticInputs.bakedCatalogSignerKeyID)
-        let expectations: [(now: String, warnings: Set<AutotuneRecommendWarning>)] = [
-            ("2026-07-23T23:00:00Z", [.catalogArtifactFeedFallbackUsed]),
-            ("2026-07-24T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedStale]),
-            ("2026-08-09T00:00:01Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedUpdateRequired]),
-            ("2026-07-09T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedUpdateRequired]),
+        let expectations: [(now: String, warnings: Set<AutotuneRecommendWarning>, usable: Bool)] = [
+            ("2026-07-23T23:00:00Z", [.catalogArtifactFeedFallbackUsed], true),
+            ("2026-07-24T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedStale], true),
+            ("2026-08-09T00:00:01Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedStale], true),
+            ("2026-07-09T00:00:00Z", [.catalogArtifactFeedFallbackUsed, .catalogArtifactFeedUpdateRequired], false),
         ]
         for expectation in expectations {
             let inputs = AutotuneStaticInputs(
@@ -413,14 +428,14 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             XCTAssertEqual(selection.warnings, expectation.warnings, expectation.now)
             XCTAssertTrue(selection.usedFallback, expectation.now)
             XCTAssertEqual(selection.selectedBytes, fixture.feedBytes, expectation.now)
-            XCTAssertEqual(selection.value == nil, expectation.warnings.count > 1, expectation.now)
+            XCTAssertEqual(selection.value != nil, expectation.usable, expectation.now)
             XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(selection.warnings), expectation.now)
         }
     }
 
     func testOfflineQualifiedSelectionMatchesTheLoaderVerdict() throws {
         // The compiled-in matcher's feed is the same qualified selection the
-        // loader would make for those bytes offline: bound AND fresh.
+        // loader would make for those bytes offline: bound and not future-dated.
         let fixture = try boundFixture()
         let signer = AutotuneStaticInputs.bakedCatalogSignerKeyID
         func usable(now: String, signer bakedSigner: String? = signer, candidateSigner: String? = signer) -> QualifiedArtifactFeed? {
@@ -430,8 +445,8 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             )
         }
         XCTAssertNotNil(usable(now: "2026-07-11T00:00:00Z"))
-        XCTAssertNil(usable(now: "2026-07-24T00:00:00Z"), "stale")
-        XCTAssertNil(usable(now: "2026-08-09T00:00:01Z"), "expired")
+        XCTAssertNotNil(usable(now: "2026-07-24T00:00:00Z"), "stale")
+        XCTAssertNotNil(usable(now: "2026-08-09T00:00:01Z"), "older than 30 days")
         XCTAssertNil(usable(now: "2026-07-09T00:00:00Z"), "future")
         XCTAssertNil(usable(now: "2026-07-11T00:00:00Z", signer: nil), "no manifest signer")
         XCTAssertNil(usable(now: "2026-07-11T00:00:00Z", signer: "streamvc-autotune-static-v5"), "other signer")
@@ -738,7 +753,7 @@ final class AutotuneArtifactFeedTests: XCTestCase {
         let usable = try XCTUnwrap(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(3_600)))
         XCTAssertEqual(usable.feed.version, feed.version)
         XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("\"gguf-q4-k-m\""))
-        // Past the §3.7.6 freshness window the offline feed is no longer usable.
-        XCTAssertNil(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(15 * 86_400)))
+        // Age alone never disables the authenticated compiled-in artifact feed.
+        XCTAssertNotNil(AutotuneStaticInputs.bakedUsableArtifactFeed(now: feed.generatedAt.addingTimeInterval(365 * 86_400)))
     }
 }

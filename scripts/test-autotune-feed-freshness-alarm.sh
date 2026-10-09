@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail-closed structural checks for autotune-feed cadence + freshness alarm.
+# Structural checks for manual-only autotune-feed legacy-client freshness checks.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -12,7 +12,7 @@ checker="$root/scripts/check-autotune-feed-freshness.py"
   exit 1
 }
 [[ -f "$renew" ]] || {
-  printf '[test-autotune-feed-freshness-alarm] ERROR: missing weekly cadence workflow\n' >&2
+  printf '[test-autotune-feed-freshness-alarm] ERROR: missing manual cadence workflow\n' >&2
   exit 1
 }
 [[ -f "$checker" ]] || {
@@ -60,9 +60,9 @@ for name, workflow in (("alarm", alarm), ("renew", renew)):
             raise SystemExit(f"{name} workflow must not contain {forbidden!r}")
     if workflow.count(CHECKER) != 1:
         raise SystemExit(f"{name} must invoke the checker exactly once")
+    if "\n  schedule:" in workflow or "\n    - cron:" in workflow or "cron:" in workflow:
+        raise SystemExit(f"{name} workflow must be manual-only; found schedule/cron")
 
-if 'cron: "0 */6 * * *"' not in alarm:
-    raise SystemExit("alarm must run every 6 hours")
 if "group: autotune-feed-freshness-alarm" not in alarm:
     raise SystemExit("alarm must use its own concurrency group")
 if "cancel-in-progress: true" not in alarm:
@@ -72,25 +72,21 @@ if '--max-age-days "$MAX_AGE_DAYS"' not in alarm:
 if "|| '20'" not in alarm:
     raise SystemExit("alarm default max-age must be 20 days")
 
-if 'cron: "0 16 * * 2"' not in renew:
-    raise SystemExit("weekly cadence must run Tuesday 16:00 UTC (after Wednesday signed renewal)")
-if 'cron: "0 16 * * 1"' in renew:
-    raise SystemExit("weekly cadence must not share Monday 16:00 UTC with discovery-head")
-if 'cron: "0 16 * * 3"' in renew:
-    raise SystemExit("weekly cadence must not share Wednesday 16:00 UTC with the signed renewal")
 if "RATE_CARD_URL" in alarm or "RATE_CARD_URL" in renew:
     raise SystemExit("workflows must pin coordinator.malibu.tech; no URL override")
 if "group: renew-autotune-static-feed" not in renew:
-    raise SystemExit("weekly cadence must use its own concurrency group")
+    raise SystemExit("manual cadence check must use its own concurrency group")
 if "cancel-in-progress: false" not in renew:
-    raise SystemExit("weekly cadence must not cancel an in-flight Tuesday run")
-if "|| '7'" not in renew:
-    raise SystemExit("weekly cadence default max-age must be 7 days")
+    raise SystemExit("manual cadence check must not cancel an in-flight run")
+if "|| '20'" not in renew:
+    raise SystemExit("manual cadence check default max-age must be 20 days")
+if "|| '7'" in renew:
+    raise SystemExit("manual cadence check must not retain the old weekly 7-day SLA")
 
 for requirement in (
     "CLIENT_HORIZON_DAYS = 30.0",
     "FUTURE_SKEW_MINUTES = 10.0",
-    "rate_card_update_required",
+    "legacy-client",
     "scripts/renew-autotune-static-feed.sh --deploy",
     "--max-age-days must be < 30",
 ):
@@ -103,4 +99,4 @@ PY
 # Workflow YAML is not a shell script; do not bash -n it.
 python3 -m py_compile "$checker"
 
-printf '[test-autotune-feed-freshness-alarm] ok: cadence + alarm workflows fail closed\n'
+printf '[test-autotune-feed-freshness-alarm] ok: autotune-feed checks are manual-only\n'

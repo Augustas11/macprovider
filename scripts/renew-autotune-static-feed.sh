@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Renew the signed SPEC-023 autotune static feed WITHOUT changing its content —
-# a freshness re-stamp that clears the client 30-day freshness horizon
-# (AutotuneRecommend.swift loadSignedStatic: now - generated_at > 30d fails
-# closed and strands any provider that restarts). Since #1268 the coordinator
-# hot-reloads the feed on SIGHUP, so this deploys with ZERO provider disruption:
-# no coordinator restart, every provider WebSocket stays connected.
+# a manual freshness re-stamp retained for legacy CLIs that still enforce the
+# former 30-day generated_at horizon. Current clients warn on old generated_at
+# instead of blocking join. Since #1268 the coordinator hot-reloads the feed on
+# SIGHUP, so this deploys with ZERO provider disruption: no coordinator restart,
+# every provider WebSocket stays connected.
 #
 # SIGNING STAYS OFF THE PRODUCTION HOST. The Ed25519 feed-signing key is the
 # thing that protects clients from a compromised coordinator serving forged
@@ -12,10 +12,10 @@
 # the key lives — operator laptop or a production-release GitHub Actions runner),
 # pushes only signed bytes to Pearl, and does the symlink swap + SIGHUP over SSH.
 #
-# Primary always-on signer: .github/workflows/renew-autotune-static-feed-signed.yml
-# (Wednesday 16:00 UTC, production-release). This script is that job's deploy
-# path and the laptop fallback. Do not install a Pearl systemd signer and do
-# not install a laptop LaunchAgent as the SLA.
+# Manual signer: .github/workflows/renew-autotune-static-feed-signed.yml. This
+# script is that job's deploy path and the laptop fallback. Do not install a
+# Pearl systemd signer or laptop LaunchAgent; date-only renewal is no longer an
+# unattended SLA.
 #
 # Default is DRY-RUN: build + verify a re-dated release locally and stop. Pass
 # --deploy to push to the coordinator host. --deploy is fail-closed and atomic,
@@ -182,12 +182,10 @@ log "re-stamping release source inputs for $RELEASE_ID"
 # previous signed release directory the §3.7.4 rebinding check requires.
 # SPEC-023 §3.7.8: once a release is artifact-bound, every later cut must
 # authenticate the PREVIOUS signed release (cross-release rebinding, intake
-# transitions), and `generate` fails closed without it. The scheduled renewal
+# transitions), and `generate` fails closed without it. Manual renewal
 # fetches the live coordinator's current release directory as that input when
-# the operator has not named one, so the monthly freshness cron keeps working
-# after activation instead of stranding providers at the 30-day horizon. The
-# fetched bytes are AUTHENTICATED by `generate` (keyring + ledger binding +
-# signer equality), never trusted by path.
+# the operator has not named one. The fetched bytes are AUTHENTICATED by
+# `generate` (keyring + ledger binding + signer equality), never trusted by path.
 ARTIFACT_FEED_STATE="$( cd "$WORKTREE" && python3 scripts/catalog-release.py status | sed -n 's/^artifact-feed state *: *//p' )"
 case "$ARTIFACT_FEED_STATE" in
   post-activation|post_activation)
@@ -351,7 +349,7 @@ aa_refuse_existing_release
 # CONTENT-CONTINUITY GUARD: a renewal must change ONLY dates. Compare the new
 # feed content (version/generated_at stripped) against the live release; abort
 # if models, gates, or rate-card rows differ — a real catalog change must go
-# through a reviewed release, never this freshness cron.
+# through a reviewed release, never this freshness-only recovery path.
 # The rules live in `catalog-release.py continuity-check` (feed_continuity_drift)
 # so they are unit-tested: candidate/demand/rate-card/policy compared with
 # release-derived fields stripped, and the artifact feed compared by PRESENCE
@@ -361,7 +359,7 @@ aa_refuse_existing_release
 # expiry re-sign is freshness; a model change is a content release) and
 # trusted-keys.json must be byte-equal: this job copies both from main, so a
 # Tier-2 or keyring change merged there must go through the catalog-content
-# lane, never this unattended cron.
+# lane, never this freshness-only recovery path.
 log "checking content continuity against the live release (freshness-only guard)"
 LIVE_SNAPSHOT="$STAGING/live-current"
 mkdir -p "$LIVE_SNAPSHOT"
@@ -454,8 +452,9 @@ log "previous release retained as .previous-target -> $CURRENT_TARGET"
 
 # ---------------------------------------------------------------------------
 # 5. #1688 B2: coverage report. The renewal is already live and is NEVER undone
-#    for coverage: an expired feed strands every provider, a dropped window
-#    slot strands only providers that skipped three renewals without a restart.
+#    for coverage: an expired legacy-client feed can block older providers, while
+#    a dropped window slot affects only providers that skipped three renewals
+#    without a restart.
 #    A loss is a loud success: a GitHub Actions ::warning:: plus a
 #    renewal_coverage_loss record in Pearl's catalog-window-overrides.jsonl.
 # ---------------------------------------------------------------------------

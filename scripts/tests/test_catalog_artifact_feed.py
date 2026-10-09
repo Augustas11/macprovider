@@ -2519,7 +2519,7 @@ class HermeticReleaseTest(unittest.TestCase):
 
     def test_cb_policy_bound_release_is_unaffected_by_the_committed_artifact_source(self):
         """A committed artifact source alone must not implicitly activate its feed:
-        `resign` and scheduled freshness renewal call `generate` unconditionally."""
+        `resign` and manual freshness renewal call `generate` unconditionally."""
         with self.harness() as harness:
             self.assertTrue((harness.catalog / "autotune-artifacts-source.json").exists())
             harness.bump("published-2026-09-26-renewal-v1", "2026-09-26T00:00:00Z")
@@ -3260,14 +3260,13 @@ class ReleaseOrderingTest(unittest.TestCase):
 
 
 class RenewalFlowTest(unittest.TestCase):
-    """The scheduled freshness renewal, driven through the real code path.
+    """The manual freshness renewal, driven through the real code path.
 
-    `scripts/renew-autotune-static-feed.sh` runs monthly against a production
-    signing key: the signed feed carries a 30-day client freshness horizon, so a
-    renewal that cannot complete strands every provider that restarts after the
-    horizon. Its restamp is `catalog-release.py restamp`, and these tests run that
-    restamp → generate → sign → generate → verify sequence in both the
-    CB-policy-bound five-feed state and the artifact-bound six-feed state.
+    `scripts/renew-autotune-static-feed.sh` remains available for legacy-client
+    recovery and operator-directed publication repair. Its restamp is
+    `catalog-release.py restamp`, and these tests run that restamp → generate →
+    sign → generate → verify sequence in both the CB-policy-bound five-feed
+    state and the artifact-bound six-feed state.
     """
 
     NOW = "2026-10-05T09:15:00Z"
@@ -3324,7 +3323,7 @@ class RenewalFlowTest(unittest.TestCase):
         """The freshness-only deploy guard in `renew-autotune-static-feed.sh`. A
         restamp changes only release-derived fields; a change confined to the
         artifact feed's `models` — or the feed appearing or disappearing — is a
-        catalog release and must not ride the scheduled renewal."""
+        catalog release and must not ride the manual freshness renewal."""
         restamped = "published-2026-10-05-inband-provenance-v1"
         with self.harness() as harness:
             harness.measure_sizes()
@@ -3373,7 +3372,7 @@ class RenewalFlowTest(unittest.TestCase):
     def test_continuity_check_covers_tier2_content_and_the_keyring_bytes(self):
         """#1688 B1: the renewal copies tier2-catalog.json and trusted-keys.json
         from main, so a Tier-2 model change or any keyring byte change is a
-        content release and must not ride the unattended freshness renewal. A
+        content release and must not ride the manual freshness renewal. A
         Tier-2 re-sign that moves only its signing envelope stays freshness."""
         with self.harness() as harness:
             harness.measure_sizes()

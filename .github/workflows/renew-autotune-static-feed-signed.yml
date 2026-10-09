@@ -1,23 +1,17 @@
 name: Renew signed autotune static feed
 
-# Protected weekly freshness re-stamp for the SPEC-023 signed autotune feed.
+# Protected manual freshness re-stamp for the SPEC-023 signed autotune feed.
 # Signs on a macos-15-intel runner (Swift CryptoKit + sealed Go Tier-2
 # verifier + sealed OpenSSL 3 verify), then rsyncs only signed bytes to
 # Pearl and SIGHUPs the coordinator.
 #
 # The feed key MUST NOT live on Pearl. It is an autotune-feed-renewal secret
 # (AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64). Do not reuse the discovery-head
-# PEM or the download.malibu.tech SSH key. This environment has no reviewer
-# gate so the weekly restamp can run unattended.
-#
-# Tuesday watch (renew-autotune-static-feed.yml) and the 20-day alarm stay as
-# read-only backstops. A red Tuesday run means this Wednesday job missed.
+# PEM or the download.malibu.tech SSH key. This workflow is manual-only and
+# exists for legacy-client recovery or operator-directed publication repair.
 
 on:
   workflow_dispatch:
-  schedule:
-    # Wednesday 16:00 UTC: offset from Monday discovery-head and Tuesday watch.
-    - cron: "0 16 * * 3"
 
 permissions:
   contents: read

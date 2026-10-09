@@ -85,7 +85,7 @@ class AutotuneFeedFreshnessTests(unittest.TestCase):
         self.assertIn("EXPIRED", err)
         self.assertIn("30-day horizon", err)
 
-    def test_weekly_sla_fails_at_seven_days(self) -> None:
+    def test_manual_threshold_fails_at_seven_days(self) -> None:
         code, _, err = _run(
             {"generated_at": "2026-08-24T04:00:00Z"},
             ["--max-age-days", "7", "--now", NOW],
@@ -93,7 +93,7 @@ class AutotuneFeedFreshnessTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("7.0d old", err)
 
-    def test_weekly_sla_passes_inside_seven_days(self) -> None:
+    def test_manual_threshold_passes_inside_seven_days(self) -> None:
         code, out, err = _run(
             {"generated_at": "2026-08-25T04:00:01Z"},
             ["--max-age-days", "7", "--now", NOW],
