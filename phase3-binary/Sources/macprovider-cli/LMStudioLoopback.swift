@@ -131,9 +131,9 @@ enum LMStudioLoopbackServeModel {
         let publisher: String?
         let sizeBytes: Int?
         /// One entry per loaded instance: its id and `config.context_length`.
+        /// A runtime-reported file path is deliberately not decoded: it never
+        /// chooses a local file (SPEC-046, SPEC-010-R007(i)).
         let loadedInstances: [LoadedInstance]
-        /// `<publisher>/<repo>/<file>` when this LM Studio reports one.
-        var path: String? = nil
     }
 
     /// The `models[]` of LM Studio's native `GET /api/v1/models`, or nil when
@@ -163,8 +163,7 @@ enum LMStudioLoopbackServeModel {
                 format: string(object["format"]),
                 publisher: string(object["publisher"]),
                 sizeBytes: OpenAICompatibleLoopbackRuntime.intValue(object["size_bytes"]),
-                loadedInstances: loaded,
-                path: string(object["path"])
+                loadedInstances: loaded
             ))
         }
         return models

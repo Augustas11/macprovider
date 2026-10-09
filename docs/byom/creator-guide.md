@@ -258,7 +258,7 @@ the pool's runtime allowlist must name it. Full detail:
 | Native MLX | Hugging Face snapshot | `mlx_cache` | The snapshot in the Hugging Face cache or the model store `serve` uses (`--mlx-cache-dir` to inspect only another cache) |
 | llama.cpp | `llamacpp:<file stem>` | `llamacpp_loopback` | `llama-server --jinja`, and `--llamacpp-model-path` pinning the one GGUF file |
 | Ollama | `ollama:<tag>` | `ollama_loopback` | A pulled tag; `OLLAMA_MODELS` if not `~/.ollama/models` |
-| LM Studio | `lmstudio:<model key or identifier>` | `lmstudio_loopback` | LM Studio 0.4+ with the model loaded; several quantizations resolve to the loaded one |
+| LM Studio | `lmstudio:<model key or identifier>` | `lmstudio_loopback` | LM Studio 0.4+ with the model loaded; several quantizations resolve to the loaded one by publisher and size, and files they cannot tell apart are refused |
 | `mlx_lm.server` | `mlxlm:<snapshot dir>` | `mlxlm_loopback` | Started with a local snapshot path (`--model <path>`, port 8081); auto-detected, or set `MACPROVIDER_MLXLM_MODEL_PATH` |
 | oMLX | `omlx:<snapshot dir>` | `omlx_loopback` | `MACPROVIDER_OMLX_MODEL_PATH`; no API key on the server |
 

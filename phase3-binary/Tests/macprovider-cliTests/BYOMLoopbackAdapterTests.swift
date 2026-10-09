@@ -188,24 +188,24 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         let q4 = ggufBytes, q8 = ggufBytes + Data(repeating: 0x11, count: 64)
         try write(q4, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q4.gguf"))
         try write(q8, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q8.gguf"))
-        func entry(key: String, instance: String?, size: Int, publisher: String = "pub", path: String? = nil) -> LMStudioLoopbackServeModel.Model {
+        func entry(key: String, instance: String?, size: Int?, publisher: String = "pub") -> LMStudioLoopbackServeModel.Model {
             LMStudioLoopbackServeModel.Model(
                 key: key, type: "llm", format: "gguf", publisher: publisher, sizeBytes: size,
-                loadedInstances: instance.map { [LMStudioLoopbackServeModel.LoadedInstance(id: $0, contextLength: 4096)] } ?? [],
-                path: path
+                loadedInstances: instance.map { [LMStudioLoopbackServeModel.LoadedInstance(id: $0, contextLength: 4096)] } ?? []
             )
         }
         // The loaded quantization's size singles it out.
         let bySize = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: q8.count)])
         XCTAssertEqual(bySize.resolveArtifact(servedModelRef: "lmstudio:tiny")?.locator, "pub/Tiny-GGUF/tiny-q8.gguf")
-        // A reported path singles it out even when sizes tie.
-        let byPath = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: 0, path: "pub/Tiny-GGUF/tiny-q4.gguf")])
-        XCTAssertNil(byPath.resolveArtifact(servedModelRef: "lmstudio:tiny"), "a size no file has drops every file")
-        let byPathOnly = BYOMLMStudioModelStore(root: models, servedModels: [
-            LMStudioLoopbackServeModel.Model(key: "tiny", type: "llm", format: "gguf", publisher: "pub", sizeBytes: nil,
-                                             loadedInstances: [.init(id: "tiny", contextLength: nil)], path: "pub/Tiny-GGUF/tiny-q4.gguf"),
-        ])
-        XCTAssertEqual(byPathOnly.resolveArtifact(servedModelRef: "lmstudio:tiny")?.locator, "pub/Tiny-GGUF/tiny-q4.gguf")
+        XCTAssertNil(bySize.ambiguityMessage(servedModelRef: "lmstudio:tiny"))
+        let noSize = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: 0)])
+        XCTAssertNil(noSize.resolveArtifact(servedModelRef: "lmstudio:tiny"), "a size no file has drops every file")
+        // Metadata that does not single out one file is ambiguous: nothing
+        // resolves, and the reason names the files and the fix.
+        let unsized = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: nil)])
+        XCTAssertNil(unsized.resolveArtifact(servedModelRef: "lmstudio:tiny"))
+        let message = try XCTUnwrap(unsized.ambiguityMessage(servedModelRef: "lmstudio:tiny"))
+        XCTAssertTrue(message.contains("pub/Tiny-GGUF/tiny-q4.gguf") && message.contains("pub/Tiny-GGUF/tiny-q8.gguf") && message.contains("remove"), message)
         // A custom --identifier maps to its entry's key.
         let alias = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny-q8", instance: "my-alias", size: q8.count)])
         XCTAssertEqual(alias.resolveArtifact(servedModelRef: "lmstudio:my-alias")?.locator, "pub/Tiny-GGUF/tiny-q8.gguf")
@@ -217,6 +217,26 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         ]).resolveArtifact(servedModelRef: "lmstudio:tiny"))
         XCTAssertNil(BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "nothing-here", instance: "my-alias", size: 1)]).resolveArtifact(servedModelRef: "lmstudio:my-alias"))
         XCTAssertNil(BYOMLMStudioModelStore(root: models).resolveArtifact(servedModelRef: "lmstudio:tiny"))
+    }
+
+    /// #1880 audit: LM Studio's runtime-reported `path` never chooses a local
+    /// file, so a path naming one of two same-size quantizations, or an alias
+    /// path, still leaves them ambiguous.
+    func testLMStudioRuntimePathNeverChoosesAFile() throws {
+        let root = try temporaryDirectory("byom-lms-path")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let models = root.appendingPathComponent("m", isDirectory: true)
+        let q4 = ggufBytes + Data(repeating: 0x01, count: 64), q5 = ggufBytes + Data(repeating: 0x02, count: 64)
+        try write(q4, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q4.gguf"))
+        try write(q5, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q5.gguf"))
+        for path in ["pub/Tiny-GGUF/tiny-q4.gguf", "/Users/x/.lmstudio/models/pub/Tiny-GGUF/tiny-q5.gguf", "Tiny-GGUF/tiny-q4.gguf", "../outside/tiny.gguf"] {
+            let body = #"{"models":[{"type":"llm","publisher":"pub","key":"tiny","size_bytes":"# + "\(q4.count)" +
+                #","path":"# + "\"\(path)\"" + #","loaded_instances":[{"id":"tiny","config":{}}],"format":"gguf"}]}"#
+            let served = try XCTUnwrap(LMStudioLoopbackServeModel.models(from: Data(body.utf8)))
+            let store = BYOMLMStudioModelStore(root: models, servedModels: served)
+            XCTAssertNil(store.resolveArtifact(servedModelRef: "lmstudio:tiny"), "path \(path) chose a file")
+            XCTAssertNotNil(store.ambiguityMessage(servedModelRef: "lmstudio:tiny"))
+        }
     }
 
     // MARK: - llama.cpp: fingerprint, stem-not-path, operator root

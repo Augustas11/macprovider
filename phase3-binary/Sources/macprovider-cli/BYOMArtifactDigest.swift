@@ -346,10 +346,11 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     static let servedModelRefPrefix = "lmstudio:"
     let root: URL
     /// LM Studio's `/api/v1/models` list, when fetched. It only NARROWS the
-    /// files the name rule already admits under `root` (the runtime never
-    /// names a file): a custom `--identifier` maps to its entry's key, and
-    /// several quantizations answering one name narrow to the file with the
-    /// served entry's publisher, exact size, and reported path.
+    /// files the name rule already admits under `root` with metadata, never
+    /// with a runtime-reported file path (SPEC-046, SPEC-010-R007(i)): a
+    /// custom `--identifier` maps to its entry's key, and several
+    /// quantizations answering one name narrow to the files with the served
+    /// entry's publisher and exact size. Exactly one must remain.
     let servedModels: [LMStudioLoopbackServeModel.Model]?
     private let fileManager: FileManager
     /// Bounds the directory walk so a pathological models tree cannot turn a
@@ -396,8 +397,24 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
     }
 
     /// LM Studio binds through its models directory from the id; the runtime
-    /// reports no artifact path and none is needed.
+    /// reports no artifact path and none is used.
     func resolveArtifact(servedModelRef: String, runtimeArtifactPath: String?) -> BYOMResolvedArtifact? {
+        // One file answers or none does: several matching GGUFs (e.g. every
+        // quantization of a repo with the same publisher and size) is
+        // ambiguous and must not pick silently.
+        guard let hits = matchingFiles(servedModelRef: servedModelRef), hits.count == 1, let hit = hits.first else { return nil }
+        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+    }
+
+    /// An actionable reason when several local files still answer the served
+    /// name after the metadata narrowing; nil when zero or one does.
+    func ambiguityMessage(servedModelRef: String) -> String? {
+        guard let hits = matchingFiles(servedModelRef: servedModelRef), hits.count > 1 else { return nil }
+        let files = hits.map(\.relative).sorted().joined(separator: ", ")
+        return "\(hits.count) GGUF files under the LM Studio models root answer \(servedModelRef) with the same publisher and size (\(files)); LM Studio reports no file path the CLI may trust, so remove or move the other files out of the models root, or load the model under a key that names one file (its file name)"
+    }
+
+    private func matchingFiles(servedModelRef: String) -> [(url: URL, relative: String)]? {
         guard let served = Self.modelID(from: servedModelRef) else { return nil }
         let entry = servedModels.flatMap { LMStudioLoopbackServeModel.servedEntry(named: served, in: $0) }
         // A custom identifier names no file; the entry's key does.
@@ -441,15 +458,8 @@ struct BYOMLMStudioModelStore: BYOMGGUFArtifactLocator, Sendable {
             if let size = entry.sizeBytes {
                 hits = hits.filter { (try? $0.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) == size }
             }
-            if let path = entry.path?.trimmingCharacters(in: CharacterSet(charactersIn: "/")), !path.isEmpty {
-                hits = hits.filter { $0.relative == path || $0.relative.hasSuffix("/" + path) || path.hasSuffix("/" + $0.relative) }
-            }
         }
-        // One file answers or none does: several matching GGUFs (e.g. every
-        // quantization of a repo when the id names the repo and LM Studio does
-        // not single one out) is ambiguous and must not pick silently.
-        guard hits.count == 1, let hit = hits.first else { return nil }
-        return BYOMResolvedArtifact(fileURL: hit.url, locator: hit.relative)
+        return hits
     }
 }
 

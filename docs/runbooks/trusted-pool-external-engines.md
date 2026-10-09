@@ -44,7 +44,7 @@ The first production activation of a pool with an external engine follows
 |---|---|---|---|---|---|
 | llama.cpp `llama-server` | `llamacpp:<file stem>` | `llamacpp_loopback`, `llamacpp` | GGUF file, `macprovider.gguf-file.v1` | `GET /props` `model_path` is the file you pinned | `MACPROVIDER_LLAMACPP_MODEL_PATH` (one file) or `MACPROVIDER_LLAMACPP_MODEL_ROOT` |
 | Ollama | `ollama:<tag>` | `ollama_loopback`, `ollama` | GGUF blob the tag's manifest names in `OLLAMA_MODELS` | the manifest in your Ollama store | `OLLAMA_MODELS` if not `~/.ollama/models` |
-| LM Studio (0.4+, app server or headless `llmster`) | `lmstudio:<model key or --identifier>` | `lmstudio_loopback`, `lmstudio` | the one GGUF the name resolves to under your LM Studio models root, narrowed by LM Studio's `GET /api/v1/models` entry when several match | `GET /api/v1/models`: one loaded instance answers the name, format `gguf`, with the file's publisher and exact size | `MACPROVIDER_LMSTUDIO_MODELS_ROOT` if not `~/.lmstudio/models` |
+| LM Studio (0.4+, app server or headless `llmster`) | `lmstudio:<model key or --identifier>` | `lmstudio_loopback`, `lmstudio` | the one GGUF the name resolves to under your LM Studio models root, narrowed by the publisher and exact size of LM Studio's `GET /api/v1/models` entry when several match (never by a path LM Studio reports); several left is an error | `GET /api/v1/models`: one loaded instance answers the name, format `gguf`, with the file's publisher and exact size | `MACPROVIDER_LMSTUDIO_MODELS_ROOT` if not `~/.lmstudio/models` |
 | `mlx_lm.server` | `mlxlm:<snapshot dir name>` | `mlxlm_loopback`, `mlxlm` | MLX snapshot, `macprovider.snapshot-manifest.v1` | `GET /v1/models` lists the snapshot's path | none when the server runs with a local `--model` path (auto-detected); `MACPROVIDER_MLXLM_MODEL_PATH` and `MACPROVIDER_MLXLM_ORIGIN` override |
 | oMLX (`omlx serve`) | `omlx:<snapshot dir name>` | `omlx_loopback`, `omlx` | MLX snapshot, `macprovider.snapshot-manifest.v1` | `GET /v1/models/status`: one local `llm` entry whose `model_path` is the snapshot | `MACPROVIDER_OMLX_MODEL_PATH` (required), `MACPROVIDER_OMLX_ORIGIN` |
 
@@ -210,7 +210,7 @@ use it either.
 | Symptom | Cause |
 |---|---|
 | `serve` exits with `upstreamNotRecognized(<runtime_source>)` | The engine is not reachable at `loopback_origin`, is a different engine, or does not list the declared file (llama.cpp `/props`, LM Studio key not loaded or another size, oMLX status without the snapshot, oMLX API key set). |
-| `serve` exits with `artifactResolutionFailed` | No declared file or snapshot (missing env), an ambiguous LM Studio key, or a snapshot that changed while hashing. |
+| `serve` exits with `artifactResolutionFailed` | No declared file or snapshot (missing env), an ambiguous LM Studio key (several GGUFs with the same publisher and size: remove the others from the models root, or load the model under a key naming one file), or a snapshot that changed while hashing. |
 | Requests fail `503 model_not_loaded` | The engine stopped listing the bound file, or the file changed. Restart `serve` after restoring it. |
 | Buyers get `503 engine_unavailable` | The pool's active policy does not list the engine, the Mac is not a current member, or no member of that engine serves the model right now. |
 | Offer answers `runtime_source_not_allowed` | The catalog release's artifact for this model does not list the engine in `allowed_runtime_sources`. |
