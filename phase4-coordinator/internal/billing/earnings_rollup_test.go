@@ -185,14 +185,14 @@ func drainRollup(t *testing.T, store *Store) {
 			break
 		}
 	}
-	if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets WHERE gen != computed_gen`); n != 0 {
-		t.Fatalf("dirty buckets after drain=%d", n)
+	if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets b, provider_earnings_rollup_state s WHERE b.gen != b.computed_gen OR b.computed_epoch != s.epoch`); n != 0 {
+		t.Fatalf("dirty or old-epoch buckets after drain=%d", n)
 	}
 }
 
 func cachedBucketCount(t *testing.T, store *Store, provider string) int64 {
 	t.Helper()
-	return scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets WHERE provider_id = ? AND gen = computed_gen`, provider)
+	return scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets b, provider_earnings_rollup_state s WHERE b.provider_id = ? AND b.gen = b.computed_gen AND b.computed_epoch = s.epoch`, provider)
 }
 
 func TestEarningsHourKeyMatchesLexicalBoundaries(t *testing.T) {
@@ -659,8 +659,10 @@ func TestProviderEarningsRollupConcurrentWritersAndJob(t *testing.T) {
 				}
 				return
 			}
-			got, ok, err := providerEarningsFromRollupTx(ctx, tx, provider, win)
-			if err == nil && ok {
+			got, ok, err := store.providerEarningsFromRollupTx(ctx, tx, provider, win)
+			if errors.Is(err, errEarningsRollupMaturityRace) {
+				err = nil
+			} else if err == nil && ok {
 				var want providerEarningsFigures
 				want, err = viewEarningsReference(ctx, tx, provider, win)
 				if err == nil && !reflect.DeepEqual(got, want) {
@@ -806,8 +808,12 @@ func TestProviderEarningsRollupResetsOnTriggerLossOrViewChange(t *testing.T) {
 			if got := scalar(t, store.db, `SELECT epoch FROM provider_earnings_rollup_state`); got != epoch+1 {
 				t.Fatalf("epoch %d -> %d, want a reset", epoch, got)
 			}
-			if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets`); n != 0 {
-				t.Fatalf("buckets after reset=%d", n)
+			// The reset is an epoch switch: rows stay, none is trusted.
+			if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets b, provider_earnings_rollup_state s WHERE b.computed_epoch = s.epoch`); n != 0 {
+				t.Fatalf("buckets current after reset=%d", n)
+			}
+			if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets`); n == 0 {
+				t.Fatal("reset deleted cached rows; it must only switch the epoch")
 			}
 			if n := scalar(t, store.db, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_per_%'`); n != int64(len(providerEarningsRollupTriggers())) {
 				t.Fatalf("triggers after reset=%d", n)
@@ -915,4 +921,264 @@ func TestRetrySQLiteBusyRetriesThenGivesUp(t *testing.T) {
 	if err := retrySQLiteBusy(context.Background(), "test", time.Minute, func(time.Duration) { t.Fatal("slept on a non-busy error") }, func() error { return other }); !errors.Is(err, other) {
 		t.Fatalf("non-busy err=%v", err)
 	}
+}
+
+// REPLACE conflicts delete rows without firing delete triggers (SQLite's
+// recursive_triggers is off); the BEFORE triggers must still mark the old
+// row's bucket. Covers a changed hour, a changed provider via an explicit id,
+// UPDATE OR REPLACE, and replaced related rows (resolution, verdict).
+func TestProviderEarningsRollupReplacementWritesMarkOldBuckets(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	if got := scalar(t, store.db, `PRAGMA recursive_triggers`); got != 0 {
+		t.Fatalf("recursive_triggers=%d; this test needs the production default (off)", got)
+	}
+	db := store.db
+	day := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
+	wins := rollupTestWindows(day)
+	providers := []string{"r-a", "r-b"}
+	a := insertRollupCredit(t, db, rollupCredit{requestID: "rep-1", provider: "r-a", ts: "2026-09-16T03:00:00.000000000Z", model: "m", credits: 100})
+	b := insertRollupCredit(t, db, rollupCredit{requestID: "rep-2", provider: "r-a", ts: "2026-09-15T03:00:00.000000000Z", model: "m", credits: 200, quarantined: true})
+	insertRollupCredit(t, db, rollupCredit{requestID: "rep-3", provider: "r-b", ts: "2026-09-14T03:00:00.000000000Z", model: "m", credits: 300})
+	c := insertRollupCredit(t, db, rollupCredit{requestID: "rep-4", provider: "r-b", ts: "2026-09-13T03:00:00.000000000Z", model: "m", credits: 400, quarantined: true})
+	insertRollupResolution(t, db, b, "force_credit", "2026-09-15T04:00:00.000000000Z", "2000-01-01T00:00:00.000000000Z")
+	lrcCols := `request_id, attempt_n, provider_id, ts_utc, model, status, stream, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits, created_at_utc`
+	for _, tc := range []struct{ name, sql string }{
+		{"same key, new hour", `INSERT OR REPLACE INTO ledger_request_credits (` + lrcCols + `) VALUES ('rep-1', 0, 'r-a', '2026-09-10T03:00:00.000000000Z', 'm', 200, 0, 'provider_reported', 1, 1, 1, 7, 9000, 7, '2026-09-10T03:00:00.000000000Z')`},
+		{"explicit id, new provider", fmt.Sprintf(`INSERT OR REPLACE INTO ledger_request_credits (id, `+lrcCols+`) VALUES (%d, 'rep-x', 0, 'r-b', '2026-09-16T05:00:00.000000000Z', 'm', 200, 0, 'provider_reported', 1, 1, 1, 9, 9000, 9, '2026-09-16T05:00:00.000000000Z')`, a)},
+		{"update or replace onto another key", `UPDATE OR REPLACE ledger_request_credits SET request_id = 'rep-x', provider_id = 'r-b' WHERE request_id = 'rep-3'`},
+		{"replaced resolution moves to another credit", fmt.Sprintf(`INSERT OR REPLACE INTO ledger_quarantine_resolutions(id, request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc)
+SELECT id, %d, 'force_void', 'op', 'x', created_at_utc, NULL, created_at_utc FROM ledger_quarantine_resolutions WHERE request_credit_id = %d`, c, b)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drainRollup(t, store)
+			if _, err := db.Exec(tc.sql); err != nil {
+				t.Fatal(err)
+			}
+			checkRollupMatchesView(t, store, providers, wins)
+			drainRollup(t, store)
+			checkRollupMatchesView(t, store, providers, wins)
+		})
+	}
+
+	t.Run("replaced verdict moves to another attempt", func(t *testing.T) {
+		store, route := enforceCreditFixture(t, "rep-verified", true, true, RouteSnapshotModeEnforce)
+		ws := rollupTestWindows(enforceCreditFixtureTS.Truncate(24 * time.Hour))
+		if _, err := store.db.Exec(`
+INSERT INTO settlement_attempt_outputs(account_scope, request_id, attempt_n, provider_id, terminal_state, terminal_state_ts_unix_ms,
+    output_prefix_start_byte, output_prefix_end_byte, usage_hash, usage_canonical_json, usage_source, created_at_utc)
+VALUES (?, ?, 0, ?, 'normal_done', 1, 0, 1, ?, '{}', 'coordinator_observed', '2026-09-25T09:00:00Z')`,
+			route.AccountScope, route.RequestID, route.ProviderID, strings.Repeat("a", 64)); err != nil {
+			t.Fatal(err)
+		}
+		drainRollup(t, store)
+		if got, _, _ := store.providerEarningsFromRollup(context.Background(), route.ProviderID, ws[0]); got.total == 0 {
+			t.Fatal("fixture: verified credit not payable")
+		}
+		if _, err := store.db.Exec(`INSERT OR REPLACE INTO settlement_receipt_verdicts SELECT * FROM settlement_receipt_verdicts WHERE request_id = ?`, route.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE OR REPLACE settlement_receipt_verdicts SET request_id = 'elsewhere' WHERE request_id = ?`, route.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		checkRollupMatchesView(t, store, []string{route.ProviderID}, ws)
+		if got, _, _ := store.providerEarningsFromRollup(context.Background(), route.ProviderID, ws[0]); got.total != 0 {
+			t.Fatalf("credit still payable after its verdict moved: %+v", got)
+		}
+	})
+}
+
+// The guard for the replacement triggers: their conflict keys are the
+// schema's UNIQUE keys.
+func TestProviderEarningsRollupReplaceKeysMatchSchema(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	for _, table := range []string{"ledger_request_credits", "ledger_quarantine_resolutions", "settlement_route_snapshots", "settlement_receipt_verdicts", "settlement_attempt_outputs"} {
+		var pk string
+		if err := store.db.QueryRow(`SELECT group_concat(name) FROM pragma_table_info(?) WHERE pk > 0`, table).Scan(&pk); err != nil || pk != "id" {
+			t.Fatalf("%s primary key=%q err=%v, want id", table, pk, err)
+		}
+		rows, err := store.db.Query(`SELECT il.name FROM pragma_index_list(?) il WHERE il."unique" = 1`, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, n)
+		}
+		rows.Close()
+		if table == "ledger_quarantine_resolutions" && len(names) != 0 {
+			t.Fatalf("%s has UNIQUE indexes %v the replacement trigger does not cover", table, names)
+		}
+		for _, n := range names {
+			cols := map[string]bool{}
+			crow, err := store.db.Query(`SELECT name FROM pragma_index_info(?)`, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var list []string
+			for crow.Next() {
+				var c sql.NullString
+				if err := crow.Scan(&c); err != nil {
+					t.Fatal(err)
+				}
+				if !c.Valid {
+					t.Fatalf("%s.%s is an expression index the replacement trigger does not cover", table, n)
+				}
+				cols[c.String] = true
+				list = append(list, c.String)
+			}
+			crow.Close()
+			if table == "ledger_request_credits" {
+				if !reflect.DeepEqual(list, earningsRollupLRCKey) {
+					t.Fatalf("%s unique key %v, trigger covers %v", table, list, earningsRollupLRCKey)
+				}
+				continue
+			}
+			for _, c := range earningsRollupLRCKey {
+				if !cols[c] {
+					t.Fatalf("%s unique key %v lacks %s: a key conflict could delete a row of other credits", table, list, c)
+				}
+			}
+		}
+	}
+}
+
+// Credit A sits in a cached hour, B in a live hour; both mature after the
+// read fixed its cutoff and before its live statements. Without the shared
+// cutoff the read would count B and not A, a total the view never had.
+func TestProviderEarningsRollupMaturityDuringReadIsCoherent(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	db := store.db
+	soon := time.Now().UTC().Add(1500 * time.Millisecond)
+	a := insertRollupCredit(t, db, rollupCredit{requestID: "a", provider: "p", ts: "2026-09-15T03:00:00.000000000Z", model: "m", credits: 10, quarantined: true})
+	insertRollupResolution(t, db, a, "force_credit", "2026-09-15T04:00:00.000000000Z", sqliteTimeText(soon))
+	drainRollup(t, store)
+	b := insertRollupCredit(t, db, rollupCredit{requestID: "b", provider: "p", ts: "2026-09-16T03:00:00.000000000Z", model: "m", credits: 20, quarantined: true})
+	insertRollupResolution(t, db, b, "force_credit", "2026-09-16T04:00:00.000000000Z", sqliteTimeText(soon.Add(100*time.Millisecond)))
+	reads := 0
+	store.earningsRollupReadHook = func() {
+		reads++
+		if reads == 1 {
+			time.Sleep(time.Until(soon) + 300*time.Millisecond)
+		}
+	}
+	win := rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC))[0]
+	got, ok, err := store.providerEarningsFromRollup(context.Background(), "p", win)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if reads != 2 {
+		t.Fatalf("reads=%d; want the raced read retried once", reads)
+	}
+	if got.total != 30 {
+		t.Fatalf("total=%d; want 30 (the view after both maturities), never 20", got.total)
+	}
+}
+
+// A reset between a recompute's read and its publish must not let the old
+// figures become trusted under the new epoch (generation ABA).
+func TestProviderEarningsRollupResetBetweenReadAndPublishIsRejected(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "r", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+	fired := false
+	store.earningsRollupAfterRead = func(string, string) {
+		if fired {
+			return
+		}
+		fired = true
+		if _, err := store.db.Exec(`UPDATE provider_earnings_rollup_state SET fingerprint = 'other'`); err != nil {
+			t.Error(err)
+		}
+		if _, err := NewStore(reqStore.DB()); err != nil {
+			t.Error(err)
+		}
+	}
+	pass, err := store.RefreshProviderEarningsRollup(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fired || pass.Recomputed != 0 || pass.Conflicts != 1 {
+		t.Fatalf("pass=%+v fired=%v; want the publish rejected", pass, fired)
+	}
+	if n := cachedBucketCount(t, store, "p"); n != 0 {
+		t.Fatalf("buckets trusted under the new epoch=%d", n)
+	}
+	store.earningsRollupAfterRead = nil
+	drainRollup(t, store)
+	checkRollupMatchesView(t, store, []string{"p"}, rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)))
+}
+
+// A pass stops at its context deadline between buckets, without error.
+func TestProviderEarningsRollupPassHonoursDeadline(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	for i := 0; i < 10; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("d-%d", i), provider: "p", ts: sqliteTimeText(time.Date(2026, 9, 16, i, 0, 0, 0, time.UTC)), model: "m", credits: 1})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	store.earningsRollupAfterRead = func(string, string) { time.Sleep(100 * time.Millisecond) }
+	start := time.Now()
+	pass, err := store.RefreshProviderEarningsRollup(ctx, 10)
+	if err != nil {
+		t.Fatalf("deadline surfaced as error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Fatalf("pass ran %s past a 150ms deadline", elapsed)
+	}
+	if !pass.More || pass.Recomputed >= 10 {
+		t.Fatalf("pass=%+v; want an early stop with more work", pass)
+	}
+}
+
+// Buckets that conflict on every pass must not starve the rest of the scan.
+func TestProviderEarningsRollupConflictingBucketsDoNotStarveOthers(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	for i := 0; i < 8; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("hot-%d", i), provider: "a-hot", ts: sqliteTimeText(time.Date(2026, 9, 16, i, 0, 0, 0, time.UTC)), model: "m", credits: 1})
+	}
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "cold", provider: "z-cold", ts: "2026-09-16T01:00:00.000000000Z", model: "m", credits: 1})
+	// Every recompute of a hot bucket loses to a write.
+	store.earningsRollupAfterRead = func(provider, hour string) {
+		if provider == "a-hot" {
+			if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = 'a-hot' AND ts_utc LIKE ? || '%'`, hour); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	for i := 0; i < 4 && cachedBucketCount(t, store, "z-cold") == 0; i++ {
+		if _, err := store.RefreshProviderEarningsRollup(context.Background(), 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cachedBucketCount(t, store, "z-cold") != 1 {
+		t.Fatal("a later provider was starved by buckets that always conflict")
+	}
+}
+
+// Resetting a populated cache is an epoch switch (constant work at
+// startup); the refresher then rebuilds it and the figures stay exact.
+func TestProviderEarningsRollupResetOfPopulatedCache(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	for i := 0; i < 40; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("pop-%d", i), provider: fmt.Sprintf("p-%d", i%4), ts: sqliteTimeText(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(i*7) * time.Hour)), model: "m", credits: int64(i)})
+	}
+	drainRollup(t, store)
+	rollupRows := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup`)
+	if _, err := store.db.Exec(`UPDATE provider_earnings_rollup_state SET fingerprint = 'other'`); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup`); got != rollupRows {
+		t.Fatalf("reset deleted cache rows %d -> %d; it must not bulk-delete", rollupRows, got)
+	}
+	providers := []string{"p-0", "p-1", "p-2", "p-3"}
+	wins := rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC))
+	drainRollup(t, restarted)
+	checkRollupMatchesView(t, restarted, providers, wins)
 }

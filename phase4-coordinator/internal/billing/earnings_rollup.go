@@ -13,29 +13,34 @@ package billing
 //   - Every input of the view and of the endpoint's figures lives in five
 //     tables (ledger_request_credits, ledger_quarantine_resolutions,
 //     settlement_route_snapshots, settlement_receipt_verdicts,
-//     settlement_attempt_outputs). AFTER INSERT/UPDATE/DELETE triggers on all
-//     five bump the generation of every (provider, hour) bucket the changed
-//     row can affect, inside the writer's own transaction.
-//   - A bucket is cached for the generation it was computed from. The recompute
-//     reads the generation and the view in one read snapshot and commits only
-//     if the generation is unchanged, so a write that lands in between leaves
-//     the bucket dirty. Generations only grow, so there is no ABA.
-//   - The only input that changes without a write is time: a force-credit
-//     resolution becomes payable when force_credit_matures_at_utc passes. Each
-//     bucket stores the earliest future maturity of its rows (read before the
-//     view) and is not trusted once that instant has passed.
-//   - A reader trusts a cached bucket only when its generation is current and
-//     it is not stale, and reads every other hour live from the view, all in
-//     one read snapshot. The schema (view SQL + trigger DDL) is fingerprinted;
-//     any change, or a trigger lost to a table rebuild, resets the cache.
+//     settlement_attempt_outputs). Triggers on all five bump the generation
+//     of every (provider, hour) bucket a write can affect, inside the
+//     writer's own transaction: AFTER INSERT/UPDATE/DELETE for the written
+//     row, and BEFORE INSERT/UPDATE for any existing row a REPLACE conflict
+//     would delete (SQLite fires no delete trigger for those unless
+//     recursive_triggers is on).
+//   - A bucket is cached for the (generation, epoch) it was computed from.
+//     The recompute reads both and the view in one read snapshot and commits
+//     only if neither moved. Rows are never deleted, so a generation only
+//     grows within an epoch, and a reset only grows the epoch: no ABA.
+//   - The only input that changes without a write is time: a force credit
+//     becomes payable when force_credit_matures_at_utc passes. Each bucket
+//     stores the earliest future maturity of its rows (read before the view)
+//     and is not trusted once that instant has passed. A reader fixes a cutoff
+//     at the start of its snapshot and, after its last statement, confirms no
+//     credit of the provider matured since the cutoff; otherwise it retries.
+//     So every served figure equals the view at one instant.
+//   - The schema (view SQL + trigger DDL) is fingerprinted; any change, or a
+//     trigger lost to a table rebuild, bumps the epoch, which invalidates
+//     every cached bucket at once without a bulk delete.
 //
 // Hour buckets are keyed by earningsHourKeySQL so that, for any timestamp text
 // whose first 13 characters are a valid UTC hour, bucket H holds exactly the
 // rows with H:00:00.000000000Z <= ts_utc < (H+1h):00:00.000000000Z under the
 // same lexical comparison the endpoint's from/to, week and today filters use
 // (all of which are midnight boundaries). Rows whose ts_utc does not start
-// with a valid hour land in the '' bucket; a provider with any such row is
-// served by the original full view read.
+// with a valid hour land in the empty-key bucket; a provider with any such row
+// is served by the original full view read.
 
 import (
 	"context"
@@ -47,6 +52,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
@@ -55,18 +61,21 @@ import (
 
 // providerEarningsRollupVersion is part of the schema fingerprint: bump it
 // whenever the meaning of a cached bucket changes without a DDL change.
-const providerEarningsRollupVersion = 1
+const providerEarningsRollupVersion = 2
 
 const (
 	// DefaultProviderEarningsRollupLimit bounds the buckets one refresh pass
 	// recomputes; each bucket is its own short write transaction.
 	DefaultProviderEarningsRollupLimit = 50
 	// defaultProviderEarningsBackfillBatch bounds the ledger rows one backfill
-	// step reads; the write transaction only inserts their distinct buckets.
-	defaultProviderEarningsBackfillBatch = 2000
+	// step reads, and so the bucket marks its write transaction inserts.
+	defaultProviderEarningsBackfillBatch = 500
 	// providerEarningsRollupMigrationBudget bounds how long startup waits for
 	// a lock held by another process (backup, sqlite3 shell) before failing.
 	providerEarningsRollupMigrationBudget = 60 * time.Second
+	// providerEarningsRollupReadAttempts bounds the retries of a read that
+	// raced a force-credit maturity before it falls back to the view.
+	providerEarningsRollupReadAttempts = 3
 )
 
 const earningsHourLayout = "2006-01-02T15"
@@ -116,7 +125,23 @@ var earningsRollupLRCColumns = []string{
 	"settlement_policy_mode", "settlement_account_scope_hash", "settlement_policy_version",
 }
 
+// earningsRollupLRCKey is ledger_request_credits' only UNIQUE key besides
+// its INTEGER PRIMARY KEY id. Every UNIQUE key of the other four inputs
+// contains (request_id, attempt_n, provider_id), so a key conflict there
+// deletes a row that affects the same credits as the new row; only an id
+// conflict can reach other credits. TestProviderEarningsRollupReplaceKeysMatchSchema
+// pins both facts against the schema.
+var earningsRollupLRCKey = []string{"request_id", "attempt_n", "provider_id"}
+
 type earningsRollupTrigger struct{ name, ddl string }
+
+func earningsMarkSQL(from, where string) string {
+	return `INSERT INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen)
+    SELECT c.provider_id, ` + earningsHourKeySQL("c.ts_utc") + `, 1, 0
+      FROM ` + from + `
+     WHERE ` + where + `
+    ON CONFLICT(provider_id, bucket_hour) DO UPDATE SET gen = gen + 1;`
+}
 
 func earningsMarkBucketSQL(providerExpr, tsExpr string) string {
 	return `INSERT INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen)
@@ -124,29 +149,30 @@ func earningsMarkBucketSQL(providerExpr, tsExpr string) string {
     ON CONFLICT(provider_id, bucket_hour) DO UPDATE SET gen = gen + 1;`
 }
 
-func earningsMarkCreditsSQL(where string) string {
-	return `INSERT INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen)
-    SELECT c.provider_id, ` + earningsHourKeySQL("c.ts_utc") + `, 1, 0
-      FROM ledger_request_credits c
-     WHERE ` + where + `
-    ON CONFLICT(provider_id, bucket_hour) DO UPDATE SET gen = gen + 1;`
-}
-
-func earningsMarkAttemptSQL(row string) string {
-	return earningsMarkCreditsSQL("c.request_id = " + row + ".request_id AND c.attempt_n = " + row + ".attempt_n AND c.provider_id = " + row + ".provider_id")
-}
-
-func earningsMarkCreditIDSQL(row string) string {
-	return earningsMarkCreditsSQL("c.id = " + row + ".request_credit_id")
+// earningsCreditLink joins a row r of an input table to the credits it can
+// affect, aliased c.
+func earningsCreditLink(table, r string) string {
+	if table == "ledger_quarantine_resolutions" {
+		return "c.id = " + r + ".request_credit_id"
+	}
+	return "c.request_id = " + r + ".request_id AND c.attempt_n = " + r + ".attempt_n AND c.provider_id = " + r + ".provider_id"
 }
 
 // providerEarningsRollupTriggers is the complete trigger set. Every write to a
-// view input marks the buckets of the credits it can affect (OLD and NEW).
+// view input marks the buckets of the credits it can affect: the written
+// row's OLD and NEW, and any row a REPLACE conflict deletes.
 func providerEarningsRollupTriggers() []earningsRollupTrigger {
 	changed := make([]string, 0, len(earningsRollupLRCColumns))
 	for _, col := range earningsRollupLRCColumns {
 		changed = append(changed, "OLD."+col+" IS NOT NEW."+col)
 	}
+	keyMatch := make([]string, 0, len(earningsRollupLRCKey))
+	keyChanged := []string{"OLD.id IS NOT NEW.id"}
+	for _, col := range earningsRollupLRCKey {
+		keyMatch = append(keyMatch, "c."+col+" = NEW."+col)
+		keyChanged = append(keyChanged, "OLD."+col+" IS NOT NEW."+col)
+	}
+	lrcConflict := "c.id = NEW.id OR (" + strings.Join(keyMatch, " AND ") + ")"
 	out := []earningsRollupTrigger{
 		{"trg_per_lrc_insert", `CREATE TRIGGER trg_per_lrc_insert AFTER INSERT ON ledger_request_credits
 BEGIN
@@ -162,6 +188,15 @@ END`},
 BEGIN
     ` + earningsMarkBucketSQL("OLD.provider_id", "OLD.ts_utc") + `
 END`},
+		{"trg_per_lrc_replace_insert", `CREATE TRIGGER trg_per_lrc_replace_insert BEFORE INSERT ON ledger_request_credits
+BEGIN
+    ` + earningsMarkSQL("ledger_request_credits c", lrcConflict) + `
+END`},
+		{"trg_per_lrc_replace_update", `CREATE TRIGGER trg_per_lrc_replace_update BEFORE UPDATE ON ledger_request_credits
+WHEN ` + strings.Join(keyChanged, " OR ") + `
+BEGIN
+    ` + earningsMarkSQL("ledger_request_credits c", lrcConflict) + `
+END`},
 	}
 	for _, t := range []struct{ short, table string }{
 		{"lqr", "ledger_quarantine_resolutions"},
@@ -169,10 +204,10 @@ END`},
 		{"srv", "settlement_receipt_verdicts"},
 		{"sao", "settlement_attempt_outputs"},
 	} {
-		mark := earningsMarkAttemptSQL
-		if t.table == "ledger_quarantine_resolutions" {
-			mark = earningsMarkCreditIDSQL
+		mark := func(r string) string {
+			return earningsMarkSQL("ledger_request_credits c", earningsCreditLink(t.table, r))
 		}
+		replaced := earningsMarkSQL(t.table+" o JOIN ledger_request_credits c ON "+earningsCreditLink(t.table, "o"), "o.id = NEW.id")
 		out = append(out,
 			earningsRollupTrigger{"trg_per_" + t.short + "_insert", `CREATE TRIGGER trg_per_` + t.short + `_insert AFTER INSERT ON ` + t.table + `
 BEGIN
@@ -186,6 +221,16 @@ END`},
 			earningsRollupTrigger{"trg_per_" + t.short + "_delete", `CREATE TRIGGER trg_per_` + t.short + `_delete AFTER DELETE ON ` + t.table + `
 BEGIN
     ` + mark("OLD") + `
+END`},
+			earningsRollupTrigger{"trg_per_" + t.short + "_replace_insert", `CREATE TRIGGER trg_per_` + t.short + `_replace_insert BEFORE INSERT ON ` + t.table + `
+WHEN NEW.id IS NOT NULL
+BEGIN
+    ` + replaced + `
+END`},
+			earningsRollupTrigger{"trg_per_" + t.short + "_replace_update", `CREATE TRIGGER trg_per_` + t.short + `_replace_update BEFORE UPDATE ON ` + t.table + `
+WHEN OLD.id IS NOT NEW.id
+BEGIN
+    ` + replaced + `
 END`},
 		)
 	}
@@ -204,9 +249,11 @@ func providerEarningsRollupFingerprint(viewSQL string) string {
 }
 
 // ensureProviderEarningsRollup is the startup migration. It is additive (new
-// tables and triggers only) and idempotent: it resets the cache only when the
-// fingerprint differs or a trigger is missing, and the reset is one short
-// write transaction (no ledger scan; the backfill runs later in batches).
+// tables, indexes and triggers only) and idempotent. When the fingerprint
+// differs or a trigger is missing it recreates the triggers and bumps the
+// epoch in one transaction whose size does not depend on the data: cached
+// rows of an older epoch are simply never trusted again and are rebuilt by
+// the refresher in bounded batches, and the backfill runs later in batches.
 func (s *Store) ensureProviderEarningsRollup(ctx context.Context) error {
 	return retrySQLiteBusy(ctx, "provider earnings rollup migration", providerEarningsRollupMigrationBudget, time.Sleep, func() error {
 		return s.ensureProviderEarningsRollupOnce(ctx)
@@ -229,13 +276,10 @@ CREATE TABLE IF NOT EXISTS provider_earnings_rollup_buckets (
     bucket_hour TEXT NOT NULL,
     gen INTEGER NOT NULL,
     computed_gen INTEGER NOT NULL,
+    computed_epoch INTEGER NOT NULL DEFAULT 0,
     stale_at_utc TEXT NULL,
     PRIMARY KEY(provider_id, bucket_hour)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_perb_dirty ON provider_earnings_rollup_buckets(provider_id, bucket_hour)
-    WHERE gen != computed_gen;
-CREATE INDEX IF NOT EXISTS idx_perb_stale ON provider_earnings_rollup_buckets(stale_at_utc)
-    WHERE stale_at_utc IS NOT NULL;
 CREATE TABLE IF NOT EXISTS provider_earnings_rollup (
     provider_id TEXT NOT NULL,
     bucket_hour TEXT NOT NULL,
@@ -245,6 +289,26 @@ CREATE TABLE IF NOT EXISTS provider_earnings_rollup (
     fault_count INTEGER NOT NULL,
     PRIMARY KEY(provider_id, bucket_hour, model)
 ) WITHOUT ROWID;
+`); err != nil {
+		return err
+	}
+	hasEpoch, err := s.columnExists(ctx, "provider_earnings_rollup_buckets", "computed_epoch")
+	if err != nil {
+		return err
+	}
+	if !hasEpoch {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE provider_earnings_rollup_buckets ADD COLUMN computed_epoch INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_perb_dirty ON provider_earnings_rollup_buckets(provider_id, bucket_hour)
+    WHERE gen != computed_gen;
+CREATE INDEX IF NOT EXISTS idx_perb_epoch ON provider_earnings_rollup_buckets(computed_epoch, provider_id, bucket_hour);
+CREATE INDEX IF NOT EXISTS idx_perb_stale ON provider_earnings_rollup_buckets(stale_at_utc)
+    WHERE stale_at_utc IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lqr_force_credit_matures ON ledger_quarantine_resolutions(force_credit_matures_at_utc)
+    WHERE resolution_kind = 'force_credit' AND force_credit_matures_at_utc IS NOT NULL;
 `); err != nil {
 		return err
 	}
@@ -277,27 +341,41 @@ CREATE TABLE IF NOT EXISTS provider_earnings_rollup (
 		reason = "rollup trigger missing"
 	}
 	var high int64
-	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
-		for _, t := range triggers {
-			if _, err := conn.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+t.name); err != nil {
+	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		// Drop every rollup trigger, including ones an older build named
+		// differently, then create the current set.
+		rows, err := conn.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg\_per\_%' ESCAPE '\'`)
+		if err != nil {
+			return err
+		}
+		var existing []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
 				return err
 			}
+			existing = append(existing, name)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, name := range existing {
+			if _, err := conn.ExecContext(ctx, `DROP TRIGGER IF EXISTS "`+name+`"`); err != nil {
+				return err
+			}
+		}
+		for _, t := range triggers {
 			if _, err := conn.ExecContext(ctx, t.ddl); err != nil {
 				return fmt.Errorf("create %s: %w", t.name, err)
 			}
-		}
-		if _, err := conn.ExecContext(ctx, `DELETE FROM provider_earnings_rollup`); err != nil {
-			return err
-		}
-		if _, err := conn.ExecContext(ctx, `DELETE FROM provider_earnings_rollup_buckets`); err != nil {
-			return err
 		}
 		// Rows above high were inserted after the triggers above (AUTOINCREMENT
 		// never reuses ids), so they mark themselves; the backfill covers the rest.
 		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM ledger_request_credits`).Scan(&high); err != nil {
 			return err
 		}
-		_, err := conn.ExecContext(ctx, `
+		_, err = conn.ExecContext(ctx, `
 INSERT INTO provider_earnings_rollup_state(id, fingerprint, epoch, backfill_high_id, backfill_cursor_id, backfill_complete, reset_at_utc)
 VALUES (1, ?, 1, ?, 0, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
@@ -441,85 +519,153 @@ type ProviderEarningsRollupPass struct {
 	BackfillMarked   int
 	BackfillComplete bool
 	Recomputed       int
-	// More is true when the pass stopped at a bound with work left.
+	// Conflicts counts recomputes discarded because a writer or a reset moved
+	// the bucket after the read snapshot; a later pass retries them.
+	Conflicts int
+	// Failed counts buckets whose recompute errored; the pass skipped them and
+	// went on. LastFailure is the last such error.
+	Failed      int
+	LastFailure error
+	// More is true when the pass stopped at a bound (limit or ctx deadline)
+	// with work left.
 	More bool
 }
 
 var errEarningsRollupMoved = errors.New("provider earnings rollup bucket changed during recompute")
 
+type earningsBucketKey struct{ provider, hour string }
+
+// earningsRollupCursors rotates the refresher's scans so buckets that keep
+// conflicting cannot starve the rest.
+type earningsRollupCursors struct {
+	mu    sync.Mutex
+	dirty earningsBucketKey
+	epoch earningsBucketKey
+}
+
 // RefreshProviderEarningsRollup runs one bounded pass: one backfill batch
-// while the backfill is incomplete, then up to limit dirty or stale buckets.
-// Every write is a short transaction; reads use the read pool.
+// while the backfill is incomplete, then up to limit buckets that are stale,
+// dirty, or from an older epoch. It stops early, without error, when ctx's
+// deadline passes; each bucket is its own short write transaction and reads
+// use the read pool.
 func (s *Store) RefreshProviderEarningsRollup(ctx context.Context, limit int) (ProviderEarningsRollupPass, error) {
 	var pass ProviderEarningsRollupPass
 	if limit <= 0 || limit > DefaultProviderEarningsRollupLimit {
 		limit = DefaultProviderEarningsRollupLimit
 	}
+	yield := func(err error) (ProviderEarningsRollupPass, error) {
+		if ctx.Err() != nil {
+			pass.More = true
+			return pass, nil
+		}
+		return pass, err
+	}
 	marked, complete, err := s.backfillProviderEarningsRollup(ctx)
 	if err != nil {
-		return pass, err
+		return yield(err)
 	}
 	pass.BackfillMarked, pass.BackfillComplete = marked, complete
-	type bucketKey struct{ provider, hour string }
-	var work []bucketKey
-	rows, err := s.reader().QueryContext(ctx, `
-SELECT provider_id, bucket_hour FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_dirty
- WHERE gen != computed_gen
- LIMIT ?`, limit)
-	if err != nil {
-		return pass, err
+	var epoch int64
+	if err := s.reader().QueryRowContext(ctx, `SELECT epoch FROM provider_earnings_rollup_state WHERE id = 1`).Scan(&epoch); err != nil {
+		return yield(err)
 	}
-	for rows.Next() {
-		var k bucketKey
-		if err := rows.Scan(&k.provider, &k.hour); err != nil {
-			rows.Close()
-			return pass, err
-		}
-		work = append(work, k)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return pass, err
-	}
-	rows.Close()
-	if len(work) < limit {
-		rows, err = s.reader().QueryContext(ctx, `
+	// Stale buckets get a reserved share so dirty churn cannot starve them.
+	work, err := s.selectEarningsBuckets(ctx, `
 SELECT provider_id, bucket_hour FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_stale
- WHERE stale_at_utc IS NOT NULL AND stale_at_utc <= `+sqliteNowText+` AND gen = computed_gen
- LIMIT ?`, limit-len(work))
-		if err != nil {
-			return pass, err
-		}
-		for rows.Next() {
-			var k bucketKey
-			if err := rows.Scan(&k.provider, &k.hour); err != nil {
-				rows.Close()
-				return pass, err
-			}
-			work = append(work, k)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return pass, err
-		}
-		rows.Close()
+ WHERE stale_at_utc IS NOT NULL AND stale_at_utc <= `+sqliteNowText+` AND gen = computed_gen AND computed_epoch = ?
+ ORDER BY stale_at_utc
+ LIMIT ?`, epoch, max(1, limit/5))
+	if err != nil {
+		return yield(err)
 	}
+	if room := limit - len(work); room > 0 {
+		dirty, err := s.selectRotatingEarningsBuckets(ctx, &s.earningsRollupCursors.dirty, `INDEXED BY idx_perb_dirty WHERE gen != computed_gen`, nil, room)
+		if err != nil {
+			return yield(err)
+		}
+		work = append(work, dirty...)
+	}
+	if room := limit - len(work); room > 0 {
+		// Buckets cached under an older epoch, oldest epoch first.
+		var oldest sql.NullInt64
+		if err := s.reader().QueryRowContext(ctx, `SELECT MIN(computed_epoch) FROM provider_earnings_rollup_buckets`).Scan(&oldest); err != nil {
+			return yield(err)
+		}
+		if oldest.Valid && oldest.Int64 < epoch {
+			old, err := s.selectRotatingEarningsBuckets(ctx, &s.earningsRollupCursors.epoch, `INDEXED BY idx_perb_epoch WHERE computed_epoch = ?`, []any{oldest.Int64}, room)
+			if err != nil {
+				return yield(err)
+			}
+			work = append(work, old...)
+		}
+	}
+	seen := map[earningsBucketKey]bool{}
 	for _, k := range work {
-		if err := ctx.Err(); err != nil {
-			return pass, err
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if ctx.Err() != nil {
+			return yield(nil)
 		}
 		switch err := s.recomputeProviderEarningsBucket(ctx, k.provider, k.hour); {
 		case err == nil:
 			pass.Recomputed++
 		case errors.Is(err, errEarningsRollupMoved):
-			// A writer changed the bucket after our snapshot; a later pass
-			// recomputes it.
+			pass.Conflicts++
+		case ctx.Err() != nil:
+			return yield(nil)
 		default:
-			return pass, fmt.Errorf("recompute provider earnings bucket %s %q: %w", k.provider, k.hour, err)
+			pass.Failed++
+			pass.LastFailure = fmt.Errorf("recompute provider earnings bucket %s %q: %w", k.provider, k.hour, err)
 		}
 	}
 	pass.More = !complete || len(work) == limit
 	return pass, nil
+}
+
+func (s *Store) selectEarningsBuckets(ctx context.Context, query string, args ...any) ([]earningsBucketKey, error) {
+	rows, err := s.reader().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []earningsBucketKey
+	for rows.Next() {
+		var k earningsBucketKey
+		if err := rows.Scan(&k.provider, &k.hour); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// selectRotatingEarningsBuckets returns up to n buckets matching cond in
+// (provider, hour) order after *cursor, wrapping to the start, and advances
+// the cursor past the last one returned.
+func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, cursor *earningsBucketKey, cond string, args []any, n int) ([]earningsBucketKey, error) {
+	s.earningsRollupCursors.mu.Lock()
+	from := *cursor
+	s.earningsRollupCursors.mu.Unlock()
+	base := `SELECT provider_id, bucket_hour FROM provider_earnings_rollup_buckets ` + cond
+	out, err := s.selectEarningsBuckets(ctx, base+` AND (provider_id, bucket_hour) > (?, ?) ORDER BY provider_id, bucket_hour LIMIT ?`, append(append([]any{}, args...), from.provider, from.hour, n)...)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) < n && (from != earningsBucketKey{}) {
+		wrapped, err := s.selectEarningsBuckets(ctx, base+` AND (provider_id, bucket_hour) <= (?, ?) ORDER BY provider_id, bucket_hour LIMIT ?`, append(append([]any{}, args...), from.provider, from.hour, n-len(out))...)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, wrapped...)
+	}
+	if len(out) > 0 {
+		s.earningsRollupCursors.mu.Lock()
+		*cursor = out[len(out)-1]
+		s.earningsRollupCursors.mu.Unlock()
+	}
+	return out, nil
 }
 
 // backfillProviderEarningsRollup marks the buckets of one batch of ledger rows
@@ -539,9 +685,8 @@ func (s *Store) backfillProviderEarningsRollup(ctx context.Context) (int, bool, 
 	if batch <= 0 {
 		batch = defaultProviderEarningsBackfillBatch
 	}
-	type pair struct{ provider, hour string }
-	seen := map[pair]bool{}
-	var marks []pair
+	seen := map[earningsBucketKey]bool{}
+	var marks []earningsBucketKey
 	rows, err := s.reader().QueryContext(ctx, `
 SELECT id, provider_id, `+earningsHourKeySQL("ts_utc")+`
   FROM ledger_request_credits
@@ -553,15 +698,15 @@ SELECT id, provider_id, `+earningsHourKeySQL("ts_utc")+`
 	}
 	n, last := 0, cursor
 	for rows.Next() {
-		var p pair
-		if err := rows.Scan(&last, &p.provider, &p.hour); err != nil {
+		var k earningsBucketKey
+		if err := rows.Scan(&last, &k.provider, &k.hour); err != nil {
 			rows.Close()
 			return 0, false, err
 		}
 		n++
-		if !seen[p] {
-			seen[p] = true
-			marks = append(marks, p)
+		if !seen[k] {
+			seen[k] = true
+			marks = append(marks, k)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -586,8 +731,8 @@ UPDATE provider_earnings_rollup_state
 		} else if affected != 1 {
 			return errEarningsRollupMoved
 		}
-		for _, p := range marks {
-			if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen) VALUES (?, ?, 1, 0)`, p.provider, p.hour); err != nil {
+		for _, k := range marks {
+			if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen) VALUES (?, ?, 1, 0)`, k.provider, k.hour); err != nil {
 				return err
 			}
 		}
@@ -603,14 +748,18 @@ UPDATE provider_earnings_rollup_state
 }
 
 // recomputeProviderEarningsBucket rebuilds one bucket from the base tables and
-// commits it only if its generation did not move since the read snapshot.
+// commits it only if neither its generation nor the epoch moved since the
+// read snapshot.
 func (s *Store) recomputeProviderEarningsBucket(ctx context.Context, providerID, hour string) error {
 	tx, err := s.reader().BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	var gen int64
-	if err := tx.QueryRowContext(ctx, `SELECT gen FROM provider_earnings_rollup_buckets WHERE provider_id = ? AND bucket_hour = ?`, providerID, hour).Scan(&gen); err != nil {
+	var gen, epoch int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT b.gen, s.epoch
+  FROM provider_earnings_rollup_buckets b, provider_earnings_rollup_state s
+ WHERE b.provider_id = ? AND b.bucket_hour = ? AND s.id = 1`, providerID, hour).Scan(&gen, &epoch); err != nil {
 		_ = tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return errEarningsRollupMoved
@@ -619,8 +768,8 @@ func (s *Store) recomputeProviderEarningsBucket(ctx context.Context, providerID,
 	}
 	var staleAt sql.NullString
 	var models map[string]earningsBucketAgg
-	// The '' bucket (unparseable ts_utc) is never served from the cache: a
-	// provider that has one is read in full from the view.
+	// The empty-key bucket (unparseable ts_utc) is never served from the
+	// cache: a provider that has one is read in full from the view.
 	if hour != "" {
 		next, err := nextEarningsHour(hour)
 		if err != nil {
@@ -657,8 +806,9 @@ SELECT MIN(lqr.force_credit_matures_at_utc)
 	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		res, err := conn.ExecContext(ctx, `
 UPDATE provider_earnings_rollup_buckets
-   SET computed_gen = gen, stale_at_utc = ?
- WHERE provider_id = ? AND bucket_hour = ? AND gen = ?`, staleAt, providerID, hour, gen)
+   SET computed_gen = gen, computed_epoch = ?, stale_at_utc = ?
+ WHERE provider_id = ? AND bucket_hour = ? AND gen = ?
+   AND ? = (SELECT epoch FROM provider_earnings_rollup_state WHERE id = 1)`, epoch, staleAt, providerID, hour, gen, epoch)
 		if err != nil {
 			return err
 		}
@@ -694,22 +844,41 @@ type providerEarningsFigures struct {
 	models                              []string
 }
 
+// errEarningsRollupMaturityRace means a force credit of the provider matured
+// while the read ran, so its statements may disagree; the read is retried.
+var errEarningsRollupMaturityRace = errors.New("provider earnings read raced a force-credit maturity")
+
 // providerEarningsFromRollup serves the figures from cached buckets plus a
 // live view read of every hour without a current cache entry, in one read
-// snapshot. ok=false means the cache cannot answer (backfill not finished, or
-// the provider has rows outside hour bucketing) and the caller reads the view.
+// snapshot and at one maturity instant. ok=false means the cache cannot
+// answer (backfill not finished, the provider has rows outside hour
+// bucketing, or maturities kept racing the read) and the caller reads the
+// view.
 func (s *Store) providerEarningsFromRollup(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, bool, error) {
+	for attempt := 0; attempt < providerEarningsRollupReadAttempts; attempt++ {
+		figures, ok, err := s.providerEarningsFromRollupOnce(ctx, providerID, win)
+		if !errors.Is(err, errEarningsRollupMaturityRace) {
+			return figures, ok, err
+		}
+	}
+	return providerEarningsFigures{}, false, nil
+}
+
+func (s *Store) providerEarningsFromRollupOnce(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, bool, error) {
 	tx, err := s.reader().BeginTx(ctx, nil)
 	if err != nil {
 		return providerEarningsFigures{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	return providerEarningsFromRollupTx(ctx, tx, providerID, win)
+	return s.providerEarningsFromRollupTx(ctx, tx, providerID, win)
 }
 
-func providerEarningsFromRollupTx(ctx context.Context, tx *sql.Tx, providerID string, win earningsWindows) (providerEarningsFigures, bool, error) {
+func (s *Store) providerEarningsFromRollupTx(ctx context.Context, tx *sql.Tx, providerID string, win earningsWindows) (providerEarningsFigures, bool, error) {
+	// cutoff is the maturity instant every figure is evaluated at.
+	var cutoff string
 	var complete int
-	if err := tx.QueryRowContext(ctx, `SELECT backfill_complete FROM provider_earnings_rollup_state WHERE id = 1`).Scan(&complete); errors.Is(err, sql.ErrNoRows) {
+	var epoch int64
+	if err := tx.QueryRowContext(ctx, `SELECT `+sqliteNowText+`, backfill_complete, epoch FROM provider_earnings_rollup_state WHERE id = 1`).Scan(&cutoff, &complete, &epoch); errors.Is(err, sql.ErrNoRows) {
 		return providerEarningsFigures{}, false, nil
 	} else if err != nil {
 		return providerEarningsFigures{}, false, err
@@ -719,9 +888,9 @@ func providerEarningsFromRollupTx(ctx context.Context, tx *sql.Tx, providerID st
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT bucket_hour,
-       gen = computed_gen AND (stale_at_utc IS NULL OR stale_at_utc > `+sqliteNowText+`)
+       gen = computed_gen AND computed_epoch = ? AND (stale_at_utc IS NULL OR stale_at_utc > ?)
   FROM provider_earnings_rollup_buckets
- WHERE provider_id = ?`, providerID)
+ WHERE provider_id = ?`, epoch, cutoff, providerID)
 	if err != nil {
 		return providerEarningsFigures{}, false, err
 	}
@@ -773,6 +942,9 @@ SELECT bucket_hour, model, payable_count, payable_credits, fault_count
 		return providerEarningsFigures{}, false, err
 	}
 	rows.Close()
+	if s.earningsRollupReadHook != nil {
+		s.earningsRollupReadHook()
+	}
 	// Every hour that is not clean is read live: the gaps between clean hours
 	// plus everything before the first and after the last. Hours with no
 	// bucket hold no rows, so merging them into a gap costs nothing.
@@ -815,6 +987,26 @@ SELECT bucket_hour, model, payable_count, payable_credits, fault_count
 		return providerEarningsFigures{}, false, nil
 	} else if err != nil {
 		return providerEarningsFigures{}, false, err
+	}
+	// The view's payable set changes over time only when a force credit
+	// matures (the startup migration creates the index this range scan uses). If none of this provider's matured after cutoff (up to now,
+	// which is no earlier than any statement above), every statement saw the
+	// same payable set: the one at cutoff.
+	var raced bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM ledger_quarantine_resolutions lqr INDEXED BY idx_lqr_force_credit_matures
+      JOIN ledger_request_credits c ON c.id = lqr.request_credit_id
+     WHERE lqr.resolution_kind = 'force_credit'
+       AND lqr.force_credit_matures_at_utc IS NOT NULL
+       AND lqr.force_credit_matures_at_utc > ?
+       AND lqr.force_credit_matures_at_utc <= `+sqliteNowText+`
+       AND c.provider_id = ?)`, cutoff, providerID).Scan(&raced); err != nil {
+		return providerEarningsFigures{}, false, err
+	}
+	if raced {
+		return providerEarningsFigures{}, false, errEarningsRollupMaturityRace
 	}
 	return foldEarningsBuckets(buckets, win), true, nil
 }

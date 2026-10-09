@@ -1247,7 +1247,7 @@ func runCoordinator() (exitCode int) {
 	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
 	// because disabling it is one way to stop pool traffic before a rollback.
 	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
-	startProviderEarningsRollupRefresher(shutdownCtx, billingStore, logger)
+	startProviderEarningsRollupRefresher(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	if privacyAuthority != nil {
 		buyerOpts = append(buyerOpts, buyer.WithPrivacyAuthority(privacyAuthority))
 	}
@@ -2973,46 +2973,54 @@ type providerEarningsRollupRefresher interface {
 
 const (
 	providerEarningsRollupTick = 5 * time.Second
-	// providerEarningsRollupTickBudget caps the work per tick. Reads use the
-	// billing read pool; each write is a few-row transaction, so the money
-	// writer is never held for long, and the 1-in-5 duty cycle bounds IO
-	// while the one-time backfill and first drain run.
+	// providerEarningsRollupTickBudget is the hard work budget of one tick:
+	// every pass runs under a context that expires with it, and a pass stops
+	// between buckets once it expires. Reads use the billing read pool and
+	// each write is one bucket's few-row transaction.
 	providerEarningsRollupTickBudget = time.Second
-	providerEarningsRollupPassPause  = 10 * time.Millisecond
+	// providerEarningsRollupMaxDeferral bounds how long the refresher yields
+	// to buyer money-path traffic, so the cache still converges under steady
+	// load (at most one 1 s tick per 15 s then).
+	providerEarningsRollupMaxDeferral = 15 * time.Second
+	providerEarningsRollupPassPause   = 10 * time.Millisecond
 )
 
 // startProviderEarningsRollupRefresher keeps the provider earnings rollup
 // (#1925) current: it runs the one-time backfill and recomputes buckets that
-// writers marked dirty or that a maturing force credit made stale. The
-// earnings endpoint stays exact without it (unrefreshed hours are read live),
-// only slower.
-func startProviderEarningsRollupRefresher(ctx context.Context, refresher providerEarningsRollupRefresher, logger zerolog.Logger) {
+// writers marked dirty, that a maturing force credit made stale, or that a
+// reset left on an older epoch. The earnings endpoint stays exact without it
+// (unrefreshed hours are read live), only slower.
+func startProviderEarningsRollupRefresher(ctx context.Context, refresher providerEarningsRollupRefresher, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
 	if refresher == nil {
 		return
 	}
 	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
 		backfillDone := false
 		tick := func() {
-			deadline := time.Now().Add(providerEarningsRollupTickBudget)
-			for ctx.Err() == nil {
-				passCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				pass, err := refresher.RefreshProviderEarningsRollup(passCtx, billing.DefaultProviderEarningsRollupLimit)
-				cancel()
+			attempts.MarkAttempt(time.Now())
+			tickCtx, cancel := context.WithTimeout(ctx, providerEarningsRollupTickBudget)
+			defer cancel()
+			for tickCtx.Err() == nil {
+				pass, err := refresher.RefreshProviderEarningsRollup(tickCtx, billing.DefaultProviderEarningsRollupLimit)
 				if err != nil {
-					if ctx.Err() == nil {
+					if tickCtx.Err() == nil {
 						logger.Error().Err(err).Msg("provider earnings rollup refresh failed")
 					}
 					return
+				}
+				if pass.Failed > 0 || pass.Conflicts > 0 {
+					logger.Warn().Err(pass.LastFailure).Int("failed", pass.Failed).Int("conflicts", pass.Conflicts).Int("recomputed", pass.Recomputed).Msg("provider earnings rollup buckets not refreshed")
 				}
 				if pass.BackfillComplete && !backfillDone {
 					backfillDone = true
 					logger.Info().Msg("provider earnings rollup backfill complete")
 				}
-				if !pass.More || time.Now().After(deadline) {
+				if !pass.More {
 					return
 				}
 				select {
-				case <-ctx.Done():
+				case <-tickCtx.Done():
 					return
 				case <-time.After(providerEarningsRollupPassPause):
 				}
@@ -3026,6 +3034,9 @@ func startProviderEarningsRollupRefresher(ctx context.Context, refresher provide
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, providerEarningsRollupMaxDeferral, time.Now()) {
+					continue
+				}
 				tick()
 			}
 		}

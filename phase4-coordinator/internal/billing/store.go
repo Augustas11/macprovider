@@ -85,6 +85,10 @@ type Store struct {
 	// earningsRollupAfterRead runs between a bucket recompute's read snapshot
 	// and its write transaction (tests only).
 	earningsRollupAfterRead func(providerID, hour string)
+	// earningsRollupReadHook runs inside an earnings read between the cache
+	// eligibility check and the live reads (tests only).
+	earningsRollupReadHook func()
+	earningsRollupCursors  earningsRollupCursors
 }
 
 type SQLiteMetrics interface {
