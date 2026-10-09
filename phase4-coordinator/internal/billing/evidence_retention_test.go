@@ -309,6 +309,41 @@ func TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation(t *testing.T
 	}
 }
 
+// SPEC-022 R-15.9: a retention-capable coordinator records billing contract
+// 4 at open and with every deletion, so a pre-retention (contract 3)
+// coordinator refuses the database instead of dropping archived credits from
+// the payable view.
+func TestEvidenceRetentionRaisesRollbackFloor(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	floor := func() int64 {
+		return scalar(t, f.store.db, `SELECT contract FROM billing_compat_floor WHERE id = 1`)
+	}
+	if got := floor(); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor at open=%d want %d", got, billingCompatContractEvidenceRetention)
+	}
+	if billingCompatContractRelayBlind >= billingCompatContractEvidenceRetention {
+		t.Fatal("a pre-retention contract would accept the retention floor")
+	}
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	// Even with the row lowered by hand, the deletion commits with floor 4.
+	if _, err := f.store.db.Exec(`UPDATE billing_compat_floor SET contract = ?`, billingCompatContractRelayBlind); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify))
+	if err != nil || report.DeletedRequests != 1 {
+		t.Fatalf("run=%+v err=%v", report, err)
+	}
+	if got := floor(); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor after deletion=%d want %d", got, billingCompatContractEvidenceRetention)
+	}
+	if _, err := NewStore(f.store.db); err != nil {
+		t.Fatalf("retention-capable coordinator refused its own floor: %v", err)
+	}
+}
+
 func TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)

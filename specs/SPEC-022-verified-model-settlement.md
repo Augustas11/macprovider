@@ -25,8 +25,11 @@ Deletion refuses unless the archive has been re-verified locally and its
 checksum has been confirmed at an off-host destination. Archived credits stay
 payable, and they stay verified for the billing mirror and reward counts,
 through hot tombstones. Ledger, operator-credit, payout, and settlement-window
-rows are never deleted. Retention is off by default. The conformance state of
-`SPEC-022-R001`..`SPEC-022-R014` does not change.
+rows are never deleted. Retention is off by default. A retention-capable
+coordinator records billing compatibility floor 4 at open and with every
+deletion (R-15.9), so a pre-retention coordinator refuses the database at
+startup. The conformance
+state of `SPEC-022-R001`..`SPEC-022-R014` does not change.
 
 ### v0.3.1
 
@@ -2050,6 +2053,20 @@ R-15.8. Default off. Retention is disabled by default
 (`billing.retention.enabled: false`). A dry run reports the eligible request
 count and the row and payload-byte counts per table, without writing.
 
+R-15.9. Rollback floor. Archived credits stay payable only through the
+R-15.6 tombstones, which a pre-retention coordinator does not read: its
+payable view would drop them and void their payouts. A retention-capable
+coordinator therefore implements billing compatibility contract 4. It MUST
+record contract 4 in `billing_compat_floor` when it opens the database, before
+any retention run can start, and every delete transaction MUST record it again
+in the same transaction as the deletion. A coordinator refuses to open a
+database whose floor is above its own contract (`requireBillingCompatFloor`),
+so every pre-retention release (contract 3 or lower) fails closed at startup
+against such a database. Once a retention-capable release has opened the
+database, the coordinator rolls forward only. A rollback that restores a
+database snapshot taken before that release first opened it, together with
+the release that wrote the snapshot, stays valid. No path may lower the floor.
+
 ## Acceptance criteria
 
 - **AC-022-1:** With enforce mode enabled, a provider/model pair whose
@@ -2344,6 +2361,9 @@ count and the row and payload-byte counts per table, without writing.
   - ledger reconciliation.
 
   A settled credit can be rederived from the archive alone.
+- **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
+  compatibility floor 4 at open and in every delete transaction, so a
+  coordinator below contract 4 refuses to open the database.
 
 ## Implementation sequencing
 

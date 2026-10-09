@@ -680,6 +680,14 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
 		return err
 	}
+	// SPEC-022 R-15.9: a database opened by a retention-capable coordinator
+	// may lose evidence to retention at any time after, and a pre-retention
+	// coordinator would drop archived credits from the payable view. Contract
+	// 4 is recorded before any deletion can run, so such a binary refuses the
+	// database at open.
+	if err := s.recordBillingCompatFloorAt(ctx, billingCompatContractEvidenceRetention); err != nil {
+		return err
+	}
 	if err := s.rebuildSpec022PayableRequestCreditsView(ctx); err != nil {
 		return err
 	}

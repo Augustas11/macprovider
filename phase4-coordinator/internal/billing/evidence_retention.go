@@ -1208,6 +1208,7 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 	first := &providerFirstVerifiedVerdicts{q: conn, cache: map[string]int64{}}
 	var done []archivedRequest
 	tableDeleted := map[string]int64{}
+	floorRecorded := false
 	for _, req := range batch {
 		if !journalOK[req.RequestID] {
 			report.SkippedRequests[retentionSkipRouteJournal]++
@@ -1234,6 +1235,16 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 		if !hotRowsSubsetOfArchive(b, req) || !sameCredits(b, req) {
 			report.SkippedRequests[retentionSkipHotRowNotArchived]++
 			continue
+		}
+		if !floorRecorded {
+			// SPEC-022 R-15.9: archived credits are payable only through the
+			// tombstones, which a pre-retention coordinator cannot read. Open
+			// already recorded this floor; recording it again here makes every
+			// deletion commit with it, whatever happened to the row since.
+			if err := recordBillingCompatFloorExec(ctx, conn, billingCompatContractEvidenceRetention); err != nil {
+				return nil, err
+			}
+			floorRecorded = true
 		}
 		for _, table := range evidenceRetentionTables {
 			for _, row := range b.evidence[table] {

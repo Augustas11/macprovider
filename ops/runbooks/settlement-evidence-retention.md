@@ -80,7 +80,8 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
    `settlement_evidence_archived_credits`,
    `settlement_evidence_archived_verdict_counts`, and
    `settlement_evidence_retention_state`. It also rebuilds the payable view
-   with the archived-credit branch. Nothing is deleted while
+   with the archived-credit branch and records billing compatibility floor 4
+   (section 6: from here on, roll forward only). Nothing is deleted while
    `enabled: false`.
 
 ## 2. Dry run
@@ -211,12 +212,25 @@ restore into a scratch copy of the database, never into the live one.
   SIGHUP. A run in progress stops deleting at the next batch boundary. Each
   batch either commits whole or not at all. The archive stays
   `offhost_verified` and is resumed after re-enabling.
-- To roll back the coordinator release: use the normal runtime rollback.
-  Releases older than this change ignore the new tables. On an older release,
-  however, the archived requests' enforce credits drop out of
-  `spec022_payable_request_credits`, because the older view has no tombstone
-  branch. Do not roll back past this change after a live run unless
-  payouts are paused. The archives stay valid either way.
+- Roll the coordinator forward only, once this release has started. On
+  open it records billing compatibility contract 4 in `billing_compat_floor`
+  (SPEC-022 R-15.9), and every deletion records it again. Older releases
+  implement contract 3 or lower and refuse to open the database at startup
+  (`billing: database requires a newer coordinator billing contract`). The
+  guard exists because an older payable view has no tombstone branch: it
+  would drop archived credits and void their payouts.
+- The updater needs no extra step. It already rejects a downgrade `--apply`.
+  A rollback of the deploying transaction restores the pre-apply database
+  snapshot, which is still at contract 3, together with the previous release.
+  If that snapshot is skipped or refused, the older coordinator fails closed
+  at startup and the rollback raises its critical alert. Roll forward to a
+  retention-capable release. Check the floor with:
+
+  ```sql
+  SELECT contract, recorded_at_utc FROM billing_compat_floor;
+  ```
+
+  Never lower it by hand.
 - Tombstones (`settlement_evidence_archived_credits`) are permanent: a trigger
   refuses updates and deletes.
 
