@@ -1,12 +1,44 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.13
+version: v0.22.14
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.14 (2026-10-09)** — Redesigns the R009 concurrency probe (#1906).
+  #1906 sets the goal as maximum aggregate throughput, bounded only by memory
+  fit and the buyer-facing TTFT ceiling, with zero errors. The v0.13.0 probe
+  fired `B` streams in one burst, each with a prompt filling the calibration
+  context minus the reserve (about 200k tokens on a 200k context) and a
+  64-token completion, rejected any depth whose per-stream p95 TTFT exceeded
+  1.5x the `B = 1` p95, and stopped at the first step that added less than
+  the gain fraction. Under continuous batching any queued prefill raises
+  TTFT, so the relative gate blocks every depth above 1–2 regardless of
+  throughput; a context-filling prompt with a 64-token completion is a shape
+  nobody sends; and the early stop missed rungs where aggregate rises again.
+  Lab data in `docs/research/issue-1906/` shows decode-heavy traffic still
+  gains about 1.2x at 16 rows. R009 steps 2, 3, 4 and 7 and AC-43 now
+  require a fixed synthetic agent-chat request shape (default 1792 prompt
+  tokens, capped at context − reserve − completion, and 1024 completion
+  tokens) measured by `B` closed-loop workers over a 30 s warmup and a 90 s
+  window; remove the regression gate; and measure every ladder depth up to
+  the bound, stopping only at a TTFT-ceiling failure or an error, then select
+  the highest aggregate among feasible depths with the existing tie band
+  toward the lower depth. No buyer-traffic data exists yet to choose the
+  shape from, so an operator can calibrate for a known workload with the new
+  `--calibrate-concurrency-prompt-tokens` and
+  `--calibrate-concurrency-completion-tokens` options. The absolute TTFT
+  ceiling, minimum aggregate-gain fraction (now only the selection tie band),
+  depth ladder, memory-fit bound at the full production context, draft pin
+  and fail-closed rules are unchanged. `concurrency_calibration` moves to
+  `autotune_concurrency_calibration.v2`: `ttft_regression_factor` is removed,
+  `probe_prompt_tokens` is added after `calibration_context_tokens`, and each
+  measurement gains an informational `per_stream_decode_tps` (median
+  per-stream decode rate, or `null`) after `per_stream_p95_ttft_ms`. Stored
+  v1 records stay readable.
 
 - **v0.22.13 (2026-10-09)** — Raises the served hard cap
   `max_concurrency_override_limit` from 8 to 32 (#1906). The tier constant
@@ -2205,17 +2237,17 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
     "measurements": []
   },
   "concurrency_calibration": {
-    "schema_version": "autotune_concurrency_calibration.v1",
+    "schema_version": "autotune_concurrency_calibration.v2",
     "recommended_max_batch": 4,
     "tier_constant_max_batch": 4,
     "memory_fit_cap": 8,
-    "hard_cap": 8,
+    "hard_cap": 32,
     "ttft_ceiling_ms": 8000,
-    "ttft_regression_factor": 1.5,
     "min_aggregate_gain_fraction": 0.15,
     "calibration_context_tokens": 200000,
+    "probe_prompt_tokens": 1792,
     "prompt_reserve_tokens": 256,
-    "completion_tokens": 64,
+    "completion_tokens": 1024,
     "draft_pinned": false,
     "measurements": []
   },
@@ -2508,12 +2540,12 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 **SPEC-023-R009:** When `autotune --recommend --calibrate-concurrency` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact, after selection, before recommendation-state or config mutation. It MUST:
 
 1. **Bound the search.** Compute a `memory_fit_cap` = the largest batch depth whose target-model weights plus per-slot KV cache at the recommendation's emitted production context (and emitted `kv_bits`) fit within the same memory-safety envelope §5/§9 already use, then clamp the search to the closed integer range `[1, min(memory_fit_cap, max_concurrency_override_limit)]`, where `max_concurrency_override_limit` is the served hard cap (32 since v0.22.13; 8 before). The calibrated value MUST NEVER exceed this range, so it can neither exceed the served hard cap nor advertise slots the box cannot host. When the verified model config or KV geometry cannot be read (so `memory_fit_cap` cannot be computed), the CLI MUST fall back to the CONSERVATIVE chip/RAM tier constant (`recommendedMaxBatch`), NOT the hard cap: a box whose memory fit cannot be proven MUST NOT be swept above the capacity it already advertises today, because over-advertisement risks a buyer-facing TTFT breach and thermal/swap pressure under real full-context traffic.
-2. **Measure aggregate throughput under genuine concurrency.** For each swept batch depth `B` (starting at `B = 1` and increasing one depth at a time through `B = 8`, then over the ladder 12, 16, 24, 32 within the bound, plus the bound itself when it falls between rungs), the CLI MUST start a local, non-joining serve of the selected artifact at `--max-batch B` in the serve mode production will use, then drive `B` genuinely concurrent uncached probe requests and record the **aggregate** decode tokens/sec across those `B` streams together with each stream's TTFT and the batch's per-stream p95 TTFT. Single-stream serialized replicates MUST NOT be used to characterize a depth `B > 1`, because they cannot observe concurrency's aggregate effect. Each probe request MUST use uncached prompts filling the calibration context to its advertised boundary minus an explicit token reserve, and prompt identity MUST differ between measured streams.
-3. **Gate each depth.** A depth `B` is feasible only when every one of its `B` streams returns success with measurable throughput, no stop-token leak occurs, its per-stream p95 TTFT is no greater than the buyer-facing TTFT ceiling, and its per-stream p95 TTFT does not exceed the measured single-stream (`B = 1`) p95 TTFT by more than a bounded regression factor. The buyer-facing TTFT ceiling is `min(--buyer-ttft-ceiling-ms, 8000)` ms when the operator sets `--buyer-ttft-ceiling-ms` (§5) and 8000 ms otherwise: an operator's stricter buyer SLO MUST tighten — never loosen — the calibration gate, so calibration cannot select a concurrency depth that breaches the ceiling paid selection already enforces. `B = 1` MUST be measured first and MUST pass, or the calibration fails closed.
-4. **Select the empirical optimum.** Among feasible depths, the CLI MUST select the depth with the highest aggregate tokens/sec; when two feasible depths are within a bounded aggregate-gain fraction of each other, it MUST prefer the LOWER depth (memory-risk posture, matching SPEC-029 FR-5). The search MAY stop increasing `B` once a depth is infeasible or fails to raise aggregate throughput by the bounded gain fraction over the previous depth.
+2. **Measure aggregate throughput under genuine concurrency.** For each swept batch depth `B` (starting at `B = 1` and increasing one depth at a time through `B = 8`, then over the ladder 12, 16, 24, 32 within the bound, plus the bound itself when it falls between rungs), the CLI MUST start a local, non-joining serve of the selected artifact at `--max-batch B` and the production calibration context, in the serve mode production will use, then hold `B` genuinely concurrent closed-loop workers against it: each worker issues a fresh request as soon as its previous one ends, worker arrivals are staggered (250 ms apart), and measurement covers a fixed window (90 s) after a warmup (30 s). Workers stop issuing at the window end. The CLI MUST record the **aggregate** decode tokens/sec as the generated tokens streamed inside the window divided by the window length, the per-stream p95 TTFT over requests that started inside the window (over every request when none did), and, as informational evidence only, the median per-stream decode rate over requests decoding inside the window. Single-stream serialized replicates MUST NOT be used to characterize a depth `B > 1`, because they cannot observe concurrency's aggregate effect. Each probe request MUST use a fixed synthetic agent-chat shape, not a context-filling prompt: `min(P, calibration context − prompt reserve − completion tokens)` uncached prompt tokens and a `C`-token completion, where `P` defaults to 1792 and `C` to 1024. No buyer-traffic data exists yet to choose the shape from; an operator MAY calibrate for a known workload with `--calibrate-concurrency-prompt-tokens P` and `--calibrate-concurrency-completion-tokens C` (each ≥ 1, each requiring `--calibrate-concurrency`). A calibration context that leaves no prompt room after the reserve and `C` fails closed. Prompt identity MUST differ between all requests. The memory-fit bound (step 1) stays computed at the full production context.
+3. **Gate each depth.** A depth `B` is feasible only when every request in its run returns success, no stop-token leak occurs, the window yields measurable throughput, and its per-stream p95 TTFT is no greater than the buyer-facing TTFT ceiling. Memory fit (step 1) and this ceiling are the only bounds; no other latency or per-stream rate gate applies. A TTFT increase relative to `B = 1` MUST NOT reject a depth: under continuous batching any queued prefill raises TTFT, so a relative gate blocks every depth above 1–2 regardless of throughput. The buyer-facing TTFT ceiling is `min(--buyer-ttft-ceiling-ms, 8000)` ms when the operator sets `--buyer-ttft-ceiling-ms` (§5) and 8000 ms otherwise: an operator's stricter buyer SLO MUST tighten — never loosen — the calibration gate, so calibration cannot select a concurrency depth that breaches the ceiling paid selection already enforces. `B = 1` MUST be measured first and MUST pass, or the calibration fails closed.
+4. **Select the empirical optimum.** The CLI MUST measure every ladder depth up to the bound, stopping only when a depth exceeds the TTFT ceiling (deeper depths are then not measured) or errors (step 6). A depth that fails to raise aggregate throughput MUST NOT stop the sweep. Among feasible depths, the CLI MUST select the depth with the highest aggregate tokens/sec, tie-broken toward the LOWER depth: it selects the lowest feasible depth whose aggregate is within the bounded aggregate-gain fraction (`min_aggregate_gain_fraction`, 0.15) of the highest feasible aggregate (memory-risk posture, matching SPEC-029 FR-5), so a few percent more aggregate does not add slots for noise.
 5. **Respect the draft-model exclusion.** When a draft model is configured, SPEC-028 FR-4 pins `effective_max_batch = 1`; the CLI MUST NOT sweep, MUST emit `recommended_max_batch = 1` with `draft_pinned = true`, and MUST record the pin rather than a measured optimum.
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
-7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, TTFT regression factor, minimum aggregate-gain fraction, calibration context, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements, and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied `max_concurrency_override` MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged.
+7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, minimum aggregate-gain fraction, calibration context, probe prompt tokens, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements (aggregate tokens/sec, per-stream p95 TTFT, informational median per-stream decode rate, pass/fail and reason), and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied `max_concurrency_override` MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged.
 
 Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 
@@ -2724,7 +2756,7 @@ AC-41 (`SPEC-023-R007`, RAM-class rule): On a Mac with `ram_gb >= 16` where the 
 
 AC-42 (`SPEC-023-R007`, hard-gate carve-out and 8 GB path): When every eligible RAM-class-matched row on a `ram_gb >= 16` Mac fails a **hard** §5 gate (`swap_detected`, `thermal_throttle_detected`, the buyer-TTFT ceiling, or insufficient headroom), the rule does not fire and the Llama 3.2 3B onboarding SKU may again be `recommended_model`, so the Mac still receives a paid recommendation. **Advisory** signals alone (`tps_below_gate`, `ttft_above_gate`, Warning-majority pressure, the advisory `swap_observed_under_load`) never demote a RAM-class-matched row out of eligibility and therefore never send a 16 GB Mac back to 3B. On an 8 GB Mac the RAM-class-matched rows are ineligible under `hardware_fits` (`12 > 8 − 4`), so Llama 3.2 3B remains the SPEC-003 / Entry 116 onboarding default and the JSON, warning, and coordinator-join outcomes are byte-for-byte the pre-v0.11.0 result for the same inputs.
 
-AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by driving `B` genuinely concurrent uncached streams at each swept batch depth `B` (never serialized single-stream replicates), records per-depth aggregate tokens/sec and per-stream p95 TTFT, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lower depth within the aggregate-gain fraction. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 32)` and is never below `1`. A depth is feasible only when all `B` streams succeed with measurable throughput, no stop-token leak occurs, its per-stream p95 TTFT is within the buyer-facing ceiling, and it does not regress the `B = 1` p95 TTFT beyond the bounded factor; `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
+AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by holding `B` genuinely concurrent closed-loop workers at each swept batch depth `B` (never serialized single-stream replicates) with the configured synthetic request shape (`min(P, context − reserve − completion)` uncached prompt tokens and `C` completion tokens, defaults `P = 1792`, `C = 1024`, overridable by `--calibrate-concurrency-prompt-tokens` / `--calibrate-concurrency-completion-tokens`; distinct prompts) over a 30 s warmup and a 90 s measured window, records per-depth in-window aggregate tokens/sec, per-stream p95 TTFT, and (informational) median per-stream decode rate, measures every ladder depth up to the bound unless a depth exceeds the TTFT ceiling or errors, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lowest feasible depth within the aggregate-gain fraction of that highest aggregate. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 32)` and is never below `1`. A depth is feasible only when every request succeeds, no stop-token leak occurs, the window yields measurable throughput, and its per-stream p95 TTFT is within the buyer-facing ceiling; neither a TTFT increase over `B = 1` nor a slow per-stream decode rate rejects a depth. `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
 
 AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override`, lowered only by `SPEC-023-R018` item 9 (v0.15.2) when that many slots do not fit memory at the emitted context. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
 

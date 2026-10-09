@@ -56,6 +56,12 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, opt-in empirical max-batch calibration: measure the selected model's aggregate concurrent throughput before emitting or applying config.")
     var calibrateConcurrency = false
 
+    @Option(name: .customLong("calibrate-concurrency-prompt-tokens"), help: "With --calibrate-concurrency, prompt tokens per probe request (default 1792; capped at the calibration context minus the reserve and completion).")
+    var calibrateConcurrencyPromptTokens: Int?
+
+    @Option(name: .customLong("calibrate-concurrency-completion-tokens"), help: "With --calibrate-concurrency, completion tokens per probe request (default 1024).")
+    var calibrateConcurrencyCompletionTokens: Int?
+
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
 
@@ -832,6 +838,18 @@ struct AutotuneCommand: AsyncParsableCommand {
         if calibrateConcurrency && (checkOnly || prefetch || freshnessCheck) {
             throw ValidationError("--calibrate-concurrency cannot be combined with --check-only, --prefetch, or --freshness-check")
         }
+        for (flag, value) in [
+            ("--calibrate-concurrency-prompt-tokens", calibrateConcurrencyPromptTokens),
+            ("--calibrate-concurrency-completion-tokens", calibrateConcurrencyCompletionTokens),
+        ] {
+            guard let value else { continue }
+            if !calibrateConcurrency {
+                throw ValidationError("\(flag) requires --calibrate-concurrency")
+            }
+            if value < 1 {
+                throw ValidationError("\(flag) must be >= 1")
+            }
+        }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
@@ -1315,15 +1333,19 @@ struct AutotuneCommand: AsyncParsableCommand {
                     tierConstant: hardware.recommendedMaxBatch,
                     draftConfigured: draftConfigured,
                     calibrationContext: calibrationContext,
-                    promptReserveTokens: 256,
-                    completionTokens: 64,
+                    promptTokens: calibrateConcurrencyPromptTokens
+                        ?? AutotuneConcurrencyCalibrator.defaultProbePromptTokens,
+                    promptReserveTokens: AutotuneConcurrencyCalibrator.promptReserveTokens,
+                    completionTokens: calibrateConcurrencyCompletionTokens
+                        ?? AutotuneConcurrencyCalibrator.defaultProbeCompletionTokens,
                     prober: Stage1ConcurrencyCalibrationAdapter(
                         model: selectedBenchmark.modelArtifactPath,
                         port: port,
                         artifactBinding: CandidateArtifactBinding(
                             path: selectedBenchmark.modelArtifactPath,
                             sha256: selectedBenchmark.artifactSHA256
-                        )
+                        ),
+                        isInterrupted: { interruptFlag.isSet() }
                     ),
                     deadline: recommendationDeadline,
                     isInterrupted: { interruptFlag.isSet() },

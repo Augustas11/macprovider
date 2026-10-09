@@ -472,11 +472,11 @@ final class AutotuneRecommendTests: XCTestCase {
             memoryFitCap: 5,
             hardCap: 8,
             ttftCeilingMS: 8_000,
-            ttftRegressionFactor: 1.5,
             minAggregateGainFraction: 0.15,
             calibrationContextTokens: tierCore.knobs.maxContext,
+            probePromptTokens: 1_792,
             promptReserveTokens: 256,
-            completionTokens: 64,
+            completionTokens: 1_024,
             draftPinned: false,
             measurements: [
                 AutotuneConcurrencyCalibrationMeasurement(
@@ -505,7 +505,7 @@ final class AutotuneRecommendTests: XCTestCase {
         )
         let concurrency = try XCTUnwrap(calibratedRoot["concurrency_calibration"] as? [String: Any])
         XCTAssertEqual(concurrency["recommended_max_batch"] as? Int, 3)
-        XCTAssertEqual(concurrency["schema_version"] as? String, "autotune_concurrency_calibration.v1")
+        XCTAssertEqual(concurrency["schema_version"] as? String, "autotune_concurrency_calibration.v2")
         // Fixed §6 order: concurrency_calibration follows serve_config.
         let serveIdx = try XCTUnwrap(calibratedJSON.range(of: "\"serve_config\""))
         let concIdx = try XCTUnwrap(calibratedJSON.range(of: "\"concurrency_calibration\""))

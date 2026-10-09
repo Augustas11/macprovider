@@ -7,9 +7,10 @@ import Foundation
 /// `slots_total`. `autotune --recommend` emits it from a blind chip/RAM tier
 /// constant (`AutotuneRecommendHardware.recommendedMaxBatch`) that never
 /// measures the specific box. This type measures the selected, already-verified
-/// artifact's *aggregate* decode throughput and per-stream tail latency across a
-/// bounded batch sweep and selects the empirically best depth, under a
-/// memory-fit hard upper bound and a tail-latency ceiling. It is engine-agnostic
+/// artifact's steady-state *aggregate* decode throughput and per-stream tail
+/// TTFT across a bounded batch sweep and selects the empirically best depth,
+/// bounded only by memory fit and the buyer-facing TTFT ceiling, with zero
+/// errors. It is engine-agnostic
 /// by construction: it drives genuine concurrent load and measures whatever
 /// serve mode production runs (independent single-stream today; shared-forward
 /// continuous batching, SPEC-038/039, once enabled).
@@ -19,6 +20,11 @@ struct AutotuneConcurrencyCalibrationMeasurement: Codable, Equatable {
     var streams: Int
     var aggregateTPS: Double
     var perStreamP95TTFTMS: Int?
+    /// Median per-stream decode rate (tok/s) under this depth's steady-state
+    /// load. Informational, never a gate. Optional so stored v1 records (which
+    /// never measured it) decode, and nil when the window had no measurable
+    /// per-stream decode span.
+    var perStreamDecodeTPS: Double? = nil
     var passed: Bool
     var failureReason: String? = nil
 
@@ -27,13 +33,17 @@ struct AutotuneConcurrencyCalibrationMeasurement: Codable, Equatable {
         case streams
         case aggregateTPS = "aggregate_tps"
         case perStreamP95TTFTMS = "per_stream_p95_ttft_ms"
+        case perStreamDecodeTPS = "per_stream_decode_tps"
         case passed
         case failureReason = "failure_reason"
     }
 }
 
 struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
-    static let schemaVersion = "autotune_concurrency_calibration.v1"
+    /// v2 (SPEC-023 v0.22.14): `ttft_regression_factor` removed;
+    /// `probe_prompt_tokens` and per-measurement `per_stream_decode_tps`
+    /// added.
+    static let schemaVersion = "autotune_concurrency_calibration.v2"
 
     var schemaVersion: String = Self.schemaVersion
     var recommendedMaxBatch: Int
@@ -41,9 +51,9 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
     var memoryFitCap: Int
     var hardCap: Int
     var ttftCeilingMS: Int
-    var ttftRegressionFactor: Double
     var minAggregateGainFraction: Double
     var calibrationContextTokens: Int
+    var probePromptTokens: Int
     var promptReserveTokens: Int
     var completionTokens: Int
     var draftPinned: Bool
@@ -56,24 +66,73 @@ struct AutotuneConcurrencyCalibrationResult: Codable, Equatable {
         case memoryFitCap = "memory_fit_cap"
         case hardCap = "hard_cap"
         case ttftCeilingMS = "ttft_ceiling_ms"
-        case ttftRegressionFactor = "ttft_regression_factor"
         case minAggregateGainFraction = "min_aggregate_gain_fraction"
         case calibrationContextTokens = "calibration_context_tokens"
+        case probePromptTokens = "probe_prompt_tokens"
         case promptReserveTokens = "prompt_reserve_tokens"
         case completionTokens = "completion_tokens"
         case draftPinned = "draft_pinned"
         case measurements
     }
 
+    init(
+        recommendedMaxBatch: Int,
+        tierConstantMaxBatch: Int,
+        memoryFitCap: Int,
+        hardCap: Int,
+        ttftCeilingMS: Int,
+        minAggregateGainFraction: Double,
+        calibrationContextTokens: Int,
+        probePromptTokens: Int,
+        promptReserveTokens: Int,
+        completionTokens: Int,
+        draftPinned: Bool,
+        measurements: [AutotuneConcurrencyCalibrationMeasurement]
+    ) {
+        self.recommendedMaxBatch = recommendedMaxBatch
+        self.tierConstantMaxBatch = tierConstantMaxBatch
+        self.memoryFitCap = memoryFitCap
+        self.hardCap = hardCap
+        self.ttftCeilingMS = ttftCeilingMS
+        self.minAggregateGainFraction = minAggregateGainFraction
+        self.calibrationContextTokens = calibrationContextTokens
+        self.probePromptTokens = probePromptTokens
+        self.promptReserveTokens = promptReserveTokens
+        self.completionTokens = completionTokens
+        self.draftPinned = draftPinned
+        self.measurements = measurements
+    }
+
+    /// Stored recommendation state may hold a v1 record. It keeps its own
+    /// `schema_version`, its `ttft_regression_factor` is ignored, and the
+    /// v2-only `probe_prompt_tokens` it never recorded decodes as 0 instead of
+    /// failing the whole state load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(String.self, forKey: .schemaVersion)
+        recommendedMaxBatch = try c.decode(Int.self, forKey: .recommendedMaxBatch)
+        tierConstantMaxBatch = try c.decode(Int.self, forKey: .tierConstantMaxBatch)
+        memoryFitCap = try c.decode(Int.self, forKey: .memoryFitCap)
+        hardCap = try c.decode(Int.self, forKey: .hardCap)
+        ttftCeilingMS = try c.decode(Int.self, forKey: .ttftCeilingMS)
+        minAggregateGainFraction = try c.decode(Double.self, forKey: .minAggregateGainFraction)
+        calibrationContextTokens = try c.decode(Int.self, forKey: .calibrationContextTokens)
+        probePromptTokens = try c.decodeIfPresent(Int.self, forKey: .probePromptTokens) ?? 0
+        promptReserveTokens = try c.decode(Int.self, forKey: .promptReserveTokens)
+        completionTokens = try c.decode(Int.self, forKey: .completionTokens)
+        draftPinned = try c.decode(Bool.self, forKey: .draftPinned)
+        measurements = try c.decode([AutotuneConcurrencyCalibrationMeasurement].self, forKey: .measurements)
+    }
+
     /// Deterministic field order matching the SPEC-023 §6 output contract.
     var jsonString: String {
         let samples = measurements.map { sample in
             """
-            {"batch_depth":\(sample.batchDepth),"streams":\(sample.streams),"aggregate_tps":\(concurrencyCalibrationJSONNumber(sample.aggregateTPS)),"per_stream_p95_ttft_ms":\(sample.perStreamP95TTFTMS.map(String.init) ?? "null"),"passed":\(sample.passed),"failure_reason":\(sample.failureReason.map(concurrencyCalibrationJSONString) ?? "null")}
+            {"batch_depth":\(sample.batchDepth),"streams":\(sample.streams),"aggregate_tps":\(concurrencyCalibrationJSONNumber(sample.aggregateTPS)),"per_stream_p95_ttft_ms":\(sample.perStreamP95TTFTMS.map(String.init) ?? "null"),"per_stream_decode_tps":\(sample.perStreamDecodeTPS.map(concurrencyCalibrationJSONNumber) ?? "null"),"passed":\(sample.passed),"failure_reason":\(sample.failureReason.map(concurrencyCalibrationJSONString) ?? "null")}
             """
         }.joined(separator: ",")
         return """
-        {"schema_version":\(concurrencyCalibrationJSONString(Self.schemaVersion)),"recommended_max_batch":\(recommendedMaxBatch),"tier_constant_max_batch":\(tierConstantMaxBatch),"memory_fit_cap":\(memoryFitCap),"hard_cap":\(hardCap),"ttft_ceiling_ms":\(ttftCeilingMS),"ttft_regression_factor":\(concurrencyCalibrationJSONNumber(ttftRegressionFactor)),"min_aggregate_gain_fraction":\(concurrencyCalibrationJSONNumber(minAggregateGainFraction)),"calibration_context_tokens":\(calibrationContextTokens),"prompt_reserve_tokens":\(promptReserveTokens),"completion_tokens":\(completionTokens),"draft_pinned":\(draftPinned),"measurements":[\(samples)]}
+        {"schema_version":\(concurrencyCalibrationJSONString(schemaVersion)),"recommended_max_batch":\(recommendedMaxBatch),"tier_constant_max_batch":\(tierConstantMaxBatch),"memory_fit_cap":\(memoryFitCap),"hard_cap":\(hardCap),"ttft_ceiling_ms":\(ttftCeilingMS),"min_aggregate_gain_fraction":\(concurrencyCalibrationJSONNumber(minAggregateGainFraction)),"calibration_context_tokens":\(calibrationContextTokens),"probe_prompt_tokens":\(probePromptTokens),"prompt_reserve_tokens":\(promptReserveTokens),"completion_tokens":\(completionTokens),"draft_pinned":\(draftPinned),"measurements":[\(samples)]}
         """
     }
 }
@@ -113,39 +172,63 @@ enum AutotuneConcurrencyCalibrationError: Error, Equatable, CustomStringConverti
     }
 }
 
-/// Outcome of measuring one batch depth: aggregate decode throughput across all
-/// concurrent streams, plus the per-stream p95 TTFT.
+/// Outcome of measuring one batch depth under steady-state closed-loop load:
+/// in-window aggregate decode throughput across all streams, per-stream p95
+/// TTFT, and the median per-stream decode rate (informational; nil when no
+/// request had a measurable decode span inside the window).
 enum ConcurrencyProbeOutcome: Equatable {
-    case feasible(aggregateTPS: Double, perStreamP95TTFTMS: Double)
+    case feasible(aggregateTPS: Double, perStreamP95TTFTMS: Double, perStreamDecodeTPS: Double?)
     case infeasible(reason: String, nErr: Int)
 }
 
 protocol AutotuneConcurrencyCalibrationProbing {
-    /// Start a local non-joining serve at `--max-batch batchDepth`, drive
-    /// `batchDepth` genuinely concurrent uncached probe streams whose prompts
-    /// fill the calibration context to its advertised boundary minus
-    /// `promptReserveTokens` (SPEC-023-R009 step 2) while generating
-    /// `completionTokens`, and return aggregate throughput + per-stream p95
-    /// TTFT. Implementations MUST apply the probe-safety (swap/thermal) veto.
+    /// Start a local non-joining serve at `--max-batch batchDepth` and the
+    /// production `calibrationContext`, keep `batchDepth` closed-loop workers
+    /// issuing uncached, distinct requests of `promptTokens` prompt tokens and
+    /// `completionTokens` completion tokens (SPEC-023-R009 step 2), and return
+    /// the steady-state window metrics. Implementations MUST apply the
+    /// probe-safety (swap/thermal) veto.
     func measure(
         batchDepth: Int,
         calibrationContext: Int,
-        promptReserveTokens: Int,
+        promptTokens: Int,
         completionTokens: Int,
         deadline: Date?
     ) async throws -> ConcurrencyProbeOutcome
 }
 
 struct AutotuneConcurrencyCalibrator {
+    /// Default probe request shape (SPEC-023-R009 step 2): a fixed synthetic
+    /// agent-chat shape, overridable with
+    /// `--calibrate-concurrency-prompt-tokens` and
+    /// `--calibrate-concurrency-completion-tokens` for a known workload. No
+    /// buyer-traffic data exists yet to choose it from; it replaces a
+    /// context-filling prompt with a 64-token completion, a shape nobody sends.
+    static let defaultProbePromptTokens = 1_792
+    static let defaultProbeCompletionTokens = 1_024
+    static let promptReserveTokens = 256
+
+    /// Per-request prompt length: the requested prompt, shrunk only when the
+    /// calibration context cannot hold it plus the reserve and completion.
+    static func probePromptTokens(
+        requested: Int = defaultProbePromptTokens,
+        calibrationContext: Int,
+        promptReserveTokens: Int,
+        completionTokens: Int
+    ) -> Int {
+        max(1, min(requested, calibrationContext - promptReserveTokens - completionTokens))
+    }
+
     /// Served hard cap.
     var hardCap = ProviderCapacity.maxConcurrencyOverrideLimit
+    /// The buyer-facing TTFT ceiling is the only latency gate. There is no
+    /// gate relative to batch=1: under continuous batching any queued prefill
+    /// raises TTFT at every depth above 1, so a relative gate blocks every
+    /// depth regardless of throughput (#1906).
     var ttftCeilingMS = 8_000
-    /// A higher batch depth is rejected if its per-stream p95 TTFT exceeds the
-    /// single-stream (batch=1) p95 by more than this factor.
-    var ttftRegressionFactor = 1.5
-    /// Two feasible depths within this aggregate-throughput fraction of each
-    /// other are treated as tied; the LOWER depth wins (memory-risk posture,
-    /// SPEC-029 FR-5).
+    /// Selection tie band: the LOWEST feasible depth whose aggregate is within
+    /// this fraction of the best measured aggregate wins (memory-risk posture,
+    /// SPEC-029 FR-5), so a few percent of noise does not add slots.
     var minAggregateGainFraction = 0.15
 
     /// Depths above this are swept on a coarse ladder rather than one at a
@@ -166,6 +249,20 @@ struct AutotuneConcurrencyCalibrator {
         return depths
     }
 
+    /// Highest aggregate wins, tie-broken toward the LOWEST depth whose
+    /// aggregate is within `minAggregateGainFraction` of that best.
+    static func selectDepth(
+        feasible: [AutotuneConcurrencyCalibrationMeasurement],
+        minAggregateGainFraction: Double
+    ) -> Int {
+        guard let best = feasible.map(\.aggregateTPS).max() else { return 1 }
+        let threshold = best / (1 + minAggregateGainFraction)
+        return feasible
+            .filter { $0.aggregateTPS >= threshold }
+            .map(\.batchDepth)
+            .min() ?? 1
+    }
+
     /// SPEC-023-R009. `memoryFitCap` is the largest depth whose weights + KV at
     /// the production context/kv_bits fit the §5/§9 memory-safety envelope.
     /// `tierConstant` is the blind `recommendedMaxBatch` value this measurement
@@ -176,6 +273,7 @@ struct AutotuneConcurrencyCalibrator {
         tierConstant: Int,
         draftConfigured: Bool,
         calibrationContext: Int,
+        promptTokens requestedPromptTokens: Int = AutotuneConcurrencyCalibrator.defaultProbePromptTokens,
         promptReserveTokens: Int,
         completionTokens: Int,
         prober: AutotuneConcurrencyCalibrationProbing,
@@ -185,12 +283,18 @@ struct AutotuneConcurrencyCalibrator {
     ) async throws -> AutotuneConcurrencyCalibrationResult {
         guard hardCap >= 1,
               ttftCeilingMS >= 1,
-              ttftRegressionFactor >= 1,
               minAggregateGainFraction >= 0,
               memoryFitCap >= 1
         else {
             throw AutotuneConcurrencyCalibrationError.invalidBounds(memoryFitCap: memoryFitCap, hardCap: hardCap)
         }
+
+        let promptTokens = Self.probePromptTokens(
+            requested: requestedPromptTokens,
+            calibrationContext: calibrationContext,
+            promptReserveTokens: promptReserveTokens,
+            completionTokens: completionTokens
+        )
 
         func makeResult(
             recommended: Int,
@@ -203,9 +307,9 @@ struct AutotuneConcurrencyCalibrator {
                 memoryFitCap: memoryFitCap,
                 hardCap: hardCap,
                 ttftCeilingMS: ttftCeilingMS,
-                ttftRegressionFactor: ttftRegressionFactor,
                 minAggregateGainFraction: minAggregateGainFraction,
                 calibrationContextTokens: calibrationContext,
+                probePromptTokens: promptTokens,
                 promptReserveTokens: promptReserveTokens,
                 completionTokens: completionTokens,
                 draftPinned: draftPinned,
@@ -218,6 +322,15 @@ struct AutotuneConcurrencyCalibrator {
             return makeResult(recommended: 1, draftPinned: true, measurements: [])
         }
 
+        // The probe shape must leave prompt room in the calibration context.
+        guard requestedPromptTokens >= 1,
+              completionTokens >= 1,
+              promptReserveTokens >= 0,
+              calibrationContext - promptReserveTokens - completionTokens >= 1
+        else {
+            throw AutotuneConcurrencyCalibrationError.invalidBounds(memoryFitCap: memoryFitCap, hardCap: hardCap)
+        }
+
         let upperBound = max(1, min(memoryFitCap, hardCap))
 
         var measurements: [AutotuneConcurrencyCalibrationMeasurement] = []
@@ -228,31 +341,35 @@ struct AutotuneConcurrencyCalibrator {
             let outcome = try await prober.measure(
                 batchDepth: batchDepth,
                 calibrationContext: calibrationContext,
-                promptReserveTokens: promptReserveTokens,
+                promptTokens: promptTokens,
                 completionTokens: completionTokens,
                 deadline: deadline
             )
             guard !isInterrupted() else { throw AutotuneConcurrencyCalibrationError.interrupted }
             guard !hasDeadlineExpired() else { throw AutotuneConcurrencyCalibrationError.deadlineExceeded }
             switch outcome {
-            case .feasible(let aggregateTPS, let p95TTFTMS):
+            case .feasible(let aggregateTPS, let p95TTFTMS, let decodeTPS):
                 guard aggregateTPS.isFinite, aggregateTPS > 0,
-                      p95TTFTMS.isFinite, p95TTFTMS >= 0, p95TTFTMS <= Double(Int.max)
+                      p95TTFTMS.isFinite, p95TTFTMS >= 0, p95TTFTMS <= Double(Int.max),
+                      decodeTPS.map({ $0.isFinite && $0 >= 0 }) ?? true
                 else {
                     throw AutotuneConcurrencyCalibrationError.probeFailed(
                         batchDepth: batchDepth,
-                        reason: "probe returned invalid metrics (aggregate_tps \(aggregateTPS), p95 \(p95TTFTMS)ms)"
+                        reason: "probe returned invalid metrics (aggregate_tps \(aggregateTPS), p95 \(p95TTFTMS)ms, per-stream decode \(decodeTPS.map { "\($0)" } ?? "none") tok/s)"
                     )
                 }
                 let ttft = Int(p95TTFTMS.rounded(.up))
-                let withinCeiling = p95TTFTMS <= Double(ttftCeilingMS)
+                let failureReason: String? = p95TTFTMS > Double(ttftCeilingMS)
+                    ? "per-stream p95 TTFT \(ttft)ms exceeded ceiling \(ttftCeilingMS)ms"
+                    : nil
                 return AutotuneConcurrencyCalibrationMeasurement(
                     batchDepth: batchDepth,
                     streams: batchDepth,
                     aggregateTPS: aggregateTPS,
                     perStreamP95TTFTMS: ttft,
-                    passed: withinCeiling,
-                    failureReason: withinCeiling ? nil : "per-stream p95 TTFT \(ttft)ms exceeded ceiling \(ttftCeilingMS)ms"
+                    perStreamDecodeTPS: decodeTPS,
+                    passed: failureReason == nil,
+                    failureReason: failureReason
                 )
             case .infeasible(let reason, let nErr):
                 throw AutotuneConcurrencyCalibrationError.probeFailed(
@@ -265,15 +382,11 @@ struct AutotuneConcurrencyCalibrator {
         // Baseline: batch=1 MUST be measured first and MUST pass the ceiling.
         let baseline = try await run(1)
         measurements.append(baseline)
-        guard baseline.passed, let baselineP95 = baseline.perStreamP95TTFTMS else {
+        guard baseline.passed else {
             throw AutotuneConcurrencyCalibrationError.baselineFailed(
                 reason: baseline.failureReason ?? "batch=1 did not pass the TTFT ceiling"
             )
         }
-
-        // best is always a feasible depth; seed with the passing baseline.
-        var bestDepth = 1
-        var bestAggregate = baseline.aggregateTPS
 
         for depth in Self.sweepDepths(upperBound: upperBound).dropFirst() {
             // A probe ERROR — serve/process failure, swap/thermal safety veto,
@@ -286,39 +399,143 @@ struct AutotuneConcurrencyCalibrator {
             let sample = try await run(depth)
             measurements.append(sample)
 
-            // Latency gates are normal SEARCH signals, not errors. A depth whose
-            // per-stream p95 exceeds the ceiling (`sample.passed == false`) or
-            // regresses past the bounded factor over the batch=1 baseline stops
-            // the sweep and keeps the best lower FEASIBLE depth —
-            // contention degrades latency monotonically, so deeper depths will
-            // not recover.
-            let regressed: Bool
-            if let p95 = sample.perStreamP95TTFTMS {
-                regressed = Double(p95) > Double(baselineP95) * ttftRegressionFactor
-            } else {
-                regressed = true
-            }
-            if !sample.passed || regressed {
-                if regressed, sample.failureReason == nil {
-                    let last = measurements.count - 1
-                    measurements[last].passed = false
-                    measurements[last].failureReason = "per-stream p95 TTFT regressed past \(concurrencyCalibrationJSONNumber(ttftRegressionFactor))x the batch=1 baseline (\(baselineP95)ms)"
-                }
-                break
-            }
-
-            // Feasible: keep it only when it MATERIALLY raises aggregate
-            // throughput; otherwise keep the LOWER depth (memory-risk posture,
-            // SPEC-029 FR-5) and stop climbing — diminishing returns.
-            if sample.aggregateTPS > bestAggregate * (1 + minAggregateGainFraction) {
-                bestDepth = depth
-                bestAggregate = sample.aggregateTPS
-            } else {
+            // The TTFT ceiling is a normal SEARCH signal, not an error. A depth
+            // over it stops the sweep: queueing raises TTFT monotonically with
+            // depth, so deeper depths will not recover. A sub-gain-fraction
+            // step does NOT stop the sweep; aggregate can rise again further
+            // up the ladder.
+            if !sample.passed {
                 break
             }
         }
 
-        return makeResult(recommended: bestDepth, draftPinned: false, measurements: measurements)
+        return makeResult(
+            recommended: Self.selectDepth(feasible: measurements.filter(\.passed), minAggregateGainFraction: minAggregateGainFraction),
+            draftPinned: false,
+            measurements: measurements
+        )
+    }
+}
+
+/// One request observed by the steady-state concurrency probe.
+struct ConcurrencyWindowRequest: Equatable {
+    var start: Date
+    var end: Date
+    /// Arrival time of every non-empty streamed content/reasoning delta.
+    var chunkTimes: [Date]
+    /// Authoritative all-channel decode count from the terminal usage chunk.
+    var usageDecodedTokens: Int?
+    /// Provider-reported decode wall-time from the terminal usage chunk.
+    var usageGenerationMS: Int?
+}
+
+struct ConcurrencyWindowMetrics: Equatable {
+    var aggregateTPS: Double
+    var perStreamP95TTFTMS: Double
+    /// Median per-request decode rate; nil when no request had a measurable
+    /// decode span inside the window.
+    var perStreamDecodeTPS: Double?
+    var tokensInWindow: Double
+    var ttftSamples: Int
+    var decodeSamples: Int
+}
+
+/// Steady-state window math for the concurrency probe, kept pure so it is
+/// unit-testable without a serve.
+enum ConcurrencyWindowAggregation {
+    /// A stream is "visible" when its streamed deltas account for at least this
+    /// fraction of the authoritative decode count. Otherwise (a reasoning
+    /// channel suppressed from SSE) its tokens are spread uniformly over the
+    /// provider-reported decode window.
+    static let visibleChunkFraction = 0.9
+    private static let generationWindowToleranceMS = 250.0
+
+    /// - Aggregate TPS: tokens generated inside `[windowStart, windowEnd)`
+    ///   divided by the window length. A visible stream contributes its
+    ///   in-window deltas (scaled to the authoritative count); a suppressed
+    ///   stream contributes its decode window's overlap pro rata.
+    /// - Per-stream p95 TTFT over requests that STARTED inside the window, or
+    ///   over every request when none did (requests longer than the window).
+    /// - Per-stream decode: median over requests whose decode overlaps the
+    ///   window of the in-window delta rate (visible) or tokens over the
+    ///   decode window (suppressed).
+    static func aggregate(
+        requests: [ConcurrencyWindowRequest],
+        windowStart: Date,
+        windowEnd: Date
+    ) -> ConcurrencyWindowMetrics? {
+        let windowSeconds = windowEnd.timeIntervalSince(windowStart)
+        guard windowSeconds > 0, !requests.isEmpty else { return nil }
+
+        var tokensInWindow = 0.0
+        var decodeRates: [Double] = []
+        var startedInWindowTTFTs: [Double] = []
+        var allTTFTs: [Double] = []
+
+        for request in requests {
+            let tokens = request.usageDecodedTokens ?? request.chunkTimes.count
+            let elapsedMS = max(0, request.end.timeIntervalSince(request.start) * 1_000)
+            let visible = !request.chunkTimes.isEmpty
+                && Double(request.chunkTimes.count) >= Double(tokens) * visibleChunkFraction
+            let decodeStart: Date
+            if visible {
+                decodeStart = request.chunkTimes[0]
+            } else if let generationMS = request.usageGenerationMS, generationMS >= 1,
+                      Double(generationMS) <= elapsedMS + generationWindowToleranceMS {
+                decodeStart = max(request.start, request.end.addingTimeInterval(-Double(generationMS) / 1_000))
+            } else {
+                decodeStart = request.chunkTimes.first ?? request.end
+            }
+
+            let ttftMS = max(0, decodeStart.timeIntervalSince(request.start) * 1_000)
+            allTTFTs.append(ttftMS)
+            if request.start >= windowStart, request.start < windowEnd {
+                startedInWindowTTFTs.append(ttftMS)
+            }
+
+            guard tokens > 0 else { continue }
+            if visible {
+                let inWindow = request.chunkTimes.filter { $0 >= windowStart && $0 < windowEnd }
+                let tokensPerChunk = Double(tokens) / Double(request.chunkTimes.count)
+                tokensInWindow += Double(inWindow.count) * tokensPerChunk
+                if inWindow.count >= 2, let first = inWindow.first, let last = inWindow.last {
+                    let span = last.timeIntervalSince(first)
+                    if span > 0 {
+                        decodeRates.append(Double(inWindow.count - 1) * tokensPerChunk / span)
+                    }
+                }
+            } else {
+                let length = request.end.timeIntervalSince(decodeStart)
+                if length <= 0 {
+                    if request.end >= windowStart, request.end < windowEnd {
+                        tokensInWindow += Double(tokens)
+                    }
+                    continue
+                }
+                let overlap = min(request.end, windowEnd).timeIntervalSince(max(decodeStart, windowStart))
+                if overlap > 0 {
+                    tokensInWindow += Double(tokens) * overlap / length
+                    decodeRates.append(Double(tokens) / length)
+                }
+            }
+        }
+
+        let ttftSamples = startedInWindowTTFTs.isEmpty ? allTTFTs : startedInWindowTTFTs
+        return ConcurrencyWindowMetrics(
+            aggregateTPS: tokensInWindow / windowSeconds,
+            perStreamP95TTFTMS: Stage2Prober.percentile95(ttftSamples),
+            perStreamDecodeTPS: median(decodeRates),
+            tokensInWindow: tokensInWindow,
+            ttftSamples: ttftSamples.count,
+            decodeSamples: decodeRates.count
+        )
+    }
+
+    private static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        return sorted.count.isMultiple(of: 2) ? sorted[mid - 1] / 2 + sorted[mid] / 2 : sorted[mid]
     }
 }
 
@@ -347,18 +564,29 @@ extension AutotuneRecommendResult {
 
 /// Production `AutotuneConcurrencyCalibrationProbing`: starts one local,
 /// non-joining serve of the selected verified artifact at `--max-batch
-/// batchDepth`, drives `batchDepth` genuinely concurrent uncached probe streams
-/// against it, and returns aggregate decode throughput plus per-stream p95 TTFT.
-/// Mirrors `Stage1ContextCalibrationAdapter`'s runner/artifact wiring and reuses
-/// `Stage2Prober`'s streaming `/v1/chat/completions` probe shape and
-/// `Stage1Prober`'s usage-token throughput finalization. The calibrator is
-/// tested against a fake probe; this is the box-touching implementation.
+/// batchDepth`, runs `batchDepth` closed-loop workers against it (each issues a
+/// fresh distinct request as soon as its previous one ends, arrivals
+/// staggered), and measures a fixed window after a warmup. Mirrors
+/// `Stage1ContextCalibrationAdapter`'s runner/artifact wiring and reuses
+/// `Stage1Prober`'s usage-chunk parsing. The calibrator is tested against a
+/// fake probe and the window math through `ConcurrencyWindowAggregation`; this
+/// is the box-touching implementation.
 struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbing {
     var model: String
     var port: Int
     var artifactBinding: CandidateArtifactBinding
     var runnerFactory: () throws -> CandidateProviderRunner = { try CandidateProviderRunner() }
     var safetySampler: ProbeSafetySampling = SystemProbeSafetySampler()
+    /// Polled between and during requests so an interrupt does not wait out
+    /// the measured window.
+    var isInterrupted: @Sendable () -> Bool = { false }
+
+    /// Steady-state schedule (SPEC-023-R009 step 2). Workers stop issuing at
+    /// the window end; requests in flight then drain, and only tokens streamed
+    /// inside the window count.
+    static let warmupSeconds: TimeInterval = 30
+    static let windowSeconds: TimeInterval = 90
+    static let arrivalStaggerSeconds: TimeInterval = 0.25
 
     private static let readyTimeoutSec: TimeInterval = 120
     private static let stopGraceSeconds: Double = 10
@@ -366,20 +594,14 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
     private static let probeTotalTimeoutSec: TimeInterval = 300
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
-    private struct ConcurrencyStreamResult {
-        var start: Date
-        var end: Date
-        var ttftMS: Double
-        var decodedTokens: Int
-        var throughputTPS: Double
-        var statusCode: Int
-        var stopTokenLeak: String?
+    private struct StreamFailure: Error, CustomStringConvertible {
+        var description: String
     }
 
     func measure(
         batchDepth: Int,
         calibrationContext: Int,
-        promptReserveTokens: Int,
+        promptTokens: Int,
         completionTokens: Int,
         deadline: Date?
     ) async throws -> ConcurrencyProbeOutcome {
@@ -398,8 +620,8 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
         }
         defer { samplerTask.cancel() }
 
-        // Start ONE serve at this batch depth (started once per depth, not per
-        // stream) and tear it down after the concurrent streams complete.
+        // Start ONE serve at this batch depth and the production context (the
+        // memory-fit bound is computed there) and tear it down afterwards.
         let runner = try runnerFactory()
         try runner.start(
             model: model,
@@ -429,84 +651,78 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
                 )
             }
 
-            // Drive `batchDepth` genuinely concurrent streams — one child task
-            // each, all in flight at once — with DISTINCT padded prompts so no
-            // two streams share a prefill/cache path. A single child throwing
-            // ends the group and marks the depth infeasible.
-            let streams: [ConcurrencyStreamResult]
+            let loadStart = Date()
+            let windowStart = loadStart.addingTimeInterval(Self.warmupSeconds)
+            let windowEnd = windowStart.addingTimeInterval(Self.windowSeconds)
+            let isInterrupted = self.isInterrupted
+            let model = self.model
+            let port = self.port
+
+            // `batchDepth` closed-loop workers with DISTINCT padded prompts so
+            // no two requests share a prefill/cache path. Any failed request
+            // throws, cancels the other workers, and marks the depth
+            // infeasible.
+            let requests: [ConcurrencyWindowRequest]
             do {
-                streams = try await withThrowingTaskGroup(of: ConcurrencyStreamResult.self) { group in
+                requests = try await withThrowingTaskGroup(of: [ConcurrencyWindowRequest].self) { group in
                     for index in 0..<batchDepth {
                         group.addTask {
-                            try await Self.measureStream(
-                                model: model,
-                                port: port,
-                                calibrationContext: calibrationContext,
-                                promptReserveTokens: promptReserveTokens,
-                                completionTokens: completionTokens,
-                                streamIndex: index,
-                                batchDepth: batchDepth
-                            )
+                            let staggerNS = UInt64(Double(index) * Self.arrivalStaggerSeconds * 1_000_000_000)
+                            try await Task.sleep(nanoseconds: staggerNS)
+                            var observed: [ConcurrencyWindowRequest] = []
+                            var sequence = 0
+                            while Date() < windowEnd {
+                                try Self.checkAbort(isInterrupted: isInterrupted, deadline: deadline)
+                                let next = try await Self.measureStream(
+                                    model: model,
+                                    port: port,
+                                    promptTokens: promptTokens,
+                                    completionTokens: completionTokens,
+                                    streamIndex: index,
+                                    sequence: sequence,
+                                    batchDepth: batchDepth,
+                                    isInterrupted: isInterrupted,
+                                    deadline: deadline
+                                )
+                                observed.append(next)
+                                sequence += 1
+                            }
+                            return observed
                         }
                     }
-                    var collected: [ConcurrencyStreamResult] = []
-                    for try await result in group {
-                        collected.append(result)
+                    var collected: [ConcurrencyWindowRequest] = []
+                    for try await observed in group {
+                        collected += observed
                     }
                     return collected
                 }
             } catch {
+                let reason = (error as? StreamFailure)?.description ?? "\(error)"
                 return .infeasible(
-                    reason: "concurrency probe stream failed: \(error.localizedDescription)",
+                    reason: "concurrency probe stream failed: \(reason)",
+                    nErr: 1
+                )
+            }
+
+            let metrics = ConcurrencyWindowAggregation.aggregate(
+                requests: requests,
+                windowStart: windowStart,
+                windowEnd: windowEnd
+            )
+            guard let metrics,
+                  metrics.aggregateTPS.isFinite, metrics.aggregateTPS > 0,
+                  metrics.perStreamP95TTFTMS.isFinite
+            else {
+                return .infeasible(
+                    reason: "concurrency window produced no measurable throughput (\(requests.count) requests)",
                     nErr: max(1, batchDepth)
                 )
             }
-
-            guard streams.count == batchDepth else {
-                return .infeasible(
-                    reason: "concurrency probe produced \(streams.count) of \(batchDepth) streams",
-                    nErr: max(1, batchDepth - streams.count)
-                )
-            }
-
-            var nErr = 0
-            var firstFailure: String?
-            for stream in streams {
-                if let leaked = stream.stopTokenLeak {
-                    return .infeasible(reason: "stop-token leak: \(leaked)", nErr: max(1, nErr + 1))
-                }
-                guard (200...299).contains(stream.statusCode) else {
-                    nErr += 1
-                    firstFailure = firstFailure ?? "HTTP \(stream.statusCode)"
-                    continue
-                }
-                guard stream.throughputTPS.isFinite, stream.throughputTPS > 0, stream.ttftMS.isFinite else {
-                    nErr += 1
-                    firstFailure = firstFailure ?? "stream produced no measurable throughput (TPS \(stream.throughputTPS), TTFT \(stream.ttftMS)ms)"
-                    continue
-                }
-            }
-            if nErr > 0 {
-                return .infeasible(reason: firstFailure ?? "concurrency probe failed", nErr: nErr)
-            }
-
-            // Aggregate throughput = total decoded tokens across all streams
-            // over the wall-clock from the first stream's start to the last
-            // stream's end. This is the concurrency signal Stage 2's serialized
-            // single-stream replicates cannot observe.
-            let wallStart = streams.map(\.start).min() ?? Date()
-            let wallEnd = streams.map(\.end).max() ?? wallStart
-            let wallSeconds = max(0.001, wallEnd.timeIntervalSince(wallStart))
-            let totalDecoded = streams.reduce(0) { $0 + $1.decodedTokens }
-            let aggregateTPS = Double(totalDecoded) / wallSeconds
-            let perStreamP95TTFTMS = Stage2Prober.percentile95(streams.map(\.ttftMS))
-            guard aggregateTPS.isFinite, aggregateTPS > 0, perStreamP95TTFTMS.isFinite else {
-                return .infeasible(
-                    reason: "concurrency aggregate produced invalid metrics (aggregate_tps \(aggregateTPS), p95 \(perStreamP95TTFTMS)ms)",
-                    nErr: max(1, batchDepth)
-                )
-            }
-            return .feasible(aggregateTPS: aggregateTPS, perStreamP95TTFTMS: perStreamP95TTFTMS)
+            return .feasible(
+                aggregateTPS: metrics.aggregateTPS,
+                perStreamP95TTFTMS: metrics.perStreamP95TTFTMS,
+                perStreamDecodeTPS: metrics.perStreamDecodeTPS
+            )
         }
 
         samplerTask.cancel()
@@ -519,33 +735,46 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
         return outcome
     }
 
+    private static func checkAbort(isInterrupted: @Sendable () -> Bool, deadline: Date?) throws {
+        if isInterrupted() {
+            throw AutotuneConcurrencyCalibrationError.interrupted
+        }
+        if let deadline, Date() >= deadline {
+            throw AutotuneConcurrencyCalibrationError.deadlineExceeded
+        }
+    }
+
     /// Issues one streaming request, racing a total-duration ceiling so a
-    /// slow/stuck stream cannot hang the whole concurrent group.
+    /// slow/stuck stream cannot hang the whole worker group.
     private static func measureStream(
         model: String,
         port: Int,
-        calibrationContext: Int,
-        promptReserveTokens: Int,
+        promptTokens: Int,
         completionTokens: Int,
         streamIndex: Int,
-        batchDepth: Int
-    ) async throws -> ConcurrencyStreamResult {
-        try await withThrowingTaskGroup(of: ConcurrencyStreamResult.self) { group in
+        sequence: Int,
+        batchDepth: Int,
+        isInterrupted: @escaping @Sendable () -> Bool,
+        deadline: Date?
+    ) async throws -> ConcurrencyWindowRequest {
+        try await withThrowingTaskGroup(of: ConcurrencyWindowRequest.self) { group in
             group.addTask {
                 try await performStream(
                     model: model,
                     port: port,
-                    calibrationContext: calibrationContext,
-                    promptReserveTokens: promptReserveTokens,
+                    promptTokens: promptTokens,
                     completionTokens: completionTokens,
                     streamIndex: streamIndex,
-                    batchDepth: batchDepth
+                    sequence: sequence,
+                    batchDepth: batchDepth,
+                    isInterrupted: isInterrupted,
+                    deadline: deadline
                 )
             }
             group.addTask {
                 let nanoseconds = UInt64(probeTotalTimeoutSec * 1_000_000_000)
                 try await Task.sleep(nanoseconds: nanoseconds)
-                throw URLError(.timedOut)
+                throw StreamFailure(description: "request exceeded \(Int(probeTotalTimeoutSec))s")
             }
             defer { group.cancelAll() }
             return try await group.next()!
@@ -555,23 +784,19 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
     private static func performStream(
         model: String,
         port: Int,
-        calibrationContext: Int,
-        promptReserveTokens: Int,
+        promptTokens: Int,
         completionTokens: Int,
         streamIndex: Int,
-        batchDepth: Int
-    ) async throws -> ConcurrencyStreamResult {
-        // SPEC-023-R009 step 2: fill the calibration context to its advertised
-        // boundary MINUS the reserve (prompt reserve + completion budget), not
-        // `paddedPrompt`'s ~80%, so each concurrent slot carries a
-        // production-representative KV footprint — otherwise a higher depth
-        // could pass under a shorter prompt and be selected even though it would
-        // breach latency/memory near the real production context boundary.
-        // Distinct nonce per stream so streams neither collapse to one cached
-        // prefill nor measure a shared-prompt best case.
-        let promptTokenTarget = max(1, calibrationContext - promptReserveTokens - completionTokens)
-        var words = Array(repeating: "probe", count: promptTokenTarget)
-        words[0] = "probe-concurrency-\(batchDepth)-\(streamIndex)-\(UUID().uuidString)"
+        sequence: Int,
+        batchDepth: Int,
+        isInterrupted: @Sendable () -> Bool,
+        deadline: Date?
+    ) async throws -> ConcurrencyWindowRequest {
+        // SPEC-023-R009 step 2: the configured probe shape, not a
+        // context-filling prompt. The unique nonce leads the prompt so no two
+        // requests share a cached prefix.
+        var words = Array(repeating: "probe", count: max(1, promptTokens))
+        words[0] = "probe-concurrency-\(batchDepth)-\(streamIndex)-\(sequence)-\(UUID().uuidString)"
         let prompt = words.joined(separator: " ")
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
@@ -593,13 +818,16 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
         let started = Date()
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(statusCode) else {
+            throw StreamFailure(description: "HTTP \(statusCode)")
+        }
         var generatedText = ""
-        var firstTokenAt: Date?
-        var deltaCount = 0
+        var chunkTimes: [Date] = []
         var usageDecodedTokens: Int?
         var usageGenerationMS: Int?
 
         for try await rawLine in bytes.lines {
+            try checkAbort(isInterrupted: isInterrupted, deadline: deadline)
             guard rawLine.hasPrefix("data:") else {
                 continue
             }
@@ -613,38 +841,47 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
             if let generationMS = Stage1Prober.usageGenerationMS(from: payload) {
                 usageGenerationMS = generationMS
             }
-            guard let content = Stage1Prober.contentDelta(from: payload), !content.isEmpty else {
+            guard let delta = streamedDelta(from: payload), !delta.isEmpty else {
                 continue
             }
-            if firstTokenAt == nil {
-                firstTokenAt = Date()
-            }
-            generatedText += content
-            deltaCount += 1
+            chunkTimes.append(Date())
+            generatedText += delta
         }
 
         let ended = Date()
-        let metrics = Stage1Prober.finalizeProbeMetrics(
-            contentFallbackTokens: deltaCount,
-            usageDecodedTokens: usageDecodedTokens,
-            usageGenerationMS: usageGenerationMS,
-            firstTokenAt: firstTokenAt,
-            started: started,
-            ended: ended
-        )
-        // Aggregate numerator: the authoritative all-channel decode count when
-        // present (may be 0 → an infeasible stream that
-        // `finalizeProbeMetrics` already reports as 0 TPS), else the visible
-        // content-delta count.
-        let decodedTokens = usageDecodedTokens ?? max(1, deltaCount)
-        return ConcurrencyStreamResult(
+        if let leaked = stopTokens.first(where: { generatedText.contains($0) }) {
+            throw StreamFailure(description: "stop-token leak: \(leaked)")
+        }
+        if usageDecodedTokens == 0 || (usageDecodedTokens == nil && chunkTimes.isEmpty) {
+            throw StreamFailure(description: "stream produced no measurable tokens")
+        }
+        return ConcurrencyWindowRequest(
             start: started,
             end: ended,
-            ttftMS: metrics.ttftMS,
-            decodedTokens: decodedTokens,
-            throughputTPS: metrics.throughputTPS,
-            statusCode: statusCode,
-            stopTokenLeak: Self.stopTokens.first(where: { generatedText.contains($0) })
+            chunkTimes: chunkTimes,
+            usageDecodedTokens: usageDecodedTokens,
+            usageGenerationMS: usageGenerationMS
         )
+    }
+
+    /// Generated text from a streamed chunk: visible content, or a reasoning
+    /// channel when the serve streams one separately. Both are decode work.
+    private static func streamedDelta(from payload: String) -> String? {
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first
+        else {
+            return nil
+        }
+        if let delta = first["delta"] as? [String: Any] {
+            for key in ["content", "reasoning_content", "reasoning"] {
+                if let text = delta[key] as? String, !text.isEmpty {
+                    return text
+                }
+            }
+            return nil
+        }
+        return first["text"] as? String
     }
 }
