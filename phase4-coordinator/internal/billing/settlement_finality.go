@@ -326,7 +326,36 @@ SELECT EXISTS (SELECT 1 FROM settlement_route_snapshots
 	}
 }
 
+// requestSettlementFinalityAfterVerdictsHook runs between the verdict read
+// and the remaining reads of a hot finality lookup (tests only).
+var requestSettlementFinalityAfterVerdictsHook func()
+
+// RequestSettlementFinality answers from hot evidence, or from the finality
+// SPEC-022 R-15 retention froze for an archived request. The hot lookup reads
+// verdicts, snapshots, credits, and outputs in separate statements, so a
+// retention deletion can commit between them and leave a partial view. The
+// frozen row commits in the same transaction as that deletion and holds the
+// answer computed from the complete evidence, so once it exists it wins over
+// any hot result or error.
 func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
+	finality, found, err := s.requestSettlementFinalityHot(ctx, accountScope, requestID, nowUnixMS)
+	if accountScope == "" || requestID == "" {
+		return finality, found, err
+	}
+	archived, archivedFound, archivedErr := s.archivedRequestSettlementFinality(ctx, accountScope, requestID)
+	if archivedErr != nil {
+		if err != nil {
+			return finality, found, err
+		}
+		return RequestSettlementFinality{}, false, archivedErr
+	}
+	if archivedFound {
+		return archived, true, nil
+	}
+	return finality, found, err
+}
+
+func (s *Store) requestSettlementFinalityHot(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
 	if accountScope == "" {
 		return RequestSettlementFinality{}, false, fmt.Errorf("account scope is required")
 	}
@@ -339,6 +368,9 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	rows, err := s.requestSettlementVerdicts(ctx, accountScope, requestID)
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
+	}
+	if hook := requestSettlementFinalityAfterVerdictsHook; hook != nil {
+		hook()
 	}
 	missing, err := s.requestSettlementAttemptsWithoutVerdict(ctx, accountScope, requestID, rows, nowUnixMS)
 	if err != nil {
@@ -403,9 +435,9 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	}
 	rows = append(rows, pending...)
 	if len(rows) == 0 {
-		// SPEC-022 R-15.6: retention froze the finality of a request whose
-		// evidence it deleted, so a held buyer reservation still settles.
-		return s.archivedRequestSettlementFinality(ctx, accountScope, requestID)
+		// SPEC-022 R-15.6: RequestSettlementFinality falls back to the
+		// finality retention froze when it deleted this request's evidence.
+		return RequestSettlementFinality{}, false, nil
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].attemptN != rows[j].attemptN {

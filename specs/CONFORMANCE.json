@@ -7265,6 +7265,7 @@
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesArchiveChangedAfterVerification",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesRowChangedAfterExport",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRetriesInterruptedJournalCleanup",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityLookupStraddlingDeletion",
         "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone",
         "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts",
         "phase4-coordinator/internal/billing/evidence_retention_endpoint_test.go:TestEvidenceRetentionAdminRouteIsOperatorOnlyAndGatedByEnabled"

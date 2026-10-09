@@ -670,6 +670,47 @@ func TestEvidenceRetentionRetriesInterruptedJournalCleanup(t *testing.T) {
 	if got := scalar(t, f.store.db, `SELECT status = 'deleted' FROM settlement_evidence_archives`); got != 1 {
 		t.Fatal("archive not marked deleted after the journal retry")
 	}
+	// The deletion count committed with the interrupted run's deletion.
+	if got := scalar(t, f.store.db, `SELECT deleted_requests FROM settlement_evidence_archives`); got != 1 {
+		t.Fatalf("archive deleted_requests=%d want 1", got)
+	}
+}
+
+// A finality lookup reads verdicts and usage in separate statements. When
+// retention deletes the request between them, the lookup returns the
+// finality frozen with that deletion instead of a partial view or an error.
+func TestEvidenceRetentionFinalityLookupStraddlingDeletion(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.settle(t)
+	hot, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
+	if err != nil || !found || !hot.Closed {
+		t.Fatalf("hot finality=%+v found=%v err=%v", hot, found, err)
+	}
+	fired := false
+	requestSettlementFinalityAfterVerdictsHook = func() {
+		if fired {
+			return
+		}
+		fired = true
+		report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify))
+		if err != nil || report.DeletedRequests != 1 {
+			t.Errorf("interleaved retention run=%+v err=%v", report, err)
+		}
+	}
+	t.Cleanup(func() { requestSettlementFinalityAfterVerdictsHook = nil })
+	got, found, err := f.store.RequestSettlementFinality(ctx, b.AccountScope, b.RequestID, f.store.nowUTC().UnixMilli())
+	if !fired {
+		t.Fatal("hook did not interleave the deletion")
+	}
+	if f.hotRows(t, "b") != 0 {
+		t.Fatal("interleaved run did not delete request b")
+	}
+	if err != nil || !found || got != hot {
+		t.Fatalf("straddling lookup=%+v found=%v err=%v, want the frozen %+v", got, found, err, hot)
+	}
 }
 
 func TestEvidenceRetentionRespectsSettlementCycleFinality(t *testing.T) {
