@@ -2698,8 +2698,8 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(explanation["warning_state"] as? String, "ready")
         XCTAssertTrue(result.warnings.contains(.catalogArtifactFeedStale))
         XCTAssertFalse(result.warnings.contains(.noEligibleModel))
-        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(result.warnings))
-        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(result.warnings))
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks(Set(result.warnings)))
+        XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)))
     }
 
     func testRecommendationIsDeterministicForSameDiversificationID() throws {
