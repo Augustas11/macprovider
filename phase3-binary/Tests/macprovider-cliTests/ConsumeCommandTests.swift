@@ -1437,7 +1437,7 @@ final class ConsumeCommandTests: XCTestCase {
         let response = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
-            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
         )
 
         XCTAssertEqual(response.status, .unauthorized)
@@ -1470,13 +1470,13 @@ final class ConsumeCommandTests: XCTestCase {
         let oldResponse = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
-            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
         )
         clock.now = ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-31T23:49:59Z")!
         let rolledBackResponse = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
-            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
         )
 
         XCTAssertEqual(oldResponse.status, .unauthorized)
@@ -2224,7 +2224,7 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(try ledger.summary(), .empty)
     }
 
-    func testPhase3DPricingExpirationWhileResolverPendingStopsBeforeReservation() throws {
+    func testPhase3DPricingFutureSkewWhileResolverPendingStopsBeforeReservation() throws {
         let token = try ConsumeLocalToken.generate()
         let home = try makeTemporaryDirectory()
         let ledgerURL = home.appendingPathComponent("budget.jsonl")
@@ -2280,7 +2280,9 @@ final class ConsumeCommandTests: XCTestCase {
         channel.embeddedEventLoop.run()
         XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 1)
 
-        nowBox.set(ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-20T00:00:00Z")!)
+        // Pricing age alone is advisory; a clock rolled back past the future
+        // skew bound while the resolver is pending must still fail closed.
+        nowBox.set(ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-19T23:49:59Z")!)
         endpointPromise.succeed("8.8.8.8")
         channel.embeddedEventLoop.run()
         let response = try drainResponse(from: channel)

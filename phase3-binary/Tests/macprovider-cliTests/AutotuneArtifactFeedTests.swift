@@ -454,8 +454,15 @@ final class AutotuneArtifactFeedTests: XCTestCase {
             bakedBytes: nil, bakedSignerKeyID: signer, candidateBytes: fixture.candidateBytes,
             candidateSignerKeyID: signer, now: Self.date("2026-07-11T00:00:00Z")
         ))
-        let stale = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: usable(now: "2026-07-24T00:00:00Z"))
-        XCTAssertEqual(stale.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model", "candidate-row identity is rule 6")
+        // With no usable feed (here future-dated), identity falls back to the
+        // v0.1 candidate-row name match (rule 6).
+        let unusable = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: usable(now: "2026-07-09T00:00:00Z"))
+        XCTAssertEqual(unusable.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"), "test-model", "candidate-row identity is rule 6")
+        // An old but valid feed stays the authority: the covered key needs the
+        // artifact leg (observed revision), not the name alone.
+        let old = BYOMCatalogMatcher(candidateBytes: fixture.candidateBytes, artifactFeed: usable(now: "2026-08-09T00:00:01Z"))
+        XCTAssertNil(old.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache"))
+        XCTAssertEqual(old.catalogKey(for: "mlx-community/Test-Model-4bit", runtimeSource: "mlx_cache", revisions: [Self.primaryRevision]), "test-model")
     }
 
     private static let secondRevision = String(repeating: "3", count: 40)
