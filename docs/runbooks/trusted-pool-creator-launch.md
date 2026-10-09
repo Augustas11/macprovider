@@ -1,9 +1,17 @@
 # Trusted Pool creator launch (SPEC-043)
 
-This is the operator runbook for an approved **single-operator Trusted Pool**.
-It does not authorize a live external creator launch. Isolated-candidate
-CONFORMANCE fill for SPEC-043-R001 through R012 is not a live Trusted Pool
-announcement.
+This is the operator runbook for Trusted Pool creators. Two classes exist
+(SPEC-043 0.3.0):
+
+- **Self-serve private pools.** Any creator accepts the published Creator
+  Agreement with their own account API key and runs a private pool with no
+  operator step. Guide: [creator guide](../byom/creator-guide.md).
+- **Operator-approved and publicly announced pools.** An operator approves
+  the creator and the launch environment. This runbook's readiness gates
+  below apply to this class. Public listing stays operator-only.
+
+Isolated-candidate CONFORMANCE fill for SPEC-043-R001 through R012 is not a
+live public Trusted Pool announcement.
 
 Buyer-facing wording is **Trusted Pool**. Do not call this a Privacy Pool,
 coordinator-blind, anonymous, ZK, or regulated-compliance product.
@@ -15,18 +23,31 @@ https://github.com/Augustas11/macprovider/issues/1160 is complete. Isolated-cand
 CONFORMANCE is not a live Trusted Pool launch. Remaining live-readiness before
 announce is tracked on issue 1233.
 
-## Pilot policy
+## Policy
 
-Until a live external creator is announced, production coordinators must keep:
+Self-serve private pools (`self_serve_private` launch environment):
 
-- `trusted_pools.enabled` off, or any enabled pool in a non-routeable lifecycle
-- membership limited to the creator’s own admitted Macs (SPEC-003)
-- buyers on dedicated pool-authorized accounts (not wallet-session pool select)
-- reviewed distribution artifacts only; no public announcement without a matching
-  digest-bound approval
-- settlement in observe / labels-only mode (`split_execution_status` remains
+- `trusted_pools.enabled` must be on. A self-serve approval authorizes only the
+  `self_serve_private` environment; it never authorizes a candidate,
+  production, or publicly announced pool.
+- membership is limited to Macs claimed (`macprovider-cli claim`) by the
+  creator's own GitHub user (SPEC-043-R006 self-serve ceiling); delegated
+  membership is refused
+- buyers are API-key accounts the creator authorizes; wallet sessions cannot
+  select a pool
+- per-account bounds apply: 600 requests and 60 mutating requests per hour,
+  8 pools per account, 256 self-serve pools in total, 512 events per pool
+- settlement is `pool_operator_attested` provider credit; creator revenue
+  split is declared, not executed (`split_execution_status` remains
   `declared_not_executed`)
-- no third-party provider marketplace joins and no creator revenue-split payout
+
+Public listing and operator-approved pools stay operator-only:
+
+- no public announcement without a matching digest-bound approval, reviewed
+  distribution artifacts, and the readiness items under "Blocked before any
+  live announcement"
+- no third-party provider marketplace joins and no creator revenue-split
+  payout
 
 ## What is already proven (isolated candidate)
 
@@ -43,6 +64,9 @@ Unauthorized pool select fails before a second provider dispatch. Payout-ready
 rows stay zero.
 
 ## Blocked before any live announcement
+
+These items gate a publicly announced pool. They do not gate self-serve
+private pools.
 
 These journey observations are **true** on the signed same-day recapture from
 workflow [`33037491210`](https://github.com/Augustas11/macprovider/actions/runs/33037491210)
