@@ -316,10 +316,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # SPEC-014 v0.2 Phase 2E gate: keep the GitHub-auth pairing surface
-    # deployable only when the portal bundle guard and live pairing
-    # integration scenarios both pass. The workflow already runs on every
-    # PR and main push; this job is intentionally present for all runs so
-    # branch protection can require a stable job name.
+    # deployable only when the portal bundle guard (here) and live pairing
+    # integration scenarios (integration job) both pass. The workflow already
+    # runs on every PR and main push; this job is intentionally present for
+    # all runs so branch protection can require a stable job name.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -328,24 +328,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go
-        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
-        # when upgrading instead of trusting the mutable tag in this required
-        # pairing/security gate.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: test/integration/go.mod
-          cache-dependency-path: test/integration/go.sum
-
       - name: Verify Node runtime for portal probe
         run: node --version
 
       - name: Run provider portal bundle guard
         run: bash frontdoor/provider-portal/check-bundle.sh
 
-      - name: Run SPEC-014 v0.2 pairing scenarios
-        working-directory: test/integration
-        run: go test -race -count=1 -timeout 5m ./spec_014_v0_2_pairing
+      # The SPEC-014 v0.2 pairing scenarios (./spec_014_v0_2_pairing) run in
+      # the required `integration (cross-service)` job, whose
+      # `go test -race -count=1 -timeout 5m ./...` already covers that package
+      # with the same flags (#1920).
 
   dist-tooling:
     name: deploy tooling (check-deploy-config gate) ${{ matrix.shard }}
@@ -514,12 +506,15 @@ jobs:
 
   spec-015-acceptance:
     name: spec-015-acceptance
-    runs-on: macos-15
-    timeout-minutes: 35
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: changes
-    # Cross-service money-path acceptance. Skipped only for docs-only PRs
-    # (Markdown/docs with no specs/** or code changes); ci-required treats the
-    # skip as a pass. Any code or spec change still runs it. Fail-open.
+    # SPEC-015 AC manifest report plus the AC-9 pinned Python/Node OpenAI SDK
+    # compatibility run against the real local gateway. The other checks the
+    # runner used to repeat (integration, gateway, coordinator, Swift and
+    # nginx subsets) run in their own jobs; see run_acceptance.sh. Nothing
+    # left here needs macOS (#1920). Skipped only for docs-only PRs; ci-required
+    # treats the skip as a pass. Fail-open.
     if: ${{ needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
@@ -532,9 +527,6 @@ jobs:
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
       - name: Run SPEC-015 acceptance runner
         run: bash test/integration/spec015/run_acceptance.sh
