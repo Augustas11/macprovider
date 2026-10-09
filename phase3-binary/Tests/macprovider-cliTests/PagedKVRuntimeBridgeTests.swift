@@ -1287,7 +1287,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testSharedPrefillCompatibilityAllowsRaggedOffsetsWithOneChunkLength() async throws {
-        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        // Six 16-token handles reserve four 4-token blocks each.
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
         func input(_ id: String, offset: Int, length: Int, native: Bool = false, committed: Int? = nil)
             async throws -> ContinuousBatchPrefillInput
         {

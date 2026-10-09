@@ -421,7 +421,10 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertEqual(
             Set(serveConfig.keys),
-            Set(ConfigApplier.recommendationOwnedKeys).subtracting([MaxContextProvenance.configKey]),
+            // The apply writes the provenance record itself, and the depth key
+            // only appears for a depth above the legacy limit of 8.
+            Set(ConfigApplier.recommendationOwnedKeys)
+                .subtracting([MaxContextProvenance.configKey, AppConfig.maxConcurrencyDepthOverrideKey]),
             "the apply writes the provenance record itself"
         )
         XCTAssertEqual(serveConfig["model"] as? String, selected.model)

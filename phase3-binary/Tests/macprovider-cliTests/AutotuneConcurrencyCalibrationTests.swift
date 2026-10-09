@@ -34,7 +34,7 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         let climbing: [Int: ConcurrencyProbeOutcome] = Dictionary(
             uniqueKeysWithValues: (1...12).map { depth in
                 (depth, ConcurrencyProbeOutcome.feasible(
-                    aggregateTPS: 100 * Foundation.pow(2, Double(depth)),
+                    aggregateTPS: 100 * Foundation.pow(2.0, Double(depth)),
                     perStreamP95TTFTMS: 1_000,
                     perStreamDecodeTPS: 30
                 ))
@@ -89,12 +89,12 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
             uniqueKeysWithValues: AutotuneConcurrencyCalibrator.sweepDepths(upperBound: 32)
                 .enumerated().map { index, depth in
                     (depth, ConcurrencyProbeOutcome.feasible(
-                        aggregateTPS: 100 * Foundation.pow(2, Double(index)),
+                        aggregateTPS: 100 * Foundation.pow(2.0, Double(index)),
                         perStreamP95TTFTMS: 1_000,
                         perStreamDecodeTPS: 30
                     ))
                 }
-                + [(20, ConcurrencyProbeOutcome.feasible(aggregateTPS: 100 * Foundation.pow(2, 11), perStreamP95TTFTMS: 1_000, perStreamDecodeTPS: 30))]
+                + [(20, ConcurrencyProbeOutcome.feasible(aggregateTPS: 100 * Foundation.pow(2.0, 11.0), perStreamP95TTFTMS: 1_000, perStreamDecodeTPS: 30))]
         )
         let prober = ConcurrencyCalibrationFake(outcomesByDepth: climbing)
         let result = try await AutotuneConcurrencyCalibrator().calibrate(
@@ -116,7 +116,7 @@ final class AutotuneConcurrencyCalibrationTests: XCTestCase {
         // 8 -> 12 rows adds only 3%, but the sweep keeps climbing: 16 rows is
         // the aggregate peak (+25% over 8). 24 rows is within the 15% tie band
         // of 16, so the lower depth wins. 32 breaches the TTFT ceiling.
-        let eight = 40 * Foundation.pow(1.2, 8)
+        let eight = 40 * Foundation.pow(1.2, 8.0)
         var outcomes: [Int: ConcurrencyProbeOutcome] = Dictionary(
             uniqueKeysWithValues: (1...8).map { depth in (depth, feasible(40 * Foundation.pow(1.2, Double(depth)))) }
         )
