@@ -11413,7 +11413,13 @@
         "scripts/source_authenticated_evidence.py:def validate_envelope",
         "phase4-coordinator/internal/sourceevidence/store.go:func (s *Store) RecordNoDispatch",
         "phase4-coordinator/internal/sourceevidence/producer.go:func (p *Producer) Export",
-        "phase4-coordinator/internal/sourceevidence/handler.go:func (h *Handler) ServeHTTP"
+        "phase4-coordinator/internal/sourceevidence/handler.go:func (h *Handler) ServeHTTP",
+        "phase5-gateway/internal/router/refusal_evidence.go:func (s *Server) recordRefusal",
+        "phase5-gateway/internal/router/refusal_evidence.go:func (s *Server) exportRefusalRecords",
+        "phase5-gateway/internal/sourceevidence/sourceevidence.go:func IntentCommitment",
+        "phase5-gateway/internal/storage/sqlite/refusal_records.go:func (s *Store) ResolveRefusalRecords",
+        "scripts/source_authenticated_evidence.py:def validate_gateway_refusal_projection",
+        "scripts/build-trusted-pool-model-journey-result.py:def capture_gateway_record"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec1816_pool_model_route_test.go:TestSPEC1816PoolModelListing",
@@ -11423,7 +11429,11 @@
         "phase5-gateway/internal/router/pool_model_disclosure_test.go:TestPoolModelDisclosureHeadersAllowlisted",
         "scripts/tests/test_source_authenticated_evidence.py::SourceAuthenticatedEvidenceTests",
         "phase4-coordinator/internal/sourceevidence/store_test.go:TestStoreClosesNoDispatchAndFencesSettlementWrites",
-        "phase4-coordinator/internal/sourceevidence/producer_test.go:TestProducerSignsSortedCoordinatorProjection"
+        "phase4-coordinator/internal/sourceevidence/producer_test.go:TestProducerSignsSortedCoordinatorProjection",
+        "phase5-gateway/internal/router/refusal_evidence_test.go:TestRefusalEvidenceRecordsAndExportsPoolRefusals",
+        "phase5-gateway/internal/router/refusal_evidence_test.go:TestRefusalEvidenceExportFailsClosed",
+        "phase5-gateway/internal/sourceevidence/sourceevidence_test.go:TestIntentBindingCrossLanguageVector",
+        "scripts/tests/test_trusted_pool_model_journey_result.py::TrustedPoolModelCaptureTests"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-MODEL"
@@ -11433,7 +11443,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "#1816 shipped bounded pool serving, but the complete production journey failed. #1880 repairs selected-view listings, served-route-only disclosure, and eligibility wording. SPEC-006 v0.9.47 defines authenticated exports and bounded coordinator no-dispatch closure projections, which are implemented with default-disabled, fail-closed release provenance. SPEC-006 v0.9.48 specifies the gateway refusal record and refusal-intent export that bind early refusals and pre-quota pool refusals without un-blanking unserved models. Unknown-model redaction remains required by SPEC-017. Reviewed production provenance enrollment, gateway refusal-intent implementation, complete accounting joins for the remaining roles, protected promotion integration, and a fresh complete signed journey remain pending. Unit tests and partial source projections do not promote this row."
+        "rationale": "#1816 shipped bounded pool serving, but the complete production journey failed. #1880 repairs selected-view listings, served-route-only disclosure, and eligibility wording. SPEC-006 v0.9.47 defines authenticated exports and bounded coordinator no-dispatch closure projections, which are implemented with default-disabled, fail-closed release provenance. SPEC-006 v0.9.48 specifies, and the gateway implements default-disabled, the gateway refusal record and refusal-intent export that bind early refusals and pre-quota pool refusals without un-blanking unserved models; the journey builder consumes them. Unknown-model redaction remains required by SPEC-017. Reviewed production provenance enrollment for both producers, complete accounting joins for the remaining roles, protected promotion integration, and a fresh complete signed journey remain pending. Unit tests and partial source projections do not promote this row."
       }
     },
     {

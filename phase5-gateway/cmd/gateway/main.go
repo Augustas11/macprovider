@@ -16,6 +16,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/router"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
+	"github.com/augstar/macprovider-gateway/internal/sourceevidence"
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
 
@@ -100,7 +101,12 @@ func main() {
 	coordinatorClient := newCoordinatorClient(cfg)
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	gatewayRouter := newGatewayRouter(cfg, store, readStore, oauth, coordinatorClient, settlementJournal)
+	refusalEvidence, err := refusalEvidenceOptions(cfg)
+	if err != nil {
+		slog.Error("refusal evidence setup failed", "error", err)
+		os.Exit(1)
+	}
+	gatewayRouter := newGatewayRouter(cfg, store, readStore, oauth, coordinatorClient, settlementJournal, refusalEvidence...)
 	// #763: drain whatever the previous process left unsealed BEFORE
 	// listening, then keep draining on a ticker. Startup alone is not
 	// enough — the H7 failure is a logical double-failure inside a running
@@ -242,13 +248,41 @@ func newGatewayRouter(
 	oauth auth.OAuthProvider,
 	coordinatorClient *http.Client,
 	settlementJournal router.SettlementJournal,
+	extra ...router.Option,
 ) *router.Server {
-	return router.New(cfg, store, oauth,
+	opts := []router.Option{
 		router.WithHTTPClient(coordinatorClient),
 		router.WithVersion(version),
 		router.WithReadStore(readStore),
 		router.WithSettlementJournal(settlementJournal),
-	)
+	}
+	return router.New(cfg, store, oauth, append(opts, extra...)...)
+}
+
+// refusalEvidenceOptions loads the SPEC-006 §5.4.3.3 refusal record keys.
+// Enabled-but-unprovisioned evidence fails startup, like the coordinator
+// export; the export signer additionally requires reviewed fixed
+// provenance, which the default build does not carry.
+func refusalEvidenceOptions(cfg config.Config) ([]router.Option, error) {
+	rc := cfg.Evidence.RefusalRecords
+	if !rc.Enabled {
+		return nil, nil
+	}
+	intentKey, err := sourceevidence.LoadSecretBytes(rc.IntentKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("intent key: %w", err)
+	}
+	if len(intentKey) < 32 {
+		return nil, fmt.Errorf("intent key must be at least 32 bytes")
+	}
+	var signer *sourceevidence.Signer
+	if rc.ExportEnabled {
+		signer, err = sourceevidence.NewSigner(rc.SigningPrivateKeyPath, sourceevidence.DefaultFixedProvenance())
+		if err != nil {
+			return nil, fmt.Errorf("export signer: %w", err)
+		}
+	}
+	return []router.Option{router.WithRefusalEvidence(intentKey, rc.RefusalRecordRetention(), signer, rc.MaxScopes)}, nil
 }
 
 // settlementJournalRecoveryTimeout bounds one recovery pass (startup and

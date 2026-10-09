@@ -352,6 +352,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolSelectionAllowed := !authn.Demo && authn.WalletSession == nil
 	poolID, poolErr := s.resolvePoolSelection(upCtx, r.Header, subject.AccountID, poolSelectionAllowed)
 	if poolErr != nil {
+		// SPEC-006 §5.4.3.3: written identically for every pool-denial
+		// cause, before the SPEC-043-R007 floor hides its cost.
+		s.recordRefusal(r, subject, chat.Model, storage.RefusalTerminalPreQuota, poolErr.status, poolErr.code)
 		s.enforcePoolRejectionTimingFloor(start)
 		demand.markGatewayFailure(poolErr.status, poolErr.code)
 		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
@@ -361,6 +364,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// quota reservation. A non-native engine without a pool is refused here.
 	engineClass, engineErr := resolveEngineSelection(r.Header, poolID)
 	if engineErr != nil {
+		s.recordRefusal(r, subject, chat.Model, storage.RefusalTerminalPreQuota, engineErr.status, engineErr.code)
 		demand.markGatewayFailure(engineErr.status, engineErr.code)
 		writeError(w, engineErr.status, engineErr.typ, engineErr.code, engineErr.message)
 		return
@@ -1054,7 +1058,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 				demand.markNoProvider(resp.StatusCode, openAIErrorCode(body))
 			}
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, model, promptEstimate, maxUsageTokens, retryExhausted, window)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		if isNullUsageProviderError(body) {
@@ -1248,7 +1252,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				demand.markNoProvider(resp.StatusCode, openAIErrorCode(body))
 			}
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, model, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
@@ -2111,7 +2115,7 @@ func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader,
 	}
 }
 
-func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool, window string) {
+func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, model string, promptEstimate, maxUsageTokens int64, retryExhausted bool, window string) {
 	if coordinatorPoolStateStaleError(resp.StatusCode, body) &&
 		(strings.TrimSpace(resp.Header.Get(gatewayPriorProviderDispatchHeader)) != "" || strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "") {
 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
@@ -2142,12 +2146,17 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 		return
 	}
 	if s.isWholesaleAccount(subject.AccountID) && isCoordNoProviderAvailable503(resp.StatusCode, body) {
+		s.recordRefusal(r, subject, model, storage.RefusalTerminalPostReservation, http.StatusTooManyRequests, "no_provider_available")
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "no_provider_available", "No provider available")
 		return
 	}
 	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode == http.StatusServiceUnavailable {
+		s.recordRefusal(r, subject, model, storage.RefusalTerminalPostReservation, http.StatusServiceUnavailable, "no_provider_available")
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
 		return
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode < 600 {
+		s.recordRefusal(r, subject, model, storage.RefusalTerminalPostReservation, resp.StatusCode, openAIErrorCode(body))
 	}
 	copyCleanHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))

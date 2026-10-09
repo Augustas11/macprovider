@@ -86,6 +86,9 @@ type Server struct {
 	settlementReconcileCatchupRunning     bool
 	demandRetentionMu                     sync.Mutex
 	demandRetentionStop                   chan struct{}
+	// refusalEvidence is nil unless SPEC-006 §5.4.3.3 refusal records are
+	// enabled (WithRefusalEvidence).
+	refusalEvidence *refusalEvidence
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -280,6 +283,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
 	mux.HandleFunc("/admin/settlement/reconcile", s.handleSettlementReconcile)
 	mux.HandleFunc("/admin/settlement/release-holds", s.handleSettlementReleaseHolds)
+	if s.refusalEvidence != nil && s.refusalEvidence.signer != nil {
+		mux.HandleFunc(refusalEvidenceExportPath, s.handleRefusalEvidenceExport)
+	}
 	if s.cfg.Explorer.Enabled {
 		mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
 		mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
@@ -1435,7 +1441,9 @@ var gatewayPermanentCodes = map[string]bool{
 	"method_not_allowed": true, "invalid_window": true, "invalid_kill_switch": true,
 	"invalid_kill_switch_version": true, "invalid_capacity_signal": true,
 	"byom_non_settlement_unavailable": true,
-	"invalid_operator_token":          true, "invalid_demo_token": true, "missing_bearer_token": true,
+	// SPEC-006 §5.4.3.3 operator-only refusal-intent export.
+	"invalid_source_export_request": true, "source_export_not_provable": true, "source_export_unavailable": true,
+	"invalid_operator_token": true, "invalid_demo_token": true, "missing_bearer_token": true,
 	"invalid_api_key": true, "api_key_revoked": true, "account_blocked": true,
 	"not_found": true, "session_id_untyped": true, "query_timeout": true,
 	"oauth_callback_not_allowed": true, "oauth_action_unknown": true,

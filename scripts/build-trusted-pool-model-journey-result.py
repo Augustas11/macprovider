@@ -36,6 +36,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import source_authenticated_evidence as sae
 from check_spec_governance import (
     JOURNEY_RESULT_PAYLOAD_SCHEMA,
     TRUSTED_POOL_MODEL_ARTIFACT_ID,
@@ -78,7 +79,7 @@ sha256_hex = base.sha256_hex
 fingerprint = base.fingerprint
 
 
-EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v3"
+EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v4"
 VERIFICATION_SCHEMA = "macprovider.trust-pool-manifest-verification.v2"
 JOURNEY_ID = TRUSTED_POOL_MODEL_JOURNEY_ID
 REPOSITORY = "Augustas11/macprovider"
@@ -206,6 +207,21 @@ REFUSALS = {
         "model_not_found", "engine_unavailable", "no_providers_available", "model_unavailable", "provider_unavailable",
         "pool_unavailable")),
 }
+# SPEC-006 §5.4.3.3: one gateway-signed refusal-intent export covers every
+# refusal scenario. A pre-quota refusal never reaches quota or the
+# coordinator; the attestation-removal refusal's code family is open, so it
+# may be either terminal.
+GATEWAY_EXPORT = "gateway/refusal-export.json"
+GATEWAY_EXPORT_MAX_AGE_SECONDS = 86400
+REFUSAL_TERMINALS = {
+    "refusals/no-pool-header": ("post_reservation_refusal",),
+    "refusals/other-pool": ("post_reservation_refusal",),
+    "refusals/wrong-engine": ("post_reservation_refusal",),
+    "pause/paused": ("pre_quota_refusal",),
+    "rotation/entry-removal/after": ("post_reservation_refusal",),
+    "rotation/attestation-removal/after": ("pre_quota_refusal", "post_reservation_refusal"),
+}
+GATEWAY_RECORD_KEYS = {"terminal_kind", "status", "error_code", "forwarded_to_coordinator", "reservation", "usage_debit_tokens", "intent_bound"}
 STEP_ASSERTIONS = {
     "step-01-preconditions": "the #1816 build is deployed coordinator, then gateway, then member CLIs; trusted pools, bounds, route_snapshot_v2 and payout-disabled facts hold",
     "step-02-pricing-bounds-and-owner-authority": "int64-safe pricing bounds whose recomputed digest every route carries hold every signed rate; the owner map reload applied",
@@ -216,11 +232,11 @@ STEP_ASSERTIONS = {
     "step-07-pool-models-disclosure": "the pool models view lists exactly the signed entries as closed pool-model objects; the global view and global route snapshots carry none",
     "step-08-native-entry-paid": "native mlx_cache entry served, joined end to end, settled verified with a payable credit recomputed from the frozen entry rates",
     "step-09-attested-member-paid": "GGUF entry served by the attested member, pool_operator_attested, joined end to end, verified, payable at the recomputed entry rates",
-    "step-10-refusals": "no pool header, another pool and a wrong engine fail closed with no route snapshot or ledger row and one refunded reservation",
+    "step-10-refusals": "no pool header, another pool and a wrong engine fail closed with no route snapshot or ledger row, one refunded reservation, and a gateway-signed refusal record bound to the request",
     "step-11-window-rotation-no-gap": "a window-only rotation keeps the terms digest, rebinds after activation, and serves on both sides of the boundary",
     "step-12-price-change-in-flight": "an attempt dispatched before the price change activates settles after it at its snapshot rates; the member re-offers and later attempts use the new rates",
     "step-13-current-generation-revocation": "entry removal and attestation removal revoke the bindings after activation; the in-flight attempt settles; later requests are refused",
-    "step-14-pause-resume-rollback": "a paused pool refuses, resumes serving, and the rollback preflight blocks m9 and clears p1816",
+    "step-14-pause-resume-rollback": "a paused pool refuses before quota with a gateway-signed refusal record and no reservation, resumes serving, and the rollback preflight blocks m9 and clears p1816",
     "step-15-restart-ordering": "the coordinator restarts before the gateway and the pool model serves after the restart",
     "step-16-redaction": "closed schema; prompts, completions, keys, locators and raw identities absent; raw files kept as digests",
 }
@@ -840,7 +856,61 @@ def capture_request_meta(capture: Capture, run: dict[str, Any], base_dir: str) -
             "model_kind": kind, "stream": bool_of(meta["stream"], f"{base_dir}/request.json stream")}
 
 
-def capture_refusal(capture: Capture, run: dict[str, Any], salt: str, base_dir: str) -> dict[str, Any]:
+def load_source_registry() -> Any:
+    """The reviewed source-evidence key registry comes from verifier source,
+    never from the capture; a missing registry fails closed."""
+    path = sae._default_registry_path()
+    require(path.is_file(), "the reviewed source-evidence key registry is not enrolled; gateway refusal exports cannot be verified")
+    try:
+        return sae.load_json_file(path, "$registry")
+    except sae.EvidenceError as exc:
+        die(f"source-evidence key registry: {exc}")
+        raise AssertionError from exc
+
+
+def capture_gateway_export(capture: Capture, run: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
+    """Verify the gateway-signed refusal-intent export (SPEC-006 §5.4.3.3)
+    against the reviewed registry, this run and the deployed source commit.
+    It must be generated before captured_at and within a day of it."""
+    envelope = base.parse_json_bytes(capture.read(GATEWAY_EXPORT), GATEWAY_EXPORT)
+    signed = envelope.get("signed") if isinstance(envelope, dict) else None
+    require(isinstance(signed, dict), f"{GATEWAY_EXPORT} must be a signed export envelope")
+    captured = datetime.fromtimestamp(rfc3339_ms(run["captured_at"], "run.json.captured_at") / 1000, timezone.utc)
+    expected = sae.ExpectedExport(
+        producer="gateway", role=sae.GATEWAY_REFUSAL_ROLE, instance_id=str(signed.get("instance_id")),
+        source_sha=run["source_commit"], run_id=run["run_id"], challenge_nonce=str(signed.get("challenge_nonce")),
+        domain=sae.SIGNATURE_DOMAIN_NAME, now=captured, max_age_seconds=GATEWAY_EXPORT_MAX_AGE_SECONDS,
+    )
+    try:
+        result = sae.validate_envelope(envelope, load_source_registry(), expected)
+    except sae.EvidenceError as exc:
+        die(f"{GATEWAY_EXPORT}: {exc}")
+        raise AssertionError from exc
+    require(result.get("typed_projection") == "gateway_refusal_intent_v1", f"{GATEWAY_EXPORT} must be a gateway refusal_intent export")
+    summary = {"signed_sha256": result["signed_sha256"], "key_id": result["key_id"], "record_count": result["record_count"]}
+    return summary, dict(result["records_by_scope"]), signed["challenge_nonce"]
+
+
+def capture_gateway_record(capture: Capture, run: dict[str, Any], base_dir: str, rid: str, gateway: dict[str, Any]) -> dict[str, Any]:
+    """Bind the scenario's own (account, X-Request-ID, model, pool, engine)
+    to one signed gateway record by recomputing its intent binding."""
+    raw = capture.object(f"{base_dir}/request.json")
+    parts = []
+    for field in ("model", "pool_select", "engine_select"):
+        value = raw.get(field)
+        require(value is None or isinstance(value, str), f"{base_dir}/request.json {field} must be a string or null")
+        parts.append(value or "")
+    binding = sae.gateway_intent_binding(run["run_id"], gateway["nonce"], run["buyer_account_id"], rid, *parts)
+    record = gateway["records"].pop(binding, None)
+    require(record is not None, f"{base_dir}: no gateway refusal record binds this request's (X-Request-ID, model, pool)")
+    return {
+        "terminal_kind": record["terminal_kind"], "status": record["status"], "error_code": record["error_code"],
+        "forwarded_to_coordinator": record["forwarded_to_coordinator"], "reservation": record["quota"]["reservation"],
+        "usage_debit_tokens": record["usage_debit_tokens"], "intent_bound": True,
+    }
+
+
+def capture_refusal(capture: Capture, run: dict[str, Any], salt: str, base_dir: str, gateway: dict[str, Any]) -> dict[str, Any]:
     status, headers = parse_headers(capture.read(f"{base_dir}/response.headers"), f"{base_dir}/response.headers")
     body = base.parse_json_bytes(capture.read(f"{base_dir}/response.json"), f"{base_dir}/response.json")
     error = body.get("error") if isinstance(body, dict) else None
@@ -850,8 +920,9 @@ def capture_refusal(capture: Capture, run: dict[str, Any], salt: str, base_dir: 
         for kind in ENTRY_KINDS:
             if row["model"] == run["entries"][kind]["pool_model_id"]:
                 row["model"] = kind
+    rid = require_string(headers.get("x-request-id"), REQUEST_ID_RE, f"{base_dir} X-Request-ID")
     return {
-        "x_request_id": require_string(headers.get("x-request-id"), REQUEST_ID_RE, f"{base_dir} X-Request-ID"),
+        "x_request_id": rid,
         "date_unix": date_header_seconds(headers, base_dir),
         "status": status,
         "error_code": token(error.get("code"), f"{base_dir} error.code"),
@@ -861,6 +932,7 @@ def capture_refusal(capture: Capture, run: dict[str, Any], salt: str, base_dir: 
         "route_snapshot_count": len(capture.rows(f"{base_dir}/route_snapshots.json")),
         "ledger_row_count": len(capture.rows(f"{base_dir}/ledger.json")),
         "quota_reservations": capture_reservations(capture, salt, base_dir),
+        "gateway_record": capture_gateway_record(capture, run, base_dir, rid, gateway),
     }
 
 
@@ -1039,6 +1111,8 @@ def build_evidence(capture_dir: Path, cli: str) -> tuple[dict[str, Any], dict[st
             "artifact_hash": entry.get("artifact_hash"),
             "creator_fields_null": entry.get("license") is None and entry.get("paid_serving_attested") is None,
         }
+    gateway_summary, gateway_records, gateway_nonce = capture_gateway_export(capture, run)
+    gateway = {"records": gateway_records, "nonce": gateway_nonce}
     deploy = capture.object("deploy.json")
     restart = capture.object("restart/order.json")
     require(len(restart) == 2 and len(deploy) == 4, "deploy.json and restart/order.json must hold exactly their timestamps")
@@ -1091,13 +1165,15 @@ def build_evidence(capture_dir: Path, cli: str) -> tuple[dict[str, Any], dict[st
         "models": capture_models(capture),
         "requests": {name: capture_paid(capture, run, salt, name, stream) for name, (_, stream) in PAID_REQUESTS.items()},
         "attestation_removal_inflight": inflight,
-        "refusals": {name: capture_refusal(capture, run, salt, name) for name in REFUSALS},
+        "refusals": {name: capture_refusal(capture, run, salt, name, gateway) for name in REFUSALS},
+        "gateway_refusal_export": gateway_summary,
         "window_probes": capture_probes(capture, run, salt),
         "rollback_preflight": capture_rollback(capture),
         "restart": {key: z_seconds(restart.get(key), f"restart.{key}") for key in ("coordinator_restarted_at", "gateway_restarted_at")},
         "route_snapshot_digests_recomputed": run_verify_route_snapshots(cli, capture.snapshots),
         "raw_documents": None,
     }
+    require(not gateway["records"], f"{GATEWAY_EXPORT} carries a record no refusal scenario binds")
     evidence["raw_documents"] = dict(sorted(capture.raw.items()))
     latest = max(manifests, key=lambda m: m["manifest_version"])
     bounds = evidence["pricing_bounds"]
@@ -1205,7 +1281,7 @@ def check_header(ev: dict[str, Any], now: datetime) -> None:
         "environment", "result", "steps", "redaction", "observations", "candidate_identity", "identities", "entries", "roles",
         "preconditions", "deploy_order", "pricing_bounds", "economics", "owner_authority", "manifest_root", "manifests",
         "pool_state", "current_pool_state", "event_counts", "proposals", "admission", "models", "requests",
-        "attestation_removal_inflight", "refusals", "window_probes", "rollback_preflight", "restart",
+        "attestation_removal_inflight", "refusals", "gateway_refusal_export", "window_probes", "rollback_preflight", "restart",
         "route_snapshot_digests_recomputed", "raw_documents",
     }, "evidence")
     require(ev["schema_version"] == EVIDENCE_SCHEMA, f"schema_version must equal {EVIDENCE_SCHEMA!r}")
@@ -2031,7 +2107,7 @@ REFUSAL_REQUESTS = {
 
 def check_refusal(j: Journey, ev: dict[str, Any], name: str, statuses: tuple[int, ...], codes: tuple[str, ...]) -> dict[str, Any]:
     r = obj(ev["refusals"][name], {"x_request_id", "date_unix", "status", "error_code", "disclosure_headers", "request", "request_log",
-                                   "route_snapshot_count", "ledger_row_count", "quota_reservations"}, name)
+                                   "route_snapshot_count", "ledger_row_count", "quota_reservations", "gateway_record"}, name)
     rid = require_string(r["x_request_id"], REQUEST_ID_RE, f"{name}.x_request_id")
     require(r["status"] in statuses, f"{name} status must be one of {list(statuses)}, got {r['status']}")
     require(r["error_code"] in codes, f"{name} error.code must be one of {list(codes)}, got {r['error_code']!r}")
@@ -2045,14 +2121,32 @@ def check_refusal(j: Journey, ev: dict[str, Any], name: str, statuses: tuple[int
         require(isinstance(request["engine_select"], str) and request["engine_select"] != "llamacpp",
                 f"{name}: the request must select an engine the entry does not allow")
     require(isinstance(request["stream"], bool), f"{name}.request.stream")
+    # SPEC-006 §5.4.3.3: the gateway-signed record, whose binding the capture
+    # recomputed from this scenario's own request, is the (X-Request-ID,
+    # model, pool) binding; SPEC-017 §5.2b.2 keeps an unserved logged model
+    # (and pool) blank, so a blank log row is consistent, never a gap.
+    g = obj(r["gateway_record"], GATEWAY_RECORD_KEYS, f"{name}.gateway_record")
+    require(g["intent_bound"] is True, f"{name}: the gateway refusal record must bind this request's intent")
+    require(g["status"] == r["status"] and g["error_code"] == r["error_code"], f"{name}: the gateway refusal record must be the captured refusal")
+    require(g["usage_debit_tokens"] == 0, f"{name}: the gateway refusal record must show no debit")
+    require(g["terminal_kind"] in REFUSAL_TERMINALS[name], f"{name}: the gateway terminal must be one of {list(REFUSAL_TERMINALS[name])}")
+    pre_quota = g["terminal_kind"] == "pre_quota_refusal"
+    require(g["forwarded_to_coordinator"] is (not pre_quota) and g["reservation"] == ("none" if pre_quota else "refunded"),
+            f"{name}: the gateway refusal record's forwarding and reservation must match its terminal")
     for row in list_of(r["request_log"], f"{name}.request_log"):
         obj(row, REQUEST_LOG_KEYS, f"{name}.request_log")
-        require(row["external_request_id"] == rid and row["model"] == request["model_kind"] and row["pool"] == request["pool"],
-                f"{name}: a request_log row must be this request's (X-Request-ID, model and pool)")
+        require(row["external_request_id"] == rid and row["model"] in ("", None, request["model_kind"]) and row["pool"] in (None, request["pool"]),
+                f"{name}: a request_log row must be this request's (X-Request-ID, and a blank or the requested model and pool)")
     require(r["route_snapshot_count"] == 0, f"{name} must leave no route snapshot")
     require(r["ledger_row_count"] == 0, f"{name} must leave no ledger row")
-    reservation = check_reservation(j, r["quota_reservations"], rid, name)
-    require(reservation["status"] == "refunded" and reservation["settled_tokens"] == 0, f"{name}: the X-Request-ID's reservation must be refunded")
+    if pre_quota:
+        # A pre-quota refusal never reached quota or the coordinator: there is
+        # no reservation to refund, and none is fabricated.
+        require(list_of(r["request_log"], f"{name}.request_log") == [], f"{name}: a pre-quota refusal must leave no coordinator request_log row")
+        require(list_of(r["quota_reservations"], f"{name}.quota_reservations") == [], f"{name}: a pre-quota refusal must leave no gateway reservation")
+    else:
+        reservation = check_reservation(j, r["quota_reservations"], rid, name)
+        require(reservation["status"] == "refunded" and reservation["settled_tokens"] == 0, f"{name}: the X-Request-ID's reservation must be refunded")
     return {"date_unix": int_in(r["date_unix"], f"{name}.date_unix", 1)}
 
 
@@ -2160,6 +2254,10 @@ def validate_evidence(ev: Any, *, now: datetime, fill_observations: bool = False
     models = check_models(j, ev)
     paid = {name: check_paid(j, requests[name], name, kind, stream, pricing) for name, (kind, stream) in PAID_REQUESTS.items()}
     obj(ev["refusals"], set(REFUSALS), "refusals")
+    export = obj(ev["gateway_refusal_export"], {"signed_sha256", "key_id", "record_count"}, "gateway_refusal_export")
+    hex64(export["signed_sha256"], "gateway_refusal_export.signed_sha256")
+    require_string(export["key_id"], re.compile(r"^[A-Za-z0-9._:-]{1,128}$"), "gateway_refusal_export.key_id")
+    require(export["record_count"] == len(REFUSALS), "the gateway refusal export must carry exactly one record per refusal scenario")
     refusals = {name: check_refusal(j, ev, name, statuses, codes) for name, (statuses, codes) in REFUSALS.items()}
     # A re-added native entry serves only behind its fresh binding.
     if admission["native_readd_bound_ms"] is not None:

@@ -186,6 +186,68 @@ class Fixture:
             envelope = self.coordinator_envelope(signed)
         return self.validate(envelope=envelope, registry=self.coordinator_registry(), expected=self.coordinator_expected())
 
+    def gateway_expected(self):
+        return sae.ExpectedExport(
+            producer="gateway",
+            role="refusal_intent",
+            instance_id="gateway-prod-a",
+            source_sha=SOURCE_SHA,
+            run_id="run-1880",
+            challenge_nonce=NONCE,
+            domain=sae.SIGNATURE_DOMAIN_NAME,
+            now=NOW,
+            max_age_seconds=300,
+        )
+
+    def gateway_registry(self):
+        registry = self.registry()
+        registry["keys"][0]["permitted_roles"] = ["refusal_intent"]
+        return registry
+
+    def gateway_record(self, scope, terminal="post_reservation_refusal"):
+        pre = terminal == "pre_quota_refusal"
+        return {
+            "schema_version": "macprovider.gateway-refusal-record.v1",
+            "source": "gateway",
+            "record_kind": "refusal_intent",
+            "request_scope_commitment": scope,
+            "terminal_kind": terminal,
+            "status": 503 if pre else 404,
+            "error_code": "pool_unavailable" if pre else "model_not_found",
+            "forwarded_to_coordinator": not pre,
+            "quota": {"reservation": "none" if pre else "refunded", "settled_tokens": 0, "settlement_hold": 0},
+            "usage_debit_tokens": 0,
+            "privacy": {"raw_account_id_emitted": False, "raw_external_request_id_emitted": False,
+                        "raw_rejected_model_emitted": False, "raw_selector_emitted": False},
+            "recorded_at": "2026-10-07T11:59:59.000Z",
+        }
+
+    def gateway_signed(self):
+        signed = self.signed()
+        pre = sae.gateway_intent_binding("run-1880", NONCE, "acct", "rid-1", "pool/p/m", "p", "")
+        post = sae.gateway_intent_binding("run-1880", NONCE, "acct", "rid-2", "pool/p/m", "p", "llamacpp")
+        signed.update({
+            "role": "refusal_intent",
+            "request_scopes": sorted([pre, post]),
+            "snapshot": {
+                "schema_version": "macprovider.gateway-source-snapshot.v1",
+                "producer_contract_version": "gateway-refusal-intent-v1",
+                "registry_bundle_digest": "sha256:" + sae.sha256_hex(sae.canonical_bytes(self.gateway_registry())),
+                "record_table_schema": "gateway_refusal_records.v1",
+                "record_schema": "macprovider.gateway-refusal-record.v1",
+                "canonicalization": "ascii-jcs-subset-v1",
+                "intent_hmac": "hmac-sha256-length-prefixed-v1",
+                "scope_binding": "sha256-run-nonce-length-prefixed-v1",
+            },
+            "records": sorted([self.gateway_record(pre, "pre_quota_refusal"), self.gateway_record(post)],
+                              key=lambda r: r["request_scope_commitment"]),
+        })
+        return signed
+
+    def gateway_validate(self, signed=None):
+        return self.validate(envelope=self.envelope(self.gateway_signed() if signed is None else signed),
+                             registry=self.gateway_registry(), expected=self.gateway_expected())
+
     def sign(self, signed: dict) -> bytes:
         message = sae.SIGNATURE_DOMAIN + sae.canonical_bytes(signed)
         msg = self.tmp / "message.bin"
@@ -373,6 +435,41 @@ class SourceAuthenticatedEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="other-key.") as other:
             other_fx = Fixture(pathlib.Path(other))
             self.assert_rejected("Ed25519 verification failed", mutate_registry=lambda r: r["keys"][0].__setitem__("public_key", b64url(other_fx.public)))
+
+    def test_gateway_refusal_intent_projection_accepts_closed_records(self):
+        result = self.fx.gateway_validate()
+        self.assertEqual(result["typed_projection"], "gateway_refusal_intent_v1")
+        scope = sae.gateway_intent_binding("run-1880", NONCE, "acct", "rid-1", "pool/p/m", "p", "")
+        self.assertEqual(result["records_by_scope"][scope]["terminal_kind"], "pre_quota_refusal")
+
+    def test_gateway_intent_binding_cross_language_vector(self):
+        # Pinned in phase5-gateway/internal/sourceevidence TestIntentBindingCrossLanguageVector.
+        self.assertEqual(
+            sae.gateway_intent_binding("run-1", "N" * 43, "acct", "00000000-0000-4000-8000-000000000001",
+                                       "pool/abcdefghijklmnopqrstuv/m", "abcdefghijklmnopqrstuv", "llamacpp"),
+            "98196f215d5ab8903a20ede754d0540c60bf41fadce12d38eb3d69f68845e6b8",
+        )
+
+    def test_gateway_projection_rejects_inconsistent_quota_and_shape(self):
+        def reject(fragment, mutate):
+            signed = self.fx.gateway_signed()
+            mutate(signed)
+            with self.assertRaises(sae.EvidenceError) as cm:
+                self.fx.gateway_validate(signed)
+            self.assertIn(fragment, str(cm.exception))
+
+        def pre_quota(signed):
+            return next(r for r in signed["records"] if r["terminal_kind"] == "pre_quota_refusal")
+
+        reject("must be none for pre_quota_refusal", lambda s: pre_quota(s)["quota"].__setitem__("reservation", "refunded"))
+        reject("must be False for pre_quota_refusal", lambda s: pre_quota(s).__setitem__("forwarded_to_coordinator", True))
+        reject("0..0", lambda s: s["records"][0]["quota"].__setitem__("settled_tokens", 5))
+        reject("usage_debit_tokens", lambda s: s["records"][0].__setitem__("usage_debit_tokens", 1))
+        reject("must be false", lambda s: s["records"][0]["privacy"].__setitem__("raw_rejected_model_emitted", True))
+        reject("extra", lambda s: s["records"][0].__setitem__("model", "pool/p/m"))
+        reject("one-for-one", lambda s: s["records"].pop())
+        reject("must contain records", lambda s: (s.__setitem__("request_scopes", []), s.__setitem__("records", [])))
+        reject("scope_binding", lambda s: s["snapshot"].__setitem__("scope_binding", "other"))
 
     def test_coordinator_no_dispatch_projection_accepts_real_ed25519_closed_records(self):
         result = self.fx.coordinator_validate()

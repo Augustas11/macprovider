@@ -237,6 +237,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureUsageEventsPoolOperatorAttestedSource(ctx); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, refusalRecordsDDL); err != nil {
+		return err
+	}
 	// Stamp the schema version. We always insert v1 (preserves
 	// historical behavior for any tooling that checked exactly that
 	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it

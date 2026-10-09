@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import email.utils
 import hashlib
@@ -76,6 +77,63 @@ def load_builder():
 
 
 BUILDER = load_builder()
+SAE = BUILDER.sae
+ENROLLED_REGISTRY_LOADER = BUILDER.load_source_registry
+GATEWAY_INSTANCE = "gateway-test"
+GATEWAY_NONCE = base64.urlsafe_b64encode(b"g" * 32).decode("ascii").rstrip("=")
+# pause/paused is refused by the gateway before quota (SPEC-006 §5.4.3.3).
+PRE_QUOTA_REFUSALS = {"pause/paused"}
+
+
+class GatewaySigner:
+    """A reviewed gateway source key and registry for the refusal-intent export."""
+
+    def __init__(self, root: Path) -> None:
+        self.private = root / "gateway-source-ed25519.pem"
+        root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(self.private)], check=True, capture_output=True)
+        der = subprocess.run(["openssl", "pkey", "-in", str(self.private), "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout
+        self.registry = {"schema_version": SAE.REGISTRY_SCHEMA, "keys": [{
+            "key_id": "gateway-test-1", "algorithm": "ed25519",
+            "public_key": base64.urlsafe_b64encode(der[-32:]).decode("ascii").rstrip("="),
+            "producer": "gateway", "instance_id": GATEWAY_INSTANCE, "permitted_roles": ["refusal_intent"],
+            "permitted_domains": [SAE.SIGNATURE_DOMAIN_NAME], "not_before": "2026-01-01T00:00:00.000Z",
+            "not_after": "2028-01-01T00:00:00.000Z", "revoked_at": None,
+            "reviewed_source_constraints": {"source_sha_allowlist": [SOURCE], "notes": "test gateway key"},
+        }]}
+        self.root = root
+        self.source = SOURCE
+
+    def set_source(self, source_sha: str) -> None:
+        """Re-enroll the key for another reviewed source commit (in place, so
+        the patched registry loader sees it)."""
+        self.source = source_sha
+        self.registry["keys"][0]["reviewed_source_constraints"]["source_sha_allowlist"] = [source_sha]
+
+    def envelope(self, run_id: str, generated_at: str, records: list[dict]) -> dict:
+        records = sorted(records, key=lambda r: r["request_scope_commitment"])
+        signed = {
+            "schema_version": SAE.SIGNED_SCHEMA, "producer": "gateway", "role": "refusal_intent", "instance_id": GATEWAY_INSTANCE,
+            "source_sha": self.source, "export_id": "123e4567-e89b-42d3-a456-426614174000", "run_id": run_id,
+            "challenge_nonce": GATEWAY_NONCE, "generated_at": generated_at,
+            "request_scopes": [r["request_scope_commitment"] for r in records],
+            "snapshot": {
+                "schema_version": "macprovider.gateway-source-snapshot.v1", "producer_contract_version": "gateway-refusal-intent-v1",
+                "registry_bundle_digest": "sha256:" + SAE.sha256_hex(SAE.canonical_bytes(self.registry)),
+                "record_table_schema": "gateway_refusal_records.v1", "record_schema": "macprovider.gateway-refusal-record.v1",
+                "canonicalization": "ascii-jcs-subset-v1", "intent_hmac": "hmac-sha256-length-prefixed-v1",
+                "scope_binding": "sha256-run-nonce-length-prefixed-v1",
+            },
+            "records": records,
+        }
+        signed_bytes = SAE.canonical_bytes(signed)
+        msg, sig = self.root / "message.bin", self.root / "signature.bin"
+        msg.write_bytes(SAE.SIGNATURE_DOMAIN + signed_bytes)
+        subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(self.private), "-rawin", "-in", str(msg), "-out", str(sig)],
+                       check=True, capture_output=True)
+        return {"schema_version": SAE.ENVELOPE_SCHEMA, "signed": signed, "signatures": [{
+            "algorithm": "ed25519", "key_id": "gateway-test-1", "signed_sha256": SAE.sha256_hex(signed_bytes),
+            "signature": base64.urlsafe_b64encode(sig.read_bytes()).decode("ascii").rstrip("=")}]}
 
 
 class TrustedPoolModelHeaderTests(unittest.TestCase):
@@ -243,6 +301,9 @@ class Fixture:
         self.capture = root / "capture"
         self.cli = Path(cli) if cli else root / "cli" / "coordinator-cli"
         self.fake = cli is None
+        self.gateway = GatewaySigner(root / "gateway-key")
+        self.refusals: dict[str, str] = {}
+        self.built = False
 
     def snapshot_digest(self, snapshot_json: str) -> str:
         path = self.root / "snapshot-for-digest.json"
@@ -339,7 +400,40 @@ class Fixture:
                   "manifest_history": {"target_tier": tier, "manifests": 7, "v2_snapshots": 7, "runtime_classes": ["llamacpp_loopback"],
                                        "extensions": ["pool_model_entries/v1"], "cannot_replay": cannot}})
         write(c / "restart/order.json", {"coordinator_restarted_at": iso(nb[6] + 10), "gateway_restarted_at": iso(nb[6] + 20)})
+        self.built = True
+        self.write_gateway_export()
         return c
+
+    def gateway_record(self, name: str, terminal: str | None = None, **changes) -> dict:
+        base_dir = self.capture / name
+        request = json.loads((base_dir / "request.json").read_text())
+        response = json.loads((base_dir / "response.json").read_text())
+        status = int((base_dir / "response.headers").read_text().split(" ", 2)[1])
+        terminal = terminal or self.refusals[name]
+        pre = terminal == "pre_quota_refusal"
+        record = {
+            "schema_version": "macprovider.gateway-refusal-record.v1", "source": "gateway", "record_kind": "refusal_intent",
+            "request_scope_commitment": SAE.gateway_intent_binding(
+                "trusted-pool-model-20261006T010203Z", GATEWAY_NONCE, BUYER, "req-" + name.replace("/", "-"),
+                request["model"], request["pool_select"] or "", request["engine_select"] or ""),
+            "terminal_kind": terminal, "status": status, "error_code": response["error"]["code"],
+            "forwarded_to_coordinator": not pre,
+            "quota": {"reservation": "none" if pre else "refunded", "settled_tokens": 0, "settlement_hold": 0},
+            "usage_debit_tokens": 0,
+            "privacy": {"raw_account_id_emitted": False, "raw_external_request_id_emitted": False,
+                        "raw_rejected_model_emitted": False, "raw_selector_emitted": False},
+            "recorded_at": iso(self.nb[7] + 7000, ".000"),
+        }
+        record.update(changes)
+        return record
+
+    def write_gateway_export(self, records: list[dict] | None = None) -> None:
+        """Sign the gateway refusal-intent export from the refusal captures as
+        they are now (call again after mutating a refusal's request)."""
+        if records is None:
+            records = [self.gateway_record(name) for name in self.refusals]
+        write(self.capture / "gateway/refusal-export.json",
+              self.gateway.envelope("trusted-pool-model-20261006T010203Z", iso(self.nb[7] + 7100, ".000"), records))
 
     def manifest(self, version: int) -> dict:
         return next(m for m in self.verification["manifests"] if m["manifest_version"] == version)
@@ -494,7 +588,15 @@ class Fixture:
         write(base / "request_log.json", "")
         write(base / "route_snapshots.json", "")
         write(base / "ledger.json", "")
-        write(base / "quota_reservations.json", [{"request_id": rid, "account_id": BUYER, "status": "refunded", "settled_tokens": 0, "settlement_hold": 0}])
+        if name in PRE_QUOTA_REFUSALS:
+            write(base / "quota_reservations.json", "")
+            self.refusals[name] = "pre_quota_refusal"
+        else:
+            write(base / "quota_reservations.json", [{"request_id": rid, "account_id": BUYER, "status": "refunded", "settled_tokens": 0,
+                                                      "settlement_hold": 0}])
+            self.refusals[name] = "post_reservation_refusal"
+        if self.built:
+            self.write_gateway_export()
 
 
 def valid_signed(**overrides):
@@ -577,8 +679,11 @@ class CaptureCase(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.fixture = Fixture(self.root, synthetic_verification())
         self.capture = self.fixture.build()
+        registry = self.fixture.gateway.registry
+        BUILDER.load_source_registry = lambda: registry
 
     def tearDown(self) -> None:
+        BUILDER.load_source_registry = ENROLLED_REGISTRY_LOADER
         self._tmp.cleanup()
 
     def build(self):
@@ -891,6 +996,10 @@ class TrustedPoolModelCaptureTests(CaptureCase):
             with self.subTest(label=label):
                 self.setUp()
                 self.mutate_json(path, mutate)
+                # Without the gateway's record of that request there is no binding.
+                self.assert_rejected("no gateway refusal record binds")
+                # With it (the gateway saw this request), the scenario check fails.
+                self.fixture.write_gateway_export()
                 self.assert_rejected(fragment)
         self.setUp()
         path = self.capture / "pause/paused/response.headers"
@@ -1009,9 +1118,65 @@ class TrustedPoolModelCaptureTests(CaptureCase):
         self.mutate_json("run.json", lambda r: r.update(expires_at="2099-01-01"))
         self.assert_rejected("within 30 days")
 
-    def test_refusal_requires_one_refunded_reservation(self) -> None:
-        write(self.capture / "pause/paused/quota_reservations.json", "")
+    def test_post_reservation_refusal_requires_one_refunded_reservation(self) -> None:
+        write(self.capture / "refusals/other-pool/quota_reservations.json", "")
         self.assert_rejected("exactly one gateway reservation")
+
+    def test_pre_quota_pause_has_a_positive_gateway_record_and_zero_state(self) -> None:
+        evidence = self.build()
+        record = evidence["refusals"]["pause/paused"]["gateway_record"]
+        self.assertEqual(("pre_quota_refusal", False, "none"), (record["terminal_kind"], record["forwarded_to_coordinator"], record["reservation"]))
+        self.assertEqual([], evidence["refusals"]["pause/paused"]["quota_reservations"])
+        for label, mutate, fragment in (
+            ("fabricated reservation", lambda: write(self.capture / "pause/paused/quota_reservations.json", [
+                {"request_id": "req-pause-paused", "account_id": BUYER, "status": "refunded", "settled_tokens": 0, "settlement_hold": 0}]),
+             "no gateway reservation"),
+            ("coordinator saw it", lambda: write(self.capture / "pause/paused/request_log.json", [
+                {"request_id": "c-1", "attempt_n": 0, "external_request_id": "req-pause-paused", "pool_id": POOL, "model": "", "status": 503}]),
+             "no coordinator request_log row"),
+            ("post-reservation terminal", lambda: self.fixture.write_gateway_export(
+                [self.fixture.gateway_record(n, "post_reservation_refusal" if n == "pause/paused" else None) for n in self.fixture.refusals]),
+             "gateway terminal must be one of"),
+            ("empty captures alone", lambda: (self.capture / "gateway/refusal-export.json").unlink(), "absent or unsafe"),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                mutate()
+                self.assert_rejected(fragment)
+
+    def test_blank_unserved_request_log_model_is_bound_by_the_gateway_record(self) -> None:
+        # SPEC-017 §5.2b.2: the coordinator logs an unserved model (and pool) blank.
+        write(self.capture / "refusals/other-pool/request_log.json", [
+            {"request_id": "c-1", "attempt_n": 0, "external_request_id": "req-refusals-other-pool", "pool_id": "", "model": "", "status": 404}])
+        evidence = self.build()
+        self.assertEqual("", evidence["refusals"]["refusals/other-pool"]["request_log"][0]["model"])
+        self.assertTrue(evidence["refusals"]["refusals/other-pool"]["gateway_record"]["intent_bound"])
+        write(self.capture / "refusals/other-pool/request_log.json", [
+            {"request_id": "c-1", "attempt_n": 0, "external_request_id": "req-refusals-other-pool", "pool_id": "", "model": "llama", "status": 404}])
+        self.assert_rejected("a blank or the requested model")
+
+    def test_gateway_export_is_authenticated_and_complete(self) -> None:
+        names = list(self.fixture.refusals)
+        for label, mutate, fragment in (
+            ("status mismatch", lambda: self.fixture.write_gateway_export(
+                [self.fixture.gateway_record(n, status=500) if n == "refusals/wrong-engine" else self.fixture.gateway_record(n) for n in names]),
+             "must be the captured refusal"),
+            ("extra record", lambda: self.fixture.write_gateway_export(
+                [self.fixture.gateway_record(n) for n in names] + [self.fixture.gateway_record(names[0], request_scope_commitment="e" * 64)]),
+             "no refusal scenario binds"),
+            ("missing record", lambda: self.fixture.write_gateway_export([self.fixture.gateway_record(n) for n in names[1:]]),
+             "no gateway refusal record binds"),
+            ("tampered envelope", lambda: self.mutate_json("gateway/refusal-export.json",
+                                                           lambda e: e["signed"]["records"][0].update(status=404)),
+             "signed_sha256"),
+            ("other run", lambda: self.mutate_json("run.json", lambda r: r.update(run_id="trusted-pool-model-20261006T010204Z")),
+             "run_id"),
+            ("unenrolled registry", lambda: setattr(BUILDER, "load_source_registry", ENROLLED_REGISTRY_LOADER), "not enrolled"),
+        ):
+            with self.subTest(label=label):
+                self.setUp()
+                mutate()
+                self.assert_rejected(fragment)
 
     def test_rejects_ordering_violation(self) -> None:
         self.mutate_json("run.json", lambda r: r["manifest_versions"].update(price_change=4, entry_removal=3))
@@ -1111,6 +1276,8 @@ class TrustedPoolModelPayloadTests(CaptureCase):
         source_sha = self.git(root, "rev-parse", "HEAD")
         self.mutate_json("run.json", lambda r: r.update(source_commit=source_sha))
         self.mutate_json("preconditions.json", lambda p: p["deploy-build"]["observed"].update(contains_commit=source_sha[:12]))
+        self.fixture.gateway.set_source(source_sha)
+        self.fixture.write_gateway_export()
         source = "journeys/evidence/trusted-pool-model-20261006T010203Z.redacted.json"
         evidence, bundle = BUILDER.build_evidence(self.capture, str(self.fixture.cli))
         BUILDER.write_bundle(root / source, bundle)

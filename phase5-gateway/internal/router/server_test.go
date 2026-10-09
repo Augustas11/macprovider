@@ -7505,6 +7505,7 @@ func TestBYOMNonSettlementUnavailableIsPermanent(t *testing.T) {
 // the CURRENT known set has no silent gaps, and giving the next audit
 // round a single, greppable checklist to diff a fresh sweep against.
 var gatewayEmittedErrorCodes = []string{
+	"invalid_source_export_request", "source_export_not_provable", "source_export_unavailable",
 	"account_blocked", "account_concurrency_exceeded", "account_create_failed",
 	"account_lookup_failed", "account_request_rate_exceeded", "admin_state_write_failed",
 	"api_key_issuance_failed", "api_key_lookup_failed", "api_key_not_found",

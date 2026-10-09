@@ -859,3 +859,42 @@ type ExplorerHealth struct {
 	FeedbackEventsWindow          int       `json:"feedback_events_window"`
 	AuditEventsWindow             int       `json:"audit_events_window"`
 }
+
+// Refusal terminals of SPEC-006 §5.4.3.3.
+const (
+	RefusalTerminalPreQuota        = "pre_quota_refusal"
+	RefusalTerminalPostReservation = "post_reservation_refusal"
+)
+
+// RefusalRecord is the gateway-owned refusal record of SPEC-006 §5.4.3.3.
+// It never carries the raw model or selectors: IntentCommitment is a
+// private-keyed HMAC over them.
+type RefusalRecord struct {
+	AccountID         string
+	ExternalRequestID string
+	IntentCommitment  string
+	TerminalKind      string
+	Status            int
+	ErrorCode         string
+	Forwarded         bool
+	RecordedAt        time.Time
+}
+
+// RefusalRecordKey looks up one refusal record.
+type RefusalRecordKey struct {
+	AccountID         string
+	ExternalRequestID string
+}
+
+// ResolvedRefusalRecord is a refusal record and the quota and usage facts for
+// the same (account, request) read in one transaction. ReservationStatus is
+// "" when no quota_reservations row exists.
+type ResolvedRefusalRecord struct {
+	Record             RefusalRecord
+	ReservationCount   int
+	ReservationStatus  string
+	ReservationSettled int64
+	ReservationHold    int64
+	UsageRows          int
+	UsageTokens        int64
+}

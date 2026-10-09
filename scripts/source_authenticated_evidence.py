@@ -57,6 +57,12 @@ COORDINATOR_NO_DISPATCH_RECORD_SCHEMA = "macprovider.coordinator-no-dispatch-rec
 COORDINATOR_NO_DISPATCH_CLOSURE_SCHEMA = "macprovider.coordinator-no-dispatch-closure.v1"
 COORDINATOR_CONTRACT_VERSION = "coordinator-no-dispatch-v1"
 COORDINATOR_REGISTRY_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+GATEWAY_REFUSAL_ROLE = "refusal_intent"
+GATEWAY_SOURCE_SNAPSHOT_SCHEMA = "macprovider.gateway-source-snapshot.v1"
+GATEWAY_REFUSAL_RECORD_SCHEMA = "macprovider.gateway-refusal-record.v1"
+GATEWAY_CONTRACT_VERSION = "gateway-refusal-intent-v1"
+GATEWAY_INTENT_BINDING_DOMAIN = b"macprovider.gateway-refusal-intent-binding.v1\n"
+GATEWAY_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 
@@ -337,6 +343,8 @@ def validate_typed_projection(signed: dict[str, Any], registry_digest: str) -> d
     is deliberately narrow: coordinator no-dispatch refusal exports may contain
     only all-or-nothing closed_terminal records with exact settlement absence.
     """
+    if signed["producer"] == "gateway" and signed["role"] == GATEWAY_REFUSAL_ROLE:
+        return validate_gateway_refusal_projection(signed, registry_digest)
     if signed["producer"] != "coordinator" or signed["role"] != COORDINATOR_NO_DISPATCH_ROLE:
         return {"typed_projection": "opaque_authenticity_only"}
     validate_coordinator_snapshot(signed["snapshot"], registry_digest)
@@ -503,6 +511,86 @@ def validate_coordinator_closure(value: Any, generated_at: _dt.datetime, path: s
     if closed_at > generated_at:
         fail(f"{path}.closed_at_utc", "must not be after signed generated_at")
     require_ascii(closure["closure_id_hmac"], f"{path}.closure_id_hmac", pattern=HEX64_RE, max_len=64)
+
+
+def gateway_intent_binding(run_id: str, challenge_nonce: str, account_id: str, external_request_id: str,
+                           model: str, pool_select: str, engine_select: str) -> str:
+    """SPEC-006 §5.4.3.3 request_scope_commitment, recomputed by a caller
+    that holds the private intent."""
+    h = hashlib.sha256(GATEWAY_INTENT_BINDING_DOMAIN)
+    for part in (run_id, challenge_nonce, account_id, external_request_id, model, pool_select, engine_select):
+        raw = part.encode("utf-8")
+        h.update(len(raw).to_bytes(4, "big"))
+        h.update(raw)
+    return h.hexdigest()
+
+
+def validate_gateway_refusal_projection(signed: dict[str, Any], registry_digest: str) -> dict[str, Any]:
+    """SPEC-006 §5.4.3.3: every record is a closed gateway refusal record
+    whose quota facts match its terminal; records match scopes one-for-one."""
+    snap = exact_keys(
+        signed["snapshot"],
+        {"schema_version", "producer_contract_version", "registry_bundle_digest", "record_table_schema", "record_schema",
+         "canonicalization", "intent_hmac", "scope_binding"},
+        "$envelope.signed.snapshot",
+    )
+    expected = {
+        "schema_version": GATEWAY_SOURCE_SNAPSHOT_SCHEMA,
+        "producer_contract_version": GATEWAY_CONTRACT_VERSION,
+        "record_table_schema": "gateway_refusal_records.v1",
+        "record_schema": GATEWAY_REFUSAL_RECORD_SCHEMA,
+        "canonicalization": "ascii-jcs-subset-v1",
+        "intent_hmac": "hmac-sha256-length-prefixed-v1",
+        "scope_binding": "sha256-run-nonce-length-prefixed-v1",
+    }
+    for key, want in expected.items():
+        if snap[key] != want:
+            fail(f"$envelope.signed.snapshot.{key}", f"must equal {want}")
+    if snap["registry_bundle_digest"] != registry_digest:
+        fail("$envelope.signed.snapshot.registry_bundle_digest", "must equal sha256 of canonical registry bytes used by verifier")
+    generated_at = parse_timestamp_ms(signed["generated_at"])
+    records = signed["records"]
+    if not records:
+        fail("$envelope.signed.records", "gateway refusal export must contain records; unprovable scopes are not signed")
+    if len(records) != len(signed["request_scopes"]):
+        fail("$envelope.signed.records", "must match request_scopes one-for-one")
+    by_scope: dict[str, dict[str, Any]] = {}
+    for i, record in enumerate(records):
+        path = f"$envelope.signed.records[{i}]"
+        rec = exact_keys(record, {"schema_version", "source", "record_kind", "request_scope_commitment", "terminal_kind", "status",
+                                  "error_code", "forwarded_to_coordinator", "quota", "usage_debit_tokens", "privacy", "recorded_at"}, path)
+        for key, want in {"schema_version": GATEWAY_REFUSAL_RECORD_SCHEMA, "source": "gateway", "record_kind": GATEWAY_REFUSAL_ROLE}.items():
+            if rec[key] != want:
+                fail(f"{path}.{key}", f"must equal {want}")
+        scope = require_ascii(rec["request_scope_commitment"], f"{path}.request_scope_commitment", pattern=HEX64_RE, max_len=64)
+        terminal = rec["terminal_kind"]
+        if terminal not in ("pre_quota_refusal", "post_reservation_refusal"):
+            fail(f"{path}.terminal_kind", "must be pre_quota_refusal or post_reservation_refusal")
+        require_int(rec["status"], f"{path}.status", 400, 599)
+        require_ascii(rec["error_code"], f"{path}.error_code", pattern=GATEWAY_ERROR_CODE_RE, max_len=64)
+        forwarded = require_bool(rec["forwarded_to_coordinator"], f"{path}.forwarded_to_coordinator")
+        quota = exact_keys(rec["quota"], {"reservation", "settled_tokens", "settlement_hold"}, f"{path}.quota")
+        want_reservation, want_forwarded = ("none", False) if terminal == "pre_quota_refusal" else ("refunded", True)
+        if forwarded is not want_forwarded:
+            fail(f"{path}.forwarded_to_coordinator", f"must be {want_forwarded} for {terminal}")
+        if quota["reservation"] != want_reservation:
+            fail(f"{path}.quota.reservation", f"must be {want_reservation} for {terminal}")
+        for field in ("settled_tokens", "settlement_hold"):
+            require_int(quota[field], f"{path}.quota.{field}", 0, 0)
+        require_int(rec["usage_debit_tokens"], f"{path}.usage_debit_tokens", 0, 0)
+        privacy = exact_keys(rec["privacy"], {"raw_account_id_emitted", "raw_external_request_id_emitted", "raw_rejected_model_emitted",
+                                              "raw_selector_emitted"}, f"{path}.privacy")
+        for field, value in privacy.items():
+            if require_bool(value, f"{path}.privacy.{field}") is not False:
+                fail(f"{path}.privacy.{field}", "must be false")
+        if parse_timestamp_ms(require_timestamp_ms(rec["recorded_at"], f"{path}.recorded_at")) > generated_at:
+            fail(f"{path}.recorded_at", "must not be after signed generated_at")
+        if scope in by_scope:
+            fail(f"{path}.request_scope_commitment", "duplicate scope")
+        by_scope[scope] = rec
+    if sorted(by_scope) != signed["request_scopes"]:
+        fail("$envelope.signed.records", "record request_scope_commitment values must exactly equal sorted request_scopes")
+    return {"typed_projection": "gateway_refusal_intent_v1", "records_by_scope": by_scope}
 
 
 def validate_envelope(envelope: Any, registry: Any, expected: ExpectedExport, *, openssl_bin: str = "openssl") -> dict[str, Any]:

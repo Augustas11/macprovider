@@ -158,7 +158,7 @@ for index, line in enumerate(lines):
 
 required_builder = [
     'JOURNEY_ID = TRUSTED_POOL_MODEL_JOURNEY_ID',
-    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v3"',
+    'EVIDENCE_SCHEMA = "macprovider.trusted-pool-model-evidence.v4"',
     'ARTIFACT_ID = TRUSTED_POOL_MODEL_ARTIFACT_ID',
     "require_git_file_matches",
     "must be pending and mapped",

@@ -546,7 +546,12 @@ SQL; this section is the order of work. SPEC-047-R011 is not promoted by it
    pause and resume, both `pool-rollback-preflight` runs (stdout and exit
    status), the restart times and a request dispatched after the gateway
    restart, then the admission events, the pool event counts, and the
-   never-global count (aliased `AS n`).
+   never-global count (aliased `AS n`). Then request the gateway
+   refusal-intent export for the six refusals and save it as
+   `gateway/refusal-export.json` (request shape in the journey file). It needs
+   `evidence.refusal_records` enabled on the gateway for the whole run, export
+   enabled, and an enrolled reviewed gateway source key; without them the
+   refusals cannot be bound and the build fails.
 7. Build `coordinator-cli` from the reviewed `main` commit and build the
    redacted evidence locally:
 

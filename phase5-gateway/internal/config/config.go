@@ -32,6 +32,56 @@ type Config struct {
 	Retry503    Retry503Config    `yaml:"retry_503"`
 	Explorer    ExplorerConfig    `yaml:"explorer"`
 	Features    FeaturesConfig    `yaml:"features"`
+	Evidence    EvidenceConfig    `yaml:"evidence"`
+}
+
+// EvidenceConfig holds source-evidence producers (SPEC-006 §5.4.3).
+type EvidenceConfig struct {
+	RefusalRecords RefusalRecordsConfig `yaml:"refusal_records"`
+}
+
+// RefusalRecordsConfig enables the SPEC-006 §5.4.3.3 gateway refusal record
+// and its operator-only signed export. Both are off by default; with records
+// disabled the gateway writes nothing.
+type RefusalRecordsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// IntentKeyPath holds the private HMAC key of the intent commitment.
+	IntentKeyPath string `yaml:"intent_key_path"`
+	// RetentionHours bounds stored records (default 168, at most 720).
+	RetentionHours int `yaml:"retention_hours"`
+	// ExportEnabled serves POST /admin/evidence/source-exports/gateway-v1.
+	ExportEnabled         bool   `yaml:"export_enabled"`
+	SigningPrivateKeyPath string `yaml:"signing_private_key_path"`
+	MaxScopes             int    `yaml:"max_scopes"`
+}
+
+const (
+	defaultRefusalRecordRetentionHours = 168
+	maxRefusalRecordRetentionHours     = 720
+)
+
+// RefusalRecordRetention is the effective record retention.
+func (c RefusalRecordsConfig) RefusalRecordRetention() time.Duration {
+	if c.RetentionHours <= 0 {
+		return defaultRefusalRecordRetentionHours * time.Hour
+	}
+	return time.Duration(c.RetentionHours) * time.Hour
+}
+
+func (c RefusalRecordsConfig) validate() error {
+	if c.RetentionHours < 0 || c.RetentionHours > maxRefusalRecordRetentionHours {
+		return fmt.Errorf("evidence.refusal_records.retention_hours must be between 0 and %d", maxRefusalRecordRetentionHours)
+	}
+	if c.MaxScopes < 0 || c.MaxScopes > 1000 {
+		return fmt.Errorf("evidence.refusal_records.max_scopes must be between 0 and 1000")
+	}
+	if c.Enabled && strings.TrimSpace(c.IntentKeyPath) == "" {
+		return fmt.Errorf("evidence.refusal_records.intent_key_path must be set when refusal records are enabled")
+	}
+	if c.ExportEnabled && (!c.Enabled || strings.TrimSpace(c.SigningPrivateKeyPath) == "") {
+		return fmt.Errorf("evidence.refusal_records.export_enabled requires enabled records and signing_private_key_path")
+	}
+	return nil
 }
 
 type ListenConfig struct {
@@ -873,7 +923,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("auth.oauth.return_to_allowlist[%d] origin %q missing matching cors.allowed_origins entry", i, origin)
 		}
 	}
-	return nil
+	return c.Evidence.RefusalRecords.validate()
 }
 
 func validateWholesaleAccountIDs(ids []string) error {

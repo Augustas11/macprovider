@@ -205,7 +205,11 @@ Two coordinator facts the journey reflects rather than requires otherwise:
     engine selector, model) is the scenario's: no pool header (404
     `model_not_found`), another authorized pool's header (404
     `model_not_found`), a disallowed engine selector on the GGUF entry (503
-    `engine_unavailable`); any `request_log` row is that request's; no
+    `engine_unavailable`); one gateway-signed refusal record (SPEC-006
+    §5.4.3.3) binds the request's X-Request-ID, model, pool and engine
+    selectors, with the captured status and code and no debit; any
+    `request_log` row carries the X-Request-ID and a blank or the requested
+    model and pool (SPEC-017 §5.2b.2 keeps an unserved model blank); no
     disclosure header, no route snapshot, no ledger row, and exactly one
     reservation for the X-Request-ID, the journey buyer's, `refunded`, zero
     tokens, no hold.
@@ -245,7 +249,10 @@ Two coordinator facts the journey reflects rather than requires otherwise:
     ledger-only path uses its captured ledger creation time to prove
     settlement after the removal boundary; it cannot omit that timestamp.
 14. `step-14-pause-resume-rollback` - while paused a pool request answers 503
-    `pool_unavailable` and refunds; after resume a pool request is paid; the
+    `pool_unavailable` before quota: its gateway-signed refusal record is
+    `pre_quota_refusal`, not forwarded, with no reservation and no debit, and
+    the capture shows no coordinator request log, route snapshot, ledger row
+    or reservation (none is fabricated); after resume a pool request is paid; the
     history has at least two `lifecycle_changed`; `pool-rollback-preflight
     --target-tier m9` exits 3 with `rollback_blocked: true` and a non-empty
     `cannot_replay`, and `--target-tier p1816` exits 0 with neither.
@@ -310,6 +317,7 @@ capture/
   rollback/preflight-p1816.json + .rc
   restart/order.json                       # {"coordinator_restarted_at": "...Z", "gateway_restarted_at": "...Z"}
   restart/after/                           # paid, dispatched after the gateway restart
+  gateway/refusal-export.json              # the gateway refusal-intent export (SPEC-006 §5.4.3.3) for the six refusals, below
 ```
 
 A **paid request directory** holds `response.headers`, `response.json`
@@ -393,6 +401,27 @@ $G "SELECT request_id, account_id, status, settled_tokens, settlement_hold FROM 
 $G "SELECT request_id, prompt_tokens, completion_tokens, token_source, outcome FROM usage_events WHERE request_id='$RID';" > usage_events.json
 ```
 
+Gateway refusal-intent export (one per run, after the last refusal and
+before `captured_at`, within 24 hours of it). The scopes are the refusals'
+own requests: the buyer account, each `X-Request-ID`, and each
+`request.json` `model`, `pool_select` and `engine_select` (`null` as `""`).
+The nonce is 32 fresh random bytes, unpadded base64url. The envelope must
+verify against the reviewed source-evidence key registry in
+`schemas/source-evidence-key-registry-v1.json` for producer `gateway`, role
+`refusal_intent`, the run's `run_id` and `source_commit`; the builder fails
+closed until that registry is enrolled. The envelope is a capture input and
+is kept only as a digest.
+
+```bash
+curl -sS -X POST -H "Authorization: Bearer $GATEWAY_OPERATOR_KEY" \
+  --data @gateway-export-request.json "$GATEWAY_ADMIN/admin/evidence/source-exports/gateway-v1" \
+  > gateway/refusal-export.json
+# gateway-export-request.json: {"schema_version": "macprovider.gateway-source-export-request.v1",
+#   "run_id": "<run.json run_id>", "challenge_nonce": "<43 base64url chars>",
+#   "scopes": [{"account_id": "<buyer>", "external_request_id": "<RID>", "model": "pool/<pool>/<slug>",
+#               "pool_select": "<pool id or empty>", "engine_select": "<selector or empty>"}, ...]}
+```
+
 A refusal directory uses the same `request_log.json`, `route_snapshots.json`,
 `ledger.json` and `quota_reservations.json` queries; a probe directory uses
 the `request_log.json`, `route_snapshots.json` and `quota_reservations.json`
@@ -425,7 +454,7 @@ python3 scripts/build-trusted-pool-model-journey-result.py capture --capture-dir
 ```
 
 `capture` verifies the signed events, normalizes every record into the closed
-redacted evidence (schema `macprovider.trusted-pool-model-evidence.v3`),
+redacted evidence (schema `macprovider.trusted-pool-model-evidence.v4`),
 recomputes every route snapshot digest with `verify-route-snapshot`, runs the
 full semantic validator over it, and writes it with the signed event bundle
 beside it: `journeys/evidence/trusted-pool-model-<run>.manifests/`
