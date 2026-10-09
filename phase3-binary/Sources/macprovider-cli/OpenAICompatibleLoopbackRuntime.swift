@@ -1187,7 +1187,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
         }
         let client = httpClient ?? LoopbackServeHTTPClient()
-        let resolver = BYOMArtifactDigestResolver(locators: [BYOMLMStudioModelStore(root: modelsRoot)], cache: cache)
+        // The model list narrows several quantizations or a custom identifier
+        // to the loaded file; the binding below re-checks it on every request.
+        let servedModels = await LMStudioLoopbackServeModel.fetchModels(client, origin: validatedOrigin)
+        let resolver = BYOMArtifactDigestResolver(locators: [BYOMLMStudioModelStore(root: modelsRoot, servedModels: servedModels)], cache: cache)
         let evidence: BYOMArtifactEvidence
         do {
             evidence = try resolver.computeEvidence(

@@ -98,7 +98,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withInferredMLXLMSnapshot()
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
@@ -171,7 +171,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withInferredMLXLMSnapshot()
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -269,7 +269,7 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withInferredMLXLMSnapshot()
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -472,7 +472,7 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             ).withCatalogMatcher(
                 offline: offlineArtifactFeed,
                 coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
-            ).withInferredMLXLMSnapshot()
+            ).withLoopbackRuntimeProbes()
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
                 : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
@@ -685,7 +685,7 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withInferredMLXLMSnapshot()
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -794,7 +794,7 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withInferredMLXLMSnapshot()
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -905,7 +905,7 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withInferredMLXLMSnapshot()
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
         // BYOM identity is resolved through the one matcher selection every
         // admission command shares (#1816): the coordinator's signed live
         // artifact feed when usable, else the compiled-in release; the

@@ -181,6 +181,44 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertEqual(store.resolveArtifact(servedModelRef: "lmstudio:tiny-q8")?.locator, "pub/Tiny-GGUF/tiny-q8.gguf")
     }
 
+    func testLMStudioStoreNarrowsQuantizationsAndCustomIdentifiersByTheServedEntry() throws {
+        let root = try temporaryDirectory("byom-lms-served")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let models = root.appendingPathComponent("m", isDirectory: true)
+        let q4 = ggufBytes, q8 = ggufBytes + Data(repeating: 0x11, count: 64)
+        try write(q4, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q4.gguf"))
+        try write(q8, to: models.appendingPathComponent("pub/Tiny-GGUF/tiny-q8.gguf"))
+        func entry(key: String, instance: String?, size: Int, publisher: String = "pub", path: String? = nil) -> LMStudioLoopbackServeModel.Model {
+            LMStudioLoopbackServeModel.Model(
+                key: key, type: "llm", format: "gguf", publisher: publisher, sizeBytes: size,
+                loadedInstances: instance.map { [LMStudioLoopbackServeModel.LoadedInstance(id: $0, contextLength: 4096)] } ?? [],
+                path: path
+            )
+        }
+        // The loaded quantization's size singles it out.
+        let bySize = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: q8.count)])
+        XCTAssertEqual(bySize.resolveArtifact(servedModelRef: "lmstudio:tiny")?.locator, "pub/Tiny-GGUF/tiny-q8.gguf")
+        // A reported path singles it out even when sizes tie.
+        let byPath = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: 0, path: "pub/Tiny-GGUF/tiny-q4.gguf")])
+        XCTAssertNil(byPath.resolveArtifact(servedModelRef: "lmstudio:tiny"), "a size no file has drops every file")
+        let byPathOnly = BYOMLMStudioModelStore(root: models, servedModels: [
+            LMStudioLoopbackServeModel.Model(key: "tiny", type: "llm", format: "gguf", publisher: "pub", sizeBytes: nil,
+                                             loadedInstances: [.init(id: "tiny", contextLength: nil)], path: "pub/Tiny-GGUF/tiny-q4.gguf"),
+        ])
+        XCTAssertEqual(byPathOnly.resolveArtifact(servedModelRef: "lmstudio:tiny")?.locator, "pub/Tiny-GGUF/tiny-q4.gguf")
+        // A custom --identifier maps to its entry's key.
+        let alias = BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny-q8", instance: "my-alias", size: q8.count)])
+        XCTAssertEqual(alias.resolveArtifact(servedModelRef: "lmstudio:my-alias")?.locator, "pub/Tiny-GGUF/tiny-q8.gguf")
+        // The runtime only narrows: another publisher, or two entries answering
+        // the name, resolves nothing; without a list the old rule holds.
+        XCTAssertNil(BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "tiny", instance: "tiny", size: q8.count, publisher: "evil")]).resolveArtifact(servedModelRef: "lmstudio:tiny"))
+        XCTAssertNil(BYOMLMStudioModelStore(root: models, servedModels: [
+            entry(key: "tiny", instance: "tiny", size: q8.count), entry(key: "other", instance: "tiny", size: q4.count),
+        ]).resolveArtifact(servedModelRef: "lmstudio:tiny"))
+        XCTAssertNil(BYOMLMStudioModelStore(root: models, servedModels: [entry(key: "nothing-here", instance: "my-alias", size: 1)]).resolveArtifact(servedModelRef: "lmstudio:my-alias"))
+        XCTAssertNil(BYOMLMStudioModelStore(root: models).resolveArtifact(servedModelRef: "lmstudio:tiny"))
+    }
+
     // MARK: - llama.cpp: fingerprint, stem-not-path, operator root
 
     func testLlamaCppRequiresThePropsFingerprintBeforeTrustingInventory() async throws {

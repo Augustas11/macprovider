@@ -2400,6 +2400,9 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// adapter has no default and is attempted only when both are set.
     var mlxlmOrigin: String?
     var mlxlmModelPath: URL?
+    /// LM Studio's `/api/v1/models`, fetched by `withLoopbackRuntimeProbes`;
+    /// narrows the LM Studio store's file resolution (see BYOMLMStudioModelStore).
+    var lmstudioServedModels: [LMStudioLoopbackServeModel.Model]?
     /// SPEC-046 v0.5.0 `omlx_loopback` (#1690 M9): the operator-named oMLX
     /// origin and the MLX snapshot directory it serves; attempted only when
     /// both are set.
@@ -2493,7 +2496,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         BYOMArtifactDigestResolver(
             locators: [
                 BYOMOllamaModelStore(root: ollamaModelsRoot),
-                BYOMLMStudioModelStore(root: lmstudioModelsRoot),
+                BYOMLMStudioModelStore(root: lmstudioModelsRoot, servedModels: lmstudioServedModels),
                 BYOMLlamaCppModelStore(root: llamacppModelRoot, pinnedFile: llamacppModelPath),
             ],
             cache: BYOMArtifactDigestCache(url: artifactDigestCacheURL)
@@ -2547,6 +2550,17 @@ struct BYOMDiscoveryEnvironment: Sendable {
             return copy
         }
         return self
+    }
+
+    /// The read-only runtime probes the BYOM commands run before resolving
+    /// candidates: mlx_lm.server inference and LM Studio's model list.
+    func withLoopbackRuntimeProbes(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async -> BYOMDiscoveryEnvironment {
+        var copy = await withInferredMLXLMSnapshot(httpClient: httpClient)
+        if copy.lmstudioServedModels == nil, let origin = lmstudioOrigin,
+           let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) {
+            copy.lmstudioServedModels = await LMStudioLoopbackServeModel.fetchModels(httpClient, origin: baseURL)
+        }
+        return copy
     }
 
     /// Mirrors `DurableModelArtifactStore.defaultRoot` with injectable inputs.
