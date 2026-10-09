@@ -1055,6 +1055,10 @@ func main() {
 			if err != nil {
 				logger.Fatal().Err(err).Msg("privacy class authority rejected")
 			}
+			if cfg.PrivacyClass.CodeBound.Enabled && !privacyAuthority.CodeBoundActive() {
+				// SPEC-049-R033: code-bound fails closed; Beta is unaffected.
+				logger.Error().Msg("privacy class code-bound unavailable: compiled Apple App Attest root failed its fingerprint check")
+			}
 			wsOpts = append(wsOpts, providerws.WithPrivacyAuthority(privacyAuthority))
 		}
 	}
