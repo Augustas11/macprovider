@@ -1691,12 +1691,24 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 // later occupancy writer; this only closes the race between accept-release
 // and the next provider capacity update.
 func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
+	ok, _ := r.ConsumeForwardedSlotDetailed(providerID, assignedID)
+	return ok
+}
+
+// ConsumeForwardedSlotDetailed is ConsumeForwardedSlot that also reports
+// whether the seat was taken against coordinator-owned occupancy the Mac has
+// not yet confirmed: other forwarded chats were open, or a seat was restored
+// with no ready report since. The Mac retires a chat only after its end frame,
+// so an error_queue_full answer to such a dispatch is that lag, not a full
+// node, even once every other chat has finished (#1906).
+func (r *Registry) ConsumeForwardedSlotDetailed(providerID, assignedID string) (ok, unconfirmed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
-		return false
+		return false, false
 	}
+	unconfirmed = p.forwardedInFlight > 0 || p.awaitingReadyOccupancy
 	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
 		p.SlotsFree--
@@ -1704,7 +1716,7 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 	if p.SlotsFree == 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateBusy)
 	}
-	return true
+	return true, unconfirmed
 }
 
 // ForwardedInFlight reports how many accepted forwarded chats the coordinator
@@ -1814,7 +1826,10 @@ func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string, refusedS
 	}
 	p.capacitySafetyHold = true
 	p.awaitingReadyOccupancy = true
-	p.ignoredLowerReadyReport = false
+	// The refusal already proved the coordinator-owned count too high, so the
+	// Mac's next ready report applies as-is instead of being ignored once as
+	// a possibly stale lower report.
+	p.ignoredLowerReadyReport = true
 	if p.State == StateReady || p.State == StateBusy {
 		r.setStateLocked(p, StateBusy)
 	}

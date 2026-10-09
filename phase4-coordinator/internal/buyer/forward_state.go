@@ -149,6 +149,10 @@ type forwardState struct {
 	slotConsumedOnAccept bool
 	consumedProviderID   string
 	consumedAssignedID   string
+	// acceptedOnUnconfirmedOccupancy records that the latest accepted
+	// attempt took its seat while the coordinator, not a Mac report, owned
+	// that provider's occupancy (pool.ConsumeForwardedSlotDetailed).
+	acceptedOnUnconfirmedOccupancy bool
 
 	// queueFullRequeueUntil bounds how long provider error_queue_full
 	// refusals may send this request back to the same provider's slot queue.

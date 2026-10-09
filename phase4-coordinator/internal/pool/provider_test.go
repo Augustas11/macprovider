@@ -83,6 +83,49 @@ func TestQueueFullBlocksRestoresUntilReadyFreeReport(t *testing.T) {
 	}
 }
 
+func TestReadyReportAfterQueueFullAppliesLowerCount(t *testing.T) {
+	// #1906 round-3 L1: an explicit refusal proved the coordinator-owned
+	// count too high, so the first ready report after it is the Mac's count
+	// and must not be ignored as a stale lower report.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	free := 2
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 2 || !got.RoutingEligible() {
+		t.Fatalf("first ready report after queue-full: slots_free=%d routing=%v, want 2/true", got.SlotsFree, got.RoutingEligible())
+	}
+}
+
+func TestConsumeForwardedSlotDetailedReportsUnconfirmedOccupancy(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	if ok, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !ok || unconfirmed {
+		t.Fatalf("first consume on a Mac-confirmed count: ok=%v unconfirmed=%v, want true/false", ok, unconfirmed)
+	}
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !unconfirmed {
+		t.Fatal("consume with another chat in flight must report unconfirmed occupancy")
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	if registry.ForwardedInFlight("p1", "s1") != 0 {
+		t.Fatal("in-flight count did not drain")
+	}
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); !unconfirmed {
+		t.Fatal("consume after a restore with no ready report since must report unconfirmed occupancy")
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	free := 4
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	if _, unconfirmed := registry.ConsumeForwardedSlotDetailed("p1", "s1"); unconfirmed {
+		t.Fatal("consume after the Mac confirmed ready occupancy must not report unconfirmed")
+	}
+}
+
 func TestQueueFullHoldClearsOnNextForwardedCompletion(t *testing.T) {
 	// #1906: eight seats, eight chats in flight from the coordinator's view.
 	// One finishes; the re-issued chat is refused because the Mac still counts

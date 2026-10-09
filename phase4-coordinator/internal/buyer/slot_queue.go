@@ -150,6 +150,14 @@ func (q *slotQueue) hasStandardWaiters(providerID string) bool {
 	return false
 }
 
+// claims is the coordinator-local demand on providerID: queued waiters plus
+// seat reservations.
+func (q *slotQueue) claims(providerID string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.queues[providerID]) + q.reserved[providerID]
+}
+
 func (q *slotQueue) reserveProvider(providerID string, slotsFree func() int) bool {
 	reserved, _ := q.reserveProviderLive(providerID, slotsFree)
 	return reserved
@@ -220,10 +228,16 @@ func (q *slotQueue) releaseReservation(providerID string) {
 // providerID while holding the queue lock. Selectors read slots_free from the
 // pool and the reservation count from here; serializing the pair against the
 // queue lock keeps an accepted chat from being counted twice in between.
-func (q *slotQueue) releaseReservationAfter(providerID string, consume func()) {
+// consume receives the number of other reservations still held on
+// providerID.
+func (q *slotQueue) releaseReservationAfter(providerID string, consume func(otherReserved int)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	consume()
+	otherReserved := 0
+	if providerID != "" && q.reserved[providerID] > 1 {
+		otherReserved = q.reserved[providerID] - 1
+	}
+	consume(otherReserved)
 	if providerID == "" {
 		return
 	}

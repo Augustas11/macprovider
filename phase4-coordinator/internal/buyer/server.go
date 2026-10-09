@@ -8059,10 +8059,29 @@ func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forw
 	}
 	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, s.liveSlotsFree(provider))
 	if !reserved {
-		return false, busy
+		return false, busy || s.demandBelowAdvertisedCapacity(provider)
 	}
 	state.queuedSlotProviderID = provider.ProviderID
 	return true, false
+}
+
+// demandBelowAdvertisedCapacity reports whether the coordinator's own claims
+// on provider (accepted chats in flight, seat leases and queued waiters) leave
+// at least one of its advertised SlotsTotal seats for another request. Seat
+// reservations are checked against slots_free, which can sit below SlotsTotal
+// minus that demand while the Mac still counts chats the coordinator has seen
+// finish, so a reservation miss with demand below SlotsTotal is a lagging
+// count to wait out in the slot queue, not overflow to shed (#1906).
+func (s *Server) demandBelowAdvertisedCapacity(provider pool.Provider) bool {
+	if s.pool == nil || s.slotQueue == nil {
+		return false
+	}
+	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || live.SlotsTotal <= 0 {
+		return false
+	}
+	demand := s.pool.ForwardedInFlight(provider.ProviderID, provider.AssignedID) + s.slotQueue.claims(provider.ProviderID)
+	return demand < live.SlotsTotal
 }
 
 // liveSlotsFree is routableSlotsFree as a callback the slot queue evaluates
@@ -9274,7 +9293,10 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 			// capacity. Public traffic sheds that overflow immediately.
 			// Wholesale traffic may queue it because upstream provider
 			// integrations prefer bounded capacity waits over retry churn.
-			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow {
+			// When coordinator-owned demand is still below SlotsTotal the
+			// block is a slots_free count that lags the Mac, not overflow,
+			// so the request waits for the seat (#1906).
+			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow || s.demandBelowAdvertisedCapacity(provider) {
 				queued = append(queued, provider)
 			}
 			continue
@@ -9315,6 +9337,7 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 		return
 	}
 	s.restoreConsumedForwardedSlot(state)
+	state.acceptedOnUnconfirmedOccupancy = false
 	if s.pool != nil {
 		provider := state.provider
 		if provider.ProviderID == "" && state.queuedSlotProviderID != "" {
@@ -9324,8 +9347,12 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 			}
 		}
 		if provider.ProviderID != "" && provider.AssignedID != "" {
-			consume := func() {
-				if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
+			// otherReserved counts sibling dispatches holding a seat lease on
+			// this provider: chats the Mac may already be running that the
+			// coordinator has not yet counted in flight.
+			consume := func(otherReserved int) {
+				if ok, unconfirmed := s.pool.ConsumeForwardedSlotDetailed(provider.ProviderID, provider.AssignedID); ok {
+					state.acceptedOnUnconfirmedOccupancy = unconfirmed || otherReserved > 0
 					state.slotConsumedOnAccept = true
 					state.consumedProviderID = provider.ProviderID
 					state.consumedAssignedID = provider.AssignedID
@@ -9335,11 +9362,17 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 				// Consume and lease release in one slot-queue critical
 				// section: a sibling selector must never count this chat as
 				// both a consumed seat and a live reservation (#1906).
-				s.slotQueue.releaseReservationAfter(state.queuedSlotProviderID, consume)
+				leaseProviderID := state.queuedSlotProviderID
+				s.slotQueue.releaseReservationAfter(leaseProviderID, func(otherReserved int) {
+					if leaseProviderID != provider.ProviderID {
+						otherReserved = 0
+					}
+					consume(otherReserved)
+				})
 				state.queuedSlotProviderID = ""
 				return
 			}
-			consume()
+			consume(0)
 		}
 	}
 	s.releaseQueuedSlotReservation(state)
@@ -9371,14 +9404,19 @@ func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
 }
 
 // requeueAfterQueueFull reports whether a provider error_queue_full refusal
-// may send the request back to the same provider's slot queue: only while
-// other forwarded chats are open there, since the next of them to finish is
-// what clears the queue-full hold. Call it after the refusal is recorded.
+// may send the request back to the same provider's slot queue: while other
+// forwarded chats are open there (the next to finish clears the queue-full
+// hold), or when the refused attempt was accepted against occupancy the Mac
+// had not yet confirmed. In that case the refusal is a chat the coordinator
+// already saw finish but the Mac has not retired, and the Mac's next ready
+// report clears the hold even after every other chat finished. A refusal of
+// a dispatch made against Mac-confirmed free seats with nothing in flight is
+// a full node and sheds. Call it after the refusal is recorded.
 func (s *Server) requeueAfterQueueFull(r *http.Request, state *forwardState) bool {
 	if state == nil || hasPinnedRoute(r.Header) || s.pool == nil {
 		return false
 	}
-	if s.pool.ForwardedInFlight(state.provider.ProviderID, state.provider.AssignedID) == 0 {
+	if s.pool.ForwardedInFlight(state.provider.ProviderID, state.provider.AssignedID) == 0 && !state.acceptedOnUnconfirmedOccupancy {
 		return false
 	}
 	now := s.now()
