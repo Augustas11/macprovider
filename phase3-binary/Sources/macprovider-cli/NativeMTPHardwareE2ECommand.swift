@@ -122,7 +122,9 @@ struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
 
 final class NativeMTPHardwareE2ERunner {
     static let defaultModelID = nativeMTPHardwareDefaultModelID
-    static let upstreamRevision = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+    /// The pinned mlx-swift-lm revision; single source is `KVBuildIdentity`, whose
+    /// drift test fails CI when it disagrees with Package.resolved.
+    static let upstreamRevision = KVBuildIdentity.mlxSwiftLMRevision
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let reproducibleBuildSHA256 = String(repeating: "1", count: 64)

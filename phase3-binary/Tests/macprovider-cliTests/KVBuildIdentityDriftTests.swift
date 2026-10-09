@@ -49,11 +49,22 @@ final class KVBuildIdentityDriftTests: XCTestCase {
             "KVBuildIdentity.mlxSwiftLMRevision drifted from Package.resolved — bump the constant on a dependency change")
     }
 
-    func testMLXSwiftVersionMatchesPackageResolved() throws {
+    /// mlx-swift is checked by exact revision always, and by version only when
+    /// Package.resolved records one (a fork revision pin has no version).
+    func testMLXSwiftPinMatchesPackageResolved() throws {
         let resolved = try pins()
         let pin = try XCTUnwrap(resolved["mlx-swift"], "mlx-swift not pinned in Package.resolved")
         XCTAssertEqual(
-            KVBuildIdentity.mlxVersion, pin.version,
-            "KVBuildIdentity.mlxVersion drifted from Package.resolved — bump the constant on a dependency change")
+            KVBuildIdentity.mlxSwiftRevision, pin.revision,
+            "KVBuildIdentity.mlxSwiftRevision drifted from Package.resolved — bump the constant on a dependency change")
+        if let version = pin.version {
+            XCTAssertEqual(
+                KVBuildIdentity.mlxSwiftVersion, version,
+                "KVBuildIdentity.mlxSwiftVersion drifted from Package.resolved — bump the constant on a dependency change")
+        }
+        XCTAssertEqual(
+            KVBuildIdentity.mlxVersion,
+            "\(KVBuildIdentity.mlxSwiftVersion)+\(KVBuildIdentity.mlxSwiftRevision)",
+            "the envelope mlx_version must carry the exact mlx-swift revision")
     }
 }

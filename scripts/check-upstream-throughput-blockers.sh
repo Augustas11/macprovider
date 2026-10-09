@@ -148,17 +148,28 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
-native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
+# mlx-swift-lm fork tag 3.32.3-macprovider.2 on upstream tag 3.32.3.
+native_mtp_exception_revision = "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
+native_mtp_exception_base = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
+# mlx-swift fork tag 0.32.3-macprovider.1 on upstream tag 0.32.3; its MLX core
+# submodule points at Augustas11/mlx v0.32.2-macprovider.1 (ff1b9483).
+native_mtp_exception_mlx_swift_revision = "d073a644c559318d93e267ed2a53baf434787a41"
+native_mtp_exception_mlx_swift_base = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
+native_mtp_exception_mlx_swift_repo = "Augustas11/mlx-swift"
 native_mtp_exception_review_approved = False
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
     native_mtp_exception_revision,
+) and commit_is_descendant(
+    native_mtp_exception_mlx_swift_repo,
+    native_mtp_exception_mlx_swift_base,
+    native_mtp_exception_mlx_swift_revision,
 )
 native_mtp_exception_pin_matches = (
     pins.get("mlx_swift_lm_revision") == native_mtp_exception_revision
+    and pins.get("mlx_swift_revision") == native_mtp_exception_mlx_swift_revision
 )
 native_mtp_exception_approved = (
     native_mtp_exception_remote_verified
@@ -433,12 +444,12 @@ out = {
             else "candidate_step_overhead_revision_pending_review"
         ),
         "note": (
-            "The reviewed Qwen MTP transaction surfaces and the exact-layout Qwen3.6 "
-            "A3B fused-MoE path (approved 2026-10-05 at b1811029) remain present; the "
-            "candidate adds a single-pass checkpointed GDN verify kernel and skips the "
-            "all-true SSM mask for unpadded packed verification, and is not approved "
-            "until Studio validation and the freeze audits pass; native MTP stays "
-            "default-off; upstream #645 remains the tagged-release replacement tracker"
+            "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
+            "(3.32.3-macprovider.2) with mlx-swift 0.32.3 on a batch-invariant "
+            "small-M quantized matmul MLX core fork (0.32.3-macprovider.1); it is "
+            "not approved until Studio validation and the freeze audits pass; "
+            "native MTP stays default-off; upstream #645 remains the tagged-release "
+            "replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
@@ -449,14 +460,18 @@ out = {
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
         "fork_revision": native_mtp_exception_revision,
         "upstream_base_revision": native_mtp_exception_base,
+        "mlx_swift_fork_location": "https://github.com/Augustas11/mlx-swift",
+        "mlx_swift_fork_revision": native_mtp_exception_mlx_swift_revision,
+        "mlx_swift_upstream_base_revision": native_mtp_exception_mlx_swift_base,
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
         "review_status": "candidate_extension_pending_studio_and_freeze_audits",
         "scope": (
-            "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
-            "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked_"
-            "plus_single_pass_checkpointed_gdn_verify_and_unpadded_packed_ssm_mask_skip"
+            "packed_mtp_target_verification_public_cache_transactions_and_packed_"
+            "drafter_plus_fused_qwen36_a3b_moe_behind_MLX_LM_QWEN35_FUSED_MOE_"
+            "with_layout_validation_plus_one_pass_gdn_verify_checkpoint_plus_"
+            "unpadded_packed_ssm_mask_skip_plus_mlx_swift_and_mlx_core_batch_"
+            "invariant_small_m_quantized_matmul_fork"
         ),
         "removal_trigger": (
             "first reviewed upstream tag with equivalent standalone-checkpoint "

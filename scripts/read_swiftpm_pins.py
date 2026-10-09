@@ -21,18 +21,30 @@ EXPECTED_LOCATIONS = {
 }
 
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-SPEC048_MLX_SWIFT_LM_REVISION = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+# Fork tag 3.32.3-macprovider.2 on upstream mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_REVISION = "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
+SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
+# Fork tag 0.32.3-macprovider.1: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the batch-invariant small-M quantized matmul fork.
+SPEC048_MLX_SWIFT_REVISION = "d073a644c559318d93e267ed2a53baf434787a41"
+
+# Each reviewed fork is accepted only at its exact revision with no version.
+REVIEWED_FORK_PINS = {
+    "mlx-swift-lm": (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION),
+    "mlx-swift": (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION),
+}
 
 
 def normalized_location(value: str) -> str:
     return value.strip().lower().removesuffix(".git").rstrip("/")
 
 
-def is_spec048_mlx_swift_lm_fork(identity: str, location: str, revision: object) -> bool:
+def is_reviewed_fork_pin(identity: str, location: str, revision: object) -> bool:
+    reviewed = REVIEWED_FORK_PINS.get(identity)
     return (
-        identity == "mlx-swift-lm"
-        and location == normalized_location(SPEC048_MLX_SWIFT_LM_FORK)
-        and revision == SPEC048_MLX_SWIFT_LM_REVISION
+        reviewed is not None
+        and location == normalized_location(reviewed[0])
+        and revision == reviewed[1]
     )
 
 
@@ -51,7 +63,7 @@ def read_pins(path: Path) -> dict[str, str]:
         version = state.get("version")
         revision = state.get("revision")
         if location != normalized_location(EXPECTED_LOCATIONS[identity]):
-            if is_spec048_mlx_swift_lm_fork(identity, location, revision) and version is None:
+            if is_reviewed_fork_pin(identity, location, revision) and version is None:
                 pins[output_name] = revision
                 pins[f"{output_name}_revision"] = revision
                 continue

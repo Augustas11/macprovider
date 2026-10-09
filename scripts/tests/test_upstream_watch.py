@@ -74,7 +74,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            "revision": "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -84,11 +84,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
+            "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
+            "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -103,6 +103,76 @@ class SwiftPMPinParsingTests(unittest.TestCase):
             resolved.write_text(json.dumps(payload))
             with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
                 read_pins(resolved)
+
+    def test_fails_closed_when_spec048_fork_uses_previous_reviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_accepts_mlx_swift_fork_at_exact_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "d073a644c559318d93e267ed2a53baf434787a41"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+
+            pins = read_pins(resolved)
+
+        self.assertEqual(pins["mlx_swift"], "d073a644c559318d93e267ed2a53baf434787a41")
+        self.assertEqual(
+            pins["mlx_swift_revision"], "d073a644c559318d93e267ed2a53baf434787a41"
+        )
+
+    def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "19601207e9a0de51e03ee6ec0c3c5f3784275075"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_fails_closed_when_mlx_swift_fork_also_carries_a_version(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "d073a644c559318d93e267ed2a53baf434787a41",
+            "version": "0.32.3",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_reads_checked_in_package_resolved(self):
+        resolved = Path(__file__).parents[2] / "phase3-binary" / "Package.resolved"
+
+        pins = read_pins(resolved)
+
+        self.assertEqual(
+            pins["mlx_swift_lm_revision"], "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
+        )
+        self.assertEqual(
+            pins["mlx_swift_revision"], "d073a644c559318d93e267ed2a53baf434787a41"
+        )
 
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
         fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
