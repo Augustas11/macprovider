@@ -81,6 +81,11 @@ SKIP_SUFFIXES = (".md", ".html", ".json", ".go", ".example", ".service", ".conf"
 ACTIVATE_MARKERS = ('. "$CCG_LIB"', 'ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}")',
                     'ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}" 120)')
 GUARDED = {
+    "scripts/ops/lib/privacy-activation.py": (
+        "def config_guard():",
+        "return module.LockSet('/opt/macprovider')",
+        "with config_guard():",
+    ),
     # Tier-2 activation writers: patch + SIGHUP in one guarded remote shell,
     # rollback guarded + compare-and-swap.
     "scripts/activate-tier2-attestation.sh": ACTIVATE_MARKERS,
