@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -119,6 +120,10 @@ func (h *adminHandler) serveSelfServeCreatorHTTP(w http.ResponseWriter, r *http.
 			return
 		}
 		h.writeLookupError(w, "creator_lookup_failed", err)
+		return
+	}
+	if rest == "earnings" {
+		h.handleSelfServeEarnings(w, r, principal)
 		return
 	}
 	if strings.HasPrefix(rest, "pools/") && strings.HasSuffix(rest, "/promote") {
@@ -478,4 +483,119 @@ func (h *adminHandler) handleSelfServePromote(w http.ResponseWriter, r *http.Req
 		"event": committed,
 		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
 	})
+}
+
+// CreatorEarningsQuery scopes a SPEC-043-R010 0.3.0 earnings read: the
+// creator's owned providers, the creator's own pools, and an optional UTC
+// day range [From, To).
+type CreatorEarningsQuery struct {
+	ProviderIDs []string
+	PoolIDs     []string
+	From        time.Time
+	To          time.Time
+}
+
+// CreatorPoolEarnings is one pool's payable provider credits.
+type CreatorPoolEarnings struct {
+	PoolID          string `json:"pool_id"`
+	PayableRequests int64  `json:"payable_requests"`
+	ProviderCredits int64  `json:"provider_credits"`
+}
+
+const maxSelfServeEarningsRange = 31 * 24 * time.Hour
+
+// handleSelfServeEarnings answers GET earnings?pool_id=&from=&to=: payable
+// provider credits that the creator's claimed Macs earned on the creator's
+// own pools. It is read-only provider earnings, never an executed revenue
+// split; an unknown or foreign pool is not_found.
+func (h *adminHandler) handleSelfServeEarnings(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	if h.deps.CreatorEarnings == nil {
+		writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "unavailable"}})
+		return
+	}
+	query := r.URL.Query()
+	from, to, err := parseSelfServeEarningsRange(query.Get("from"), query.Get("to"))
+	if err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_range"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	var poolIDs []string
+	if poolID := strings.TrimSpace(query.Get("pool_id")); poolID != "" {
+		if !creatorOwnsPool(state, poolID, principal.CreatorID) {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
+		poolIDs = []string{poolID}
+	} else {
+		for id, pool := range state.Pools {
+			if pool != nil && pool.CreatorAccountID == principal.CreatorID {
+				poolIDs = append(poolIDs, id)
+			}
+		}
+	}
+	sort.Strings(poolIDs)
+	owned, err := h.selfServeOwnedProviders(r.Context(), principal)
+	if err != nil {
+		h.writeLookupError(w, "provider_ownership_lookup_failed", err)
+		return
+	}
+	byPool := make(map[string]CreatorPoolEarnings, len(poolIDs))
+	if len(owned) > 0 && len(poolIDs) > 0 {
+		rows, err := h.deps.CreatorEarnings(r.Context(), CreatorEarningsQuery{ProviderIDs: owned, PoolIDs: poolIDs, From: from, To: to})
+		if err != nil {
+			h.writeLookupError(w, "earnings_lookup_failed", err)
+			return
+		}
+		for _, row := range rows {
+			byPool[row.PoolID] = row
+		}
+	}
+	pools := make([]CreatorPoolEarnings, 0, len(poolIDs))
+	var totalCredits, totalRequests int64
+	for _, id := range poolIDs {
+		row := byPool[id]
+		row.PoolID = id
+		pools = append(pools, row)
+		totalCredits += row.ProviderCredits
+		totalRequests += row.PayableRequests
+	}
+	out := map[string]any{
+		"creator_account_id":     principal.CreatorID,
+		"owned_provider_count":   len(owned),
+		"github_identity_linked": principal.GitHubUserID > 0,
+		"split_execution_status": "declared_not_executed",
+		"earnings_basis":         "payable_provider_credits_owned_providers",
+		"pools":                  pools,
+		"total_provider_credits": totalCredits,
+		"total_payable_requests": totalRequests,
+		"from":                   nil,
+		"to":                     nil,
+	}
+	if !from.IsZero() {
+		out["from"] = from.Format("2006-01-02")
+		out["to"] = to.Format("2006-01-02")
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"earnings": out})
+}
+
+func parseSelfServeEarningsRange(fromRaw, toRaw string) (time.Time, time.Time, error) {
+	if fromRaw == "" && toRaw == "" {
+		return time.Time{}, time.Time{}, nil
+	}
+	from, err1 := time.Parse("2006-01-02", fromRaw)
+	to, err2 := time.Parse("2006-01-02", toRaw)
+	if err1 != nil || err2 != nil || !to.After(from) || to.Sub(from) > maxSelfServeEarningsRange {
+		return time.Time{}, time.Time{}, errors.New("trustpool: invalid earnings range")
+	}
+	return from.UTC(), to.UTC(), nil
 }

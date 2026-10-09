@@ -1292,6 +1292,17 @@ func main() {
 				}
 				return ids, nil
 			},
+			CreatorEarnings: func(ctx context.Context, q trustpool.CreatorEarningsQuery) ([]trustpool.CreatorPoolEarnings, error) {
+				rows, err := billingStore.CreatorPoolEarnings(ctx, q.ProviderIDs, q.PoolIDs, q.From, q.To)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]trustpool.CreatorPoolEarnings, 0, len(rows))
+				for _, row := range rows {
+					out = append(out, trustpool.CreatorPoolEarnings{PoolID: row.PoolID, PayableRequests: row.PayableRequests, ProviderCredits: row.ProviderCredits})
+				}
+				return out, nil
+			},
 		})
 		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
 			trustPoolAdminReloader = reloader

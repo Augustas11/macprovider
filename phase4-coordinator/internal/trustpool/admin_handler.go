@@ -82,6 +82,9 @@ type AdminDeps struct {
 	// OwnedProviderIDs reads the provider ownership-claim table for one
 	// GitHub user id (SPEC-043-R006 0.3.0 self-serve ceiling).
 	OwnedProviderIDs func(ctx context.Context, githubUserID int64) ([]string, error)
+	// CreatorEarnings reads payable provider credits for the self-serve
+	// earnings view (SPEC-043-R010 0.3.0). Nil makes the read unavailable.
+	CreatorEarnings func(ctx context.Context, q CreatorEarningsQuery) ([]CreatorPoolEarnings, error)
 }
 
 func NewAdminHandler(deps AdminDeps) http.Handler {
