@@ -377,20 +377,20 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertThrowsError(try CreatorOperations.signModelRevocation(home: home, poolID: pool, poolModelID: "pool/\(pool)/missing"))
     }
 
-    private func proposal(pool: String, pricing: Bool = false, maxContext: Bool = true) -> Data {
+    private func proposal(pool: String, pricing: Bool = false, maxContext: Bool = true, license: String = "null", paidServing: String = "null") -> Data {
         let pricingJSON = pricing ? #"{"prompt_rate_per_mtok":10,"prompt_cache_hit_rate_per_mtok":5,"completion_rate_per_mtok":20}"# : "null"
         return Data("""
         {"schema":"pool_model_proposal.v1","generated_at":"2026-10-09T00:00:00Z","cli_version":"x","pool_id":"\(pool)",
         "provider_id":null,"candidate_id":"c","served_model_ref":"lmstudio:m","runtime_source":"lmstudio_loopback","display_name":"m",
         "catalog_model_key":null,"model_entry":{"pool_model_id":"pool/\(pool)/m","artifact_hash_algorithm":"macprovider.gguf-file.v1",
-        "artifact_hash":"\(String(repeating: "c", count: 64))","allowed_runtime_sources":["lmstudio_loopback"],"license":null,
-        "paid_serving_attested":null,"pricing":\(pricingJSON),"disclosure_class":"pool_attested_unverified",
+        "artifact_hash":"\(String(repeating: "c", count: 64))","allowed_runtime_sources":["lmstudio_loopback"],"license":\(license),
+        "paid_serving_attested":\(paidServing),"pricing":\(pricingJSON),"disclosure_class":"pool_attested_unverified",
         "max_context_tokens":\(maxContext ? "4096" : "null")},"creator_requirements":[],"evidence":{"evaluation_digest_sha256":null,
         "known_answer_probe_evidence_sha256":null},"offer_status":null,"warnings":[]}
         """.utf8)
     }
 
-    func testManifestSignFromProposalFillsOnlyCreatorFields() throws {
+    func testManifestSignFromProposalTakesCreatorFieldsOnlyFromFlags() throws {
         let pool = "AAAAAAAAAAAAAAAAAAAAAA"
         var completion = CreatorOperations.ProposalCompletion()
         XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
@@ -401,21 +401,44 @@ final class CreatorCommandTests: XCTestCase {
             XCTAssertTrue(String(describing: $0).contains("--attest-paid-serving"))
         }
         completion.paidServingAttested = true
-        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
-            XCTAssertTrue(String(describing: $0).contains("--prompt-rate-per-mtok"))
+        // A provider-suggested price is shown, never signed.
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)) {
+            let message = String(describing: $0)
+            XCTAssertTrue(message.contains("--prompt-rate-per-mtok") && message.contains("suggests"), message)
         }
-        let suggested = try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)
-        XCTAssertEqual(suggested.pricing.completionRatePerMtok, 20)
-        XCTAssertEqual(suggested.license, "Apache-2.0")
-        XCTAssertTrue(suggested.paidServingAttested)
-        XCTAssertEqual(suggested.maxContextTokens, 4096)
-        XCTAssertEqual(suggested.artifactHash, String(repeating: "c", count: 64))
         completion.pricing = PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3)
-        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, maxContext: false), poolID: pool, completion: completion))
+        // A provider-reported context limit is shown, never signed.
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: pool, completion: completion)) {
+            let message = String(describing: $0)
+            XCTAssertTrue(message.contains("--max-context-tokens") && message.contains("4096"), message)
+        }
         completion.maxContextTokens = 8192
-        XCTAssertEqual(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, maxContext: false), poolID: pool, completion: completion).maxContextTokens, 8192)
+        let entry = try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, pricing: true), poolID: pool, completion: completion)
+        XCTAssertEqual(entry.pricing, PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3))
+        XCTAssertEqual(entry.maxContextTokens, 8192)
+        XCTAssertEqual(entry.license, "Apache-2.0")
+        XCTAssertTrue(entry.paidServingAttested)
+        XCTAssertEqual(entry.artifactHash, String(repeating: "c", count: 64))
         XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool), poolID: "BBBBBBBBBBBBBBBBBBBBBB", completion: completion))
         XCTAssertNoThrow(try CreatorManifestSignCommand.parse(["--pool", pool, "--from-proposal", "a.json", "--from-proposal", "b.json", "--license", "MIT", "--attest-paid-serving"]))
+    }
+
+    func testManifestSignFromProposalRefusesProviderSetCreatorFields() throws {
+        let pool = "AAAAAAAAAAAAAAAAAAAAAA"
+        var completion = CreatorOperations.ProposalCompletion()
+        completion.license = "Apache-2.0"
+        completion.pricing = PoolModelPricing(promptRatePerMtok: 1, promptCacheHitRatePerMtok: 1, completionRatePerMtok: 3)
+        completion.maxContextTokens = 8192
+        // Even with every flag passed, a modified proposal is refused.
+        completion.paidServingAttested = true
+        for tampered in [proposal(pool: pool, license: #""MIT""#), proposal(pool: pool, paidServing: "true"), proposal(pool: pool, paidServing: "false")] {
+            XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: tampered, poolID: pool, completion: completion)) {
+                XCTAssertTrue(String(describing: $0).contains("creator-owned"), String(describing: $0))
+            }
+        }
+        // A tampered paid_serving_attested never replaces --attest-paid-serving.
+        completion.paidServingAttested = false
+        XCTAssertThrowsError(try CreatorOperations.modelEntry(fromProposal: proposal(pool: pool, paidServing: "true"), poolID: pool, completion: completion))
     }
 
     func testManifestWindowReportsEffectiveFromAndExpiry() throws {

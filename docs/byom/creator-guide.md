@@ -99,7 +99,8 @@ If you are both creator and provider, you review your own proposal.
 ## 4. Creator: sign and submit the manifest
 
 The quickest path signs straight from the proposal. `--from-proposal` keeps
-the proposal's hash and runtime as they are and fills only your fields; it
+the proposal's hash and runtime as they are; every creator field (license,
+paid-serving attestation, rates, context limit) comes only from your flags. It
 can be repeated, one per proposal:
 
 ```bash
@@ -109,9 +110,11 @@ macprovider-cli creator manifest sign --pool <pool-id> --from-proposal proposal.
   --completion-rate-per-mtok 40000 --max-context-tokens 16384
 ```
 
-The rates are needed only when the proposal suggests none, and
-`--max-context-tokens` only when it reports none. A proposal for another pool
-is refused.
+All of these flags are required. A rate the provider suggested, or a context
+window it reported, is shown in the error when you leave the flag out, but it
+is never signed for you. A proposal for another pool is refused, and so is one
+whose `license` or `paid_serving_attested` is not null: `models propose` always
+leaves those null, so a set value means the file was edited.
 
 Alternatively, write `models.json` from the proposal's `model_entry`,
 adding your fields:

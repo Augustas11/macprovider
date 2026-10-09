@@ -24,7 +24,8 @@ struct CreatorCommand: AsyncParsableCommand {
           `macprovider-cli models propose <served-model-ref> --pool <id> --json > proposal.json`
           hashes the served model into a proposal.
           creator manifest sign --pool <id> --from-proposal proposal.json --license <SPDX>
-              --attest-paid-serving [--prompt-rate-per-mtok N ...]   (or --models-file models.json)
+              --attest-paid-serving --prompt-rate-per-mtok N --prompt-cache-hit-rate-per-mtok N
+              --completion-rate-per-mtok N --max-context-tokens N   (or --models-file models.json)
           creator manifest submit --pool <id>
           creator admit <provider-id> --pool <id>
           creator authorize-buyer <account-id> --pool <id>
@@ -813,8 +814,11 @@ enum CreatorOperations {
     }
 
     /// Turns one `models propose --json` bundle into a signable entry. The
-    /// proposal's hash and runtime are kept verbatim; only creator-owned
-    /// nulls are filled, and a value the proposal already carries wins.
+    /// proposal's hash and runtime are kept verbatim. Every creator-owned
+    /// value comes only from the creator's flags: a proposal is untrusted
+    /// provider input, so one that already carries a license or paid-serving
+    /// attestation (always null by the proposal contract) is refused, and its
+    /// suggested rates and context limit are shown, never signed.
     static func modelEntry(fromProposal data: Data, poolID: String, completion: ProposalCompletion) throws -> PoolModelEntry {
         let proposal: ProposalFile
         do {
@@ -829,20 +833,25 @@ enum CreatorOperations {
             throw CreatorCLIError.invalidInput("proposal is for pool \(proposal.poolID), not \(poolID)")
         }
         let p = proposal.modelEntry
-        guard let license = (p.license ?? completion.license)?.trimmingCharacters(in: .whitespaces), !license.isEmpty else {
+        guard p.license == nil, p.paidServingAttested == nil else {
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): the proposal sets creator-owned license or paid_serving_attested, which a pool_model_proposal.v1 always leaves null; ask the provider for an unmodified `models propose --json` output")
+        }
+        guard let license = completion.license?.trimmingCharacters(in: .whitespaces), !license.isEmpty else {
             throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --license <SPDX id or LicenseRef-*>")
         }
-        guard p.paidServingAttested == true || completion.paidServingAttested else {
+        guard completion.paidServingAttested else {
             throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --attest-paid-serving to sign paid_serving_attested=true")
         }
-        guard let pricing = p.pricing ?? completion.pricing else {
-            throw CreatorCLIError.invalidInput("\(p.poolModelID): the proposal suggests no pricing; pass --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok")
+        guard let pricing = completion.pricing else {
+            let hint = p.pricing.map { " (the provider suggests prompt \($0.promptRatePerMtok), cached prompt \($0.promptCacheHitRatePerMtok), completion \($0.completionRatePerMtok))" } ?? ""
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --prompt-rate-per-mtok, --prompt-cache-hit-rate-per-mtok and --completion-rate-per-mtok\(hint)")
         }
         guard pricing.promptCacheHitRatePerMtok <= pricing.promptRatePerMtok else {
             throw CreatorCLIError.invalidInput("\(p.poolModelID): the cached-prompt rate must not exceed the prompt rate")
         }
-        guard let maxContext = p.maxContextTokens ?? completion.maxContextTokens, (1...1_048_576).contains(maxContext) else {
-            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --max-context-tokens (1...1048576); the proposal reports none")
+        guard let maxContext = completion.maxContextTokens, (1...1_048_576).contains(maxContext) else {
+            let hint = p.maxContextTokens.map { " (the provider reports \($0))" } ?? ""
+            throw CreatorCLIError.invalidInput("\(p.poolModelID): pass --max-context-tokens (1...1048576)\(hint)")
         }
         return PoolModelEntry(
             poolModelID: p.poolModelID, artifactHashAlgorithm: p.artifactHashAlgorithm, artifactHash: p.artifactHash,
@@ -1021,13 +1030,13 @@ struct CreatorManifestSignCommand: AsyncParsableCommand {
     @Option(help: "Minimum attestation tier.") var minAttestationTier = "self_signed"
     @Option(help: "Minimum eligible members.") var minEligibleMembers: UInt64 = 1
     @Option(help: "Policy validity in days.") var validityDays = 90
-    @Option(name: .customLong("from-proposal"), help: "pool_model_proposal.v1 JSON from `models propose --json` (repeatable). Its model_entry is completed with the flags below.") var fromProposal: [String] = []
+    @Option(name: .customLong("from-proposal"), help: "pool_model_proposal.v1 JSON from `models propose --json` (repeatable). Its hash and runtime are kept; every creator field comes from the flags below.") var fromProposal: [String] = []
     @Option(help: "SPDX id or LicenseRef-* for --from-proposal entries.") var license: String?
     @Flag(help: "Attest paid serving is permitted for --from-proposal entries (signed as paid_serving_attested=true).") var attestPaidServing = false
-    @Option(help: "Prompt rate per million tokens for a --from-proposal entry that suggests no pricing.") var promptRatePerMtok: UInt64?
+    @Option(help: "Prompt rate per million tokens for --from-proposal entries (required; a provider suggestion is never signed).") var promptRatePerMtok: UInt64?
     @Option(help: "Cached-prompt rate per million tokens (no higher than the prompt rate).") var promptCacheHitRatePerMtok: UInt64?
     @Option(help: "Completion rate per million tokens.") var completionRatePerMtok: UInt64?
-    @Option(help: "max_context_tokens for a --from-proposal entry that reports none.") var maxContextTokens: UInt64?
+    @Option(help: "max_context_tokens for --from-proposal entries (required).") var maxContextTokens: UInt64?
 
     func run() async throws {
         var options = CreatorOperations.ManifestOptions()
