@@ -180,6 +180,9 @@ func (w *evidenceArchiveWriter) writeRequest(b requestEvidenceBundle) error {
 			return err
 		}
 	}
+	if err := write(evidenceRetentionJournalTable, evidenceArchiveRoleEvidence, b.routeJournal); err != nil {
+		return err
+	}
 	w.requests++
 	return nil
 }
@@ -453,6 +456,9 @@ func equalRowCounts(a, b map[string]int64) bool {
 }
 
 func evidenceArchiveKnownTable(table string) bool {
+	if table == evidenceRetentionJournalTable {
+		return true
+	}
 	for _, t := range evidenceRetentionTables {
 		if t == table {
 			return true

@@ -227,6 +227,26 @@ func TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence(t *testing.T
 	if report.RouteJournalDeletedRows != 2 {
 		t.Fatalf("route journal deleted=%d want 2", report.RouteJournalDeletedRows)
 	}
+	// The journal copies are archived losslessly before they are deleted.
+	manifest, err := readEvidenceArchiveManifest(filepath.Join(dir, report.ArchiveFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manifest.RowCounts[evidenceRetentionJournalTable]; got != 2 {
+		t.Fatalf("archived journal rows=%d want 2", got)
+	}
+	journalColumns := scalar(t, f.journalDB, `SELECT COUNT(*) FROM pragma_table_info('settlement_route_snapshot_journal')`)
+	err = streamEvidenceArchive(filepath.Join(dir, report.ArchiveFile), manifest, func(req archivedRequest) error {
+		for _, row := range req.Rows[evidenceRetentionJournalTable] {
+			if int64(len(row)) != journalColumns {
+				t.Errorf("archived journal row has %d columns, table has %d", len(row), journalColumns)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The money record stays hot and unchanged.
 	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE settled = 1`); got != 3 {
 		t.Fatalf("settled credits=%d want 3", got)
@@ -542,6 +562,113 @@ INSERT INTO settlement_receipt_audit_outbox (
 	}
 	if got := report.Tables["settlement_route_snapshots"].DeletedRows; got != 2 {
 		t.Fatalf("deleted route snapshots=%d want 2", got)
+	}
+}
+
+// A row whose id is archived but whose content changed after export is not
+// deleted: the archive would hold the earlier contents.
+func TestEvidenceRetentionRefusesRowChangedAfterExport(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	verifier := &recordingVerifier{hook: func() {
+		if _, err := f.store.db.Exec(`UPDATE settlement_receipt_verdicts SET reason = reason || '-changed' WHERE request_id = ?`, b.RequestID); err != nil {
+			t.Error(err)
+		}
+	}}
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), verifier.verify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedRequests != 1 || report.SkippedRequests[retentionSkipHotRowChanged] != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+	if f.hotRows(t, "b") != 3 || f.hotRows(t, "c") != 0 {
+		t.Fatalf("hot rows b=%d c=%d", f.hotRows(t, "b"), f.hotRows(t, "c"))
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_id = ?`, b.RequestID); got != 0 {
+		t.Fatalf("changed request tombstones=%d want 0", got)
+	}
+}
+
+func TestEvidenceArchiveRowsEqualComparesEveryColumn(t *testing.T) {
+	base := archiveRow{"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AA=="}}
+	same := archiveRow{"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AA=="}}
+	if !archiveRowsEqual(base, same) {
+		t.Fatal("identical rows differ")
+	}
+	// An integral REAL reads back from JSON as an integer.
+	if !archiveRowsEqual(archiveRow{"r": float64(4)}, archiveRow{"r": int64(4)}) {
+		t.Fatal("integral REAL and its JSON round trip differ")
+	}
+	for name, other := range map[string]archiveRow{
+		"text":    {"id": int64(1), "a": "y", "n": nil, "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AA=="}},
+		"null":    {"id": int64(1), "a": "x", "n": "v", "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AA=="}},
+		"real":    {"id": int64(1), "a": "x", "n": nil, "f": float64(2.6), "i": int64(3), "b": archiveBlob{Base64: "AA=="}},
+		"int":     {"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(4), "b": archiveBlob{Base64: "AA=="}},
+		"blob":    {"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AQ=="}},
+		"type":    {"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": "3", "b": archiveBlob{Base64: "AA=="}},
+		"missing": {"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(3)},
+		"extra":   {"id": int64(1), "a": "x", "n": nil, "f": float64(2.5), "i": int64(3), "b": archiveBlob{Base64: "AA=="}, "z": nil},
+	} {
+		if archiveRowsEqual(base, other) {
+			t.Fatalf("%s: changed row compared equal", name)
+		}
+	}
+}
+
+// Journal copies are deleted after the main transaction commits. A run that
+// stops between the two leaves them hot; the next run resumes the archive,
+// retries the journal step for the requests it already tombstoned, and only
+// then marks the archive deleted.
+func TestEvidenceRetentionRetriesInterruptedJournalCleanup(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, true)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	if n, err := f.store.MirrorPendingRouteSnapshots(ctx, 100); err != nil || n != 2 {
+		t.Fatalf("mirror route journal n=%d err=%v", n, err)
+	}
+	f.settle(t)
+	if _, err := f.journalDB.Exec(`CREATE TRIGGER block_journal_delete BEFORE DELETE ON settlement_route_snapshot_journal BEGIN SELECT RAISE(ABORT, 'journal unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	opts := retentionTestOptions(dir, (&recordingVerifier{}).verify)
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err == nil || report.Status == EvidenceRetentionStatusDeleted {
+		t.Fatalf("interrupted run err=%v report=%+v", err, report)
+	}
+	if f.hotRows(t, "b") != 0 {
+		t.Fatal("main rows not deleted before the journal step")
+	}
+	journalRows := func() int64 {
+		return scalar(t, f.journalDB, `SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id = ?`, b.RequestID)
+	}
+	if journalRows() != 1 {
+		t.Fatalf("journal rows after interruption=%d want 1", journalRows())
+	}
+	if got := scalar(t, f.store.db, `SELECT status = 'offhost_verified' FROM settlement_evidence_archives`); got != 1 {
+		t.Fatal("interrupted archive was not left pending")
+	}
+	if _, err := f.journalDB.Exec(`DROP TRIGGER block_journal_delete`); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusDeleted || !report.ResumedArchive || report.RouteJournalDeletedRows != 1 {
+		t.Fatalf("resumed run=%+v", report)
+	}
+	if journalRows() != 0 {
+		t.Fatalf("journal rows after resume=%d want 0", journalRows())
+	}
+	if got := scalar(t, f.store.db, `SELECT status = 'deleted' FROM settlement_evidence_archives`); got != 1 {
+		t.Fatal("archive not marked deleted after the journal retry")
 	}
 }
 

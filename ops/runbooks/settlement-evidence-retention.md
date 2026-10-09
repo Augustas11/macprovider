@@ -131,6 +131,13 @@ persisted cursor and writes nothing.
      or count check. It is marked `failed` and nothing is deleted. The next
      run writes a fresh archive.
    - `nothing_eligible`.
+
+   `skipped_requests.hot_row_changed_since_archive` counts requests left hot
+   because a row changed after export; the next archive picks them up.
+   `route_snapshot_journal_kept_rows` counts archived journal rows left hot
+   for the same reason. If a run stops after the main delete commits but
+   before the journal step, the archive stays `offhost_verified` and the next
+   run finishes the journal step before marking it `deleted`.
 6. Copy every finished archive and its manifest into long-term off-host
    storage. Retention never deletes archive files.
 

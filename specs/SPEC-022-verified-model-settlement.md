@@ -2011,7 +2011,15 @@ unless all of the following hold:
 
 Deletion takes its row identities from the verified archive file, not from
 process memory. It deletes only rows present in that file, and refuses a
-request whose hot rows include any row that is not in the archive.
+request whose hot rows include any row that is not in the archive or whose
+columns differ from its archived copy.
+
+The route-snapshot journal is a separate database file, so its archived rows
+are deleted after the main delete transaction commits, by id, and only while
+each live row still equals its archived copy. A run interrupted between the
+two steps resumes the same archive: it retries the journal step for every
+request that archive already tombstoned, and marks the archive deleted only
+after that step completes.
 
 R-15.5. Bounded work. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is

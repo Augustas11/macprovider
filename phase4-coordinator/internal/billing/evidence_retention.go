@@ -32,6 +32,11 @@ var evidenceRetentionTables = []string{
 	"settlement_route_snapshots",
 }
 
+// evidenceRetentionJournalTable is the route-snapshot journal, in its own
+// database file. Its rows are archived losslessly with the request and
+// deleted only after the main-database rows they mirror.
+const evidenceRetentionJournalTable = "settlement_route_snapshot_journal"
+
 // evidenceReferenceTables are copied into the archive so a settled credit
 // can be rederived from the archive alone. They are never deleted.
 var evidenceReferenceTables = []string{
@@ -84,6 +89,7 @@ const (
 	retentionSkipFirstVerified      = "provider_first_verified_verdict"
 	retentionSkipAlreadyArchived    = "already_archived"
 	retentionSkipHotRowNotArchived  = "hot_row_not_in_archive"
+	retentionSkipHotRowChanged      = "hot_row_changed_since_archive"
 )
 
 var (
@@ -212,8 +218,11 @@ type EvidenceRetentionReport struct {
 	ResumedArchive          bool                                   `json:"resumed_archive,omitempty"`
 	DeletedRequests         int                                    `json:"deleted_requests"`
 	RouteJournalDeletedRows int64                                  `json:"route_snapshot_journal_deleted_rows"`
-	Vacuum                  []EvidenceRetentionVacuumReport        `json:"vacuum,omitempty"`
-	Error                   string                                 `json:"error,omitempty"`
+	// RouteJournalKeptRows are archived journal rows left hot because the
+	// live row no longer equals its archived copy.
+	RouteJournalKeptRows int64                           `json:"route_snapshot_journal_kept_rows,omitempty"`
+	Vacuum               []EvidenceRetentionVacuumReport `json:"vacuum,omitempty"`
+	Error                string                          `json:"error,omitempty"`
 }
 
 // EvidenceRetentionVacuumReport is the incremental-vacuum outcome of one
@@ -560,10 +569,11 @@ func collectRouteJournal(ctx context.Context, journalDB *sql.DB, b *requestEvide
 		return nil
 	}
 	for _, scope := range b.scopes {
+		// Every column: the rows are archived losslessly (R-15.3).
 		rows, err := queryArchiveRows(ctx, journalDB, `
-SELECT account_scope, request_id, attempt_n, provider_id, route_snapshot_digest, mirrored_at_utc
-  FROM settlement_route_snapshot_journal
- WHERE account_scope = ? AND request_id = ?`, scope, b.requestID)
+SELECT * FROM settlement_route_snapshot_journal
+ WHERE account_scope = ? AND request_id = ?
+ ORDER BY id`, scope, b.requestID)
 		if err != nil {
 			return err
 		}
@@ -857,14 +867,48 @@ func (s *Store) anyCreditArchived(ctx context.Context, q evidenceQueryer, b requ
 	return rows.Next(), rows.Err()
 }
 
+// creditTombstones counts the request's credits that retention already
+// tombstoned and reports whether archiveID wrote every one of them.
+func creditTombstones(ctx context.Context, q evidenceQueryer, b requestEvidenceBundle, archiveID int64) (int, bool, error) {
+	if len(b.credits) == 0 {
+		return 0, false, nil
+	}
+	ids := make([]int64, len(b.credits))
+	for i, c := range b.credits {
+		ids[i] = c.id
+	}
+	ph, args := int64Placeholders(ids)
+	rows, err := q.QueryContext(ctx, `SELECT archive_id FROM settlement_evidence_archived_credits WHERE request_credit_id IN (`+ph+`)`, args...)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	n, all := 0, true
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, false, err
+		}
+		n++
+		all = all && id == archiveID
+	}
+	return n, all, rows.Err()
+}
+
 func addRetentionStats(report *EvidenceRetentionReport, b requestEvidenceBundle) {
-	for _, table := range evidenceRetentionTables {
+	add := func(table string, rows []archiveRow) {
 		st := report.Tables[table]
-		for _, row := range b.evidence[table] {
+		for _, row := range rows {
 			st.Rows++
 			st.PayloadBytes += archiveRowPayloadBytes(row)
 		}
 		report.Tables[table] = st
+	}
+	for _, table := range evidenceRetentionTables {
+		add(table, b.evidence[table])
+	}
+	if len(b.routeJournal) > 0 {
+		add(evidenceRetentionJournalTable, b.routeJournal)
 	}
 }
 
@@ -1158,26 +1202,28 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 			case <-timer.C:
 			}
 		}
-		// The route-snapshot journal lives in another database file, so its
-		// mirror state is checked before the main transaction.
+		// The route-snapshot journal lives in another database file, so it is
+		// checked before the main transaction: every live journal row of the
+		// request must equal its archived copy.
 		journalOK := map[string]bool{}
 		for _, req := range batch {
 			b := requestEvidenceBundle{requestID: req.RequestID, scopes: archivedScopes(req)}
 			if err := collectRouteJournal(ctx, journalDB, &b); err != nil {
 				return err
 			}
-			b.evidence = map[string][]archiveRow{"settlement_route_snapshots": req.Rows["settlement_route_snapshots"]}
-			ok, _ := evaluateRouteJournalOnly(b)
-			journalOK[req.RequestID] = ok
+			journalOK[req.RequestID] = rowsMatchArchive(b.routeJournal, req.Rows[evidenceRetentionJournalTable]) == ""
 		}
-		done, err := s.deleteArchivedBatch(ctx, archiveID, batch, cut, journalOK, report)
+		done, cleanup, err := s.deleteArchivedBatch(ctx, archiveID, batch, cut, journalOK, report)
 		if err != nil {
 			return err
 		}
 		deleted += len(done)
 		processed += len(batch)
 		batch, batchBytes = nil, 0
-		return deleteMirroredRouteJournalRows(ctx, journalDB, done, report)
+		// Journal copies go after the main rows commit. Requests this archive
+		// tombstoned in an earlier, interrupted run are in cleanup too, so the
+		// journal step is retried until the archive is marked deleted.
+		return deleteArchivedRouteJournalRows(ctx, journalDB, cleanup, report)
 	}
 	err = streamEvidenceArchive(archive.Path, archive.Manifest, func(req archivedRequest) error {
 		if want, ok := archive.Digests[req.RequestID]; !ok || want != req.Digest {
@@ -1223,14 +1269,18 @@ func evaluateRouteJournalOnly(b requestEvidenceBundle) (bool, string) {
 	return true, ""
 }
 
-func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch []archivedRequest, cut evidenceRetentionCutoffs, journalOK map[string]bool, report *EvidenceRetentionReport) ([]archivedRequest, error) {
+// deleteArchivedBatch deletes one batch in one transaction. It returns the
+// requests it deleted and the requests whose route-journal copies must now be
+// removed: those plus requests this archive already tombstoned in an earlier
+// run that stopped before its journal step.
+func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch []archivedRequest, cut evidenceRetentionCutoffs, journalOK map[string]bool, report *EvidenceRetentionReport) ([]archivedRequest, []archivedRequest, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	committed := false
 	defer func() {
@@ -1240,34 +1290,44 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 	}()
 	stamp := sqliteTimeText(s.nowUTC())
 	first := &providerFirstVerifiedVerdicts{q: conn, cache: map[string]int64{}}
-	var done []archivedRequest
+	var done, cleanup []archivedRequest
 	tableDeleted := map[string]int64{}
 	floorRecorded := false
 	for _, req := range batch {
+		b, err := collectRequestEvidence(ctx, conn, req.RequestID)
+		if err != nil {
+			return nil, nil, err
+		}
+		tombstones, byThisArchive, err := creditTombstones(ctx, conn, b, archiveID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if tombstones > 0 {
+			if byThisArchive && tombstones == len(b.credits) && sameCredits(b, req) {
+				cleanup = append(cleanup, req)
+			} else {
+				report.SkippedRequests[retentionSkipAlreadyArchived]++
+			}
+			continue
+		}
 		if !journalOK[req.RequestID] {
 			report.SkippedRequests[retentionSkipRouteJournal]++
 			continue
 		}
-		b, err := collectRequestEvidence(ctx, conn, req.RequestID)
-		if err != nil {
-			return nil, err
-		}
-		if archivedAny, err := s.anyCreditArchived(ctx, conn, b); err != nil {
-			return nil, err
-		} else if archivedAny {
-			report.SkippedRequests[retentionSkipAlreadyArchived]++
-			continue
-		}
 		firstVerified, err := first.forBundle(ctx, b)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, false); !ok {
 			report.SkippedRequests[reason]++
 			continue
 		}
-		if !hotRowsSubsetOfArchive(b, req) || !sameCredits(b, req) {
+		if !sameCredits(b, req) {
 			report.SkippedRequests[retentionSkipHotRowNotArchived]++
+			continue
+		}
+		if reason := hotRowsMatchArchive(b, req); reason != "" {
+			report.SkippedRequests[reason]++
 			continue
 		}
 		if !floorRecorded {
@@ -1276,7 +1336,7 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 			// already recorded this floor; recording it again here makes every
 			// deletion commit with it, whatever happened to the row since.
 			if err := recordBillingCompatFloorExec(ctx, conn, billingCompatContractEvidenceRetention); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			floorRecorded = true
 		}
@@ -1285,7 +1345,7 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 				id, _ := row.int64("id")
 				res, err := conn.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = ?`, id)
 				if err != nil {
-					return nil, fmt.Errorf("delete %s id=%d: %w", table, id, err)
+					return nil, nil, fmt.Errorf("delete %s id=%d: %w", table, id, err)
 				}
 				n, _ := res.RowsAffected()
 				tableDeleted[table] += n
@@ -1298,7 +1358,7 @@ INSERT INTO settlement_evidence_archived_verdict_counts (provider_id, settlement
 VALUES (?, ?, ?, 1)
 ON CONFLICT(provider_id, settlement_outcome, receipt_result) DO UPDATE SET verdict_count = verdict_count + 1`,
 						providerID, outcome, result); err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 				}
 			}
@@ -1308,13 +1368,14 @@ ON CONFLICT(provider_id, settlement_outcome, receipt_result) DO UPDATE SET verdi
 			if _, err := conn.ExecContext(ctx, `
 INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc)
 VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stamp); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		done = append(done, req)
+		cleanup = append(cleanup, req)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	committed = true
 	for table, n := range tableDeleted {
@@ -1322,7 +1383,7 @@ VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stam
 		st.DeletedRows += n
 		report.Tables[table] = st
 	}
-	return done, nil
+	return done, cleanup, nil
 }
 
 // archivedCreditVerified mirrors the billing mirror's spec022_verified
@@ -1346,24 +1407,85 @@ func archivedCreditVerified(c retentionCredit, verdicts []archiveRow) bool {
 	return false
 }
 
-// hotRowsSubsetOfArchive refuses a request whose hot evidence includes any
-// row the verified archive does not hold (SPEC-022 R-15.4).
-func hotRowsSubsetOfArchive(b requestEvidenceBundle, req archivedRequest) bool {
+// hotRowsMatchArchive refuses a request whose hot evidence includes a row
+// the verified archive does not hold, or a row whose content changed after
+// it was archived (SPEC-022 R-15.4): deletion must lose nothing.
+func hotRowsMatchArchive(b requestEvidenceBundle, req archivedRequest) string {
 	for _, table := range evidenceRetentionTables {
-		archived := map[int64]bool{}
-		for _, row := range req.Rows[table] {
-			if id, ok := row.int64("id"); ok {
-				archived[id] = true
-			}
+		if reason := rowsMatchArchive(b.evidence[table], req.Rows[table]); reason != "" {
+			return reason
 		}
-		for _, row := range b.evidence[table] {
-			id, ok := row.int64("id")
-			if !ok || !archived[id] {
-				return false
-			}
+	}
+	return ""
+}
+
+// rowsMatchArchive reports why live rows are not all present, column for
+// column, among the archived rows ("" when they are).
+func rowsMatchArchive(live, archived []archiveRow) string {
+	byID := make(map[int64]archiveRow, len(archived))
+	for _, row := range archived {
+		if id, ok := row.int64("id"); ok {
+			byID[id] = row
+		}
+	}
+	for _, row := range live {
+		id, ok := row.int64("id")
+		if !ok {
+			return retentionSkipHotRowNotArchived
+		}
+		want, ok := byID[id]
+		if !ok {
+			return retentionSkipHotRowNotArchived
+		}
+		if !archiveRowsEqual(row, want) {
+			return retentionSkipHotRowChanged
+		}
+	}
+	return ""
+}
+
+// archiveRowsEqual compares two rows column by column. A REAL that holds an
+// integral value is written to JSON without a fraction and reads back as an
+// integer, so numbers compare by value.
+func archiveRowsEqual(a, b archiveRow) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for col, av := range a {
+		bv, ok := b[col]
+		if !ok || !archiveValuesEqual(av, bv) {
+			return false
 		}
 	}
 	return true
+}
+
+func archiveValuesEqual(a, b any) bool {
+	switch x := a.(type) {
+	case nil:
+		return b == nil
+	case string:
+		y, ok := b.(string)
+		return ok && x == y
+	case archiveBlob:
+		y, ok := b.(archiveBlob)
+		return ok && x == y
+	case int64:
+		switch y := b.(type) {
+		case int64:
+			return x == y
+		case float64:
+			return float64(x) == y && int64(y) == x
+		}
+	case float64:
+		switch y := b.(type) {
+		case float64:
+			return x == y
+		case int64:
+			return float64(y) == x && int64(x) == y
+		}
+	}
+	return false
 }
 
 func sameCredits(b requestEvidenceBundle, req archivedRequest) bool {
@@ -1382,10 +1504,12 @@ func sameCredits(b requestEvidenceBundle, req archivedRequest) bool {
 	return true
 }
 
-// deleteMirroredRouteJournalRows removes the route-snapshot journal copies
-// of deleted snapshots: mirrored rows whose key and digest match.
-func deleteMirroredRouteJournalRows(ctx context.Context, journalDB *sql.DB, done []archivedRequest, report *EvidenceRetentionReport) error {
-	if journalDB == nil || len(done) == 0 {
+// deleteArchivedRouteJournalRows removes the route-snapshot journal rows
+// archived with each request, by id, only while the live row still equals
+// its archived copy. A row already gone is the expected state on a retry; a
+// row that changed stays hot and is reported.
+func deleteArchivedRouteJournalRows(ctx context.Context, journalDB *sql.DB, reqs []archivedRequest, report *EvidenceRetentionReport) error {
+	if journalDB == nil || len(reqs) == 0 {
 		return nil
 	}
 	tx, err := journalDB.BeginTx(ctx, nil)
@@ -1393,24 +1517,42 @@ func deleteMirroredRouteJournalRows(ctx context.Context, journalDB *sql.DB, done
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, req := range done {
-		for _, srs := range req.Rows["settlement_route_snapshots"] {
-			scope, _ := srs.str("account_scope")
-			attempt, _ := srs.int64("attempt_n")
-			provider, _ := srs.str("provider_id")
-			digest, _ := srs.str("route_snapshot_digest")
-			res, err := tx.ExecContext(ctx, `
-DELETE FROM settlement_route_snapshot_journal
- WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
-   AND route_snapshot_digest = ? AND mirrored_at_utc IS NOT NULL`, scope, req.RequestID, attempt, provider, digest)
+	var deleted, kept int64
+	for _, req := range reqs {
+		for _, archived := range req.Rows[evidenceRetentionJournalTable] {
+			id, ok := archived.int64("id")
+			if !ok {
+				kept++
+				continue
+			}
+			live, err := queryArchiveRows(ctx, tx, `SELECT * FROM settlement_route_snapshot_journal WHERE id = ?`, id)
+			if err != nil {
+				return err
+			}
+			if len(live) == 0 {
+				continue
+			}
+			if !archiveRowsEqual(live[0], archived) {
+				kept++
+				continue
+			}
+			res, err := tx.ExecContext(ctx, `DELETE FROM settlement_route_snapshot_journal WHERE id = ?`, id)
 			if err != nil {
 				return err
 			}
 			n, _ := res.RowsAffected()
-			report.RouteJournalDeletedRows += n
+			deleted += n
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	report.RouteJournalDeletedRows += deleted
+	report.RouteJournalKeptRows += kept
+	st := report.Tables[evidenceRetentionJournalTable]
+	st.DeletedRows += deleted
+	report.Tables[evidenceRetentionJournalTable] = st
+	return nil
 }
 
 func (s *Store) incrementalVacuumAll(ctx context.Context, opts EvidenceRetentionOptions) []EvidenceRetentionVacuumReport {
