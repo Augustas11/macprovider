@@ -26,6 +26,10 @@ func (f *fakeEarningsRollupRefresher) RefreshProviderEarningsRollup(ctx context.
 	return billing.ProviderEarningsRollupPass{More: n < f.moreUntil, BackfillComplete: n >= f.moreUntil}, nil
 }
 
+func (f *fakeEarningsRollupRefresher) ProviderEarningsRollupBacklog(context.Context) (billing.ProviderEarningsRollupBacklog, error) {
+	return billing.ProviderEarningsRollupBacklog{BackfillComplete: true}, nil
+}
+
 type busyIdleTracker struct{}
 
 func (busyIdleTracker) IdleFor(time.Time) time.Duration { return 0 }

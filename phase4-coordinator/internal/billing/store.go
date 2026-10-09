@@ -88,7 +88,12 @@ type Store struct {
 	// earningsRollupReadHook runs inside an earnings read between the cache
 	// eligibility check and the live reads (tests only).
 	earningsRollupReadHook func()
-	earningsRollupCursors  earningsRollupCursors
+	// earningsViewReadHook runs inside a full-view earnings read between its
+	// payable totals and its pending sum (tests only).
+	earningsViewReadHook func()
+	// earningsViewFallbacks counts earnings reads the rollup could not serve.
+	earningsViewFallbacks atomic.Int64
+	earningsRollupSched   earningsRollupScheduler
 }
 
 type SQLiteMetrics interface {

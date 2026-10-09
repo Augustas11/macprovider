@@ -1664,30 +1664,71 @@ func (h *handler) providerEarningsFigures(ctx context.Context, providerID string
 	if err != nil || ok {
 		return figures, err
 	}
+	h.store.earningsViewFallbacks.Add(1)
 	return h.providerEarningsFiguresFromView(ctx, providerID, win)
 }
 
 // providerEarningsFiguresFromView reads the figures from the provider's whole
-// payable history; its cost is linear in that history.
+// payable history; its cost is linear in that history. All statements run in
+// one read snapshot and, like the rollup read, are retried if a force credit
+// of the provider matured during the read, so the fields agree with each
+// other. If maturities keep racing, the last read is returned.
 func (h *handler) providerEarningsFiguresFromView(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {
-	rangeSQL, rangeArgs := earningsRangeFilter(win.from, win.to, win.hasRange)
-	payable, err := h.providerPayableTotals(ctx, providerID, sqliteTimeText(win.week), sqliteTimeText(win.today), rangeSQL, rangeArgs...)
+	var last providerEarningsFigures
+	for attempt := 0; attempt < providerEarningsRollupReadAttempts; attempt++ {
+		figures, err := h.providerEarningsFiguresFromViewOnce(ctx, providerID, win)
+		if !errors.Is(err, errEarningsRollupMaturityRace) {
+			return figures, err
+		}
+		last = figures
+	}
+	return last, nil
+}
+
+func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, providerID string, win earningsWindows) (providerEarningsFigures, error) {
+	tx, err := h.store.reader().BeginTx(ctx, nil)
 	if err != nil {
 		return providerEarningsFigures{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var cutoff string
+	if err := tx.QueryRowContext(ctx, `SELECT `+sqliteNowText).Scan(&cutoff); err != nil {
+		return providerEarningsFigures{}, err
+	}
+	rangeSQL, rangeArgs := earningsRangeFilter(win.from, win.to, win.hasRange)
+	payable, err := providerPayableTotalsOn(ctx, tx, providerID, sqliteTimeText(win.week), sqliteTimeText(win.today), rangeSQL, rangeArgs...)
+	if err != nil {
+		return providerEarningsFigures{}, err
+	}
+	if h.store.earningsViewReadHook != nil {
+		h.store.earningsViewReadHook()
 	}
 	out := providerEarningsFigures{total: payable.total, week: payable.week, today: payable.today, models: payable.models}
 	// Without a range the lifetime scan above is exactly the pending sum.
 	out.pending = out.total
 	if win.hasRange {
-		if out.pending, err = sumOn(ctx, h.store.reader(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID); err != nil {
+		if out.pending, err = sumOnQ(ctx, tx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID); err != nil {
 			return providerEarningsFigures{}, err
 		}
 	}
-	out.faults, err = sumOn(ctx, h.store.reader(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
+	out.faults, err = sumOnQ(ctx, tx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
 	if err != nil {
 		return providerEarningsFigures{}, err
 	}
+	if raced, err := providerMaturedSince(ctx, tx, providerID, cutoff); err != nil {
+		return providerEarningsFigures{}, err
+	} else if raced {
+		return out, errEarningsRollupMaturityRace
+	}
 	return out, nil
+}
+
+func sumOnQ(ctx context.Context, q sqlQueryer, query string, args ...any) (int64, error) {
+	var n sql.NullInt64
+	if err := q.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n.Int64, nil
 }
 
 type providerPayableTotals struct {
@@ -1702,8 +1743,12 @@ type providerPayableTotals struct {
 // again over the provider's lifetime. The remaining cost is still linear in
 // the provider's payable history (walked via its provider_id index).
 func (h *handler) providerPayableTotals(ctx context.Context, providerID, weekStart, todayStart, rangeSQL string, rangeArgs ...any) (providerPayableTotals, error) {
+	return providerPayableTotalsOn(ctx, h.store.reader(), providerID, weekStart, todayStart, rangeSQL, rangeArgs...)
+}
+
+func providerPayableTotalsOn(ctx context.Context, q sqlQueryer, providerID, weekStart, todayStart, rangeSQL string, rangeArgs ...any) (providerPayableTotals, error) {
 	args := append([]any{weekStart, todayStart, providerID}, rangeArgs...)
-	rows, err := h.store.reader().QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 SELECT model,
        SUM(provider_credits),
        SUM(CASE WHEN `+sqliteTimeSince("ts_utc")+` THEN provider_credits END),

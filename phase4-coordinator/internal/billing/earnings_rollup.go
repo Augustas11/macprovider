@@ -46,6 +46,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -307,8 +308,6 @@ CREATE INDEX IF NOT EXISTS idx_perb_dirty ON provider_earnings_rollup_buckets(pr
 CREATE INDEX IF NOT EXISTS idx_perb_epoch ON provider_earnings_rollup_buckets(computed_epoch, provider_id, bucket_hour);
 CREATE INDEX IF NOT EXISTS idx_perb_stale ON provider_earnings_rollup_buckets(stale_at_utc)
     WHERE stale_at_utc IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_lqr_force_credit_matures ON ledger_quarantine_resolutions(force_credit_matures_at_utc)
-    WHERE resolution_kind = 'force_credit' AND force_credit_matures_at_utc IS NOT NULL;
 `); err != nil {
 		return err
 	}
@@ -522,38 +521,128 @@ type ProviderEarningsRollupPass struct {
 	// Conflicts counts recomputes discarded because a writer or a reset moved
 	// the bucket after the read snapshot; a later pass retries them.
 	Conflicts int
-	// Failed counts buckets whose recompute errored; the pass skipped them and
-	// went on. LastFailure is the last such error.
-	Failed      int
-	LastFailure error
-	// More is true when the pass stopped at a bound (limit or ctx deadline)
-	// with work left.
+	// SlowOrFailed counts buckets that exceeded their time slice or errored;
+	// each is backed off (doubling, up to an hour) so it cannot take every
+	// pass's budget. LastFailure is the last such error.
+	SlowOrFailed int
+	LastFailure  error
+	// LockBusy is true when the pass stopped because another connection held
+	// the write lock longer than the maintenance lock wait.
+	LockBusy bool
+	// More is true when the pass stopped at a bound (limit, ctx deadline, or
+	// a busy write lock) with work left.
 	More bool
 }
 
-var errEarningsRollupMoved = errors.New("provider earnings rollup bucket changed during recompute")
+var (
+	errEarningsRollupMoved    = errors.New("provider earnings rollup bucket changed during recompute")
+	errEarningsRollupLockBusy = errors.New("provider earnings rollup: write lock busy")
+)
+
+const (
+	// earningsRollupLockWaitMax caps how long maintenance waits for the
+	// SQLite write lock (and so holds the shared writer connection while
+	// waiting); the connection's own busy_timeout is restored afterwards.
+	earningsRollupLockWaitMax = 250 * time.Millisecond
+	// earningsRollupBucketSlice is a bucket's first time slice; each backoff
+	// doubles it up to earningsRollupBucketSliceMax.
+	earningsRollupBucketSlice    = 250 * time.Millisecond
+	earningsRollupBucketSliceMax = time.Second
+	earningsRollupBackoffBase    = time.Minute
+	earningsRollupBackoffMax     = time.Hour
+	earningsRollupBackoffEntries = 4096
+)
 
 type earningsBucketKey struct{ provider, hour string }
 
-// earningsRollupCursors rotates the refresher's scans so buckets that keep
-// conflicting cannot starve the rest.
-type earningsRollupCursors struct {
-	mu    sync.Mutex
-	dirty earningsBucketKey
-	epoch earningsBucketKey
+type earningsRollupBackoff struct {
+	failures int
+	retryAt  time.Time
+}
+
+// earningsRollupQueue is one class of refresh work. Each pass takes a
+// guaranteed share from every class, interleaved, so no class can starve
+// another, and each class rotates by (provider, hour) so no bucket can
+// starve its own class.
+type earningsRollupQueue int
+
+const (
+	earningsQueueDirty earningsRollupQueue = iota
+	earningsQueueStale
+	earningsQueueOldEpoch
+	earningsQueueCount
+)
+
+// earningsRollupScheduler is the refresher's in-memory state.
+type earningsRollupScheduler struct {
+	mu      sync.Mutex
+	cursors [earningsQueueCount]earningsBucketKey
+	backoff map[earningsBucketKey]earningsRollupBackoff
+	turn    int
+}
+
+func (q *earningsRollupScheduler) slice(k earningsBucketKey) time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	d := earningsRollupBucketSlice
+	for i := 0; i < q.backoff[k].failures && d < earningsRollupBucketSliceMax; i++ {
+		d *= 2
+	}
+	return min(d, earningsRollupBucketSliceMax)
+}
+
+func (q *earningsRollupScheduler) deferred(k earningsBucketKey, now time.Time) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	b, ok := q.backoff[k]
+	return ok && now.Before(b.retryAt)
+}
+
+func (q *earningsRollupScheduler) fail(k earningsBucketKey, now time.Time) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.backoff == nil {
+		q.backoff = map[earningsBucketKey]earningsRollupBackoff{}
+	}
+	if len(q.backoff) >= earningsRollupBackoffEntries {
+		for key, b := range q.backoff {
+			if !now.Before(b.retryAt) {
+				delete(q.backoff, key)
+			}
+		}
+	}
+	b := q.backoff[k]
+	b.failures++
+	delay := earningsRollupBackoffBase
+	for i := 1; i < b.failures && delay < earningsRollupBackoffMax; i++ {
+		delay *= 2
+	}
+	b.retryAt = now.Add(min(delay, earningsRollupBackoffMax))
+	q.backoff[k] = b
+}
+
+func (q *earningsRollupScheduler) succeed(k earningsBucketKey) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.backoff, k)
 }
 
 // RefreshProviderEarningsRollup runs one bounded pass: one backfill batch
-// while the backfill is incomplete, then up to limit buckets that are stale,
-// dirty, or from an older epoch. It stops early, without error, when ctx's
-// deadline passes; each bucket is its own short write transaction and reads
-// use the read pool.
+// while the backfill is incomplete, then up to limit buckets taken in equal
+// interleaved shares from the dirty, stale and old-epoch classes. It stops
+// early, without error, when ctx's deadline passes or another connection
+// holds the write lock. Every bucket runs under its own time slice; one that
+// overruns it, or errors, is backed off. Reads use the read pool.
 func (s *Store) RefreshProviderEarningsRollup(ctx context.Context, limit int) (ProviderEarningsRollupPass, error) {
 	var pass ProviderEarningsRollupPass
 	if limit <= 0 || limit > DefaultProviderEarningsRollupLimit {
 		limit = DefaultProviderEarningsRollupLimit
 	}
 	yield := func(err error) (ProviderEarningsRollupPass, error) {
+		if errors.Is(err, errEarningsRollupLockBusy) {
+			pass.LockBusy, pass.More = true, true
+			return pass, nil
+		}
 		if ctx.Err() != nil {
 			pass.More = true
 			return pass, nil
@@ -566,62 +655,123 @@ func (s *Store) RefreshProviderEarningsRollup(ctx context.Context, limit int) (P
 	}
 	pass.BackfillMarked, pass.BackfillComplete = marked, complete
 	var epoch int64
-	if err := s.reader().QueryRowContext(ctx, `SELECT epoch FROM provider_earnings_rollup_state WHERE id = 1`).Scan(&epoch); err != nil {
+	var oldest sql.NullInt64
+	if err := s.reader().QueryRowContext(ctx, `
+SELECT s.epoch, (SELECT MIN(computed_epoch) FROM provider_earnings_rollup_buckets WHERE computed_epoch > 0)
+  FROM provider_earnings_rollup_state s WHERE s.id = 1`).Scan(&epoch, &oldest); err != nil {
 		return yield(err)
 	}
-	// Stale buckets get a reserved share so dirty churn cannot starve them.
-	work, err := s.selectEarningsBuckets(ctx, `
-SELECT provider_id, bucket_hour FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_stale
- WHERE stale_at_utc IS NOT NULL AND stale_at_utc <= `+sqliteNowText+` AND gen = computed_gen AND computed_epoch = ?
- ORDER BY stale_at_utc
- LIMIT ?`, epoch, max(1, limit/5))
-	if err != nil {
-		return yield(err)
-	}
-	if room := limit - len(work); room > 0 {
-		dirty, err := s.selectRotatingEarningsBuckets(ctx, &s.earningsRollupCursors.dirty, `INDEXED BY idx_perb_dirty WHERE gen != computed_gen`, nil, room)
+	share := (limit + int(earningsQueueCount) - 1) / int(earningsQueueCount)
+	var queues [earningsQueueCount][]earningsBucketKey
+	full := false
+	for qi := earningsRollupQueue(0); qi < earningsQueueCount; qi++ {
+		var cond string
+		var args []any
+		switch qi {
+		case earningsQueueDirty:
+			cond = `INDEXED BY idx_perb_dirty WHERE gen != computed_gen`
+		case earningsQueueStale:
+			cond = `INDEXED BY idx_perb_stale WHERE stale_at_utc IS NOT NULL AND stale_at_utc <= ` + sqliteNowText + ` AND gen = computed_gen AND computed_epoch = ?`
+			args = []any{epoch}
+		case earningsQueueOldEpoch:
+			// Epoch 0 means never computed: those rows are dirty work.
+			if !oldest.Valid || oldest.Int64 >= epoch {
+				continue
+			}
+			cond = `INDEXED BY idx_perb_epoch WHERE computed_epoch = ?`
+			args = []any{oldest.Int64}
+		}
+		keys, err := s.selectRotatingEarningsBuckets(ctx, qi, cond, args, share)
 		if err != nil {
 			return yield(err)
 		}
-		work = append(work, dirty...)
+		queues[qi] = keys
+		full = full || len(keys) == share
 	}
-	if room := limit - len(work); room > 0 {
-		// Buckets cached under an older epoch, oldest epoch first.
-		var oldest sql.NullInt64
-		if err := s.reader().QueryRowContext(ctx, `SELECT MIN(computed_epoch) FROM provider_earnings_rollup_buckets`).Scan(&oldest); err != nil {
-			return yield(err)
-		}
-		if oldest.Valid && oldest.Int64 < epoch {
-			old, err := s.selectRotatingEarningsBuckets(ctx, &s.earningsRollupCursors.epoch, `INDEXED BY idx_perb_epoch WHERE computed_epoch = ?`, []any{oldest.Int64}, room)
-			if err != nil {
-				return yield(err)
-			}
-			work = append(work, old...)
-		}
-	}
+	// Interleave the classes, starting from a different class each pass, so
+	// a tight time budget still reaches every class.
+	s.earningsRollupSched.mu.Lock()
+	start := s.earningsRollupSched.turn
+	s.earningsRollupSched.turn++
+	s.earningsRollupSched.mu.Unlock()
+	var work []earningsBucketKey
 	seen := map[earningsBucketKey]bool{}
-	for _, k := range work {
-		if seen[k] {
-			continue
+	for i := 0; i < share; i++ {
+		for j := 0; j < int(earningsQueueCount); j++ {
+			qi := (start + j) % int(earningsQueueCount)
+			if i < len(queues[qi]) && !seen[queues[qi][i]] {
+				seen[queues[qi][i]] = true
+				work = append(work, queues[qi][i])
+			}
 		}
-		seen[k] = true
+	}
+	for _, k := range work {
 		if ctx.Err() != nil {
 			return yield(nil)
 		}
-		switch err := s.recomputeProviderEarningsBucket(ctx, k.provider, k.hour); {
+		now := time.Now()
+		if s.earningsRollupSched.deferred(k, now) {
+			continue
+		}
+		bucketCtx, cancel := context.WithTimeout(ctx, s.earningsRollupSched.slice(k))
+		err := s.recomputeProviderEarningsBucket(bucketCtx, k.provider, k.hour)
+		overran := bucketCtx.Err() != nil
+		cancel()
+		switch {
 		case err == nil:
 			pass.Recomputed++
+			s.earningsRollupSched.succeed(k)
 		case errors.Is(err, errEarningsRollupMoved):
 			pass.Conflicts++
-		case ctx.Err() != nil:
-			return yield(nil)
+		case errors.Is(err, errEarningsRollupLockBusy), ctx.Err() != nil:
+			return yield(err)
 		default:
-			pass.Failed++
+			pass.SlowOrFailed++
+			if overran {
+				err = fmt.Errorf("exceeded its %s slice: %w", s.earningsRollupSched.slice(k), err)
+			}
 			pass.LastFailure = fmt.Errorf("recompute provider earnings bucket %s %q: %w", k.provider, k.hour, err)
+			s.earningsRollupSched.fail(k, now)
 		}
 	}
-	pass.More = !complete || len(work) == limit
+	pass.More = !complete || full
 	return pass, nil
+}
+
+// ProviderEarningsRollupBacklog is a cheap health snapshot: refresh work
+// waiting per class (each count capped at earningsRollupBacklogCap) and the
+// earnings reads served by the full view since the last call.
+type ProviderEarningsRollupBacklog struct {
+	BackfillComplete       bool
+	Dirty, Stale, OldEpoch int64
+	ViewFallbacksSinceLast int64
+}
+
+const earningsRollupBacklogCap = 100000
+
+func (s *Store) ProviderEarningsRollupBacklog(ctx context.Context) (ProviderEarningsRollupBacklog, error) {
+	var b ProviderEarningsRollupBacklog
+	var epoch int64
+	if err := s.reader().QueryRowContext(ctx, `SELECT epoch, backfill_complete = 1 FROM provider_earnings_rollup_state WHERE id = 1`).Scan(&epoch, &b.BackfillComplete); err != nil {
+		return b, err
+	}
+	capped := func(inner string, args ...any) (int64, error) {
+		var n int64
+		err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+inner+` LIMIT ?)`, append(args, earningsRollupBacklogCap)...).Scan(&n)
+		return n, err
+	}
+	var err error
+	if b.Dirty, err = capped(`SELECT 1 FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_dirty WHERE gen != computed_gen`); err != nil {
+		return b, err
+	}
+	if b.Stale, err = capped(`SELECT 1 FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_stale WHERE stale_at_utc IS NOT NULL AND stale_at_utc <= ` + sqliteNowText); err != nil {
+		return b, err
+	}
+	if b.OldEpoch, err = capped(`SELECT 1 FROM provider_earnings_rollup_buckets INDEXED BY idx_perb_epoch WHERE computed_epoch < ?`, epoch); err != nil {
+		return b, err
+	}
+	b.ViewFallbacksSinceLast = s.earningsViewFallbacks.Swap(0)
+	return b, nil
 }
 
 func (s *Store) selectEarningsBuckets(ctx context.Context, query string, args ...any) ([]earningsBucketKey, error) {
@@ -642,12 +792,13 @@ func (s *Store) selectEarningsBuckets(ctx context.Context, query string, args ..
 }
 
 // selectRotatingEarningsBuckets returns up to n buckets matching cond in
-// (provider, hour) order after *cursor, wrapping to the start, and advances
-// the cursor past the last one returned.
-func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, cursor *earningsBucketKey, cond string, args []any, n int) ([]earningsBucketKey, error) {
-	s.earningsRollupCursors.mu.Lock()
-	from := *cursor
-	s.earningsRollupCursors.mu.Unlock()
+// (provider, hour) order after the queue's cursor, wrapping to the start,
+// and advances the cursor past the last one returned (attempted or not).
+func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, qi earningsRollupQueue, cond string, args []any, n int) ([]earningsBucketKey, error) {
+	sched := &s.earningsRollupSched
+	sched.mu.Lock()
+	from := sched.cursors[qi]
+	sched.mu.Unlock()
 	base := `SELECT provider_id, bucket_hour FROM provider_earnings_rollup_buckets ` + cond
 	out, err := s.selectEarningsBuckets(ctx, base+` AND (provider_id, bucket_hour) > (?, ?) ORDER BY provider_id, bucket_hour LIMIT ?`, append(append([]any{}, args...), from.provider, from.hour, n)...)
 	if err != nil {
@@ -661,11 +812,70 @@ func (s *Store) selectRotatingEarningsBuckets(ctx context.Context, cursor *earni
 		out = append(out, wrapped...)
 	}
 	if len(out) > 0 {
-		s.earningsRollupCursors.mu.Lock()
-		*cursor = out[len(out)-1]
-		s.earningsRollupCursors.mu.Unlock()
+		sched.mu.Lock()
+		sched.cursors[qi] = out[len(out)-1]
+		sched.mu.Unlock()
 	}
 	return out, nil
+}
+
+// maintenanceTransact is sqliteutil.Transact for rollup maintenance with a
+// bounded write-lock wait. The SQLite busy handler ignores context
+// cancellation, so the reserved writer connection's busy_timeout is lowered
+// to min(earningsRollupLockWaitMax, remaining ctx budget) for BEGIN IMMEDIATE
+// and restored before the connection returns to the pool; a connection whose
+// timeout cannot be restored is discarded rather than reused. A lock held
+// longer than the wait returns errEarningsRollupLockBusy.
+func (s *Store) maintenanceTransact(ctx context.Context, fn func(context.Context, *sql.Conn) error) (err error) {
+	// Half the remaining budget: the busy handler must give up before the
+	// context does, so a held lock reads as busy, not as a slow bucket.
+	wait := earningsRollupLockWaitMax
+	if deadline, ok := ctx.Deadline(); ok {
+		wait = min(wait, time.Until(deadline)/2)
+	}
+	if wait < time.Millisecond {
+		return context.DeadlineExceeded
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var previous int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, wait.Milliseconds())); err != nil {
+		return err
+	}
+	defer func() {
+		if _, rerr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, previous)); rerr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			if err == nil {
+				err = rerr
+			}
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		if sqliteBusyOrLocked(err) {
+			return fmt.Errorf("%w: %v", errEarningsRollupLockBusy, err)
+		}
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if err := fn(ctx, conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // backfillProviderEarningsRollup marks the buckets of one batch of ledger rows
@@ -718,7 +928,7 @@ SELECT id, provider_id, `+earningsHourKeySQL("ts_utc")+`
 	if done {
 		last = high
 	}
-	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	err = s.maintenanceTransact(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		res, err := conn.ExecContext(ctx, `
 UPDATE provider_earnings_rollup_state
    SET backfill_cursor_id = ?, backfill_complete = ?
@@ -803,7 +1013,7 @@ SELECT MIN(lqr.force_credit_matures_at_utc)
 	if s.earningsRollupAfterRead != nil {
 		s.earningsRollupAfterRead(providerID, hour)
 	}
-	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	return s.maintenanceTransact(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		res, err := conn.ExecContext(ctx, `
 UPDATE provider_earnings_rollup_buckets
    SET computed_gen = gen, computed_epoch = ?, stale_at_utc = ?
@@ -989,26 +1199,36 @@ SELECT bucket_hour, model, payable_count, payable_credits, fault_count
 		return providerEarningsFigures{}, false, err
 	}
 	// The view's payable set changes over time only when a force credit
-	// matures (the startup migration creates the index this range scan uses). If none of this provider's matured after cutoff (up to now,
+	// matures. If none of this provider's matured after cutoff (up to now,
 	// which is no earlier than any statement above), every statement saw the
 	// same payable set: the one at cutoff.
-	var raced bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1
-      FROM ledger_quarantine_resolutions lqr INDEXED BY idx_lqr_force_credit_matures
-      JOIN ledger_request_credits c ON c.id = lqr.request_credit_id
-     WHERE lqr.resolution_kind = 'force_credit'
-       AND lqr.force_credit_matures_at_utc IS NOT NULL
-       AND lqr.force_credit_matures_at_utc > ?
-       AND lqr.force_credit_matures_at_utc <= `+sqliteNowText+`
-       AND c.provider_id = ?)`, cutoff, providerID).Scan(&raced); err != nil {
+	raced, err := providerMaturedSince(ctx, tx, providerID, cutoff)
+	if err != nil {
 		return providerEarningsFigures{}, false, err
 	}
 	if raced {
 		return providerEarningsFigures{}, false, errEarningsRollupMaturityRace
 	}
 	return foldEarningsBuckets(buckets, win), true, nil
+}
+
+// providerMaturedSince reports whether a force credit of the provider matured
+// after cutoff, up to now (no earlier than any statement already run in tx).
+// Force credits are operator actions, so walking them through
+// idx_lqr_kind_created stays small without a startup index build.
+func providerMaturedSince(ctx context.Context, tx *sql.Tx, providerID, cutoff string) (bool, error) {
+	var raced bool
+	err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM ledger_quarantine_resolutions lqr
+      JOIN ledger_request_credits c ON c.id = lqr.request_credit_id
+     WHERE lqr.resolution_kind = 'force_credit'
+       AND lqr.force_credit_matures_at_utc IS NOT NULL
+       AND lqr.force_credit_matures_at_utc > ?
+       AND lqr.force_credit_matures_at_utc <= `+sqliteNowText+`
+       AND c.provider_id = ?)`, cutoff, providerID).Scan(&raced)
+	return raced, err
 }
 
 // foldEarningsBuckets applies the endpoint's filters to hour buckets. Every

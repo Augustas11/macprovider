@@ -1148,7 +1148,7 @@ func TestProviderEarningsRollupConflictingBucketsDoNotStarveOthers(t *testing.T)
 			}
 		}
 	}
-	for i := 0; i < 4 && cachedBucketCount(t, store, "z-cold") == 0; i++ {
+	for i := 0; i < 6 && cachedBucketCount(t, store, "z-cold") == 0; i++ {
 		if _, err := store.RefreshProviderEarningsRollup(context.Background(), 5); err != nil {
 			t.Fatal(err)
 		}
@@ -1181,4 +1181,196 @@ func TestProviderEarningsRollupResetOfPopulatedCache(t *testing.T) {
 	wins := rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC))
 	drainRollup(t, restarted)
 	checkRollupMatchesView(t, restarted, providers, wins)
+}
+
+// Another connection holds the SQLite write lock far longer than the tick
+// budget. The refresher must give up on the lock within its own wait (not
+// the connection's 5 s busy_timeout), report it as a yield, and hand the
+// shared writer connection back with its busy_timeout restored.
+func TestProviderEarningsRollupYieldsToHeldWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locked.db")
+	reqStore, err := requestlog.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "l", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+	before := scalar(t, store.db, `PRAGMA busy_timeout`)
+	if before < 1000 {
+		t.Fatalf("fixture busy_timeout=%d; want the production multi-second wait", before)
+	}
+	other, err := sql.Open("sqlite", sqliteutil.WithPragmas(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	holder, err := other.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_, _ = holder.ExecContext(context.Background(), `ROLLBACK`)
+			_ = holder.Close()
+		}
+	}
+	t.Cleanup(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	pass, err := store.RefreshProviderEarningsRollup(ctx, DefaultProviderEarningsRollupLimit)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("held lock surfaced as error: %v", err)
+	}
+	if !pass.LockBusy || !pass.More || pass.Recomputed != 0 {
+		t.Fatalf("pass=%+v; want a lock-busy yield", pass)
+	}
+	if elapsed > earningsRollupLockWaitMax+500*time.Millisecond {
+		t.Fatalf("refresher waited %s on a held lock; cap is %s", elapsed, earningsRollupLockWaitMax)
+	}
+	if got := scalar(t, store.db, `PRAGMA busy_timeout`); got != before {
+		t.Fatalf("writer connection busy_timeout=%d after maintenance, want restored %d", got, before)
+	}
+	release()
+	drainRollup(t, store)
+	checkRollupMatchesView(t, store, []string{"p"}, rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)))
+}
+
+// After a reset, every historical bucket is old-epoch work while more than a
+// full pass of dirty buckets conflicts forever. Old-epoch work still has a
+// guaranteed share and drains.
+func TestProviderEarningsRollupOldEpochProgressUnderDirtyChurn(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	for i := 0; i < 10; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("cold-%d", i), provider: "m-cold", ts: sqliteTimeText(time.Date(2026, 9, 1, i, 0, 0, 0, time.UTC)), model: "m", credits: int64(i + 1)})
+	}
+	drainRollup(t, store)
+	if _, err := store.db.Exec(`UPDATE provider_earnings_rollup_state SET fingerprint = 'other'`); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2*DefaultProviderEarningsRollupLimit; i++ {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("hot-%d", i), provider: "a-hot", ts: sqliteTimeText(time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Hour)), model: "m", credits: 1})
+	}
+	store.earningsRollupAfterRead = func(provider, hour string) {
+		if provider == "a-hot" {
+			if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = 'a-hot' AND ts_utc LIKE ? || '%'`, hour); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	conflicts := 0
+	for i := 0; i < 3 && cachedBucketCount(t, store, "m-cold") < 10; i++ {
+		pass, err := store.RefreshProviderEarningsRollup(context.Background(), DefaultProviderEarningsRollupLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conflicts += pass.Conflicts
+	}
+	if got := cachedBucketCount(t, store, "m-cold"); got != 10 || conflicts == 0 {
+		t.Fatalf("cold buckets rebuilt=%d/10 conflicts=%d; old-epoch work starved behind dirty churn", got, conflicts)
+	}
+	store.earningsRollupAfterRead = nil
+	checkRollupMatchesView(t, store, []string{"m-cold"}, rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)))
+}
+
+// A stale bucket whose recompute overruns its slice is backed off: later
+// stale work proceeds in the same pass, and the slow bucket does not take
+// the next pass's budget. Its figures stay exact (read live meanwhile).
+func TestProviderEarningsRollupSlowStaleBucketIsBackedOff(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	matures := time.Now().UTC().Add(400 * time.Millisecond)
+	for _, p := range []string{"a-slow", "z-stale"} {
+		id := insertRollupCredit(t, store.db, rollupCredit{requestID: p, provider: p, ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10, quarantined: true})
+		insertRollupResolution(t, store.db, id, "force_credit", "2026-09-16T06:00:00.000000000Z", sqliteTimeText(matures))
+	}
+	drainRollup(t, store)
+	if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets WHERE stale_at_utc IS NOT NULL`); n != 2 {
+		t.Fatalf("buckets carrying a maturity=%d want 2", n)
+	}
+	time.Sleep(time.Until(matures) + 100*time.Millisecond)
+	slowCalls := 0
+	store.earningsRollupAfterRead = func(provider, _ string) {
+		if provider == "a-slow" {
+			slowCalls++
+			time.Sleep(earningsRollupBucketSlice + 150*time.Millisecond)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	pass, err := store.RefreshProviderEarningsRollup(ctx, DefaultProviderEarningsRollupLimit)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pass.SlowOrFailed != 1 || slowCalls != 1 {
+		t.Fatalf("pass=%+v slowCalls=%d; want the slow bucket cut at its slice", pass, slowCalls)
+	}
+	if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets WHERE provider_id = 'z-stale' AND stale_at_utc IS NULL`); n != 1 {
+		t.Fatal("stale work after the slow bucket did not run in the same pass")
+	}
+	start := time.Now()
+	if _, err := store.RefreshProviderEarningsRollup(context.Background(), DefaultProviderEarningsRollupLimit); err != nil {
+		t.Fatal(err)
+	}
+	if slowCalls != 1 || time.Since(start) > earningsRollupBucketSlice {
+		t.Fatalf("backed-off bucket retried at once (calls=%d, pass took %s)", slowCalls, time.Since(start))
+	}
+	store.earningsRollupAfterRead = nil
+	checkRollupMatchesView(t, store, []string{"a-slow", "z-stale"}, rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)))
+}
+
+// The full-view fallback reads every figure in one snapshot: a credit
+// written between its statements shows up in none of them.
+func TestProviderEarningsViewFallbackIsOneSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fallback.db")
+	reqStore, err := requestlog.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readDB, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readDB.Close() })
+	store.SetReadDB(readDB)
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "in", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+	insertRollupCredit(t, store.db, rollupCredit{requestID: "odd", provider: "p", ts: "2026-09-16 06:00:00", model: "m", credits: 1})
+	win := rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC))[3] // [today, today+1)
+	want, err := viewEarningsReference(context.Background(), store.db, "p", win)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.earningsViewReadHook = func() {
+		insertRollupCredit(t, store.db, rollupCredit{requestID: "late", provider: "p", ts: "2026-08-01T05:00:00.000000000Z", model: "m", credits: 1000, fault: "breaker_qualifying"})
+	}
+	h := &handler{store: store}
+	got, err := h.providerEarningsFigures(context.Background(), "p", win)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fallback=%+v; want the pre-write snapshot %+v", got, want)
+	}
+	if n := store.earningsViewFallbacks.Load(); n != 1 {
+		t.Fatalf("view fallbacks counted=%d want 1", n)
+	}
 }
