@@ -250,6 +250,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
+	mux.HandleFunc("/v1/creator/", s.handleCreatorProxy)
 	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
 	mux.Handle(privacyDirectoryRoute, s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePrivacyDirectory)))
 	if s.cfg.Features.ResponsesAPIEnabled {
@@ -1556,6 +1557,9 @@ var gatewayPermanentCodes = map[string]bool{
 	// (setGatewayRetryAfter only fires for retryable codes), matching the
 	// SPEC-042 R010 table (503 | no).
 	"pool_unavailable": true, "pool_selection_invalid": true,
+	// SPEC-006 §5.11 creator self-serve proxy.
+	"creator_upstream_error": true, "creator_identity_lookup_failed": true,
+	"demo_creator_forbidden": true, "wallet_session_creator_forbidden": true,
 	// SPEC-006-R016 buyer engine selection: the named engine cannot serve the
 	// same request on this route later, and a bad selector is a client error.
 	"engine_unavailable": true, "invalid_engine_selection": true,

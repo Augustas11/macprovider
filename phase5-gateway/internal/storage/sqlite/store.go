@@ -1216,6 +1216,27 @@ func (s *Store) AddAccountIdentity(ctx context.Context, identity storage.Account
 	return err
 }
 
+// LookupAccountIdentityByProvider returns the account's linked identity for
+// one OAuth provider, or storage.ErrNotFound when none is linked.
+func (s *Store) LookupAccountIdentityByProvider(ctx context.Context, accountID, provider string) (storage.AccountIdentity, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT account_id, provider, provider_user_id, email, created_at
+		FROM account_identities
+		WHERE account_id = ? AND provider = ?
+		ORDER BY created_at, provider_user_id
+		LIMIT 1`, accountID, provider)
+	var identity storage.AccountIdentity
+	var created string
+	if err := row.Scan(&identity.AccountID, &identity.Provider, &identity.ProviderUserID, &identity.Email, &created); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.AccountIdentity{}, storage.ErrNotFound
+		}
+		return storage.AccountIdentity{}, err
+	}
+	identity.CreatedAt = decodeTime(created)
+	return identity, nil
+}
+
 func (s *Store) LookupAccountByIdentity(ctx context.Context, provider, providerUserID string) (storage.Account, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT a.account_id, a.status, a.quota_class, a.concurrency_class, a.created_at
