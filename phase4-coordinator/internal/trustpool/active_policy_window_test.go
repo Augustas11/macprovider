@@ -226,3 +226,35 @@ func snapshotHasMember(s RouteableSnapshot, providerID string) bool {
 	}
 	return false
 }
+
+// SPEC-042-R001 supersession (#1880): a v2 whose window overlaps v1 from a
+// later not_before routes from that instant, v1's routeable_until is cut at
+// v2's not_before, and v1 never routes again after v2 expires.
+func TestRouteableSnapshotsSupersedingPolicyWindow(t *testing.T) {
+	v1Start := time.Unix(1_000, 0).UTC()
+	v2Start := time.Unix(2_000, 0).UTC()
+	v2End := time.Unix(3_000, 0).UTC()
+	v1End := time.Unix(9_000, 0).UTC()
+	state := sameTermsRolloverState(v1Start, "terms-changed")
+	p := state.Pools["QpsclmzwdJaWJTk3zowcXQ"]
+	p.ManifestPolicies[0].ExpiresAtUnix = uint64(v1End.Unix())
+	p.ManifestPolicies[1].NotBeforeUnix = uint64(v2Start.Unix())
+	p.ManifestPolicies[1].ExpiresAtUnix = uint64(v2End.Unix())
+	at := func(when time.Time) RouteableSnapshot {
+		state.RouteGateCheckedAt = when
+		snaps := state.RouteableSnapshots()
+		if len(snaps) != 1 {
+			t.Fatalf("snapshots = %+v", snaps)
+		}
+		return snaps[0]
+	}
+	if got := at(v1Start.Add(time.Minute)); !got.Routeable || got.ManifestVersion != 1 || !got.RouteableUntilUTC.Equal(v2Start) {
+		t.Fatalf("before v2: version=%d until=%s routeable=%v, want v1 until %s", got.ManifestVersion, got.RouteableUntilUTC, got.Routeable, v2Start)
+	}
+	if got := at(v2Start); !got.Routeable || got.ManifestVersion != 2 || !got.RouteableUntilUTC.Equal(v2End) {
+		t.Fatalf("at v2 not_before: version=%d until=%s routeable=%v, want v2", got.ManifestVersion, got.RouteableUntilUTC, got.Routeable)
+	}
+	if got := at(v2End.Add(time.Minute)); got.Routeable {
+		t.Fatalf("after v2 expiry: superseded v1 revived (version=%d)", got.ManifestVersion)
+	}
+}

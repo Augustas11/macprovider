@@ -918,6 +918,7 @@ func (s *Server) applyModelAdmissionOfferCatalogMatch(event ModelAdmissionEvent,
 	event.CatalogCandidateSHA256 = match.CandidateSHA256
 	event.CatalogSignerKeyID = match.SignerKeyID
 	event.CatalogMembers = match.Members
+	event.RequestedPoolModelID = body.RequestedPoolModelID
 	// SPEC-047-R011: the offered pairs are kept so a pool entry accepted
 	// after this offer can match it exactly.
 	if len(body.ArtifactHashes) > 0 {

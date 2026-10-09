@@ -290,7 +290,7 @@ func TestTrustPoolSignRoundTripThroughDurableStore(t *testing.T) {
 		t.Fatal("policy-terms-digest accepted a non-manifest event")
 	}
 	overlap := append(withoutFlag(f.manifestArgs("m1-manifest-3", filepath.Join(f.dir, "overlap.json"), notBefore, expiresAt), "--manifest-authority-key"), "--prev", successorOut)
-	if err := trustPoolAdmin(overlap, os.Getenv, nil, &out); err == nil || !strings.Contains(err.Error(), "previous policy window") {
+	if err := trustPoolAdmin(overlap, os.Getenv, nil, &out); err == nil || !strings.Contains(err.Error(), "previous policy not_before") {
 		t.Fatalf("overlapping successor window error = %v", err)
 	}
 }

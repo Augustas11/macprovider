@@ -158,7 +158,10 @@ final class CreatorCommandTests: XCTestCase {
         let next = try CreatorOperations.signManifest(home: home, poolID: identity.poolID, options: options)
         XCTAssertEqual(next.state.manifestVersion, 2)
         XCTAssertEqual(next.state.snapshot.policies.last?.core.prevManifestCoreHash, try core.manifestCoreDigest())
-        XCTAssertGreaterThanOrEqual(next.state.snapshot.policies.last?.core.notBeforeUnix ?? 0, core.expiresAtUnix)
+        // SPEC-042-R001 supersession: v2 takes effect now, inside v1's window.
+        let nextNotBefore = try XCTUnwrap(next.state.snapshot.policies.last?.core.notBeforeUnix)
+        XCTAssertGreaterThanOrEqual(nextNotBefore, core.notBeforeUnix)
+        XCTAssertLessThan(nextNotBefore, core.expiresAtUnix)
 
         if let out = ProcessInfo.processInfo.environment["MACPROVIDER_CREATOR_CROSSCHECK_OUT"], !out.isEmpty {
             let dump: [String: Any] = ["root_issuer_registered": root, "manifest_accepted": manifest, "pool_created": create]

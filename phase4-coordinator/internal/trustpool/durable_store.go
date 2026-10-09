@@ -314,6 +314,21 @@ func (s *Store) nowUTC() time.Time {
 	return time.Now().UTC()
 }
 
+// PoolModelPricingBounds is the configured SPEC-005-R015 bounds manifest
+// acceptance applies now; nil when unset or invalid (every entry then fails
+// closed with pool_model_pricing_bounds_unset).
+func (s *Store) PoolModelPricingBounds() *poolmanifest.PoolModelPricingBounds {
+	if s == nil || s.poolModelAcceptance == nil {
+		return nil
+	}
+	bounds := s.poolModelAcceptance().PricingBounds
+	if bounds == nil || bounds.Validate() != nil {
+		return nil
+	}
+	out := *bounds
+	return &out
+}
+
 // Pool-model acceptance rejection codes (SPEC-042-R015, SPEC-005-R015).
 // The extension-rule codes come from poolmanifest.PoolModelRejectCode.
 const (
@@ -3779,8 +3794,9 @@ type manifestPolicyWindow struct {
 }
 
 // activePolicyView returns a copy of p whose manifest fields are the accepted
-// policy core active at `at`, plus that core's expiry. accepted policy windows
-// never overlap, so at most one matches. ok=false means the pool has accepted
+// policy core active at `at`, plus that core's effective expiry. A later
+// version supersedes an overlapping earlier one from its own not_before
+// (SPEC-042-R001), so at most one matches. ok=false means the pool has accepted
 // policies but none is active at `at` (pool_policy_stale): a future-dated
 // core never routes early and an expired core never keeps routing. A pool with
 // no accepted policy is returned unchanged.
@@ -3792,8 +3808,9 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 	if now < 0 {
 		return p, time.Time{}, false
 	}
-	for _, w := range p.ManifestPolicies {
-		if uint64(now) < w.NotBeforeUnix || uint64(now) >= w.ExpiresAtUnix {
+	for i, w := range p.ManifestPolicies {
+		expires := p.effectivePolicyExpiry(i)
+		if uint64(now) < w.NotBeforeUnix || uint64(now) >= expires {
 			continue
 		}
 		view := *p
@@ -3811,12 +3828,31 @@ func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedP
 		view.ManifestRetentionPolicyID = w.RetentionPolicyID
 		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
 		var until time.Time
-		if w.ExpiresAtUnix <= uint64(math.MaxInt64) {
-			until = time.Unix(int64(w.ExpiresAtUnix), 0).UTC()
+		if expires <= uint64(math.MaxInt64) {
+			until = time.Unix(int64(expires), 0).UTC()
 		}
 		return &view, until, true
 	}
 	return p, time.Time{}, false
+}
+
+// effectivePolicyExpiry is ManifestPolicies[i]'s expiry cut at the not_before
+// of every later accepted version that supersedes it (SPEC-042-R001).
+func (p *ReconstructedPoolState) effectivePolicyExpiry(i int) uint64 {
+	windows := make([][2]uint64, len(p.ManifestPolicies))
+	for j, w := range p.ManifestPolicies {
+		windows[j] = [2]uint64{w.NotBeforeUnix, w.ExpiresAtUnix}
+	}
+	return poolmanifest.SupersededExpiry(windows, i)
+}
+
+func (p *ReconstructedPoolState) policyIndex(version uint64) int {
+	for i, w := range p.ManifestPolicies {
+		if w.Version == version {
+			return i
+		}
+	}
+	return -1
 }
 
 func (p *ReconstructedPoolState) extendedSameTermsRouteableUntil(version uint64) time.Time {
@@ -3824,19 +3860,19 @@ func (p *ReconstructedPoolState) extendedSameTermsRouteableUntil(version uint64)
 	if !ok {
 		return time.Time{}
 	}
-	if active.ExpiresAtUnix > uint64(math.MaxInt64) {
+	untilUnix := p.effectivePolicyExpiry(p.policyIndex(version))
+	if untilUnix > uint64(math.MaxInt64) {
 		return time.Time{}
 	}
-	untilUnix := active.ExpiresAtUnix
 	if active.TermsDigest != "" {
-		for _, next := range p.ManifestPolicies {
+		for j, next := range p.ManifestPolicies {
 			if next.Version <= active.Version {
 				continue
 			}
 			if next.NotBeforeUnix != untilUnix || next.TermsDigest != active.TermsDigest {
 				break
 			}
-			untilUnix = next.ExpiresAtUnix
+			untilUnix = p.effectivePolicyExpiry(j)
 			if untilUnix > uint64(math.MaxInt64) {
 				return time.Time{}
 			}

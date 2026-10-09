@@ -734,3 +734,32 @@ func assertAuthError(t *testing.T, rr *httptest.ResponseRecorder, status int, co
 		t.Fatalf("body = %#v, want {error:%q}", body, code)
 	}
 }
+
+// #1880: a provider-scoped portal read by MP session cookie is authorized
+// only for a provider the session's GitHub user owns.
+func TestAuthorizeProviderSessionReadRequiresOwnership(t *testing.T) {
+	s, store := newSpec014AuthTestServer(t, true)
+	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	sessionID, _ := seedSpec014HTTPBindState(t, store, now)
+	if _, err := store.DB().ExecContext(context.Background(), `INSERT INTO provider_ownership (provider_id, github_user_id, claimed_at) VALUES (?, ?, ?)`, "provider-a", 42, timeTextForSpec014HTTPTest(now)); err != nil {
+		t.Fatalf("seed ownership: %v", err)
+	}
+	read := func(cookie, providerID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/providers/"+providerID+"/earnings", nil)
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: session.Name, Value: cookie})
+		}
+		rr := httptest.NewRecorder()
+		if s.AuthorizeProviderSessionRead(rr, req, providerID) {
+			rr.WriteHeader(http.StatusOK)
+		}
+		return rr
+	}
+	if rr := read(sessionID, "provider-a"); rr.Code != http.StatusOK {
+		t.Fatalf("owner status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertAuthError(t, read(sessionID, "provider-b"), http.StatusForbidden, "forbidden")
+	assertAuthError(t, read("", "provider-a"), http.StatusUnauthorized, "session_invalid")
+	assertAuthError(t, read("tampered", "provider-a"), http.StatusUnauthorized, "session_invalid")
+}

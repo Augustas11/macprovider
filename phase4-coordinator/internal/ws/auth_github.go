@@ -326,6 +326,31 @@ func (s *Server) handleInstallPairRefresh(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// AuthorizeProviderSessionRead authorizes a provider-scoped portal read by
+// the MP session cookie (#1880): the session must be valid (401
+// session_invalid otherwise, as /v1/auth/me/providers answers) and its GitHub
+// user must own providerID in the ownership-claim table that
+// /v1/auth/me/providers lists (403 forbidden otherwise).
+func (s *Server) AuthorizeProviderSessionRead(w http.ResponseWriter, r *http.Request, providerID string) bool {
+	sess, ok := s.authenticateMPSession(w, r)
+	if !ok {
+		return false
+	}
+	owned, err := s.authStore.ListOwnedProviders(r.Context(), sess.GitHubUserID)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("owned providers lookup failed")
+		writeAuthError(w, http.StatusInternalServerError, "internal_error")
+		return false
+	}
+	for _, p := range owned {
+		if p.ProviderID == providerID {
+			return true
+		}
+	}
+	writeAuthError(w, http.StatusForbidden, "forbidden")
+	return false
+}
+
 func (s *Server) authenticateMPSession(w http.ResponseWriter, r *http.Request) (auth.MPSession, bool) {
 	if s.authStore == nil {
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")

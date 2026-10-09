@@ -246,6 +246,44 @@ func (b PoolModelPricingBounds) Contains(p PoolModelPricing) bool {
 		in(p.CompletionRatePerMtok, b.MinCompletionRatePerMtok, b.MaxCompletionRatePerMtok)
 }
 
+// Violation names the first bound an entry's rates fall outside, with that
+// bound's configured value: ok=false when the bounds contain the pricing.
+// Bound names are the SPEC-005-R015 config keys (min_/max_ prompt,
+// prompt_cache_hit, completion _rate_per_mtok).
+func (b PoolModelPricingBounds) Violation(p PoolModelPricing) (bound string, limit int64, ok bool) {
+	for _, r := range []struct {
+		name   string
+		v      uint64
+		lo, hi int64
+	}{
+		{"prompt_rate_per_mtok", p.PromptRatePerMtok, b.MinPromptRatePerMtok, b.MaxPromptRatePerMtok},
+		{"prompt_cache_hit_rate_per_mtok", p.PromptCacheHitRatePerMtok, b.MinPromptCacheHitRatePerMtok, b.MaxPromptCacheHitRatePerMtok},
+		{"completion_rate_per_mtok", p.CompletionRatePerMtok, b.MinCompletionRatePerMtok, b.MaxCompletionRatePerMtok},
+	} {
+		if r.v > math.MaxInt64 || int64(r.v) > r.hi {
+			return "max_" + r.name, r.hi, true
+		}
+		if int64(r.v) < r.lo {
+			return "min_" + r.name, r.lo, true
+		}
+	}
+	return "", 0, false
+}
+
+// PoolModelPricingBoundsError names the entry and the bound it violated; it
+// is ErrPoolModelPricingBounds under errors.Is.
+type PoolModelPricingBoundsError struct {
+	PoolModelID string
+	Bound       string
+	Limit       int64
+}
+
+func (e *PoolModelPricingBoundsError) Error() string {
+	return fmt.Sprintf("%v: %s violates %s=%d", ErrPoolModelPricingBounds, e.PoolModelID, e.Bound, e.Limit)
+}
+
+func (e *PoolModelPricingBoundsError) Unwrap() error { return ErrPoolModelPricingBounds }
+
 // PoolModelEntries decodes the core's pool_model_entries/v1 extension. A core
 // without it has no entries. The body must already be canonical (acceptance
 // guarantees it for every accepted core).
@@ -557,6 +595,9 @@ func (pc PolicyCore) ValidatePoolModelAcceptance(ctx PoolModelAcceptanceContext)
 	}
 	for _, m := range entries {
 		if !ctx.PricingBounds.Contains(m.Pricing) {
+			if bound, limit, ok := ctx.PricingBounds.Violation(m.Pricing); ok {
+				return &PoolModelPricingBoundsError{PoolModelID: m.PoolModelID, Bound: bound, Limit: limit}
+			}
 			return ErrPoolModelPricingBounds
 		}
 		slug := m.PoolModelID[strings.LastIndexByte(m.PoolModelID, '/')+1:]
