@@ -408,7 +408,7 @@ func (s *Store) RequireOnCallReadinessForPromotion(ctx context.Context, poolID s
 		return nil
 	}
 	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
-	if environment == "" || environment == promotionLaunchEnvironmentCandidate {
+	if !launchEnvironmentRequiresProductionGate(environment) {
 		return nil
 	}
 	rec, ok, err := s.OnCallReadiness(ctx, environment)

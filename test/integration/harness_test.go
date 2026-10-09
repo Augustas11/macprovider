@@ -1671,6 +1671,9 @@ type fakeProvider struct {
 	trustedPoolV1      bool
 	omitCatalogRelease bool
 	binaryVersion      string // "" = "1.6.0-fake"
+	// reconnectRequests makes runWS close its session and hello again on
+	// the same receipt key, as a restarted provider CLI does.
+	reconnectRequests chan struct{}
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -1722,7 +1725,15 @@ func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL
 		modelID:       defaultFakeModelID,
 		hReady:        make(chan struct{}),
 		stopped:       make(chan struct{}),
+
+		reconnectRequests: make(chan struct{}, 1),
 	}
+}
+
+// reconnect closes the provider's WS session and starts a fresh one with a
+// new hello; the inference endpoint stays up.
+func (p *fakeProvider) reconnect() {
+	p.reconnectRequests <- struct{}{}
 }
 
 func (p *fakeProvider) enableReceipts() {
@@ -2623,6 +2634,11 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-readDone:
+			return
+		case <-p.reconnectRequests:
+			_ = conn.Close()
+			<-readDone
+			p.runWS(ctx)
 			return
 		case <-hbTick.C:
 			hb := map[string]any{

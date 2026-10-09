@@ -284,7 +284,7 @@ func (s *Store) RequireReviewedArtifactLifecycleForPromotion(ctx context.Context
 		return nil
 	}
 	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
-	if environment == "" || environment == promotionLaunchEnvironmentCandidate {
+	if !launchEnvironmentRequiresProductionGate(environment) {
 		return nil
 	}
 	rec, ok, err := s.ReviewedArtifactLifecycle(ctx, poolID)

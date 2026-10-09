@@ -1277,6 +1277,32 @@ func main() {
 			},
 			// Read through the store so a SIGHUP key rotation applies here too.
 			ProviderOwnerPublicKeyForProvider: trustPoolStore.ProviderOwnerPublicKey,
+			SelfServeProviderAdmitted: func(providerID string) bool {
+				return creatorProviderTokenAuthenticated(registry, providerID)
+			},
+			GatewayServiceToken: cfg.Auth.GatewayServiceToken,
+			OwnedProviderIDs: func(ctx context.Context, githubUserID int64) ([]string, error) {
+				owned, err := tokenStore.ListOwnedProviders(ctx, githubUserID)
+				if err != nil {
+					return nil, err
+				}
+				ids := make([]string, 0, len(owned))
+				for _, p := range owned {
+					ids = append(ids, p.ProviderID)
+				}
+				return ids, nil
+			},
+			CreatorEarnings: func(ctx context.Context, q trustpool.CreatorEarningsQuery) ([]trustpool.CreatorPoolEarnings, error) {
+				rows, err := billingStore.CreatorPoolEarnings(ctx, q.ProviderIDs, q.PoolIDs, q.From, q.To)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]trustpool.CreatorPoolEarnings, 0, len(rows))
+				for _, row := range rows {
+					out = append(out, trustpool.CreatorPoolEarnings{PoolID: row.PoolID, PayableRequests: row.PayableRequests, ProviderCredits: row.ProviderCredits})
+				}
+				return out, nil
+			},
 		})
 		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
 			trustPoolAdminReloader = reloader
@@ -1287,6 +1313,8 @@ func main() {
 		logger.Info().
 			Int("trusted_pools_creator_admin_credentials", len(creatorAdminCredentials)).
 			Msg("trusted pools creator admin route mounted at /creator/trust-pools/")
+		providerMux.Handle("/internal/creator/trust-pools/", trustPoolAdminHandler)
+		logger.Info().Msg("trusted pools self-serve creator route mounted at /internal/creator/trust-pools/")
 	}
 	// Phase 3: MicroMDM command webhook for DeviceAttestation ingest.
 	// Point MicroMDM `-command-webhook-url` here. Auth is loopback-only
@@ -3696,6 +3724,23 @@ func creatorProviderServingCapable(registry *pool.Registry, providerID string) b
 	for _, provider := range registry.Snapshot() {
 		if provider.ProviderID == providerID {
 			return provider.ServingCapable()
+		}
+	}
+	return false
+}
+
+// creatorProviderTokenAuthenticated reports whether providerID is connected
+// under its SPEC-003 provider token with no pending receipt-key rotation. A
+// self-serve creator admits on this, not ServingCapable, because an
+// uncatalogued BYOM model only becomes routable once its offer binds to the
+// pool, which needs membership first (SPEC-043-R006 0.3.0).
+func creatorProviderTokenAuthenticated(registry *pool.Registry, providerID string) bool {
+	if registry == nil || providerID == "" {
+		return false
+	}
+	for _, provider := range registry.Snapshot() {
+		if provider.ProviderID == providerID {
+			return provider.AuthState == pool.AuthBearerValidated && len(provider.PendingReceiptPubkey) == 0
 		}
 	}
 	return false
