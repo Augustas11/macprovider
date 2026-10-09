@@ -17,12 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.1: upstream mlx-swift-lm 3.32.3 plus the
+        // Fork tag 3.32.3-macprovider.2: upstream mlx-swift-lm 3.32.3 plus the
         // packed MTP verification, fused A3B MoE and GDN checkpoint commits
-        // upstream does not carry. Resolves mlx-swift 0.32.3.
+        // upstream does not carry. It resolves the Augustas11/mlx-swift fork
+        // (tag 0.32.3-macprovider.1), whose MLX core keeps small-M quantized
+        // matmuls on one kernel route so a row decodes the same tokens alone
+        // and inside a continuous batch (the startup batched-isolation gate).
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "d9897e61b45b8d286f19907594f01ed198e81124"
+            revision: "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

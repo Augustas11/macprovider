@@ -12,10 +12,9 @@
     {
       "identity" : "mlx-swift",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/ml-explore/mlx-swift",
+      "location" : "https://github.com/Augustas11/mlx-swift",
       "state" : {
-        "revision" : "19601207e9a0de51e03ee6ec0c3c5f3784275075",
-        "version" : "0.32.3"
+        "revision" : "d073a644c559318d93e267ed2a53baf434787a41"
       }
     },
     {
@@ -23,7 +22,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Augustas11/mlx-swift-lm.git",
       "state" : {
-        "revision" : "d9897e61b45b8d286f19907594f01ed198e81124"
+        "revision" : "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
       }
     },
     {
