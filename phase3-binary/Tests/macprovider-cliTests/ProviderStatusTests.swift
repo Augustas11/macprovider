@@ -1370,6 +1370,7 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(scheduler["max_observed_batch_depth"] as? Int, 0)
         XCTAssertEqual(scheduler["slots_total"] as? Int, 0)
         XCTAssertEqual(scheduler["slots_free"] as? Int, 0)
+        XCTAssertEqual(scheduler["shared_forward_calls"] as? Int, 0)
     }
 
     func testStatusResponsePublishesContinuousBatchingRuntimeSnapshot() async throws {
@@ -1406,7 +1407,8 @@ final class ProviderStatusTests: XCTestCase {
                     waitingCount: 2,
                     maxObservedBatchDepth: 4,
                     slotsTotal: 8,
-                    slotsFree: 5
+                    slotsFree: 5,
+                    sharedForwardCalls: 17
                 )
             )
         )
@@ -1436,6 +1438,7 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(scheduler["max_observed_batch_depth"] as? Int, 4)
         XCTAssertEqual(scheduler["slots_total"] as? Int, 8)
         XCTAssertEqual(scheduler["slots_free"] as? Int, 5)
+        XCTAssertEqual(scheduler["shared_forward_calls"] as? Int, 17)
     }
 
     func testStatusSeparatesLiveCatalogTrustFromBuyerServing() async {

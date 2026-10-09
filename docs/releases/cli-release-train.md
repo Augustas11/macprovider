@@ -406,33 +406,29 @@ the China supply track green until a reviewed signed post-#1745 CLI and its
 installer/release mirror are published and #1756 passes from a clean mainland
 Mac with the prohibited resolver boundary active.
 
-### Precondition for any candidate cut after #1672
+### Continuous-batching continuity before candidate promotion or upgrade
 
-`v1.8.176` predates #1672 and is unaffected. Any candidate cut from `main` at
-`b61f081c` or later enforces SPEC-038 FR-CB10 per-tuple acceptance coverage
-**fail-closed**: descriptor membership alone no longer permits batching, and a
-provider will not batch until its operator declares the exact tuple in
-`continuous_batching_accepted_tuples`.
+SPEC-038 FR-CB10 requires exact signed-policy coverage for coordinator-joined
+serving. Since #1803 (`b55463f6f`), `continuous_batching_accepted_tuples` is
+an isolated `--no-join` test input; it cannot authorize production batching.
+Keeping `continuous_batching: canary` in configuration is insufficient.
 
-On such a candidate a provider left as-is serial-routes with reason
-`tuple_acceptance_coverage_unavailable`; strict `continuous_batching: on`
-fails at startup rather than serving unbatched. Declare the tuple on the
-Studio canary **before** deploying such a candidate, or CB there goes serial
-with no other symptom:
+Before recommending or installing successor bytes, preserve each previously
+active qualified hardware/model/cache tuple. Publish reviewed policy coverage
+for the successor's exact provider version, live executable CDHash, package
+manifest and campaign evidence before the successor is recommended. Reuse
+unchanged decode qualification; never copy an old CDHash grant to new bytes.
+An empty policy, rollout `off`, or identity mismatch is a capability loss,
+even when feed signature verification and provider join succeed.
 
-```yaml
-continuous_batching_accepted_tuples:
-  - model_id: <served model id>
-    model_sha256: <64-char lowercase hex, must equal the runtime value exactly>
-    cache_class: <runtime cache class>
-    kv_dtype: bf16
-    requires_moe: true
-    hardware_class: <hardware class>
-```
-
-Config load rejects a whitespace-padded field or a non-canonical SHA, so a
-declaration that could never have matched fails at startup instead of loading
-and silently never matching.
+After the signed upgrade and restart, verify `policy.load_status=live_verified`,
+`policy.authorized=true`, `policy.local_proof_result=passed`,
+`paged_kv_decision=attached`, and `active=true`, then confirm a scheduler-admitted
+serving request through the Malibu gateway. Ready/connected alone is insufficient.
+An intentional disable requires an explicit reviewed operator decision; do not
+silently reinterpret missing coverage as intentional. See
+[the signed-policy enable gate](../runbooks/continuous-batching-enable-gate.md)
+and [the regression investigation](../runbooks/continuous-batching-upgrade-continuity.md).
 
 ## Active candidate
 

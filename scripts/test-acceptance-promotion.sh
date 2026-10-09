@@ -142,6 +142,26 @@ for requirement in (
 ):
     if requirement not in publish_step[pre_gate_label:]:
         raise SystemExit(f"promotion live coordinator gate omits: {requirement}")
+# Every executable publication rail must retain the qualified CB baseline.
+# Check the actual continued command, rather than a mention elsewhere in YAML.
+import re
+workflow_dir = pathlib.Path(sys.argv[1]).parent
+signer = (workflow_dir.parent.parent / "scripts/resign-autotune-static.sh").read_text(encoding="utf-8")
+baseline_default = 'export MACPROVIDER_REQUIRED_CB_BASELINE="${MACPROVIDER_REQUIRED_CB_BASELINE:=studio-qwen3.6-a3b-v1}"'
+if baseline_default not in signer or signer.index(baseline_default) > signer.index('python3 "$REPO_ROOT/scripts/catalog-release.py"'):
+    raise SystemExit("direct static signing must enforce CB continuity before generation")
+for name in ("release.yml", "promote-acceptance-candidate.yml", "verify-live-coordinator-release-rollout.yml"):
+    text = (workflow_dir / name).read_text(encoding="utf-8")
+    commands = re.findall(
+        r"python3 scripts/verify-live-coordinator-release-gate\.py \\\n((?:[^\n]*\\\n)*[^\n]*)",
+        text,
+    )
+    if not commands:
+        raise SystemExit(f"{name} lost its executable live coordinator gate")
+    for command in commands:
+        if "--required-continuous-batching-baseline" not in command:
+            raise SystemExit(f"{name} has a publication gate without CB continuity enforcement")
+
 rollout = pathlib.Path(sys.argv[1]).parent / "verify-live-coordinator-release-rollout.yml"
 rollout_text = rollout.read_text(encoding="utf-8")
 if (

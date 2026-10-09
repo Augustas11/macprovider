@@ -91,6 +91,13 @@ spec.loader.exec_module(module)
 canonical = pathlib.Path(sys.argv[2])
 static = pathlib.Path(sys.argv[3])
 coordinator_config = pathlib.Path(sys.argv[4])
+bundle_entries = [
+    line.strip()
+    for line in (pathlib.Path(sys.argv[1]).with_name("catalog-verifier-bundle.txt")).read_text().splitlines()
+    if line.strip() and not line.startswith("#")
+]
+if "scripts/cb_release_baselines.py" not in bundle_entries:
+    raise SystemExit("catalog verifier bundle omits the CB baseline helper")
 
 with tempfile.TemporaryDirectory() as directory:
     user_owned = pathlib.Path(directory) / "openssl"
@@ -660,6 +667,24 @@ rate_card_bytes = (static / "rate-card.json").read_bytes()
 rate_card_obj = module.validate_rate_card(rate_card_bytes)
 cb_policy_bytes = (static / "continuous-batching-policy.json").read_bytes()
 cb_policy_obj = module.validate_cb_policy(cb_policy_bytes, candidate_bytes, candidate_obj)
+if module.REQUIRED_CB_BASELINES["studio-qwen3.6-a3b-v1"]["model_key"] != "qwen/qwen3.6-35b-a3b":
+    raise SystemExit("catalog release did not load the reviewed CB baseline source of truth")
+old_required_cb_baseline = os.environ.get("MACPROVIDER_REQUIRED_CB_BASELINE")
+os.environ["MACPROVIDER_REQUIRED_CB_BASELINE"] = "studio-qwen3.6-a3b-v1"
+module.validate_cb_policy(cb_policy_bytes, candidate_bytes, candidate_obj)
+empty_cb_policy = dict(cb_policy_obj)
+empty_cb_policy["entries"] = []
+try:
+    module.validate_cb_policy(module.canonical_sorted_bytes(empty_cb_policy), candidate_bytes, candidate_obj)
+except module.CatalogError as exc:
+    if "required CB baseline studio-qwen3.6-a3b-v1 is missing" not in str(exc):
+        raise
+else:
+    raise SystemExit("required CB baseline deletion was accepted")
+if old_required_cb_baseline is None:
+    os.environ.pop("MACPROVIDER_REQUIRED_CB_BASELINE", None)
+else:
+    os.environ["MACPROVIDER_REQUIRED_CB_BASELINE"] = old_required_cb_baseline
 qwen_row = candidate_obj["rows"]["qwen3-8b"]
 
 # A curated source is the only path for a Studio-qualified tuple to survive

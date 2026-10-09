@@ -23,8 +23,9 @@
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
-#                           candidate, coordinator.connected, candidate compatibility set) or
-#                           `--run-id N` of a successful signed journey run for the candidate
+#                           candidate, coordinator.connected, candidate compatibility set,
+#                           CB active, live_verified, authorized, local proof passed, paged KV attached,
+#                           then sends one provider-attributed buyer request through the gateway)
 #   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
 #                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
 #                           promote-signed-*-journey run whose head SHA, title or log names the
@@ -41,12 +42,13 @@
 # PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
+OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 OPS_NAME=cli-release
 # Free-text --done is refused for these; see structured_done.
 STRUCTURED_STEPS="canary_smoke e2e_gate"
 # shellcheck source=lib/common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+. "$OPS_DIR/lib/common.sh"
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
@@ -264,7 +266,7 @@ bash scripts/release-staged-version-policy.sh v$V" \
   fi
 
   # 6. canary install/join smoke.
-  if [ "$published" = true ] || marker_candidate_matches canary_smoke "$ok_sha"; then
+  if marker_canary_probe_matches "$ok_sha"; then
     step canary_smoke "done" "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("evidence")')"
   else
     step canary_smoke pending ""
@@ -274,8 +276,7 @@ bash scripts/release-staged-version-policy.sh v$V" \
 #   macprovider-cli --version == $V; joins via compatibility set $compat_id;
 #   operator pause survives coordinator drain; one bounded buyer request is served.
 # Record it with structured evidence (free text is refused):
-#   $0 next --done canary_smoke --probe        (reads the canary /v1/status via STUDIO_SSH)
-#   $0 next --done canary_smoke --run-id <id>  (a successful signed journey run for $ok_sha)"
+#   $0 next --done canary_smoke --probe        (reads /v1/status via STUDIO_SSH and reuses catalog gateway proof)"
   fi
 
   # 7. in-scope e2e on the candidate (Promotion gate item 3).
@@ -308,7 +309,7 @@ bash scripts/release-staged-version-policy.sh v$V" \
     if [ -n "$prod_active" ]; then
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
-      ! marker_candidate_matches canary_smoke "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha"; then
+      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha"; then
       set_next promotion blocked "Promote v$V" "" \
         "physical_acceptance_confirmed=true needs verified bytes, canary smoke and e2e evidence recorded for $ok_sha"
     else
@@ -392,6 +393,19 @@ marker_candidate_matches() {
     [ "$(marker_field "$OPS_SCOPE" "$1" 'd.get("candidate_sha")')" = "$2" ]
 }
 
+marker_canary_probe_matches() {
+  local sha="$1"
+  [ -n "$sha" ] || return 1
+  marker_done "$OPS_SCOPE" canary_smoke || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("candidate_sha")')" = "$sha" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("kind")')" = "status_probe_gateway_proof" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "true" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("paged_kv_decision")')" = "attached" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_authorized")')" = "true" ] || return 1
+  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_local_proof_result")')" = "passed" ] || return 1
+}
+
 # check_journey_run RUN_ID CANDIDATE_SHA VERSION -> JSON evidence on stdout, or refuse.
 # The run must be a successful signed journey run that names the candidate.
 check_journey_run() {
@@ -447,27 +461,41 @@ structured_done() {
         probe="$(python3 - "$OPS_TMP_DIR/canary.json" "$V" "$compat" <<'PY'
 import json, sys
 d, v, compat = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+cb = d.get("continuous_batching") or {}
+policy = cb.get("policy") or {}
 got = {
     "binary_version": d.get("binary_version"),
     "coordinator_connected": (d.get("coordinator") or {}).get("connected"),
     "compatibility_set_id": d.get("compatibility_set_id"),
+    "continuous_batching_active": cb.get("active"),
+    "paged_kv_decision": cb.get("paged_kv_decision"),
+    "policy_load_status": policy.get("load_status"),
+    "policy_authorized": policy.get("authorized"),
+    "policy_local_proof_result": policy.get("local_proof_result"),
 }
 bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
 if got["coordinator_connected"] is not True: bad.append("coordinator.connected is not true")
 if compat and got["compatibility_set_id"] != compat: bad.append("compatibility_set_id %r != %r" % (got["compatibility_set_id"], compat))
+if got["continuous_batching_active"] is not True: bad.append("continuous_batching.active is not true")
+if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
+if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
+if got["policy_authorized"] is not True: bad.append("continuous_batching.policy.authorized is not true")
+if got["policy_local_proof_result"] != "passed": bad.append("continuous_batching.policy.local_proof_result %r != 'passed'" % (got["policy_local_proof_result"],))
 if bad:
     sys.stderr.write("; ".join(bad) + "\n"); sys.exit(1)
 print(json.dumps(got, sort_keys=True))
 PY
 )" || refuse "canary probe failed the candidate checks"
-        mark_done "$OPS_SCOPE" canary_smoke "status probe: $probe" \
-          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "status_probe", "probe": json.loads(sys.argv[2])}))' "$sha" "$probe")"
+        local gateway_proof
+        gateway_proof="$({ "$OPS_DIR/catalog-activate.sh" _gateway-proof; } 2>&1)" ||
+          refuse "canary gateway proof failed after status validation: $gateway_proof"
+        mark_done "$OPS_SCOPE" canary_smoke "status probe + gateway proof: $probe" \
+          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "status_probe_gateway_proof", "probe": json.loads(sys.argv[2]), "gateway_proof_sha256": __import__("hashlib").sha256(sys.argv[3].encode()).hexdigest()}))' "$sha" "$probe" "$gateway_proof")"
       elif [ -n "$DONE_RUN_IDS" ] && [ -z "$DONE_CARRY" ]; then
-        mark_done "$OPS_SCOPE" canary_smoke "journey runs: $DONE_RUN_IDS" \
-          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "runs", "runs": json.loads(sys.argv[2])}))' "$sha" "$runs_json")"
+        refuse "canary_smoke requires --probe so continuous-batching activation is read from the upgraded provider status"
       else
-        refuse "canary_smoke needs --probe or --run-id <id>; free text is not evidence"
+        refuse "canary_smoke needs --probe; free text and run IDs are not activation evidence"
       fi ;;
     e2e_gate)
       [ "$DONE_PROBE" = 0 ] || refuse "--probe is not evidence for e2e_gate"

@@ -95,6 +95,7 @@
 # they are never printed, written to disk, or put in argv.
 
 set -euo pipefail
+export MACPROVIDER_REQUIRED_CB_BASELINE="${MACPROVIDER_REQUIRED_CB_BASELINE:=studio-qwen3.6-a3b-v1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"

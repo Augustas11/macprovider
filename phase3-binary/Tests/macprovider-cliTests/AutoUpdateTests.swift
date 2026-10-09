@@ -6,6 +6,42 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutoUpdateTests: XCTestCase {
+    private static func inactiveContinuousBatchingLocalStatus() -> [String: Any] {
+        [
+            "model": "mlx-community/Test-Model",
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "continuous_batching": [
+                "active": false,
+                "mode": "off",
+                "paged_kv_decision": "not_attached",
+            ],
+        ]
+    }
+
+    private static func protectedContinuousBatchingLocalStatus() -> [String: Any] {
+        [
+            "model": "mlx-community/Test-Model",
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "continuous_batching": [
+                "active": true,
+                "mode": "canary",
+                "cache_class": "mixed",
+                "paged_kv_decision": "attached",
+                "policy": [
+                    "load_status": ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue,
+                    "authorized": true,
+                    "local_proof_result": "passed",
+                    "tuple_sha256": String(repeating: "b", count: 64),
+                    "decision_reason": "authorized",
+                    "emergency_off_override": false,
+                    "release_id": "published-previous",
+                ],
+            ],
+        ]
+    }
+
     func testAutoUpdaterServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus() {
         let started = Date()
         XCTAssertFalse(AutoUpdater.launchctlServiceLoaded(
@@ -1324,7 +1360,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { false },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         do {
@@ -2015,7 +2052,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         await updater.handleCoordinatorRecommendation("1.7.0")
@@ -2088,7 +2126,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         await updater.handleCoordinatorRecommendation("1.7.0")
@@ -2204,7 +2243,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         try await updater.preserveMarkerAndSwapForTest(
@@ -2319,7 +2359,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         do {
@@ -2452,7 +2493,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         do {
@@ -2519,7 +2561,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
@@ -2582,7 +2625,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         await updater.handleSignedReleaseDiscovery()
@@ -2651,7 +2695,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
         let lock = try store.acquireRecoveryLock()
         defer { withExtendedLifetime(lock) {} }
@@ -2727,7 +2772,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
         let lock = try store.acquireRecoveryLock()
         defer { withExtendedLifetime(lock) {} }
@@ -2789,7 +2835,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
         let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
         defer { withExtendedLifetime(lock) {} }
@@ -2862,7 +2909,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -2912,7 +2960,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -2965,7 +3014,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -3254,7 +3304,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3282,7 +3333,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3320,7 +3372,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3345,7 +3398,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { false },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3561,7 +3615,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3590,7 +3645,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         // Target 1.7.0 is below the persisted minimum 1.8.0.
@@ -3618,7 +3674,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3650,7 +3707,8 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             launchdProviderAvailable: { true },
-            headlessOperatorManagedTopology: { false }
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
         let attribution = [
             "accepted_session_recovery": "true",

@@ -492,6 +492,7 @@ jobs:
           policy_file="$RUNNER_TEMP/release-staged-policy.env"
           bash scripts/release-staged-version-policy.sh "$TAG" > "$policy_file"
           source "$policy_file"
+          required_cb_baseline="studio-qwen3.6-a3b-v1"
           prepublication_recommendation_args=(
             --expected-previous-recommendation "$MACPROVIDER_RELEASE_COORDINATOR_RECOMMENDATION"
           )
@@ -506,6 +507,7 @@ jobs:
             --descendant-catalog-dir "$reviewed_catalog" \
             --baked-catalog-dir "$accepted" \
             --baked-cli-native-mtp-admission-schema "$baked_native_schema" \
+            --required-continuous-batching-baseline "$required_cb_baseline" \
             --publication-phase pre-publication
           echo "::endgroup::"
           # Repository rules and the production-release environment serialize

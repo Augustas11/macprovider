@@ -2080,6 +2080,7 @@ jobs:
               --coordinator-url https://coordinator.malibu.tech \
               --openssl "$OPENSSL_BIN" \
               "${prepublication_recommendation_args[@]}" \
+              --required-continuous-batching-baseline studio-qwen3.6-a3b-v1 \
               --publication-phase pre-publication
             echo "::endgroup::"
           fi

@@ -1625,6 +1625,81 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(SelfUpdate.localHealthRequiredConsecutiveSamples, 11)
     }
 
+    func testLocalHealthRequiresContinuousBatchingPreservationWhenPreviousWasActive() throws {
+        let protectedContinuousBatching: [String: Any] = [
+            "active": true,
+            "mode": "canary",
+            "cache_class": "mixed",
+            "paged_kv_decision": "attached",
+            "policy": [
+                "load_status": ContinuousBatchingPolicyLoadStatus.liveVerified.rawValue,
+                "authorized": true,
+                "local_proof_result": "passed",
+                "tuple_sha256": String(repeating: "b", count: 64),
+                "decision_reason": "authorized",
+                "emergency_off_override": false,
+                "release_id": "published-previous",
+            ],
+        ]
+        let previousStatus: [String: Any] = [
+            "binary_version": "1.8.49",
+            "compatibility_set_id": "previous-set",
+            "compatibility_set_sha256": String(repeating: "9", count: 64),
+            "model": "model-a",
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "model_loaded": true,
+            "status": "ready",
+            "service_instance": [
+                "instance_id": "instance-a",
+                "pid": 123,
+            ],
+            "continuous_batching": protectedContinuousBatching,
+        ]
+        let previousContinuousBatching = try XCTUnwrap(
+            AutoUpdateContinuousBatchingPreservationGate.protectedSnapshot(from: previousStatus)
+        )
+        var successor = previousStatus
+        successor["binary_version"] = "1.8.50"
+        successor["compatibility_set_id"] = "set-50"
+        successor["compatibility_set_sha256"] = String(repeating: "a", count: 64)
+
+        XCTAssertEqual(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                successor,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64),
+                previousContinuousBatching: previousContinuousBatching
+            ),
+            "123:instance-a"
+        )
+
+        var missingContinuousBatching = successor
+        missingContinuousBatching.removeValue(forKey: "continuous_batching")
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                missingContinuousBatching,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64),
+                previousContinuousBatching: previousContinuousBatching
+            )
+        )
+
+        var identityChanged = successor
+        identityChanged["model_hash"] = String(repeating: "c", count: 64)
+        XCTAssertNil(
+            SelfUpdate.localHealthyTargetInstanceKey(
+                identityChanged,
+                targetVersion: "1.8.50",
+                expectedCompatibilitySetID: "set-50",
+                expectedCompatibilitySetSHA256: String(repeating: "a", count: 64),
+                previousContinuousBatching: previousContinuousBatching
+            )
+        )
+    }
+
     func testStaleLocalStatusOwnerSelectsOnlyOldServeProcessAtExpectedPath() {
         let status: [String: Any] = [
             "binary_version": "1.8.102",
