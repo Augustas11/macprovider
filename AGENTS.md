@@ -44,6 +44,19 @@ while sessions regenerated evidence instead of deploying. Each is binding.
 7. **Handoffs are committed and point at paths that exist.** One session at a
    time mutates Pearl or a Studio provider. Handback is written, naming what
    changed live.
+8. **Releases and live changes go through `scripts/ops/` only.** CLI release,
+   catalog/CB/native-MTP activation and the Pearl runtime train each have one
+   entry point (`cli-release.sh`, `catalog-activate.sh`, `pearl-runtime.sh`).
+   Run `status`, then `next`; `next --run` executes exactly one documented
+   step and takes the live-ops lock (`live-lock.sh`). Never call the release
+   workflows, `deploy-pearl-vps.sh`, `catalog-content-release.sh --deploy`,
+   the Pearl updater `--apply`, or a coordinator restart directly. Claude Code
+   enforces this with `scripts/ops/hooks/claude-pretooluse-ops-guard.sh`;
+   other agents follow it from this rule. See `scripts/ops/README.md`.
+9. **No closing keyword next to an issue number** (the close/fix/resolve
+   family, any tense, even negated) in a PR body, title or commit message
+   unless that PR completes the issue. Write `Related: #N`. GitHub ignores
+   negation; that is how the #1690 and #1749 epics were auto-closed early.
 
 ## Project Overview
 
