@@ -6961,14 +6961,20 @@ actor ModelRuntime: ModelRuntimeServing {
             // and any stop-string prefix; the serial stream's end sends the
             // remainder as the final text renders it, so the buyer's bytes
             // equal the receipt's.
-            let validated = try Self.finishContinuousBatchStream(
+            // The final flush can carry the first buyer-visible chunk when
+            // filtering held all earlier output back, so it marks the clock
+            // too and receipt TTFT is read only after it.
+            var validated = try Self.finishContinuousBatchStream(
                 finalized,
                 state: streamState,
                 request: request,
                 structuredAccumulator: structuredAccumulator,
                 idleState: idleState,
-                onChunk: onChunk
+                onChunk: firstTokenClock.markingFirstChunk(replay: false, onChunk)
             )
+            if validated.ttftMilliseconds == nil {
+                validated.ttftMilliseconds = firstTokenClock.ttftMilliseconds(since: completionStartedAt)
+            }
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
             if !finalized.truncatedAtSerialStop,
@@ -11943,7 +11949,7 @@ struct CompletionResult: Sendable {
     let kvCacheBytesReused: Int
     let completionTokens: Int
     let generatedCompletionTokens: Int
-    let ttftMilliseconds: Int64?
+    var ttftMilliseconds: Int64?
     let generationMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?

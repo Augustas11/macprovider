@@ -386,10 +386,18 @@ actor InferenceRelay {
         // `error_queue_full` refusal (#1906). The entry stays in `active`
         // until the task returns, so drain still waits for post-end work.
         let releasingSendFrame: SendFrame = { [weak self, state, sendFrame] frame in
-            if (frame["type"] as? String) == "inference_response_end" {
+            let isEnd = (frame["type"] as? String) == "inference_response_end"
+            if isEnd {
                 await self?.markEnded(requestID, state: state)
             }
-            try await sendFrame(frame)
+            do {
+                try await sendFrame(frame)
+            } catch {
+                // The coordinator never saw this end, so the request still
+                // holds its admission slot there; count it here again.
+                if isEnd { await self?.unmarkEnded(requestID, state: state) }
+                throw error
+            }
         }
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, releasingSendFrame, tier2Session, state, settlementMetadata, streamInterval, relayBlindRuntime] in
             await Self.process(
@@ -507,6 +515,11 @@ actor InferenceRelay {
     private func markEnded(_ requestID: String, state: RelayRequestState) {
         guard active[requestID]?.state === state else { return }
         endedRequestIDs.insert(requestID)
+    }
+
+    private func unmarkEnded(_ requestID: String, state: RelayRequestState) {
+        guard active[requestID]?.state === state else { return }
+        endedRequestIDs.remove(requestID)
     }
 
     private func removeActive(_ requestID: String, state: RelayRequestState) {
