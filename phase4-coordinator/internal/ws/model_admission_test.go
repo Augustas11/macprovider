@@ -2001,4 +2001,18 @@ func TestModelAdmissionOfferRequestedPoolModelID(t *testing.T) {
 	if status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, unsigned); status != http.StatusUnauthorized {
 		t.Fatalf("unsigned requested id status=%d body=%s", status, body)
 	}
+	// A present-but-empty or null value is refused, never read as absent:
+	// it would otherwise ride outside the signed preimage.
+	for _, c := range []struct {
+		seed  string
+		value any
+	}{{"e0", ""}, {"e1", nil}} {
+		value := c.value
+		empty := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID(c.seed), "ollama:qwen3-8b", priv, nil)
+		empty["requested_pool_model_id"] = value
+		status, body := postModelAdmissionOffer(t, h.HTTP.URL, bearer, empty)
+		if status != http.StatusBadRequest || !strings.Contains(string(body), "invalid_offer") {
+			t.Fatalf("present-empty requested id %#v status=%d body=%s", value, status, body)
+		}
+	}
 }

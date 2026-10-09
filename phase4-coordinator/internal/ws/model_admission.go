@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -2082,10 +2084,15 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	}
 	var body modelAdmissionOfferSubmitRequest
 	r.Body = http.MaxBytesReader(w, r.Body, modelAdmissionMaxBodyBytes+1)
-	if err := decodeStrictJSON(r.Body, &body); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = decodeStrictJSON(bytes.NewReader(raw), &body)
+	}
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_json", "invalid model admission offer package"))
 		return
 	}
+	body.requestedPoolModelIDPresent = jsonObjectHasKeyFold(raw, "requested_pool_model_id")
 	event, err := s.verifyModelAdmissionOffer(r.Context(), providerID, body)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -2455,6 +2462,25 @@ type modelAdmissionOfferSubmitRequest struct {
 	// RequestedPoolModelID (#1880, SPEC-047-R002 0.2.8) is optional; it is
 	// signed only when present, so offers without it keep their bytes.
 	RequestedPoolModelID string `json:"requested_pool_model_id,omitempty"`
+	// requestedPoolModelIDPresent records that the wire carried the key at
+	// all, so a present-but-empty (or null) value is refused instead of
+	// being read as absent and left out of the signed preimage.
+	requestedPoolModelIDPresent bool
+}
+
+// jsonObjectHasKeyFold reports whether a JSON object has key, matched
+// case-insensitively as encoding/json matches struct fields.
+func jsonObjectHasKeyFold(raw []byte, key string) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	for name := range fields {
+		if strings.EqualFold(name, key) {
+			return true
+		}
+	}
+	return false
 }
 
 type modelAdmissionWithdrawRequest struct {
@@ -2642,6 +2668,9 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	}
 	if payload.CatalogModelKey != "" && len(payload.CatalogModelKey) > 128 {
 		return fmt.Errorf("invalid catalog_model_key")
+	}
+	if payload.requestedPoolModelIDPresent && payload.RequestedPoolModelID == "" {
+		return fmt.Errorf("empty requested_pool_model_id")
 	}
 	if payload.RequestedPoolModelID != "" {
 		if _, _, ok := poolmanifest.ParsePoolModelID(payload.RequestedPoolModelID); !ok {
