@@ -490,11 +490,11 @@ enum CreatorOperations {
     }
 
     /// Sends the persisted registration unchanged and forgets it only on a
-    /// definitive (< 500) answer. A replay of a committed registration is
+    /// definitive answer (see `isDefinitive`). A replay of a committed registration is
     /// answered as success by the coordinator's idempotent replay.
     static func sendPendingRootRegistration(client: CreatorClient, pendingURL: URL, operationID: String, event: [String: Any]) async throws -> [String: Any] {
         let response = try await client.request("POST", "events", body: event, operationID: operationID)
-        if response.status < 500 { try FileManager.default.removeItem(at: pendingURL) }
+        if CreatorOperations.isDefinitive(response.status) { try FileManager.default.removeItem(at: pendingURL) }
         return try client.expect(response)
     }
 
@@ -644,13 +644,23 @@ enum CreatorOperations {
         return result
     }
 
+    /// Whether a status settles the operation itself. Rate limiting, an
+    /// authentication failure, a timeout, and a 5xx are answered before the
+    /// coordinator looks at the operation, so the pending write is kept.
+    static func isDefinitive(_ status: Int) -> Bool {
+        switch status {
+        case 401, 408, 425, 429: return false
+        default: return status < 500
+        }
+    }
+
     /// POSTs under a per-pool sticky operation id: the id is kept until the
-    /// gateway gives a definitive (< 500) answer, so re-running a command after
-    /// a lost response replays instead of appending a duplicate event.
+    /// gateway gives a definitive answer, so re-running a command after a
+    /// lost response replays instead of appending a duplicate event.
     static func stickyRequest(home: CreatorHome, client: CreatorClient, poolID: String, key: String, label: String, path: String, body: [String: Any]) async throws -> [String: Any] {
         let operationID = try home.stickyOperationID(poolID: poolID, key: key, label: label)
         let response = try await client.request("POST", path, body: body, operationID: operationID)
-        if response.status < 500 { try home.clearOperationID(poolID: poolID, key: key) }
+        if isDefinitive(response.status) { try home.clearOperationID(poolID: poolID, key: key) }
         return try client.expect(response)
     }
 

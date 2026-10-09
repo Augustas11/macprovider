@@ -248,6 +248,54 @@ final class CreatorCommandTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: home.poolDir(identity.poolID).appendingPathComponent("root-registration-pending.json").path))
     }
 
+    func testRateLimitedRetryKeepsThePendingRootRegistration() async throws {
+        final class RateLimitedCoordinator: CreatorTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private var committed: (key: String, body: Data)?
+            private(set) var nonces = 0
+            private(set) var rootAttempts = 0
+            func send(_ request: URLRequest) async throws -> CreatorResponse {
+                if request.url?.path == "/v1/creator/root-registration-nonces" {
+                    lock.withLock { nonces += 1 }
+                    return jsonResponse(201, ["root_registration_nonce": [
+                        "nonce": "nonce-1", "creator_account_id": "acct_creator", "approval_record_id": "self-serve:acct_creator",
+                        "current_approval_version": "self-serve-1", "launch_environment": "self_serve_private",
+                        "expires_at_utc": "2026-10-09T12:15:00.5Z", "purpose": "root_issuer_registration",
+                    ]])
+                }
+                let key = request.value(forHTTPHeaderField: "Idempotency-Key") ?? ""
+                let payload = request.httpBody ?? Data()
+                let attempt = lock.withLock { () -> Int in
+                    rootAttempts += 1
+                    if committed == nil { committed = (key, payload) }
+                    return rootAttempts
+                }
+                switch attempt {
+                case 1: throw CreatorCLIError.transport("connection reset after commit")
+                case 2: return jsonResponse(429, ["error": ["code": "rate_limited"]])
+                default:
+                    let same = lock.withLock { committed?.key == key && committed?.body == payload }
+                    return jsonResponse(same ? 202 : 409, same ? ["event": ["ok": true]] : ["error": ["code": "conflicting_operation_id"]])
+                }
+            }
+        }
+        let fake = RateLimitedCoordinator()
+        let home = CreatorHome(root: homeURL)
+        let client = CreatorClient(login: CreatorLogin(gatewayURL: "https://api.malibu.tech", apiKey: "k"), transport: fake)
+        let identity = try CreatorOperations.keygen(home: home)
+        let pending = home.poolDir(identity.poolID).appendingPathComponent("root-registration-pending.json")
+        do { _ = try await CreatorOperations.registerRoot(home: home, client: client, poolID: identity.poolID, displayName: "Studio Pool"); XCTFail("expected lost response") } catch {}
+        do { _ = try await CreatorOperations.registerRoot(home: home, client: client, poolID: identity.poolID, displayName: "Studio Pool"); XCTFail("expected 429") } catch {}
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pending.path), "a 429 must keep the signed registration")
+        _ = try await CreatorOperations.registerRoot(home: home, client: client, poolID: identity.poolID, displayName: "Studio Pool")
+        XCTAssertEqual(fake.nonces, 1)
+        XCTAssertEqual(fake.rootAttempts, 3)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: pending.path))
+        XCTAssertFalse(CreatorOperations.isDefinitive(429))
+        XCTAssertFalse(CreatorOperations.isDefinitive(401))
+        XCTAssertTrue(CreatorOperations.isDefinitive(409))
+    }
+
     func testOptionalPoolMustBeAWellFormedPoolID() {
         XCTAssertThrowsError(try CreatorStatusCommand.parse(["--pool", "../me"]))
         XCTAssertThrowsError(try CreatorEarningsCommand.parse(["--pool", "short"]))
