@@ -140,6 +140,21 @@ These source checks support proceeding to a consolidated promotion-ready
 candidate; they do not cut a candidate, authorize production enablement or
 replace final signed-identity and changed buyer-path confirmation.
 
+Privacy network activation handback, 2026-10-09 (SPEC-049 §8.3, Related:
+#1749). Live changes: the signed CLI 1.8.224 code identity is approved on
+production, and eligible 1.8.224 providers enrolled automatically (six
+enrolled plus the operator-pinned canary). Buyer confirmation through the
+public gateway with the reviewed reference client passed for identity pin and
+signed directory, each stream and non-stream; directory-selected private
+requests were also served by enrolled Llama providers. Every private request
+settled as `relay_blind_settled`; ordinary traffic stayed healthy. Synthetic
+load on the canary was paused for 37 seconds for the pin/directory run and
+restarted. Findings carried to #1911: reservation selection bound the first
+provider for a model regardless of free slots, and private requests lose free
+slots to sustained plaintext load. The approval still carries the old dated
+expiry until a runtime containing `43180f577` is deployed and the approve
+step is rerun.
+
 Privacy activation follow-up [#1892](https://github.com/Augustas11/macprovider/pull/1892)
 merged on 2026-10-08 as `394bf61aea689075ac5506c506484cc75168649a`,
 with antfleet-ops approval and all checks green. The accepted campaign includes
