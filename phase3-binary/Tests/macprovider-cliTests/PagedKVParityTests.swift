@@ -275,7 +275,7 @@ final class PagedKVParityTests: XCTestCase {
         let ctx = try await loadLocal(dir)
         let container = ModelContainer(context: ctx)
         let cacheKinds = try PagedKVSharedForwardBackend.CacheKind.kinds(from: ctx.model.newCache(parameters: nil))
-        let layerCount = cacheKinds?.count ?? (try ctx.model.newCache(parameters: nil).count)
+        let layerCount = try cacheKinds?.count ?? ctx.model.newCache(parameters: nil).count
         // Same strings and tokenization as production (ModelRuntime.swift:1532-1533,1575-1578).
         let promptA = ctx.tokenizer.encode(text: "Draft a short summary of today's shipping forecast.", addSpecialTokens: true)
         let promptB = ctx.tokenizer.encode(text: "List three ingredients commonly used in a simple tomato soup.", addSpecialTokens: true)

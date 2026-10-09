@@ -85,10 +85,26 @@ pins = resolved.get("pins")
 if resolved.get("version") not in (2, 3) or not isinstance(pins, list) or not pins:
     raise SystemExit("phase3-binary/Package.resolved is not a valid SwiftPM lock")
 identities = {pin.get("identity") for pin in pins if isinstance(pin, dict)}
-if "async-http-client" not in identities:
+required = {
+    "mlx-swift",
+    "mlx-swift-lm",
+    "swift-transformers",
+    "swift-huggingface",
+    "swift-jinja",
+    "swift-nio",
+    "swift-argument-parser",
+}
+missing = sorted(required - identities)
+if missing:
+    raise SystemExit(f"Package.resolved is missing linked packages: {', '.join(missing)}")
+# SwiftPM 6.3 resolves only enabled traits. swift-huggingface's opt-in Xet
+# transport (swift-xet, async-http-client) is enabled by nothing in this graph,
+# so the reviewed lock must not carry it; a pin here means a new trait was
+# switched on without review.
+trait_gated = sorted({"swift-xet", "async-http-client"} & identities)
+if trait_gated:
     raise SystemExit(
-        "Package.resolved is missing async-http-client; the pinned Xcode locked "
-        "resolve requires it after the #1336 swift-transformers bump (#1360)"
+        f"Package.resolved carries trait-gated Xet transport pins: {', '.join(trait_gated)}"
     )
 PY
 
