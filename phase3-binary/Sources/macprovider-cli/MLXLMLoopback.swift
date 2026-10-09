@@ -54,13 +54,43 @@ enum MLXLMLoopbackServeModel {
     /// Origins `models discover` probes when MACPROVIDER_MLXLM_MODEL_PATH is
     /// unset: the operator's MACPROVIDER_MLXLM_ORIGIN alone, else the
     /// mlx_lm.server default and the recommended non-clashing port. A port
-    /// the provider's own serve listens on is never probed.
+    /// the provider's own serve listens on is never probed, configured or
+    /// not.
     static func discoveryOrigins(configured: String?, excludingPort servePort: Int? = nil) -> [String] {
-        if let configured = LoopbackServeSelection.nonEmpty(configured) { return [configured] }
-        return [defaultOrigin, recommendedOrigin].filter { origin in
+        let candidates = LoopbackServeSelection.nonEmpty(configured).map { [$0] } ?? [defaultOrigin, recommendedOrigin]
+        return candidates.filter { origin in
             guard let servePort else { return true }
             return URL(string: origin)?.port != servePort
         }
+    }
+
+    /// True only for the `GET /v1/models` answer mlx_lm.server itself gives
+    /// (mlx-lm 0.31-0.32 `server.py`): Python's `http.server` (`Server:
+    /// BaseHTTP/... Python/...`), a body of exactly `object: "list"` and
+    /// `data`, and entries of exactly `id`, `object: "model"` and one shared
+    /// integer `created` (no `owned_by`, which other OpenAI-compatible
+    /// servers send). Auto-detection requires it; a declared path does not.
+    static func isMLXLMServerModelList(_ response: BYOMHTTPResponse) -> Bool {
+        guard let server = response.headers.first(where: { $0.0.caseInsensitiveCompare("Server") == .orderedSame })?.1,
+              server.hasPrefix("BaseHTTP/"), server.contains("Python/"),
+              let text = String(data: response.body, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              Set(root.keys) == ["object", "data"],
+              case .string("list")? = root["object"],
+              case .array(let models)? = root["data"], !models.isEmpty
+        else { return false }
+        var created: Int?
+        for model in models {
+            guard case .object(let entry) = model,
+                  Set(entry.keys) == ["id", "object", "created"],
+                  case .string? = entry["id"],
+                  case .string("model")? = entry["object"],
+                  case .int(let stamp)? = entry["created"]
+            else { return false }
+            if let created, created != stamp { return false }
+            created = stamp
+        }
+        return true
     }
 
     /// Where an auto-detected snapshot may live: serve's durable model store
@@ -117,7 +147,7 @@ enum MLXLMLoopbackServeModel {
             origin.appendingPathComponent("v1/models"),
             maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
             maxBodyBytes: maxModelsBodyBytes
-        ), response.statusCode == 200, let ids = modelIDs(from: response.body) else {
+        ), response.statusCode == 200, isMLXLMServerModelList(response), let ids = modelIDs(from: response.body) else {
             return .none
         }
         var directories = Set<URL>()

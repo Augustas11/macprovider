@@ -2453,6 +2453,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// Where an auto-detected mlx_lm.server snapshot may live; nil derives
     /// them from `durableModelRoot` and `mlxCacheRoot`.
     var mlxlmApprovedRoots: MLXLMLoopbackServeModel.ApprovedSnapshotRoots?
+    /// The provider's own serve port, never probed for mlx_lm.server.
+    var mlxlmExcludedPort: Int?
     /// LM Studio's `/api/v1/models`, fetched by `withLoopbackRuntimeProbes`;
     /// narrows the LM Studio store's file resolution (see BYOMLMStudioModelStore).
     var lmstudioServedModels: [LMStudioLoopbackServeModel.Model]?
@@ -2564,6 +2566,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         lmstudioOrigin: String? = nil,
         llamacppOrigin: String? = nil,
         llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
+        servePort: Int? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2590,7 +2593,14 @@ struct BYOMDiscoveryEnvironment: Sendable {
             production.mlxlmSelectionError = .invalidDeclaredPath(path)
         }
         production.mlxlmApprovedRoots = MLXLMLoopbackServeModel.ApprovedSnapshotRoots.default(environment: environment, homeDirectory: homeDirectory)
+        production.mlxlmExcludedPort = servePort
         return production
+    }
+
+    /// The port the provider's serve listens on per its config (default
+    /// 8080 when the config cannot be read), so discovery never probes it.
+    static func configuredServePort(configPath: String? = nil) -> Int {
+        (try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)))?.port ?? 8080
     }
 
     /// When MACPROVIDER_MLXLM_MODEL_PATH is unset, finds a running
@@ -2605,7 +2615,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
             durableModelRoot: durableModelRoot ?? Self.defaultDurableModelRoot(),
             hubCacheRoot: mlxCacheRoot
         )
-        for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin) {
+        for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin, excludingPort: mlxlmExcludedPort) {
             guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else { continue }
             switch await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL, roots: roots) {
             case .none:

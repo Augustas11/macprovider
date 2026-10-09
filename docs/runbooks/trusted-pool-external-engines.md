@@ -63,7 +63,11 @@ unset, `models discover`, `evaluate`, `propose`, `offer` and `serve` ask
 `127.0.0.1:8080` and `127.0.0.1:8081` for `GET /v1/models`, and use the one
 local snapshot directory the server lists as its `--model` path. Malibu's
 own serve lists catalog ids there and is never taken for `mlx_lm.server`, and
-`serve` never probes its own port. The listed directory is used only when,
+no command probes the provider's configured serve port, even when an origin
+names it. Only an answer shaped like `mlx_lm.server`'s own is used: a Python
+`http.server` (`Server: BaseHTTP/... Python/...`) whose model entries carry
+exactly `id`, `object` and one shared `created` (another OpenAI-compatible
+server, which sends `owned_by`, is ignored). The listed directory is used only when,
 with symlinks resolved, it is inside the provider model store
 (`~/Library/Application Support/macprovider/models`, or
 `MACPROVIDER_MODEL_ARTIFACT_ROOT`) or is a Hugging Face hub cache snapshot

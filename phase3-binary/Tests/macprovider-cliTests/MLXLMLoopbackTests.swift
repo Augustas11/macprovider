@@ -261,10 +261,31 @@ final class MLXLMLoopbackTests: XCTestCase {
         XCTAssertFalse(hubRoots.contains(hub.appendingPathComponent("models--org--m")))
         XCTAssertFalse(hubRoots.contains(hub.appendingPathComponent("models--org--m/blobs/x")))
 
-        // Serve never probes its own port, even for an in-root directory.
+        // Serve never probes its own port, even for an in-root directory, and
+        // not even when an origin names it.
         let selfPort = MLXLMPortStubClient(listings: [8080: [snapshot.path]])
         let skipped = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: selfPort, environment: [:], servePort: 8080, roots: roots(holding: snapshot))
         XCTAssertNil(skipped.directory)
+        let configuredSelf = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:8080", client: selfPort, environment: [:], servePort: 8080, roots: roots(holding: snapshot))
+        XCTAssertNil(configuredSelf.directory)
+        XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: "http://127.0.0.1:8080", excludingPort: 8080), [])
+        // Discovery excludes the configured serve port too.
+        var discovering = BYOMDiscoveryEnvironment(
+            namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent/hub"), ollamaOrigin: nil,
+            durableModelRoot: snapshot.deletingLastPathComponent()
+        )
+        discovering.mlxlmExcludedPort = 8080
+        let notSelf = try await discovering.withInferredMLXLMSnapshot(httpClient: selfPort)
+        XCTAssertNil(notSelf.mlxlmModelPath)
+        discovering.mlxlmOrigin = "http://127.0.0.1:8080"
+        let configuredNotSelf = try await discovering.withInferredMLXLMSnapshot(httpClient: selfPort)
+        XCTAssertNil(configuredNotSelf.mlxlmModelPath)
+
+        // Another OpenAI-compatible server listing one in-root directory is
+        // not mlx_lm.server: nothing is auto-detected from it.
+        let other = MLXLMPortStubClient(listings: [8081: [snapshot.path]], foreign: [8081])
+        let notMLXLM = try await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, client: other, environment: [:], servePort: 8080, roots: roots(holding: snapshot))
+        XCTAssertNil(notMLXLM.directory)
 
         // A present-but-malformed declared path is an error, never "unset".
         let malformed = ["MACPROVIDER_MLXLM_MODEL_PATH": "relative/dir"]
@@ -284,6 +305,22 @@ final class MLXLMLoopbackTests: XCTestCase {
         } catch let error as MLXLMSnapshotSelectionError {
             XCTAssertEqual(error, .invalidDeclaredPath("relative/dir"))
         }
+    }
+
+    func testMLXLMServerFingerprintMatchesOnlyMLXLMModelLists() {
+        func response(_ server: String?, _ body: String) -> BYOMHTTPResponse {
+            BYOMHTTPResponse(statusCode: 200, headers: server.map { [("Server", $0)] } ?? [], body: Data(body.utf8))
+        }
+        let mlx = #"{"object": "list", "data": [{"id": "mlx-community/x", "object": "model", "created": 1700000000}, {"id": "/m/s", "object": "model", "created": 1700000000}]}"#
+        XCTAssertTrue(MLXLMLoopbackServeModel.isMLXLMServerModelList(response("BaseHTTP/0.6 Python/3.12.8", mlx)))
+        XCTAssertFalse(MLXLMLoopbackServeModel.isMLXLMServerModelList(response(nil, mlx)), "no Server header")
+        XCTAssertFalse(MLXLMLoopbackServeModel.isMLXLMServerModelList(response("uvicorn", mlx)), "not Python http.server")
+        XCTAssertFalse(MLXLMLoopbackServeModel.isMLXLMServerModelList(response("BaseHTTP/0.6 Python/3.12.8",
+            #"{"object": "list", "data": [{"id": "/m/s", "object": "model", "created": 1, "owned_by": "me"}]}"#)), "owned_by")
+        XCTAssertFalse(MLXLMLoopbackServeModel.isMLXLMServerModelList(response("BaseHTTP/0.6 Python/3.12.8",
+            #"{"object": "list", "data": [{"id": "a", "object": "model", "created": 1}, {"id": "/m/s", "object": "model", "created": 2}]}"#)), "differing created")
+        XCTAssertFalse(MLXLMLoopbackServeModel.isMLXLMServerModelList(response("BaseHTTP/0.6 Python/3.12.8",
+            #"{"object": "list", "data": [], "extra": 1}"#)), "extra top-level key")
     }
 
     func testPoolUsageGuardAppliesToMLXLM() {
@@ -580,17 +617,28 @@ private final class MLXLMRecordingClientR3: BYOMDiscoveryHTTPClient, @unchecked 
     }
 }
 
+/// Answers `GET /v1/models` per port the way mlx_lm.server 0.31-0.32 does
+/// (Python `http.server`, entries of id/object/created only), or, for the
+/// ports in `foreign`, the way another OpenAI-compatible server does.
 private final class MLXLMPortStubClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
     private let listings: [Int: [String]]
+    private let foreign: Set<Int>
 
-    init(listings: [Int: [String]]) { self.listings = listings }
+    init(listings: [Int: [String]], foreign: Set<Int> = []) {
+        self.listings = listings
+        self.foreign = foreign
+    }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
-        guard url.path == "/v1/models", let ids = listings[url.port ?? 0] else {
+        guard url.path == "/v1/models", let port = url.port, let ids = listings[port] else {
             throw URLError(.cannotConnectToHost)
         }
-        let body: [String: Any] = ["object": "list", "data": ids.map { ["id": $0, "object": "model"] }]
-        return BYOMHTTPResponse(statusCode: 200, headers: [], body: try JSONSerialization.data(withJSONObject: body))
+        if foreign.contains(port) {
+            let body: [String: Any] = ["object": "list", "data": ids.map { ["id": $0, "object": "model", "created": 1_700_000_000, "owned_by": "organization-owner"] }]
+            return BYOMHTTPResponse(statusCode: 200, headers: [("Server", "uvicorn")], body: try JSONSerialization.data(withJSONObject: body))
+        }
+        let body: [String: Any] = ["object": "list", "data": ids.map { ["id": $0, "object": "model", "created": 1_700_000_000] }]
+        return BYOMHTTPResponse(statusCode: 200, headers: [("Server", "BaseHTTP/0.6 Python/3.12.8")], body: try JSONSerialization.data(withJSONObject: body))
     }
 
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
