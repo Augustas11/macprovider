@@ -71,6 +71,30 @@ for (const status of [401, 403, 404]) {
   });
 }
 
+for (const status of [401, 403, 404]) {
+  test(`github mode earnings ${status} after a successful load clears the shown earnings`, async () => {
+    const assigned = [];
+    let earningsStatus = 200;
+    const context = loadPortal((url) => {
+      if (String(url).endsWith("/earnings")) {
+        return earningsStatus === 200
+          ? response(200, { provider_id: "provider-a", usdc_lifetime: 1 })
+          : response(earningsStatus, { error: "x" });
+      }
+      return response(404, { error: "x" });
+    }, assigned);
+    context.state.cfg = { github_oauth_enabled: true };
+    vm.runInContext(`selectGitHubProvider("provider-a", false)`, context);
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(context.state.earn.data, "first earnings load did not populate data");
+    earningsStatus = status;
+    await vm.runInContext(`earnFetch("dashboard", { force: true })`, context);
+    assert.equal(context.state.earn.data, null, "stale earnings kept after refusal");
+    assert.equal(context.state.earn.err && context.state.earn.err.status, status);
+    assert.deepEqual(assigned, [], "earnings refusal started GitHub sign-in");
+  });
+}
+
 test("github mode: a 401 from /v1/auth/me/providers still asks to sign in", async () => {
   const assigned = [];
   const context = loadPortal(() => response(401, { error: "session_invalid" }), assigned);

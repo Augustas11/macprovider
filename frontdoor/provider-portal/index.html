@@ -713,6 +713,12 @@
             handleAuthRejection(r.status, surface || "dashboard");
             return;
           }
+          // A cookie-mode refusal means this session may no longer read
+          // these earnings: drop what was shown instead of leaving it stale.
+          if (useCookieAuth && (r.status === 401 || r.status === 403 || r.status === 404)) {
+            state.earn.data = null;
+            state.earn.ts = 0;
+          }
           state.earn.err = { status: r.status };
           render();
         })
