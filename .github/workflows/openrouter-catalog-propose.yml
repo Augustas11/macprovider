@@ -53,7 +53,8 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
-          out="$(mktemp -d)"
+          # The engine refuses an existing output directory; give it a fresh path.
+          out="$(mktemp -d)/out"
           python3 scripts/openrouter_pricing_engine.py propose \
             --policy scripts/openrouter_pricing_policy.json \
             --candidates scripts/openrouter_catalog_seed_candidates.json \
