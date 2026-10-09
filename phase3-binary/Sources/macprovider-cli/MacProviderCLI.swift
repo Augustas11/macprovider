@@ -2817,12 +2817,19 @@ struct ServeCommand: AsyncParsableCommand {
                     )
                 case .mlxLM:
                     // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
-                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) and
-                    // hashed by the CLI, never reported by the runtime.
+                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) or,
+                    // when unset, the one local path a running mlx_lm.server
+                    // lists as its --model (as `models discover` finds it);
+                    // the CLI hashes it and the listing check still binds it.
+                    let mlxlmTarget = await MLXLMLoopbackServeModel.serveTarget(
+                        configuredOrigin: resolved.loopbackOrigin,
+                        declaredDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        client: LoopbackServeHTTPClient()
+                    )
                     modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
                         servedModelRef: loopbackServedRef,
-                        origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
-                        snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        origin: mlxlmTarget.origin,
+                        snapshotDirectory: mlxlmTarget.directory,
                         catalogModelIDAlias: catalogModelIDAlias
                     )
                 case .lmStudio:

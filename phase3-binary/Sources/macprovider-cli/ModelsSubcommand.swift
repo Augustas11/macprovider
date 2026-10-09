@@ -38,8 +38,9 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
         127.0.0.1:8081) for GET /v1/models and binds the one snapshot directory the \
         server lists as its --model path. Start it with a local snapshot path, e.g. \
         `mlx_lm.server --model /path/to/snapshot --host 127.0.0.1 --port 8081`; \
-        port 8080 is macprovider-cli serve's own port. serve itself still needs \
-        MACPROVIDER_MLXLM_MODEL_PATH and loopback_origin for an mlxlm: model.
+        port 8080 is macprovider-cli serve's own port. serve detects the same \
+        server for an mlxlm: model; a server started with a Hugging Face repo id \
+        is not supported.
         """
     )
 

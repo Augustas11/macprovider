@@ -165,6 +165,46 @@ final class MLXLMLoopbackTests: XCTestCase {
         XCTAssertEqual(MLXLMLoopbackServeModel.discoveryOrigins(configured: "http://127.0.0.1:9191"), ["http://127.0.0.1:9191"])
     }
 
+    func testServeDetectsTheRunningMLXLMServerSnapshotWhenThePathIsUnset() async throws {
+        let snapshot = try makeSnapshot()
+        let ports = MLXLMPortStubClient(listings: [
+            8080: ["qwen/qwen3.6-35b-a3b"],
+            8081: ["mlx-community/Other-4bit", snapshot.path],
+        ])
+        // No path, no origin: the probe finds mlx_lm.server on 8081, not serve on 8080.
+        let found = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, declaredDirectory: nil, client: ports, environment: [:])
+        XCTAssertEqual(found.origin, "http://127.0.0.1:8081")
+        XCTAssertEqual(found.directory?.path, snapshot.resolvingSymlinksInPath().standardizedFileURL.path)
+        // A declared directory is used as is, with the configured origin.
+        let declared = URL(fileURLWithPath: "/declared/snapshot")
+        let pinned = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:9191", declaredDirectory: declared, client: ports, environment: [:])
+        XCTAssertEqual(pinned.origin, "http://127.0.0.1:9191")
+        XCTAssertEqual(pinned.directory, declared)
+        // A configured origin is the only one probed.
+        let configured = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: "http://127.0.0.1:8080", declaredDirectory: nil, client: ports, environment: [:])
+        XCTAssertNil(configured.directory)
+
+        // A repo-id server: nothing detected, and serve refuses with the fix.
+        let repoOnly = MLXLMPortStubClient(listings: [8081: ["mlx-community/Other-4bit"]])
+        let none = await MLXLMLoopbackServeModel.serveTarget(configuredOrigin: nil, declaredDirectory: nil, client: repoOnly, environment: [:])
+        XCTAssertNil(none.directory)
+        do {
+            _ = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+                servedModelRef: "mlxlm:Other-4bit", origin: none.origin, snapshotDirectory: none.directory, httpClient: repoOnly
+            )
+            XCTFail("serve must refuse without a snapshot directory")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("--model <path written by macprovider-cli models prepare>"))
+        }
+
+        // The detected directory still goes through the listing check and hashing.
+        let runtime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+            servedModelRef: "mlxlm:" + snapshot.lastPathComponent, origin: found.origin, snapshotDirectory: found.directory, httpClient: ports
+        )
+        let hash = await runtime.loadedModelHash
+        XCTAssertNotNil(hash)
+    }
+
     func testPoolUsageGuardAppliesToMLXLM() {
         let auth = { (source: String) -> PoolRuntimeAuthorization in
             PoolRuntimeAuthorization(wire: [

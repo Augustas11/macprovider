@@ -83,6 +83,41 @@ enum MLXLMLoopbackServeModel {
         return directories.count == 1 ? directories.first : nil
     }
 
+    /// The error serve answers when MACPROVIDER_MLXLM_MODEL_PATH is unset and
+    /// no running mlx_lm.server reports a local snapshot path.
+    static let undetectedSnapshotMessage = "\(snapshotPathEnvironmentKey) is unset and no mlx_lm.server on the loopback origin lists a local snapshot directory. A server started with a Hugging Face repo id is not supported: start it with `mlx_lm.server --model <path written by macprovider-cli models prepare> --host 127.0.0.1 --port 8081` (and loopback_origin: http://127.0.0.1:8081), or set \(snapshotPathEnvironmentKey) to the served snapshot directory"
+
+    /// Serve's mlx_lm.server target: the declared snapshot directory with the
+    /// configured origin, else the first probe origin (`loopback_origin`, then
+    /// MACPROVIDER_MLXLM_ORIGIN, then 8080 and 8081) whose server lists one
+    /// local snapshot path. The serve-time binding check still runs on it.
+    static func serveTarget(
+        configuredOrigin: String?,
+        declaredDirectory: URL?,
+        client: any BYOMDiscoveryHTTPClient,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async -> (origin: String, directory: URL?) {
+        let resolved = resolveOrigin(configured: configuredOrigin, environment: environment)
+        if let declaredDirectory { return (resolved, declaredDirectory) }
+        let explicit = LoopbackServeSelection.nonEmpty(configuredOrigin) ?? LoopbackServeSelection.nonEmpty(environment[originEnvironmentKey])
+        for origin in discoveryOrigins(configured: explicit) {
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin),
+                  let directory = await inferSnapshotDirectory(client, origin: baseURL)
+            else { continue }
+            servingSnapshot.set(directory)
+            return (origin, directory)
+        }
+        return (resolved, nil)
+    }
+
+    /// The snapshot directory serve bound to: declared, else inferred at
+    /// startup. Pool usage recounts read it.
+    static func servingSnapshotDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        snapshotDirectory(environment: environment) ?? servingSnapshot.get()
+    }
+
+    private static let servingSnapshot = MLXLMServingSnapshotBox()
+
     /// The operator-declared snapshot directory, resolved and standardized.
     /// Nil when unset: there is then no identity leg, and serving fails closed.
     static func snapshotDirectory(
@@ -425,4 +460,12 @@ extension BYOMModelAdmissionRuntime {
         let status = try await client.submitOffer(package, bearerToken: bearer)
         return (status, candidate, [snapshot.algorithm: snapshot.digest])
     }
+}
+
+private final class MLXLMServingSnapshotBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: URL?
+
+    func set(_ url: URL) { lock.lock(); value = url; lock.unlock() }
+    func get() -> URL? { lock.lock(); defer { lock.unlock() }; return value }
 }

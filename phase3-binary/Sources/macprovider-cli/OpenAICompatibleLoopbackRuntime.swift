@@ -1073,7 +1073,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
         }
         guard let snapshotDirectory else {
-            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(MLXLMLoopbackServeModel.snapshotPathEnvironmentKey) is not set to an absolute snapshot directory")
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(MLXLMLoopbackServeModel.undetectedSnapshotMessage)
         }
         let client = httpClient ?? LoopbackServeHTTPClient()
         let listed: Bool
