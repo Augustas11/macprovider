@@ -150,6 +150,12 @@ type forwardState struct {
 	consumedProviderID   string
 	consumedAssignedID   string
 
+	// queueFullRequeueUntil bounds how long provider error_queue_full
+	// refusals may send this request back to the same provider's slot queue.
+	// Set at the first refusal to one slot-queue deadline; a refusal after it
+	// excludes the provider like any other fault.
+	queueFullRequeueUntil time.Time
+
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
 	// advanceToNextProvider exactly once per advance; failover

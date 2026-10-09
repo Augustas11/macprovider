@@ -7377,6 +7377,10 @@ type routeError struct {
 	message               string
 	typ                   string
 	routeSnapshotPressure bool
+	// providerBusy marks a reservation that failed because the provider's
+	// live count had no free seat (full or safety hold) rather than because
+	// coordinator reservations already claimed its free seats.
+	providerBusy bool
 }
 
 func byomNonSettlementRouteError(model string) *routeError {
@@ -7890,6 +7894,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// enum keys to SPEC-004 §7 stringly names.
 	s.logRoutingDecisionFullWithCache(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "", balancedCache)
 	var capacityErr *routeError
+	var busyCandidates []pool.Provider
 	preflightRejected := false
 	for _, candidate := range candidates {
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
@@ -7907,6 +7912,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		if routeErr.code == "no_provider_available" {
 			capacityErr = routeErr
+			if routeErr.providerBusy {
+				busyCandidates = append(busyCandidates, candidate)
+			}
 			continue
 		}
 		preflightRejected = true
@@ -7920,6 +7928,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					return provider, routeErr
 				}
 			}
+		} else if queueEligible {
+			// A candidate that filled or entered a safety hold between the
+			// selection snapshot and the reservation is a busy provider, not
+			// reservation overflow: wait for it like any busy provider (#1906).
+			if len(busyCandidates) > 0 {
+				provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, busyCandidates, headers, class, dailyKey, estimatedTokens, state, slotWaiterStandard)
+				if queued {
+					return provider, routeErr
+				}
+			}
 		}
 		return pool.Provider{}, capacityErr
 	}
@@ -7927,8 +7945,8 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 }
 
 func (s *Server) selectReservedProvider(candidate pool.Provider, model string, requestID string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
-	if !s.reserveSelectedProviderSlot(candidate, state) {
-		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
+	if reserved, busy := s.reserveSelectedProviderSlot(candidate, state); !reserved {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model, providerBusy: busy}
 	}
 	provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
 	if routeErr != nil {
@@ -7938,24 +7956,37 @@ func (s *Server) selectReservedProvider(candidate pool.Provider, model string, r
 	return provider, nil
 }
 
-func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forwardState) bool {
+func (s *Server) reserveSelectedProviderSlot(provider pool.Provider, state *forwardState) (reserved, busy bool) {
 	if s.slotQueue == nil || state == nil || !state.slotReservationsEnabled {
-		return true
+		return true, false
 	}
 	if provider.ProviderID == "" {
-		return false
+		return false, false
 	}
 	if state.queuedSlotProviderID == provider.ProviderID {
-		return true
+		return true, false
 	}
 	if state.queuedSlotProviderID != "" {
 		s.releaseQueuedSlotReservation(state)
 	}
-	if !s.slotQueue.reserveProvider(provider.ProviderID, provider.SlotsFree) {
-		return false
+	reserved, busy = s.slotQueue.reserveProviderLive(provider.ProviderID, func() int { return s.routableSlotsFree(provider) })
+	if !reserved {
+		return false, busy
 	}
 	state.queuedSlotProviderID = provider.ProviderID
-	return true
+	return true, false
+}
+
+// routableSlotsFree is the provider's live reservable seat count, falling
+// back to the selection snapshot when the session is no longer registered
+// (the dispatch path rejects that case on its own).
+func (s *Server) routableSlotsFree(provider pool.Provider) int {
+	if s.pool != nil {
+		if free, ok := s.pool.RoutableSlotsFree(provider.ProviderID, provider.AssignedID); ok {
+			return free
+		}
+	}
+	return provider.SlotsFree
 }
 
 func poolRouteableSnapshotExpiredAt(snap trustpool.Snapshot, now time.Time) bool {
@@ -8838,7 +8869,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 	tried := map[string]struct{}{}
 	queueCandidates := make([]poolQueueCandidate, 0, len(ordered))
 	for _, candidate := range ordered {
-		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID})
+		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID, slotsTotal: candidate.SlotsTotal})
 	}
 	for len(tried) < len(queueCandidates) {
 		waiter, ok := s.slotQueue.enterBestWithKind(queueCandidates, tried, waiterKind)
@@ -9131,13 +9162,14 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 	normal := make([]pool.Provider, 0, len(candidates))
 	queued := make([]pool.Provider, 0, len(candidates))
 	for _, provider := range candidates {
-		if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
+		slotsFree := s.routableSlotsFree(provider)
+		if s.slotQueue.blocksProvider(provider.ProviderID, slotsFree) {
 			// A positive SlotsFree provider blocked only by coordinator-local
 			// reservations represents same-moment demand beyond advertised
 			// capacity. Public traffic sheds that overflow immediately.
 			// Wholesale traffic may queue it because upstream provider
 			// integrations prefer bounded capacity waits over retry churn.
-			if provider.SlotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow {
+			if slotsFree <= 0 || s.slotQueue.hasStandardWaiters(provider.ProviderID) || queueReservationOverflow {
 				queued = append(queued, provider)
 			}
 			continue
@@ -9187,11 +9219,22 @@ func (s *Server) noteProviderAcceptedRequest(state *forwardState) {
 			}
 		}
 		if provider.ProviderID != "" && provider.AssignedID != "" {
-			if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
-				state.slotConsumedOnAccept = true
-				state.consumedProviderID = provider.ProviderID
-				state.consumedAssignedID = provider.AssignedID
+			consume := func() {
+				if s.pool.ConsumeForwardedSlot(provider.ProviderID, provider.AssignedID) {
+					state.slotConsumedOnAccept = true
+					state.consumedProviderID = provider.ProviderID
+					state.consumedAssignedID = provider.AssignedID
+				}
 			}
+			if s.slotQueue != nil && state.queuedSlotProviderID != "" {
+				// Consume and lease release in one slot-queue critical
+				// section: a sibling selector must never count this chat as
+				// both a consumed seat and a live reservation (#1906).
+				s.slotQueue.releaseReservationAfter(state.queuedSlotProviderID, consume)
+				state.queuedSlotProviderID = ""
+				return
+			}
+			consume()
 		}
 	}
 	s.releaseQueuedSlotReservation(state)
@@ -9222,19 +9265,39 @@ func (s *Server) dropConsumedForwardedSlot(state *forwardState) {
 	state.consumedAssignedID = ""
 }
 
-func (s *Server) dropForwardedInFlight(state *forwardState) {
+// requeueAfterQueueFull reports whether a provider error_queue_full refusal
+// may send the request back to the same provider's slot queue.
+func (s *Server) requeueAfterQueueFull(r *http.Request, state *forwardState) bool {
+	if state == nil || hasPinnedRoute(r.Header) {
+		return false
+	}
+	now := s.now()
+	if state.queueFullRequeueUntil.IsZero() {
+		deadline := s.slotQueueDeadline
+		if deadline <= 0 {
+			deadline = slotQueueDefaultDeadline
+		}
+		state.queueFullRequeueUntil = now.Add(deadline)
+	}
+	return now.Before(state.queueFullRequeueUntil)
+}
+
+// markForwardedSlotFull records a provider error_queue_full refusal. The
+// refused attempt never ran, so its accept-consumed seat returns to the
+// coordinator count in the same pool update that raises the queue-full hold.
+func (s *Server) markForwardedSlotFull(state *forwardState) {
 	if s == nil || state == nil {
 		return
 	}
-	if s.pool != nil && state.slotConsumedOnAccept {
-		providerID := state.consumedProviderID
-		assignedID := state.consumedAssignedID
-		if providerID == "" {
-			providerID = state.provider.ProviderID
-			assignedID = state.provider.AssignedID
+	if s.pool != nil {
+		providerID := state.provider.ProviderID
+		assignedID := state.provider.AssignedID
+		if state.slotConsumedOnAccept && state.consumedProviderID != "" {
+			providerID = state.consumedProviderID
+			assignedID = state.consumedAssignedID
 		}
 		if providerID != "" && assignedID != "" {
-			s.pool.DropForwardedInFlight(providerID, assignedID)
+			s.pool.MarkForwardedSlotFull(providerID, assignedID, state.slotConsumedOnAccept)
 		}
 	}
 	s.dropConsumedForwardedSlot(state)

@@ -23,6 +23,10 @@ type slotWaiter struct {
 
 type poolQueueCandidate struct {
 	providerID string
+	// slotsTotal raises this provider's waiter cap to its advertised seat
+	// count, so a node serving more seats than maxPending can hold one
+	// waiter per seat while a completion frees capacity (#1906).
+	slotsTotal int
 }
 
 func newSlotQueue(maxPending int) *slotQueue {
@@ -67,7 +71,11 @@ func (q *slotQueue) enterBestWithKind(candidates []poolQueueCandidate, tried map
 			continue
 		}
 		queueLen := len(q.queues[providerID])
-		if queueLen >= q.maxPending {
+		maxPending := q.maxPending
+		if candidate.slotsTotal > maxPending {
+			maxPending = candidate.slotsTotal
+		}
+		if queueLen >= maxPending {
 			continue
 		}
 		if bestProviderID == "" || queueLen < bestLen {
@@ -151,6 +159,28 @@ func (q *slotQueue) reserveProvider(providerID string, slotsFree int) bool {
 	return true
 }
 
+// reserveProviderLive is reserveProvider with slots_free read under the
+// queue lock, so the check and the reservation see one consistent count with
+// releaseReservationAfter. busy reports a failed reservation whose live count
+// had no free seat at all (full or safety hold), as opposed to free seats
+// already claimed by reservations and waiters.
+func (q *slotQueue) reserveProviderLive(providerID string, slotsFree func() int) (reserved, busy bool) {
+	if providerID == "" {
+		return false, false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	free := slotsFree()
+	if free <= 0 {
+		return false, true
+	}
+	if len(q.queues[providerID])+q.reserved[providerID] >= free {
+		return false, false
+	}
+	q.reserved[providerID]++
+	return true, false
+}
+
 func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree int) bool {
 	if waiter == nil {
 		return false
@@ -165,6 +195,15 @@ func (q *slotQueue) reserveHead(waiter *slotWaiter, slotsFree int) bool {
 		return false
 	}
 	q.reserved[waiter.providerID]++
+	// Leave the queue in the same critical section: a waiter counted as both
+	// queued demand and a reservation reads as overflow to sibling selectors.
+	copy(queue, queue[1:])
+	queue = queue[:len(queue)-1]
+	if len(queue) == 0 {
+		delete(q.queues, waiter.providerID)
+	} else {
+		q.queues[waiter.providerID] = queue
+	}
 	return true
 }
 
@@ -174,6 +213,24 @@ func (q *slotQueue) releaseReservation(providerID string) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.reserved[providerID] <= 1 {
+		delete(q.reserved, providerID)
+		return
+	}
+	q.reserved[providerID]--
+}
+
+// releaseReservationAfter runs consume and then drops one reservation for
+// providerID while holding the queue lock. Selectors read slots_free from the
+// pool and the reservation count from here; serializing the pair against the
+// queue lock keeps an accepted chat from being counted twice in between.
+func (q *slotQueue) releaseReservationAfter(providerID string, consume func()) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	consume()
+	if providerID == "" {
+		return
+	}
 	if q.reserved[providerID] <= 1 {
 		delete(q.reserved, providerID)
 		return

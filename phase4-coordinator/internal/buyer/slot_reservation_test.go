@@ -477,7 +477,7 @@ func TestSlotQueueWaitsThroughQueueFullSafetyHold(t *testing.T) {
 	provider.State = pool.StateBusy
 	provider.SlotsFree = 0
 	registry.Register(&provider, nil)
-	if !registry.MarkForwardedSlotFull(provider.ProviderID, provider.AssignedID) {
+	if !registry.MarkForwardedSlotFull(provider.ProviderID, provider.AssignedID, false) {
 		t.Fatal("failed to apply queue-full safety hold")
 	}
 	s.slotQueueDeadline = 100 * time.Millisecond

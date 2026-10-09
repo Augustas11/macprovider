@@ -179,14 +179,20 @@ func (s *Server) forwardWithFailover(
 		// Mark fault state — shared across all transports. The mutation
 		// order matches the pre-refactor inline blocks exactly:
 		// excluded → faultedRoutes → (markBusy MarkState if set).
-		excluded[state.provider.SortKey()] = struct{}{}
+		// A provider queue-full refusal means the Mac has not yet retired a
+		// chat whose end frame already arrived. Within one slot-queue
+		// deadline of the first refusal the provider stays selectable, so the
+		// request waits in its slot queue for the next completion instead of
+		// shedding. The queue-full hold paces each retry to a completion, and
+		// the advance below re-excludes the provider (#1906).
+		if tr.markBusy && s.requeueAfterQueueFull(r, state) {
+			delete(excluded, state.provider.SortKey())
+		} else {
+			excluded[state.provider.SortKey()] = struct{}{}
+		}
 		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
 		if tr.markBusy {
-			s.pool.MarkForwardedSlotFull(state.provider.ProviderID, state.provider.AssignedID)
-			// Queue-full / still-busy terminals keep the consumed occupancy.
-			// Restoring here would republish a free slot while the Mac is full.
-			// Drop the in-flight ignore counter so later ready/thermal reports apply.
-			s.dropForwardedInFlight(state)
+			s.markForwardedSlotFull(state)
 		}
 
 		// Failover branch — the unified failover state machine. The
