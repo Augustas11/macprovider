@@ -1,6 +1,6 @@
 # Eligible-network privacy Beta activation
 
-Authority: SPEC-049 §8.3, decision-log Entry 250. This is a configuration-only
+Authority: SPEC-049 §8.3, decision-log Entry 251. This is a configuration-only
 activation of released CLI224 using the existing reviewed runtime. It does not
 authorize another CLI or coordinator release or conformance promotion.
 

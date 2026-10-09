@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The bounded CLI224 eligible-network activation exception is recorded in §8.3 and Entry 250; live buyer confirmation, a full signed v0.2 journey and SPEC-049-R023 remain pending. No conformance or production promotion is made by this draft."
+    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The bounded CLI224 eligible-network activation exception is recorded in §8.3 and Entry 251; live buyer confirmation, a full signed v0.2 journey and SPEC-049-R023 remain pending. No conformance or production promotion is made by this draft."
   }
 }
 ```
@@ -658,7 +658,7 @@ This is the one-time limited activation exception that `specs/PROCESS.md` allows
 ### 8.3 Limited activation exception: eligible-network Beta (2026-10-09)
 
 This dated exception supersedes §8.1 for v0.2 automatic enrollment, as recorded
-in decision-log Entry 250. It authorizes staged activation, not conformance
+in decision-log Entry 251. It authorizes staged activation, not conformance
 promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
 
 - **Exact scope.** Existing providers and new joins may enroll only after all
@@ -721,7 +721,7 @@ promotion. SPEC-049 remains draft and SPEC-049-R023 remains open.
 
 ## 10. Changelog and history
 
-- 0.2.2 - Dated eligible-network activation exception (§8.3, Entry 250), limited
+- 0.2.2 - Dated eligible-network activation exception (§8.3, Entry 251), limited
   to signed CLI224, with staged real-buyer confirmation, unchanged admission
   and disclosure, explicit missing-journey evidence, rollback and expiry.
   No wire, requirement or conformance promotion.

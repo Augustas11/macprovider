@@ -29,9 +29,9 @@ EXPIRY = '2026-10-20T00:00:00Z'
 CONFIG_GUARD_MODULE = Path('/usr/local/share/macprovider/scripts/coordinator_config_guard.py')
 CONFIG_GUARD_SHA256 = 'be9c226719b2b6921bd9455e3e3ee9e4222da19fbacaaa3a3a0cd70e72625338'
 RUNTIME_HASHES = {
-    'coordinator': 'b208eb9b034e65ff8a4a5ac274996aebfd85369b0e9c247d5984517fbb1b5121',
-    'gateway': '99f8a8738086c7d1da11421b169c575dced23f76af311ef30d015baf46d26382',
-    'coordinator-cli': '1012085a840e707bc498be71e727f776178baa4e91389cce1b0340b908625f0b',
+    'coordinator': '756c1b05cc48ea746eb4aabaf56c6a957cd8858fa1402efe57225ce4666722e6',
+    'gateway': '9d3d6ccc15e4e7cc27a52a4e872a07dfccf2caccb63b0d0b0b84931ee2787ace',
+    'coordinator-cli': 'f097f5fa7e4610f504d1fe62d7404f155e2b9c09a6227887b80c41ec7fac2413',
 }
 IDENTITY = dict(team_id='YF7XNRJUG4', signing_identifier='live.malibu.provider.cli',
                 code_cdhash='94b66febaee9ac7265dc0fe1a6ad87559ff602b8',
@@ -98,8 +98,8 @@ def verify_config_paths(argv):
 
 
 def runtime_provenance():
-    # These hashes are from the signature-verified immutable v1.8.227 release,
-    # source fbb96363e92f6ffe2ce60d39f11a433eb6534c0c (contains #1871/#1892).
+    # These hashes are from the signature-verified immutable v1.8.228 release,
+    # source 78cd2868c258185cce540c12bd3d0173d12fa598 (contains #1871/#1892).
     for binary, expected in RUNTIME_HASHES.items():
         path = Path('/opt/macprovider', binary)
         with path.open('rb') as stream:

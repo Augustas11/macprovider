@@ -13,7 +13,7 @@ remote_state() {
 }
 
 gather() {
-  OPS_SCOPE=privacy-224-entry250
+  OPS_SCOPE=privacy-224-entry251
   if [ "${PRIVACY_ACTIVATION_DISABLE:-0}" = 1 ]; then
     set_next disable mutate 'Disable private routing durably; preserve ordinary traffic' \
       'bash scripts/ops/privacy-activate.sh _disable'
