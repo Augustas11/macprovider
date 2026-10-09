@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Fail closed if phase3-binary/Package.resolved is incomplete under the
-# pinned release toolchain (Xcode 16.4). This is the same lock flag the
-# candidate/release path uses (`-onlyUsePackageVersionsFromResolvedFile`).
-# Newer local toolchains (Xcode 26.x) resolve a different graph and cannot
-# reproduce this check — refuse to run unless 16.4 is selected.
+# pinned release build toolchain (Xcode 26.6, Swift 6.3.3). This is the same
+# lock flag the candidate/release path uses
+# (`-onlyUsePackageVersionsFromResolvedFile`). Other Xcode versions can resolve
+# a different graph and cannot reproduce this check — refuse to run unless the
+# pinned Xcode is selected.
 #
 # See issue #1360 (async-http-client unpinned after #1336).
 set -euo pipefail
 
-readonly expected_developer_dir="/Applications/Xcode_16.4.app/Contents/Developer"
+readonly expected_developer_dir="/Applications/Xcode_26.6.app/Contents/Developer"
 
 die() {
   printf '[verify-swift-package-lock] ERROR: %s\n' "$*" >&2
@@ -37,6 +38,6 @@ xcodebuild \
   -onlyUsePackageVersionsFromResolvedFile
 
 cmp -s "$work/Package.resolved.before" Package.resolved ||
-  die "locked resolve mutated Package.resolved; regenerate it under Xcode 16.4"
+  die "locked resolve mutated Package.resolved; regenerate it under Xcode 26.6"
 
-printf '[verify-swift-package-lock] ok: locked SwiftPM resolve succeeded under Xcode 16.4\n'
+printf '[verify-swift-package-lock] ok: locked SwiftPM resolve succeeded under Xcode 26.6\n'

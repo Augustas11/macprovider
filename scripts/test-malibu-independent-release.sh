@@ -85,6 +85,12 @@ if "secrets." in build or "contents: write" in build:
     raise SystemExit("unprotected Malibu build job has secrets or write permission")
 if "contents: write" in sign:
     raise SystemExit("candidate signer must not have release publication permission")
+if (
+    "    runs-on: macos-26\n" not in build
+    or "sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer" not in build
+    or "Xcode_16.4" in build
+):
+    raise SystemExit("Malibu candidate build must run the pinned Swift 6.3 Xcode 26.6 toolchain")
 if "contents: write" not in publish:
     raise SystemExit("publication job lacks explicit release permission")
 for forbidden in ("swift build", "package.sh", "codesign --force --deep", "git push"):

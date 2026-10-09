@@ -7,7 +7,7 @@ This is the mandatory correctness-first matrix for any change to `mlx-swift-lm`,
 1. Use a tagged, remotely consumable `mlx-swift-lm` release. Never resolve production from `main`.
 2. Record exact before/after versions and revisions for `mlx-swift-lm`, `mlx-swift`, `swift-transformers`, and `swift-jinja`.
 3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966.
-4. Keep production on Xcode 16.4 / Swift 6.1 unless a separately reviewed release-toolchain migration lands first. `mlx-swift 0.31.5/0.31.6` require Swift 6.3.
+4. Build, test, resolve, candidate, and release jobs that compile `phase3-binary` or Malibu.app run only on the protected build toolchain: Xcode 26.6 (17F113) at `/Applications/Xcode_26.6.app`, Swift 6.3.3, macOS SDK 26.5, on the `macos-26` / `macos-26-intel` images. It replaced Xcode 16.4 / Swift 6.1 in the reviewed release-toolchain migration that landed with the mlx-swift-lm 3.32.3 dependency upgrade (`mlx-swift 0.32.3` declares `swift-tools-version: 6.3`; Related: #1906, #700). The protected `macos-15-intel` signers stay on the pinned signer toolchain (Xcode 16.4) for the sealed OpenSSL bottle and never compile the package. Any further toolchain move needs its own reviewed migration and release-runner proof.
 5. Correctness, token accounting, cache ownership, and artifact parity gate throughput. No performance waiver may override a red correctness row.
 
 ## Evidence header
@@ -94,7 +94,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2`.
+Current protected baseline (2026-10-09): `mlx-swift-lm 3.32.3` and `mlx-swift 0.32.3` (the mlx-swift-lm 3.32.3 dependency upgrade), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is
