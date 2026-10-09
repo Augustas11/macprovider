@@ -325,5 +325,9 @@ Buyers pay your signed rates under the standard formula and platform fee.
 
 - A Mac in two active pools with the same artifact binds only when its
   config names the entry: set `pool_model_id`. Without it the offer status
-  warns `pool_binding_ambiguous`; a `pool_model_id` that matches no active
-  entry warns `pool_binding_requested_entry_unmatched`.
+  warns `pool_binding_ambiguous`. The coordinator refuses a changed offer
+  while that one is pending, so recover in this order: `models admission
+  withdraw <candidate> --yes --json`, set `pool_model_id`, `models offer
+  <candidate> --yes --json` again, then `macprovider-cli restart`. A
+  `pool_model_id` that matches no active entry warns
+  `pool_binding_requested_entry_unmatched`.

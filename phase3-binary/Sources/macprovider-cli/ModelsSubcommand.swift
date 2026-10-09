@@ -3118,7 +3118,7 @@ enum BYOMPoolBindingHint {
     static func hints(for warnings: [String]) -> [String] {
         var out: [String] = []
         if warnings.contains(ambiguous) {
-            out.append("models offer warning: pool_binding_ambiguous: this artifact is an entry in more than one of your active pools, so the offer bound to none; set pool_model_id: pool/<pool_id>/<slug> in the provider config (or MACPROVIDER_POOL_MODEL_ID), submit the offer again, then run macprovider-cli restart")
+            out.append("models offer warning: pool_binding_ambiguous: this artifact is an entry in more than one of your active pools, so the offer bound to none; withdraw it first (macprovider-cli models admission withdraw <served-model-ref> --yes --json; the coordinator refuses a changed offer while this one is pending), set pool_model_id: pool/<pool_id>/<slug> in the provider config (or MACPROVIDER_POOL_MODEL_ID), run macprovider-cli models offer <served-model-ref> --yes --json again, then run macprovider-cli restart")
         }
         if warnings.contains(requestedEntryUnmatched) {
             out.append("models offer warning: pool_binding_requested_entry_unmatched: no active pool entry matches the configured pool_model_id for this artifact; check the pool id and slug against the creator's signed manifest (creator status), and that the pool is active and this Mac is a member")

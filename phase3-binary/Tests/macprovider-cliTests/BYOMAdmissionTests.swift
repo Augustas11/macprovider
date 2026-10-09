@@ -106,7 +106,11 @@ final class BYOMAdmissionTests: XCTestCase {
 
     func testPoolBindingWarningsBecomeNextSteps() {
         XCTAssertTrue(BYOMPoolBindingHint.hints(for: []).isEmpty)
-        XCTAssertTrue(BYOMPoolBindingHint.hints(for: ["pool_binding_ambiguous"]).first?.contains("set pool_model_id") == true)
+        let ambiguous = BYOMPoolBindingHint.hints(for: ["pool_binding_ambiguous"]).first ?? ""
+        XCTAssertTrue(ambiguous.contains("models admission withdraw") && ambiguous.contains("set pool_model_id") && ambiguous.contains("models offer") && ambiguous.contains("restart"), ambiguous)
+        if let withdraw = ambiguous.range(of: "models admission withdraw"), let configure = ambiguous.range(of: "set pool_model_id") {
+            XCTAssertLessThan(withdraw.lowerBound, configure.lowerBound, "withdraw must come before re-offering")
+        }
         XCTAssertTrue(BYOMPoolBindingHint.hints(for: ["pool_binding_requested_entry_unmatched"]).first?.contains("check the pool id and slug") == true)
     }
 
