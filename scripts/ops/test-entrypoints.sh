@@ -458,6 +458,11 @@ pearl_config "$OLD" ""
 run_rc 0 "live policy differs from the applied config" scripts/ops/cli-release.sh status
 expect_next compatibility_policy:blocked
 case "$(next_field reason)" in *"revoked_ids differ"*) ok ;; *) bad "mismatch reason: $(next_field reason)" ;; esac
+# The same live revocation with an unapplied on-disk edit is not a pending
+# train edit: still blocked, never a restart that would drop the revocation.
+printf '# unapplied\n' >> "$tmp/pearl/coordinator.yaml"
+run_rc 0 "live revocation hidden by an unapplied disk config" scripts/ops/cli-release.sh status
+expect_next compatibility_policy:blocked
 health_policy_mode() { python3 - "$tmp/svc/healthz.json" "$1" <<'PYH'
 import json, sys
 d = json.load(open(sys.argv[1])); d.pop("_policy", None); d["compatibility_policy_mode"] = sys.argv[2]
@@ -583,6 +588,16 @@ bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied bump not recovered by one restart"; fi
 run_rc 0 "cli status after the recovered bump" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "recovered bump not live"; fi
+# An old runtime that already lists the candidate admits it, but the bump is
+# verified on /healthz fields only a repository runtime reports: stop with
+# "ship the runtime first", never offer the impossible bump.
+mkdir -p "$tmp/saved" && cp "$tmp/pearl/coordinator.yaml" "$tmp/svc/boot.txt" "$tmp/svc/running.yaml" "$tmp/svc/healthz.json" "$tmp/saved/"
+pearl_config "$OLD $COMPAT" "$META"; pearl_boot
+health_legacy v9.0.0 "$LIVE"
+run_rc 0 "old runtime: no recommendation bump" scripts/ops/cli-release.sh status
+expect_next recommendation_bump:blocked
+case "$(next_field command):$(next_field reason)" in "scripts/ops/pearl-runtime.sh status:"*"not repository"*) ok ;; *) bad "old-runtime bump reason: $(next_field reason)" ;; esac
+cp "$tmp/saved/coordinator.yaml" "$tmp/pearl/"; cp "$tmp/saved/boot.txt" "$tmp/saved/running.yaml" "$tmp/saved/healthz.json" "$tmp/svc/"
 # Fresh ops state (no verification record): the compatibility id comes from
 # the verified v<ver> tag, or the gate fails closed.
 mkdir -p "$tmp/state-fresh"

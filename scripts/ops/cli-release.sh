@@ -180,7 +180,8 @@ load_registrations() {
     bytes="$(candidate_release_bytes "$V")"
     if [ -n "$bytes" ]; then prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"; fi
     if python3 "$OPS_LIB_DIR/release-registrations.py" evaluate "$OPS_TMP_DIR/reg-facts.json" "$V" \
-      "${compat:-}" "${prj:-}" "${sig:-}" "$OPS_TMP_DIR/healthz.json" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
+      "${compat:-}" "${prj:-}" "${sig:-}" "$OPS_TMP_DIR/healthz.json" \
+      "$REPO_ROOT/phase4-coordinator/dist/compatibility-revoked-ids.txt" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
       REG_DIR="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
       REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
       REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
@@ -632,7 +633,14 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
     step recommendation_bump "done" "live recommends $V; applied target_id $compat_id"
   else
     step recommendation_bump pending "live recommends $L; target_id $compat_id applied: $REG_TARGET_APPLIED"
-    if [ -z "$compat_id" ]; then
+    if [ "$REG_MODE" != repository ]; then
+      # The bump is verified on /healthz compatibility_policy_target_id, which
+      # only a repository-admission runtime reports: ship that runtime first.
+      set_next recommendation_bump blocked "Ship the repository-admission coordinator runtime before recommending v$V" \
+        "scripts/ops/pearl-runtime.sh status" \
+        "the running coordinator reports compatibility_policy_mode '${REG_MODE:-unknown}', not repository"
+      next_meta recommendation_bump "$ROLLOUT_DOC"
+    elif [ -z "$compat_id" ]; then
       set_next recommendation_bump blocked "Recommend v$V" "" "no verified compatibility_set_id for v$V is recorded"
     else
       set_next recommendation_bump mutate "Move Pearl latest_binary_version and compatibility_set.target_id to $V and restart" \

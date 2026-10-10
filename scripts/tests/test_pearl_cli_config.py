@@ -46,7 +46,8 @@ class RecommendTest(unittest.TestCase):
         for target, why in (("other/repo:v1.8.240@%s" % SHA, "repository"),
                             ("test/repo:v1.8.235@%s" % SHA, "revoked_ids"),
                             ("test/repo:v1.8.0240@%s" % SHA, "malformed"),
-                            ("test/repo:v9223372036854775808.0.0@%s" % SHA, "malformed")):
+                            ("test/repo:v9223372036854775808.0.0@%s" % SHA, "malformed"),
+                            (NEW + "\n", "malformed")):
             with self.assertRaisesRegex(pcc.Refused, why):
                 pcc.plan(CONFIG, args(recommend=("1.8.240", target)), NOW)
 

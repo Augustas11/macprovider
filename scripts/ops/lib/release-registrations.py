@@ -338,7 +338,7 @@ def expired(value, now):
 
 
 def compat_repo(item):
-    m = COMPAT_ID.match(item or "")
+    m = COMPAT_ID.fullmatch(item) if isinstance(item, str) else None
     if not m or len(item) > 256 or any(int(x) > INT64_MAX for x in m.group(2).split(".")):
         return None
     return m.group(1)
@@ -359,30 +359,60 @@ def compat_verdict(target, revoked, compat_id):
     return ""
 
 
-def live_policy(f, health_path):
-    """(mode, mismatch): the running coordinator's policy mode, and why it
-    cannot be trusted ('' when /healthz agrees with the applied config)."""
+def read_seed(path):
+    if not path:
+        return set()
+    try:
+        return {l.strip() for l in open(path) if l.strip() and not l.startswith("#")}
+    except OSError:
+        return set()
+
+
+def live_policy(f, health_path, applied, compat_id, seed):
+    """(mode, live, mismatch, pending): the running coordinator's policy mode
+    and (target, revoked) as /healthz reports it, why it cannot be trusted
+    ('' when it equals the disk config), and the pending train edit that
+    explains a difference while a restart is due ('' when none).
+
+    A difference is a pending edit only when the disk config is not the
+    running one AND the disk policy differs from the live one exactly by
+    train edits: target_id moved to the candidate (recommendation_bump)
+    and/or seed ids added to revoked_ids (revocation_seed), every live
+    revocation kept. Anything else fails closed."""
     try:
         health = json.load(open(health_path)) if health_path else None
     except (OSError, ValueError):
         health = None
     if not isinstance(health, dict):
-        return "", "live /healthz is unreadable"
+        return "", None, "live /healthz is unreadable", ""
     mode = health.get("compatibility_policy_mode")
     if mode is None:
-        return "legacy_exact", ""
+        return "legacy_exact", None, "", ""
     if mode != "repository":
-        return str(mode), "live /healthz reports compatibility_policy_mode %r, not repository" % mode
-    if health.get("compatibility_policy_target_id") != f.get("target_id"):
-        return mode, "live /healthz target %r differs from the applied config target %r" % (
-            health.get("compatibility_policy_target_id"), f.get("target_id"))
-    live_revoked = health.get("compatibility_policy_revoked_ids")
-    if not isinstance(live_revoked, list) or sorted(map(str, live_revoked)) != sorted(f.get("revoked_ids", [])):
-        return mode, "live /healthz revoked_ids differ from the applied config"
-    return mode, ""
+        return str(mode), None, "live /healthz reports compatibility_policy_mode %r, not repository" % mode, ""
+    target, revoked = health.get("compatibility_policy_target_id"), health.get("compatibility_policy_revoked_ids")
+    if compat_repo(target) is None or not isinstance(revoked, list) or any(compat_repo(x) is None for x in revoked):
+        return mode, None, "live /healthz compatibility policy is malformed", ""
+    live = (target, set(revoked))
+    disk_target, disk_revoked = f.get("target_id"), set(f.get("revoked_ids", []))
+    if (disk_target, disk_revoked) == live:
+        return mode, live, "", ""
+    if not applied:
+        target_ok = disk_target == target or (bool(compat_id) and disk_target == compat_id)
+        extra = disk_revoked - live[1]
+        if target_ok and live[1] <= disk_revoked and extra <= seed:
+            edits = []
+            if disk_target != target:
+                edits.append("target_id -> %s" % disk_target)
+            if extra:
+                edits.append("%d seed revocation(s)" % len(extra))
+            return mode, live, "", "; ".join(edits)
+    if disk_target != target:
+        return mode, live, "live /healthz target %r differs from the applied config target %r" % (target, disk_target), ""
+    return mode, live, "live /healthz revoked_ids differ from the applied config", ""
 
 
-def evaluate(facts_path, version, compat_id, prj, prjsig, health_path=""):
+def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_path=""):
     f = json.load(open(facts_path))
     local = local_sig = None
     if prj and prjsig and os.path.isfile(prj) and os.path.isfile(prjsig):
@@ -412,14 +442,8 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path=""):
                     "with (or its boot digest is unreadable): restart-only registrations are not proven live")
     if not f.get("privacy_class_enabled"):
         miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
-    mode, mismatch = live_policy(f, health_path)
-    if mismatch and not out["config_applied"] and mode == "repository":
-        # The disk config is not the one running (a restart is due), so the
-        # live policy is not expected to equal it; admission already fails on
-        # config_applied, and the train's restart step validates and applies
-        # the disk config. Unreadable or non-repository policies still block.
-        mismatch = ""
-    out["compat_mode"], out["policy_mismatch"] = mode, mismatch
+    mode, live, mismatch, pending = live_policy(f, health_path, out["config_applied"], compat_id, read_seed(seed_path))
+    out["compat_mode"], out["policy_mismatch"], out["pending_policy_edit"] = mode, mismatch, pending
     if mismatch:
         miss.append("compatibility policy not provable: %s" % mismatch)
         rejection = "policy_mismatch"
@@ -427,7 +451,8 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path=""):
         listed = compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", [])
         rejection = "" if compat_id and listed else "compatibility_set_unaccepted"
     else:
-        rejection = compat_verdict(f.get("target_id") or "", f.get("revoked_ids", []), compat_id or "")
+        # Revocation is judged only against the running coordinator's policy.
+        rejection = compat_verdict(live[0], live[1], compat_id or "")
     out["compat_rejection"] = rejection if compat_id else ""
     out["compat_accepted"] = bool(compat_id) and not rejection and out["config_applied"]
     out["target_applied"] = bool(compat_id) and compat_id == f.get("target_id") and out["config_applied"] and not mismatch
@@ -508,7 +533,7 @@ def main(argv):
         stage(*args)
     elif cmd == "unapproved" and len(args) in (2, 4):
         unapproved(*args)
-    elif cmd == "evaluate" and len(args) in (5, 6):
+    elif cmd == "evaluate" and len(args) in (5, 6, 7):
         evaluate(*args)
     else:
         fail("bad arguments for %s" % cmd)

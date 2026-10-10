@@ -11800,7 +11800,8 @@
         "scripts/ops/test-entrypoints.sh:health_legacy",
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetCheckedInRevocationSeedValidates",
         "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello",
-        "scripts/tests/test_pearl_cli_config.py:RevokeTest"
+        "scripts/tests/test_pearl_cli_config.py:RevokeTest",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestBelowRequiredReleaseConnectsUpdateOnlyWithRecommendation"
       ],
       "journeys": [],
       "evidence": [],

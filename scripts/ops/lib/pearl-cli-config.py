@@ -73,7 +73,7 @@ def block(text, header):
 
 def compat_repo(item):
     """owner/repo of a canonical compatibility_set_id, or None."""
-    m = COMPAT_ID.match(item or "")
+    m = COMPAT_ID.fullmatch(item) if isinstance(item, str) else None
     if not m or len(item) > 256 or any(int(x) > INT64_MAX for x in m.group(2).split(".")):
         return None
     return m.group(1)
