@@ -2046,7 +2046,8 @@ R-15.5. Bounded work. Before writing a new archive, retention reads the free
 space of the archive filesystem and refuses the run
 (`refused_archive_disk_low`) while it is below `archive_min_free_bytes`
 (default 20 GiB) or `archive_min_free_percent` (default 10) of the
-filesystem. Each run reports the archive's byte size and the filesystem's
+filesystem. It re-reads free space as the archive grows and stops the export,
+removing the partial archive and deleting nothing, if the floor is reached. Each run reports the archive's byte size and the filesystem's
 free and total bytes. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is
 never starved. The number of requests per run and the ledger rows scanned

@@ -1,12 +1,24 @@
 package billing
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 )
+
+// evidenceArchiveSpaceCheckBytes is how much compressed archive output an
+// export writes between free-space re-reads. The writer buffers at most a
+// few MiB more before it reaches the file, far below any useful floor.
+// Tests lower it and replace archiveFilesystemSpaceFunc.
+var evidenceArchiveSpaceCheckBytes int64 = 4 << 20
+
+var archiveFilesystemSpaceFunc = archiveFilesystemSpace
+
+// errEvidenceArchiveDiskLow stops an export that reached the free-space floor.
+var errEvidenceArchiveDiskLow = errors.New("archive filesystem below its free-space floor")
 
 // archiveFilesystemSpace creates the archive directory if needed and returns
 // the free bytes available to the coordinator and the total size of its

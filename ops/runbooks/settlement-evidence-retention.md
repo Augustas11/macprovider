@@ -62,7 +62,7 @@ one of these is true:
 | `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
-| `max_requests_per_run` | `20000` | Requests archived per run. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests and 16 MiB of archived payload). |
+| `max_requests_per_run` | `20000` | Requests archived per run. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests; a batch is also flushed once it reaches 16 MiB of archived payload, so it can exceed 16 MiB by at most one request). |
 | `max_scan_rows_per_run` | `500000` | Ledger credits scanned per run. The scan resumes from a persisted cursor and wraps. |
 | `incremental_vacuum_pages` | `2048` | Pages released per `PRAGMA incremental_vacuum` step. |
 | `incremental_vacuum_max_steps` | `256` | Steps per run, per database file. |
@@ -159,8 +159,10 @@ persisted cursor and writes nothing.
    event. Other statuses:
    - `refused_archive_disk_low` (logged with `level=warn`): the archive
      filesystem is below `archive_min_free_bytes` or
-     `archive_min_free_percent`. Nothing is exported or deleted. Free space
-     or move `archive_dir`.
+     `archive_min_free_percent`, checked before the export and again every
+     4 MiB of archive written. The partial archive is removed and nothing
+     is deleted; the next run re-selects the same requests. Free space or
+     move `archive_dir`.
    - `refused_offhost_unverified`: only with an off-host command configured.
      The archive is kept and nothing is deleted. Fix the command; the next
      run resumes this archive.

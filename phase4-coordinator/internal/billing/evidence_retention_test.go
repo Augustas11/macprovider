@@ -1264,3 +1264,48 @@ UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0;`); err
 		t.Fatalf("final rollup row: report=%+v err=%v", report, err)
 	}
 }
+
+// Free space is re-read while the archive is written: an export that reaches
+// the floor stops, removes its partial file, keeps the scan cursor, and
+// deletes nothing; the next run with room archives the same requests.
+func TestEvidenceRetentionStopsExportAtArchiveDiskFloor(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	dir := t.TempDir()
+	calls := 0
+	prevFn, prevStep := archiveFilesystemSpaceFunc, evidenceArchiveSpaceCheckBytes
+	t.Cleanup(func() { archiveFilesystemSpaceFunc, evidenceArchiveSpaceCheckBytes = prevFn, prevStep })
+	evidenceArchiveSpaceCheckBytes = 0
+	archiveFilesystemSpaceFunc = func(d string) (int64, int64, error) {
+		calls++
+		if calls == 1 {
+			return 50 << 30, 100 << 30, nil
+		}
+		return 1 << 30, 100 << 30, nil
+	}
+	opts := retentionTestOptions(dir, nil)
+	opts.ArchiveMinFreeBytes = 20 << 30
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusArchiveDiskLow || report.DeletedRequests != 0 || calls < 2 {
+		t.Fatalf("mid-export disk-low run=%+v calls=%d", report, calls)
+	}
+	if f.hotRows(t, "b") != 3 || f.hotRows(t, "c") != 3 || scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`) != 0 {
+		t.Fatal("mid-export disk-low run recorded an archive or deleted")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("archive dir after abort=%v err=%v", entries, err)
+	}
+	archiveFilesystemSpaceFunc = prevFn
+	opts.ArchiveMinFreeBytes = 0
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 2 {
+		t.Fatalf("run with room=%+v err=%v", report, err)
+	}
+}

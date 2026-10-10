@@ -1111,7 +1111,7 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	if archive == nil {
 		// A new archive needs room: refuse below the free-space floor rather
 		// than fill the filesystem the coordinator may share.
-		free, total, err := archiveFilesystemSpace(opts.ArchiveDir)
+		free, total, err := archiveFilesystemSpaceFunc(opts.ArchiveDir)
 		if err != nil {
 			return report, err
 		}
@@ -1128,7 +1128,11 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		fillCutoffs(&report, cut)
 		// Each eligible request is written to the archive as it is selected
 		// and then dropped, so the run never holds more than one request.
+		// Free space is re-read as the archive grows, so neither the archive
+		// nor concurrent database growth can push the filesystem below the
+		// floor during export.
 		var w *evidenceArchiveWriter
+		var spaceCheckedAt int64
 		selected, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
 			if w == nil {
 				created, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
@@ -1138,13 +1142,34 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 				w = created
 			}
 			addRetentionStats(&report, b)
-			return w.writeRequest(b)
+			if err := w.writeRequest(b); err != nil {
+				return err
+			}
+			if w.counter.n-spaceCheckedAt < evidenceArchiveSpaceCheckBytes {
+				return nil
+			}
+			spaceCheckedAt = w.counter.n
+			free, total, err := archiveFilesystemSpaceFunc(opts.ArchiveDir)
+			if err != nil {
+				return err
+			}
+			if reason := archiveDiskBelowFloor(free, total, opts); reason != "" {
+				return fmt.Errorf("%w: %s", errEvidenceArchiveDiskLow, reason)
+			}
+			return nil
 		})
 		if err == nil {
 			err = s.saveEvidenceRetentionCursor(ctx, nextCursor)
 		}
 		if err != nil {
+			// The partial archive is removed and the scan cursor is not
+			// advanced, so the next run re-selects the same requests.
 			w.abort()
+			if errors.Is(err, errEvidenceArchiveDiskLow) {
+				report.Status = EvidenceRetentionStatusArchiveDiskLow
+				report.Error = err.Error()
+				return report, nil
+			}
 			return report, err
 		}
 		if selected == 0 {

@@ -7263,6 +7263,7 @@
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhileOffhostCommandFails",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFirstRunIsChunked",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesBelowArchiveDiskFloor",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionStopsExportAtArchiveDiskFloor",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal",
         "phase4-coordinator/internal/billing/evidence_retention_earnings_test.go:TestEvidenceRetentionKeepsProviderEarningsAndVerifiedReceiptCountExact",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails",
