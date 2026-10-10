@@ -71,7 +71,7 @@ authorized.
 | PR | Change | Status |
 |---|---|---|
 | #1953 | Hybrid 16-step decode window; stop-boundary rule; self-check keyed by decode window (SPEC-038 v0.3.16). Expected +17% hybrid CB throughput at 8 concurrent output-heavy | merged (`2bddd66d0`) |
-| #1960 (issue #1958) | CB self-check ladder bounded by the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | in progress: approved, updating onto main before merge |
+| #1960 (issue #1958) | CB self-check ladder bounded by the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | merged (`072f86a99`) |
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
