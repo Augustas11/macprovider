@@ -46,7 +46,19 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // 3 = SPEC-022 v0.3.0 (R-14.8): settlement_receipt_verdicts may hold
 // relay_blind_settled rows with the relay-blind-settlement-v1 profile. A
 // binary that cannot read them is not a rollback target; roll forward.
-const billingCompatContract = 3
+// 4 = SPEC-022 v0.4.0 (R-15.9): settled-evidence retention may delete
+// evidence; archived credits are payable only through the archived-credit
+// tombstones, which a contract-3 binary does not read. Recorded at open,
+// before any retention run, and again in every deletion transaction.
+const billingCompatContract = billingCompatContractEvidenceRetention
+
+// billingCompatContractRelayBlind is contract 3, the floor the relay-blind
+// outcome widening records.
+const billingCompatContractRelayBlind = 3
+
+// billingCompatContractEvidenceRetention is contract 4, the evidence
+// retention floor (SPEC-022 R-15.9).
+const billingCompatContractEvidenceRetention = 4
 
 // billingCompatContractPoolOperatorAttested is contract 2, the floor the
 // R-12.6a usage-source widening records.

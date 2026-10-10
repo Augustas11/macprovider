@@ -310,6 +310,9 @@ type requestCreditSourceCapabilities struct {
 	// the credit's settlement account scope hash that bind a credit to its
 	// literal verified verdict.
 	HasVerifiedVerdicts bool
+	// HasArchivedCredits reports the SPEC-022 R-15 tombstone table that
+	// keeps spec022_verified for credits whose verdict was archived.
+	HasArchivedCredits bool
 }
 
 func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (requestCreditSourceCapabilities, error) {
@@ -345,7 +348,12 @@ func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (req
 	if err != nil {
 		return requestCreditSourceCapabilities{}, err
 	}
+	hasArchived, err := sqliteObjectExists(ctx, db, "settlement_evidence_archived_credits")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
 	return requestCreditSourceCapabilities{
+		HasArchivedCredits:              hasArchived,
 		HasVerifiedVerdicts:             hasVerdicts && hasScopeHash,
 		HasSettlementPolicyMode:         hasPolicy,
 		HasSpec022PayableView:           hasPayable,
@@ -380,11 +388,19 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
 	// but never verified (R-10.7).
 	verifiedExpr := "0"
 	if caps.HasSpec022PayableView && caps.HasVerifiedVerdicts {
+		archivedVerified := ""
+		if caps.HasArchivedCredits {
+			archivedVerified = `
+             OR EXISTS (
+                SELECT 1 FROM settlement_evidence_archived_credits archived
+                 WHERE archived.request_credit_id = lrc.id
+                   AND archived.spec022_verified = 1)`
+		}
 		verifiedExpr = fmt.Sprintf(`CASE
            WHEN %s = 'enforce'
             AND %s = 0
             AND EXISTS (SELECT 1 FROM spec022_payable_request_credits payable WHERE payable.id = lrc.id)
-            AND EXISTS (
+            AND (EXISTS (
                 SELECT 1 FROM settlement_receipt_verdicts srv
                  WHERE srv.account_scope_hash = lrc.settlement_account_scope_hash
                    AND srv.request_id = lrc.request_id
@@ -392,9 +408,9 @@ func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) str
                    AND srv.provider_id = lrc.provider_id
                    AND srv.closed = 1
                    AND srv.receipt_result = 'valid'
-                   AND srv.settlement_outcome = 'verified')
+                   AND srv.settlement_outcome = 'verified')%s)
            THEN 1 ELSE 0
-       END`, policyExpr, positiveExcludedExpr)
+       END`, policyExpr, positiveExcludedExpr, archivedVerified)
 	}
 	rewardsExcludedExpr := "0"
 	if caps.HasRewardsExcluded {

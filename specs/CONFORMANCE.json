@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.3.1",
+      "version": "v0.4.0",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -7231,6 +7231,61 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1851",
         "rationale": "SPEC-022 v0.3.0 R-14 relay-blind settlement lane. Coordinator and gateway halves are implemented: the enforce_settlement_profile guard, shared route-snapshot prerequisites, the relay-blind snapshot and dispatch metadata, the relay-blind-settlement-v1 verifier with both R-7.10 guards, the relay_blind_settled CHECK migration and billing compat floor 3, the R-7.9 payable binding on every money predicate, and relay-blind-only gateway finality with enforce-aware reconcile. The provider CLI receipt builder and capability (#1851 slice 5) are implemented, and the integration suite runs the full enforce round trip against the real Swift InferenceRelay over a SPEC-008 session: plain relay-blind and privacy-class, stream and non-stream, settle as relay_blind_settled with payable credit equal to gateway debit; a tampered receipt is quarantined and refunded; a session without the capability is excluded. Pending: a signed CLI candidate, the JOURNEY-PRIVACY-CLASS-BETA enforce canary, old-CLI exclusion and tampered-receipt steps on hardware, plain relay-blind enforce evidence, and three-lane audits."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R015",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/evidence_retention.go:func evaluateRetentionEligibility",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) RunEvidenceRetention",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) deleteArchivedBatch",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func incrementalVacuum",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func poolProvenRollupPending",
+        "phase4-coordinator/internal/billing/evidence_archive_disk.go:func archiveDiskBelowFloor",
+        "phase4-coordinator/internal/billing/earnings_rollup.go:func providerEarningsRollupTriggers",
+        "phase4-coordinator/internal/billing/evidence_archive.go:func verifyEvidenceArchive",
+        "phase4-coordinator/internal/billing/evidence_archive.go:func RederiveArchivedCredit",
+        "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) dropArchivedEvidenceCredits",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) frozenRequestFinality",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) archivedRequestSettlementFinality",
+        "phase4-coordinator/internal/billing/recovery.go:func creditEvidenceArchivedTx",
+        "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention",
+        "phase4-coordinator/internal/billing/evidence_retention_endpoint.go:func (h *handler) evidenceRetentionHandler",
+        "phase4-coordinator/cmd/coordinator-cli/settlement_evidence_archive.go:func settlementEvidenceArchive"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDeletesWithoutOffhostCommand",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhileOffhostCommandFails",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFirstRunIsChunked",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesBelowArchiveDiskFloor",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionStopsExportAtArchiveDiskFloor",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal",
+        "phase4-coordinator/internal/billing/evidence_retention_earnings_test.go:TestEvidenceRetentionKeepsProviderEarningsAndVerifiedReceiptCountExact",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDeletesOnlyArchivedRowsInBoundedBatches",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRederivesSettledCreditFromArchive",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionReadersTolerateArchivedRequests",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRaisesRollbackFloor",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesArchiveChangedAfterVerification",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesRowChangedAfterExport",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRetriesInterruptedJournalCleanup",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityLookupStraddlingDeletion",
+        "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone",
+        "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts",
+        "phase4-coordinator/internal/billing/evidence_retention_endpoint_test.go:TestEvidenceRetentionAdminRouteIsOperatorOnlyAndGatedByEnabled"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements."
       }
     },
     {

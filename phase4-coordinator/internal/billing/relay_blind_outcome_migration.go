@@ -36,7 +36,7 @@ func (s *Store) ensureRelayBlindSettlementOutcomeVocabulary(ctx context.Context)
 	}
 	// Contract 3 commits in the same transaction as the widening, so a
 	// failed widening leaves the floor where it was (contract 2).
-	return s.widenSchemaChecks(ctx, relayBlindSettlementOutcomeWidenings, billingCompatContract)
+	return s.widenSchemaChecks(ctx, relayBlindSettlementOutcomeWidenings, billingCompatContractRelayBlind)
 }
 
 // widenSchemaChecks applies every pending CHECK replacement in one

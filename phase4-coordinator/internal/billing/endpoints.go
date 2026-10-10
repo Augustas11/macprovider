@@ -327,6 +327,10 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.wholesaleStatementItem(w, r)
 		return
 	}
+	if r.URL.Path == evidenceRetentionPath || r.URL.Path == evidenceRetentionRunPath {
+		h.evidenceRetentionHandler(w, r)
+		return
+	}
 	if r.URL.Path == settlementReceiptAuditOutboxPoisonPath {
 		h.settlementReceiptAuditOutboxPoisonListHandler(w, r)
 		return
@@ -1356,14 +1360,38 @@ func (h *handler) settlementReceiptSummariesForProviders(ctx context.Context, pr
 		args = append(args, providerID)
 	}
 	args = append(args, rangeArgs...)
+	hotSQL := `
+SELECT provider_id,
+       CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN 1 ELSE 0 END AS verified_count,
+       CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN 1 ELSE 0 END AS zero_settled_count,
+       CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END AS failed_count,
+       CASE WHEN closed=0 THEN 1 ELSE 0 END AS pending_count
+  FROM settlement_receipt_verdicts
+ WHERE provider_id IN (` + placeholders + `)` + rangeSQL
+	if !hasRange {
+		// SPEC-022 R-15.6: unranged totals include verdicts that retention
+		// moved to the settled-evidence archive. Retention moves a verdict
+		// between the two sources in one transaction, so they are read in one
+		// statement (one snapshot) and a concurrent run never counts twice.
+		hotSQL += `
+UNION ALL
+SELECT provider_id,
+       CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN verdict_count ELSE 0 END,
+       CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN verdict_count ELSE 0 END,
+       0,
+       0
+  FROM settlement_evidence_archived_verdict_counts
+ WHERE provider_id IN (` + placeholders + `)`
+		args = append(args, args[:len(providerIDs)]...)
+	}
 	rows, err := h.store.reader().QueryContext(ctx, `
 SELECT provider_id,
-       COALESCE(SUM(CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS verified_count,
-       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
-       COALESCE(SUM(CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS failed_count,
-       COALESCE(SUM(CASE WHEN closed=0 THEN 1 ELSE 0 END), 0) AS pending_count
-  FROM settlement_receipt_verdicts
- WHERE provider_id IN (`+placeholders+`)`+rangeSQL+`
+       COALESCE(SUM(verified_count), 0),
+       COALESCE(SUM(zero_settled_count), 0),
+       COALESCE(SUM(failed_count), 0),
+       COALESCE(SUM(pending_count), 0)
+  FROM (`+hotSQL+`
+)
  GROUP BY provider_id`, args...)
 	if err != nil {
 		return nil, err

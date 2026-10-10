@@ -326,7 +326,36 @@ SELECT EXISTS (SELECT 1 FROM settlement_route_snapshots
 	}
 }
 
+// requestSettlementFinalityAfterVerdictsHook runs between the verdict read
+// and the remaining reads of a hot finality lookup (tests only).
+var requestSettlementFinalityAfterVerdictsHook func()
+
+// RequestSettlementFinality answers from hot evidence, or from the finality
+// SPEC-022 R-15 retention froze for an archived request. The hot lookup reads
+// verdicts, snapshots, credits, and outputs in separate statements, so a
+// retention deletion can commit between them and leave a partial view. The
+// frozen row commits in the same transaction as that deletion and holds the
+// answer computed from the complete evidence, so once it exists it wins over
+// any hot result or error.
 func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
+	finality, found, err := s.requestSettlementFinalityHot(ctx, accountScope, requestID, nowUnixMS)
+	if accountScope == "" || requestID == "" {
+		return finality, found, err
+	}
+	archived, archivedFound, archivedErr := s.archivedRequestSettlementFinality(ctx, accountScope, requestID)
+	if archivedErr != nil {
+		if err != nil {
+			return finality, found, err
+		}
+		return RequestSettlementFinality{}, false, archivedErr
+	}
+	if archivedFound {
+		return archived, true, nil
+	}
+	return finality, found, err
+}
+
+func (s *Store) requestSettlementFinalityHot(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
 	if accountScope == "" {
 		return RequestSettlementFinality{}, false, fmt.Errorf("account scope is required")
 	}
@@ -340,11 +369,18 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
 	}
+	if hook := requestSettlementFinalityAfterVerdictsHook; hook != nil {
+		hook()
+	}
 	missing, err := s.requestSettlementAttemptsWithoutVerdict(ctx, accountScope, requestID, rows, nowUnixMS)
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
 	}
 	withoutSnapshot, err := s.requestEnforceCreditsWithoutSnapshot(ctx, accountScope, requestID, nowUnixMS)
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
+	}
+	withoutSnapshot, err = s.dropArchivedEvidenceCredits(ctx, accountScope, requestID, withoutSnapshot)
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
 	}
@@ -399,6 +435,8 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	}
 	rows = append(rows, pending...)
 	if len(rows) == 0 {
+		// SPEC-022 R-15.6: RequestSettlementFinality falls back to the
+		// finality retention froze when it deleted this request's evidence.
 		return RequestSettlementFinality{}, false, nil
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -837,6 +875,52 @@ SELECT lrc.attempt_n, lrc.provider_id, lrc.ts_utc,
 		}
 	}
 	return out, rows.Err()
+}
+
+// dropArchivedEvidenceCredits removes credits whose evidence SPEC-022 R-15
+// retention archived: their evidence is in the archive, not missing, so
+// they never synthesize a settlement_evidence_missing refund.
+func (s *Store) dropArchivedEvidenceCredits(ctx context.Context, accountScope, requestID string, rows []requestSettlementVerdictRow) ([]requestSettlementVerdictRow, error) {
+	if len(rows) == 0 {
+		return rows, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	q, err := s.reader().QueryContext(ctx, `
+SELECT lrc.attempt_n, lrc.provider_id
+  FROM settlement_evidence_archived_credits archived
+  JOIN ledger_request_credits lrc ON lrc.id = archived.request_credit_id
+ WHERE archived.request_id = ?
+   AND lrc.settlement_account_scope_hash = ?`, requestID, SettlementAccountScopeHash(accountScope))
+	if err != nil {
+		return nil, err
+	}
+	defer q.Close()
+	type key struct {
+		attemptN   int64
+		providerID string
+	}
+	archived := map[key]bool{}
+	for q.Next() {
+		var k key
+		if err := q.Scan(&k.attemptN, &k.providerID); err != nil {
+			return nil, err
+		}
+		archived[k] = true
+	}
+	if err := q.Err(); err != nil {
+		return nil, err
+	}
+	if len(archived) == 0 {
+		return rows, nil
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		if !archived[key{attemptN: row.attemptN, providerID: row.providerID}] {
+			out = append(out, row)
+		}
+	}
+	return out, nil
 }
 
 // Snapshots exist before pending verdicts do. Looking only at verdict rows can

@@ -185,7 +185,7 @@ func (r *Runner) providerUptimeOK(providerID string, now time.Time) bool {
 const countVerifiedReceiptsSQL = `
         SELECT COUNT(*)
           FROM settlement_receipt_verdicts INDEXED BY idx_srv_provider_recent
-         WHERE provider_id = ?
+         WHERE provider_id = ?1
            AND closed = 1
            AND settlement_outcome = 'verified'
            AND receipt_result = 'valid'
@@ -197,8 +197,18 @@ const countVerifiedReceiptsSQL = `
 const countVerifiedReceiptsUnpinnedSQL = `
         SELECT COUNT(*)
           FROM settlement_receipt_verdicts
-         WHERE provider_id = ?
+         WHERE provider_id = ?1
            AND closed = 1
+           AND settlement_outcome = 'verified'
+           AND receipt_result = 'valid'
+    `
+
+// countArchivedVerifiedReceiptsSQL reads the per-provider verdict counts that
+// SPEC-022 R-15.6 retention keeps for verdicts it moved out of the hot table.
+const countArchivedVerifiedReceiptsSQL = `
+        SELECT COALESCE(SUM(verdict_count), 0)
+          FROM settlement_evidence_archived_verdict_counts
+         WHERE provider_id = ?1
            AND settlement_outcome = 'verified'
            AND receipt_result = 'valid'
     `
@@ -230,9 +240,26 @@ func (r *Runner) countVerifiedReceipts(ctx context.Context, providerID string) (
 		}
 		query = countVerifiedReceiptsUnpinnedSQL
 	}
+	// SPEC-022 R-15.6: verdicts moved to the settled-evidence archive still
+	// count toward the unlock threshold. Retention moves a verdict from the
+	// hot table into the archived counts in one transaction, so both sources
+	// are read in one statement (one snapshot): a run that commits between
+	// two separate reads would count the moved verdicts twice.
+	if tableExists(ctx, source, "settlement_evidence_archived_verdict_counts") {
+		query = "SELECT (" + query + ") + (" + countArchivedVerifiedReceiptsSQL + ")"
+	} else if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var count int
 	err := source.QueryRowContext(ctx, query, providerID).Scan(&count)
 	return count, err
+}
+
+// CountVerifiedReceipts is the E1 verified-receipt count of providerID read
+// from the billing database: closed, valid, verified verdicts still hot plus
+// those SPEC-022 R-15 retention archived.
+func CountVerifiedReceipts(ctx context.Context, billingDB *sql.DB, providerID string) (int, error) {
+	return (&Runner{payoutReader: billingDB}).countVerifiedReceipts(ctx, providerID)
 }
 
 func indexExists(ctx context.Context, db *sql.DB, name string) bool {

@@ -94,6 +94,10 @@ type Store struct {
 	// earningsViewFallbacks counts earnings reads the rollup could not serve.
 	earningsViewFallbacks atomic.Int64
 	earningsRollupSched   earningsRollupScheduler
+	// evidenceRetention holds the SPEC-022 R-15 settings and last report;
+	// evidenceRetentionRun makes runs single-flight.
+	evidenceRetention    evidenceRetentionRuntime
+	evidenceRetentionRun sync.Mutex
 }
 
 type SQLiteMetrics interface {
@@ -671,6 +675,17 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureLedgerRequestCreditSettlementPolicyGuards(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
+		return err
+	}
+	// SPEC-022 R-15.9: a database opened by a retention-capable coordinator
+	// may lose evidence to retention at any time after, and a pre-retention
+	// coordinator would drop archived credits from the payable view. Contract
+	// 4 is recorded before any deletion can run, so such a binary refuses the
+	// database at open.
+	if err := s.recordBillingCompatFloorAt(ctx, billingCompatContractEvidenceRetention); err != nil {
 		return err
 	}
 	if err := s.rebuildSpec022PayableRequestCreditsView(ctx); err != nil {
@@ -1469,6 +1484,15 @@ SELECT lrc.*
    )
    AND (
        COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
+       -- SPEC-022 R-15.6: a credit whose evidence retention archived was
+       -- payable when archived and stays payable. Its archived evidence is
+       -- immutable, so, as before archival, payability does not depend on
+       -- the settled stamp (a voided payout keeps it payable for re-settle).
+       OR EXISTS (
+           SELECT 1
+             FROM settlement_evidence_archived_credits archived
+            WHERE archived.request_credit_id = lrc.id
+       )
        OR (
            lrc.settlement_policy_mode = 'enforce'
            AND lrc.settlement_account_scope_hash IS NOT NULL

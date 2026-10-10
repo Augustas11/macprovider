@@ -95,29 +95,34 @@ func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
 	}
 }
 
-// simulateEvidenceRetentionView adds the SPEC-022 R-15 (#1909) payable-view
-// clause that keeps an archived settled credit payable once its evidence
-// rows are deleted, so these tests see the view retention will ship.
+// simulateEvidenceRetentionView confirms the payable view carries the
+// SPEC-022 R-15 (#1909) branch that keeps an archived credit payable once its
+// evidence rows are deleted.
 func simulateEvidenceRetentionView(t *testing.T, store *Store) {
 	t.Helper()
 	var viewSQL string
 	if err := store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='view' AND name='spec022_payable_request_credits'`).Scan(&viewSQL); err != nil {
 		t.Fatal(err)
 	}
-	const anchor = "COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')"
-	if !strings.Contains(viewSQL, anchor) {
-		t.Fatalf("payable view changed shape:\n%s", viewSQL)
+	if !strings.Contains(viewSQL, "settlement_evidence_archived_credits") {
+		t.Fatalf("payable view lacks the archived-credit branch:\n%s", viewSQL)
 	}
-	viewSQL = strings.Replace(viewSQL, anchor, anchor+`
-       OR (lrc.settled = 1 AND EXISTS (SELECT 1 FROM settlement_evidence_archived_credits archived WHERE archived.request_credit_id = lrc.id))`, 1)
-	for _, stmt := range []string{
-		`CREATE TABLE settlement_evidence_archived_credits (request_credit_id INTEGER PRIMARY KEY)`,
-		`DROP VIEW spec022_payable_request_credits`,
-		viewSQL,
-	} {
-		if _, err := store.db.Exec(stmt); err != nil {
-			t.Fatalf("%s: %v", stmt, err)
-		}
+}
+
+// tombstoneSQL records a request's credits in the retention tombstone table
+// under one shared test archive, as a retention delete transaction does.
+const tombstoneSQL = `INSERT INTO settlement_evidence_archived_credits(request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc)
+SELECT lrc.id, lrc.request_id, a.id, 1, '2026-10-01T00:00:00.000000000Z'
+  FROM ledger_request_credits lrc, settlement_evidence_archives a
+ WHERE lrc.request_id = ? AND a.file_name = 'pool-proven-test-archive'`
+
+func ensureTestEvidenceArchive(t *testing.T, store *Store) {
+	t.Helper()
+	if _, err := store.db.Exec(`INSERT INTO settlement_evidence_archives (
+    file_name, sha256, size_bytes, request_count, row_counts_json, cutoff_window_end_utc, status, created_at_utc, updated_at_utc
+) VALUES ('pool-proven-test-archive', '0000000000000000000000000000000000000000000000000000000000000000', 1, 1, '{}', '', 'deleted', '2026-10-01T00:00:00.000000000Z', '2026-10-01T00:00:00.000000000Z')
+ON CONFLICT(file_name) DO NOTHING`); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -125,9 +130,10 @@ func simulateEvidenceRetentionView(t *testing.T, store *Store) {
 // (outputs, verdicts, snapshots) and keeps its settled credit payable.
 func archiveEvidence(t *testing.T, store *Store, requestID string) {
 	t.Helper()
+	ensureTestEvidenceArchive(t, store)
 	for _, stmt := range []string{
 		`UPDATE ledger_request_credits SET settled = 1 WHERE request_id = ?`,
-		`INSERT INTO settlement_evidence_archived_credits(request_credit_id) SELECT id FROM ledger_request_credits WHERE request_id = ?`,
+		tombstoneSQL,
 		`DELETE FROM settlement_attempt_outputs WHERE request_id = ?`,
 		`DELETE FROM settlement_receipt_verdicts WHERE request_id = ?`,
 		`DELETE FROM settlement_route_snapshots WHERE request_id = ?`,
@@ -305,7 +311,7 @@ func TestPoolProvenRollupFreezeWinsOverAStaleEvaluation(t *testing.T) {
 	archiveEvidence(t, store, nullVerdictFirst.RequestID)
 	for _, stmt := range []string{
 		`UPDATE ledger_request_credits SET settled = 1 WHERE request_id = ?`,
-		`INSERT INTO settlement_evidence_archived_credits(request_credit_id) SELECT id FROM ledger_request_credits WHERE request_id = ?`,
+		tombstoneSQL,
 		`DELETE FROM settlement_route_snapshots WHERE request_id = ?`,
 		`DELETE FROM settlement_receipt_verdicts WHERE request_id = ?`,
 	} {

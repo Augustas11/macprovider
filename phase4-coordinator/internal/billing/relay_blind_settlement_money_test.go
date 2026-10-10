@@ -303,8 +303,10 @@ func TestRelayBlindSettlementOutcomeMigrationOnPopulatedDatabase(t *testing.T) {
 	if _, err := db.Exec(`UPDATE settlement_receipt_verdicts SET receipt_profile = 'relay-blind-settlement-v2'`); err == nil {
 		t.Fatal("widened CHECK accepted an unknown profile")
 	}
-	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
-		t.Fatalf("compat floor=%d want 3", got)
+	// Contract 3 with the widening, then contract 4 (SPEC-022 R-15.9) later
+	// in the same open.
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("compat floor=%d want %d", got, billingCompatContractEvidenceRetention)
 	}
 	if got := scalar(t, db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 1 {
 		t.Fatalf("payable after migration=%d want 1", got)
@@ -588,8 +590,8 @@ func TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails(t *testing.T) 
 	_, store := newRequestAndBillingStores(t)
 	ctx := context.Background()
 	db := store.db
-	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
-		t.Fatalf("fresh floor=%d want 3", got)
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("fresh floor=%d want %d", got, billingCompatContractEvidenceRetention)
 	}
 	var reverse []schemaCheckWidening
 	for _, w := range relayBlindSettlementOutcomeWidenings {
@@ -622,8 +624,10 @@ func TestBillingCompatFloorStaysAtTwoWhenRelayBlindMigrationFails(t *testing.T) 
 	if _, err := NewStore(db); err != nil {
 		t.Fatalf("NewStore after repair: %v", err)
 	}
-	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != 3 {
-		t.Fatalf("floor after relay-blind migration=%d want 3", got)
+	// The repaired open records contract 3 with the widening and then the
+	// SPEC-022 R-15.9 retention contract 4.
+	if got := scalar(t, db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor after relay-blind migration=%d want %d", got, billingCompatContractEvidenceRetention)
 	}
 }
 

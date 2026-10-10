@@ -652,10 +652,20 @@ journal is cleared. It runs then because the copy is only ever restored by a
 rollback of its own transaction, and that rollback checks the copy itself before
 restoring it (below). Checking before commit would add nothing to that
 rollback and would keep the healthy release armed for rollback, with the
-heartbeat paused, for the whole check. The updater still holds its lock, and
-therefore the deploy lock, until the check ends. If the updater crashes after
-the commit point, `--reconcile` carries the release forward and then runs the
-same pruning and check.
+heartbeat paused, for the whole check. Since #1793 the updater releases its
+lock and the deploy (config) lock as soon as `rollout_completed` is recorded,
+then runs the check without either lock, so config transactions are not stalled
+for the length of the check. The check reads the committed transaction's copy,
+which pruning always protects because `current-release.json` names it. Pruning
+of older copies runs only after a passing check, and only after the updater
+lock is taken again without waiting. If the lock is busy, the audit records
+`database_snapshot_pruned` `deferred` and the next run prunes. A failed check
+skips pruning (`database_snapshot_pruned` `skipped`), so every older rollback
+point is kept. The audit records `rollback_point_verification` `started` before
+the check, so a check interrupted by a crash shows as a `started` event with no
+result. If the updater crashes after the commit point, `--reconcile` carries
+the release forward, releases the locks, and then runs the same check and
+pruning.
 
 - `rollback_point_verified`: every copy returned `ok`.
 - `rollback_point_unverified`: at least one copy failed or could not be checked.
