@@ -28,5 +28,9 @@ verification mask the cache builds is registered as plain like the others,
 and sharing requires a plain mask on every path; a packed all-true foreign
 mask regression was added to the same test.
 
-Carried: none above LOW. The architecture LOW is fixed; the INFO is the
+Second closure check on `189565ef0`: 0 C / 0 H / 0 M / 0 L.
+
+Final standing: code 0/0/0/0 (closure), security 0/0/0/0 (round 3),
+architecture 0/0/0/0 after its round-3 LOW was fixed (INFO: SPEC landing
+dependency). Carried: none. The architecture LOW is fixed; the INFO is the
 agreed SPEC landing dependency.
