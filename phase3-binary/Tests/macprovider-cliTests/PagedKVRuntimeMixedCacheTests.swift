@@ -62,7 +62,11 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
                     5: 6,
                     12: 7,
                     7: 8,
-                ]
+                ],
+                // The probe packs row A after a decode window with row B'
+                // after a two-token prefill, which only packs when recurrent
+                // state has a fixed shape.
+                fixedShapeRecurrentState: true
             ),
             processor: MixedCacheUserInputProcessor(),
             tokenizer: MixedCacheTokenizer()
@@ -85,8 +89,15 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(result.crossRowDivergences, 0)
         XCTAssertTrue(result.challengeDistinguishing)
         XCTAssertGreaterThanOrEqual(recorder.forwardBatchSizes().filter { $0 == 2 }.count, 2)
+        // The probe decodes row A through one serve-path window: inputs 4, 5,
+        // then 6 for every later step, so A's state records 6. The rejoined
+        // row B prefilled [11, 12].
+        XCTAssertEqual(
+            ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention]),
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
         XCTAssertTrue(
-            recorder.previousMambaSnapshots().contains([204, 211]),
+            recorder.previousMambaSnapshots().contains([206, 212]),
             "peer-rejoin decode must retain row A's post-window state while admitting the rejoined row B state"
         )
     }
@@ -815,17 +826,23 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     private let vocabularySize = 64
     private let attentionDType: DType
     private let returnsBackendStateForBatches: Bool
+    /// Off: the recurrent state records every input token, so its shape
+    /// follows the forward's length and tests can read a prefill's full
+    /// input back from it. On: one value per row, as real recurrent state.
+    private let fixedShapeRecurrentState: Bool
 
     init(
         recorder: MixedCacheRecorder,
         nextTokenByInput: [Int: Int],
         attentionDType: DType = .float32,
-        returnsBackendStateForBatches: Bool = false
+        returnsBackendStateForBatches: Bool = false,
+        fixedShapeRecurrentState: Bool = false
     ) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
         self.attentionDType = attentionDType
         self.returnsBackendStateForBatches = returnsBackendStateForBatches
+        self.fixedShapeRecurrentState = fixedShapeRecurrentState
         super.init()
     }
 
@@ -856,9 +873,20 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
                     eval(previous)
                     recorder.recordPreviousMambaState(previous.asArray(Float.self))
                 }
-                let stateValues = flatTokens.map { Float($0 + 200) }
-                mamba[0] = MLXArray(stateValues, [batch, sequenceLength, 1])
-                mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, sequenceLength, 1])
+                if fixedShapeRecurrentState {
+                    // Real conv/SSM state has one shape whatever the forward's
+                    // length, so a row that prefilled packs with a row that
+                    // decoded. This records the row's last input token.
+                    let stateValues = (0 ..< batch).map { row in
+                        Float(flatTokens[row * sequenceLength + sequenceLength - 1] + 200)
+                    }
+                    mamba[0] = MLXArray(stateValues, [batch, 1, 1])
+                    mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, 1, 1])
+                } else {
+                    let stateValues = flatTokens.map { Float($0 + 200) }
+                    mamba[0] = MLXArray(stateValues, [batch, sequenceLength, 1])
+                    mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, sequenceLength, 1])
+                }
             } else {
                 recorder.recordBadLayout()
             }
