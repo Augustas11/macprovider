@@ -116,3 +116,130 @@ route difference that the rebase has to check.
 - `python3 scripts/gen_spec_index.py --check`: up to date
 - `python3 scripts/check_spec_pr_declaration.py --event <PR body with SPEC-048-R002> --base origin/main --head HEAD`: passed
 - `bash -n scripts/check-upstream-throughput-blockers.sh`: OK; the watch's import prelude runs against `scripts/`
+
+## Rebase onto main with #1910
+
+The branch is rebased onto `origin/main`: first onto `ea6711ed8`, which
+contains #1910 ("ragged shared prefill", SPEC-038 v0.3.11, merge
+`702c33788`), with the conflicts below; then, without conflicts, onto
+`cdfb74d5f` (nine later main commits; the only Swift change is in
+`CoordinatorClient.swift`). Hashes earlier in this file are pre-rebase. The
+two grouping-rule commits are now `44658175e` and `bb60acf48`; their messages
+still name their old SPEC versions (v0.3.11/v0.3.12, now v0.3.12/v0.3.13).
+
+**Conflicts and resolutions.**
+
+| File | Resolution |
+| --- | --- |
+| `.github/workflows/ci.yml` | Main split the Swift job into four test shards, a journeys job, an app-test job and an aggregator (#1939). The Xcode 26.6 commit now applies to that layout: every Swift job (`swift-test-shard`, `swift-journeys`, `malibu-app-tests`, `swift-package-lock`) runs on `macos-26` and selects `Xcode_26.6.app`; main's cache keys already carry the `xcodebuild -version` hash. |
+| `specs/SPEC-038-continuous-batching.md` | Main's v0.3.11 (ragged shared prefill) keeps its number. Ours renumber after it: kernel-route-invariant groups v0.3.11 -> v0.3.12, dense route bound v0.3.12 -> v0.3.13, plus the new v0.3.14 below. Change-log entries stay newest first; the FR-CB2 body tags follow the new numbers. |
+| `specs/CONFORMANCE.json` | SPEC-038 version follows the SPEC; both sides' SPEC-038-R002 test mappings kept; #1910's two shortening tests replaced by their renamed/rewritten successors. |
+| `specs/README.md` | Regenerated with `scripts/gen_spec_index.py` at every step. |
+| `ContinuousBatchScheduler.swift` | Main's `allowsRaggedPrefillOffsets` dispatch kept beside our `prefillGrouping`; the grouping break moved into main's `selectEqualOffsetPrefillGroup`. |
+| `ModelRuntime.swift` | `productionContinuousBatchSchedulerConfiguration` takes both `prefillGrouping` and `allowsRaggedPrefillOffsets`. |
+| `ContinuousBatchSchedulerTests.swift`, `PagedKVRuntimeBridgeTests.swift` | Both sides' tests and helper parameters kept. |
+
+**Integration (`07c6a10a2`, SPEC-038 v0.3.14).**
+
+1. *Grouping rule in the ragged path.* `ContinuousBatchPrefillGrouping.select`
+   takes `minimumGroupedChunkTokens`; below it the group is the head alone.
+2. *No chunk shortening.* #1910 let the head shrink to a peer's chunk (down
+   to half its own) and let peers shrink to the group length. That changes a
+   row's chunk partition from its lone one, and can leave a remainder below
+   the bound (A3B: a 200-token chunk cut to 128 leaves 72 tokens, which take
+   `gather_qmv` alone where the lone 200-token chunk took `gather_qmm_rhs`).
+   A row now joins a group only when the group length is its own balanced
+   chunk, in both selectors. The equal-offset selector had the same issue
+   (a peer's chunk was recomputed under the head's length) and is fixed the
+   same way. Uniform-length workloads group as before; mixed-length rows
+   whose balanced chunks differ prefill separately.
+3. *Attention mask route.* Read in core `v0.32.2-macprovider.2`
+   (`fast.cpp`, `backend/metal/scaled_dot_product_attention.cpp`,
+   `softmax.cpp`, `matmul.cpp`, `kernels/steel/attn/kernels/steel_attention.h`):
+   - `use_fallback` sends every prompt chunk (query length > 8) of head dim
+     192 or 256 to the unfused SDPA regardless of mask form; the NAX fused
+     exception needs >= 1024 query tokens, a causal mask and no array mask,
+     which CB chunks (at most 512) never reach. The unfused path builds the
+     causal mask as the same boolean `where(mask, scores, finfo.min)` that a
+     boolean array mask takes. Head dim 128 takes the fused steel kernel
+     with `do_causal` (blocks past the diagonal skipped) or `has_mask`
+     (masked entries set to `finite_min`); both give exact zeros.
+   - So the mask form is not a route difference. The padded key length is:
+     a ragged row attends over `max offset + L` keys, alone over
+     `offset_b + L`. Studio bitwise check (bfloat16, 16 Q / 2 KV heads):
+     head dim 128 bit-equal in every case; head dim 256 not bit-equal
+     (3128 keys padded to 4096: 7.5e-9; 4028 -> 4228 and 2064 -> 4164:
+     2.4e-4; 7128 -> 8228: 1.2e-4). Slicing each row's own keys out of the
+     padded buffer and attending with the causal mask is bit-equal to the
+     lone call in every case.
+   - Fix: a ragged forward builds `PagedKVRaggedPrefillBatchLayerCache`,
+     which implements `KVCacheAttentionProtocol.updateAndAttend`: it updates
+     the batch as before, then runs SDPA per row over exactly that row's
+     `offset + L` keys with `.causal`, the lone call. Projections, MoE, GDN
+     and the output head stay batched. Decode and equal-offset prefill
+     still build the plain `PagedKVBatchLayerCache`. A model that calls SDPA
+     itself (not through `attentionWithCacheUpdate`) reaches `update`
+     without `updateAndAttend`; the backend logs
+     `event=continuous_batch_ragged_prefill_disabled` and stops forming
+     ragged groups. None of the CB catalog families do; no probe run logged
+     it.
+
+**Tests** (Studio, Xcode 26.6 toolchain, metallib `f42aef60…` beside
+`xctest`): `ContinuousBatchSchedulerTests` 163/0 failures,
+`PagedKVRuntimeBridgeTests` 73/0, `ServingKnobsConfigTests` 114/0,
+`ContinuousBatchFirstTokenClockTests` 4/0, `PagedKVRuntimeMixedCacheTests` 11
+with the same 4 pre-existing assertion failures in
+`testMixedCacheIsolationProbeCoversLockstepWindowBeforePeerRejoin`. New:
+`testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise`,
+`testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound`,
+`testRaggedPrefillGroupingKeepsChunksBelowTheGroupingBoundAlone`,
+`testRaggedPrefillGroupingNeverShortensARowsChunkToMeetAPeer`;
+`testPrefillChunksBelowTheGroupingBoundPrefillAlone` runs both selectors.
+
+**Studio probes** (`docs/research/mlx-swift-lm-3.32.3/ragged-prefill-rebase/`).
+Before = rebased branch without the integration (`fdc28226…`); interim =
+rule and natural chunks, padded attention (`9cd6c057…`); after = the commit
+(`d2d148c1…`, built from `07c6a10a2`'s Swift sources before the second
+rebase, which added only a `CoordinatorClient.swift` change).
+
+| Probe | Model / mode | Before | Interim | After |
+| --- | --- | --- | --- | --- |
+| equal-length pairs/quads | A3B fused on | 69/108, decode-8 5/14 | 0/108, 0/14 | 0/108, 0/14 |
+| equal-length pairs/quads | A3B fused off | 63/108, decode-8 6/14 | 0/108, 0/14 | 0/108, 0/14 |
+| keyed equal-length pairs/quads | 27B | 3/108 | 0/108 | 0/108 |
+| keyed ragged arrivals (short + staggered long) | A3B fused on | 13/24 | 0/24 | 0/24 |
+| keyed ragged arrivals | A3B fused off | 9/24 | 0/24 | 0/24 |
+| keyed ragged arrivals | 27B | 3/24 | 0/24 | 0/24 |
+| staggered identical 1337-token prompts (ragged 443-token groups) | A3B fused on | 7/12 | 0/24 | 0/12 |
+| staggered identical prompts | A3B fused off | 3/12 | n/a | 0/12 |
+| staggered identical prompts | 27B | 0/12 | 0/24 | 0/12 |
+
+The before build formed ragged groups of 7- and 21-token keyed tails,
+equal-offset A3B groups of 36-86 tokens, and shortened 258-305-token chunks.
+The after build formed ragged groups only of 443-token chunks (A3B: 3 groups
+of 3 rows per mode; 27B: one of 4) and every row matched. The interim build's
+padded attention flipped no greedy token in these runs; the bitwise check
+above is why it is replaced anyway.
+
+Startup probes on the after build: A3B fused on and off `established=true`
+640/640, 27B `established=true` 1024/1024; all `proven=true rowsDecoded=2
+rowFailures=0 crossRowDivergences=0`, `active=True paged=attached
+proof=passed slots=8`, `min_grouped_chunk_tokens` 128 / 128 / 33.
+
+**AGENTS rule 2 (decode path).** Against the R015-qualified build:
+- #1910 changed these lines on functions decode runs: the `hop_decode`
+  `CBTrace.log` and its `windowStartedNs` timestamp around
+  `decodeLockstepWindow` (trace only, off unless `MACPROVIDER_CB_TRACE=1`);
+  `servePathDecodeLockstepWindow`'s `MACPROVIDER_LAB_HYBRID_DECODE_WINDOW`
+  override (compiled only into the lab harness, which R015 runs, and inert
+  unless that variable is set); `PagedKVBatchLayerCache.makeMask`'s ragged
+  branch, which replaced a debug-only `assert` and needs `n > 1` with
+  distinct row offsets (decode is `n == 1`; packed MTP verification returns
+  earlier); and the streaming TTFT clock wrapping `onChunk` (receipt timing,
+  not tokens). None changes a decode token.
+- This integration changes no decode-path line. `PagedKVBatchLayerCache`
+  lost `final` and three members became `fileprivate` so the ragged
+  subclass can read them; decode never builds the subclass.
+- R015's native rows keep the equal-offset rule; its 1536/4096-token prompts
+  in 512-token chunks group as before. R015 is not rerun on this basis; the
+  operator decides on the #1910 lines above.

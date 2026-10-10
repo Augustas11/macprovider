@@ -1,0 +1,40 @@
+plan [{'filler': 12, 'prompt_tokens': 40, 'ids': [0, 9, 10, 11]}, {'filler': 12, 'prompt_tokens': 41, 'ids': [1, 2, 4, 5]}, {'filler': 12, 'prompt_tokens': 43, 'ids': [3, 7, 8, 12]}, {'filler': 40, 'prompt_tokens': 77, 'ids': [0, 4, 9, 10]}, {'filler': 40, 'prompt_tokens': 78, 'ids': [1, 2, 5, 6]}, {'filler': 40, 'prompt_tokens': 80, 'ids': [3, 7, 8, 12]}]
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 0, "first_delta_spread_ms": 116.9, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 1, "first_delta_spread_ms": 146.6, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 2, "first_delta_spread_ms": 97.6, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 0, "first_delta_spread_ms": 535.8, "match": {"0": true, "9": true, "10": true, "11": true}, "completion_tokens_match": {"0": true, "9": true, "10": true, "11": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 1, "first_delta_spread_ms": 301.7, "match": {"0": true, "9": true, "10": true, "11": true}, "completion_tokens_match": {"0": true, "9": true, "10": true, "11": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 2, "first_delta_spread_ms": 306.7, "match": {"0": true, "9": true, "10": true, "11": true}, "completion_tokens_match": {"0": true, "9": true, "10": true, "11": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 0, "first_delta_spread_ms": 94.8, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 1, "first_delta_spread_ms": 99.8, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 2, "first_delta_spread_ms": 96.4, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 0, "first_delta_spread_ms": 298.6, "match": {"1": true, "2": true, "4": true, "5": true}, "completion_tokens_match": {"1": true, "2": true, "4": true, "5": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 1, "first_delta_spread_ms": 302.1, "match": {"1": true, "2": true, "4": true, "5": true}, "completion_tokens_match": {"1": true, "2": true, "4": true, "5": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 2, "first_delta_spread_ms": 300.7, "match": {"1": true, "2": true, "4": true, "5": true}, "completion_tokens_match": {"1": true, "2": true, "4": true, "5": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 0, "first_delta_spread_ms": 100.1, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 1, "first_delta_spread_ms": 98.9, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 2, "first_delta_spread_ms": 101.5, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 0, "first_delta_spread_ms": 305.5, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 1, "first_delta_spread_ms": 306.2, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 2, "first_delta_spread_ms": 305.6, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 0, "first_delta_spread_ms": 136.1, "match": {"0": true, "4": true}, "completion_tokens_match": {"0": true, "4": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 1, "first_delta_spread_ms": 130.0, "match": {"0": true, "4": true}, "completion_tokens_match": {"0": true, "4": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 2, "first_delta_spread_ms": 135.1, "match": {"0": true, "4": true}, "completion_tokens_match": {"0": true, "4": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 0, "first_delta_spread_ms": 417.8, "match": {"0": true, "4": true, "9": true, "10": true}, "completion_tokens_match": {"0": true, "4": true, "9": true, "10": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 1, "first_delta_spread_ms": 411.9, "match": {"0": true, "4": true, "9": true, "10": true}, "completion_tokens_match": {"0": true, "4": true, "9": true, "10": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 2, "first_delta_spread_ms": 411.6, "match": {"0": true, "4": true, "9": true, "10": true}, "completion_tokens_match": {"0": true, "4": true, "9": true, "10": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 0, "first_delta_spread_ms": 136.2, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 1, "first_delta_spread_ms": 134.1, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 2, "first_delta_spread_ms": 132.0, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 0, "first_delta_spread_ms": 542.7, "match": {"1": true, "2": true, "5": true, "6": true}, "completion_tokens_match": {"1": true, "2": true, "5": true, "6": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 1, "first_delta_spread_ms": 612.9, "match": {"1": true, "2": true, "5": true, "6": true}, "completion_tokens_match": {"1": true, "2": true, "5": true, "6": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 2, "first_delta_spread_ms": 414.6, "match": {"1": true, "2": true, "5": true, "6": true}, "completion_tokens_match": {"1": true, "2": true, "5": true, "6": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 0, "first_delta_spread_ms": 137.4, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 1, "first_delta_spread_ms": 137.4, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 2, "first_delta_spread_ms": 130.1, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 0, "first_delta_spread_ms": 424.6, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 1, "first_delta_spread_ms": 414.9, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 2, "first_delta_spread_ms": 418.7, "match": {"3": true, "7": true, "8": true, "12": true}, "completion_tokens_match": {"3": true, "7": true, "8": true, "12": true}}
+{"decode8_trial": 0, "match": {"12:0": true, "12:9": true, "12:10": true, "12:11": true, "12:1": true, "12:2": true, "12:4": true}}
+{"decode8_trial": 1, "match": {"12:0": true, "12:9": true, "12:10": true, "12:11": true, "12:1": true, "12:2": true, "12:4": true}}
+summary {'decode8_mismatches': 0, 'group_runs': 36, 'row_mismatches': 0}

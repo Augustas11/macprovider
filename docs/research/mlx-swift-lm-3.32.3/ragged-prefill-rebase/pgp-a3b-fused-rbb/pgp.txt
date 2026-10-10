@@ -1,0 +1,40 @@
+plan [{'filler': 12, 'prompt_tokens': 40, 'ids': [0, 9, 10, 11]}, {'filler': 12, 'prompt_tokens': 41, 'ids': [1, 2, 4, 5]}, {'filler': 12, 'prompt_tokens': 43, 'ids': [3, 7, 8, 12]}, {'filler': 40, 'prompt_tokens': 77, 'ids': [0, 4, 9, 10]}, {'filler': 40, 'prompt_tokens': 78, 'ids': [1, 2, 5, 6]}, {'filler': 40, 'prompt_tokens': 80, 'ids': [3, 7, 8, 12]}]
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"0": true, "9": true}, "completion_tokens_match": {"0": true, "9": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 0, "first_delta_spread_ms": 0.3, "match": {"0": false, "9": true, "10": false, "11": true}, "completion_tokens_match": {"0": false, "9": true, "10": false, "11": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"0": false, "9": true, "10": false, "11": true}, "completion_tokens_match": {"0": false, "9": true, "10": false, "11": true}}
+{"filler": 12, "prompt_tokens": 40, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"0": false, "9": true, "10": false, "11": true}, "completion_tokens_match": {"0": false, "9": true, "10": false, "11": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 1, "first_delta_spread_ms": 0.0, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"1": true, "2": true}, "completion_tokens_match": {"1": true, "2": true}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 0, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": true, "4": false, "5": false}, "completion_tokens_match": {"1": false, "2": true, "4": false, "5": false}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": true, "4": false, "5": false}, "completion_tokens_match": {"1": false, "2": true, "4": false, "5": false}}
+{"filler": 12, "prompt_tokens": 41, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": true, "4": false, "5": false}, "completion_tokens_match": {"1": false, "2": true, "4": false, "5": false}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 1, "first_delta_spread_ms": 0.0, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"3": true, "7": true}, "completion_tokens_match": {"3": true, "7": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 0, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": true}, "completion_tokens_match": {"3": false, "7": false, "8": true, "12": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": true}, "completion_tokens_match": {"3": false, "7": false, "8": true, "12": true}}
+{"filler": 12, "prompt_tokens": 43, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": true}, "completion_tokens_match": {"3": false, "7": false, "8": true, "12": true}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"0": false, "4": false}, "completion_tokens_match": {"0": false, "4": false}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 1, "first_delta_spread_ms": 0.0, "match": {"0": false, "4": false}, "completion_tokens_match": {"0": false, "4": false}}
+{"filler": 40, "prompt_tokens": 77, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"0": false, "4": false}, "completion_tokens_match": {"0": false, "4": false}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 0, "first_delta_spread_ms": 0.1, "match": {"0": false, "4": false, "9": false, "10": false}, "completion_tokens_match": {"0": false, "4": false, "9": false, "10": false}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"0": false, "4": false, "9": false, "10": false}, "completion_tokens_match": {"0": false, "4": false, "9": false, "10": false}}
+{"filler": 40, "prompt_tokens": 77, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"0": false, "4": false, "9": false, "10": false}, "completion_tokens_match": {"0": false, "4": false, "9": false, "10": false}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"1": false, "2": false}, "completion_tokens_match": {"1": false, "2": false}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 1, "first_delta_spread_ms": 0.0, "match": {"1": false, "2": false}, "completion_tokens_match": {"1": false, "2": false}}
+{"filler": 40, "prompt_tokens": 78, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"1": false, "2": false}, "completion_tokens_match": {"1": false, "2": false}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 0, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": false, "5": false, "6": true}, "completion_tokens_match": {"1": false, "2": false, "5": false, "6": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": false, "5": false, "6": true}, "completion_tokens_match": {"1": false, "2": false, "5": false, "6": true}}
+{"filler": 40, "prompt_tokens": 78, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"1": false, "2": false, "5": false, "6": true}, "completion_tokens_match": {"1": false, "2": false, "5": false, "6": true}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 0, "first_delta_spread_ms": 0.0, "match": {"3": false, "7": false}, "completion_tokens_match": {"3": true, "7": false}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 1, "first_delta_spread_ms": 0.0, "match": {"3": false, "7": false}, "completion_tokens_match": {"3": true, "7": false}}
+{"filler": 40, "prompt_tokens": 80, "size": 2, "trial": 2, "first_delta_spread_ms": 0.0, "match": {"3": false, "7": false}, "completion_tokens_match": {"3": true, "7": false}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 0, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": false}, "completion_tokens_match": {"3": true, "7": false, "8": true, "12": false}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 1, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": false}, "completion_tokens_match": {"3": true, "7": false, "8": true, "12": false}}
+{"filler": 40, "prompt_tokens": 80, "size": 4, "trial": 2, "first_delta_spread_ms": 0.1, "match": {"3": false, "7": false, "8": true, "12": false}, "completion_tokens_match": {"3": true, "7": false, "8": true, "12": false}}
+{"decode8_trial": 0, "match": {"12:0": false, "12:9": true, "12:10": true, "12:11": true, "12:1": false, "12:2": true, "12:4": false}}
+{"decode8_trial": 1, "match": {"12:0": false, "12:9": true, "12:10": true, "12:11": true, "12:1": false, "12:2": true, "12:4": true}}
+summary {'decode8_mismatches': 5, 'group_runs': 36, 'row_mismatches': 69}
