@@ -174,6 +174,9 @@ func runCoordinator() (exitCode int) {
 		}))
 	}
 
+	// Filter all loggers, including independently constructed subsystem loggers.
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
 	// #1693 E2 V8: catch SIGHUP before any slow boot work; the main signal
 	// loop takes it over (handOff) once it is registered.
 	bootSIGHUP := installBootSIGHUPGuard(zerolog.New(os.Stdout).With().Timestamp().Logger())
@@ -181,6 +184,10 @@ func runCoordinator() (exitCode int) {
 	cfg, bootConfigDigests, err := config.LoadWithOverlayDigests(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	if err := configureLogging(cfg.Logging); err != nil {
+		fmt.Fprintf(os.Stderr, "logging: %v\n", err)
 		os.Exit(1)
 	}
 	bootConfigLoadedAt := time.Now()

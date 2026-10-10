@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerid"
 	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1587,6 +1588,21 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
+// LogLevel defaults omitted or empty levels to info. Accept only named levels:
+// zerolog also accepts numeric levels and no-level, which bypass useful filtering.
+func (c LoggingConfig) LogLevel() (zerolog.Level, error) {
+	level := strings.ToLower(c.Level)
+	if level == "" {
+		level = "info"
+	}
+	switch level {
+	case "debug", "info", "warn":
+		return zerolog.ParseLevel(level)
+	default:
+		return zerolog.InfoLevel, fmt.Errorf("logging.level must be debug, info, or warn")
+	}
+}
+
 type RateCardEntry struct {
 	PromptCreditsPerMtok         int64 `yaml:"prompt_credits_per_mtok"`
 	PromptCacheHitCreditsPerMtok int64 `yaml:"prompt_cache_hit_credits_per_mtok"`
@@ -2773,6 +2789,9 @@ func (c Config) ProviderByID() map[string]ProviderConfig {
 }
 
 func (c Config) Validate() error {
+	if _, err := c.Logging.LogLevel(); err != nil {
+		return err
+	}
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
 	}
