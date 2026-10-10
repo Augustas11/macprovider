@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoggingLevelValidation(t *testing.T) {
-	for _, value := range []string{"", "trace", "debug", "info", "INFO", "warn", "error", "fatal", "panic", "disabled"} {
+	for _, value := range []string{"", "debug", "info", "INFO", "warn"} {
 		t.Run(value, func(t *testing.T) {
 			cfg := validTestConfig()
 			cfg.Logging.Level = value
@@ -17,7 +17,7 @@ func TestLoggingLevelValidation(t *testing.T) {
 			}
 		})
 	}
-	for _, value := range []string{"verbose", "none", "-1", "0", " info "} {
+	for _, value := range []string{"verbose", "none", "-1", "0", " info ", "trace", "error", "fatal", "panic", "disabled"} {
 		cfg := validTestConfig()
 		cfg.Logging.Level = value
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "logging.level") {

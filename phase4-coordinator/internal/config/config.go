@@ -1596,10 +1596,10 @@ func (c LoggingConfig) LogLevel() (zerolog.Level, error) {
 		level = "info"
 	}
 	switch level {
-	case "trace", "debug", "info", "warn", "error", "fatal", "panic", "disabled":
+	case "debug", "info", "warn":
 		return zerolog.ParseLevel(level)
 	default:
-		return zerolog.InfoLevel, fmt.Errorf("logging.level must be trace, debug, info, warn, error, fatal, panic, or disabled")
+		return zerolog.InfoLevel, fmt.Errorf("logging.level must be debug, info, or warn")
 	}
 }
 

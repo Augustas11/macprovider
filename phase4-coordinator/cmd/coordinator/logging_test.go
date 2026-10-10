@@ -15,7 +15,8 @@ func TestConfigureLogging(t *testing.T) {
 	for _, tc := range []struct {
 		level string
 		debug bool
-	}{{"", false}, {"info", false}, {"debug", true}} {
+		info  bool
+	}{{"", false, true}, {"info", false, true}, {"debug", true, true}, {"warn", false, false}} {
 		t.Run(tc.level, func(t *testing.T) {
 			var out bytes.Buffer
 			// Construct before applying config, like the early boot logger.
@@ -30,7 +31,10 @@ func TestConfigureLogging(t *testing.T) {
 			if strings.Contains(out.String(), "debug-event") != tc.debug {
 				t.Fatalf("debug visibility: %s", &out)
 			}
-			for _, event := range []string{"info-event", "warn-event", "error-event"} {
+			if strings.Contains(out.String(), "info-event") != tc.info {
+				t.Fatalf("info visibility: %s", &out)
+			}
+			for _, event := range []string{"warn-event", "error-event"} {
 				if !strings.Contains(out.String(), event) {
 					t.Fatalf("missing %s: %s", event, &out)
 				}
