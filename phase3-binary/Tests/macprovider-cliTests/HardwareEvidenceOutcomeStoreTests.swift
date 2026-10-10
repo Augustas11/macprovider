@@ -46,6 +46,15 @@ final class HardwareEvidenceOutcomeStoreTests: XCTestCase {
         stored = try HardwareEvidenceOutcomeStore.read(from: storeURL)
         XCTAssertEqual(stored.outcome, "skipped")
         XCTAssertEqual(stored.reason, "provider_id missing")
+
+        HardwareEvidenceOutcomeStore.record(
+            .pending("hardware evidence already submitted; verification pending"),
+            at: now,
+            to: storeURL
+        )
+        stored = try HardwareEvidenceOutcomeStore.read(from: storeURL)
+        XCTAssertEqual(stored.outcome, "pending")
+        XCTAssertEqual(stored.reason, "hardware evidence already submitted; verification pending")
     }
 
     func testRecordIsOwnerOnly() throws {

@@ -610,10 +610,33 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	h.persistHardwareProfileAsync(req.ProviderID, req.HardwareSummary, now)
+	if attested {
+		h.recordAppAttestVerification(req.ProviderID, appAttestKeyID)
+	}
 	if h.Metrics != nil {
 		h.Metrics.IncRegisterSource("app")
 	}
 	writeAppTrackRegisterSuccess(w, req.ProviderID, token, attested, h.CoordinatorWSURL)
+}
+
+// recordAppAttestVerification writes the Apple-verified attestation through
+// the separate app_attest_recorder role (SPEC-033 §5.7), the only source the
+// automatic hardware trust reads. Best effort: registration already succeeded,
+// and a missing record only keeps the Mac on the operator approval path.
+func (h *Handler) recordAppAttestVerification(providerID string, keyID []byte) {
+	recorder, ok := h.StatsDB.(interface {
+		RecordAppAttestVerification(context.Context, string, []byte) error
+	})
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := recorder.RecordAppAttestVerification(ctx, providerID, keyID); err != nil {
+		// Fail-safe (the Mac stays on operator approval) but never silent:
+		// a structured line for journald alerting, without the error text.
+		fmt.Printf("app_attest_record_failed provider_id=%s\n", providerID)
+	}
 }
 
 func writeAppTrackRegisterSuccess(w http.ResponseWriter, providerID, token string, attested bool, coordinatorWSURL string) {

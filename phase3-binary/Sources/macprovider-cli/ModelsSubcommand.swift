@@ -97,15 +97,15 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             writeStderr("models discover is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = try await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+            configPath: nil,
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
@@ -171,16 +171,16 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             writeStderr("models evaluate is JSON-only in this release; pass --json")
             throw ExitCode(2)
         }
-        let environment = try await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+            configPath: nil,
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes(target: candidate)
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -270,16 +270,16 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             }
             throw ExitCode(2)
         }
-        let environment = try await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+            configPath: config,
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes(target: candidate)
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -473,19 +473,19 @@ struct ModelsProposeCommand: AsyncParsableCommand {
             if let evaluationDigest, evaluationDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
                 throw BYOMModelAdmissionError.invalidEvaluationDigest
             }
-            let environment = try await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+                configPath: config,
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: nil,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
             ).withCatalogMatcher(
                 offline: offlineArtifactFeed,
                 coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
-            ).withLoopbackRuntimeProbes()
+            ).withLoopbackRuntimeProbes(target: candidate)
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
                 : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
@@ -692,16 +692,16 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = try await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+                configPath: config,
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes(target: candidate)
             let client = try resolved.coordinatorURL.map { try BYOMModelAdmissionClient(coordinatorURL: $0) }
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -803,16 +803,16 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 coordinatorURL: coordinatorURL,
                 providerID: providerID
             )
-            let environment = try await BYOMDiscoveryEnvironment.production(
+            let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+                configPath: config,
                 namespacePath: localDiscoveryNamespacePath,
                 mlxCacheDir: mlxCacheDir,
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin,
                 openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
-            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
+                llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
+            ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes(target: candidate)
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
             let runtime = BYOMModelAdmissionRuntime(
                 environment: environment,
@@ -915,15 +915,15 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
             ctlSocketPath: ctlSocketPath
         )
         let currentModelID = await readCurrentModelID(config: modelsConfig)
-        let environment = try await BYOMDiscoveryEnvironment.production(
+        let environment = try await BYOMDiscoveryEnvironment.productionForConfig(
+            configPath: config,
             namespacePath: localDiscoveryNamespacePath,
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin,
             openAICompatibleOrigin: skipOpenaiCompatible ? nil : openaiCompatibleOrigin,
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
-            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+            llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
         // BYOM identity is resolved through the one matcher selection every
         // admission command shares (#1816): the coordinator's signed live

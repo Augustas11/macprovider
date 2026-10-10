@@ -321,8 +321,10 @@ func (s *Server) handleHardwareTrustApproveApprove(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleHardwareTrustRevoke inactivates a granted operator_api trust root with
-// an audit trail. Trust-reducing (fail-safe), so a single operator actor is
+// handleHardwareTrustRevoke inactivates a granted operator_api trust root, and
+// the automatic app_attest root for the same hardware (SPEC-033 §5.7), with an
+// audit trail. The revoke is final for the automatic path: a ledgered revoke
+// blocks any later automatic re-grant of that hardware. Trust-reducing (fail-safe), so a single operator actor is
 // acceptable, but it is operator-authenticated and ledgered (issue #582).
 func (s *Server) handleHardwareTrustRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -417,7 +419,10 @@ func (s *Server) handleHardwareTrustRevoke(w http.ResponseWriter, r *http.Reques
 		"unified_memory_gb":      unifiedMemoryGB,
 		"revoked_by":             revokedBy,
 		"status":                 "revoked",
-		"source":                 "operator_api",
+		// Migration 031: one revoke expires every operator-revocable root for the
+		// hardware, the dual-control operator_api root and the automatic
+		// app_attest root alike.
+		"revoked_sources": []string{"operator_api", "app_attest"},
 	})
 }
 

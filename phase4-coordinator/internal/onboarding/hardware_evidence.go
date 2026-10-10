@@ -37,6 +37,14 @@ const (
 
 var ErrHardwareEvidenceRateLimited = errors.New("hardware evidence rate limited")
 
+// hardwareEvidencePendingCode tells the provider binary its evidence is already
+// on file and awaiting the verifier (SPEC-033-R003); it is not a flood refusal.
+const hardwareEvidencePendingCode = "hardware_evidence_pending"
+
+// hardwareEvidenceRateLimitedCode is the 10-minute cooldown after a job that
+// has already finished. Nothing is queued, so it stays a failure for the CLI.
+const hardwareEvidenceRateLimitedCode = "hardware_evidence_rate_limited"
+
 // HardwareEvidenceRequest is provider-authenticated autotune evidence. The
 // coordinator queues it for the verifier sidecar; public stats only consume it
 // after the sidecar promotes a conservative trusted profile.
@@ -234,6 +242,29 @@ SELECT id, status, decision_reason
 	return record, true, nil
 }
 
+// ExistingActiveHardwareVerificationJob reports the provider's newest
+// non-terminal job, whatever hardware identity it carries (SPEC-033-R003).
+func (s *PGStore) ExistingActiveHardwareVerificationJob(ctx context.Context, providerID string) (HardwareEvidenceJobRecord, bool, error) {
+	if s == nil || s.db == nil {
+		return HardwareEvidenceJobRecord{}, false, errors.New("onboarding postgres store is nil")
+	}
+	var record HardwareEvidenceJobRecord
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, status, decision_reason, evidence_sha256
+  FROM hardware_verification_jobs
+ WHERE provider_id = $1
+   AND status IN ('pending', 'waiting_trust')
+ ORDER BY submitted_at DESC, id DESC
+ LIMIT 1`, providerID).Scan(&record.JobID, &record.Status, &record.DecisionReason, &record.EvidenceSHA)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HardwareEvidenceJobRecord{}, false, nil
+	}
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, false, err
+	}
+	return record, true, nil
+}
+
 func (s *PGStore) ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
 	if s == nil || s.db == nil {
 		return HardwareEvidenceJobRecord{}, false, errors.New("onboarding postgres store is nil")
@@ -355,6 +386,18 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	// SPEC-033-R003: evidence for other hardware is already queued. Say so with
+	// a distinct code, before the flood limiter, so install/update can continue
+	// instead of failing on what is only a wait for the verifier.
+	alreadyPending, pendingErr := h.hasPendingHardwareEvidence(ctx, providerID)
+	if pendingErr != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
+		return
+	}
+	if alreadyPending {
+		writeHardwareEvidencePending(w)
+		return
+	}
 	if h.HardwareEvidenceProviderRateLimiter != nil && !h.HardwareEvidenceProviderRateLimiter.Allow(providerID) {
 		w.Header().Set("Retry-After", "600")
 		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence provider rate limit exceeded")
@@ -363,8 +406,13 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 	record, err := store.InsertHardwareVerificationJob(ctx, providerID, req, generatedAt)
 	if err != nil {
 		if errors.Is(err, ErrHardwareEvidenceRateLimited) {
+			// A job may have been queued concurrently since the check above.
+			if racedPending, lookupErr := h.hasPendingHardwareEvidence(ctx, providerID); lookupErr == nil && racedPending {
+				writeHardwareEvidencePending(w)
+				return
+			}
 			w.Header().Set("Retry-After", "600")
-			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence queue already has a recent job")
+			writeJSONError(w, http.StatusTooManyRequests, hardwareEvidenceRateLimitedCode, "hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later")
 			return
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
@@ -376,6 +424,25 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeHardwareEvidenceResponse(w, status, providerID, record)
+}
+
+// hasPendingHardwareEvidence reports whether the provider already has a
+// pending or waiting_trust job. A store without the lookup reports false so the
+// existing limiter and admission cap still decide.
+func (h *Handler) hasPendingHardwareEvidence(ctx context.Context, providerID string) (bool, error) {
+	store, ok := h.StatsDB.(interface {
+		ExistingActiveHardwareVerificationJob(context.Context, string) (HardwareEvidenceJobRecord, bool, error)
+	})
+	if !ok {
+		return false, nil
+	}
+	_, found, err := store.ExistingActiveHardwareVerificationJob(ctx, providerID)
+	return found, err
+}
+
+func writeHardwareEvidencePending(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "600")
+	writeJSONError(w, http.StatusTooManyRequests, hardwareEvidencePendingCode, "hardware evidence already submitted; verification pending")
 }
 
 // hardwareEvidenceResponseStatus is the submission/replay state machine. New

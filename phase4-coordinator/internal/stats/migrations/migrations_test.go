@@ -51,6 +51,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{28, "stats_intake_current"},
 		{29, "stats_billing_mirror_privacy_columns"},
 		{30, "stats_timeseries_daily"},
+		{31, "hardware_trust_app_attest_auto"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -969,4 +970,66 @@ func TestProviderAutoupdateEventsMigrationShape(t *testing.T) {
 		"runtime onboarding role must not receive table-level insert")
 	mustNotContain(t, body, "GRANT DELETE ON provider_autoupdate_events",
 		"runtime onboarding role must not delete durable autoupdate events")
+}
+
+// TestHardwareTrustAppAttestAutoMigrationShape pins the SPEC-033 R002 trust
+// boundary in migration 031: the automatic trust root is written only by a
+// SECURITY DEFINER function the verifier alone may execute, it keys on the App
+// Attest flag, never expires, never overrides an existing row, refuses revoked
+// hardware, takes the provider advisory lock without blocking, and revoke now
+// expires app_attest roots too.
+func TestHardwareTrustAppAttestAutoMigrationShape(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var body string
+	for _, m := range all {
+		if m.Name == "hardware_trust_app_attest_auto" {
+			body = stripSQLComments(m.SQL)
+		}
+	}
+	if body == "" {
+		t.Fatal("hardware_trust_app_attest_auto migration body is empty")
+	}
+	for _, want := range []string{
+		"CHECK (source IN ('inventory', 'operator_api', 'app_attest'))",
+		"CHECK (grant_source IN ('operator', 'app_attest'))",
+		"CREATE OR REPLACE FUNCTION auto_trust_attested_hardware(p_job_id BIGINT)",
+		"SECURITY DEFINER",
+		"pg_try_advisory_xact_lock(582026, hashtext(v_provider))",
+		"FROM provider_app_attest_verifications v",
+		"REVOKE ALL ON provider_app_attest_verifications FROM provider_onboarding;",
+		"GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;",
+		"WHERE g.provider_id = job.provider_id\n           AND g.action = 'revoke'",
+		"'system:app_attest',\n        v_now,\n        NULL,",
+		"ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_inserted = ROW_COUNT;",
+		"encode(sha256(v_key_id), 'hex')",
+		"AND t.source IN ('operator_api', 'app_attest')",
+		"WHERE t.provider_id = BTRIM(p_provider_id)\n       AND t.source = 'app_attest'\n       AND (t.expires_at IS NULL OR t.expires_at > revoke_time);",
+		"REVOKE ALL ON FUNCTION auto_trust_attested_hardware(BIGINT) FROM PUBLIC;",
+		"REVOKE ALL ON FUNCTION auto_trust_attested_hardware(BIGINT) FROM provider_onboarding;",
+		"GRANT EXECUTE ON FUNCTION auto_trust_attested_hardware(BIGINT) TO stats_hardware_verifier;",
+		"ALTER FUNCTION auto_trust_attested_hardware(BIGINT) OWNER TO hardware_trust_definer;",
+		"REVOKE CREATE ON SCHEMA public FROM hardware_trust_definer;",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("migration 031 missing %q", want)
+		}
+	}
+	if strings.Contains(body, "pg_advisory_xact_lock(582026, hashtext(v_provider))") {
+		t.Error("migration 031 auto-trust must not take a blocking advisory lock (deadlocks against approve/revoke)")
+	}
+	if strings.Contains(body, "DO UPDATE") {
+		t.Error("migration 031 must never update an existing trust root or grant")
+	}
+	if strings.Contains(body, "provider_identities") {
+		t.Error("migration 031 must not read provider_identities: provider_onboarding can write its attested flag")
+	}
+	if strings.Contains(body, "ON provider_app_attest_verifications TO provider_onboarding") {
+		t.Error("provider_onboarding must not be granted access to recorded App Attest verifications")
+	}
+	if strings.Contains(body, "GRANT EXECUTE ON FUNCTION auto_trust_attested_hardware(BIGINT) TO provider_onboarding") {
+		t.Error("provider_onboarding must not execute the automatic trust function")
+	}
 }

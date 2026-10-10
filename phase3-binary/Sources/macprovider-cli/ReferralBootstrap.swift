@@ -395,7 +395,24 @@ struct ReferralBootstrapJournal: Sendable {
     }
 
     private func ensureJournalDirectory() throws {
-        let path = url.deletingLastPathComponent().path
+        let directory = url.deletingLastPathComponent()
+        let path = directory.path
+        // A first bootstrap on a fresh Mac has no ~/.config/macprovider yet.
+        // Create the missing ancestors owner-only; existing ones are left as
+        // they are. The journal directory itself is still created and checked
+        // below with no symlink following.
+        let parent = directory.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: parent.path) {
+            do {
+                try FileManager.default.createDirectory(
+                    at: parent,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            } catch {
+                throw ReferralBootstrapFailure(kind: .unavailable)
+            }
+        }
         if mkdir(path, 0o700) != 0, errno != EEXIST {
             throw ReferralBootstrapFailure(kind: .unavailable)
         }

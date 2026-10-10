@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.6.3-draft
-**Date:** 2026-09-20
+**Status:** v0.7.2-draft
+**Date:** 2026-10-10
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -14,7 +14,7 @@ production-live coordinator trust signal that ships **unspecced**.
 **Source-of-truth discipline.** This is documentation of shipped behavior. The **code and
 migrations are authoritative**; this spec MUST byte-match them and any disagreement is a spec
 bug. The contract spans: the verifier (`phase4-coordinator/internal/stats/hardwareverify/verify.go`),
-migrations **007, 008, 013, 015, 016, 017, 019** (`phase4-coordinator/internal/stats/migrations/`), the
+migrations **007, 008, 013, 015, 016, 017, 019, 031** (`phase4-coordinator/internal/stats/migrations/`), the
 deployment/role SQL (`phase4-coordinator/dist/stats-inventory-writer.sql`,
 `dist/stats-hardware-verifier-bootstrap.sql`), the HTTP enqueue path
 (`internal/onboarding/hardware_evidence.go`) and its producer
@@ -80,9 +80,10 @@ lifecycle; it does not define admission or tier weighting.
 
 ## 2. Data model
 
-Four tables plus **two** guard triggers, the migration-019 dual-control approval workflow, and
+Four tables plus **two** guard triggers, the migration-019 dual-control approval workflow, the
+migration-031 attested-hardware automatic trust function, and
 least-privilege **column-level** grants. Migrations
-**007, 008, 013, 015, 016, 017, 019** plus the role SQL in `dist/stats-inventory-writer.sql` and
+**007, 008, 013, 015, 016, 017, 019, 031** plus the role SQL in `dist/stats-inventory-writer.sql` and
 `dist/stats-hardware-verifier-bootstrap.sql` are the byte-authoritative DDL; the tables below are a
 load-bearing summary — a reimplementation MUST read those files for exact column lists,
 `NOT NULL`/`DEFAULT` clauses, `CHECK` constraints, indexes, roles, and grants.
@@ -107,12 +108,14 @@ Migration 008 introduced trust roots keyed by `(provider_id, hardware_identity_h
 Migration 019 is now authoritative for the effective shape: primary key
 `(provider_id, hardware_identity_hash, source)`, plus `chip_normalized`, `unified_memory_gb`,
 `trusted_by`, `trusted_at`, `expires_at NULL`, `notes`, and
-`source CHECK (source IN ('inventory', 'operator_api'))`. A row asserts an operator vouches that
+`source CHECK (source IN ('inventory', 'operator_api', 'app_attest'))` (migration 031 adds
+`app_attest`, §5.7). A row asserts an operator vouches that
 `hardware_identity_hash` for this provider is a genuine device with this chip + memory.
 `expires_at IS NULL` or in the future ⇒ active. Inventory rows are written by the operator
 trust-curation role (`stats_trust_inventory_writer`); durable dual-control approval rows are
-written by migration-019 SECURITY DEFINER functions as `source='operator_api'`. The verifier reads
-either active source.
+written by migration-019 SECURITY DEFINER functions as `source='operator_api'`; automatic
+attested-hardware roots are written by the migration-031 SECURITY DEFINER function as
+`source='app_attest'` (§5.7). The verifier reads any active source.
 
 ### 2.3 `provider_hardware_profiles` — the verified output (migration 007)
 
@@ -195,6 +198,14 @@ DB-level counterpart of the application's terminal-safe `WHERE` (§6).
   `source='inventory'`; migration 019 widens the trust-root primary key to
   `(provider_id, hardware_identity_hash, source)` so operator API approvals and inventory sync
   own independent rows and cannot clobber each other.
+- **`auto_trust_attested_hardware(job_id)`** (migration 031): a SECURITY DEFINER function owned
+  by `hardware_trust_definer` whose EXECUTE is granted **only** to `stats_hardware_verifier`. It is
+  the single writer of `hardware_verification_trust.source='app_attest'` rows and of the matching
+  `hardware_trust_grants` audit rows (`grant_source='app_attest'`). `provider_onboarding` still
+  has no write path to any trust root and no EXECUTE on this function (§5.7, §10.1).
+- **`app_attest_recorder`** (migration 031, `NOLOGIN` until provisioned): `SELECT, INSERT` on
+  `provider_app_attest_verifications`, nothing else. It is the only writer of recorded App Attest
+  verifications, the sole attestation input to the function above.
 
 ### 2.8 Migration 019 operator approval coupling
 
@@ -213,6 +224,13 @@ provider-submitted evidence semantics:
   widens the trust-root primary key from two columns to three. Operators MUST quiesce old
   two-column inventory sync before applying the migration and MUST pair rollback with the matching
   older binary, as documented in the migration file.
+
+Migration 031 widens two `CHECK` constraints in place (`hardware_verification_trust.source` gains
+`app_attest`; `hardware_trust_grants.grant_source` gains `app_attest`), adds four nullable audit
+columns to `hardware_trust_grants` (`job_id`, `evidence_sha256`, `attestation_basis`,
+`attestation_digest`), and replaces `revoke_hardware_trust_approval` so an operator revoke also
+expires an active `app_attest` root (§5.7). It does not change the primary key, so it carries no
+stats-inventory-sync sequencing constraint.
 
 ---
 
@@ -272,7 +290,11 @@ authenticated bearer identity; the handler (`HandleHardwareEvidence`) binds the 
   job submitted within the last 10 minutes (`hardware_evidence.go`), so a provider cannot flood the
   queue while one job is outstanding. A same-provider resubmission with the same
   `hardware_identity_hash` as an existing non-terminal job is accepted before this limiter as an
-  install/update idempotency replay;
+  install/update idempotency replay. A distinct submission while the provider already has a
+  non-terminal job (for a different hardware identity) is answered **before** the per-provider
+  limiter with HTTP `429`, `Retry-After: 600` and error code **`hardware_evidence_pending`**
+  (SPEC-033-R003), distinct from the generic `rate_limited` code so the provider binary can tell
+  "evidence already on file, verification pending" from a flood refusal;
 - computes a **canonical** SHA-256 of the evidence (`canonicalEvidenceSHA`) → `evidence_sha256`;
 - in the **same transaction**, upserts a **`source='cli_hello'` profile row** *before* inserting
   the job (the upsert **omits `verified`**, so trigger A governs it: `FALSE` on an initial insert or
@@ -299,6 +321,22 @@ under the column-limited `provider_onboarding` role without requiring `SELECT` o
 profile payload columns. On conflict, each path MUST keep `source` coordinator-controlled, MUST
 NOT write `verified`, and MUST NOT replace a profile whose `last_reported_at` is newer than the
 incoming observation.
+
+**SPEC-033-R003 — An outstanding evidence job is not an install or update failure.** When an
+authenticated provider submits new hardware evidence while it already has a `pending` or
+`waiting_trust` job, the coordinator MUST NOT insert a second job and MUST answer HTTP `429` with
+`Retry-After` and the error code `hardware_evidence_pending`, evaluated before the per-provider
+flood limiter. This does not apply to an accepted replay: a resubmission that §3.1 answers with 2xx
+`existing` (same document, or the same `hardware_identity_hash` as the queued job) keeps that
+answer. When the admission cap refuses a submission only because a job that has already finished
+(`verified`/`rejected`) was submitted within the last 10 minutes, the coordinator MUST answer `429`
+with `Retry-After` and the distinct code `hardware_evidence_rate_limited`, never
+`hardware_evidence_pending`. The provider binary MUST classify only a `429` carrying
+`hardware_evidence_pending` as **pending**: evidence is already on file, the submission is skipped
+without error, and `--require-hardware-evidence` install/update/freshness paths MUST continue rather
+than exit non-zero. Every other `429` (IP or per-provider flood limit,
+`hardware_evidence_rate_limited`, and an older coordinator's `rate_limited` queue message, which
+cannot tell a queued job from a finished one) and every other non-2xx response stays a failure.
 
 ---
 
@@ -385,9 +423,100 @@ earlier in the same document — so `"m"` and `" m "` collide); `invalid_benchma
 (Computed in the batch SELECT as `trust_matched`/`chip_profile_matched`, read as
 `job.TrustMatched`/`job.ChipProfileMatched`.)
 
+A job that reaches `missing_trusted_hardware_identity` is first offered to the automatic
+attested-hardware path (§5.7). Only when that path declines does the job park in `waiting_trust` for
+the migration-019 dual-control operator approval.
+
 ### 5.6 Success
 
 Passing every gate returns `hardware-verifier.v2:verified_trusted_hardware`.
+
+### 5.7 Automatic trust for attested hardware (`app_attest`)
+
+Operator decision 2026-10-10 (#1880): hardware whose attestation the coordinator has already
+verified is trusted automatically; dual-control operator approval (§2.8) remains only for hardware
+without a verified attestation.
+
+**What "verified attestation" means here — exactly one signal.** A provider has a verified
+attestation iff it has a row in `provider_app_attest_verifications` (migration 031:
+`provider_id` primary key, `app_attest_key_id` 32 bytes and unique, `verified_at`). Only the
+`app_attest_recorder` role may write that table (`SELECT, INSERT`; no `UPDATE`/`DELETE`), and
+`provider_onboarding` has no privilege on it. The coordinator connects as `app_attest_recorder`
+through the separate `onboarding.app_attest_record_dsn` and writes the row only after a successful
+app-track registration (`internal/onboarding/apptrack.go`) in which
+`AppleAppAttestVerifier.Verify` (`internal/onboarding/appattest.go`) returned success: the
+attestation object chains to the pinned Apple App Attestation Root CA, the credential certificate
+carries the Apple nonce extension equal to `SHA-256(authData ‖ clientDataHash)`, `clientDataHash`
+binds the provider id, identity public key, register nonce, coordinator domain, bundle id and team id
+(SPEC-026 §5.3), the RP-ID hash equals `SHA-256(team_id.bundle_id)`, the authenticator-data
+credential id equals `app_attest_key_id`, the attested public key equals the leaf certificate's
+P-256 key, and the sign count is zero. The verifier does not yet enforce the production AAGUID
+(SPEC-026 §5.3 carried gap), so an attestation from a development build signed by the Malibu team
+also verifies; an outside party cannot produce one without the team's signing identity.
+Rows are insert-only and first-wins per provider and per key, so one App Attest key can vouch for
+one provider identity only. Without `app_attest_record_dsn` nothing is recorded and no hardware is
+trusted automatically. Nothing else counts:
+
+- `provider_identities.attested` (migration 006) is **not** read: `provider_onboarding` can write
+  it, so it is not a trust input;
+
+- a self-signed Secure Enclave key presented at WebSocket hello (`AttestationTierSelfSigned`)
+  proves key custody only, not hardware (`internal/pool/provider.go`), and does not qualify;
+- live MDM Managed Device Attestation (`AttestationTierHardware`, SPEC-008) is held in the
+  coordinator's SQLite MDA store, which the stats-database verifier cannot read; it does not
+  qualify until a later amendment records it in the stats database.
+
+**Decision.** For a job whose `Evaluate` result is `missing_trusted_hardware_identity` (every §5.1–
+§5.4 reject gate passed), the verifier calls `auto_trust_attested_hardware(job_id)` inside its batch
+transaction. The function:
+
+1. returns `FALSE` unless the job is still `pending`/`waiting_trust`;
+2. takes the per-provider advisory lock **non-blocking** (`pg_try_advisory_xact_lock(582026,
+   hashtext(provider_id))`, the same key as §2.8) and returns `FALSE` when it is held, so the job is
+   re-tried on the next timer run instead of deadlocking against an operator approve/revoke;
+3. derives `(provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb)` from the job
+   row and returns `FALSE` unless the hash is 64 lowercase hex;
+4. returns `FALSE` unless the provider has a verified attestation (above);
+5. returns `FALSE` if any `hardware_trust_grants` row with `action='revoke'` exists for the
+   provider, **whatever hardware hash it named**. The hash is self-reported; the provider identity is
+   the one the App Attest key is bound to, so a revoked device can never be trusted automatically
+   again under a new hash. Only dual-control approval can trust it again;
+6. inserts `hardware_verification_trust` with `source='app_attest'`, `trusted_by='system:app_attest'`,
+   `expires_at = NULL` (no expiry), `ON CONFLICT DO NOTHING` on the three-column key, and — only when
+   that row was newly created — one `hardware_trust_grants` audit row: `action='grant'`,
+   `grant_source='app_attest'`, `requested_by = approved_by = 'system:app_attest'`, the bound
+   `job_id`, the job's `evidence_sha256`, `attestation_basis='apple_app_attest'`, and
+   `attestation_digest = hex(SHA-256(app_attest_key_id))`;
+7. returns `TRUE` iff an **active** `app_attest` row now exists for exactly that tuple.
+
+An existing `app_attest` row is never updated: a row an operator expired stays expired, and a row
+for the same hash with a different chip/memory tuple makes the function return `FALSE`. On `TRUE`
+the verifier treats the trust gate as satisfied and re-runs `Evaluate`; promotion then goes through
+the unchanged §7.1 path, and trigger A (§2.5) re-verifies the trust join against the just-inserted
+row in the same transaction. On `FALSE` the job parks in `waiting_trust` exactly as before and stays
+approvable through the dual-control path. The decision is idempotent: a re-run finds the existing
+row, inserts nothing, and writes no second audit row.
+
+**Revocation.** `revoke_hardware_trust_approval` (replaced by migration 031) expires an active
+`operator_api` **or** `app_attest` root for the named `(provider_id, hardware_identity_hash)` and
+ledgers `action='revoke'`. In the same transaction it expires **every** active `app_attest` root
+the provider holds, under any hardware hash, so an automatic root obtained before the revoke for
+another self-reported hash cannot keep serving; operator and inventory roots for other hashes are
+separate approvals and are left alone. Step 5 then keeps the automatic path from re-granting that
+provider under any hash.
+
+**SPEC-033-R002 — Attested hardware is trusted without operator approval.** A hardware-evidence job
+that passes every §5.1–§5.4 gate and whose provider has a verified attestation (a
+`provider_app_attest_verifications` row written by `app_attest_recorder`, as defined in §5.7) MUST
+be granted an `app_attest` trust root with no expiry and an audit row recording the actor
+(`system:app_attest`), the job, the evidence digest and the attestation digest, without any operator
+action. It MUST promote on that verifier run when the chip-profile gate (§5.5) also passes and the
+provider advisory lock was free; otherwise it stays `waiting_trust` and is retried on later runs.
+The grant MUST be idempotent, MUST NOT override an expired or differently-bound `app_attest` row,
+and MUST NOT trust automatically any job of a provider for which an operator revoke is recorded,
+whatever hardware hash the job reports. An operator revoke MUST expire every `app_attest` root of
+that provider, including roots for hashes other than the one revoked. A job whose provider lacks a verified attestation MUST keep
+the existing `waiting_trust` + dual-control path.
 
 ---
 
@@ -395,7 +524,8 @@ Passing every gate returns `hardware-verifier.v2:verified_trusted_hardware`.
 
 - The batch scan selects `status IN ('pending','waiting_trust')`. **`waiting_trust` is
   non-terminal**: it is re-evaluated on every run, so once an operator later inserts the missing
-  trust or chip-profile row, the same job promotes without re-submission.
+  trust or chip-profile row — or the provider's identity later becomes attested (§5.7) — the same
+  job promotes without re-submission.
 - `verified` and `rejected` are terminal (never re-scanned). Trigger B (§2.6) forbids the verifier
   from reopening them at the DB layer.
 - A `waiting_trust` job that later hits a **reject** gate (e.g. its evidence has since gone stale
@@ -509,8 +639,21 @@ No provider-reachable path sets `provider_hardware_profiles.verified = TRUE`:
   (`source='operator'`), the same
   trust level as curating a trust row.
 
-So: **a provider without an operator-curated trust row can reach at best `waiting_trust`, never
-`verified`.** This is the load-bearing property and it holds.
+So: **a provider with neither an operator-curated trust row nor a verified App Attest identity
+(§5.7) can reach at best `waiting_trust`, never `verified`.** This is the load-bearing property and
+it holds.
+
+**Automatic trust keeps the onboarding-compromise guarantee (v0.7.1).** §5.7 adds a third
+trust-root writer, `auto_trust_attested_hardware`, reachable only by `stats_hardware_verifier`. Its
+only attestation input is `provider_app_attest_verifications`, which only `app_attest_recorder`
+can write; `provider_onboarding` holds no privilege on it and no EXECUTE on the function, and the
+function never reads `provider_identities.attested` (which onboarding can write). So a
+**compromised** onboarding SQL role still cannot obtain trust: it cannot fabricate an attestation
+record, cannot create a trust root, and cannot set the profile `verified` bit. Automatic trust for a
+provider requires the `app_attest_recorder` credential (held only by the coordinator's
+registration path, used after a successful Apple App Attest verification) or the verifier or
+operator roles. Every automatic grant is ledgered with its job and attestation digest, and an
+operator revoke ends automatic trust for that provider under every hardware hash.
 
 ### 10.2 What `verified` does NOT prove (non-guarantees — do not overstate)
 
@@ -652,6 +795,19 @@ issues; closing them is code follow-up, not a spec change:
   guarantee.
 - **AC-HV-11 (chip/memory re-verification).** A `provider_onboarding` update that changes
   `chip_normalized` or `unified_memory_gb` MUST clear `verified` (trigger A).
+- **AC-HV-13 (attested auto-trust, SPEC-033-R002).** A job that passes every §5 gate for a
+  provider with a `provider_app_attest_verifications` row MUST end the verifier run `verified` with
+  an active `app_attest` trust root (`expires_at IS NULL`) and exactly one `grant_source='app_attest'`
+  audit row; calling the function again MUST change nothing. A provider whose only signal is
+  `provider_identities.attested = TRUE` MUST park in `waiting_trust`, and `provider_onboarding` MUST
+  be refused any write to `provider_app_attest_verifications`. An expired or differently-bound
+  `app_attest` row, or any prior `action='revoke'` grant for the provider (under any hardware hash),
+  MUST keep the job in `waiting_trust`.
+- **AC-HV-14 (pending is not fatal, SPEC-033-R003).** A distinct evidence submission while a
+  `pending`/`waiting_trust` job exists MUST return `429` `hardware_evidence_pending` without
+  inserting a job, and the provider binary MUST report it as pending and continue an install,
+  update or freshness check that requires evidence. A refusal caused only by a recently finished job
+  MUST return `hardware_evidence_rate_limited` and MUST stay a failure in the provider binary.
 - **AC-HV-12 (revocation calibration documented).** The spec MUST disclose the R1 `app_register`
   source-flip escape (a genuine revocation gap) and the R2 empty-trust *ergonomics* limitation
   (zero *active* trust is reachable via an expired placeholder and does demote — §10.4) as known
@@ -661,6 +817,35 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.7.2-draft (2026-10-10) — audit round 2 (#1880).**
+- **§5.7 / R002**: an operator revoke also expires every other `app_attest` root of the provider,
+  so automatic roots obtained before the revoke under another hash stop serving.
+
+**v0.7.1-draft (2026-10-10) — audit round 1 (#1880).**
+- **§5.7 / §10.1 / R002**: the attestation input moves from `provider_identities.attested`
+  (writable by `provider_onboarding`) to `provider_app_attest_verifications`, written only by the
+  new `app_attest_recorder` role over `onboarding.app_attest_record_dsn`; §10.1's disclosure becomes
+  a guarantee. A recorded operator revoke now blocks automatic trust for the provider under any
+  hardware hash. R002 promotion is qualified on the chip-profile gate and the advisory lock.
+- **R003**: accepted replays keep their 2xx; a refusal caused only by a recently finished job
+  answers `hardware_evidence_rate_limited`, and the provider binary treats only
+  `hardware_evidence_pending` as pending (the older coordinator's queue message stays a failure).
+
+**v0.7.0-draft (2026-10-10) — attested hardware is trusted automatically (#1880).**
+- **§5.7 added (SPEC-033-R002)**: operator decision 2026-10-10. A job that passes every reject gate
+  for a provider whose identity passed Apple App Attest verification (`provider_identities.attested`)
+  gets an `app_attest` trust root with no expiry from the migration-031 SECURITY DEFINER function,
+  is audited in `hardware_trust_grants`, and promotes on the same run. Self-signed Secure Enclave
+  keys and live MDM attestation do not qualify (the latter is not in the stats database). Without a
+  verified attestation the dual-control path is unchanged. Operator revoke now also expires
+  `app_attest` roots and blocks re-grant.
+- **§3.1 (SPEC-033-R003)**: a distinct submission while a job is outstanding returns `429`
+  `hardware_evidence_pending` before the flood limiter; the provider binary treats it as pending,
+  not as an install/update failure.
+- **§2.2/§2.7/§2.8/§6/§10.1/§12**: `app_attest` source, the new function and its EXECUTE grant,
+  migration 031, the re-drive note, the widened trust anchor under onboarding-role compromise, and
+  AC-HV-13/AC-HV-14.
 
 **v0.6.3-draft (2026-09-20) — same-hardware active-job replay for install/update retries.**
 - **§3.1 / §9 / AC-HV-6**: same-provider evidence resubmission with the same

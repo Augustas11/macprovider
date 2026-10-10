@@ -341,6 +341,82 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         )
     }
 
+    // SPEC-033-R003: evidence already queued for this provider is pending, not
+    // a failure, so a required-evidence install or update continues.
+    func testPendingEvidenceJobIsReportedAsPendingNotFailure() async throws {
+        let providerID = "mp-dddddddddddddddddddddddddddddddd"
+        let token = "keychain-pending-bearer"
+        let config = try makeTokenlessConfig(providerID: providerID)
+        let session = evidenceSession { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 429,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": "application/json",
+                    "Retry-After": "600",
+                ]
+            )!
+            let data = Data(#"{"error":{"code":"hardware_evidence_pending","message":"hardware evidence already submitted; verification pending"}}"#.utf8)
+            return (response, data)
+        }
+        defer {
+            session.invalidateAndCancel()
+            AutotuneHardwareEvidenceMockURLProtocol.requestHandler = nil
+        }
+
+        let submission = await AutotuneHardwareEvidenceSubmitter(
+            config: config,
+            credentialStore: InMemoryProviderCredentialStore(values: [providerID: token]),
+            session: session
+        ).submit(snapshot: makeFixture().snapshot)
+
+        XCTAssertEqual(
+            submission,
+            .pending("hardware evidence already submitted; verification pending (retry in 600 seconds)")
+        )
+        XCTAssertNil(AutotuneCommand.requiredHardwareEvidenceBlockReason(submission: submission, required: true))
+    }
+
+    func testPendingClassificationAcceptsOnlyQueuedJobRefusals() {
+        let pendingCode = Data(#"{"error":{"code":"hardware_evidence_pending","message":"anything"}}"#.utf8)
+        let legacyQueue = Data(#"{"error":{"code":"rate_limited","message":"hardware evidence queue already has a recent job"}}"#.utf8)
+        let providerFlood = Data(#"{"error":{"code":"rate_limited","message":"hardware evidence provider rate limit exceeded"}}"#.utf8)
+        let ipFlood = Data(#"{"error":{"code":"rate_limited","message":"hardware evidence ip rate limit exceeded"}}"#.utf8)
+
+        XCTAssertEqual(
+            AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: pendingCode, retryAfterHeader: nil),
+            "hardware evidence already submitted; verification pending"
+        )
+        // An older coordinator's queue message cannot tell queued from
+        // finished, and the finished-job cooldown is not pending: both fail.
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: legacyQueue, retryAfterHeader: "600"))
+        let cooldown = Data(#"{"error":{"code":"hardware_evidence_rate_limited","message":"hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later"}}"#.utf8)
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600"))
+        XCTAssertEqual(
+            AutotuneHardwareEvidenceSubmitter.failureReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600"),
+            "rate_limited: retry in 600 seconds (hardware_evidence_rate_limited: hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later)"
+        )
+        XCTAssertNotNil(AutotuneCommand.requiredHardwareEvidenceBlockReason(
+            submission: .failed(AutotuneHardwareEvidenceSubmitter.failureReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600")),
+            required: true
+        ))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: providerFlood, retryAfterHeader: "600"))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: ipFlood, retryAfterHeader: "60"))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 409, responseData: pendingCode, retryAfterHeader: nil))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: Data(), retryAfterHeader: nil))
+    }
+
+    func testFreshRecommendationContinuesWhenEvidenceIsPending() async {
+        let outcome = await AutotuneCommand.freshRecommendationEvidenceOutcome(
+            storedEvidence: makeFixture().snapshot,
+            submitEnabled: true,
+            submit: { _ in .pending("hardware evidence already submitted; verification pending") }
+        )
+
+        XCTAssertEqual(outcome, .ready(submitted: false))
+    }
+
     func testRateLimitedEvidenceSubmissionDoesNotReflectUntrustedCoordinatorText() {
         let body = Data(
             #"{"error":{"code":"rate_limited","message":"hardware evidence provider rate limit exceeded\u001B]0;pwned\u0007 Bearer SECRET provider_token: SECRET \u202E"}}"#.utf8
