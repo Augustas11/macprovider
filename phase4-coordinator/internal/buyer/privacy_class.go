@@ -183,7 +183,7 @@ type privacySelection struct {
 // selectPrivacyProvider walks serving sessions and keeps only a fresh privacy
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key.
-func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryptedBytes int64) (privacySelection, string) {
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64) (privacySelection, string) {
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled
@@ -221,7 +221,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, model string, encryp
 			break
 		}
 	}
-	if order := s.orderRelayBlindCandidates(providers); len(order) > 0 {
+	if order := s.orderRelayBlindCandidates(accountID, providers); len(order) > 0 {
 		return selections[order[0]], ""
 	}
 	s.logPrivacyGateRejection("no_eligible_provider")
@@ -251,7 +251,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
-	selected, code := s.selectPrivacyProvider(r.Context(), request.Model, request.EncryptedRequestBytes)
+	selected, code := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes)
 	if code != "" {
 		writePrivacyClassError(w, privacyObservedCode(code, true), "")
 		return
@@ -287,6 +287,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writePrivacyClassError(w, privacyClassUnavailable, "")
 		return
 	}
+	s.relayBlind.notePending(accountID, selected.provider.ProviderID, reservation.ProviderBinding, expires, s.now())
 	response := relayblind.ReservationResponse{
 		Version: relayblind.PrivacyReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
 		KeyRecordDigest: selected.key.KeyRecordDigest, KeyRecord: selected.key, KID: selected.key.KID, EndpointFamily: relayblind.EndpointChatCompletions,

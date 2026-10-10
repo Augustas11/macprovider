@@ -42,9 +42,15 @@ type relayBlindService struct {
 	// consumed authorization waits for a slot, so a concurrent duplicate is
 	// a replay and never takes a second slot-queue position.
 	dispatchClaims sync.Map
-	// waiters counts relay-blind slot waiters per provider. It is capped so
-	// relay-blind waits cannot fill the shared queue plaintext routing uses.
-	waiters map[string]int
+	// pending holds, per buyer account, the reservations it created that
+	// have not reached dispatch: provider ID to binding to expiry. Selection
+	// counts an account's own entries against a provider's free seats, so
+	// that account's concurrent reservations spread before any dispatches
+	// (SPEC-049-R029). It is scoped to the account so no buyer's selection
+	// reflects, or can be steered by, another buyer's reservations. It
+	// orders candidates only; it is never an eligibility input.
+	pending      map[string]map[string]map[string]int64
+	pendingCount int
 	// pick chooses the start of a candidate tier; nil means uniform random.
 	// Random needs no shared state, so no interleaving of models, key classes
 	// or request sizes can concentrate reservations on one provider.
@@ -55,27 +61,106 @@ type relayBlindService struct {
 // after the buyer disconnects.
 const relayBlindDurableWriteTimeout = 5 * time.Second
 
-func (r *relayBlindService) enterWaiter(providerID string, limit int) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.waiters == nil {
-		r.waiters = map[string]int{}
-	}
-	if r.waiters[providerID] >= limit {
-		return false
-	}
-	r.waiters[providerID]++
-	return true
-}
+// relayBlindPendingLimit bounds the in-memory pending-reservation index,
+// and relayBlindPendingPerAccount bounds one account's share of it. Past
+// either, new reservations are not tracked, which only weakens spreading.
+const (
+	relayBlindPendingLimit      = 4096
+	relayBlindPendingPerAccount = 64
+)
 
-func (r *relayBlindService) leaveWaiter(providerID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.waiters[providerID] <= 1 {
-		delete(r.waiters, providerID)
+// notePending records a reservation of accountID that has not dispatched.
+func (r *relayBlindService) notePending(accountID, providerID, binding string, expiresAtUnix int64, now time.Time) {
+	if r == nil || accountID == "" || providerID == "" || binding == "" {
 		return
 	}
-	r.waiters[providerID]--
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prunePendingLocked(accountID, now)
+	if r.pendingCount >= relayBlindPendingLimit {
+		// Entries of idle accounts are pruned only here, so a full index
+		// never stays full of expired reservations.
+		for other := range r.pending {
+			r.prunePendingLocked(other, now)
+		}
+	}
+	account := r.pending[accountID]
+	held := 0
+	for _, bindings := range account {
+		held += len(bindings)
+	}
+	if r.pendingCount >= relayBlindPendingLimit || held >= relayBlindPendingPerAccount {
+		return
+	}
+	if r.pending == nil {
+		r.pending = map[string]map[string]map[string]int64{}
+	}
+	if account == nil {
+		account = map[string]map[string]int64{}
+		r.pending[accountID] = account
+	}
+	bindings := account[providerID]
+	if bindings == nil {
+		bindings = map[string]int64{}
+		account[providerID] = bindings
+	}
+	if _, ok := bindings[binding]; !ok {
+		r.pendingCount++
+	}
+	bindings[binding] = expiresAtUnix
+}
+
+// clearPending drops a reservation once it reaches the dispatch slot wait.
+func (r *relayBlindService) clearPending(accountID, providerID, binding string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	bindings := r.pending[accountID][providerID]
+	if _, ok := bindings[binding]; !ok {
+		return
+	}
+	delete(bindings, binding)
+	r.pendingCount--
+	r.dropEmptyPendingLocked(accountID, providerID)
+}
+
+// pendingOn is the number of unexpired undispatched reservations accountID
+// holds on providerID.
+func (r *relayBlindService) pendingOn(accountID, providerID string, now time.Time) int {
+	if r == nil || accountID == "" {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prunePendingLocked(accountID, now)
+	return len(r.pending[accountID][providerID])
+}
+
+func (r *relayBlindService) prunePendingLocked(accountID string, now time.Time) {
+	for providerID, bindings := range r.pending[accountID] {
+		for binding, expires := range bindings {
+			if expires <= now.Unix() {
+				delete(bindings, binding)
+				r.pendingCount--
+			}
+		}
+		r.dropEmptyPendingLocked(accountID, providerID)
+	}
+}
+
+func (r *relayBlindService) dropEmptyPendingLocked(accountID, providerID string) {
+	account := r.pending[accountID]
+	if account == nil {
+		return
+	}
+	if len(account[providerID]) == 0 {
+		delete(account, providerID)
+	}
+	if len(account) == 0 {
+		delete(r.pending, accountID)
+	}
 }
 
 func WithRelayBlind(cfg config.RelayBlindConfig, store *relayblind.Store, relay RelayBlindRelayFunc) Option {
@@ -295,7 +380,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
-	provider, key, found := s.selectRelayBlindProvider(r.Context(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind)
+	provider, key, found := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind)
 	if !found {
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "No relay-blind provider is available")
 		return
@@ -319,6 +404,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, code, "Could not create relay-blind reservation")
 		return
 	}
+	s.relayBlind.notePending(account.ID(), provider.ProviderID, reservation.ProviderBinding, expires, s.now())
 	response := relayblind.ReservationResponse{
 		Version: relayblind.ReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
 		KeyRecordDigest: key.KeyRecordDigest, KeyRecord: key, KID: key.KID, EndpointFamily: relayblind.EndpointChatCompletions,
@@ -402,10 +488,14 @@ const (
 )
 
 // awaitRelayBlindSlot takes a coordinator slot lease on the reserved session.
-// It waits in that session's slot queue, bounded by the slot-queue deadline
-// and the reservation expiry. On success the lease is recorded in state for
+// It waits in the pinned lane of that session's slot queue (SPEC-049-R029):
+// grants alternate with the plaintext lane while both wait, and the wait
+// lasts until the reservation expires as long as the provider keeps granting
+// seats. It gives up early only when no seat is granted on the provider for
+// one slot-queue deadline. On success the lease is recorded in state for
 // noteProviderAcceptedRequest and releaseQueuedSlotReservation.
 func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind.Reservation, state *forwardState) (pool.Provider, relayBlindSlotOutcome) {
+	s.relayBlind.clearPending(reservation.AccountID, reservation.ProviderID, reservation.ProviderBinding)
 	resolve := func() (pool.Provider, bool) {
 		provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 		return provider, live && provider.AssignedID == reservation.AssignedSession && relayBlindSessionUsable(provider) && provider.IsWSTunneled()
@@ -429,38 +519,28 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 	if provider.RoutingEligible() && s.slotQueue.reserveProvider(provider.ProviderID, s.liveSlotsFree(provider)) {
 		return acquired(provider)
 	}
-	deadline := s.slotQueueDeadline
-	if deadline <= 0 {
-		deadline = slotQueueDefaultDeadline
-	}
-	if untilExpiry := time.Unix(reservation.ExpiresAtUnix, 0).Sub(s.now()); untilExpiry < deadline {
-		deadline = untilExpiry
-	}
-	if deadline <= 0 {
+	untilExpiry := time.Unix(reservation.ExpiresAtUnix, 0).Sub(s.now())
+	if untilExpiry <= 0 {
 		return pool.Provider{}, relayBlindSlotUnavailable
+	}
+	stall := s.slotQueueDeadline
+	if stall <= 0 {
+		stall = slotQueueDefaultDeadline
 	}
 	pollInterval := s.slotQueuePollInterval
 	if pollInterval <= 0 {
 		pollInterval = slotQueueDefaultPollInterval
 	}
-	// Leave at least one queue position to plaintext routing.
-	limit := s.slotQueue.maxPending / 4
-	if limit < 1 {
-		limit = 1
-	}
-	if limit >= s.slotQueue.maxPending || !s.relayBlind.enterWaiter(provider.ProviderID, limit) {
-		return pool.Provider{}, relayBlindSlotUnavailable
-	}
-	defer s.relayBlind.leaveWaiter(provider.ProviderID)
-	waiter, ok := s.slotQueue.enter(provider.ProviderID)
+	waiter, ok := s.slotQueue.enterPinned(provider.ProviderID, relayBlindPinnedLaneCap(s.slotQueue.maxPending, provider.SlotsTotal))
 	if !ok {
 		return pool.Provider{}, relayBlindSlotUnavailable
 	}
 	defer s.slotQueue.leave(waiter)
-	waitCtx, cancel := context.WithTimeout(ctx, deadline)
+	waitCtx, cancel := context.WithTimeout(ctx, untilExpiry)
 	defer cancel()
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	grants, progressAt := s.slotQueue.grantCount(provider.ProviderID), time.Now()
 	for {
 		select {
 		case <-waitCtx.Done():
@@ -474,10 +554,30 @@ func (s *Server) awaitRelayBlindSlot(ctx context.Context, reservation relayblind
 		if provider.RoutingEligible() && s.slotQueue.reserveHead(waiter, s.liveSlotsFree(provider)) {
 			return acquired(provider)
 		}
+		if now := s.slotQueue.grantCount(provider.ProviderID); now != grants {
+			grants, progressAt = now, time.Now()
+		} else if time.Since(progressAt) >= stall {
+			return pool.Provider{}, relayBlindSlotUnavailable
+		}
 	}
 }
 
-func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
+// relayBlindPinnedLaneCap is the per-provider pinned-lane waiter cap: half
+// the plaintext lane cap (4 or slots_total, whichever is larger), at least
+// one. Grants alternate between lanes, so the last pinned waiter is served
+// within about one plaintext-lane length of grants.
+func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
+	laneCap := maxPending
+	if slotsTotal > laneCap {
+		laneCap = slotsTotal
+	}
+	if laneCap/2 < 1 {
+		return 1
+	}
+	return laneCap / 2
+}
+
+func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
 	var providers []pool.Provider
 	var keys []relayblind.KeyRecord
 	for _, provider := range s.pool.Snapshot() {
@@ -502,7 +602,7 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 			keys = append(keys, records[0])
 		}
 	}
-	order := s.orderRelayBlindCandidates(providers)
+	order := s.orderRelayBlindCandidates(accountID, providers)
 	if len(order) == 0 {
 		return pool.Provider{}, relayblind.KeyRecord{}, false
 	}
@@ -510,12 +610,15 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, model string, enc
 }
 
 // orderRelayBlindCandidates returns the indexes of fully eligible providers
-// in selection order: providers whose free slot is not already claimed by the
-// slot queue first, then busy ones, each tier starting at a random provider.
-// A reservation is pinned to one provider, so binding every reservation to
-// the first provider in session order leaves idle providers unused while the
-// first one's queue times out.
-func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []int {
+// in selection order (SPEC-049-R029): providers with a free slot not already
+// claimed by the slot queue or by one of accountID's own undispatched
+// reservations first, then busy ones, each tier starting at a random
+// provider. A reservation is pinned to one provider, so binding every
+// reservation to the first provider in session order leaves idle providers
+// unused while the first one's queue times out. The callers pass candidates
+// of one model and key class only, so the random start rotates per model and
+// key class without a shared counter.
+func (s *Server) orderRelayBlindCandidates(accountID string, providers []pool.Provider) []int {
 	sorted := make([]int, len(providers))
 	for i := range sorted {
 		sorted[i] = i
@@ -524,7 +627,17 @@ func (s *Server) orderRelayBlindCandidates(providers []pool.Provider) []int {
 	var free, busy []int
 	for _, i := range sorted {
 		provider := providers[i]
-		if provider.RoutingEligible() && (s.slotQueue == nil || !s.slotQueue.blocksProvider(provider.ProviderID, s.liveSlotsFree(provider))) {
+		pending := 0
+		if s.relayBlind != nil && s.now != nil {
+			pending = s.relayBlind.pendingOn(accountID, provider.ProviderID, s.now())
+		}
+		var hasRoom bool
+		if s.slotQueue == nil {
+			hasRoom = pending < s.routableSlotsFree(provider)
+		} else {
+			hasRoom = !s.slotQueue.blocksProviderWith(provider.ProviderID, s.liveSlotsFree(provider), pending)
+		}
+		if provider.RoutingEligible() && hasRoom {
 			free = append(free, i)
 		} else {
 			busy = append(busy, i)

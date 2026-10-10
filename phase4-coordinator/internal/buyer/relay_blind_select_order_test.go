@@ -25,7 +25,7 @@ func cyclingPick() func(int) int {
 }
 
 func selectOrderIDs(s *Server, providers []pool.Provider) []string {
-	order := s.orderRelayBlindCandidates(providers)
+	order := s.orderRelayBlindCandidates("", providers)
 	ids := make([]string, len(order))
 	for i, index := range order {
 		ids[i] = providers[index].ProviderID
