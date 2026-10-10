@@ -13,6 +13,8 @@
 //   MACPROVIDER_DECODE_ISOLATION_WINDOW=<steps per lockstep window> (optional,
 //     default the serve window, 16)
 //   MACPROVIDER_DECODE_ISOLATION_STEPS=<total steps> (optional, default the window)
+//   MACPROVIDER_DECODE_ISOLATION_ROWS_PER_FORWARD=<n> (optional; default the
+//     device decode row bound, 0 = every row in one forward)
 // The fused A3B MoE path follows `MLX_LM_QWEN35_FUSED_MOE` as in serving.
 
 import Foundation
@@ -43,6 +45,16 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
         let window = Int(environment["MACPROVIDER_DECODE_ISOLATION_WINDOW"] ?? "")
             ?? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention])
         let steps = Int(environment["MACPROVIDER_DECODE_ISOLATION_STEPS"] ?? "") ?? max(4, window)
+        // Rows per decode forward: the device decode row bound (capped) by
+        // default; MACPROVIDER_DECODE_ISOLATION_ROWS_PER_FORWARD=0 puts every
+        // row in one forward (uncapped).
+        let rowsPerForward: Int = {
+            let raw = Int(environment["MACPROVIDER_DECODE_ISOLATION_ROWS_PER_FORWARD"] ?? "")
+            if raw == 0 { return Int.max }
+            return raw ?? ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(
+                architecture: ModelRuntime.metalArchitectureForQuantizedRoutes()
+            )
+        }()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: URL(fileURLWithPath: directory),
             using: #huggingFaceTokenizerLoader()
@@ -97,17 +109,22 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
             var done = 0
             while done < steps {
                 let windowSteps = min(window, steps - done)
-                let perStep = try await backend.sharedDecodeLogitsForTest(
-                    requestIDs: rowIDs,
-                    tokens: rowIDs.map { current[$0]! },
-                    steps: windowSteps
-                )
-                for logits in perStep {
-                    for (index, id) in rowIDs.enumerated() {
-                        let next = logits[index].indices.max { logits[index][$0] < logits[index][$1] }!
-                        result[id, default: ([], [])].logits.append(logits[index])
-                        result[id, default: ([], [])].tokens.append(next)
-                        current[id] = next
+                // The scheduler decodes at most `rowsPerForward` rows in one
+                // forward and the rest in consecutive forwards.
+                for start in stride(from: 0, to: rowIDs.count, by: rowsPerForward) {
+                    let part = Array(rowIDs[start ..< min(start + rowsPerForward, rowIDs.count)])
+                    let perStep = try await backend.sharedDecodeLogitsForTest(
+                        requestIDs: part,
+                        tokens: part.map { current[$0]! },
+                        steps: windowSteps
+                    )
+                    for logits in perStep {
+                        for (index, id) in part.enumerated() {
+                            let next = logits[index].indices.max { logits[index][$0] < logits[index][$1] }!
+                            result[id, default: ([], [])].logits.append(logits[index])
+                            result[id, default: ([], [])].tokens.append(next)
+                            current[id] = next
+                        }
                     }
                 }
                 done += windowSteps
@@ -124,7 +141,7 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
             for step in 0 ..< steps {
                 let equal = lone.logits[step] == shared.logits[step]
                 let gap = zip(lone.logits[step], shared.logits[step]).map { abs($0 - $1) }.max() ?? 0
-                print("decode-isolation rows=\(lengths.count) window=\(window) row=\(row) keys=\(lengths[row]) step=\(step) logits_bitwise=\(equal) max_abs_diff=\(gap) lone_token=\(lone.tokens[step]) batched_token=\(shared.tokens[step])")
+                print("decode-isolation rows=\(lengths.count) rows_per_forward=\(rowsPerForward == Int.max ? "all" : String(rowsPerForward)) window=\(window) row=\(row) keys=\(lengths[row]) step=\(step) logits_bitwise=\(equal) max_abs_diff=\(gap) lone_token=\(lone.tokens[step]) batched_token=\(shared.tokens[step])")
                 if !equal || lone.tokens[step] != shared.tokens[step] {
                     failures.append("row \(row) (\(lengths[row]) keys) step \(step): max |diff| \(gap)")
                 }
