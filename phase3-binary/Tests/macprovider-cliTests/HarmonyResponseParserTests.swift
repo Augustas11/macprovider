@@ -1415,6 +1415,151 @@ final class HarmonyResponseParserTests: XCTestCase {
         XCTAssertTrue(parsed.isTerminal)
     }
 
+    func testSerialDecodeRequestStopObserverStopsOnHarmonyVisibleFinalStop() throws {
+        let ids = [
+            token(.channel),
+            text("final"),
+            token(.message),
+            text("Public "),
+            text("ST"),
+            text("OP"),
+            text(" ignored"),
+        ]
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "openai/gpt-oss-120b",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["STOP"],
+            decode: decode
+        )
+
+        var stoppedTokens: [Int] = []
+        for tokenID in ids {
+            stoppedTokens.append(tokenID)
+            if try observer.observe(generatedTokenIDs: stoppedTokens) {
+                break
+            }
+        }
+        XCTAssertEqual(stoppedTokens, Array(ids.prefix(6)))
+
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(stoppedTokens),
+            generatedTokenIDs: stoppedTokens,
+            decode: decode,
+            request: request(model: "openai/gpt-oss-120b"),
+            mode: .complete(finishReason: "request_stop"),
+            defaultCompletionTokens: stoppedTokens.count,
+            requestStops: ["STOP"],
+            globalHitStop: true
+        )
+        XCTAssertEqual(parsed.content, "Public ")
+        XCTAssertEqual(parsed.completionTokens, 1)
+        XCTAssertEqual(parsed.generatedCompletionTokens, stoppedTokens.count)
+        let completion = CompletionResult(
+            content: parsed.content,
+            finishReason: "stop",
+            promptTokens: 1,
+            completionTokens: parsed.completionTokens,
+            generatedCompletionTokens: parsed.generatedCompletionTokens,
+            settlementDisposition: .eligibleOwner
+        )
+        XCTAssertEqual(completion.content, "Public ")
+        XCTAssertEqual(completion.completionTokens, 1)
+        XCTAssertEqual(completion.generatedCompletionTokens, stoppedTokens.count)
+    }
+
+    func testSerialDecodeRequestStopObserverStopsOnHarmonyVisibleStopAcrossFinalFrames() throws {
+        let ids = [
+            token(.channel),
+            text("final"),
+            token(.message),
+            text("Public S"),
+            token(.end),
+            token(.channel),
+            text("final"),
+            token(.message),
+            text("TOP"),
+        ]
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "openai/gpt-oss-120b",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["STOP"],
+            decode: decode
+        )
+
+        XCTAssertFalse(try observer.observe(generatedTokenIDs: Array(ids.prefix(5))))
+        XCTAssertTrue(try observer.observe(generatedTokenIDs: ids))
+
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: decode(ids),
+            generatedTokenIDs: ids,
+            decode: decode,
+            request: request(model: "openai/gpt-oss-120b"),
+            mode: .complete(finishReason: "request_stop"),
+            defaultCompletionTokens: ids.count,
+            requestStops: ["STOP"],
+            globalHitStop: true
+        )
+        XCTAssertEqual(parsed.content, "Public ")
+        XCTAssertEqual(parsed.completionTokens, 1)
+        XCTAssertEqual(parsed.generatedCompletionTokens, ids.count)
+        let completion = CompletionResult(
+            content: parsed.content,
+            finishReason: "stop",
+            promptTokens: 1,
+            completionTokens: parsed.completionTokens,
+            generatedCompletionTokens: parsed.generatedCompletionTokens,
+            settlementDisposition: .eligibleOwner
+        )
+        XCTAssertEqual(completion.content, "Public ")
+        XCTAssertEqual(completion.completionTokens, 1)
+        XCTAssertEqual(completion.generatedCompletionTokens, ids.count)
+    }
+
+    func testSerialDecodeRequestStopObserverFailsClosedOnHarmonyHiddenStop() throws {
+        let ids = [
+            token(.channel),
+            text("analysis"),
+            token(.message),
+            text("ST"),
+            text("OP"),
+        ]
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "openai/gpt-oss-120b",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["STOP"],
+            decode: decode
+        )
+
+        XCTAssertFalse(try observer.observe(generatedTokenIDs: Array(ids.prefix(4))))
+        XCTAssertThrowsError(try observer.observe(generatedTokenIDs: ids)) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 502)
+            XCTAssertEqual(apiError?.code, "malformed_tool_call_final_json")
+        }
+    }
+
+    func testSerialDecodeRequestStopObserverLeavesHarmonyNoStopRequestsAlone() throws {
+        let ids = [
+            token(.channel),
+            text("analysis"),
+            token(.message),
+            text("STOP"),
+        ]
+        var decodeCalls = 0
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "openai/gpt-oss-120b",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: [],
+            decode: { tokenIDs in
+                decodeCalls += 1
+                return self.decode(tokenIDs)
+            }
+        )
+
+        XCTAssertFalse(try observer.observe(generatedTokenIDs: ids))
+        XCTAssertEqual(decodeCalls, 0)
+    }
+
     private func parse(
         _ tokenIDs: [Int],
         allowedFunctionNames: Set<String>? = nil,
