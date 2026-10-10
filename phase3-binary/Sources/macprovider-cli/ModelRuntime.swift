@@ -4500,6 +4500,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
+            queueLimit: scheduler.queueLimit,
             generation: selfCheckGeneration
         )
     }

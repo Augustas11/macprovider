@@ -1,11 +1,31 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.16
+Version: v0.3.17
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.17 (2026-10-11, self-check ladder bounded by the queue limit):**
+FR-CB10: the self-check submits all k rows of a width at once, so the
+scheduler's waiting-queue limit (`continuous_batch_queue_limit`, default
+2 x rows) bounds the widths it probes, alongside the scheduler rows, an owner
+pin and a crashed width. A Mac configured with a queue limit below its rows
+was refused with backpressure at every wider step, backed off for minutes and
+never granted above the limit. The bound a decision was measured under is
+stored with it, and a decision whose ladder reached that bound re-runs when
+the bound grows (a raised queue limit, more rows or a raised owner pin). Like
+the scheduler rows, the bound caps a wider prior grant at the `verified_k` the
+completed ladder reached. A
+backpressure refusal of the check's own probe, with no buyer request during
+the step, is retried once after the poll interval. A second refusal at that
+width stops the ladder without a correctness result: a Mac already serving a
+wider grant keeps it and resumes the ladder there after 1 h; otherwise the
+decision uses the widths verified below it and the full ladder is re-measured
+after 1 h. It never lowers a prior grant and does not grow the deferral
+backoff. FR-CB11 item 1 now states the owner-pin clamp to `verified_k` that
+FR-CB10 item 4 already required.
+
 **Change log v0.3.16 (2026-10-10, hybrid models use the 16-step decode window):**
 FR-CB2's lockstep window no longer drops to 1 for hybrid models (gated-delta
 recurrent plus attention layers, e.g. Qwen3.5/3.6 A3B); they decode in the
@@ -1052,7 +1072,24 @@ above are superseded where they conflict:
    about 1.5k tokens) because batched decode pads keys to the longest row,
    which can change a neighbour's attention route. Every slot count k from 2 to
    the scheduler rows is checked (a grant covers every row count below it):
-   it submits k distinct fixed greedy prompts together. Every row MUST equal
+   it submits k distinct fixed greedy prompts together. (v0.3.17) The ladder
+   also stops at the scheduler's waiting-queue limit, because a wider probe is
+   refused with backpressure before any row runs (and at an owner pin and
+   below a crashed width). The bound is stored with the decision; a decision
+   whose every width up to that bound passed re-runs when the bound grows.
+   Like the scheduler rows, the bound is configuration, not a measurement: a
+   prior or provisional grant wider than it is served only up to the
+   `verified_k` the completed ladder reached (item 4), and raising the bound
+   re-runs the ladder. A
+   backpressure refusal of the check's own probe at width k, with no buyer
+   request in flight or started during the step, is retried once after the
+   poll interval. A second consecutive refusal at k stops the ladder: if the
+   Mac already serves a grant wider than the widths verified below k (its
+   current served count, or a prior or provisional grant), that grant stays and the ladder resumes at k after 1 h;
+   otherwise the decision uses the widths verified below k and the full
+   ladder is re-measured after 1 h. A refusal is neither a divergence nor a
+   crash, never lowers a prior grant, and does not grow the deferral backoff;
+   with no width verified yet it is an ordinary deferral. Every row MUST equal
    that prompt run
    alone on the same paged engine, or first differ only at a numerical
    near-tie judged by the load-time isolation probe's own rule: at the first
@@ -1146,8 +1183,9 @@ NOT change `slots_total`.
 
 1. An owner-pinned `max_concurrency_override` (config with
    `max_concurrency_source: owner`, `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE`, or
-   `--max-batch`) MUST be served as written; the FR-CB10 self-check then only
-   turns batching on or off. A config value without `max_concurrency_source`,
+   `--max-batch`) MUST be served as written, except that it is never served
+   above the self-check's `verified_k` (FR-CB10 item 4); the FR-CB10
+   self-check otherwise only turns batching on or off. A config value without `max_concurrency_source`,
    or with `autotune`, is autotune-derived.
 2. Otherwise, with a draft model configured or the emergency off set, the
    count MUST be 1 (FR-CB12).

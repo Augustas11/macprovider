@@ -79,6 +79,10 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     let key: ContinuousBatchingSelfCheckKey
     /// Scheduler rows built at load: the most this check may grant.
     let maxRows: Int
+    /// The scheduler's waiting-queue limit. A probe submits all of its rows
+    /// at once, so a width above it is refused with backpressure before any
+    /// row runs; the ladder stops at it.
+    var queueLimit: Int = .max
     /// The runtime's swap generation: a result measured before a swap never
     /// applies after it, even to the same model.
     var generation: Int = 0
@@ -194,6 +198,61 @@ enum ContinuousBatchingSelfCheck {
     /// Slot counts to measure: the R009 ladder from 2 up to `maxRows`.
     static func ladder(maxRows: Int) -> [Int] {
         AutotuneConcurrencyCalibrator.sweepDepths(upperBound: maxRows).filter { $0 >= 2 }
+    }
+
+    /// The widest count the ladder probes: the scheduler rows (the memory-fit
+    /// plan), an owner pin, the width below a crashed one, and the scheduler
+    /// queue limit (wider probes are refused with backpressure).
+    static func ladderUpperBound(maxRows: Int, ownerPinned: Int?, crashedSlots: Int?, queueLimit: Int) -> Int {
+        min(ownerPinned.map { min($0, maxRows) } ?? maxRows, crashedSlots.map { $0 - 1 } ?? .max, queueLimit)
+    }
+
+    enum BackpressureOutcome: Equatable {
+        /// Nothing verified yet: an ordinary deferral.
+        case deferStep
+        /// Retry the same width once after the poll interval, without
+        /// growing the deferral backoff (a native-MTP integrity probe can
+        /// refuse a probe for a moment).
+        case retrySoon
+        /// Refused twice in a row, and the Mac already serves a grant wider
+        /// than the verified prefix: keep that grant and resume the ladder
+        /// at this width after `backpressureResumeSeconds`.
+        case pause
+        /// Refused twice in a row: decide on the verified prefix now and
+        /// re-measure the full ladder after `backpressureResumeSeconds`.
+        case endLadder
+    }
+
+    /// When a ladder stopped by backpressure is completed.
+    static let backpressureResumeSeconds = remeasureBaseSeconds
+
+    /// SPEC-038 FR-CB10: what a backpressure refusal of the check's own probe
+    /// at width `slots` does, with no buyer request during the step.
+    /// `verifiedPrefix` is the widest exact width so far (1 when none). It
+    /// never counts as a divergence or a crash, never lowers a prior grant,
+    /// and never grows the deferral backoff once a width is verified.
+    static func backpressureOutcome(
+        verifiedPrefix: Int,
+        slots: Int,
+        previousRefusalAt: Int?,
+        priorGrant: Int?
+    ) -> BackpressureOutcome {
+        guard verifiedPrefix >= 2 else { return .deferStep }
+        guard previousRefusalAt == slots else { return .retrySoon }
+        if let priorGrant, priorGrant > verifiedPrefix { return .pause }
+        return .endLadder
+    }
+
+    /// A decided ladder that reached its bound (every width up to it passed)
+    /// runs again when the bound has grown since, e.g. a raised queue limit,
+    /// more scheduler rows or a raised owner pin. A ladder stopped by a
+    /// divergence, crash or backpressure below its bound does not.
+    static func ladderBoundGrew(
+        record: ContinuousBatchingSelfCheckStore.Record,
+        currentBound: Int
+    ) -> Bool {
+        guard let decision = record.decision, let bound = record.ladderBound else { return false }
+        return currentBound > bound && decision.verifiedSlots >= bound
     }
 
     /// `measurements` ascend by slots and stop after the first inexact one.
@@ -439,6 +498,9 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         var crashedSlots: Int?
         /// A re-measurement of a kept grant is under way (resumable).
         var remeasureInProgress: Bool?
+        /// The ladder bound the decision was measured under
+        /// (`ContinuousBatchingSelfCheck.ladderUpperBound`).
+        var ladderBound: Int?
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -452,6 +514,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case remeasureAfter = "remeasure_after"
             case crashedSlots = "crashed_slots"
             case remeasureInProgress = "remeasure_in_progress"
+            case ladderBound = "ladder_bound"
         }
     }
 
@@ -584,6 +647,9 @@ actor ContinuousBatchingSelfCheckDriver {
     private let log: @Sendable (String) -> Void
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
+    /// The width whose probe the previous attempt saw refused with
+    /// backpressure, for that target only; any other outcome clears it.
+    private var backpressureRefusal: (target: ContinuousBatchingSelfCheckTarget, slots: Int)?
 
     static let repeats = 3
 
@@ -630,7 +696,12 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             if let record, let decision = record.decision {
                 if pending { await apply(decision, target: target, source: "stored") }
-                if let due = record.remeasureAfter.flatMap(Self.parseDate), Date() >= due,
+                let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
+                    maxRows: target.maxRows, ownerPinned: ownerPinnedSlots,
+                    crashedSlots: record.crashedSlots, queueLimit: target.queueLimit
+                )
+                let due = record.remeasureAfter.flatMap(Self.parseDate).map { Date() >= $0 } ?? false
+                if due || ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: bound),
                    Date() >= nextAttemptAt, await isIdle() {
                     await measure(target, remeasureOf: record)
                 }
@@ -703,8 +774,12 @@ actor ContinuousBatchingSelfCheckDriver {
         remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
     ) async {
         let runtime = runtime
-        let crashBound = (previous ?? store.record(for: target.key))?.crashedSlots.map { $0 - 1 } ?? Int.max
-        let maxSlots = min(ownerPinnedSlots.map { min($0, target.maxRows) } ?? target.maxRows, crashBound)
+        let maxSlots = ContinuousBatchingSelfCheck.ladderUpperBound(
+            maxRows: target.maxRows,
+            ownerPinned: ownerPinnedSlots,
+            crashedSlots: (previous ?? store.record(for: target.key))?.crashedSlots,
+            queueLimit: target.queueLimit
+        )
         let rungs = Set(ContinuousBatchingSelfCheck.ladder(maxRows: maxSlots))
         var record: ContinuousBatchingSelfCheckStore.Record
         if let previous {
@@ -724,6 +799,7 @@ actor ContinuousBatchingSelfCheckDriver {
         }
         guard maxSlots >= 2 else {
             record.decision = .init(slots: 1, reason: "single_row", verifiedSlots: 1)
+            record.ladderBound = maxSlots
             try? save(record)
             await apply(record.decision!, target: target, source: "measured")
             return
@@ -731,7 +807,8 @@ actor ContinuousBatchingSelfCheckDriver {
         if previous == nil, await runtime.continuousBatchingSelfCheckState() == .pending {
             await report(decision: deferrals > 0 ? "deferred" : "pending", target: target)
         }
-        log("event=cb_self_check action=step max_slots=\(maxSlots) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
+        log("event=cb_self_check action=step max_slots=\(maxSlots) rows=\(target.maxRows) queue_limit=\(target.queueLimit) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
+        let stepStartedAt = Date()
         do {
             let tokens = ContinuousBatchingSelfCheck.maxOutputTokens
             // Scheduler request ids are idempotency keys; never reuse one.
@@ -848,14 +925,58 @@ actor ContinuousBatchingSelfCheckDriver {
             }
             deferrals = 0
             nextAttemptAt = .distantPast
+            backpressureRefusal = nil
+            record.ladderBound = maxSlots
             await finish(record, crashedAt: nil, target: target)
         } catch {
             // Yielded to a real request, a transient failure, or a journal
             // write failure: completed widths are kept, the interrupted one
             // was not completed (not a crash), and the next attempt waits
             // longer each time. A kept or prior grant stays applied.
+            let refusedAt = record.inProgressSlots
             record.inProgressSlots = nil
             try? save(record)
+            let previousRefusal = backpressureRefusal.flatMap { $0.target == target ? $0.slots : nil }
+            backpressureRefusal = nil
+            // Backpressure with no buyer request during the step is the
+            // scheduler refusing the probe itself (its queue or token budget,
+            // or a native-MTP integrity probe holding it).
+            if (error as? ContinuousBatchSchedulerError) == .backpressure, let refusedAt,
+               await providerStatus.snapshot().requestsInFlight == 0,
+               await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
+                let verifiedPrefix = record.measurements.last?.slots ?? 1
+                // The count this Mac serves now (an owner pin can serve above
+                // the decision's own slots, up to its verified width), or a
+                // stored or provisional grant.
+                let served = await providerStatus.snapshot().capacity.maxConcurrency
+                let prior = [served, record.decision?.slots, priorGrant(for: target.key)]
+                    .compactMap { $0 }.filter { $0 > 1 }.max()
+                let resume = ContinuousBatchingSelfCheck.backpressureResumeSeconds
+                switch ContinuousBatchingSelfCheck.backpressureOutcome(
+                    verifiedPrefix: verifiedPrefix, slots: refusedAt, previousRefusalAt: previousRefusal, priorGrant: prior
+                ) {
+                case .retrySoon:
+                    backpressureRefusal = (target, refusedAt)
+                    nextAttemptAt = Date().addingTimeInterval(pollSeconds)
+                    log("event=cb_self_check action=backpressure_retry slots=\(refusedAt) retry_in_s=\(Int(pollSeconds))")
+                    return
+                case .pause:
+                    // Not a correctness result: the wider grant this Mac
+                    // already serves stays, and the ladder resumes here.
+                    nextAttemptAt = Date().addingTimeInterval(resume)
+                    log("event=cb_self_check action=ladder_paused reason=backpressure refused_slots=\(refusedAt) verified_k=\(verifiedPrefix) prior_grant=\(prior ?? 1) resume_in_s=\(Int(resume))")
+                    return
+                case .endLadder:
+                    log("event=cb_self_check action=ladder_ended reason=backpressure refused_slots=\(refusedAt) verified_k=\(verifiedPrefix) remeasure_in_s=\(Int(resume))")
+                    deferrals = 0
+                    nextAttemptAt = .distantPast
+                    record.ladderBound = maxSlots
+                    await finish(record, crashedAt: nil, target: target, incompleteRemeasureSeconds: resume)
+                    return
+                case .deferStep:
+                    break
+                }
+            }
             deferrals += 1
             let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
             nextAttemptAt = Date().addingTimeInterval(wait)
@@ -866,10 +987,13 @@ actor ContinuousBatchingSelfCheckDriver {
         }
     }
 
+    /// `incompleteRemeasureSeconds`: the ladder stopped below its bound for a
+    /// reason other than correctness; re-measure it after this long.
     private func finish(
         _ record: ContinuousBatchingSelfCheckStore.Record,
         crashedAt: Int?,
-        target: ContinuousBatchingSelfCheckTarget
+        target: ContinuousBatchingSelfCheckTarget,
+        incompleteRemeasureSeconds: Double? = nil
     ) async {
         // A swap during the measurement changes the target; drop the result.
         guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
@@ -888,7 +1012,8 @@ actor ContinuousBatchingSelfCheckDriver {
         var final = record
         final.decision = reconciled.decision
         final.noGainStreak = reconciled.streak
-        final.remeasureAfter = reconciled.remeasureAfterSeconds.map {
+        let remeasureAfterSeconds = [reconciled.remeasureAfterSeconds, incompleteRemeasureSeconds].compactMap { $0 }.min()
+        final.remeasureAfter = remeasureAfterSeconds.map {
             ISO8601DateFormatter().string(from: Date().addingTimeInterval($0))
         }
         if let crashedAt {

@@ -355,6 +355,111 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertGreaterThan(prompts[3].count, prompts[0].count * 20)
     }
 
+    /// #1958: a probe submits all k rows at once, so the ladder stops at the
+    /// scheduler queue limit instead of probing widths the scheduler refuses
+    /// with backpressure (which used to back off for minutes and never grant
+    /// above the limit).
+    func testQueueLimitBelowThePlannedRowsGrantsUpToTheQueueLimit() {
+        let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
+            maxRows: 32, ownerPinned: nil, crashedSlots: nil, queueLimit: 16
+        )
+        XCTAssertEqual(bound, 16)
+        let ladder = ContinuousBatchingSelfCheck.ladder(maxRows: bound)
+        XCTAssertEqual(ladder.last, 16)
+        let measurements = (2...bound).map { m($0, tps: 40 * Double($0)) }
+        let decision = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: measurements)
+        XCTAssertEqual(decision.reason, "granted")
+        XCTAssertEqual(decision.verifiedSlots, 16)
+        XCTAssertGreaterThan(decision.slots, 8)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.servedSlots(decision: decision, ownerPinned: nil, maxRows: 32), decision.slots
+        )
+        // An owner pin above the queue limit is clamped to what was verified.
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: decision, ownerPinned: 32, maxRows: 32), 16)
+
+        // The default queue limit (2 x rows) never narrows the ladder.
+        let defaultLimit = ContinuousBatchingPolicy.queueLimit(configured: nil, maxActiveRows: 32)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 32, ownerPinned: nil, crashedSlots: nil, queueLimit: defaultLimit),
+            32
+        )
+        // The other bounds still apply: owner pin, rows, and the crashed width.
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 32, ownerPinned: 8, crashedSlots: nil, queueLimit: 16), 8
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 12, ownerPinned: 32, crashedSlots: nil, queueLimit: 16), 12
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.ladderUpperBound(maxRows: 32, ownerPinned: nil, crashedSlots: 10, queueLimit: 16), 9
+        )
+    }
+
+    /// #1958: a backpressure refusal of the check's own probe stops the
+    /// ladder at that width after one quick retry, without a correctness
+    /// result: it never lowers a prior grant and never grows the deferral
+    /// backoff once a width is verified.
+    func testBackpressureRefusalEndsTheLadderAtThatWidth() {
+        typealias Outcome = ContinuousBatchingSelfCheck.BackpressureOutcome
+        func outcome(_ prefix: Int, _ slots: Int, _ previous: Int?, prior: Int? = nil) -> Outcome {
+            ContinuousBatchingSelfCheck.backpressureOutcome(
+                verifiedPrefix: prefix, slots: slots, previousRefusalAt: previous, priorGrant: prior
+            )
+        }
+        XCTAssertEqual(outcome(12, 13, nil), .retrySoon)
+        XCTAssertEqual(outcome(12, 13, 13), .endLadder)
+        // A refusal at another width is a fresh one.
+        XCTAssertEqual(outcome(13, 14, 13), .retrySoon)
+        // Nothing verified yet: never a decision, an ordinary deferral.
+        XCTAssertEqual(outcome(1, 2, 2), .deferStep)
+        // A Mac already serving a wider grant keeps it and resumes later.
+        XCTAssertEqual(outcome(12, 13, 13, prior: 16), .pause)
+        XCTAssertEqual(outcome(12, 13, nil, prior: 16), .retrySoon)
+        XCTAssertEqual(outcome(12, 13, 13, prior: 12), .endLadder)
+        // The current served count counts as a prior grant: an owner pin of 32
+        // served under a decision of 8 slots verified to 32 is kept.
+        XCTAssertEqual(outcome(12, 13, 13, prior: max(32, 8)), .pause)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.backpressureResumeSeconds, 3_600)
+
+        // A ladder ended at 13 decides on 2...12, which all passed: neither a
+        // divergence nor a crash.
+        let measurements = (2...12).map { m($0, tps: 40 * Double($0)) }
+        let decision = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: measurements)
+        XCTAssertEqual(decision.reason, "granted")
+        XCTAssertEqual(decision.verifiedSlots, 12)
+    }
+
+    /// #1958: a decision stores the ladder bound it was measured under and
+    /// re-runs when the bound grows, unless the ladder stopped below it.
+    func testDecisionReachingItsLadderBoundRerunsWhenTheBoundGrows() throws {
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: .init(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"),
+            decision: .init(slots: 12, reason: "granted", verifiedSlots: 16), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+        )
+        // Legacy records carry no bound: unchanged behaviour.
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 32))
+        record.ladderBound = 16
+        XCTAssertTrue(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 32))
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 16))
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 8))
+        // Stopped by divergence, crash or backpressure below the bound: no re-run.
+        record.decision = .init(slots: 8, reason: "granted", verifiedSlots: 12)
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 32))
+        // A single-row decision under a queue limit of 1 re-runs once it is raised.
+        record.decision = .init(slots: 1, reason: "single_row", verifiedSlots: 1)
+        record.ladderBound = 1
+        XCTAssertTrue(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 32))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-bound-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName))
+        try store.store(record)
+        XCTAssertEqual(store.record(for: record.key)?.ladderBound, 1)
+    }
+
     // MARK: - Revocation
 
     func testRevokedTupleIsNeitherCoveredNorSelfChecked() {

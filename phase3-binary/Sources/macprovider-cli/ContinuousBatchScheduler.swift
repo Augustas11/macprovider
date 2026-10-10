@@ -2041,6 +2041,9 @@ actor ContinuousBatchScheduler {
     private let schedulerID = UUID()
     /// The longest decode lockstep window this scheduler runs (FR-CB2).
     nonisolated var maxDecodeLockstepWindow: Int { configuration.maxDecodeLockstepWindow }
+    /// Most requests that may wait for a row at once (SPEC-038 FR-CB3); a
+    /// submit beyond it is refused with `.backpressure`.
+    nonisolated var queueLimit: Int { configuration.queueLimit }
     private let allocator: PagedKVBlockAllocator
     private let backend: any ContinuousBatchSchedulerBackend
     private let replayAuthority: any ContinuousBatchSchedulerReplayAuthority

@@ -3528,6 +3528,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let gate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["r1": [1], "r2": [2]], prefillGate: gate)
         let scheduler = try await makeScheduler(maxActiveRows: 1, queueLimit: 1, backend: backend)
+        XCTAssertEqual(scheduler.queueLimit, 1)
 
         let first = Task {
             try await scheduler.submit(.init(id: "r1", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 1))
