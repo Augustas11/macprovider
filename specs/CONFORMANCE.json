@@ -3647,6 +3647,29 @@
       "gap": null
     },
     {
+      "requirement_id": "SPEC-033-R002",
+      "spec_id": "SPEC-033",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/hardwareverify/verify.go:func (s *Store) ProcessPending",
+        "phase4-coordinator/internal/stats/hardwareverify/verify.go:func autoTrustAttestedHardware",
+        "phase4-coordinator/internal/ws/admin_hardware_trust.go:func (s *Server) handleHardwareTrustRevoke"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust",
+        "phase4-coordinator/internal/stats/migrations/migrations_test.go::TestHardwareTrustAppAttestAutoMigrationShape",
+        "phase4-coordinator/internal/ws/admin_hardware_trust_test.go::TestHardwareTrustRevokeInactivatesOperatorRoot"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "SPEC-033 v0.7.0 adds automatic trust for App Attest verified hardware (migration 031 plus the verifier call). Covered by Postgres integration and unit tests; pending until the coordinator runtime carrying migration 031 is live and an attested provider's job promotes without operator action."
+      }
+    },
+    {
       "requirement_id": "SPEC-034-R001",
       "spec_id": "SPEC-034",
       "state": "conformant",

@@ -568,6 +568,9 @@ func TestHardwareTrustRevokeInactivatesOperatorRoot(t *testing.T) {
 	if out["status"] != "revoked" || out["provider_id"] != "mac" {
 		t.Fatalf("revoke response = %#v", out)
 	}
+	if sources, _ := out["revoked_sources"].([]any); len(sources) != 2 || sources[0] != "operator_api" || sources[1] != "app_attest" {
+		t.Fatalf("revoked_sources = %#v, want operator_api and app_attest", out["revoked_sources"])
+	}
 	if !strings.Contains(logs.String(), "hardware_trust_approval_revoked") {
 		t.Fatalf("audit log missing revoke action: %s", logs.String())
 	}
