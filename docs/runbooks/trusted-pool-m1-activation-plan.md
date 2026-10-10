@@ -224,14 +224,19 @@ deploy canary, which since #1816 accepts a canary that loaded the release live
 from the coordinator). Check:
 
 ```bash
-sudo grep -n -A12 'compatibility_set:' /opt/macprovider/coordinator.yaml
+# Since SPEC-002-R004 (#1914) admission is by repository: read the live policy.
+curl -s "$COORDINATOR_URL/healthz" | jq '{compatibility_policy_mode, compatibility_policy_target_id, compatibility_policy_revoked_ids}'
 # local: the candidate's commit contains the merge
 git merge-base --is-ancestor 747557cc <candidate-commit> && echo ok
 ```
 
-Pass: an `accepted_ids` entry `Augustas11/macprovider:v<ver>@<commit>` whose
-commit contains `747557cc` and the §3 catalog release; its acceptance
-tarball's `macprovider-cli` sha256 equals the binary the member runs.
+Pass: the candidate `Augustas11/macprovider:v<ver>@<commit>` is admitted by the
+live policy (`compatibility_policy_mode` is `repository`, same repository as
+the target, not in `compatibility_policy_revoked_ids`; `scripts/ops/cli-release.sh
+status` step `pearl_accepted_ids` is done), its commit contains `747557cc` and
+the §3 catalog release, and its acceptance tarball's `macprovider-cli` sha256
+equals the binary the member runs. (The table above records the pre-R004
+allowlist; `accepted_ids` is now deprecated and ignored.)
 
 ### P6. Trusted pools enabled (new; not in the task list, but required)
 
@@ -436,8 +441,10 @@ acceptance candidate for the member must be cut from a commit that contains
 both `747557cc` and the §3.3 release (its `bakedArtifactFeedBase64` then
 carries `gguf-q4-k-m`). Cut it with `.github/workflows/acceptance-candidate.yml`
 (`promotion_ready=true`), signed in CI with `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`
-(`production-release` environment), then add its `v<ver>@<commit>` to
-`coordinator.compatibility_set.accepted_ids` (Pearl actor, restart). The live
+(`production-release` environment). No Pearl admission edit is needed: since
+SPEC-002-R004 (#1914) the coordinator admits every well-formed release from
+the target repository that is not in `revoked_ids`; confirm it with
+`scripts/ops/cli-release.sh status` (step `pearl_accepted_ids`). The live
 native provider is not updated by this; it keeps its own candidate.
 
 This candidate is not a prerequisite of the §3.3 deploy. The deploy canary
@@ -926,7 +933,7 @@ every pass criterion above and writes the redacted evidence;
 builds (`payload`), signs and promotes it. Capture into an operator-local
 directory in that layout:
 
-1. P1-P8 outputs with timestamps; deployed commit; `accepted_ids` entry;
+1. P1-P8 outputs with timestamps; deployed commit; live policy admission of the candidate id;
    member CLI binary sha256; llama-server build (`b11149`) and GGUF sha256.
 2. `get-pool` JSON (manifest 1 digest, `runtime_allowlist`, `settlement_mode`,
    lifecycle, member, buyer) and `trustpool_events` rows for the pool.
@@ -1018,7 +1025,7 @@ deliveries; retry once they finish.
 | B1 | RESOLVED 2026-09-25: `v1.8.200` live (gateway schema 14, paid non-stream and stream proof settled `spec022_verified`); `v1.8.199` had rolled back on the quick_check stall | #1646 Pearl actor | done |
 | B2 | Gateway pin off (`require_settlement_trailers` absent) | Pearl actor | runbook §9 step 2a after P1/P2 |
 | B3 | PARTIALLY RESOLVED by #1754: generator and both consumers implement the v0.16.0 GGUF tuple, the source contains `gguf-q4-k-m`, and all 17 MLX `size_bytes` are measured. No artifact feed is in production; the already-published current `release_id` cannot be enriched, so the remaining block is an operator-owned signed activation cut with a new `release_id`, then the Pearl config/nginx deployment. | operator (signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
-| B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
+| B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret); admission by repository policy (SPEC-002-R004), no Pearl edit | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
 | B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
 | B7 | RESOLVED: reviewed offline signer `coordinator-cli trust-pool-admin keygen` / `sign-root` / `sign-manifest` with explicit key ids, environment, custody disclosure and class, signer-set version and attestation tier (§4.1, §4.3) | repo | done; build it from `main` (not in `v1.8.200`) |
