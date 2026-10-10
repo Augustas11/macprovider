@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.14
+Version: v0.3.15
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.12 (2026-10-10, automatic CB slot count):** Follows
+SPEC-023 v0.22.19. FR-CB11's Entry 110 concurrency is now the slot count serve
+resolves at each start, not only the value an install-time apply persisted.
+Unless the owner pinned `max_concurrency_override` (`max_concurrency_source:
+owner`, environment, or `--max-batch`), serve runs the autotune recommendation
+for this Mac when the verified signed policy authorizes batching for the
+loaded tuple and batching is active, and one slot otherwise. A new policy
+entry therefore raises existing providers at their next serve start without
+another `autotune --recommend --apply`. The count is not changed while serving:
+scheduler rows, the inference gate, native-MTP slot sizing and the memory
+envelope are fixed at load, and the policy is loaded only at serve start.
 **Change log v0.3.14 (2026-10-10, route-invariant ragged prefill groups):**
 FR-CB2: the kernel-route rule (v0.3.12/v0.3.13) applies to ragged groups as
 well as equal-offset groups. A grouped row now always prefills its own
@@ -978,6 +989,31 @@ NOT inflate `slots_total`. `slots_free` MUST be derived from validated active
 capacity minus active accepted/runnable work. Internal prompt-batch,
 decode-batch, microbatch, paged-engine, and queue limits MAY differ but MUST
 NOT change `slots_total`.
+
+**(v0.3.12)** The Entry 110 concurrency is resolved at every serve start
+(SPEC-023-R009, automatic application):
+
+1. An owner-pinned `max_concurrency_override` (config with
+   `max_concurrency_source: owner`, `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE`, or
+   `--max-batch`) MUST be served as written. A config value without
+   `max_concurrency_source`, or with `autotune`, is autotune-derived.
+2. Otherwise, with a draft model configured, the count MUST be 1 (FR-CB12).
+3. Otherwise, when the verified signed policy carries an enabled entry for the
+   served model key (no emergency off), serve MUST run the SPEC-023-R009
+   recommendation for this Mac: `memory_fit_cap` at the served context when
+   the model geometry is readable, else the chip/RAM tier constant; at most 5
+   on Apple M1/M2 GPUs other than Ultra (MLX quantized matmul switches from
+   the vector to the matrix kernel above 5 rows, so rows 6-8 add cost without
+   aggregate gain there); and at most `max_concurrency_override_limit`. After
+   the model loads, if batching is not active and policy-authorized for the
+   loaded tuple, serve MUST lower the count to 1 before the startup probe and
+   the first capacity advertisement.
+4. Otherwise the count MUST be 1.
+
+The resolved count is the active-row cap, inference gate and `slots_total`
+for the life of the process. Loopback runtimes (SPEC-046) and autotune
+children keep their configured count. A policy change takes effect at the next
+serve start; serve MUST NOT resize a running scheduler.
 
 ### FR-CB12 - SPEC-028 classic-draft mutual exclusion (SPEC-038-R012)
 

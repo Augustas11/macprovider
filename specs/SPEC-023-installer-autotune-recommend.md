@@ -8,6 +8,19 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.19 (2026-10-10)** — Serve applies the R009 recommendation
+  automatically. `max_concurrency_override` was written once by
+  `autotune --recommend --apply` at install and never recomputed, so a new
+  signed continuous-batching policy entry left existing providers at their
+  install-time slot count until each owner re-ran the apply. The config now
+  records who owns the value in `max_concurrency_source` (`owner` or
+  `autotune`; absent means `autotune`, which covers every existing install).
+  Serve resolves the slot count at each start with the precedence of
+  SPEC-038 FR-CB11 (v0.3.12): owner pin, then draft model = 1, then the
+  R009 recommendation for this Mac when the signed policy authorizes
+  batching for the served tuple, else 1. An apply removes
+  `max_concurrency_source` in the same write, and rollback restores it with
+  the other recommendation-owned keys. Older CLIs ignore the key.
 - **v0.22.23 (2026-10-10)** — The native-MTP emergency revocation feed fails
   to last-known (#1938, AGENTS.md rule 10). A body past `expires_at` is still
   accepted and stays in force; an unreachable origin or a rejected body keeps
@@ -2659,6 +2672,8 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 5. **Respect the draft-model exclusion.** When a draft model is configured, SPEC-028 FR-4 pins `effective_max_batch = 1`; the CLI MUST NOT sweep, MUST emit `recommended_max_batch = 1` with `draft_pinned = true`, and MUST record the pin rather than a measured optimum.
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
 7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, minimum aggregate-gain fraction, calibration context, probe prompt tokens, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements (aggregate tokens/sec, per-stream p95 TTFT, informational median per-stream decode rate, pass/fail and reason), and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied served depth MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged. A served depth above 8 MUST be written as `max_concurrency_override: 8` plus `max_concurrency_depth_override: <depth>` (v0.22.18), because pre-#1906 CLIs reject `max_concurrency_override` above 8 at startup and ignore unknown keys; an apply at 8 or below MUST remove `max_concurrency_depth_override`. The v2 record MUST also carry `ttft_regression_factor` fixed at 1.5 after `ttft_ceiling_ms` so a pre-v2 decoder can still load stored state; it gates nothing. Served slots above the coordinator's `pool.max_concurrency_ceiling` (default 8) are clamped there, so a deeper calibrated depth routes only after an operator raises that ceiling.
+
+**Automatic application (v0.22.19).** The applied `max_concurrency_override` is a recommendation, not an owner setting: `serve` MUST recompute the served slot count at every start under SPEC-038 FR-CB11 (v0.3.12) unless the owner pinned it. Ownership is the config key `max_concurrency_source` (`owner` | `autotune`); a config without it is autotune-derived, and a value from `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` or `--max-batch` is an owner value. An apply MUST remove `max_concurrency_source`, and an unknown value MUST fail config load. For an autotune-derived value serve MUST run: 1 with a draft model configured (SPEC-028 FR-4); otherwise, when the verified signed continuous-batching policy authorizes the served tuple and batching is active, the step-1 bound for this Mac (`memory_fit_cap` at the served context, else the tier constant), capped at 5 on Apple M1/M2 GPUs other than Ultra and at `max_concurrency_override_limit`; otherwise 1. It MUST NOT exceed `memory_fit_cap` when that is computable. The count applies at serve start, where the policy is loaded; serve does not resize a running scheduler.
 
 Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 

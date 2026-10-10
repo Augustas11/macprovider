@@ -172,6 +172,19 @@ public struct MaxContextProvenance: Equatable, Sendable {
     }
 }
 
+/// Who owns `max_concurrency_override` (SPEC-023-R009, SPEC-038-R011). An
+/// `owner` value is pinned: serve runs it as written. An `autotune` value,
+/// and any config without the `max_concurrency_source` key (every install
+/// and `autotune --recommend --apply` before this key existed), is a
+/// recommendation serve recomputes at each start from the signed
+/// continuous-batching policy, so a new policy entry raises existing
+/// providers without another apply. Environment and `--max-batch` values are
+/// owner values.
+public enum MaxConcurrencySource: String, Sendable {
+    case owner
+    case autotune
+}
+
 public enum ProviderCredentialStoreKind: String, Sendable {
     case keychain
     case protectedFile = "protected_file"
@@ -186,6 +199,7 @@ public struct AppConfig: Equatable, Sendable {
     public static let maxConcurrencyDepthOverrideKey = "max_concurrency_depth_override"
     /// The `max_concurrency_override` bound every pre-#1906 CLI enforces.
     public static let legacyMaxConcurrencyOverrideLimit = 8
+    public static let maxConcurrencySourceKey = "max_concurrency_source"
 
     public var port: Int
     public var model: String?
@@ -232,6 +246,8 @@ public struct AppConfig: Equatable, Sendable {
     /// `recommendationApply`).
     public var maxContextProvenance: MaxContextProvenance? = nil
     public var maxConcurrencyOverride: Int?
+    /// `nil` means autotune-derived (see `MaxConcurrencySource`).
+    public var maxConcurrencySource: MaxConcurrencySource? = nil
     // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
     // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
     // quantization (mlx-swift default). Triple-exposed: yaml key
@@ -845,6 +861,18 @@ public enum ConfigLoader {
             || config.maxConcurrencyOverride == AppConfig.legacyMaxConcurrencyOverrideLimit {
             config.maxConcurrencyOverride = maxConcurrencyDepthOverride
         }
+        var maxConcurrencySourceRaw: String?
+        try assign(&maxConcurrencySourceRaw, from: dict, key: AppConfig.maxConcurrencySourceKey, expected: "owner or autotune")
+        if let maxConcurrencySourceRaw {
+            guard let source = MaxConcurrencySource(rawValue: maxConcurrencySourceRaw.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: AppConfig.maxConcurrencySourceKey,
+                    value: maxConcurrencySourceRaw,
+                    expected: "owner or autotune"
+                )
+            }
+            config.maxConcurrencySource = source
+        }
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
@@ -1071,6 +1099,9 @@ public enum ConfigLoader {
             config.maxContextProvenance = nil
         }
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
+        if environment["MACPROVIDER_MAX_CONCURRENCY_OVERRIDE"] != nil {
+            config.maxConcurrencySource = .owner
+        }
         try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
@@ -1295,6 +1326,7 @@ public enum ConfigLoader {
         }
         if let maxBatch = cli.maxBatch {
             config.maxConcurrencyOverride = maxBatch
+            config.maxConcurrencySource = .owner
         }
         if let idlePrewarmEnabled = cli.idlePrewarmEnabled {
             config.idlePrewarmEnabled = idlePrewarmEnabled

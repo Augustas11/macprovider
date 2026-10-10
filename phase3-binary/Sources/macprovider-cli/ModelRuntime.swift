@@ -4339,6 +4339,18 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch
     }
 
+    /// SPEC-038-R011: lowers the served slot count when continuous batching
+    /// turned out inactive for the loaded tuple. Only `serve` calls it, right
+    /// after load and before the startup probe or any request, so no permit of
+    /// the replaced gate is held. Never raises: the memory envelope, scheduler
+    /// rows, and native-MTP slot sizing were set for the larger count.
+    func lowerServedSlotsBeforeServing(to slots: Int) {
+        let lowered = max(1, slots)
+        guard lowered < maxBatch else { return }
+        maxBatch = lowered
+        inferenceGate = AsyncSemaphore(value: lowered)
+    }
+
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
         continuousBatchingCapability(
             draftConfigured: currentDraftModelID != nil

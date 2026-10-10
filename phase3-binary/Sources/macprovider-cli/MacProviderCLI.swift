@@ -2660,6 +2660,63 @@ struct ServeCommand: AsyncParsableCommand {
         FileHandle.standardError.write(Data(
             "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
+        // Facts shared by the automatic slot count and the R018 item 9 bound.
+        let servedConfigJSONData = resolved.modelArtifactPath.flatMap {
+            try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
+        }
+        let servedCatalogMinRAMGB = (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )).flatMap { catalog in
+            [resolved.modelCatalogKey, resolved.modelCatalogModelID, resolved.model]
+                .compactMap { $0 }
+                .lazy
+                .compactMap { ModelArtifactSignedRowResolver.lookup($0, in: catalog)?.1.minRAMGB }
+                .first
+        }
+        let servedWeightsBytes = ProviderContextWorkflow.liveModelFacts(
+            artifactPath: resolved.modelArtifactPath
+        ).weightsBytes
+        // SPEC-023-R009 / SPEC-038-R011: unless the owner pinned it, the slot
+        // count follows the signed policy loaded above, recomputed at every
+        // serve start. Loopback runtimes and autotune children keep theirs.
+        var autoServedSlots: AutoServedSlots.Decision?
+        if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
+            let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+            let configuredSlots = resolved.maxConcurrencyOverride
+            let decision = AutoServedSlots.resolve(
+                configuredSlots: configuredSlots,
+                source: resolved.maxConcurrencySource,
+                draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                continuousBatchingAuthorized: AutoServedSlots.policyAuthorizesServedModel(
+                    continuousBatchingPolicy,
+                    modelKeys: currentPolicyKeys,
+                    emergencyOff: emergencyOffOverride
+                ),
+                recommendedSlots: {
+                    AutoServedSlots.recommendedSlots(
+                        chip: MachineFingerprinter().sample().chip,
+                        memoryGB: memoryGB,
+                        memoryFitCap: AutoServedSlots.memoryFitSlots(
+                            configJSONData: servedConfigJSONData,
+                            memoryGB: memoryGB,
+                            catalogMinRAMGB: servedCatalogMinRAMGB,
+                            contextTokens: ProviderCapacity(
+                                maxContextOverride: resolved.maxContextOverride,
+                                maxConcurrencyOverride: nil
+                            ).maxContextTokens,
+                            weightsBytes: servedWeightsBytes
+                        )
+                    )
+                }
+            )
+            if decision.reason != "owner_pinned" {
+                resolved.maxConcurrencyOverride = decision.slots
+            }
+            autoServedSlots = decision
+            FileHandle.standardError.write(Data(
+                "event=served_slots action=resolved slots=\(decision.slots) reason=\(decision.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune")\n".utf8
+            ))
+        }
 
         printResolvedConfiguration(resolved)
 
@@ -2714,21 +2771,9 @@ struct ServeCommand: AsyncParsableCommand {
             config: resolved,
             slots: servedSlots,
             memoryGB: switchMemoryGB,
-            configJSONData: resolved.modelArtifactPath.flatMap {
-                try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
-            },
-            catalogMinRAMGB: (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
-                Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
-            )).flatMap { catalog in
-                [resolved.modelCatalogKey, resolved.modelCatalogModelID, resolved.model]
-                    .compactMap { $0 }
-                    .lazy
-                    .compactMap { ModelArtifactSignedRowResolver.lookup($0, in: catalog)?.1.minRAMGB }
-                    .first
-            },
-            modelWeightSizeBytes: ProviderContextWorkflow.liveModelFacts(
-                artifactPath: resolved.modelArtifactPath
-            ).weightsBytes
+            configJSONData: servedConfigJSONData,
+            catalogMinRAMGB: servedCatalogMinRAMGB,
+            modelWeightSizeBytes: servedWeightsBytes
         )
         let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
             config: resolved,
@@ -2916,6 +2961,20 @@ struct ServeCommand: AsyncParsableCommand {
             )
             FileHandle.standardError.write(Data(("provider model load failed: \(error)\n").utf8))
             throw error
+        }
+        // SPEC-038-R011: the pre-load gate saw a policy entry for the model
+        // key; the exact tuple is known only now. Batching inactive for the
+        // loaded tuple serves one slot, set before the startup probe and the
+        // first capacity advertisement.
+        if autoServedSlots?.reason == "cb_authorized",
+           ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride) > 1,
+           let mlxRuntime = modelRuntime as? ModelRuntime,
+           !AutoServedSlots.continuousBatchingServing(await mlxRuntime.currentSnapshot().continuousBatching) {
+            await mlxRuntime.lowerServedSlotsBeforeServing(to: 1)
+            resolved.maxConcurrencyOverride = 1
+            FileHandle.standardError.write(Data(
+                "event=served_slots action=lowered slots=1 reason=cb_inactive_for_loaded_tuple\n".utf8
+            ))
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
         // disk tier when enabled, then hand the serve-owned, lock-holding store to
