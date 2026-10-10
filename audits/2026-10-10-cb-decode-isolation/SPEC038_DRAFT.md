@@ -49,9 +49,10 @@ verification row has fewer real columns than the call:
   decode token, its own slice of the packed verification mask, and the
   causal mask for a prompt chunk. Padded verification columns attend nothing
   and produce zeros;
-- prompt chunks (more than 8 query tokens) take the unfused path, whose GEMM
-  blocking follows the key length, so every padded prompt row attends in its
-  own call.
+- prompt chunks (more than 8 query tokens) take the unfused path at head
+  dims 192 and 256, whose GEMM blocking follows the key length, or the fused
+  steel kernel at other head dims; every padded prompt row attends in its
+  own call either way.
 
 Rows of one length, with full-width verification columns, keep the single
 call. Every other operator stays batched. Sliding-window decode rows attend
@@ -59,7 +60,8 @@ over their own presented suffix. A split row synthesizes its lone mask only
 under a mask the batch cache built that restricts nothing but padding and
 causality. Under any other array mask, each split row attends with its own
 slice of that mask, so a model's mask semantics (for example a window) are
-kept. A padded call the cache cannot isolate MUST be treated like a model
+kept, and the padded call is not shared, because only a cache-built mask is
+known to exclude every row's padding. A padded call the cache cannot isolate MUST be treated like a model
 that attends outside the cache path (below). These rules hold inside
 a multi-step lockstep window: every step attends over each row's keys as of
 that step.

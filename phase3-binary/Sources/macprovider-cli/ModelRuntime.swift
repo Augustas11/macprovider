@@ -5125,8 +5125,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// other bounds, matches no live key, so the check re-runs; an earlier
     /// grant carries the Mac through the re-run as for an MLX pin change.
     static var continuousBatchingSelfCheckRuntimeBuild: String {
-        let bound = PagedKVSharedForwardBackend.deviceVerifyTokenBound
-        return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
+        continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
+    }
+
+    static func continuousBatchingSelfCheckRuntimeBuild(forwardBound bound: Int) -> String {
+        "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

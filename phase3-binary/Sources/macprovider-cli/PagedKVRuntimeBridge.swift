@@ -4413,7 +4413,10 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
             kvHeads: keys.dim(1),
             headDim: queries.dim(3),
             valueDim: values.dim(3),
-            paddedCallHasArrayMask: suppliedArray != nil,
+            // Only a plain cache mask is known to exclude every row's
+            // padding; under any other mask every padded row splits and
+            // attends over its own keys only.
+            paddedCallHasArrayMask: suppliedArray != nil && (plainMask || packedRows != nil),
             loneCallHasArrayMask: sliceSupplied
         )
         let shared = sharedRows.isEmpty ? nil : batched()

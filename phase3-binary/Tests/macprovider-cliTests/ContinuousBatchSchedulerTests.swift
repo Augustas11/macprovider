@@ -2981,7 +2981,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     /// hardware, OS, MLX pin and window) does not apply. A stored refusal is
     /// re-measured; a stored grant only carries the Mac through the re-run.
     func testSelfCheckKeyCarriesTheRowIsolationPolicy() throws {
-        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild
+        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11)
+        XCTAssertNotEqual(live, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 5))
         XCTAssertTrue(live.hasPrefix(ContinuousBatchingSelfCheckKey.currentRuntimeBuild + "+cb-isolation-v1/"), live)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("cb-isolation-key-\(UUID().uuidString)", isDirectory: true)

@@ -1909,8 +1909,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             queries: queries, keys: padded(historyKeys, keys), values: padded(historyValues, values),
             scale: scale, mask: .array(foreign)
         )
-        // The 601-key row splits (one pass alone) and keeps its own slice of
-        // the foreign mask; the 1501-key row shares the padded call.
+        // Under a foreign mask every padded row splits: the 601-key row keeps
+        // its own slice of the mask, and the 1501-key row (no padding) gets
+        // the bits of the padded call.
         let splitRow = MLXFast.scaledDotProductAttention(
             queries: queries[0 ..< 1],
             keys: concatenated([historyKeys[0], keys[0 ..< 1]], axis: 2),
@@ -1961,6 +1962,27 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(offsetOnly.storedTokens, 1)
         XCTAssertEqual(offsetOnly.offset, 601)
         XCTAssertTrue(PagedKVSharedForwardBackend.lastBatchAttentionLeftCachePathForTest)
+
+        // An all-true foreign mask over rows on one route (600 and 901 keys,
+        // both one-pass): the short row must still attend only its own keys.
+        let sameRoute = [599, 900]
+        let sameKeys = sameRoute.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let sameValues = sameRoute.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        eval(sameKeys + sameValues)
+        let allTrue = MLXArray.ones([2, 1, 1, 901], dtype: .bool)
+        let permissive = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: sameRoute.indices.map { Self.attentionRowCache(history: sameKeys[$0], sameValues[$0]) },
+            queries: queries, keys: keys, values: values, scale: scale,
+            maskOverride: .array(allTrue)
+        )
+        let shortLone = MLXFast.scaledDotProductAttention(
+            queries: queries[0 ..< 1],
+            keys: concatenated([sameKeys[0], keys[0 ..< 1]], axis: 2),
+            values: concatenated([sameValues[0], values[0 ..< 1]], axis: 2),
+            scale: scale,
+            mask: .array(allTrue[0 ..< 1, 0..., 0..., ..<600])
+        )
+        XCTAssertTrue(arrayEqual(permissive[0 ..< 1], shortLone).item(Bool.self), "a foreign mask never admits padding")
     }
 
     /// Sliding-window decode rows of different lengths attend over their own
