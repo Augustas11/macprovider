@@ -820,7 +820,14 @@ mainland-provider installer handoff.
    verifies and that the coordinator reports as loaded
    (`relayblind_privacy_release_identity_loaded`), or by an unexpired
    `approved_code_identities` entry in that applied config. Unknown fails
-   closed; the refusal names the missing item.
+   closed, including an unknown candidate `compatibility_set_id` (from fresh
+   ops state it is derived only from the trusted-signer `v<ver>` tag); the
+   refusal names the missing item. The promotion dispatch runs
+   `_check-registrations` against Pearl immediately before
+   `gh workflow run`. `promote-acceptance-candidate.yml` cannot reach Pearl,
+   so it does not re-check registrations itself: approve its
+   production-release deployment only from `cli-release.sh` (the approval
+   step is shown only while `status` still passes this gate).
 7. Signed release tag (`release_tag`): `promote-acceptance-candidate.yml`
    runs `scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin
    --require-existing`, so `v<ver>` must already be an annotated tag on the
@@ -828,9 +835,13 @@ mainland-provider installer handoff.
    git signing key (`git tag -s -a v<ver> -m "macprovider-cli <ver>"
    <candidate_sha>`), checks it with `git verify-tag`, pushes it and confirms
    origin's target. An existing `v<ver>` counts only when it is annotated,
-   peels to the candidate, and its exact remote tag object passes
-   `git verify-tag` against the operator's signer trust; an unsigned or
-   untrusted tag, a tag on another commit, or a lightweight tag is refused. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
+   peels to the candidate, and its exact remote tag object is signed by an
+   explicitly approved signer: an SSH signature verified only against
+   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (default
+   `~/.config/macprovider/release-tag-allowed-signers`, never the checkout's
+   git config), or an OpenPGP signature whose `VALIDSIG` fingerprint is in
+   `MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS`. An unsigned or unapproved tag,
+   a tag on another commit, or a lightweight tag is refused. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
    until this tag was made by hand.
 8. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.

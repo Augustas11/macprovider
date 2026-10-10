@@ -26,7 +26,12 @@ the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
 an anchored transform, backs it up under `/root/macprovider-backups`,
 validates the new file with the running coordinator's binary, user and exact
 environment, restarts the coordinator (SIGHUP does not reload this policy),
-waits for `/healthz`, checks the change is live and records the step. Nobody
+waits for `/healthz`, checks that the restarted coordinator logged the on-disk
+config as its boot config, and records the step. `recommendation_bump` is
+complete only when `/healthz` recommends the release AND the applied
+`compatibility_set.target_id` names it. When the requested edit is already on
+disk but the running coordinator never applied it (a run stopped before its
+restart), the step validates and restarts instead of reporting success. Nobody
 pastes a restart. Publication or a healthy advertised version alone does not
 prove that the new provider compatibility set is accepted and targeted; the
 `registrations` gate reads the running coordinator's applied config.

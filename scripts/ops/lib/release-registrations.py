@@ -347,7 +347,12 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
         miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
     listed = bool(compat_id) and (compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", []))
     out["compat_accepted"] = listed and out["config_applied"]
-    if compat_id and not listed:
+    out["target_applied"] = bool(compat_id) and compat_id == f.get("target_id") and out["config_applied"]
+    if not compat_id:
+        # Without the candidate's own id, acceptance cannot be proven: fail closed.
+        miss.append("the candidate compatibility_set_id is unknown (no signed_byte_verification record and no "
+                    "verified v%s tag to derive it from), so its compatibility acceptance cannot be proven" % version)
+    elif not listed:
         miss.append("compatibility_set.accepted_ids lacks %s (pearl_accepted_ids step)" % compat_id)
     if local is None and remote is not None and f.get("public_key_pem") and verify_sig(f["public_key_pem"], remote, remote_sig):
         # A published release with no local bytes: the signed file names the identity.

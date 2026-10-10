@@ -52,7 +52,16 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `/healthz` and the live postcondition, then the step is recorded. At the
   `accepted_ids` cap of 8 it evicts the oldest version that is not the
   target, not the previous stable, and not the latest connection version of
-  any provider seen in 14 days, printing the per-version table. Steps that
+  any provider seen in 14 days, printing the per-version table. An edit
+  already on disk but not applied by the running coordinator is recovered
+  with a validated restart.
+- Release tags count only with an approved signer: list SSH signers in
+  `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
+  `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints
+  in `MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS`. The checkout's git trust
+  settings are not used. `promotion` re-checks Pearl registrations
+  (`_check-registrations`) right before dispatching; the workflow itself
+  cannot reach Pearl. Steps that
   can share a restart do (setup plus accepted_ids). No step asks anyone to
   paste a restart; the ops guard still blocks a typed restart and a direct
   `_pearl-config`.

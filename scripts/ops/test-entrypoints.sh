@@ -348,7 +348,13 @@ git -C "$W" config user.name t
 git -C "$W" config user.email t@example.invalid
 git -C "$W" config gpg.format ssh
 git -C "$W" config user.signingkey "$tmp/keys/git-signing"
-git -C "$W" config gpg.ssh.allowedSignersFile "$tmp/keys/allowed_signers"
+# The gate trusts only the explicit allowlist, never the checkout's git config:
+# the config's allowed-signers file also trusts an unapproved key.
+ssh-keygen -q -t ed25519 -N '' -C x -f "$tmp/keys/untrusted" </dev/null
+cat "$tmp/keys/allowed_signers" > "$tmp/keys/permissive_signers"
+printf 't@example.invalid %s\n' "$(cat "$tmp/keys/untrusted.pub")" >> "$tmp/keys/permissive_signers"
+git -C "$W" config gpg.ssh.allowedSignersFile "$tmp/keys/permissive_signers"
+export MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS="$tmp/keys/allowed_signers"
 # An annotated tag on the candidate that is unsigned, or signed by an
 # untrusted key, does not satisfy the signed-tag gate.
 git -C "$W" tag -a "v$CAND" -m unsigned "$B"
@@ -359,10 +365,9 @@ case "$(next_field reason)" in *"unverified on $B"*) ok ;; *) bad "unsigned tag 
 run_rc 3 "release tag refused for an unsigned tag on the candidate" scripts/ops/cli-release.sh _release-tag "$CAND" "$B"
 git -C "$W" push -q origin ":refs/tags/v$CAND"
 git -C "$W" tag -d "v$CAND" >/dev/null
-ssh-keygen -q -t ed25519 -N '' -C x -f "$tmp/keys/untrusted" </dev/null
 git -C "$W" -c user.signingkey="$tmp/keys/untrusted" tag -s -a "v$CAND" -m untrusted "$B"
 git -C "$W" push -q origin "refs/tags/v$CAND"
-run_rc 0 "cli status with an untrusted signature on v$CAND" scripts/ops/cli-release.sh status
+run_rc 0 "cli status with an unapproved signer on v$CAND (trusted by git config only)" scripts/ops/cli-release.sh status
 expect_next release_tag:blocked
 git -C "$W" push -q origin ":refs/tags/v$CAND"
 git -C "$W" tag -d "v$CAND" >/dev/null
@@ -385,6 +390,9 @@ case "$(next_field command)" in
   *"candidate_run_id=111"*"physical_acceptance_confirmed=true"*) ok ;;
   *) bad "promotion command: $(next_field command)" ;;
 esac
+case "$(next_field command)" in "scripts/ops/cli-release.sh _check-registrations $CAND"*) ok ;; *) bad "promotion does not re-check registrations first" ;; esac
+MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS="$tmp/keys/absent" run_rc 0 "cli status without a signer allowlist" scripts/ops/cli-release.sh status
+if [ "$(state_of release_tag)" != "done" ]; then ok; else bad "tag accepted without an explicit signer allowlist"; fi
 case " $(step_ids) " in
   *" e2e_gate registrations release_tag promotion "*) ok ;;
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
@@ -452,6 +460,26 @@ pearl_config "$OLD $COMPAT" "$META"
 pearl_boot
 run_rc 0 "cli status with registrations restored" scripts/ops/cli-release.sh status
 expect_next promotion:mutate
+# The promotion dispatch re-reads Pearl first and refuses when a registration
+# went away after status.
+rm -f "$tmp/svc/loaded.txt"
+run_rc 3 "_check-registrations refuses a registration lost after status" scripts/ops/cli-release.sh _check-registrations "$CAND"
+expect_err "is not registered in the running coordinator"
+loaded "$CAND"
+run_rc 0 "_check-registrations passes when everything is live" scripts/ops/cli-release.sh _check-registrations "$CAND"
+# An edit already on disk but not applied (a run stopped before its restart)
+# is recovered: validate, restart, verify; the bytes stay as they are.
+pearl_config "$OLD" "$META"; pearl_boot
+pearl_config "$OLD $COMPAT" "$META"
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
+run_rc 0 "cli status with accepted_ids edited on disk but not applied" scripts/ops/cli-release.sh status
+expect_next pearl_accepted_ids:mutate
+before="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk edit is recovered with a restart" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied edit not recovered by one restart"; fi
+run_rc 0 "cli status after the recovery" scripts/ops/cli-release.sh status
+expect_next promotion:mutate
 rm -f "$SCOPE/e2e_gate.json"
 run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
 expect_next e2e_gate:manual
@@ -480,6 +508,34 @@ if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordi
   "$tmp/pearl/coordinator.yaml" "$COMPAT" "$OLD" "$CAND"; then ok; else bad "bump did not set target/latest or dropped the prior target"; fi
 run_rc 0 "cli status after the bump" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "bump not live"; fi
+# The bump is complete only with BOTH the advertised version and the applied
+# target_id; a target left on the previous release is repaired.
+pearl_config "$OLD $COMPAT" "$META"
+python3 - "$tmp/pearl/coordinator.yaml" "$CAND" <<'PYCFG'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+open(p, "w").write(re.sub(r'latest_binary_version: "[^"]*"', 'latest_binary_version: "%s"' % sys.argv[2], s))
+PYCFG
+pearl_boot
+health v9.0.0 "$CAND"
+run_rc 0 "cli status with the release advertised but the old target applied" scripts/ops/cli-release.sh status
+expect_next recommendation_bump:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump repairs the target" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if grep -q "target_id: $COMPAT" "$tmp/pearl/coordinator.yaml"; then ok; else bad "target_id not repaired"; fi
+run_rc 0 "cli status after the target repair" scripts/ops/cli-release.sh status
+if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "bump not complete after the target repair"; fi
+# Fresh ops state (no verification record): the compatibility id comes from
+# the verified v<ver> tag, or the gate fails closed.
+mkdir -p "$tmp/state-fresh"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-fresh" run_rc 0 "published release from fresh ops state" scripts/ops/cli-release.sh status
+if [ "$(fact_of compatibility_set_id_source)" = "verified tag v$CAND" ] && [ "$(state_of registrations)" = "done" ]; then ok; else bad "compat id not derived from the verified tag: $(state_of registrations)"; fi
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-fresh" MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS="$tmp/keys/absent" \
+  run_rc 0 "published release from fresh ops state without a trusted tag" scripts/ops/cli-release.sh status
+case "$(state_of registrations):$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
+  pending:*"compatibility_set_id is unknown"*) ok ;; *) bad "an unknown compatibility id passed the registrations gate" ;;
+esac
 health v9.0.0 "$CAND"
 rm -f "$tmp/svc/loaded.txt"
 run_rc 0 "cli status after the bump with the identity no longer loaded" scripts/ops/cli-release.sh status

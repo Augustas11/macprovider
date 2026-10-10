@@ -58,11 +58,11 @@ class EvaluateTest(unittest.TestCase):
             "metadata_error": "",
         }
 
-    def verdict(self, **changes):
+    def verdict(self, compat=COMPAT, **changes):
         facts = dict(self.facts, **changes)
         path = self.dir / "facts.json"
         path.write_text(json.dumps(facts))
-        out = subprocess.run([sys.executable, str(SCRIPT), "evaluate", str(path), VERSION, COMPAT,
+        out = subprocess.run([sys.executable, str(SCRIPT), "evaluate", str(path), VERSION, compat,
                               str(self.prj), str(self.prj) + ".sig"], check=True, capture_output=True, text=True)
         return json.loads(out.stdout)
 
@@ -94,6 +94,16 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn("expired", " ".join(gone["missing"]))
         unapplied = self.verdict(loaded_versions=None, approved_code_identities=[entry], boot_digests=None)
         self.assertEqual(unapplied["approved_by"], "")
+
+    def test_unknown_compatibility_id_fails_closed(self):
+        v = self.verdict(compat="")
+        self.assertFalse(v["compat_accepted"])
+        self.assertIn("compatibility_set_id is unknown", " ".join(v["missing"]))
+
+    def test_target_applied_needs_target_and_applied_config(self):
+        self.assertFalse(self.verdict()["target_applied"])
+        self.assertTrue(self.verdict(target_id=COMPAT)["target_applied"])
+        self.assertFalse(self.verdict(target_id=COMPAT, boot_digests=None)["target_applied"])
 
     def test_privacy_class_disabled_fails(self):
         self.assertIn("privacy_class.enabled", " ".join(self.verdict(privacy_class_enabled=False)["missing"]))

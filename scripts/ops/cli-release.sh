@@ -151,12 +151,18 @@ candidate_release_bytes() {
   [ -n "$prj" ] && [ -n "$sig" ] && printf '%s\t%s\n' "$prj" "$sig"
 }
 
+# registrations_live: the last load_registrations proved every registration
+# live, including the candidate's own compatibility id.
+registrations_live() {
+  [ "$REG_STATE" != unknown ] && [ -z "$REG_MISSING" ] && [ "$REG_COMPAT_ACCEPTED" = true ]
+}
+
 # load_registrations V COMPAT_ID: read Pearl's registration state (read-only)
 # into REG_STATE (unknown|unconfigured|missing|present|mismatch|staged),
 # REG_DIR, REG_BY, REG_MISSING and REG_ERR.
 load_registrations() {
   local V="$1" compat="$2" bytes prj="" sig=""
-  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""; REG_COMPAT_ACCEPTED=false
+  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""; REG_COMPAT_ACCEPTED=false; REG_TARGET_APPLIED=false
   if [ -z "${PEARL_SSH:-}" ]; then
     REG_ERR="PEARL_SSH is unset"
   elif ! registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" \
@@ -172,6 +178,7 @@ load_registrations() {
       REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
       REG_MISSING="$(json_field "$OPS_TMP_DIR/reg-verdict.json" '"; ".join(d["missing"])')"
       REG_COMPAT_ACCEPTED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("compat_accepted", False)')"
+      REG_TARGET_APPLIED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("target_applied", False)')"
     else
       REG_ERR="registration evaluation failed: $(tail -n1 "$OPS_TMP_DIR/reg-verdict.err")"
     fi
@@ -377,6 +384,16 @@ bash scripts/release-staged-version-policy.sh v$V" \
 
   local compat_id
   compat_id="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  if [ -z "$compat_id" ]; then
+    # No local verification record (fresh ops state): derive the id from the
+    # verified, trusted-signer v<ver> tag, as verify_candidate binds it.
+    local tag_commit
+    tag_commit="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$V^{}" 2>/dev/null | awk '{print $1}')"
+    if is_sha40 "$tag_commit" && [ "$(release_tag_state "v$V" "$tag_commit")" = on_candidate ]; then
+      compat_id="$(gh_repo):v$V@$tag_commit"
+      fact compatibility_set_id_source "verified tag v$V"
+    fi
+  fi
 
   # 4b. privacy release identity: the hot SPEC-049-R027 registration of the
   # candidate's code identity. Read live every time; never a local marker.
@@ -475,7 +492,7 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
   # binary is live in the running coordinator. Evaluated on every status, also
   # after publication, so it re-gates recommendation_bump and
   # verify_live_rollout (both come later in this order).
-  if [ "$REG_STATE" != unknown ] && [ -z "$REG_MISSING" ]; then
+  if registrations_live; then
     step registrations "done" "accepted_ids has $compat_id; code identity approved by $REG_BY"
   else
     step registrations pending "${REG_MISSING:-$REG_ERR}"
@@ -527,22 +544,24 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
       ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha" ||
-      [ "$REG_STATE" = unknown ] || [ -n "$REG_MISSING" ] || [ "$tag_state" != on_candidate ]; then
+      ! registrations_live || [ "$tag_state" != on_candidate ]; then
       set_next promotion blocked "Promote v$V" "" \
         "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
-"gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
+"scripts/ops/cli-release.sh _check-registrations $V
+gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
   -f candidate_run_id=$ok_id -f candidate_sha=$ok_sha -f tag=v$V \\
   -f expected_checksums_sha256=$cs -f physical_acceptance_confirmed=true"
     fi
   fi
 
-  # 8. recommendation / compatibility target bump.
-  if [ "$L" = "$V" ]; then
-    step recommendation_bump "done" "live recommends $V"
+  # 8. recommendation / compatibility target bump: both the advertised version
+  # and the applied compatibility_set.target_id must name the release.
+  if [ "$L" = "$V" ] && [ "$REG_TARGET_APPLIED" = true ]; then
+    step recommendation_bump "done" "live recommends $V; applied target_id $compat_id"
   else
-    step recommendation_bump pending "live recommends $L"
+    step recommendation_bump pending "live recommends $L; target_id $compat_id applied: $REG_TARGET_APPLIED"
     if [ -z "$compat_id" ]; then
       set_next recommendation_bump blocked "Recommend v$V" "" "no verified compatibility_set_id for v$V is recorded"
     else
@@ -863,6 +882,46 @@ PY
   log "verified: checksums.txt sha256=$cs compatibility_set_id=$compat_id"
 }
 
+# _check-registrations VERSION: re-read Pearl right before a publication
+# dispatch and refuse unless every registration is live. The promotion
+# workflow cannot reach Pearl, so this is the last check before it publishes;
+# the environment approval is shown only while `status` still passes it.
+check_registrations() {
+  local V="$1" compat
+  is_semver "$V" || die "usage: _check-registrations VERSION"
+  OPS_SCOPE="cli-release-$V"
+  compat="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  load_registrations "$V" "$compat"
+  registrations_live || refuse "v$V is not registered in the running coordinator: ${REG_MISSING:-$REG_ERR}"
+  log "v$V registrations are live in the running coordinator"
+}
+
+# verify_tag_signer OBJECT: the tag object is signed by an explicitly approved
+# signer. SSH signatures verify only against MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS
+# (default ~/.config/macprovider/release-tag-allowed-signers), never the user's
+# git config; OpenPGP signatures need a VALIDSIG fingerprint listed in
+# MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS. Anything else is untrusted.
+verify_tag_signer() {
+  local obj="$1" body raw f
+  local allowed="${MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS:-$HOME/.config/macprovider/release-tag-allowed-signers}"
+  body="$(git -C "$REPO_ROOT" cat-file tag "$obj" 2>/dev/null)" || return 1
+  case "$body" in
+    *"-----BEGIN SSH SIGNATURE-----"*)
+      [ -s "$allowed" ] || return 1
+      git -C "$REPO_ROOT" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$allowed" \
+        verify-tag "$obj" >/dev/null 2>&1 ;;
+    *"-----BEGIN PGP SIGNATURE-----"*)
+      [ -n "${MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS:-}" ] || return 1
+      raw="$(git -C "$REPO_ROOT" verify-tag --raw "$obj" 2>&1)" || return 1
+      for f in $MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS; do
+        [[ "$f" =~ ^[0-9A-Fa-f]{40}$ ]] || continue
+        printf '%s\n' "$raw" | grep -E '^\[GNUPG:\] VALIDSIG ' | tr ' ' '\n' | grep -qix "$f" && return 0
+      done
+      return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
 # release_tag_state TAG SHA -> absent | on_candidate | on <commit> | lightweight on <commit>
 # | unverified on <commit> | ambiguous | unreadable, from origin's refs (the promotion
 # workflow reads the same). on_candidate also requires the exact remote tag object to
@@ -880,7 +939,7 @@ release_tag_state() {
   elif { git -C "$REPO_ROOT" cat-file -e "$obj" 2>/dev/null ||
       git -C "$REPO_ROOT" fetch -q --no-tags origin "refs/tags/$1" 2>/dev/null; } &&
     [ "$(git -C "$REPO_ROOT" cat-file -t "$obj" 2>/dev/null)" = tag ] &&
-    git -C "$REPO_ROOT" verify-tag "$obj" >/dev/null 2>&1; then
+    verify_tag_signer "$obj"; then
     printf 'on_candidate'
   else printf 'unverified on %s' "$peeled"
   fi
@@ -911,7 +970,8 @@ release_tag() {
     git -C "$REPO_ROOT" tag -s -a "$tag" -m "macprovider-cli $V" "$sha" ||
       refuse "git tag -s failed; configure the operator's git signing key (user.signingkey)"
   fi
-  git -C "$REPO_ROOT" verify-tag "$tag" >/dev/null 2>&1 || refuse "git verify-tag $tag failed; not pushing"
+  verify_tag_signer "$(git -C "$REPO_ROOT" rev-parse "refs/tags/$tag")" ||
+    refuse "$tag is not signed by an approved signer (MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS or MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS); not pushing"
   git -C "$REPO_ROOT" push -q origin "refs/tags/$tag" || refuse "pushing $tag failed"
   [ "$(release_tag_state "$tag" "$sha")" = on_candidate ] || refuse "origin $tag does not target $sha after the push"
   log "pushed signed annotated $tag -> $sha"
@@ -985,6 +1045,7 @@ internal() {
     _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
     _release-tag) shift; release_tag "$@" ;;
     _pearl-config) shift; pearl_config "$@" ;;
+    _check-registrations) shift; check_registrations "$@" ;;
     _check-privacy-rejections) shift; check_privacy_rejections "$@" ;;
     *) usage >&2; exit 2 ;;
   esac

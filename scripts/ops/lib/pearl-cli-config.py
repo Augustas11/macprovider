@@ -343,13 +343,57 @@ def healthz(url):
     raise Refused("coordinator /healthz did not recover within 120 s")
 
 
+def disk_digests(args):
+    out = {}
+    for key, path in (("config_sha256", args.config), ("overlay_sha256", args.overlay)):
+        with open(path, "rb") as f:
+            out[key] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+def boot_digests(unit):
+    """config/overlay sha256 the current coordinator invocation logged at boot
+    (event coordinator_config_applied, source boot), or None."""
+    inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    if not re.match(r"^[0-9a-f]{32}$", inv):
+        return None
+    proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
+                          capture_output=True, text=True, timeout=60)
+    found = None
+    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+        if "coordinator_config_applied" not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("event") == "coordinator_config_applied" and event.get("source") == "boot":
+            found = {"config_sha256": event.get("config_sha256", ""), "overlay_sha256": event.get("overlay_sha256", "")}
+    return found
+
+
+def applied(args):
+    return boot_digests(args.unit) == disk_digests(args)
+
+
 def restart(args, old_pid):
     subprocess.run(["systemctl", "restart", args.unit], check=True, timeout=120, capture_output=True)
     health = healthz(args.healthz)
     pid, _, _, _, _ = running(args)
     if pid == old_pid:
         raise Refused("the coordinator main process did not change after the restart")
+    deadline = time.monotonic() + 30
+    while not applied(args):
+        if time.monotonic() > deadline:
+            raise Refused("the restarted coordinator did not log the on-disk config as its boot config")
+        time.sleep(1)
     return health
+
+
+def check_live(args, health):
+    if args.recommend and health.get("recommended_binary_version") != args.recommend[0]:
+        raise Refused("/healthz recommends %r, not %s" % (health.get("recommended_binary_version"), args.recommend[0]))
 
 
 def privacy_preflight(args, env, uid, gid):
@@ -398,6 +442,21 @@ def apply(args):
         new = new_text.encode()
         result = {"changed": new != original, **summary}
         if new == original:
+            # Disk already holds the requested state. It is complete only when
+            # the running coordinator booted with exactly these bytes;
+            # otherwise (an earlier run edited and stopped before its
+            # restart, or another edit is pending) validate and restart.
+            if applied(args):
+                check_live(args, healthz(args.healthz))
+                print(json.dumps(result, sort_keys=True))
+                return
+            check = as_service([binary, "--validate-config", "--config", args.config, "--config-overlay", args.overlay],
+                               env, uid, gid, 120)
+            if check.returncode != 0:
+                raise Refused("the running coordinator binary rejects the on-disk config (--validate-config)")
+            check_live(args, restart(args, pid))
+            result["restarted"] = True
+            result["recovered_unapplied_config"] = True
             print(json.dumps(result, sort_keys=True))
             return
         stamp = now.strftime("%Y%m%dT%H%M%SZ")
@@ -417,9 +476,7 @@ def apply(args):
             if os.path.exists(tmp):
                 os.unlink(tmp)
         try:
-            health = restart(args, pid)
-            if args.recommend and health.get("recommended_binary_version") != args.recommend[0]:
-                raise Refused("/healthz recommends %r, not %s" % (health.get("recommended_binary_version"), args.recommend[0]))
+            check_live(args, restart(args, pid))
         except Exception:
             with open(args.config, "rb") as f:
                 if f.read() == new:
