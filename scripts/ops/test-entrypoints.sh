@@ -778,7 +778,15 @@ run_rc 0 "rollback id that differs from the signed release identity" scripts/ops
 expect_next rollback:blocked
 case "$(next_field reason)" in *"is not the signed identity"*"test/repo:v$LIVE@ffff"*) ok ;; *) bad "signed-identity mismatch reason: $(next_field reason)" ;; esac
 prev_release "$PREV_COMMIT"
-printf '{"tampered":true}\n' >> "$tmp/gh/downloads/v$LIVE/pearl-release.json"
+# Valid JSON naming the right identity but with a changed field: only the
+# signature check can refuse it.
+python3 - "$tmp/gh/downloads/v$LIVE/pearl-release.json" <<'PYTAMPER'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["provider_advertised_version"] = "9.9.9"
+open(p, "w").write(json.dumps(d) + "\n")
+PYTAMPER
 run_rc 0 "rollback with tampered signed release metadata" scripts/ops/cli-release.sh status
 expect_next rollback:blocked
 case "$(next_field reason)" in *"nothing (missing, unsigned or tampered)"*) ok ;; *) bad "tampered metadata reason: $(next_field reason)" ;; esac

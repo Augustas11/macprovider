@@ -2299,7 +2299,7 @@ final class AutoUpdateTests: XCTestCase {
         outcome: AutoUpdater.RecommendationOutcome,
         restartSaw: [String],
         binary: String,
-        store: AutoUpdateMarkerStore
+        pendingAfter: AutoUpdatePendingMarker?
     ) {
         let fixture = try TempHome()
         let manifestSigningKey = P256.Signing.PrivateKey()
@@ -2386,7 +2386,9 @@ final class AutoUpdateTests: XCTestCase {
         )
         updater.preparedReleaseForTest = { _ in prepared }
         let outcome = await updater.handleCoordinatorRecommendation("1.8.232")
-        return (outcome, restartSaw.snapshot(), try String(contentsOf: binary, encoding: .utf8), store)
+        // Inspect while the fixture still exists (TempHome deletes it on return).
+        let pendingAfter = try store.readPending()
+        return (outcome, restartSaw.snapshot(), try String(contentsOf: binary, encoding: .utf8), pendingAfter)
     }
 
     // SPEC-020-R007: authorization withdrawn during the drain aborts before any
@@ -2399,9 +2401,13 @@ final class AutoUpdateTests: XCTestCase {
         let run = try await runR007Downgrade(withdraw: .duringDrain)
         XCTAssertEqual(run.binary, "revoked-binary", "no activation")
         XCTAssertEqual(run.restartSaw, [], "no restart")
-        XCTAssertNil(try run.store.readPending())
+        XCTAssertNil(run.pendingAfter, "no pending transaction remains")
         let event = await AutoUpdateEventStore.shared.lastWireObject()
         XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+        // The post-drain check refused before any backup: a refusal that only
+        // came from the later activation gate would be a .swap-phase event.
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.eligibility.rawValue)
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
         XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
     }
 
@@ -2417,6 +2423,10 @@ final class AutoUpdateTests: XCTestCase {
         let run = try await runR007Downgrade(withdraw: .afterEviction)
         XCTAssertEqual(run.binary, "revoked-binary", "the swap is rolled back")
         XCTAssertEqual(run.restartSaw, ["revoked-binary"], "only the rollback's restart of the restored revoked build ran; the older release never started")
+        // The restored revoked build awaits its readiness proof (retired by the
+        // held session on local health, SPEC-020-R007); it is not the target.
+        XCTAssertEqual(run.pendingAfter?.transactionState, .awaitingPreviousReadiness)
+        XCTAssertEqual(run.pendingAfter?.previousVersion, "1.8.233")
         let event = await AutoUpdateEventStore.shared.lastWireObject()
         XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
         XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
