@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.2.5
+**Version:** 0.2.6
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.2.3",
+  "version": "0.2.6",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -464,7 +464,7 @@ The header marker (§4.2), the reservation version (§4.6), the reservation row'
 
 Privacy-class model scopes follow SPEC-041-R004: both exact names of one uniquely matched pinned signed-catalog row may be advertised. The buyer-selected signed name remains unchanged through every cryptographic and routing binding. No general billing-equivalence expansion is allowed.
 
-At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext.
+At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext. Candidate ordering at reservation and the slot wait before dispatch follow SPEC-049-R029.
 
 ### SPEC-049-R014 - Response AEAD
 
@@ -592,6 +592,25 @@ When `privacy_class.release_code_identities.metadata_dir` and `privacy_class.rel
 **Routes.** The coordinator serves `GET /v1/privacy-class/directory` on its gateway-context buyer port. The gateway serves `GET /v1/privacy-class/directory` to buyers authenticated with an API key as for a reservation (a wallet session has no signed-request profile for this route in v0.2 and is refused with `privacy_class_unavailable`; wallet-session buyers pin with `--identity-pin`), forwards the coordinator's 200 body byte for byte (at most 1 MiB) with `Cache-Control: no-store`, maps errors to the §4.9 inventory, and adds no trust: it does not verify, re-sign, filter, or cache the directory. Both routes return `privacy_class_disabled` when the class is disabled in that component.
 
 **Buyer.** `relay-blind-client --privacy-class` without `--identity-pin` MUST take the directory public key from `--directory-public-key` (canonical base64url raw 32-byte Ed25519) or `MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY`, pinned once by the buyer from an operator channel outside the gateway and coordinator path. Before the reservation it fetches the directory from the gateway, and MUST reject it unless the envelope is closed and at most 1 MiB, `key_id` equals the pinned key's fingerprint, the signature verifies over the exact payload bytes, the payload is closed and valid per §4.11, `issued_at_unix` is at most 60 seconds in the future, and the current time is before `expires_at_unix`. After the reservation it selects the entry whose `fingerprint` equals the key record's `identity_fingerprint`; a missing or revoked entry MUST fail before encryption. The in-memory pin is the SPEC-041-R002 pin with that identity key and fingerprint, the key record's models (which MUST include the requested model), `chat_completions`, and the directory's validity window. `--identity-pin` overrides the directory and is required with a wallet session. A buyer that needs no coordinator in its identity trust path uses `--identity-pin`.
+
+### SPEC-049-R029 - Slot-aware selection and fair share for pinned waiters
+
+A privacy-class reservation pins one provider session, and SPEC-049-R013 forbids moving it. This requirement orders candidates so concurrent private requests spread across enrolled providers, and gives a pinned request a bounded share of the seats on its provider while plaintext traffic competes for them. It changes ordering and waiting only, never eligibility. It applies equally to SPEC-041 relay-blind reservations, which share the selector and the slot wait.
+
+**Selection.** The coordinator MUST first apply every SPEC-049-R013 reservation check (for relay-blind, the SPEC-041-R004 checks) and only then rank the surviving candidates of the requested model and key class in two tiers. The first tier holds providers that pass the SPEC-002 state and capacity filter and whose live `slots_free` exceeds the coordinator-local claims on them: slot-queue waiters, held seat reservations, and the requesting buyer account's own relay-blind or privacy-class reservations on that provider that have not reached the dispatch slot wait and have not expired. The second tier holds the rest. Within each tier the order MUST start at a provider drawn uniformly at random, and the reservation binds the first provider in the order. The reservation-time gate then re-runs on that provider, and a failure there still tries no other provider. The index of undispatched reservations is in memory only and keyed by buyer account. It holds at most 4096 entries in total and 64 per account, ignores reservations beyond that, drops entries at reservation expiry, and drops a reservation when its chat reaches the slot wait. It is an ordering input only. It is scoped to the account so that one buyer's concurrent requests spread deterministically, while no buyer's selection reflects another buyer's reservations. Otherwise any buyer could make honest providers look busy by holding cheap, undispatched reservations, and steer other buyers' private traffic toward a provider of its choosing. Across buyers, spreading comes from the random start.
+
+**Why a random start.** The candidate list is already scoped to one model and key class, so a random start rotates per model and key class without shared state. A deterministic counter per model and key class was tried during the #1910 audit. Requests of alternating sizes form different candidate cohorts, and a shared counter steered each cohort to the same provider. A counter would also let a buyer holding two reservations count how many reservations other buyers made for that model in between. A uniform draw has neither problem. Tests inject the draw to make it deterministic.
+
+**Fair share.** The SPEC-006 §7.8 slot queue holds two FIFO lanes per provider: a plaintext lane, and a pinned lane for relay-blind and privacy-class chats waiting on their reserved session.
+
+1. **Admission.** The plaintext lane keeps its SPEC-006 §7.8 cap: 4 or the provider's `slots_total`, whichever is larger. The pinned lane's cap is half of that, at least 1. Waiters in one lane never count against the other lane's cap.
+2. **Grants.** When a seat frees for the queue, it goes to the head of the only waiting lane. When both lanes wait, it goes to the head of the lane that did not take the previous grant on that provider. The alternation state is dropped when the provider's queue empties.
+3. **Pinned wait.** A pinned waiter MAY wait until its reservation expires, as long as the provider keeps granting seats. It MUST give up with the existing retryable `relay_blind_provider_unsupported` capacity outcome when no seat on its provider is granted to any queued waiter for one slot-queue deadline (at most 10 seconds). Reservation expiry, session loss, posture, kill switch, and key failures keep their existing SPEC-049-R013 codes.
+4. **Plaintext.** Plaintext admission, deadlines, direct dispatch, and the capacity shed are unchanged. As before, direct dispatch takes a seat only when free seats exceed all queued demand.
+
+**Why this is bounded and starvation-free.** While both lanes wait, grants strictly alternate, so each lane gets at least every other grant on the provider. A pinned waiter at position k of its lane is granted within 2k grants. A plaintext waiter at the head of its lane is granted within 2 grants. The pinned lane holds at most half the plaintext cap, so the pinned class can never take more than half of a provider's queued grants while plaintext waits. A full pinned lane drains within about one plaintext-lane length of grants. Separate caps mean neither class can crowd the other out of admission. The pinned wait still ends at reservation expiry (`reservation_ttl_seconds`, at most 30), so a seat-starved provider cannot hold a private request indefinitely.
+
+**Side channels.** Selection reads only coordinator-local occupancy of the eligible candidates, the requesting account's own undispatched reservations, and a fresh random draw. It never reads another buyer's reservations, request content, or request size beyond the existing key-record size filter. The reservation already tells the buyer which provider was bound. Preferring a free provider reveals at most coarse occupancy of providers for that model, the same kind of information as the aggregate `slots_free` that `/v1/status` already publishes (SPEC-006 §8.1). The time a pinned request waits depends on its provider's load, as it did before. Relays already observe timing (§2.5).
 
 ## 6. Operator runbook requirement
 
@@ -722,6 +741,8 @@ remains open; R023 promotion is not required for operation.
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json` and its bundle: the reviewed redacted evidence (#1864).
 
 ## 10. Changelog and history
+
+- 0.2.6 - #1911 capacity items. New SPEC-049-R029: reservation selection ranks eligible privacy-class and relay-blind candidates with a free seat first. A buyer account's own undispatched reservations count against free seats, and each tier starts at a uniformly random provider, so rotation is per model and key class with no shared state. The coordinator slot queue gains a pinned lane, with half the plaintext cap and FIFO order, and grants alternate with the plaintext lane while both wait. A pinned waiter waits until reservation expiry while its provider keeps granting seats, and gives up after one slot-queue deadline with no grant. SPEC-049-R013 points to R029. Eligibility, wire, schema, disclosure strings and error codes are unchanged. SPEC-006 §7.8 states the two lanes.
 
 - 0.2.2 - Dated eligible-network activation exception (§8.3, Entry 251), limited
   to signed CLI224, with staged real-buyer confirmation, unchanged admission

@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.13",
+      "version": "1.6.14",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.49",
+      "version": "0.9.50",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1520,7 +1520,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.2.5",
+      "version": "0.2.6",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11672,6 +11672,44 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
         "rationale": "SPEC-049 v0.2.0 automatic enrollment is implemented locally with unit and integration tests. JOURNEY-PRIVACY-CLASS-BETA and its committed signed evidence cover the v0.1 requirement set; a v0.2 journey revision on a signed v0.2 release, a staged canary, and audits are pending"
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R029",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/relay_blind.go:orderRelayBlindCandidates",
+        "phase4-coordinator/internal/buyer/relay_blind.go:awaitRelayBlindSlot",
+        "phase4-coordinator/internal/buyer/relay_blind.go:relayBlindPinnedLaneCap",
+        "phase4-coordinator/internal/buyer/relay_blind.go:notePending",
+        "phase4-coordinator/internal/buyer/slot_queue.go:nextLocked",
+        "phase4-coordinator/internal/buyer/slot_queue.go:enterPinned",
+        "phase4-coordinator/internal/buyer/slot_queue.go:reserveHead"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionSpreadsUndispatchedReservations",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionRotatesAndNeverChoosesIneligible",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionPrefersFreeEnrolledProvider",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionIgnoresOtherAccountsPending",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacyChatWaitsThroughSustainedPlaintextLoad",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacyReservationPendingClearsAtDispatch",
+        "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueAlternatesLanesWhenBothWait",
+        "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueSustainedPlaintextLoadGivesPinnedFairShare",
+        "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueSustainedPinnedLoadDoesNotStarvePlaintext",
+        "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueLanesHaveSeparateCaps",
+        "phase4-coordinator/internal/buyer/relay_blind_capacity_test.go:TestRelayBlindSlotWaitersAreCappedPerProvider",
+        "test/integration/privacy_capacity_integration_test.go:TestPrivacyClassSpreadsAcrossEnrolledProviders"
+      ],
+      "journeys": [
+        "JOURNEY-PRIVACY-CLASS-BETA-V2"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.2.6 slot-aware private selection and pinned-lane fair share (#1911) are implemented with unit and integration tests. They are not deployed yet; the coordinator change ships in a later Pearl runtime train, after which a live probe must show more than one enrolled provider serving private traffic. The requirement stays pending."
       }
     },
     {
