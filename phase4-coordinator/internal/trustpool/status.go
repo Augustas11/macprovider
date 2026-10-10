@@ -71,6 +71,8 @@ type StatusPolicy struct {
 	RetentionPolicyStatus           string   `json:"retention_policy_status"`
 	RetentionPolicyGoverningVersion string   `json:"retention_policy_governing_version,omitempty"`
 	RetentionPolicyFieldCategories  []string `json:"retention_policy_field_categories,omitempty"`
+	// PoolModels is the SPEC-043-R014 enumeration shared with pool_policy.json.
+	PoolModels []PolicyPoolModel `json:"pool_models"`
 }
 
 type StatusMembership struct {
@@ -260,6 +262,7 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			RetentionPolicyStatus:           retentionStatus,
 			RetentionPolicyGoverningVersion: retention.GoverningPolicyVersion,
 			RetentionPolicyFieldCategories:  retention.FieldCategories,
+			PoolModels:                      policyPoolModels(p),
 		},
 		Membership: StatusMembership{
 			MinEligibleMembers:           policyMinEligibleMembers(p),

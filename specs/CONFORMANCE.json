@@ -1281,7 +1281,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.3.1",
+      "version": "0.3.3",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -11729,15 +11729,20 @@
       "requirement_id": "SPEC-043-R014",
       "spec_id": "SPEC-043",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func policyPoolModels",
+        "phase4-coordinator/internal/trustpool/creator_selfserve.go:selfServePoolModelText"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/pool_model_disclosure_test.go:TestPolicyAndStatusEnumeratePoolModels"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "Creator policy/status, reviewed-artifact, and announcement enumeration of pool models against the active pool_model_entries/v1 extension, activation and announcement failure on mismatch, and creator-admin/Agreement copy are not implemented or evidenced. The buyer API surface is tracked by SPEC-006-R018."
+        "rationale": "#1880 step 5: pool_policy.json and pool_status.json enumerate the active core pool_model_entries/v1 as policy.pool_models (identity, engine set, creator-signed price, disclosure class, pool-attested, not network-verified), derived at read time; the reviewed distribution artifact and announcement approval stay bound to manifest_core_digest, and the self-serve Creator Agreement carries the R014 creator copy. Pending until a publicly announced pool exercises the announcement path and signed journey evidence exists. Buyer API disclosure is SPEC-006-R018."
       }
     },
     {

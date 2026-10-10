@@ -75,6 +75,63 @@ type PolicyPolicy struct {
 	RetentionPolicyDeletionSLA       string   `json:"retention_policy_deletion_sla,omitempty"`
 	RetentionPolicyDisputeAuditTrail string   `json:"retention_policy_dispute_audit_trail_min_period,omitempty"`
 	SplitExecutionStatus             string   `json:"split_execution_status"`
+	// PoolModels enumerates the active core's SPEC-042-R015 entries
+	// (SPEC-043-R014); [] when the core carries none.
+	PoolModels []PolicyPoolModel `json:"pool_models"`
+}
+
+// PoolModelDisclosureText is the SPEC-043-R014 / SPEC-006-R018 label of every
+// pool model.
+const PoolModelDisclosureText = "Pool-attested, not network-verified"
+
+// PoolModelPriceSource names the creator-signed entry as the price source.
+const PoolModelPriceSource = "pool_creator_signed"
+
+// PolicyPoolModel is one active pool model as pool_policy.json and
+// pool_status.json disclose it: identity, engine set, creator-signed price,
+// and disclosure class, exactly as the active core's entry carries them.
+type PolicyPoolModel struct {
+	PoolModelID           string               `json:"pool_model_id"`
+	ArtifactHashAlgorithm string               `json:"artifact_hash_algorithm"`
+	ArtifactHash          string               `json:"artifact_hash"`
+	RuntimeSources        []string             `json:"runtime_sources"`
+	MaxContextTokens      uint64               `json:"max_context_tokens"`
+	Price                 PolicyPoolModelPrice `json:"price"`
+	PriceSource           string               `json:"price_source"`
+	DisclosureClass       string               `json:"disclosure_class"`
+	DisclosureText        string               `json:"disclosure_text"`
+}
+
+// PolicyPoolModelPrice is an entry's creator-signed rates.
+type PolicyPoolModelPrice struct {
+	PromptRatePerMtok         uint64 `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok uint64 `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     uint64 `json:"completion_rate_per_mtok"`
+}
+
+// policyPoolModels is the SPEC-043-R014 enumeration of the active core's
+// pool model entries, in core order.
+func policyPoolModels(p *ReconstructedPoolState) []PolicyPoolModel {
+	entries := policyModelEntries(p)
+	out := make([]PolicyPoolModel, 0, len(entries))
+	for _, m := range entries {
+		out = append(out, PolicyPoolModel{
+			PoolModelID:           m.PoolModelID,
+			ArtifactHashAlgorithm: m.ArtifactHashAlgorithm,
+			ArtifactHash:          m.ArtifactHash,
+			RuntimeSources:        append([]string{}, m.AllowedRuntimeSources...),
+			MaxContextTokens:      m.MaxContextTokens,
+			Price: PolicyPoolModelPrice{
+				PromptRatePerMtok:         m.Pricing.PromptRatePerMtok,
+				PromptCacheHitRatePerMtok: m.Pricing.PromptCacheHitRatePerMtok,
+				CompletionRatePerMtok:     m.Pricing.CompletionRatePerMtok,
+			},
+			PriceSource:     PoolModelPriceSource,
+			DisclosureClass: m.DisclosureClass,
+			DisclosureText:  PoolModelDisclosureText,
+		})
+	}
+	return out
 }
 
 type PolicyRootIssuer struct {
@@ -239,6 +296,7 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 			RetentionPolicyDeletionSLA:       retention.DeletionSLA,
 			RetentionPolicyDisputeAuditTrail: retention.DisputeAuditTrailMinRetention,
 			SplitExecutionStatus:             policySplitExecutionStatus(p),
+			PoolModels:                       policyPoolModels(p),
 		},
 		RootIssuer:      root,
 		Predicates:      policyPredicates(p, publiclyAnnounced),
