@@ -1817,6 +1817,80 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         paddedRouteDifferences.forEach { print("  \($0)") }
     }
 
+    /// The vector-attention route port pins core `v0.32.2-macprovider.2`
+    /// (`scaled_dot_product_attention.cpp` lines 469-473, 486-523, 875): every
+    /// pass-count and partition-count boundary on both sides. A rebase that
+    /// moves one must update the port and this table.
+    func testVectorAttentionRouteMatchesTheCoreDispatchBoundaries() {
+        typealias R = PagedKVVectorAttentionRoute
+        func route(_ n: Int, q: Int = 16, kv: Int = 2, d: Int = 256, l: Int = 1, mask: Bool = true, arch: String = "applegpu_g15d") -> R.Route? {
+            R.route(keyTokens: n, queryTokens: l, queryHeads: q, kvHeads: kv, headDim: d, valueDim: d,
+                    hasArrayMask: mask, architecture: arch, partitionOverride: nil)
+        }
+        let one = R.Route(twoPass: false, partitions: 32, gqaKernel: false)
+        func two(_ p: Int, gqa: Bool = false) -> R.Route { R.Route(twoPass: true, partitions: p, gqaKernel: gqa) }
+        // Ultra ('d'), A3B decode shape (8 query heads per KV head).
+        XCTAssertEqual(route(1023), one)
+        XCTAssertEqual(route(1024), two(128))
+        XCTAssertEqual(route(16383), two(128))
+        XCTAssertEqual(route(16384), two(512))
+        XCTAssertEqual(route(65535), two(512))
+        XCTAssertEqual(route(65536), two(1024))
+        // 27B decode shape (6 per KV head) and a 2-simdgroup shape.
+        XCTAssertEqual(route(16384, q: 24, kv: 4), two(512))
+        XCTAssertEqual(route(8192, q: 4, kv: 2), two(128))
+        XCTAssertEqual(route(8193, q: 4, kv: 2), two(256))
+        // Verify widths multiply the simdgroups.
+        XCTAssertEqual(route(16384, q: 4, kv: 2, l: 3), two(512))
+        // The `_gqa` first pass: no array mask, one query, 8x GQA, head dim 64/128, 8192+ keys.
+        XCTAssertEqual(route(8191, d: 128, mask: false), two(128))
+        XCTAssertEqual(route(8192, d: 128, mask: false), two(128, gqa: true))
+        XCTAssertEqual(route(8192, d: 128, mask: true), two(128))
+        XCTAssertEqual(route(8192, d: 256, mask: false), two(128))
+        // Max ('s').
+        XCTAssertEqual(route(1023, arch: "applegpu_g15s"), one)
+        XCTAssertEqual(route(1024, arch: "applegpu_g15s"), two(64))
+        XCTAssertEqual(route(1025, arch: "applegpu_g15s"), two(128))
+        XCTAssertEqual(route(8193, arch: "applegpu_g15s"), two(256))
+        XCTAssertEqual(route(32769, arch: "applegpu_g15s"), two(512))
+        XCTAssertEqual(route(65537, arch: "applegpu_g15s"), two(1024))
+        // Other devices: two passes only with GQA from 4096 keys.
+        XCTAssertEqual(route(4095, arch: "applegpu_g13g"), one)
+        XCTAssertEqual(route(4096, arch: "applegpu_g13g"), two(64))
+        XCTAssertEqual(route(4096, q: 2, kv: 2, arch: "applegpu_g13g"), one)
+        XCTAssertEqual(route(4096, q: 4, kv: 2, arch: "applegpu_g13g"), two(32))
+        // Prompt chunks and unknown shapes have no vector route.
+        XCTAssertNil(route(4096, l: 9))
+        XCTAssertNil(route(4096, arch: ""))
+        // The override applies to every two-pass call.
+        XCTAssertEqual(
+            R.route(keyTokens: 2048, queryTokens: 1, queryHeads: 16, kvHeads: 2, headDim: 256, valueDim: 256,
+                    hasArrayMask: true, architecture: "applegpu_g15d", partitionOverride: 96),
+            two(96)
+        )
+    }
+
+    /// Rows that share the padded call: exactly those whose lone route equals
+    /// it; an unknown route shares nothing.
+    func testOnlyRowsInThePaddedCallsRouteShareIt() {
+        typealias E = PagedKVRowAttentionExtent
+        func shared(_ extents: [E], width: Int = 1, padded: Int, mask: Bool = true, lone: Bool = false, arch: String = "applegpu_g15d") -> Set<Int> {
+            PagedKVVectorAttentionRoute.rowsMatchingPaddedCall(
+                extents: extents, queryTokens: width, paddedKeyTokens: padded, queryHeads: 16, kvHeads: 2,
+                headDim: 256, valueDim: 256, paddedCallHasArrayMask: mask, loneCallHasArrayMask: lone,
+                architecture: arch, partitionOverride: nil
+            )
+        }
+        let decode = [601, 902, 1502, 3001, 9001].map { E(queryTokens: 1, keyTokens: $0) }
+        XCTAssertEqual(shared(decode, padded: 9001), [2, 3, 4])
+        XCTAssertEqual(shared(decode + [E(queryTokens: 1, keyTokens: 16400)], padded: 16400), [5])
+        XCTAssertEqual(shared(decode, padded: 9001, mask: false), [], "without an array mask the padded call attends padding")
+        XCTAssertEqual(shared(decode, padded: 9001, arch: ""), [], "unknown route: every row splits")
+        let verify = [E(queryTokens: 3, keyTokens: 1503), E(queryTokens: 2, keyTokens: 3002), E(queryTokens: 3, keyTokens: 9003)]
+        XCTAssertEqual(shared(verify, width: 3, padded: 9003, lone: true), [0, 2])
+        XCTAssertEqual(shared(verify.map { E(queryTokens: 12, keyTokens: $0.keyTokens) }, width: 12, padded: 9012), [], "prompt chunks never share")
+    }
+
     /// Which batched attention calls split per row: only padded ones.
     func testRowAttentionExtentsSplitOnlyPaddedRows() {
         typealias Extent = PagedKVRowAttentionExtent

@@ -3791,6 +3791,127 @@ struct PagedKVRowAttentionExtent: Equatable {
     let keyTokens: Int
 }
 
+/// The vector attention route MLX core takes for a call (query length at
+/// most 8), ported from core fork `Augustas11/mlx` tag
+/// `v0.32.2-macprovider.2`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+/// vector mode at line 812 (`q_pre.shape(2) <= 8`), one vs two passes at
+/// line 875, the `_gqa` first-pass kernel at lines 469-473, the partition
+/// count at lines 486-523 (with the `MLX_SDPA_BLOCKS` override at 519).
+/// Within one route a row's result does not depend on padding: both kernels
+/// (`kernels/sdpa_vector.h`) deal key `i` to partition `i mod P`, skip
+/// masked keys, and reduce the `P` partials in a fixed order. A rebase that
+/// changes that dispatch must update this port; the route-table test and the
+/// cache-level bitwise tests fail when a boundary moves (runbook per-rebase
+/// gate). An unknown route never shares the padded call.
+enum PagedKVVectorAttentionRoute {
+    struct Route: Equatable {
+        let twoPass: Bool
+        let partitions: Int
+        let gqaKernel: Bool
+    }
+
+    /// The Metal architecture name core reads, and its `MLX_SDPA_BLOCKS`
+    /// override (rounded up to 32 as core does).
+    static let deviceArchitecture: String = ModelRuntime.metalArchitectureForQuantizedRoutes()
+    static let partitionOverride: Int? = {
+        guard let raw = ProcessInfo.processInfo.environment["MLX_SDPA_BLOCKS"],
+              let value = Int(raw), value > 0
+        else { return nil }
+        return ((value + 31) / 32) * 32
+    }()
+
+    static func route(
+        keyTokens n: Int,
+        queryTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        hasArrayMask: Bool,
+        architecture: String,
+        partitionOverride: Int?
+    ) -> Route? {
+        guard queryTokens >= 1, queryTokens <= 8, kvHeads > 0, queryHeads % kvHeads == 0,
+              let device = architecture.last
+        else { return nil }
+        let large = device == "d" || device == "s"
+        let twoPass = (large && n >= 1024) || (kvHeads < queryHeads && n >= 4096)
+        guard twoPass else { return Route(twoPass: false, partitions: 32, gqaKernel: false) }
+        let gqaKernel = !hasArrayMask && queryTokens == 1 && queryHeads == 8 * kvHeads
+            && headDim == valueDim && (headDim == 64 || headDim == 128) && n >= 8192
+        let simdGroups = (queryHeads / kvHeads) * queryTokens
+        var partitions: Int
+        if device == "s" {
+            partitions = 64
+            if n > 1024 && simdGroups > 4 {
+                partitions = n <= 8192 ? 128 : n <= 32768 ? 256 : n <= 65536 ? 512 : 1024
+            }
+        } else if device == "d" {
+            partitions = 128
+            if simdGroups <= 2 && n > 8192 {
+                partitions = 256
+            } else if simdGroups >= 6 {
+                if n >= 16384 && n < 65536 {
+                    partitions = 512
+                } else if n >= 65536 {
+                    partitions = 1024
+                }
+            }
+        } else {
+            partitions = simdGroups >= 4 ? 64 : 32
+        }
+        if let partitionOverride { partitions = partitionOverride }
+        return Route(twoPass: true, partitions: partitions, gqaKernel: gqaKernel)
+    }
+
+    /// Rows whose lone call takes the padded call's route, so the padded call
+    /// gives them their lone bits. Empty when the call is not a vector call,
+    /// the padded call has no array mask (it would then attend padding), or
+    /// the architecture is unknown.
+    static func rowsMatchingPaddedCall(
+        extents: [PagedKVRowAttentionExtent],
+        queryTokens: Int,
+        paddedKeyTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        paddedCallHasArrayMask: Bool,
+        loneCallHasArrayMask: Bool,
+        architecture: String = deviceArchitecture,
+        partitionOverride: Int? = partitionOverride
+    ) -> Set<Int> {
+        guard paddedCallHasArrayMask,
+              let padded = route(
+                  keyTokens: paddedKeyTokens,
+                  queryTokens: queryTokens,
+                  queryHeads: queryHeads,
+                  kvHeads: kvHeads,
+                  headDim: headDim,
+                  valueDim: valueDim,
+                  hasArrayMask: true,
+                  architecture: architecture,
+                  partitionOverride: partitionOverride
+              )
+        else { return [] }
+        return Set(extents.indices.filter { row in
+            let extent = extents[row]
+            return extent.queryTokens == queryTokens
+                && route(
+                    keyTokens: extent.keyTokens,
+                    queryTokens: extent.queryTokens,
+                    queryHeads: queryHeads,
+                    kvHeads: kvHeads,
+                    headDim: headDim,
+                    valueDim: valueDim,
+                    hasArrayMask: loneCallHasArrayMask,
+                    architecture: architecture,
+                    partitionOverride: partitionOverride
+                ) == padded
+        })
+    }
+}
+
 enum PagedKVRowAttention {
     /// Per-row extents when one batched SDPA call would not give every row
     /// its lone bits, else nil (one call is exact). Rows whose keys or query
@@ -4067,14 +4188,21 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
     /// but MLX core picks its kernel from the padded shape: the vector
     /// (decode/verify) kernels choose one or two passes and the two-pass
     /// partition count from the key length, and the unfused prompt path
-    /// (head dims 192/256) blocks its GEMMs by it. Either changes a row's
-    /// floating-point reduction order with its neighbours. So when rows are
-    /// padded, each row attends in its own call over exactly its own keys and
-    /// query columns with the mask its lone call takes: none for one decode
-    /// token, the causal mask for a prompt chunk, and its own slice of the
-    /// packed mask for MTP verification. Rows of one length, and a model that
-    /// calls SDPA itself, keep the single call. Every other operator stays
-    /// batched.
+    /// (head dims 192/256) blocks its GEMMs by it. Either can change a row's
+    /// floating-point reduction order with its neighbours.
+    ///
+    /// For prompt chunks every padded row attends in its own call over exactly
+    /// its own keys with the causal mask. For the vector kernels a padded row
+    /// keeps its lone bits whenever its own key length selects the same route
+    /// as the padded call (`PagedKVVectorAttentionRoute`): both kernels deal
+    /// key `i` to partition `i mod P` and skip masked keys. So one batched
+    /// call serves every row whose lone route equals the padded call's, and
+    /// only the others (a short row below the two-pass switch, a row in
+    /// another partition-count class, a narrower verify row) attend in their
+    /// own call with the mask their lone call takes: none for one decode
+    /// token, their slice of the packed mask for MTP verification. Rows of
+    /// one length, and a model that calls SDPA itself, keep the single call.
+    /// Every other operator stays batched.
     func updateAndAttend(
         queries: MLXArray,
         keys incomingKeys: MLXArray,
@@ -4117,7 +4245,23 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
             }
             packedMask = array
         }
+        // Rows the one padded call already gives their lone bits.
+        let sharedRows = PagedKVVectorAttentionRoute.rowsMatchingPaddedCall(
+            extents: extents,
+            queryTokens: queryTokens,
+            paddedKeyTokens: keys.dim(2),
+            queryHeads: queries.dim(1),
+            kvHeads: keys.dim(1),
+            headDim: queries.dim(3),
+            valueDim: values.dim(3),
+            paddedCallHasArrayMask: { if case .array = mask { return true } else { return false } }(),
+            loneCallHasArrayMask: packedRows != nil
+        )
+        let shared = sharedRows.isEmpty ? nil : batched()
         return concatenated(extents.enumerated().map { row, extent in
+            if let shared, sharedRows.contains(row) {
+                return shared[row ..< row + 1, 0..., 0..., 0...]
+            }
             let rowMask: MLXFast.ScaledDotProductAttentionMaskMode
             if let packedMask {
                 rowMask = .array(packedMask[row ..< row + 1, 0..., ..<extent.queryTokens, ..<extent.keyTokens])
