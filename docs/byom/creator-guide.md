@@ -18,6 +18,8 @@ Buyers call your pool as described in the [buyer guide](buyer-guide.md).
   <https://api.malibu.tech/auth/github/start>). Use the same GitHub user for
   the claim and the key.
 - A model you are licensed to serve commercially.
+- An invite code for each new provider Mac (see
+  [Get an invite code](#get-an-invite-code)).
 
 You run two roles, usually on the same Mac:
 
@@ -28,10 +30,48 @@ You run two roles, usually on the same Mac:
 
 ## 1. Install and claim the Mac
 
+### Get an invite code
+
+A new provider Mac needs an invite code to get its provider credential.
+Without one the install stops with `referral_required` (exit 20 when it
+cannot prompt). Invites come from Macs already on the network:
+
+- Ask anyone who runs a Malibu provider for their invite link. It looks like
+  `https://malibu.tech/j#/<code>`; the code is the part after `#/`. Opening
+  the link at <https://malibu.tech/j> checks the code and offers the
+  download.
+- A provider finds its own link in the Malibu app, or reads it from the
+  coordinator with its provider token:
+
+  ```bash
+  curl -s https://coordinator.malibu.tech/v1/provider/referrals \
+    -H "Authorization: Bearer $PROVIDER_TOKEN"
+  ```
+
+  The response carries `invite_code` and `invite_url` (the link above) once
+  that Mac has served its first request, and `remaining` says how many
+  invites are left.
+
+Each code admits a limited number of new Macs. Once you run a provider, your
+own Macs can invite your next ones.
+
+### Install
+
 ```bash
 curl -fsSL https://get.malibu.tech/install.sh | bash
 macprovider-cli claim
 ```
+
+The installer asks for the invite code before it downloads anything. For an
+unattended install, write the code to a file only you can read
+(`chmod 600`) and pass its path:
+
+```bash
+curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_REFERRAL_CODE_FILE=/path/to/code bash
+```
+
+The installer creates `~/.config/macprovider` itself on a Mac that has never
+run Malibu.
 
 `claim` opens <https://portal.malibu.tech/claim>, where you sign in with
 GitHub. Pass `--no-browser` to print the URL instead of opening it. The Mac
@@ -46,6 +86,21 @@ List the Macs you have claimed and their provider ids:
 ```bash
 macprovider-cli creator providers
 ```
+
+### Hardware trust
+
+During install the Mac submits autotune evidence about its chip, memory and
+benchmarks, authenticated with its provider credential. A Mac whose identity
+passed Apple App Attest is trusted automatically as soon as the evidence
+checks out, with no operator step. Any other Mac waits for approval by two
+Malibu operators. Today neither the CLI nor the Malibu app submits App
+Attest, so new hardware is approved by operators.
+
+Waiting for that approval does not fail an install or an update. If evidence
+is already on file and pending, the installer prints `hardware evidence
+already submitted; verification pending` and carries on, and
+`macprovider-cli doctor` shows `hardware_evidence: pending`. It resubmits on
+the next update.
 
 ## 2. Create the pool
 
@@ -192,7 +247,8 @@ macprovider-cli models admission status <candidate> --json
 ```
 
 Use the same discovery flags as in `propose` (for example
-`--llamacpp-origin` and `--llamacpp-model-path`). `status` should show
+`--llamacpp-model-path`; see [Engine ports](#engine-ports) for when an
+`--*-origin` flag is needed). `status` should show
 `binding_scope: pool` and your `pool_model_id`. To withdraw an offer, use
 `models admission withdraw`. An offer answered `409 replay_conflict` means a
 different offer for that candidate is already recorded: withdraw it, then
@@ -279,6 +335,32 @@ Notes:
   so.
 - Switching a Mac to another engine is a new offer and a restart.
 
+### Engine ports
+
+`models discover`, `evaluate`, `propose` and `offer` find each engine on its
+usual port: Ollama 11434, LM Studio 1234, llama.cpp 8080, `mlx_lm.server`
+8080 then 8081 (never Malibu's own serve port). oMLX is looked at only when
+its origin and `MACPROVIDER_OMLX_MODEL_PATH` are both set.
+
+- If the config's `model` names an engine (`ollama:`, `lmstudio:`,
+  `llamacpp:`, `mlxlm:`, `omlx:`) and `loopback_origin` is set, these
+  commands use that origin for that engine. No flag is needed for a
+  non-default port.
+- To look at an engine the config does not serve, on a non-default port, pass
+  its flag: `--ollama-origin`, `--lmstudio-origin`, `--llamacpp-origin`
+  (`MACPROVIDER_MLXLM_ORIGIN` / `MACPROVIDER_OMLX_ORIGIN` for the MLX
+  servers). A flag set to anything but the engine's default port wins over
+  the config.
+- An `mlx_lm.server` that serves a snapshot outside the provider model store
+  and the Hugging Face cache is skipped, and `discover` lists the
+  `mlxlm_loopback` adapter as `unavailable`. The other engines are still
+  discovered. To use that snapshot, set `MACPROVIDER_MLXLM_MODEL_PATH` to its
+  directory. A command that names an `mlxlm:` candidate still stops with the
+  reason.
+- LM Studio models are read from `~/.lmstudio/models`. If you run the CLI
+  with a different home (for example an isolated `CFFIXED_USER_HOME`), set
+  `MACPROVIDER_LMSTUDIO_MODELS_ROOT` to LM Studio's real models directory.
+
 ## Limits
 
 Per creator account (SPEC-043 0.3.1, enforced by the coordinator):
@@ -316,6 +398,8 @@ Buyers pay your signed rates under the standard formula and platform fee.
 
 | Symptom | Cause |
 |---|---|
+| `referral_required` on install | The Mac has no invite code; see [Get an invite code](#get-an-invite-code) |
+| `hardware evidence already submitted; verification pending` | Not an error. The Mac's evidence is waiting for trust; install and update continue |
 | `not logged in` | Run `creator login` first |
 | `no local keys for pool ...` | Run `creator keygen` on the Mac that holds the keys |
 | `admit` finds no provider | The Mac is not claimed by your GitHub user, or not connected |

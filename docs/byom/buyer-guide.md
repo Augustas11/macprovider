@@ -7,6 +7,9 @@ you need to call one.
 Base URL: `https://api.malibu.tech/v1`. If you run the pool yourself, see the
 [creator guide](creator-guide.md).
 
+Buyers need no invite code: a Malibu API key is enough. Invite codes are only
+for adding provider Macs, which the creator guide covers.
+
 ## 1. Get your account id
 
 Use a normal Malibu API key (sign in at
