@@ -3787,6 +3787,140 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             if path.exists():
                 path.unlink()
 
+    # SPEC-023 §16.9 (SPEC-023-R026): macprovider.intake-decision.v2.
+    def pool_pair(self) -> tuple[str, str]:
+        artifact = self.artifact_obj["models"][self.KEY]["artifacts"]["mlx-4bit"]
+        return artifact["hash_algorithm"], artifact["hash"]
+
+    def pool_proven_source(self, **row_overrides) -> dict:
+        algorithm, artifact_hash = self.pool_pair()
+        row = {
+            "artifact_hash_algorithm": algorithm, "artifact_hash": artifact_hash,
+            "paid_request_count": 120, "distinct_provider_count": 4, "suppressed": False,
+            "license_id": "Apache-2.0", "probe_evidence_digest": "e" * 64, "probe_evaluated_at": "2026-09-29T00:00:00Z",
+        }
+        row.update(row_overrides)
+        return {
+            "schema": "model_admission_pool_proven.v1",
+            "nonce": "0123456789abcdef0123456789abcdef",
+            "generated_at": "2026-09-30T12:00:00Z",
+            "window_start": "2026-08-31T12:00:00Z",
+            "window_end": "2026-09-30T12:00:00Z",
+            "k_anonymity_min": 3,
+            "rows": [row],
+        }
+
+    def write_pool_proven(self, **row_overrides) -> bytes:
+        return self.write("model-admission-pool-proven.json", self.pool_proven_source(**row_overrides))
+
+    def pool_proven_value(self, data: bytes) -> dict:
+        frame = json.loads(data)
+        value = dict(frame["rows"][0])
+        value.update(window_start=frame["window_start"], window_end=frame["window_end"], source_sha256=catalog_release.sha256(data))
+        return value
+
+    def manifest_v2(self, decisions: list) -> dict:
+        m = self.manifest(decisions)
+        m["schema_version"] = "macprovider.intake-decision.v2"
+        m["thresholds"]["intake_pool_paid_request_floor"] = 100
+        for d in m["decisions"]:
+            d.setdefault("pool_proven_evidence", None)
+        return m
+
+    def pool_entry(self, data: bytes) -> dict:
+        entry = self.admit_entry()
+        entry["admission_clause"] = "pool_proven"
+        entry["pool_proven_evidence"] = self.pool_proven_value(data)
+        return entry
+
+    def test_v2_pool_proven_admission_is_re_derived(self):
+        # A v2 decision without the pool clause carries a null value.
+        self.validate(self.manifest_v2([self.admit_entry()]))
+        data = self.write_pool_proven()
+        self.validate(self.manifest_v2([self.pool_entry(data)]))
+        self.rejects(self.manifest_v2([self.admit_entry()]), "not cited by the manifest")
+        entry = self.admit_entry()
+        entry["pool_proven_evidence"] = self.pool_proven_value(data)
+        self.rejects(self.manifest_v2([entry]), "non-null exactly when admission_clause is pool_proven")
+        entry = self.pool_entry(data)
+        entry["pool_proven_evidence"] = None
+        self.rejects(self.manifest_v2([entry]), "non-null exactly when admission_clause is pool_proven")
+        promote = self.promote_entry()
+        promote["pool_proven_evidence"] = self.pool_proven_value(data)
+        (self.release_dir / "stats-intake.json").unlink()
+        (self.release_dir / "model-admission-intake.json").unlink()
+        self.rejects(self.manifest_v2([promote]), "pool_proven_evidence must be null for promote_recommendable")
+
+    def test_v1_cannot_select_pool_proven_and_v2_is_closed(self):
+        data = self.write_pool_proven()
+        m = self.manifest([self.pool_entry(data)])
+        self.rejects(m, "unknown key(s) ['pool_proven_evidence']")
+        entry = self.pool_entry(data)
+        del entry["pool_proven_evidence"]
+        self.rejects(self.manifest([entry]), "admission_clause must be one of")
+        m = self.manifest_v2([self.pool_entry(data)])
+        del m["thresholds"]["intake_pool_paid_request_floor"]
+        self.rejects(m, "missing key(s) ['intake_pool_paid_request_floor']")
+        m = self.manifest_v2([self.pool_entry(data)])
+        m["decisions"][0]["pool_proven_evidence"]["extra"] = 1
+        self.rejects(m, "unknown key(s) ['extra']")
+
+    def test_pool_proven_value_must_match_the_retained_frame(self):
+        data = self.write_pool_proven()
+        for field, value, fragment in (
+            ("paid_request_count", 121, "disagrees with the retained source on ['paid_request_count']"),
+            ("source_sha256", "d" * 64, "names no retained model-admission-pool-proven.json"),
+            ("window_start", "2026-08-31T00:00:00Z", "disagrees with the retained source on ['window_start']"),
+            ("artifact_hash", "f" * 64, "is not a verified artifact"),
+        ):
+            with self.subTest(field=field):
+                entry = self.pool_entry(data)
+                entry["pool_proven_evidence"][field] = value
+                self.rejects(self.manifest_v2([entry]), fragment)
+
+    def test_pool_proven_floors_licence_probe_and_suppression(self):
+        for overrides, fragment in (
+            ({"paid_request_count": 99}, "below intake_pool_paid_request_floor"),
+            ({"distinct_provider_count": None, "paid_request_count": None, "suppressed": True}, "a suppressed pool-proven value satisfies no floor"),
+            ({"probe_evidence_digest": None, "probe_evaluated_at": None}, "no current passing known-answer record"),
+            ({"license_id": None}, "no agreed licence"),
+        ):
+            with self.subTest(overrides=overrides):
+                data = self.write_pool_proven(**overrides)
+                self.rejects(self.manifest_v2([self.pool_entry(data)]), fragment)
+        data = self.write_pool_proven()
+        m = self.manifest_v2([self.pool_entry(data)])
+        m["thresholds"]["INTAKE_OFFER_FLOOR"] = 5
+        self.rejects(m, "below INTAKE_OFFER_FLOOR")
+
+    def test_pool_proven_frame_age_and_schema(self):
+        data = self.write_pool_proven()
+        m = self.manifest_v2([self.pool_entry(data)])
+        m["generated_at"] = "2026-10-01T12:00:01Z"
+        m["decisions"][0]["as_of"] = "2026-10-01T12:00:01Z"
+        self.rejects(m, "more than 24 hours before the release")
+        source = self.pool_proven_source()
+        source["rows"][0]["probe_evaluated_at"] = "2026-08-01T00:00:00Z"
+        data = self.write("model-admission-pool-proven.json", source)
+        self.rejects(self.manifest_v2([self.pool_entry(data)]), "must lie in the trailing 30 days")
+        source = self.pool_proven_source()
+        source["schema"] = "model_admission_intake_offer_counts.v1"
+        data = self.write("model-admission-pool-proven.json", source)
+        self.rejects(self.manifest_v2([self.pool_entry(data)]), "schema must be model_admission_pool_proven.v1")
+        data = self.write("model-admission-pool-proven.json", self.pool_proven_source(), mode=0o644)
+        self.rejects(self.manifest_v2([self.pool_entry(data)]), "must be mode 0600")
+
+    def test_intake_pool_proven_value_command_derives_the_value(self):
+        data = self.write_pool_proven()
+        with patch.object(catalog_release, "ARTIFACT_SOURCE_PATH", pathlib.Path(self.tmp.name) / "artifact-source.json"):
+            (pathlib.Path(self.tmp.name) / "artifact-source.json").write_text(json.dumps(self.artifact_obj))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                catalog_release.cmd_intake_pool_proven_value(CANDIDATE_OBJ["version"], self.KEY, self.audit_dir, None)
+            self.assertEqual(json.loads(out.getvalue()), self.pool_proven_value(data))
+            with self.assertRaises(catalog_release.CatalogError):
+                catalog_release.cmd_intake_pool_proven_value(CANDIDATE_OBJ["version"], self.KEY, self.audit_dir, "f" * 64)
+
     def test_a_reconstructible_admission_and_promotion_are_accepted(self):
         self.validate(self.manifest([self.admit_entry()]))
         self.rejects(self.manifest([self.promote_entry()]), "not cited by the manifest")
