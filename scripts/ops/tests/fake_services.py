@@ -47,6 +47,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path == "/buyer/healthz":
+            # The buyer listener's /healthz: no compatibility policy fields.
+            return self.send(200, '{"status": "ok"}')
         if self.path == "/healthz":
             d = json.loads(read("healthz.json", "{}"))
             if d.pop("_policy", None) == "running":

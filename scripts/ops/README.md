@@ -151,7 +151,7 @@ PEARL_INSTALL_ROOT=/opt/macprovider PEARL_BACKUP_ROOT=/root/macprovider-backups
 PEARL_CONFIG_GUARD=/usr/local/share/macprovider/scripts/coordinator_config_guard.py
 PEARL_UPDATER_LOCK=/run/lock/macprovider-pearl-updater.lock
 PEARL_CONNECTION_EVENTS_DB=/var/lib/macprovider/provider_connection_events.db
-PEARL_COORDINATOR_HEALTHZ_URL=http://127.0.0.1:8443/healthz
+PEARL_COORDINATOR_HEALTHZ_URL=http://127.0.0.1:8444/healthz  # provider listener; :8443 lacks the policy
 PEARL_PRIVACY_METADATA_DIR=/opt/macprovider/privacy-release-identities
 PEARL_RELEASE_PUBLIC_KEY_PATH=/usr/local/share/macprovider/release-signing-public.pem
 ```
