@@ -1620,6 +1620,14 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private var inferenceGate: AsyncSemaphore
+    /// SPEC-038-R011: bounds buyer rows submitted to the CB scheduler at the
+    /// served slot count (the self-check's grant), on every surface (relay and
+    /// direct HTTP). Scheduler rows (`maxBatch`) may be larger.
+    private let buyerBatchGate: AsyncSemaphore
+    /// Set by `serve` when the self-check owns the served count; a swap then
+    /// serves the owner pin or one slot until the new model's check decides.
+    private var servedSlotsManaged = false
+    private var ownerPinnedServedSlots: Int?
     private let blockingInferenceExecutor: BlockingInferenceExecutor
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
@@ -2684,6 +2692,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.buyerBatchGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
@@ -2932,13 +2941,16 @@ actor ModelRuntime: ModelRuntimeServing {
                     // not the reference.
                     var receipt: NativeMTPSelfTestReceipt?
                     var mtpSeconds = Double.infinity
-                    for _ in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+                    for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+                        // Distinct request ids: a repeated id would replay the
+                        // scheduler's retained result instead of running.
                         let start = Date()
                         receipt = try await self.executeNativeMTPSelfTest(
                             nativeMTPLoad.selfTestInput,
                             scheduler: scheduler,
                             capability: nativeMTPLoad.capability,
-                            servedSnapshotID: nativeMTPLoad.servedSnapshotID
+                            servedSnapshotID: nativeMTPLoad.servedSnapshotID,
+                            attempt: attempt
                         )
                         mtpSeconds = min(mtpSeconds, Date().timeIntervalSince(start))
                     }
@@ -3257,6 +3269,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.conversationCache = ConversationCache()
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.buyerBatchGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
@@ -3597,7 +3610,8 @@ actor ModelRuntime: ModelRuntimeServing {
         _ input: NativeMTPSelfTestInput,
         scheduler: ContinuousBatchScheduler,
         capability: NativeMTPCapability,
-        servedSnapshotID: String
+        servedSnapshotID: String,
+        attempt: Int = 0
     ) async throws -> NativeMTPSelfTestReceipt {
         guard let challenge = input.selectedChallenge,
               let servedSnapshot = input.servedSnapshot else {
@@ -3612,11 +3626,11 @@ actor ModelRuntime: ModelRuntimeServing {
             targetGeneration: servedSnapshot.generation
         )
         let schedulerResult = try await scheduler.submitNativeMTPIntegrityProbe(ContinuousBatchSchedulerRequest(
-            id: "native-mtp-selftest-\(challenge.challengeID)",
+            id: "native-mtp-selftest-\(challenge.challengeID)-\(attempt)",
             conversationKey: "",
             promptTokens: challenge.promptTokenIDs,
             maxOutputTokens: challenge.maxCompletionTokens,
-            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: "native-mtp-selftest-\(challenge.challengeID)"),
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: "native-mtp-selftest-\(challenge.challengeID)-\(attempt)"),
             temperature: 0,
             topP: 1,
             decodePath: .nativeMTP,
@@ -4422,8 +4436,19 @@ actor ModelRuntime: ModelRuntimeServing {
     /// grant, and the relay admits at most the advertised slots. Never above
     /// `maxBatch`: the memory envelope and scheduler were sized for it. A
     /// request already holding a permit of the replaced gate releases it there.
-    func applyServedSlots(_ slots: Int) {
-        inferenceGate = AsyncSemaphore(value: min(max(1, slots), maxBatch))
+    func applyServedSlots(_ slots: Int) async {
+        let served = min(max(1, slots), maxBatch)
+        await inferenceGate.resize(to: served)
+        await buyerBatchGate.resize(to: served)
+    }
+
+    func configureServedSlots(managed: Bool, ownerPinned: Int?) {
+        servedSlotsManaged = managed
+        ownerPinnedServedSlots = ownerPinned
+    }
+
+    func servedSlotLimitForTest() async -> Int {
+        await buyerBatchGate.currentLimit()
     }
 
     /// The self-check subject for the loaded model, or nil when there is
@@ -4461,9 +4486,20 @@ actor ModelRuntime: ModelRuntimeServing {
         return !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
     }
 
-    func applyContinuousBatchingSelfCheck(_ state: ContinuousBatchingSelfCheckState, servedSlots: Int) {
+    /// Applies a decision only while `expected` is still the loaded subject,
+    /// so a result measured on one model never lands on a swapped-in one.
+    @discardableResult
+    func applyContinuousBatchingSelfCheck(
+        _ state: ContinuousBatchingSelfCheckState,
+        servedSlots: Int,
+        expected: ContinuousBatchingSelfCheckKey? = nil
+    ) async -> Bool {
+        if let expected, continuousBatchingSelfCheckTarget(includeDecided: true)?.key != expected {
+            return false
+        }
         continuousBatchingSelfCheck = state
-        applyServedSlots(servedSlots)
+        await applyServedSlots(servedSlots)
+        return true
     }
 
     func setContinuousBatchingSelfCheckReport(_ report: ContinuousBatchingSelfCheckReport?) {
@@ -5334,7 +5370,15 @@ actor ModelRuntime: ModelRuntimeServing {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
             maxBatch = adoptionKnobs.maxBatch
-            inferenceGate = AsyncSemaphore(value: adoptionKnobs.maxBatch)
+        }
+        // A managed provider serves the owner pin or one slot until the new
+        // model's self-check (or its stored result) decides.
+        let swapServedSlots: Int? = servedSlotsManaged
+            ? min(ownerPinnedServedSlots ?? 1, maxBatch)
+            : adoptionKnobs?.maxBatch
+        if let swapServedSlots {
+            await inferenceGate.resize(to: swapServedSlots)
+            await buyerBatchGate.resize(to: swapServedSlots)
         }
         currentContainer = container
         currentModelID = modelID
@@ -5453,7 +5497,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: weightsManifestSHA256,
             maxContextTokens: adoptionKnobs?.maxContext,
             maxContextSource: adoptionKnobs?.contextSource,
-            maxConcurrency: adoptionKnobs?.maxBatch,
+            maxConcurrency: swapServedSlots,
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
             specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
         )
@@ -6709,8 +6753,11 @@ actor ModelRuntime: ModelRuntimeServing {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
+            let buyerBatchGate = buyerBatchGate
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest)
+                try await buyerBatchGate.withPermit {
+                    try await scheduler.submit(submission.schedulerRequest)
+                }
             }
         } catch {
             if let lease {
@@ -7162,32 +7209,35 @@ actor ModelRuntime: ModelRuntimeServing {
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
+            let buyerBatchGate = buyerBatchGate
             result = try await Self.withDrainAndClientCancellation(
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
-                    guard !drainCancelled.isFired,
-                          !shouldCancel(),
-                          !idleCancellation.isFired
-                    else {
-                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
-                        return
-                    }
-                    // Receipt TTFT is the first buyer-visible chunk this row
-                    // emits, after stop/UTF-8/tool filtering. A duplicate or
-                    // replay waiter's catch-up events never define it.
-                    if streamState.step(
-                        eventTokens: event.replayTokens ?? [event.token],
-                        stopTokenFilter: stopTokenFilter,
-                        requestStops: requestStops,
-                        structuredAccumulator: structuredAccumulator,
-                        idleState: idleState,
-                        onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
-                    ) {
-                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
-                    }
-                })
+                try await buyerBatchGate.withPermit {
+                    try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                        guard !drainCancelled.isFired,
+                              !shouldCancel(),
+                              !idleCancellation.isFired
+                        else {
+                            Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                            return
+                        }
+                        // Receipt TTFT is the first buyer-visible chunk this row
+                        // emits, after stop/UTF-8/tool filtering. A duplicate or
+                        // replay waiter's catch-up events never define it.
+                        if streamState.step(
+                            eventTokens: event.replayTokens ?? [event.token],
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: requestStops,
+                            structuredAccumulator: structuredAccumulator,
+                            idleState: idleState,
+                            onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
+                        ) {
+                            Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                        }
+                    })
+                }
             }
         } catch {
             if let lease {
@@ -9054,13 +9104,16 @@ actor ModelRuntime: ModelRuntimeServing {
                         temperature: 0.0,
                         topP: 1.0
                     )
-                    return try await blockingInferenceExecutor.run { _ in
+                    return try await blockingInferenceExecutor.run { cancellation in
+                        // Yield to a buyer at once: the driver cancels this
+                        // task when a request arrives.
                         BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                            GenerateDisposition.more
+                            cancellation.isCancelled ? GenerateDisposition.stop : GenerateDisposition.more
                         })
                     }
                 }
             }
+            try Task.checkCancellation()
             seconds += Date().timeIntervalSince(start)
             tokens += result.generationTokenCount
         }

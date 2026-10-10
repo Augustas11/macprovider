@@ -40,7 +40,8 @@ enum AutoServedSlots {
         draftConfigured: Bool,
         emergencyOff: Bool,
         provisionalPolicyEntry: Bool,
-        recommendedSlots: () -> Int
+        recommendedSlots: () -> Int,
+        memoryFitKnown: Bool = false
     ) -> Plan {
         let configured = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlots)
         if source == .owner {
@@ -54,9 +55,12 @@ enum AutoServedSlots {
         }
         let recommended = min(max(1, recommendedSlots()), ProviderCapacity.maxConcurrencyOverrideLimit)
         if provisionalPolicyEntry {
+            // SPEC-023-R009: never above a computable memory fit; without one
+            // the configured count already served keeps its rows.
+            let rows = memoryFitKnown ? recommended : max(recommended, configured)
             return Plan(
-                rows: max(recommended, configured),
-                initialServed: configured,
+                rows: rows,
+                initialServed: min(configured, rows),
                 ownerPinned: nil,
                 reason: "provisional_policy_entry"
             )

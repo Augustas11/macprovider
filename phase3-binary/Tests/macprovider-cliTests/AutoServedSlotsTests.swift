@@ -63,6 +63,21 @@ final class AutoServedSlotsTests: XCTestCase {
         XCTAssertEqual(provisional, .init(rows: 8, initialServed: 8, ownerPinned: nil, reason: "provisional_policy_entry"))
     }
 
+    func testProvisionalGrantStaysWithinAComputableMemoryFit() {
+        let bounded = AutoServedSlots.plan(
+            configuredSlots: 8, source: nil, draftConfigured: false, emergencyOff: false,
+            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: true
+        )
+        XCTAssertEqual(bounded.rows, 4)
+        XCTAssertEqual(bounded.initialServed, 4)
+        let unknown = AutoServedSlots.plan(
+            configuredSlots: 8, source: nil, draftConfigured: false, emergencyOff: false,
+            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: false
+        )
+        XCTAssertEqual(unknown.rows, 8)
+        XCTAssertEqual(unknown.initialServed, 8)
+    }
+
     func testDraftModelAndEmergencyOffForceOneSlotWithoutSelfCheck() {
         let draft = plan(configured: 4, draft: true, provisional: true, recommended: 8)
         XCTAssertEqual(draft.rows, 1)

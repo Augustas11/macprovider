@@ -775,10 +775,12 @@ must re-measure before it can serve batched traffic.
 
 **(v0.1.15)** The paragraph above is superseded for activation. The ceiling
 is enforced on each Mac by the SPEC-038 FR-CB10 self-check: batched traffic is
-served only at a slot count whose measured aggregate tokens/s, on that Mac and
+served only at a slot count whose measured median gain, on that Mac and
 runtime revision, is at least 1.2x stock serial decode in the same idle
-window, with every row token-identical to the same prompt alone on the paged
-engine. A longer idle-time measurement over every granted slot count replaces
+window, with every row equal to the same prompt alone on the paged engine or
+first differing only at a near-tie under the load-time isolation probe's
+rule (SPEC-038 FR-CB10). On a Mac that already batches the model, throughput
+alone never removes the grant (SPEC-038 FR-CB10 v0.3.15). A longer idle-time measurement over every granted slot count replaces
 the startup micro-benchmark this paragraph rejected. The signed policy may
 only revoke a model artifact on a runtime revision (Metal library SHA-256 and
 kernel identifier); it no longer grants acceptance.

@@ -1731,11 +1731,12 @@ func TestParseAuthRequestRejectsOversizedHandshakeFields(t *testing.T) {
 
 func TestParseHeartbeatAcceptsBoundedCBSelfCheck(t *testing.T) {
 	base := `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":5,"slots_free":5,"slots_total":5,"throughput_tps_estimate":10.0,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0`
-	hb, _, _, err := ParseHeartbeat([]byte(base + `,"cb_self_check":{"decision":"granted","served_slots":5,"verified_k":6,"deferrals":0,"model_sha256":"abc","metallib_sha256":"def","kernel_identifier":"k","hardware_class":"apple-silicon:Apple M2:ram-24gb","os_build":"Version 26.5 (Build 25F71)"}}`))
+	hb, _, _, err := ParseHeartbeat([]byte(base + `,"cb_self_check":{"decision":"granted","served_slots":5,"verified_k":6,"deferrals":0,"model_sha256":"abc","metallib_sha256":"def","kernel_identifier":"k","hardware_class":"apple-silicon:Apple M2:ram-24gb","os_build":"Version 26.5 (Build 25F71)","runtime_build":"72c4ab08/0.32.3+ca2f61d2"}}`))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if hb.CBSelfCheck == nil || hb.CBSelfCheck.Decision != "granted" || hb.CBSelfCheck.VerifiedK != 6 || hb.CBSelfCheck.ServedSlots != 5 {
+	if hb.CBSelfCheck == nil || hb.CBSelfCheck.Decision != "granted" || hb.CBSelfCheck.VerifiedK != 6 || hb.CBSelfCheck.ServedSlots != 5 ||
+		hb.CBSelfCheck.RuntimeBuild == nil || *hb.CBSelfCheck.RuntimeBuild != "72c4ab08/0.32.3+ca2f61d2" {
 		t.Fatalf("cb_self_check = %+v", hb.CBSelfCheck)
 	}
 	if hb, _, _, err := ParseHeartbeat([]byte(base + `}`)); err != nil || hb.CBSelfCheck != nil {

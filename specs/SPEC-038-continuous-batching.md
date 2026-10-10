@@ -998,10 +998,10 @@ above are superseded where they conflict:
    runs through the production scheduler, so it probes at the serve path's
    own decode lockstep window, and its prompts have unequal lengths (short to
    about 1.5k tokens) because batched decode pads keys to the longest row,
-   which can change a neighbour's attention route. For each slot count k on the
-   SPEC-023-R009 ladder from 2 to the scheduler rows, it submits k distinct
-   fixed greedy prompts together, twice (the first pass also compiles kernels
-   for that row count). Every row of both passes MUST equal that prompt run
+   which can change a neighbour's attention route. Every slot count k from 2 to
+   the scheduler rows is checked (a grant covers every row count below it):
+   it submits k distinct fixed greedy prompts together. Every row MUST equal
+   that prompt run
    alone on the same paged engine, or first differ only at a numerical
    near-tie judged by the load-time isolation probe's own rule: at the first
    differing position both tokens are the stock serial top two for the
@@ -1012,9 +1012,10 @@ above are superseded where they conflict:
    different order and MoE gathers group rows differently, so exact
    serial-vs-batched token identity is not required; the load-time SPEC-039
    parity and isolation probes remain the quality gate against stock serial
-   decode. Each k runs three repeats of stock serial decode then the batch,
-   back to back on the same prompts; the gain is the median batch/serial
-   ratio. It grants the k with the highest gain, preferring the lowest k
+   decode. On the SPEC-023-R009 ladder rungs each k runs three repeats of
+   stock serial decode then the batch, back to back on the same prompts; the
+   gain is the median batch/serial ratio (widths between rungs are verified
+   for isolation but not picked). It grants the rung with the highest gain, preferring the lowest k
    within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
    Mac serves serially. The highest k whose rows all passed is recorded as
    `verified_k`.
@@ -1025,23 +1026,39 @@ above are superseded where they conflict:
    beyond the probe rule, or a crashed step) may revoke or lower the grant,
    and never below `verified_k`. A throughput result may raise it but not
    lower it. A no-gain result keeps the grant (`kept_prior_grant_*`, logged)
-   and schedules a re-measurement (1 h, doubling); only three consecutive
-   clear losses (best exact gain below 1.0x) end it (`no_net_gain_confirmed`).
+   and schedules a re-measurement (1 h, doubling); three consecutive clear
+   losses (best exact gain below 1.0x) lower it to 2 slots
+   (`kept_prior_grant_lowered_no_gain`) and never to serial. While a new
+   runtime identity is checked, a Mac with an older grant for the same model
+   and hardware keeps serving it (`prior_grant_pending_recheck`).
 3. The check MUST NOT block serving. It runs only while no request is in
    flight after an idle interval and abandons a step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and
-   consecutive deferrals back off (doubling, at most 15 minutes). Progress is
-   written before each step: a step found unfinished on restart (the process
-   died, e.g. a Metal OOM at a high k) is never retried on that key, and the
-   decision uses the steps that passed below it (`crashed_at_<k>` when none).
+   consecutive deferrals back off (doubling, at most 15 minutes). Each width
+   is journaled before any inference for it runs (its alone runs included),
+   and a width whose journal write fails is not run: a step found unfinished
+   on restart (the process died, e.g. a Metal OOM at a high k), including
+   during a re-measurement of a kept grant, is never retried on that key, and
+   the decision uses the widths that passed below it (`crashed_at_<k>` when
+   none). Self-check serial runs stop generating as soon as a request
+   arrives.
    Until it decides, the provider serves one slot serially, except that a
    signed positive entry for the served model artifact is a provisional grant
    that keeps its configured count and batching (so an already-enabled model
    never drops on a new build).
+Accepted limits (security review): a party able to block the policy or
+revocation feed can keep a revoked tuple eligible, because an absent policy
+revokes nothing (operator decision; a verified revocation is enforced); and
+the near-tie rule is a heuristic, so contamination that lands on a row's own
+top-two token without matching another row's token at that position is not
+detected by it. The load-time isolation probe and the per-width checks bound
+both.
+
 4. The served count MUST NOT exceed `verified_k`, including an owner pin
    (a pin may lower the count, never raise it past what was verified). The
    decision (`granted`, `no_net_gain`, `row_divergence_at_<k>`,
-   `crashed_at_<k>`, `serial_baseline_unavailable`, or `pending`/`deferred`
+   `crashed_at_<k>`, `serial_baseline_unavailable`, `kept_prior_grant_*`,
+   `prior_grant_pending_recheck`, or `pending`/`deferred`
    before one exists), served slots, `verified_k`, deferral count and the
    runtime identity it was measured on are reported in `/v1/status`
    `continuous_batching.self_check` and on heartbeats as `cb_self_check`
@@ -1090,8 +1107,15 @@ NOT change `slots_total`.
    provisional grant's configured count) and becomes the FR-CB10 self-check's
    k, applied live: the serial-path gate and the advertised capacity change;
    the scheduler is not rebuilt, and the relay admits at most `slots_total`
-   requests, so active rows never exceed it. A stored self-check result for
-   the loaded tuple applies at startup before the first advertisement.
+   requests and every buyer row (relay or direct HTTP) takes a permit of a
+   buyer-batch gate sized to `slots_total`, so active rows never exceed it.
+   Both gates resize in place: holders keep their permits and nobody new is
+   admitted above a lowered limit. A capacity change is published at once. A
+   stored self-check result for the loaded tuple applies at startup before
+   the first advertisement, clamped to the rows after the startup memory
+   bound; a provisional grant never exceeds a computable memory fit. A warm
+   swap or adoption serves the owner pin or one slot until the new model's
+   stored result, prior grant or self-check applies.
 4. A tuple that cannot batch at all (no attached engine, revoked) serves 1.
 
 Loopback runtimes (SPEC-046) and autotune children keep their configured

@@ -1607,7 +1607,7 @@ func parseCBSelfCheck(v json.RawMessage) (*pool.ProviderCBSelfCheck, error) {
 			return nil, fmt.Errorf("cb_self_check counts must be in 0..1000000")
 		}
 	}
-	for _, s := range []*string{selfCheck.ModelSHA256, selfCheck.MetallibSHA256, selfCheck.KernelIdentifier, selfCheck.HardwareClass, selfCheck.OSBuild} {
+	for _, s := range []*string{selfCheck.ModelSHA256, selfCheck.MetallibSHA256, selfCheck.KernelIdentifier, selfCheck.HardwareClass, selfCheck.OSBuild, selfCheck.RuntimeBuild} {
 		if s != nil && (len(*s) > 256 || !isPrintableASCII(*s)) {
 			return nil, fmt.Errorf("cb_self_check identity fields must be at most 256 printable ASCII bytes")
 		}

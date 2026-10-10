@@ -498,6 +498,7 @@ type ProviderCBSelfCheck struct {
 	KernelIdentifier *string `json:"kernel_identifier"`
 	HardwareClass    *string `json:"hardware_class"`
 	OSBuild          *string `json:"os_build"`
+	RuntimeBuild     *string `json:"runtime_build,omitempty"`
 }
 
 // SetCBSelfCheck records the self-check state carried on the heartbeat just
@@ -515,7 +516,7 @@ func cloneProviderCBSelfCheck(in *ProviderCBSelfCheck) *ProviderCBSelfCheck {
 		return nil
 	}
 	out := *in
-	for _, field := range []**string{&out.ModelSHA256, &out.MetallibSHA256, &out.KernelIdentifier, &out.HardwareClass, &out.OSBuild} {
+	for _, field := range []**string{&out.ModelSHA256, &out.MetallibSHA256, &out.KernelIdentifier, &out.HardwareClass, &out.OSBuild, &out.RuntimeBuild} {
 		if *field != nil {
 			value := **field
 			*field = &value

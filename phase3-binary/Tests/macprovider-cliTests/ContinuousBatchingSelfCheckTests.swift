@@ -82,22 +82,35 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: kept.decision, ownerPinned: nil, maxRows: 16), 8)
     }
 
-    func testOnlyRepeatedClearLossesTakeAPriorGrant() {
+    func testRepeatedClearLossesLowerButNeverSwitchBatchingOff() {
         let losing = [m(2, tps: 30), m(4, tps: 35)]
         let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: losing)
         var streak = 0
-        for round in 1...ContinuousBatchingSelfCheck.confirmedNoGainStreak {
+        for round in 1...(ContinuousBatchingSelfCheck.confirmedNoGainStreak + 2) {
             let result = ContinuousBatchingSelfCheck.reconcile(
                 fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: losing, previousStreak: streak
             )
             streak = result.streak
-            if round < ContinuousBatchingSelfCheck.confirmedNoGainStreak {
-                XCTAssertGreaterThan(result.decision.slots, 1, "round \(round) keeps batching")
-            } else {
-                XCTAssertEqual(result.decision.reason, "no_net_gain_confirmed")
-                XCTAssertEqual(result.decision.slots, 1)
+            XCTAssertGreaterThan(result.decision.slots, 1, "round \(round): throughput alone never revokes")
+            XCTAssertEqual(result.decision.state, .granted(slots: result.decision.slots))
+            if round >= ContinuousBatchingSelfCheck.confirmedNoGainStreak {
+                XCTAssertEqual(result.decision.slots, 2)
+                XCTAssertEqual(result.decision.reason, "kept_prior_grant_lowered_no_gain")
             }
+            XCTAssertNotNil(result.remeasureAfterSeconds)
         }
+    }
+
+    /// Isolation-only widths between rungs verify rows but are not picked.
+    func testIsolationOnlyWidthsVerifyButAreNotGranted() {
+        var nine = m(9, tps: 400)
+        nine.throughputMeasured = false
+        let decision = ContinuousBatchingSelfCheck.decide(
+            serialTPS: 50,
+            measurements: [m(2, tps: 90), m(8, tps: 150), nine, m(10, exact: false, tps: 50)]
+        )
+        XCTAssertEqual(decision.verifiedSlots, 9)
+        XCTAssertEqual(decision.slots, 8)
     }
 
     func testCorrectnessStillRevokesOrLowersAPriorGrant() {

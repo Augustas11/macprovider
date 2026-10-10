@@ -2683,6 +2683,17 @@ struct ServeCommand: AsyncParsableCommand {
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
             let configuredSlots = resolved.maxConcurrencyOverride
+            let servedContextTokens = ProviderCapacity(
+                maxContextOverride: resolved.maxContextOverride,
+                maxConcurrencyOverride: nil
+            ).maxContextTokens
+            let memoryFitCap = AutoServedSlots.memoryFitSlots(
+                configJSONData: servedConfigJSONData,
+                memoryGB: memoryGB,
+                catalogMinRAMGB: servedCatalogMinRAMGB,
+                contextTokens: servedContextTokens,
+                weightsBytes: servedWeightsBytes
+            )
             let plan = AutoServedSlots.plan(
                 configuredSlots: configuredSlots,
                 source: resolved.maxConcurrencySource,
@@ -2697,18 +2708,10 @@ struct ServeCommand: AsyncParsableCommand {
                     AutoServedSlots.recommendedSlots(
                         chip: MachineFingerprinter().sample().chip,
                         memoryGB: memoryGB,
-                        memoryFitCap: AutoServedSlots.memoryFitSlots(
-                            configJSONData: servedConfigJSONData,
-                            memoryGB: memoryGB,
-                            catalogMinRAMGB: servedCatalogMinRAMGB,
-                            contextTokens: ProviderCapacity(
-                                maxContextOverride: resolved.maxContextOverride,
-                                maxConcurrencyOverride: nil
-                            ).maxContextTokens,
-                            weightsBytes: servedWeightsBytes
-                        )
+                        memoryFitCap: memoryFitCap
                     )
-                }
+                },
+                memoryFitKnown: memoryFitCap != nil
             )
             resolved.maxConcurrencyOverride = plan.rows
             autoServedSlots = plan
@@ -2968,32 +2971,44 @@ struct ServeCommand: AsyncParsableCommand {
         // slot when this tuple cannot batch at all.
         let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
         if let plan = autoServedSlots, let mlxRuntime = modelRuntime as? ModelRuntime {
-            var served = plan.initialServed
+            // The startup bound may have lowered the rows below the plan.
+            let rows = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+            var served = min(plan.initialServed, rows)
             var source = plan.reason
             if plan.ownerPinned == nil, !(await mlxRuntime.continuousBatchingCapableForServedSlots()) {
                 served = 1
                 source = "cb_unavailable_for_loaded_tuple"
             }
-            if plan.selfChecked,
-               let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),
-               let decision = cbSelfCheckStore.decision(for: target.key) {
-                served = ContinuousBatchingSelfCheck.servedSlots(
-                    decision: decision, ownerPinned: plan.ownerPinned, maxRows: target.maxRows
-                )
-                source = "stored_self_check_\(decision.reason)"
-                await mlxRuntime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: served)
-                await mlxRuntime.setContinuousBatchingSelfCheckReport(.init(
-                    decision: decision.reason,
-                    servedSlots: served,
-                    verifiedSlots: decision.verifiedSlots,
-                    key: target.key
-                ))
+            await mlxRuntime.configureServedSlots(managed: plan.selfChecked, ownerPinned: plan.ownerPinned)
+            if plan.selfChecked, let target = await mlxRuntime.continuousBatchingSelfCheckTarget() {
+                let record = cbSelfCheckStore.record(for: target.key)
+                if let decision = record?.decision, record?.inProgressSlots == nil {
+                    served = ContinuousBatchingSelfCheck.servedSlots(
+                        decision: decision, ownerPinned: plan.ownerPinned, maxRows: target.maxRows
+                    )
+                    source = "stored_self_check_\(decision.reason)"
+                    await mlxRuntime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: served)
+                    await mlxRuntime.setContinuousBatchingSelfCheckReport(.init(
+                        decision: decision.reason,
+                        servedSlots: served,
+                        verifiedSlots: decision.verifiedSlots,
+                        key: target.key
+                    ))
+                } else if plan.ownerPinned == nil, let prior = cbSelfCheckStore.priorGrant(for: target.key), prior > served {
+                    // This Mac batched the model under an older runtime
+                    // identity: keep batching while the new one is checked.
+                    served = min(prior, target.maxRows)
+                    source = "prior_grant_pending_recheck"
+                    await mlxRuntime.applyContinuousBatchingSelfCheck(.granted(slots: served), servedSlots: served)
+                } else {
+                    await mlxRuntime.applyServedSlots(served)
+                }
             } else {
                 await mlxRuntime.applyServedSlots(served)
             }
             resolved.maxConcurrencyOverride = served
             FileHandle.standardError.write(Data(
-                "event=served_slots action=applied slots=\(served) rows=\(plan.rows) reason=\(source)\n".utf8
+                "event=served_slots action=applied slots=\(served) rows=\(rows) reason=\(source)\n".utf8
             ))
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
@@ -3129,7 +3144,11 @@ struct ServeCommand: AsyncParsableCommand {
                 providerStatus: providerStatus,
                 store: cbSelfCheckStore,
                 ownerPinnedSlots: plan.ownerPinned,
-                provisionalSlots: plan.reason == "provisional_policy_entry" ? plan.initialServed : nil,
+                provisional: plan.reason == "provisional_policy_entry"
+                    ? resolved.modelArtifactSHA256.map {
+                        ContinuousBatchingSelfCheckDriver.Provisional(modelSHA256: $0, slots: plan.initialServed)
+                    }
+                    : nil,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

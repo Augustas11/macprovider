@@ -705,7 +705,7 @@ actor ProviderStatus {
 
     /// SPEC-038-R011: the continuous-batching self-check changed the served
     /// slot count; heartbeats and relay admission read it from here.
-    func updateServedSlots(_ slots: Int) {
+    func updateServedSlots(_ slots: Int) async {
         capacity = ProviderCapacity(
             maxContextOverride: capacity.maxContextTokens,
             maxConcurrencyOverride: max(1, slots),
@@ -713,6 +713,9 @@ actor ProviderStatus {
             maxContextSource: capacity.maxContextSource,
             throughputProbe: capacity.throughputProbe
         )
+        // Publish the new slot count at once (request-capacity handler), so
+        // coordinator routing does not keep the old count until a heartbeat.
+        await refreshAvailabilityState()
     }
 
     func completeTargetSwap(
