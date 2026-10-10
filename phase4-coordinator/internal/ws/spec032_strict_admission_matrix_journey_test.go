@@ -48,7 +48,7 @@ type spec032MapEvidence struct {
 	byProvider map[string]autotune.VerifiedEvidence
 }
 
-func (m spec032MapEvidence) LatestVerified(_ context.Context, providerID string, _ time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (m spec032MapEvidence) LatestVerified(_ context.Context, providerID string) (autotune.VerifiedEvidence, bool, error) {
 	ev, ok := m.byProvider[providerID]
 	return ev, ok, nil
 }

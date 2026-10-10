@@ -127,13 +127,21 @@ no production config load may make the tuple selectable before that promotion.
    the local self-test. `GET /v1/status` must show `native_mtp.enabled=true`
    and `mode` of `eligible` or `active`.
 
-## Weekly renewal
+## Renewal and revocation slots
 
-`renew-autotune-static-feed-signed.yml` re-binds the sidecar to each new release
-ID: `restamp` rewrites the release input's `release_id` and its 89-day window,
-and `continuity-check` accepts exactly that change. It also republishes 14 days
-of revocation slots. If a renewal is missed, the previous batch still covers at
-least one more week.
+The admission sidecar and self-test bank no longer expire on the provider
+(SPEC-023 v0.22.20), so there is no scheduled re-sign. An on-demand restamp
+(`scripts/renew-autotune-static-feed.sh`) still re-binds the sidecar to a new
+release ID: `restamp` rewrites the release input's `release_id` and its 89-day
+window, and `continuity-check` accepts exactly that change. Run one before the
+live admission's `expires_at` only if CLIs older than SPEC-023 v0.22.20 still
+serve native MTP then.
+
+Revocation slots are published on demand
+(`scripts/publish-native-mtp-revocations.sh --deploy`). Providers keep
+enforcing the newest verified revoked set they hold after the batch ages out,
+and the coordinator keeps serving the newest issued slot (SPEC-023 v0.22.23),
+so a missed publish never turns native MTP off.
 
 ## Emergency revocation
 

@@ -143,8 +143,6 @@ func FixedPoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
 var (
 	defaultCatalog atomic.Pointer[Catalog]
 
-	nowUTC = func() time.Time { return time.Now().UTC() }
-
 	// releasePublisher, when set, receives every validated reload instead of
 	// an immediate singleton swap, so the Tier-2 material becomes visible in
 	// the SAME atomic release publication as the admission catalog, the
@@ -267,7 +265,7 @@ func BuildStrict(cfg config.Tier2Config, logger zerolog.Logger, guards ...func(*
 	}
 	if cfg.RequireHashVerified && !next.Active() {
 		if next.Configured() {
-			return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
+			return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires an active catalog; the current catalog failed to load")
 		}
 		return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires a configured catalog")
 	}
@@ -333,7 +331,7 @@ func (c *Catalog) ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger)
 	return nil
 }
 
-// Active reports whether c currently has a non-expired ParsedCatalog loaded.
+// Active reports whether c currently has a verified ParsedCatalog loaded.
 func (c *Catalog) Active() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -357,7 +355,7 @@ func (c *Catalog) LoadFailed() bool {
 }
 
 // CatalogUnavailable returns true when c was configured but the catalog is
-// not currently usable (load failed, or expired since load).
+// not currently usable (load failed).
 func (c *Catalog) CatalogUnavailable() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -589,7 +587,7 @@ func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool
 	return Default().RouteSnapshotMaterial(modelID, reportedHash)
 }
 
-// ResetForTest swaps in a fresh package-singleton Catalog and restores nowUTC.
+// ResetForTest swaps in a fresh package-singleton Catalog.
 //
 // Deprecated: prefer constructing a local *Catalog via NewCatalog() and
 // passing it to dependent constructors via ws.WithCatalog. Retained for
@@ -597,7 +595,6 @@ func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool
 // that still drive the package-level shim API.
 func ResetForTest() {
 	defaultCatalog.Store(NewCatalog())
-	nowUTC = func() time.Time { return time.Now().UTC() }
 }
 
 // --- Stateless helpers (no Catalog state) -----------------------------------
@@ -735,9 +732,10 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 	if !issuedAt.Before(expiresAt) {
 		return nil, fmt.Errorf("issued_at must be before expires_at")
 	}
-	if !nowUTC().Before(expiresAt) {
-		return nil, fmt.Errorf("catalog expired")
-	}
+	// expires_at is structural only (issued_at < expires_at). A signed
+	// catalog keeps verifying model hashes after the calendar date so a
+	// missed re-sign cannot turn admission and routing off fleet-wide;
+	// withdrawal is a superseding signed catalog release (AGENTS.md rule 10).
 	models := make(map[string]ModelEntry, len(file.Models))
 	for _, model := range file.Models {
 		modelID := catalogModelKey(model.ModelID)
@@ -779,16 +777,13 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 }
 
 func activeParsedLocked(st state) *ParsedCatalog {
-	if st.active == nil || !nowUTC().Before(st.active.ExpiresAt) {
-		return nil
-	}
 	return st.active
 }
 
 // catalogUnavailableLocked returns true when a catalog was configured but is
-// not currently usable (load failed or expired).
+// not currently usable (load failed).
 func catalogUnavailableLocked(st state) bool {
-	return st.configured && activeParsedLocked(st) == nil && (st.loadFailed || st.active != nil)
+	return st.configured && st.active == nil && st.loadFailed
 }
 
 func catalogModelKey(modelID string) string {

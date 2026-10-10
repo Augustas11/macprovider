@@ -5,8 +5,8 @@ name: OpenRouter catalog propose
 # and, on digest change, a docs-only PR under docs/research/openrouter-snapshots/.
 #
 # This is NOT catalog apply. SPEC-023 forbids propose from minting a
-# rate_class or feeding catalog-release. The Wednesday restamp job
-# (renew-autotune-static-feed-signed.yml) has a content-continuity guard
+# rate_class or feeding catalog-release. A manual freshness restamp
+# (scripts/renew-autotune-static-feed.sh) has a content-continuity guard
 # that aborts on catalog changes — do not smuggle apply through it.
 # A recommendable promotion still needs an explicit §16 operator decision.
 

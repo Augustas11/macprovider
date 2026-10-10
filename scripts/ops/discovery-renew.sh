@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Signed release-discovery renewal entry point.
+# Signed release-discovery renewal entry point, on demand only (#1938): use it
+# when CLIs older than SPEC-020 v0.1.22 must rediscover a target whose newest
+# signed head is past its seven-day window. Current CLIs need no renewal.
 #
 # Usage:
 #   scripts/ops/discovery-renew.sh status          read-only; one JSON object on stdout,

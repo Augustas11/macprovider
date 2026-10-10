@@ -8,7 +8,6 @@ struct SignedReleaseDiscoveryHead: Equatable, Sendable {
     static let envelopeSchema = "macprovider.release-discovery-envelope.v1"
     static let payloadSchema = "macprovider.release-discovery.v1"
     static let keyID = "macprovider-release-p256-v1"
-    static let maxValiditySeconds: TimeInterval = 7 * 24 * 60 * 60
 
     let releaseSequence: UInt64
     let targetVersion: String
@@ -97,10 +96,12 @@ struct SignedReleaseDiscoveryHead: Equatable, Sendable {
         let minimum = signed["signed_policy_minimum"] as? String
         let normalizedMinimum = try minimum.map { try AutoUpdateRecommendation.validate($0).normalized }
         let normalizedRevoked = try revoked.map { try AutoUpdateRecommendation.validate($0).normalized }
+        // expires_at is structural only (#1938): an old head keeps working, so a
+        // missed renewal never strands self-heal. Rollback protection is the
+        // persisted release_sequence high-water mark plus digest equivocation,
+        // and withdrawal is a newer head's signed_policy_minimum/revoked set.
         guard issued <= now.addingTimeInterval(5),
-              expires > now,
-              expires.timeIntervalSince(issued) > 0,
-              expires.timeIntervalSince(issued) <= maxValiditySeconds
+              expires.timeIntervalSince(issued) > 0
         else {
             throw UpdateError.discoveryHeadExpired
         }

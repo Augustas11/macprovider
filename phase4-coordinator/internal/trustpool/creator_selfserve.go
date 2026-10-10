@@ -523,8 +523,8 @@ INSERT INTO trustpool_creator_agreement_acceptances (
 }
 
 // pauseSelfServePoolsForRenewal appends, inside the renewal transaction, a
-// paused lifecycle event for each active pool of the creator whose current
-// approval is invalid and which next would make valid again.
+// paused lifecycle event for each active pool of the creator that its current
+// approval does not let route and that next would let route again.
 func pauseSelfServePoolsForRenewal(ctx context.Context, conn *sql.Conn, approvals map[string]CreatorApproval, current, next CreatorApproval, now time.Time) ([]string, error) {
 	events, err := eventsFromQueryer(ctx, conn)
 	if err != nil {
@@ -540,7 +540,10 @@ func pauseSelfServePoolsForRenewal(ctx context.Context, conn *sql.Conn, approval
 			continue
 		}
 		version, environment := p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment
-		if current.ValidFor(p.ApprovalRecordID, version, environment, now) || !next.ValidFor(p.ApprovalRecordID, version, environment, now) {
+		// Routing validity, not the Agreement calendar (#1938): a pool keeps
+		// routing through an elapsed grace period, so renewing then must not
+		// interrupt it.
+		if current.RoutingInvalidReason(p.ApprovalRecordID, version, environment, now) == "" || next.RoutingInvalidReason(p.ApprovalRecordID, version, environment, now) != "" {
 			continue
 		}
 		paused = append(paused, id)

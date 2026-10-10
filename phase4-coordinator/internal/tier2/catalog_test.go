@@ -81,46 +81,34 @@ func TestLoadCatalogRejectsCorruptedBodyAndLogsSignatureInvalid(t *testing.T) {
 	}
 }
 
-func TestLoadCatalogRejectsExpiredCatalog(t *testing.T) {
+// expires_at is structural only: a signed catalog past its calendar date
+// still loads, stays active, and keeps verifying hashes (#1938).
+func TestLoadCatalogAcceptsCatalogPastExpiresAt(t *testing.T) {
 	defer ResetForTest()
 	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(-time.Hour), testHash)
 	path := writeTempCatalog(t, raw)
 
-	_, err := LoadCatalog(path, publicKey, zerolog.Nop())
-	if err == nil || !strings.Contains(err.Error(), "catalog expired") {
-		t.Fatalf("LoadCatalog err=%v, want expired", err)
+	if _, err := LoadCatalog(path, publicKey, zerolog.Nop()); err != nil {
+		t.Fatalf("LoadCatalog past expires_at: %v", err)
 	}
-}
-
-func TestActiveCatalogExpiresAtUseTime(t *testing.T) {
-	defer ResetForTest()
-	base := time.Now().UTC()
-	nowUTC = func() time.Time { return base }
-	raw, publicKey := signedCatalogFixture(t, base.Add(time.Hour), testHash)
-	path := writeTempCatalog(t, raw)
 	cfg := config.Default()
 	cfg.Tier2.CatalogPath = path
 	cfg.Tier2.CatalogPublicKey = publicKey
+	cfg.Tier2.RequireHashVerified = true
 	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
-	if !Active() {
-		t.Fatal("catalog should be active before expiry")
+	if !Active() || CatalogUnavailable() {
+		t.Fatal("catalog past expires_at must stay active")
 	}
-
-	nowUTC = func() time.Time { return base.Add(2 * time.Hour) }
-
-	if Active() {
-		t.Fatal("expired catalog should not remain active")
+	if !Catalogued("model-a") {
+		t.Fatal("catalog past expires_at must keep model catalogued")
 	}
-	if !CatalogUnavailable() {
-		t.Fatal("expired configured catalog should be unavailable")
+	if got := VerifyProviderHash("model-a", testHash); got != pool.HashStatusVerified {
+		t.Fatalf("VerifyProviderHash past expires_at=%q want %q", got, pool.HashStatusVerified)
 	}
-	if Catalogued("model-a") {
-		t.Fatal("expired catalog should not mark model catalogued")
-	}
-	if got := VerifyProviderHash("model-a", testHash); got != pool.HashStatusCatalogUnavailable {
-		t.Fatalf("VerifyProviderHash after expiry=%q want %q", got, pool.HashStatusCatalogUnavailable)
+	if _, err := BuildStrict(cfg.Tier2, zerolog.Nop(), func(*Catalog) error { return nil }); err != nil {
+		t.Fatalf("SIGHUP reload of catalog past expires_at rejected: %v", err)
 	}
 }
 

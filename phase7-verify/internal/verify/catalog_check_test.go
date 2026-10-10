@@ -175,6 +175,34 @@ func TestCatalogCheckHashMatch(t *testing.T) {
 	}
 }
 
+// expires_at is structural only (#1938): a receipt checked against a
+// validly signed catalog past its calendar date still verifies.
+func TestCatalogCheckHashMatchPastCatalogExpiresAt(t *testing.T) {
+	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	path, pub := writeSignedCatalog(t, "tc", time.Now().Add(-time.Minute), []catalogModel{{
+		ModelID: "model-a",
+		SHA256:  hash,
+	}})
+	parsed := receipt.Parsed{
+		Tuple: receipt.Tuple{
+			ModelID:          "model-a",
+			ReceiptVersion:   "3",
+			ModelHashPresent: true,
+			ModelHash:        hash,
+		},
+	}
+	opts := VerifyOpts{
+		Catalog: CatalogOpts{Enabled: true, Path: path, Pubkey: pub},
+	}
+	v := applyCatalogCheck(parsed, opts, time.Now().Add(365*24*time.Hour))
+	if v.Result != "" {
+		t.Fatalf("catalog past expires_at should not short-circuit: got %q (%s)", v.Result, v.Reason)
+	}
+	if v.ModelHashVerified == nil || !*v.ModelHashVerified {
+		t.Fatalf("ModelHashVerified = %v, want pointer-to-true", v.ModelHashVerified)
+	}
+}
+
 // SPEC-015 §M.3.2.1 — the tampered-catalog end-to-end path through
 // applyCatalogCheck must surface details.alg with the observed
 // signature.alg so schema validation passes (the v0.3 schema

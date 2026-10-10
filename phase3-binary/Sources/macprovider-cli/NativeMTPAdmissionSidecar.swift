@@ -1206,10 +1206,11 @@ enum NativeMTPAdmissionSidecar {
         guard issuedAt <= now else {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.issued_at")
         }
-        guard issuedAt < expiresAt, expiresAt.timeIntervalSince(issuedAt) <= 90 * 24 * 60 * 60 else {
-            throw NativeMTPAdmissionSidecarError.invalidValue("$.expires_at")
-        }
-        guard expiresAt > now else {
+        // expires_at is structural only (issued_at < expires_at): a signed
+        // admission keeps authorizing native MTP after its calendar date so a
+        // missed renewal cannot turn native MTP off fleet-wide. Withdrawal is a
+        // superseding release_id, the revocation feed, or emergency-off.
+        guard issuedAt < expiresAt else {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.expires_at")
         }
         let signerKeyID = try requireASCIIString(object, "signer_key_id", path: "$", range: 1...128)

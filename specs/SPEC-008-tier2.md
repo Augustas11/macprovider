@@ -1,8 +1,10 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.7.0 (2026-09-23, catalog serving closure and Tier-2 reload observability)
+**Version:** 0.7.1 (2026-10-10, catalog `expires_at` structural only)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.7.1 (2026-10-10, issue #1938 — no calendar expiry on live features):** §5.2: the catalog `expires_at` is structural only. The coordinator parses it and requires `issued_at < expires_at`, but a validly signed catalog stays active after that date: it is not marked `catalog_unavailable`, it keeps verifying provider hashes, and a SIGHUP reload of it is accepted. Withdrawal is a superseding signed catalog (catalog-content release) or a key rotation (§5.2.1). Release tooling still requires a future `expires_at` on an incoming catalog so coordinators and receipt verifiers built before this change keep accepting it. No wire field, routing predicate, trust tier, or attestation label changes.
 
 **Change log v0.7.0 (2026-09-23, #1688 catalog-content lane):** New §5.10 registers `SPEC-008-R002` (deny-by-default serving closure: every recommendable, rate-carded catalog model must be pinned by a matching Tier-2 entry unless listed in the reviewed `not-buyer-serving.json`), `SPEC-008-R003` (`tier2_catalog_id` and `tier2_sha256` on the `autotune_feed_sighup_reload` success event and the boot compatibility log), and `SPEC-008-R004` (offline `--validate-autotune-release` dry-load using a strict Tier-2 build that publishes no global state), with AC-A-7..AC-A-9. No routing predicate, wire field, trust tier, or attestation label changes. Consumed by SPEC-023 v0.15.0 `SPEC-023-R017`.
 
@@ -1045,6 +1047,12 @@ member, serialized with deterministic JSON:
 - no insignificant whitespace,
 - arrays in declared order,
 - lowercase hex SHA-256 strings.
+
+`expires_at` is structural only: the coordinator MUST require it to parse as
+RFC 3339 and to be later than `issued_at`, and MUST NOT deactivate, refuse to
+load, or refuse to reload a validly signed catalog because the wall clock has
+passed it. Withdrawal is a superseding signed catalog or a key rotation
+(§5.2.1), never a calendar date.
 
 The coordinator MUST verify the signature using `tier2.catalog_public_key`
 before accepting any entry. If verification fails, the coordinator MUST reject

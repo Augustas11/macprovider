@@ -29,7 +29,13 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 		trustExpired    bool
 		trustPresent    bool
 		nowOffset       time.Duration
-		wantOK          bool
+		// laterEvidence, when set, is a newer submission (any status) whose
+		// evidence is mutated by laterEvidence (#1938 re-benchmark trigger).
+		laterEvidence func(map[string]any)
+		// laterGeneratedAt offsets the later submission's generated_at from
+		// the verified job's (default +1 minute).
+		laterGeneratedAt time.Duration
+		wantOK           bool
 	}{
 		{
 			name:            "current verified exact tuple admits",
@@ -85,21 +91,62 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			nowOffset:       time.Hour,
 		},
 		{
-			name:            "evidence at ttl boundary remains current",
+			// #1938: evidence age is not a cutoff.
+			name:            "year-old evidence remains current",
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
 			profileVerified: true,
 			trustPresent:    true,
-			nowOffset:       24 * time.Hour,
+			nowOffset:       365 * 24 * time.Hour,
 			wantOK:          true,
 		},
 		{
-			name:            "evidence past ttl boundary expires",
+			name:            "later evidence from a different OS build supersedes",
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
 			profileVerified: true,
 			trustPresent:    true,
-			nowOffset:       24*time.Hour + time.Nanosecond,
+			nowOffset:       time.Hour,
+			laterEvidence: func(payload map[string]any) {
+				payload["hardware"].(map[string]any)["os_version"] = "macOS 26.1 (25B78)"
+			},
+		},
+		{
+			name:            "later evidence from different hardware supersedes",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
+			laterEvidence: func(payload map[string]any) {
+				payload["hardware"].(map[string]any)["hardware_identity_hash"] = strings.Repeat("a", 64)
+			},
+		},
+		{
+			// A later submission whose provider-supplied generated_at is not
+			// newer still supersedes: order is the coordinator job id.
+			name:             "later-ingested evidence with an older generated_at from a different OS build supersedes",
+			profileChip:      "apple m4 max",
+			profileMemory:    64,
+			profileVerified:  true,
+			trustPresent:     true,
+			nowOffset:        time.Hour,
+			laterGeneratedAt: -time.Hour,
+			laterEvidence: func(payload map[string]any) {
+				payload["hardware"].(map[string]any)["os_version"] = "macOS 26.1 (25B78)"
+			},
+		},
+		{
+			name:            "later evidence from a new CLI on the same hardware and OS does not supersede",
+			profileChip:     "apple m4 max",
+			profileMemory:   64,
+			profileVerified: true,
+			trustPresent:    true,
+			nowOffset:       time.Hour,
+			laterEvidence: func(payload map[string]any) {
+				payload["hardware"].(map[string]any)["binary_version"] = "1.8.300"
+			},
+			wantOK: true,
 		},
 	}
 
@@ -121,6 +168,29 @@ INSERT INTO hardware_verification_jobs (
 				hardwareverify.VerifiedDecisionReason, mustVerifiedEvidenceJSON(t, generatedAt)); err != nil {
 				t.Fatalf("insert verified job: %v", err)
 			}
+			if tc.laterEvidence != nil {
+				laterAt := generatedAt.Add(time.Minute)
+				if tc.laterGeneratedAt != 0 {
+					laterAt = generatedAt.Add(tc.laterGeneratedAt)
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(mustVerifiedEvidenceJSON(t, laterAt), &payload); err != nil {
+					t.Fatal(err)
+				}
+				tc.laterEvidence(payload)
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`
+INSERT INTO hardware_verification_jobs (
+    provider_id, status, chip_normalized, unified_memory_gb,
+    generated_at, decision_reason, evidence
+) VALUES (?, 'pending', ?, ?, ?, '', ?)`,
+					"mp-provider", "apple m4 max", 64, laterAt, raw); err != nil {
+					t.Fatalf("insert later job: %v", err)
+				}
+			}
 			// Back the job tuple with a trust root: NULL expiry = active, or an
 			// already-past expiry for the expired-root case.
 			var expiresAt any
@@ -139,7 +209,7 @@ INSERT INTO hardware_verification_trust (
 
 			store := NewPGEvidenceStore(db)
 			store.now = func() time.Time { return generatedAt.Add(tc.nowOffset) }
-			evidence, ok, err := store.LatestVerified(context.Background(), "mp-provider", 24*time.Hour)
+			evidence, ok, err := store.LatestVerified(context.Background(), "mp-provider")
 			if err != nil {
 				t.Fatalf("LatestVerified: %v", err)
 			}
@@ -196,7 +266,7 @@ func openAutotuneEvidenceTestDB(t *testing.T) *sql.DB {
 func TestDecodeVerifiedEvidenceRequiresImmutableBindings(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	raw := mustVerifiedEvidenceJSON(t, generatedAt)
-	evidence, err := decodeVerifiedEvidence(raw, generatedAt, generatedAt.Add(-time.Hour))
+	evidence, err := decodeVerifiedEvidence(raw, generatedAt)
 	if err != nil {
 		t.Fatalf("decodeVerifiedEvidence: %v", err)
 	}
@@ -205,7 +275,7 @@ func TestDecodeVerifiedEvidenceRequiresImmutableBindings(t *testing.T) {
 	}
 }
 
-func TestDecodeVerifiedEvidenceRejectsReboundOrStaleRows(t *testing.T) {
+func TestDecodeVerifiedEvidenceRejectsReboundRows(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name   string
@@ -234,9 +304,9 @@ func TestDecodeVerifiedEvidenceRejectsReboundOrStaleRows(t *testing.T) {
 			},
 		},
 		{
-			name: "benchmark older than admission ttl",
+			name: "benchmark generated_at invalid",
 			mutate: func(payload map[string]any) {
-				payload["benchmarks"].([]map[string]any)[0]["generated_at"] = generatedAt.Add(-2 * time.Hour).Format(time.RFC3339)
+				payload["benchmarks"].([]map[string]any)[0]["generated_at"] = "not-a-time"
 			},
 		},
 	}
@@ -253,7 +323,7 @@ func TestDecodeVerifiedEvidenceRejectsReboundOrStaleRows(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := decodeVerifiedEvidence(raw, generatedAt, generatedAt.Add(-time.Hour)); err == nil {
+			if _, err := decodeVerifiedEvidence(raw, generatedAt); err == nil {
 				t.Fatal("decodeVerifiedEvidence succeeded, want binding rejection")
 			}
 		})
@@ -268,6 +338,7 @@ func mustVerifiedEvidenceJSON(t *testing.T, generatedAt time.Time) []byte {
 		"probe_protocol":           "spec-023-harmony-stream.v2",
 		"hardware": map[string]any{
 			"binary_version":         "1.7.9",
+			"os_version":             "macOS 26.0 (25A354)",
 			"hardware_identity_hash": strings.Repeat("c", 64),
 			"executable_sha256":      strings.Repeat("e", 64),
 		},

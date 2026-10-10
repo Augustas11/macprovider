@@ -12,7 +12,7 @@ import (
 
 type erroringEvidence struct{}
 
-func (erroringEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (erroringEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return autotune.VerifiedEvidence{}, false, errors.New("evidence store down")
 }
 
@@ -51,7 +51,7 @@ func newMissingBenchmarkEvaluator(t *testing.T, quarantine bool, evidence autotu
 		TPSRatioThreshold:          0.70,
 		AlertCooldown:              time.Second,
 		QuarantineMissingBenchmark: quarantine,
-	}, missingBenchmarkCatalog(t), evidence, 30*24*time.Hour)
+	}, missingBenchmarkCatalog(t), evidence)
 	e.now = func() time.Time { return time.Unix(0, 0) }
 	return e
 }
@@ -113,7 +113,7 @@ func TestEvaluateHeartbeatDisabledEvaluatorIsInert(t *testing.T) {
 	if len(alerts) != 0 || verdict != BenchmarkVerdictUnknown {
 		t.Fatalf("nil evaluator = (%#v, %v), want (nil, Unknown)", alerts, verdict)
 	}
-	disabled := NewEvaluator(TelemetryDriftConfig{QuarantineMissingBenchmark: true}, missingBenchmarkCatalog(t), stubEvidence{ok: false}, time.Hour)
+	disabled := NewEvaluator(TelemetryDriftConfig{QuarantineMissingBenchmark: true}, missingBenchmarkCatalog(t), stubEvidence{ok: false})
 	alerts, verdict = disabled.EvaluateHeartbeatWithVerdict(context.Background(), missingBenchmarkProvider())
 	if len(alerts) != 0 || verdict != BenchmarkVerdictUnknown {
 		t.Fatalf("disabled evaluator = (%#v, %v), want (nil, Unknown)", alerts, verdict)

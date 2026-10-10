@@ -39,7 +39,10 @@ type VerifiedEvidence struct {
 }
 
 type EvidenceStore interface {
-	LatestVerified(ctx context.Context, providerID string, ttl time.Duration) (VerifiedEvidence, bool, error)
+	// LatestVerified returns the provider's newest verified evidence. Age is
+	// not a cutoff (#1938): evidence stays current until the provider submits
+	// evidence from different hardware or a different OS build.
+	LatestVerified(ctx context.Context, providerID string) (VerifiedEvidence, bool, error)
 }
 
 type AdmissionCap struct {

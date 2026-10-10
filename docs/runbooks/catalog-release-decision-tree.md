@@ -525,7 +525,7 @@ The same coordinator release changed how D1a wholesale statements price
 
 ### Renewal coverage loss
 
-Each weekly freshness renewal mints a new `release_id`. SPEC-023 §3.7.8
+Each freshness renewal (on demand since #1938) mints a new `release_id`. SPEC-023 §3.7.8
 forbids rebinding an id to new bytes, so every renewal consumes one of the 3
 retained `.previous-target` slots. A provider that has not restarted across 3
 renewals falls out of the admissible set on the 4th renewal. It is rejected
@@ -574,8 +574,8 @@ Pearl may be serving the new release, the old one, or a mixed window.
 steps below. They do not restore `coordinator.yaml`, and a hand swap of
 `current` leaves a mixed yaml/card pair. Follow [Pricing txn](#pricing-txn).
 
-1. **Freeze writers.** Disable the renewal workflow
-   (`renew-autotune-static-feed-signed.yml`) and stop
+1. **Freeze writers.** Make sure no operator restamp or revocation
+   publish is running, and stop
    `macprovider-pearl-updater.timer`. On Pearl, open and hold both locks,
    `/run/lock/macprovider-pearl-updater.lock` and
    `/opt/macprovider/.coordinator-deploy.lock` (`flock -n`), for the whole
@@ -752,8 +752,8 @@ on a journal), so a pre-#1693 deploy tag or a hand change ran during a pricing
 transaction. Two operators; never rename the journal or edit the snapshot by
 hand.
 
-1. **Freeze.** Disable the renewal workflow
-   (`renew-autotune-static-feed-signed.yml`) and stop
+1. **Freeze.** Make sure no operator restamp or revocation
+   publish is running, and stop
    `macprovider-pearl-updater.timer`. Do not take the Pearl locks yourself:
    the command in step 3 takes and holds them. Leave the coordinator stopped.
    Delete neither the snapshot nor the journal.

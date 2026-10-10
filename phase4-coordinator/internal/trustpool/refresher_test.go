@@ -10,7 +10,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
-func TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision(t *testing.T) {
+func TestRefreshRegistryKeepsRoutingAfterCreatorAgreementGrace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	db := openTrustPoolDB(t)
@@ -60,22 +60,22 @@ func TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision(t *testing.T) {
 	if !snap.Routeable || !snap.Members["provider-a"] {
 		t.Fatalf("pre-expiry snapshot = %+v, want routeable provider-a", snap)
 	}
-	initialGeneration := snap.Generation
-
+	// #1938: the Creator Agreement grace ending is a status warning; the
+	// registry keeps routing the pool.
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(-time.Second), trustpool.CreatorStatusEnabled)
-	expired, err := trustpool.RefreshRegistry(ctx, store, registry)
-	if err != nil {
-		t.Fatalf("expired RefreshRegistry: %v", err)
-	}
-	if !expired.Changed {
-		t.Fatalf("expired refresh = %+v, want changed", expired)
+	if _, err := trustpool.RefreshRegistry(ctx, store, registry); err != nil {
+		t.Fatalf("post-grace RefreshRegistry: %v", err)
 	}
 	snap = registry.Snapshot(root.poolID)
-	if !snap.Exists || snap.Routeable || !snap.RouteableExpired || len(snap.Members) != 0 || snap.Generation <= initialGeneration {
-		t.Fatalf("post-expiry snapshot = %+v, want expired closed with generation > %d", snap, initialGeneration)
+	if !snap.Exists || !snap.Routeable || snap.RouteableExpired || !snap.Members["provider-a"] {
+		t.Fatalf("post-grace snapshot = %+v, want still routeable provider-a", snap)
 	}
-	if expired.NextRefreshAtUTC != (time.Time{}) {
-		t.Fatalf("expired refresh next deadline = %s, want none", expired.NextRefreshAtUTC)
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	if p := state.Pools[root.poolID]; p.CreatorGateReason != "" || strings.Join(p.StatusWarnings, ",") != trustpool.StatusWarningCreatorAgreementExpired {
+		t.Fatalf("post-grace gate=%q warnings=%v, want no gate and the %s warning", p.CreatorGateReason, p.StatusWarnings, trustpool.StatusWarningCreatorAgreementExpired)
 	}
 }
 

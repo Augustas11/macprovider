@@ -2272,6 +2272,7 @@ type adminPoolState struct {
 	Routeable                    bool                      `json:"routeable"`
 	CreatorGateReason            string                    `json:"creator_gate_reason,omitempty"`
 	CreatorGateExpiresAtUTC      string                    `json:"creator_gate_expires_at_utc,omitempty"`
+	StatusWarnings               []string                  `json:"status_warnings,omitempty"`
 	RouteGateCheckedAtUTC        string                    `json:"route_gate_checked_at_utc,omitempty"`
 }
 
@@ -2384,6 +2385,7 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		Routeable:                      adminPoolRouteable(p),
 		CreatorGateReason:              p.CreatorGateReason,
 		CreatorGateExpiresAtUTC:        creatorGateExpiresAt,
+		StatusWarnings:                 append([]string(nil), p.StatusWarnings...),
 		RouteGateCheckedAtUTC:          routeGateCheckedAtRaw,
 	}
 }

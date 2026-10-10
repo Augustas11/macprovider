@@ -1555,10 +1555,11 @@ SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
 // verified provider_hardware_profiles row on chip_normalized + unified_memory_gb)
 // must still be backed by an UNEXPIRED hardware_verification_trust root for the
 // same (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb)
-// tuple. It deliberately OMITS the evidence-age (TTL) cutoff LatestVerified also
-// applies: revalidation evicts only on a revoked/expired trust ROOT, never on
-// benchmark staleness (which self-heals on the next verified pass and must not
-// drop an otherwise-trusted live session). clockExpr is the wall clock compared
+// tuple. It deliberately OMITS LatestVerified's newer-submission supersession
+// check (#1938; there is no evidence-age cutoff any more): revalidation evicts
+// only on a revoked/expired trust ROOT, never on a pending re-benchmark (which
+// self-heals on the next verified pass and must not drop an otherwise-trusted
+// live session). clockExpr is the wall clock compared
 // against expires_at — a $-bind for the sweep (portable to the SQLite unit-test
 // harness), clock_timestamp() for the advisory-locked re-check (sampled AFTER the
 // lock, matching revoke_hardware_trust_approval's post-lock clock so a root that

@@ -239,11 +239,29 @@ func TestNativeMTPRevocationFeedAnswers404WithoutAnIssuedSlot(t *testing.T) {
 	t.Parallel()
 	fixture := newNativeMTPFixture(t)
 	now := time.Now().UTC().Truncate(time.Second)
-	fixture.writeRevocationSlot(t, 1, now.Add(-2*time.Hour), time.Hour) // expired
-	fixture.writeRevocationSlot(t, 2, now.Add(time.Hour), time.Hour)    // future
+	fixture.writeRevocationSlot(t, 2, now.Add(time.Hour), time.Hour) // future
 	handler := nativeMTPHandler(t, fixture.cfg)
 	if rr := getForTest(handler, "/v1/native-mtp-revocations."+fixture.keyID+".json"); rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want 404", rr.Code)
+	}
+}
+
+// #1938: once every pre-signed slot has passed expires_at, the newest issued
+// slot keeps being served; a future slot is still withheld.
+func TestNativeMTPRevocationFeedServesNewestIssuedSlotPastExpiry(t *testing.T) {
+	t.Parallel()
+	fixture := newNativeMTPFixture(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	fixture.writeRevocationSlot(t, 1, now.Add(-3*time.Hour), time.Hour)
+	fixture.writeRevocationSlot(t, 2, now.Add(-2*time.Hour), time.Hour)
+	fixture.writeRevocationSlot(t, 3, now.Add(time.Hour), time.Hour)
+	handler := nativeMTPHandler(t, fixture.cfg)
+	rr := getForTest(handler, "/v1/native-mtp-revocations."+fixture.keyID+".json")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"generation":2`) {
+		t.Fatalf("served %s, want generation 2", rr.Body.String())
 	}
 }
 

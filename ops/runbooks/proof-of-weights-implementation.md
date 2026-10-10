@@ -52,8 +52,12 @@ Operator catalog pin workflow:
 ```yaml
 proof_of_weights:
   require_autotune_hello_gate: true
-  autotune_evidence_ttl_days: 30
 ```
+
+`autotune_evidence_ttl_days` is accepted and ignored since SPEC-032 v0.3.7
+(#1938): verified evidence has no age cutoff and is replaced when the provider
+re-benchmarks after a hardware or OS change. The evidence `binary_version` is
+not compared with the hello.
 
 **Requires:** signed autotune-candidates feed + onboarding Postgres (`hardware_verification_jobs` verified evidence).
 

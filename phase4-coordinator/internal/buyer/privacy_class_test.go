@@ -158,7 +158,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 			ProviderSEPublicKeys: map[string]string{"provider-a": base64.StdEncoding.EncodeToString(seRaw)},
 			ApprovedCodeIdentities: []config.ApprovedCodeIdentity{{
 				TeamID: privacyTestTeamID, SigningIdentifier: privacyTestSigning, CDHash: privacyTestCDHash,
-				BinaryVersion: privacyTestBinary, ExpiresAt: now.Add(24 * time.Hour),
+				BinaryVersion: privacyTestBinary,
 			}},
 			AllowedSEKeyBackends:            []string{relayblind.PrivacySEBackendFile, relayblind.PrivacySEBackendKeychain},
 			PostureChallengeIntervalSeconds: 60,

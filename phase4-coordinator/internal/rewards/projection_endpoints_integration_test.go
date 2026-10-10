@@ -28,7 +28,7 @@ func (projectionTokens) ValidateAndMarkTokenUsed(context.Context, string) (strin
 
 type projectionHardware struct{ calls int }
 
-func (s *projectionHardware) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s *projectionHardware) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	s.calls++
 	return autotune.VerifiedEvidence{GeneratedAt: time.Now().UTC()}, true, nil
 }
@@ -43,12 +43,12 @@ func TestRewardEndpointsShareAuthoritativeProjection(t *testing.T) {
 	accrual := rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
 		Config: config,
 		DB:     db, TokenStore: projectionTokens{}, RequireProviderTokens: true,
-		HardwareEvidence: hardware, HardwareEvidenceTTL: time.Hour,
+		HardwareEvidence: hardware,
 	})
 	wallet := rewards.NewWalletStatusHandler(rewards.WalletHandlerDeps{
 		Config:    config,
 		RewardsDB: db, TokenStore: projectionTokens{}, RequireProviderTokens: true,
-		HardwareEvidence: hardware, HardwareEvidenceTTL: time.Hour,
+		HardwareEvidence: hardware,
 	})
 	read := func(handler http.Handler, path string) map[string]any {
 		t.Helper()

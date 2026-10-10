@@ -42,7 +42,6 @@ file`) and print JSON; they never print credentials or the full config.
       config, fails closed (policy_mismatch).
 """
 import base64
-import datetime
 import hashlib
 import json
 import os
@@ -50,7 +49,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
 
 UNAPPROVED = "posture_unapproved_code_identity"
@@ -160,7 +158,7 @@ def facts(cfg_path, overlay_path, unit, version, metrics_url):
     for e in pc.get("approved_code_identities") or []:
         if isinstance(e, dict):
             approved.append({k: (str(e[k]) if e.get(k) is not None else "") for k in
-                             ("team_id", "signing_identifier", "code_cdhash", "binary_version", "expires_at")
+                             ("team_id", "signing_identifier", "code_cdhash", "binary_version")
                              if k in e})
     doc = {
         "target_id": str(compat.get("target_id") or ""),
@@ -319,24 +317,6 @@ def code_identity(payload):
             "code_cdhash": ident["slices"][0]["code_cdhash"], "binary_version": ident["binary_version"]}
 
 
-def expired(value, now):
-    """Go time.Time semantics: an RFC3339 instant with its offset; YAML may
-    hand back "YYYY-MM-DD HH:MM:SS+00:00". A value without an offset is UTC,
-    as the YAML decoder reads it. Unparseable fails closed (expired)."""
-    if not value:
-        return False
-    try:
-        text = value.strip().replace(" ", "T", 1)
-        if text.endswith(("Z", "z")):
-            text = text[:-1] + "+00:00"
-        parsed = datetime.datetime.fromisoformat(text)
-    except ValueError:
-        return True
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.timestamp() <= now
-
-
 def compat_repo(item):
     m = COMPAT_ID.fullmatch(item) if isinstance(item, str) else None
     if not m or len(item) > 256 or any(int(x) > INT64_MAX for x in m.group(2).split(".")):
@@ -431,7 +411,6 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_p
         state = "staged" if (remote, remote_sig) == (local, local_sig) else "mismatch"
     out = {"metadata_state": state, "missing": []}
     miss = out["missing"]
-    now = time.time()
     # Restart-only fields count only when the bytes on disk are exactly the
     # bytes the running process booted with (its coordinator_config_applied
     # event); anything else, including an unreadable journal, fails closed.
@@ -504,7 +483,7 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_p
     entries = [e for e in f.get("approved_code_identities", []) if e.get("code_cdhash") == cd
                and e.get("team_id") == want["team_id"] and e.get("signing_identifier") == want["signing_identifier"]]
     config_ok = out["config_applied"] and any(
-        not expired(e.get("expires_at"), now) and e.get("binary_version", "") in ("", version) for e in entries)
+        e.get("binary_version", "") in ("", version) for e in entries)
     if cd in f.get("denied_code_cdhashes", []):
         out["approved_by"] = ""
         miss.append("code_cdhash %s is in privacy_class.denied_code_cdhashes" % cd)
@@ -512,7 +491,7 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_p
         # A config entry for the identity governs over release metadata.
         out["approved_by"] = "approved_code_identities" if config_ok else ""
         if not config_ok and out["config_applied"]:
-            miss.append("privacy_class.approved_code_identities has an expired or version-mismatched entry for "
+            miss.append("privacy_class.approved_code_identities has a version-mismatched entry for "
                         "code_cdhash %s, which overrides release metadata" % cd)
     elif release_ok:
         out["approved_by"] = "release_metadata"

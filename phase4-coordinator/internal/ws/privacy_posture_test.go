@@ -460,7 +460,7 @@ func openWSPrivacyAuthority(t *testing.T, now time.Time, identity ed25519.Privat
 	cfg := config.PrivacyClassConfig{
 		Enabled:                         true,
 		ProviderSEPublicKeys:            map[string]string{"provider-a": base64.StdEncoding.EncodeToString(seRaw)},
-		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{wsApproved("0123456789abcdef0123456789abcdef01234567", now.Add(24*time.Hour))},
+		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{wsApproved("0123456789abcdef0123456789abcdef01234567")},
 		AllowedSEKeyBackends:            []string{"file", "keychain"},
 		PostureChallengeIntervalSeconds: 60,
 		PostureMaxAgeSeconds:            150,
@@ -493,7 +493,7 @@ func newWSPrivacyMaterial(t *testing.T, now time.Time) wsPrivacyMaterial {
 	cfg := config.PrivacyClassConfig{
 		Enabled:                         true,
 		ProviderSEPublicKeys:            map[string]string{"provider-a": base64.StdEncoding.EncodeToString(seRaw)},
-		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{wsApproved("0123456789abcdef0123456789abcdef01234567", now.Add(24*time.Hour))},
+		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{wsApproved("0123456789abcdef0123456789abcdef01234567")},
 		AllowedSEKeyBackends:            []string{"file", "keychain"},
 		PostureChallengeIntervalSeconds: 60,
 		PostureMaxAgeSeconds:            150,
@@ -598,9 +598,9 @@ func wsPrivacyIdentity(t *testing.T, now time.Time) (relayblind.PrivacyKeyRecord
 	}, identity
 }
 
-func wsApproved(cdhash string, expiry time.Time) config.ApprovedCodeIdentity {
+func wsApproved(cdhash string) config.ApprovedCodeIdentity {
 	return config.ApprovedCodeIdentity{
 		TeamID: "AB12CD34EF", SigningIdentifier: "live.malibu.provider.cli", CDHash: cdhash,
-		BinaryVersion: "0.0.0-fixture", ExpiresAt: expiry,
+		BinaryVersion: "0.0.0-fixture",
 	}
 }

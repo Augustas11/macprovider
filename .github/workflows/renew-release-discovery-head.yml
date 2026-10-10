@@ -1,6 +1,10 @@
 name: Renew signed release discovery head
 
-# Protected recurring renewal for append-only discovery transports.
+# Protected ON-DEMAND renewal for append-only discovery transports (#1938: no
+# schedule). Current CLIs accept a head past its expires_at (SPEC-020 v0.1.22);
+# CLIs that predate that still refuse one, so an operator dispatches this
+# (scripts/ops/discovery-renew.sh) when such CLIs must rediscover a target
+# whose newest head has aged past seven days.
 # Freshness-only: signs a strictly greater sequence for the target the CURRENT
 # signed head already points at (resolved from the live transport, not from
 # GitHub "latest", which legitimately runs ahead until an operator rolls the
@@ -16,14 +20,6 @@ on:
         required: false
         default: "168"
         type: string
-  schedule:
-    # Twice weekly auto-dispatch, inside the 168h (7-day) validity window and
-    # before the 48h freshness alarm floor, so the signed self-heal head never
-    # lapses because an operator forgot to dispatch.
-    # The run still enters the production-release environment and waits for the
-    # antfleet-ops approval; the read-only discovery-head freshness alarm
-    # (discovery-head-freshness-alarm.yml) backstops a skipped/late approval.
-    - cron: "0 16 * * 1,4"
 
 permissions:
   contents: read
@@ -93,7 +89,7 @@ jobs:
             exit 1
           }
           (( VALIDITY_HOURS_INPUT == 168 )) || {
-            echo "::error::validity_hours must be 168 so renewed heads stay inside the twice-weekly cadence and above the 48h alarm floor" >&2
+            echo "::error::validity_hours must be 168, the longest window CLIs before SPEC-020 v0.1.22 accept" >&2
             exit 1
           }
           # 1) Resolve the renewal base, the append-only ceiling, and the minimal
@@ -113,7 +109,7 @@ jobs:
           #    If the ceiling exceeds the public head, a higher-sequence draft,
           #    orphan tag, or in-flight rollout is pending; renewing the older
           #    base above it could dominate a newer target, so fail closed and let
-          #    the operator (backstopped by the freshness alarm) resolve it first.
+          #    the operator resolve it first.
           gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             > "$work/releases.json"

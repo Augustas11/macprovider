@@ -4,13 +4,15 @@
 # The coordinator serves /v1/native-mtp-revocations.<key>.json(.sig) from
 # `autotune.native_mtp_revocations_dir` (deployed as
 # $REMOTE_REVOCATION_DIR/current, a symlink to one batch directory), choosing
-# the newest issued, unexpired, correctly signed slot. This script signs a
+# the newest issued, correctly signed slot, also after its expires_at
+# (providers keep the newest verified body in force, SPEC-023 v0.22.23). This script signs a
 # batch of slots OFF the coordinator host with the static-feed key, verifies
 # it, uploads it as a new batch, and atomically retargets `current`.
 #
-# Two callers:
-#   - the weekly signed renewal (renew-autotune-static-feed.sh --deploy), which
-#     keeps at least 14 days of slots published;
+# Two callers, both on demand (no schedule since #1938; providers keep the
+# newest verified slot in force after it ages out):
+#   - a feed restamp of a native-bound release (renew-autotune-static-feed.sh
+#     --deploy);
 #   - an operator emergency: add the admission-tuple identity to the revoked
 #     source, run this with --deploy from the operator Mac, then commit the
 #     source change. The new batch starts now, so every generation exceeds the
@@ -54,7 +56,7 @@ case "$PEARL_SSH" in ""|*[!A-Za-z0-9._@-]*) fatal "unsafe PEARL_SSH" ;; esac
 case "$KEY_ID" in ""|*[!A-Za-z0-9._-]*) fatal "unsafe AUTOTUNE_STATIC_KEY_ID" ;; esac
 case "$DAYS" in ""|*[!0-9]*) fatal "NATIVE_MTP_REVOCATION_DAYS must be a positive integer" ;; esac
 case "$KEEP" in ""|*[!0-9]*|0) fatal "NATIVE_MTP_REVOCATION_KEEP must be a positive integer" ;; esac
-[ "$DAYS" -ge 14 ] || fatal "NATIVE_MTP_REVOCATION_DAYS must cover at least 14 days (one missed weekly renewal)"
+[ "$DAYS" -ge 14 ] || fatal "NATIVE_MTP_REVOCATION_DAYS must cover at least 14 days"
 [ -f "$KEY_PATH" ] || fatal "signing key file not found (path not printed)"
 [ -f "$REVOKED_SOURCE" ] || fatal "revoked source not found: $REVOKED_SOURCE"
 

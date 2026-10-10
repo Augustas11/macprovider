@@ -8,7 +8,7 @@
 #
 # scripts/renew-autotune-static-feed.sh keeps its own copy of this append:
 # its bytes are pinned by scripts/tests/fixtures/renew-remote-*.golden.sh and
-# by literal substring pins in scripts/test-renew-autotune-static-feed-signed.sh,
+# by literal substring pins in scripts/test-renew-autotune-static-feed.sh,
 # so it is not sourced from here (avoids a third copy for deploy+the content
 # lane without disturbing renew's frozen bytes).
 #

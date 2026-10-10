@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/providerid"
-	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
@@ -282,9 +281,12 @@ type PayoutTuningConfig struct {
 // legacy self-declared hello model_id behavior until the operator enables
 // the autotune hello gate explicitly.
 type ProofOfWeightsConfig struct {
-	RequireAutotuneHelloGate bool                 `yaml:"require_autotune_hello_gate"`
-	AutotuneEvidenceTTLDays  int                  `yaml:"autotune_evidence_ttl_days"`
-	TelemetryDrift           TelemetryDriftConfig `yaml:"telemetry_drift"`
+	RequireAutotuneHelloGate bool `yaml:"require_autotune_hello_gate"`
+	// AutotuneEvidenceTTLDays is accepted for overlay compatibility and
+	// ignored: hardware evidence has no age-based expiry and is replaced when
+	// the provider re-benchmarks after a hardware or OS change (#1938).
+	AutotuneEvidenceTTLDays int                  `yaml:"autotune_evidence_ttl_days"`
+	TelemetryDrift          TelemetryDriftConfig `yaml:"telemetry_drift"`
 }
 
 // AdmissionCanaryHarness exposes canary-only operator controls used to collect
@@ -1139,14 +1141,14 @@ const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
 
 // ApprovedCodeIdentity is one operator-approved privacy-class code identity.
 // BinaryVersion is optional; when set, the posture binary_version must match.
-// ExpiresAt is optional; zero means the approval does not expire. When set it
-// is exclusive: a posture at that instant is expired.
+// An approval has no calendar expiry (#1938). Removing an entry withdraws only
+// a configuration-only approval; a release-backed identity is withdrawn by an
+// entry naming another binary_version or by denied_code_cdhashes.
 type ApprovedCodeIdentity struct {
-	TeamID            string    `yaml:"team_id"`
-	SigningIdentifier string    `yaml:"signing_identifier"`
-	CDHash            string    `yaml:"code_cdhash"`
-	BinaryVersion     string    `yaml:"binary_version"`
-	ExpiresAt         time.Time `yaml:"expires_at"`
+	TeamID            string `yaml:"team_id"`
+	SigningIdentifier string `yaml:"signing_identifier"`
+	CDHash            string `yaml:"code_cdhash"`
+	BinaryVersion     string `yaml:"binary_version"`
 }
 
 // PrivacyClassConfig is the default-off SPEC-049 coordinator gate.
@@ -3904,24 +3906,7 @@ func (c Config) validateReferrals() error {
 
 func (c Config) validateProofOfWeights() error {
 	p := c.ProofOfWeights
-	if p.AutotuneEvidenceTTLDays < 0 {
-		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be >= 0")
-	}
 	if p.RequireAutotuneHelloGate {
-		if p.AutotuneEvidenceTTLDays <= 0 {
-			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
-		}
-		// FIX 2 (issue #582): the hello-gate admission window (LatestVerified filters
-		// evidence to AutotuneEvidenceTTLDays) must be at least as wide as the
-		// approve/verifier evidence-age limit (hardwareverify.MaxEvidenceAgeDays). If
-		// the TTL is set lower, a job whose evidence has aged past it is still
-		// approvable+promotable (approval gates on MaxEvidenceAgeDays, not the TTL) yet
-		// LatestVerified excludes it — so admission stays blocked even though every
-		// operator action "succeeded" (a false success). Requiring TTL >= the verifier
-		// limit closes that window.
-		if p.AutotuneEvidenceTTLDays < hardwareverify.MaxEvidenceAgeDays {
-			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days (%d) must be >= hardwareverify.MaxEvidenceAgeDays (%d) when require_autotune_hello_gate is true, else evidence approvable within the verifier's %d-day window is excluded from the hello-gate admission window and admission stays blocked", p.AutotuneEvidenceTTLDays, hardwareverify.MaxEvidenceAgeDays, hardwareverify.MaxEvidenceAgeDays)
-		}
 		if err := c.requireAutotuneEvidenceFeeds(); err != nil {
 			return err
 		}
@@ -3935,9 +3920,6 @@ func (c Config) validateProofOfWeights() error {
 			return fmt.Errorf("proof_of_weights.telemetry_drift.quarantine_missing_benchmark requires telemetry_drift.enabled")
 		}
 		return nil
-	}
-	if p.AutotuneEvidenceTTLDays <= 0 {
-		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when telemetry_drift.enabled is true")
 	}
 	if err := c.requireAutotuneEvidenceFeeds(); err != nil {
 		return err
@@ -4515,8 +4497,6 @@ func (c Config) validatePrivacyClass() error {
 			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be a P-256 point", providerID)
 		}
 	}
-	live := 0
-	now := time.Now()
 	for i, identity := range pc.ApprovedCodeIdentities {
 		field := fmt.Sprintf("privacy_class.approved_code_identities[%d]", i)
 		if !privacyTeamID(identity.TeamID) {
@@ -4530,9 +4510,6 @@ func (c Config) validatePrivacyClass() error {
 		}
 		if identity.BinaryVersion != "" && !privacyVisibleASCII(identity.BinaryVersion, 128) {
 			return fmt.Errorf("%s.binary_version must be visible ASCII", field)
-		}
-		if identity.ExpiresAt.IsZero() || identity.ExpiresAt.After(now) {
-			live++
 		}
 	}
 	seenDenied := make(map[string]struct{}, len(pc.DeniedCodeCDHashes))
@@ -4563,8 +4540,8 @@ func (c Config) validatePrivacyClass() error {
 	if !c.RelayBlind.Enabled {
 		return fmt.Errorf("privacy_class.enabled requires relay_blind.enabled")
 	}
-	if live == 0 && !release.Configured() {
-		return fmt.Errorf("privacy_class.enabled requires release_code_identities or an unexpired approved_code_identities entry")
+	if len(pc.ApprovedCodeIdentities) == 0 && !release.Configured() {
+		return fmt.Errorf("privacy_class.enabled requires release_code_identities or an approved_code_identities entry")
 	}
 	if pc.Directory.SigningKeyPath == "" {
 		return fmt.Errorf("privacy_class.directory.signing_key_path must be set when enabled")

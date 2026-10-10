@@ -6,7 +6,6 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "ops" / "lib" / "release-registrations.py"
@@ -18,23 +17,6 @@ VERSION = "1.8.240"
 CDHASH = "cd" * 20
 COMPAT = "test/repo:v%s@%s" % (VERSION, "ab" * 20)
 TARGET = "test/repo:v1.8.230@%s" % ("cd" * 20)
-
-
-class ExpiryTest(unittest.TestCase):
-    NOW = 1_800_000_000.0  # 2027-01-15T08:00:00Z
-
-    def test_offsets_are_instants(self):
-        # 10:00+03:00 is 07:00Z (past); 06:00-03:00 is 09:00Z (future).
-        self.assertTrue(rr.expired("2027-01-15T10:00:00+03:00", self.NOW))
-        self.assertFalse(rr.expired("2027-01-15T06:00:00-03:00", self.NOW))
-        self.assertTrue(rr.expired("2027-01-15T07:59:59Z", self.NOW))
-        self.assertFalse(rr.expired("2027-01-15T08:00:00.5Z", self.NOW))
-        self.assertFalse(rr.expired("2027-01-15 09:00:00+00:00", self.NOW))  # YAML datetime str()
-        self.assertFalse(rr.expired("", self.NOW))
-        self.assertTrue(rr.expired("not a time", self.NOW))
-
-    def test_tie_is_expired(self):
-        self.assertTrue(rr.expired("2027-01-15T08:00:00Z", self.NOW))
 
 
 class EvaluateTest(unittest.TestCase):
@@ -149,15 +131,16 @@ class EvaluateTest(unittest.TestCase):
         v = self.verdict(disk_digests={"config_sha256": "c" * 64, "overlay_sha256": "b" * 64})
         self.assertIn("booted with", " ".join(v["missing"]))
 
-    def test_config_entry_needs_applied_config_and_offset_expiry(self):
+    def test_config_entry_needs_applied_config_and_matching_version(self):
+        # #1938: an approved_code_identities entry has no calendar expiry.
         entry = {"team_id": "ABCDE12345", "signing_identifier": "live.malibu.provider.cli",
                  "code_cdhash": CDHASH, "binary_version": VERSION}
-        later = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + 3600))
-        ok = self.verdict(loaded_versions=None, approved_code_identities=[dict(entry, expires_at=later + "-00:00")])
+        ok = self.verdict(loaded_versions=None, approved_code_identities=[entry])
         self.assertEqual((ok["missing"], ok["approved_by"]), ([], "approved_code_identities"))
-        # Two hours of UTC+03:00 offset turns "an hour ahead" into the past.
-        gone = self.verdict(approved_code_identities=[dict(entry, expires_at=later + "+03:00")])
-        self.assertIn("expired", " ".join(gone["missing"]))
+        stale = self.verdict(approved_code_identities=[dict(entry, expires_at="2000-01-01T00:00:00Z")])
+        self.assertEqual(stale["approved_by"], "approved_code_identities")
+        other = self.verdict(approved_code_identities=[dict(entry, binary_version="9.9.9")])
+        self.assertIn("version-mismatched", " ".join(other["missing"]))
         unapplied = self.verdict(loaded_versions=None, approved_code_identities=[entry], boot_digests=None)
         self.assertEqual(unapplied["approved_by"], "")
 

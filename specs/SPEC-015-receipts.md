@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.14 (2026-10-06, buyer_cancel delivered-output boundary, #1690 BUG-2; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.15 (2026-10-10, catalog `expires_at` structural only, #1938; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.15 (2026-10-10, issue #1938 — no calendar expiry on live features):** §M.3.2 step 5 and AC-36 change: the receipt verifier no longer compares the Tier-2 catalog `expires_at` with its wall clock and never emits `catalog_expired` (the enum value stays for older output). `expires_at` stays signed and structural (`issued_at < expires_at`). §M.3.4 cache bands are unchanged. Matches SPEC-008 v0.7.1. The signed v0.4 tuple, including `catalog_expires_at_unix_ms`, is unchanged.
 
 **Change log v0.4.14 (2026-10-06, issue #1690 BUG-2 — buyer_cancel delivered-output boundary):** §N.7 adds the delivered-prefix boundary for a streamed `buyer_cancel`. The coordinator retires a request before it sends `cancel_request`, and drops every chunk the provider streamed after that, so on a high-latency provider leg the provider sent more than the buyer received. The provider's receipt then bound its whole sent output, which never equals the coordinator's delivered prefix: the receipt failed `output_hash`, the attempt was quarantined, and the provider was unpaid for output the buyer did receive. The coordinator now sends the delivered byte count it binds in `cancel_request.delivered_output_bytes` (SPEC-001 v1.9.30 §6.6), and the provider signs exactly that prefix. The boundary is fixed when the request is retired; output the coordinator records after it does not count as delivered. The LOCKED v0.4 tuple, its verifier, and the coordinator's equality gate between the receipt's `delivered_output_bytes` and the delivered prefix are unchanged. An older provider, or a boundary that falls inside a frame, fails closed as before (pending, then quarantined, buyer refunded, no provider credit).
 
@@ -3225,15 +3227,15 @@ order. Any failed step short-circuits with the named result:
    operator-side rotation tracking). If `ed25519_verify`
    returns false: `invalid` with `reason:
    "catalog_signature_invalid"`.
-5. **Check `expires_at`** against the verifier's wall clock. If
-   `now() > expires_at + 60s` (60s grace for clock skew,
-   matching §10.2.1 grace-window precedent): report
-   `inconclusive` with `reason: "catalog_expired"` and emit a
-   `warnings[]` entry with the catalog's `catalog_id` and
-   `expires_at` populated. v0.3 does NOT allow `valid` against
-   an expired catalog — catalog expiry is the operator's signal
-   to rotate; a verifier that ignored it would defeat the
-   rotation mechanism.
+5. **`expires_at` is structural only** (v0.4.15, #1938). The
+   verifier checks that it parses and that `issued_at <
+   expires_at`; it MUST NOT compare it with the wall clock. A
+   validly signed catalog keeps verifying receipts after its
+   calendar date. Withdrawal is a superseding signed catalog
+   (new `catalog_id`) or an operator key rotation (§5.2.1 of
+   SPEC-008). The `catalog_expired` reason stays in the result
+   enum only so older verifier output remains schema-valid; a
+   v0.4.15 verifier never emits it.
 6. **Find the catalog entry** whose `model_id` equals
    `receipt.model_id` AFTER applying the canonical
    `catalogModelKey` transform: `strings.ToLower(strings.TrimSpace(modelID))`
@@ -3421,10 +3423,9 @@ seconds. The three TTL bands use explicit interval notation
 - `R ∈ (-∞, 60s)` (i.e. `R < 60s`, including R ≤ 0 — a catalog
   accepted only by the §M.3.2 step 5 60s skew grace, OR a
   catalog with expires_at already in the past at fetch time):
-  do NOT cache. The next verification SHOULD re-fetch. A
-  catalog accepted only by skew grace is NEVER cached so that
-  the next verification re-checks expiry against a fresh
-  wall-clock reading.
+  do NOT cache. The next verification SHOULD re-fetch, so a
+  verifier holding a catalog past its calendar date picks up a
+  superseding catalog as soon as the operator publishes one.
 
 Cache location: the same `~/.macprovider/verify/` directory as
 the §10.2 pubkey cache, in a sibling subdirectory
@@ -3720,13 +3721,13 @@ emitter). **Test command:** fixture
 both failure modes (tampered sig bytes; alg field set to
 `"ed25519"` lowercase, `""`, `"ECDSA"`, etc.).
 
-**AC-36 (verifier inconclusive on expired catalog).** A v0.3
-verifier MUST report `inconclusive` with `reason:
-"catalog_expired"` when the catalog's `expires_at` is more than
-60 seconds in the past relative to the verifier's wall clock.
-**Test command:** fixture
-`phase7-verify/testdata/spec015_v03_catalog_expired/` using
-`SOURCE_DATE_EPOCH` or `libfaketime` for deterministic clock.
+**AC-36 (verifier keeps verifying a catalog past `expires_at`).**
+A v0.4.15 verifier MUST verify a validly signed catalog whose
+`expires_at` is in the past exactly as it verifies one whose
+`expires_at` is in the future; it MUST NOT report
+`catalog_expired`. **Test command:** `cd phase7-verify && go test
+./internal/catalog/ ./internal/verify/ -run
+'TestVerifyAcceptsCatalogPastExpiresAt|TestCatalogCheckHashMatchPastCatalogExpiresAt'`.
 
 **AC-37 (backward-compat: v0.3 verifier on v0.1/v0.2 receipt).**
 A v0.3 verifier reading a v0.1 / v0.2 receipt (no

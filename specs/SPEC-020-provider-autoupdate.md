@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.21
+Version: v0.1.23
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -334,12 +334,16 @@ downgrade, or mutation.
 The head MUST bind a schema version, monotonically increasing unsigned
 `release_sequence`, target compatibility-set ID, target artifact-index SHA-256,
 signed-policy minimum and revocation set, `issued_at`, and `expires_at`.
-`expires_at` MUST be no more than seven days after `issued_at`. The provider
+`expires_at` is structural only (v0.1.22, #1938): it MUST be later than
+`issued_at`, but the provider MUST NOT reject a head because the wall clock has
+passed it and MUST NOT bound the validity window. The provider
 MUST persist the highest accepted sequence and head digest before mutation,
 reject a lower sequence as `failure_class:"discovery_head_replay"`, reject a
 different digest at the same sequence as
-`failure_class:"discovery_head_equivocation"`, and reject an expired or
-not-yet-valid head as `failure_class:"discovery_head_expired"`. A newer head
+`failure_class:"discovery_head_equivocation"`, and reject a not-yet-valid head
+(`issued_at` more than 5 seconds in the future, or `expires_at` not after
+`issued_at`) as `failure_class:"discovery_head_expired"`. Withdrawal of a
+target is a newer head's raised `signed_policy_minimum` or added revocation. A newer head
 may only raise the effective minimum and add revocations under R-2.2a.
 
 A trusted coordinator recommendation remains the preferred target while an
@@ -349,7 +353,8 @@ disconnected automatic application.
 
 Each protected stable promotion MUST validate the candidate head signature,
 exact numeric target tag/commit/set binding, artifact-index digest, and active
-validity window before publication. Its sequence MUST be greater than the head
+validity window before publication (a new head is still signed with a window
+of at most seven days so CLIs that predate v0.1.22 accept it). Its sequence MUST be greater than the head
 in the prior public stable immutable release. After publishing the numeric
 release, promotion MUST create exactly one public immutable prerelease named
 `release-discovery-v1-<verified-sequence>` containing exactly the signed head,
@@ -360,23 +365,17 @@ reproduce those checks, and prove both the new CLI and—except for the bridge
 below—the prior CLI discover the exact new version. Failure of any check blocks
 promotion or reports the already-public release as unfit for rollout.
 
-A head renewal MUST use a newly signed, strictly greater sequence and append a
-new immutable transport even when the numeric target is unchanged. No existing
-transport may be refreshed in place. The protected
-`renew-release-discovery-head.yml` workflow is the recurring signer for that
-append-only renewal path. It is freshness-only: it binds the exact immutable
-stable target that the current signed head already points at — resolved from the
-live transport head, never from mutable GitHub `latest` ordering, which the
-separate coordinator-gated rollout (`verify-live-coordinator-release-rollout.yml`)
-advances — so a renewal keeps the head fresh without advancing the target. It
-mints the smallest sequence strictly greater than every existing append-only
-transport, so the renewal never leapfrogs a newer target's earlier-signed,
-lower-sequence discovery head and thereby blocks a later rollout. It publishes
-exactly one new immutable prerelease and anonymously proves the same-target CLI
-still discovers the renewed head. The client MUST fail closed
-when the greatest located transport is mutable, malformed, expired, incorrectly
-signed, or inconsistent with its sequence-bound tag; it MUST NOT silently fall
-back to an older located transport.
+A head renewal, when an operator publishes one, MUST use a newly signed,
+strictly greater sequence and append a new immutable transport even when the
+numeric target is unchanged. No existing transport may be refreshed in place.
+No recurring renewal is required: a head stays valid until superseded, so the
+release promotion above is the only routine signer (v0.1.22). The protected
+`renew-release-discovery-head.yml` remains as an on-demand, operator-dispatched
+renewal (`scripts/ops/discovery-renew.sh`) for CLIs that predate v0.1.22 and
+must rediscover a target whose newest head is older than seven days. The client MUST
+fail closed when the greatest located transport is mutable, malformed,
+incorrectly signed, or inconsistent with its sequence-bound tag; it MUST NOT
+silently fall back to an older located transport.
 
 **Frozen v1.8.55 bridge.** CLI v1.8.55 shipped with discovery fixed to the
 `release-discovery` tag. GitHub made that release immutable, so neither its
@@ -1338,8 +1337,8 @@ bytes or launchd state from stale markers.
 AC-V0.1-28. Signed discovery replay resistance: after accepting discovery head
 sequence `N` and digest `D`, a lower sequence is rejected with
 `discovery_head_replay`, a different digest at sequence `N` is rejected with
-`discovery_head_equivocation`, and an expired head is rejected with
-`discovery_head_expired`. No rejected head causes download, drain, marker
+`discovery_head_equivocation`, and a not-yet-valid head is rejected with
+`discovery_head_expired`; a head past its `expires_at` is accepted (v0.1.22). No rejected head causes download, drain, marker
 creation, or mutation.
 
 AC-V0.1-29. Revoked rollback target remains stopped: when local target health
@@ -1473,7 +1472,7 @@ machines.
 T-2. Attacker MITMs GitHub Releases responses or asset downloads. HTTPS,
 GitHub-host validation, signed checksums, SHA-256 tarball verification, and
 archive validation defend against asset substitution, URL hijack, and tarball
-tampering. The signed, expiring monotonic discovery head plus persisted highest
+tampering. The signed monotonic discovery head plus persisted highest
 sequence prevents mutable-listing replay and equivocation after a trusted
 checkpoint. Residual risk: the attacker can cause denial of update by blocking
 or corrupting responses.
@@ -1527,14 +1526,17 @@ known revoked after signing. Downgrade refusal alone does not block this if the
 historical release is still semantically newer than the running binary.
 `effective_minimum_safe_binary_version` and
 `effective_revoked_binary_versions` defend against signed historical-release
-replay, while the signed expiring discovery head rejects stale discovery state
-and persists the highest accepted sequence/digest. Ordinary coordinator
+replay, while the signed discovery head's persisted highest accepted
+sequence/digest rejects stale discovery state. Ordinary coordinator
 recommendations MUST NOT lower the effective floor or remove versions from the
 effective revoked set. The persisted monotonic signed-policy invariant also
 protects against attacker-controlled release listings attempting to
 retroactively clear revocations or lower previously observed signed-policy
 minimums. A provider with no prior checkpoint still requires a currently valid
-signed head; its bounded validity window is the bootstrap freshness limit.
+signed head. Residual risk (accepted in v0.1.22): an attacker who can withhold
+newer transports from a provider with no checkpoint can freeze it on an older
+signed target, but cannot downgrade it below that target or below any floor it
+has already persisted.
 
 ## Open questions
 
@@ -1573,6 +1575,20 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.23 (2026-10-10): `renew-release-discovery-head.yml` and
+  `scripts/ops/discovery-renew.sh` are kept as an unscheduled, on-demand
+  renewal for CLIs that predate v0.1.22 (#1938 audit round 1); the schedule
+  and the freshness alarm stay removed.
+- v0.1.22 (2026-10-10): No calendar expiry on the signed discovery head
+  (#1938, AGENTS.md rule 10). R001: `expires_at` is structural only; the
+  provider no longer rejects a head past `expires_at` or a window over seven
+  days, so a missed renewal can no longer strand coordinator-independent
+  self-heal. Replay, equivocation, future-issued, signature, transport-binding,
+  signed minimum and revocation checks are unchanged. The twice-weekly
+  schedule of `renew-release-discovery-head.yml` and its freshness alarm are
+  removed; the workflow stays as an on-demand renewal for CLIs that predate
+  this version, and release promotion still publishes each new head with a
+  window of at most seven days.
 - v0.1.20 (2026-09-25): SPEC-020-R006 release mirror for tag resolution
   (#1737). Providers in mainland China cannot reach api.github.com or
   github.com release assets, so coordinator-triggered autoupdate falls back to

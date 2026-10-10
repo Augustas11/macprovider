@@ -174,7 +174,7 @@ func handshakePrivacyAuthority(t *testing.T, fixture handshakePrivacyFixture) *r
 		ProviderSEPublicKeys: map[string]string{"m4-anon": base64.StdEncoding.EncodeToString(seRaw)},
 		ApprovedCodeIdentities: []config.ApprovedCodeIdentity{{
 			TeamID: "AB12CD34EF", SigningIdentifier: "live.malibu.provider.cli", CDHash: "0123456789abcdef0123456789abcdef01234567",
-			BinaryVersion: "0.1.0", ExpiresAt: time.Now().Add(24 * time.Hour),
+			BinaryVersion: "0.1.0",
 		}},
 		AllowedSEKeyBackends:            []string{"file", "keychain"},
 		PostureChallengeIntervalSeconds: 60,

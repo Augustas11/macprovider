@@ -169,7 +169,7 @@ func TestPostureAttestationDeniedQuarantinesUnapprovedRejects(t *testing.T) {
 	mustQuarantine(t, err, "posture_denied_code_identity")
 
 	unapproved := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
-		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash, time.Unix(1_800_000_000, 0).Add(time.Hour))}
+		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash)}
 	})
 	err = unapproved.auth.AcceptPrivacyKeys(context.Background(), unapproved.providerID, unapproved.session, []PrivacyKeyRecord{unapproved.record}, unapproved.now)
 	mustReject(t, err, "posture_unapproved_code_identity")
@@ -272,7 +272,7 @@ func TestPostureSignatureFailureQuarantines(t *testing.T) {
 
 func TestPostureCDHashChangeQuarantines(t *testing.T) {
 	f := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
-		cfg.ApprovedCodeIdentities = append(cfg.ApprovedCodeIdentities, approvedIdentity(secondFixtureCDHash, time.Unix(1_800_000_000, 0).UTC().Add(24*time.Hour)))
+		cfg.ApprovedCodeIdentities = append(cfg.ApprovedCodeIdentities, approvedIdentity(secondFixtureCDHash))
 	})
 	f.accept()
 	f.verify(0, nil)
@@ -288,7 +288,7 @@ func TestPostureCDHashChangeQuarantines(t *testing.T) {
 
 func TestPostureAttestationCDHashMismatchQuarantines(t *testing.T) {
 	f := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
-		cfg.ApprovedCodeIdentities = append(cfg.ApprovedCodeIdentities, approvedIdentity(secondFixtureCDHash, time.Unix(1_800_000_000, 0).UTC().Add(24*time.Hour)))
+		cfg.ApprovedCodeIdentities = append(cfg.ApprovedCodeIdentities, approvedIdentity(secondFixtureCDHash))
 	})
 	f.accept()
 	nonce, issued, err := f.auth.BeginChallenge(f.providerID, f.session, f.now)
@@ -417,7 +417,7 @@ func newPrivacyFixture(t *testing.T, mutate func(*config.PrivacyClassConfig)) *p
 	cfg := config.PrivacyClassConfig{
 		Enabled:                         true,
 		ProviderSEPublicKeys:            map[string]string{"provider-a": base64.StdEncoding.EncodeToString(seRaw)},
-		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash, now.Add(24*time.Hour))},
+		ApprovedCodeIdentities:          []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash)},
 		AllowedSEKeyBackends:            []string{PrivacySEBackendFile, PrivacySEBackendKeychain},
 		PostureChallengeIntervalSeconds: 60,
 		PostureMaxAgeSeconds:            150,
@@ -443,10 +443,10 @@ func newPrivacyFixture(t *testing.T, mutate func(*config.PrivacyClassConfig)) *p
 	}
 }
 
-func approvedIdentity(cdhash string, expiry time.Time) config.ApprovedCodeIdentity {
+func approvedIdentity(cdhash string) config.ApprovedCodeIdentity {
 	return config.ApprovedCodeIdentity{
 		TeamID: fixtureTeamID, SigningIdentifier: "live.malibu.provider.cli", CDHash: cdhash,
-		BinaryVersion: fixtureBinary, ExpiresAt: expiry,
+		BinaryVersion: fixtureBinary,
 	}
 }
 
@@ -559,7 +559,7 @@ func subtleEqual(a, b []byte) bool {
 // An approval without expires_at never expires.
 func TestApprovalWithoutExpiryStaysApproved(t *testing.T) {
 	f := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
-		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash, time.Time{})}
+		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash)}
 	})
 	f.accept()
 	f.verify(0, nil)

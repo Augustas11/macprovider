@@ -1059,10 +1059,12 @@ func validateCreatorReactivation(ctx context.Context, conn *sql.Conn, currentApp
 		if p.CreatorAccountID != next.CreatorAccountID || p.Lifecycle != LifecycleActive || p.RootIssuer == nil {
 			continue
 		}
-		if current.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+		// Routing validity (#1938): an elapsed Agreement grace leaves the pool
+		// routing, so renewing it is not a reactivation.
+		if current.RoutingInvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) == "" {
 			continue
 		}
-		if next.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+		if next.RoutingInvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) == "" {
 			return ErrCreatorApprovalGate
 		}
 	}
@@ -2905,7 +2907,8 @@ func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 // state against this coordinator's CURRENT production activation gate and the
 // CURRENT on-call readiness of its launch environment, before the state is
 // published to the routing registry. Promotion checked both once; a gate that
-// tightens later, or an on-call record that lapses, must stop routing too.
+// tightens later, or a missing on-call record, must stop routing too. A lapsed
+// on-call confirmation is only a status warning (#1938).
 func (s *Store) ApplyRouteGates(ctx context.Context, state *ReconstructedState) error {
 	if s == nil || s.db == nil || state == nil {
 		return nil
@@ -2951,10 +2954,15 @@ func (s *ReconstructedState) applyProductionRouteGates(gate productionActivation
 			}
 		} else if rec, ok := onCall[environment]; !ok {
 			reason = "oncall_readiness_missing"
-		} else if rec.Expired(at) {
-			reason = "oncall_readiness_expired"
 		} else {
-			p.OnCallReadinessExpiresAtUTC = rec.LastConfirmedAtUTC.UTC().Add(rec.ttl())
+			// A lapsed confirmation is a status warning, never a routing
+			// deadline (#1938, SPEC-043 0.3.4).
+			if !rec.LastConfirmedAtUTC.IsZero() {
+				p.OnCallReadinessExpiresAtUTC = rec.LastConfirmedAtUTC.UTC().Add(rec.ttl())
+			}
+			if rec.Expired(at) {
+				p.addStatusWarning(StatusWarningOnCallReadinessExpired)
+			}
 		}
 		p.ProductionGateReason = reason
 	}
@@ -3029,11 +3037,17 @@ type ReconstructedPoolState struct {
 	PublicReviewedArtifactDigest string
 	LastEventAtUTC               time.Time
 	CreatorGateReason            string
-	CreatorGateExpiresAtUTC      time.Time
+	// CreatorGateExpiresAtUTC is the Creator Agreement grace end. It is shown
+	// in status only and is never a routing deadline (#1938).
+	CreatorGateExpiresAtUTC time.Time
 	// OnCallReadinessExpiresAtUTC is when the launch environment's current
-	// on-call readiness lapses for an active production pool; routing stops
-	// at that instant (SPEC-043-R008/R011).
+	// on-call confirmation lapses. Status only; routing never stops at it
+	// (#1938, SPEC-043 0.3.4).
 	OnCallReadinessExpiresAtUTC time.Time
+	// StatusWarnings lists calendar lapses (creator_agreement_expired,
+	// oncall_readiness_expired) that need operator or creator attention but
+	// do not remove the pool from routing.
+	StatusWarnings []string
 	// ProductionGateReason is set when an active production pool no longer
 	// satisfies the current production activation gate or on-call readiness;
 	// it removes the pool from routing only.
@@ -3520,9 +3534,12 @@ func (s *ReconstructedState) applyCreatorRouteGates() {
 		if environment == "" {
 			environment = approval.AllowedLaunchEnvironment
 		}
-		if !approval.ValidFor(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt) {
-			p.CreatorGateReason = approval.InvalidReason(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt)
+		if reason := approval.RoutingInvalidReason(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt); reason != "" {
+			p.CreatorGateReason = reason
 			continue
+		}
+		if approval.InvalidReason(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt) == StatusWarningCreatorAgreementExpired {
+			p.addStatusWarning(StatusWarningCreatorAgreementExpired)
 		}
 		p.CreatorGateExpiresAtUTC = approval.CreatorAgreementGraceEndsAtUTC
 	}
@@ -3586,7 +3603,7 @@ func currentPublicAnnouncementBinding(state *ReconstructedState, p *Reconstructe
 		version = p.RootIssuer.CurrentApprovalVersion
 		environment = p.RootIssuer.LaunchEnvironment
 	}
-	if !approval.ValidFor(p.ApprovalRecordID, version, environment, state.RouteGateCheckedAt) {
+	if approval.RoutingInvalidReason(p.ApprovalRecordID, version, environment, state.RouteGateCheckedAt) != "" {
 		return PublicAnnouncementApproval{}, false
 	}
 	return PublicAnnouncementApproval{
@@ -3924,10 +3941,10 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		}
 		pool := s.Pools[id]
 		p, policyUntil, policyActive := pool.activePolicyView(at)
-		routeable, routeabilityReason := poolRouteability(p)
+		routeable, _ := poolRouteability(p)
 		prior := pool.priorPolicyWindow(p.ManifestVersion)
 		if routeable && !policyActive {
-			routeable, routeabilityReason = false, "pool_policy_stale"
+			routeable = false
 		}
 		generation := pool.EffectiveGeneration()
 		if pool.Lifecycle == LifecycleActive && !routeable {
@@ -3956,12 +3973,14 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(members)
 		sort.Strings(revoked)
 		sort.Strings(buyers)
-		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
+		// Only the signed manifest policy window bounds routing; Creator
+		// Agreement grace and on-call confirmation are status warnings (#1938).
+		var routeableUntil time.Time
 		if routeable {
 			if extended := s.extendedSameTermsRouteableUntil(pool, p, members, at); !extended.IsZero() && policyUntil.Before(extended) {
 				policyUntil = extended
 			}
-			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
+			routeableUntil = policyUntil
 		}
 		memberDelegationExpiry := make(map[string]time.Time, len(members))
 		var delegatedMembers []string
@@ -3990,7 +4009,6 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			Routeable:                 routeable,
 			Generation:                generation,
 			RouteableUntilUTC:         routeableUntil,
-			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,
 			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),
@@ -4034,20 +4052,6 @@ func (s *ReconstructedState) routeableMembersSurviveTermsEquivalentRollover(p *R
 		}
 	}
 	return true
-}
-
-// earliestDeadline returns the earlier non-zero instant, or zero if both are.
-func earliestDeadline(a, b time.Time) time.Time {
-	switch {
-	case a.IsZero():
-		return b
-	case b.IsZero():
-		return a
-	case b.Before(a):
-		return b
-	default:
-		return a
-	}
 }
 
 func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
@@ -4561,6 +4565,17 @@ func (a CreatorApproval) ValidFor(approvalRecordID, currentApprovalVersion, laun
 	return a.InvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment, now) == ""
 }
 
+// RoutingInvalidReason is InvalidReason without the Creator Agreement grace
+// check: an elapsed agreement is a status warning, not a routing gate (#1938).
+// Pool mutations and promotion still use the full InvalidReason.
+func (a CreatorApproval) RoutingInvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment string, now time.Time) string {
+	reason := a.InvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment, now)
+	if reason == StatusWarningCreatorAgreementExpired {
+		return ""
+	}
+	return reason
+}
+
 func (a CreatorApproval) InvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment string, now time.Time) string {
 	approvalRecordID = strings.TrimSpace(approvalRecordID)
 	currentApprovalVersion = strings.TrimSpace(currentApprovalVersion)
@@ -4578,8 +4593,23 @@ func (a CreatorApproval) InvalidReason(approvalRecordID, currentApprovalVersion,
 	case launchEnvironment == "" || launchEnvironment != a.AllowedLaunchEnvironment:
 		return "launch_environment_mismatch"
 	case a.CreatorAgreementGraceEndsAtUTC.IsZero() || !now.Before(a.CreatorAgreementGraceEndsAtUTC):
-		return "creator_agreement_expired"
+		return StatusWarningCreatorAgreementExpired
 	default:
 		return ""
 	}
+}
+
+// Calendar lapses surfaced in pool status without unrouting the pool (#1938).
+const (
+	StatusWarningCreatorAgreementExpired = "creator_agreement_expired"
+	StatusWarningOnCallReadinessExpired  = "oncall_readiness_expired"
+)
+
+func (p *ReconstructedPoolState) addStatusWarning(warning string) {
+	for _, existing := range p.StatusWarnings {
+		if existing == warning {
+			return
+		}
+	}
+	p.StatusWarnings = append(p.StatusWarnings, warning)
 }

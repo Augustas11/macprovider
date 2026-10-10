@@ -26,7 +26,6 @@ type AccrualHandlerDeps struct {
 	Config                Config
 	Connectivity          ProviderConnectivity
 	HardwareEvidence      autotune.EvidenceStore
-	HardwareEvidenceTTL   time.Duration
 	Logger                zerolog.Logger
 }
 
@@ -62,12 +61,11 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 		}
 
 		projection, err := BuildProviderRewardProjection(r.Context(), providerID, ProviderRewardProjectionDeps{
-			RewardsDB:           deps.DB,
-			PayoutDB:            deps.PayoutDB,
-			Config:              deps.Config,
-			Connectivity:        deps.Connectivity,
-			HardwareEvidence:    deps.HardwareEvidence,
-			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
+			RewardsDB:        deps.DB,
+			PayoutDB:         deps.PayoutDB,
+			Config:           deps.Config,
+			Connectivity:     deps.Connectivity,
+			HardwareEvidence: deps.HardwareEvidence,
 		})
 		if err != nil {
 			deps.Logger.Warn().Err(err).Str("provider_id", providerID).Msg("malibu accrual projection failed")

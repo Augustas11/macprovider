@@ -1848,18 +1848,37 @@ final class AutoUpdateTests: XCTestCase {
             }
         }
 
-        let expired = signedDiscoveryPayload(
+        // expires_at is structural only (#1938): a head past its calendar date,
+        // signed with a window longer than the old 168h cap, still verifies.
+        let pastExpiry = signedDiscoveryPayload(
             sequence: 8,
             targetSetID: "Augustas11/macprovider:v1.8.5@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             artifactIndexSHA256: String(repeating: "c", count: 64),
-            issuedAt: now.addingTimeInterval(-600),
+            issuedAt: now.addingTimeInterval(-30 * 86_400),
             expiresAt: now.addingTimeInterval(-1)
         )
-        let expiredData = try canonicalJSON(["schema_version": SignedReleaseDiscoveryHead.envelopeSchema, "signed": expired])
-        let expiredSignature = try privateKey.signature(for: SHA256.hash(data: try canonicalJSON(expired))).derRepresentation
+        let pastExpiryData = try canonicalJSON(["schema_version": SignedReleaseDiscoveryHead.envelopeSchema, "signed": pastExpiry])
+        let pastExpirySignature = try privateKey.signature(for: SHA256.hash(data: try canonicalJSON(pastExpiry))).derRepresentation
+        let pastExpiryHead = try SignedReleaseDiscoveryHead.loadVerified(
+            headData: pastExpiryData,
+            signatureData: pastExpirySignature,
+            now: now,
+            publicKeyPEM: privateKey.publicKey.pemRepresentation
+        )
+        XCTAssertEqual(pastExpiryHead.releaseSequence, 8)
+
+        let futureIssued = signedDiscoveryPayload(
+            sequence: 9,
+            targetSetID: "Augustas11/macprovider:v1.8.5@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            artifactIndexSHA256: String(repeating: "c", count: 64),
+            issuedAt: now.addingTimeInterval(600),
+            expiresAt: now.addingTimeInterval(1_200)
+        )
+        let futureData = try canonicalJSON(["schema_version": SignedReleaseDiscoveryHead.envelopeSchema, "signed": futureIssued])
+        let futureSignature = try privateKey.signature(for: SHA256.hash(data: try canonicalJSON(futureIssued))).derRepresentation
         XCTAssertThrowsError(try SignedReleaseDiscoveryHead.loadVerified(
-            headData: expiredData,
-            signatureData: expiredSignature,
+            headData: futureData,
+            signatureData: futureSignature,
             now: now,
             publicKeyPEM: privateKey.publicKey.pemRepresentation
         )) { error in

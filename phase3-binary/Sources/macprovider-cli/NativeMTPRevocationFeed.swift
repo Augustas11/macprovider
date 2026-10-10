@@ -107,6 +107,8 @@ enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
     case signatureInvalid(String)
     case signerMismatch
     case futureIssued
+    /// Reserved: no longer raised since #1938 (an aged body stays in force);
+    /// kept so recorded diagnostics still decode.
     case expired
     case rollback
     case revokedSetRegression
@@ -391,17 +393,26 @@ enum NativeMTPRevocationFeedManager {
                     now: now
                 )
             }
-        } catch let error as NativeMTPRevocationFeedError where error.isTransportOrHTTPFailure {
-            return try await runStoreTransaction(
-                store: store,
-                timeoutSeconds: storeTransactionTimeoutSeconds
-            ) {
-                try loadCached(
-                    pinnedSignerKeyID: pinnedSignerKeyID,
-                    verifier: verifier,
+        } catch let error as NativeMTPRevocationFeedError where error.isNetworkFeedFailure {
+            // Fail to last-known (#1938): an unreachable origin or a rejected
+            // body (bad signature, rollback, set regression, malformed bytes)
+            // keeps the newest verified revoked set in force instead of turning
+            // native MTP off. Store and anchor-integrity errors still propagate.
+            do {
+                return try await runStoreTransaction(
                     store: store,
-                    now: now
-                )
+                    timeoutSeconds: storeTransactionTimeoutSeconds
+                ) {
+                    try loadCached(
+                        pinnedSignerKeyID: pinnedSignerKeyID,
+                        verifier: verifier,
+                        store: store,
+                        now: now
+                    )
+                }
+            } catch NativeMTPRevocationFeedError.missingFeed where !error.isTransportOrHTTPFailure {
+                // No last-known state: report why the network body was refused.
+                throw error
             }
         }
     }
@@ -490,22 +501,13 @@ enum NativeMTPRevocationFeedManager {
         onRevoked: @escaping @Sendable (NativeMTPRevocationState) async -> Void,
         onUnavailable: @escaping @Sendable () async -> Void
     ) async {
+        // initialExpiresAt is accepted for call-site compatibility and ignored:
+        // an aged revocation body stays in force until a newer one replaces it
+        // (#1938), so the poll never turns native MTP off on a date.
+        _ = initialExpiresAt
         let boundedInterval = min(max(1, intervalSeconds), refreshIntervalSeconds)
-        var currentExpiresAt = initialExpiresAt
         while !Task.isCancelled {
-            let nowDate = now()
-            let sleepSeconds: TimeInterval
-            if let expiresAt = currentExpiresAt {
-                let remaining = expiresAt.timeIntervalSince(nowDate)
-                guard remaining > 0 else {
-                    await onUnavailable()
-                    return
-                }
-                sleepSeconds = min(boundedInterval, remaining)
-            } else {
-                sleepSeconds = boundedInterval
-            }
-            let sleepNanoseconds = UInt64((sleepSeconds * 1_000_000_000).rounded())
+            let sleepNanoseconds = UInt64((boundedInterval * 1_000_000_000).rounded())
             do {
                 try await sleeper(sleepNanoseconds)
                 if Task.isCancelled { return }
@@ -519,7 +521,6 @@ enum NativeMTPRevocationFeedManager {
                     now: now(),
                     onRevoked: onRevoked
                 )
-                currentExpiresAt = state.feed.expiresAt
                 if state.isRevoked(tupleSHA256: tupleSHA256) {
                     return
                 }
@@ -607,9 +608,6 @@ enum NativeMTPRevocationFeedManager {
         }
         try validateFreshness(feed: feed, now: now)
         guard let previous = try store.loadAnchor(signerKeyID: pinnedSignerKeyID) else {
-            guard now.timeIntervalSince(feed.issuedAt) <= 15 * 60 else {
-                throw NativeMTPRevocationFeedError.expired
-            }
             return
         }
         guard feed.generation >= previous.generation else {
@@ -655,22 +653,10 @@ enum NativeMTPRevocationFeedManager {
               feed.expiresAt.timeIntervalSince(feed.issuedAt) <= 60 * 60 else {
             throw NativeMTPRevocationFeedError.invalidField("expires_at")
         }
-        guard now < feed.expiresAt else {
-            throw NativeMTPRevocationFeedError.expired
-        }
+        // expires_at is structural only (#1938): the newest verified body stays
+        // in force after it, and only a newer generation replaces it.
     }
 
-}
-
-private extension NativeMTPRevocationFeedError {
-    var isTransportOrHTTPFailure: Bool {
-        switch self {
-        case .transportFailed, .invalidHTTPStatus, .redirectRejected:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 private final class NativeMTPRevocationStoreTransactionExecutor: @unchecked Sendable {
@@ -1516,5 +1502,27 @@ private struct NativeMTPRevocationDuplicateKeyScanner {
         guard index < bytes.count, bytes[index] == byte else { return false }
         index += 1
         return true
+    }
+}
+
+private extension NativeMTPRevocationFeedError {
+    var isTransportOrHTTPFailure: Bool {
+        switch self {
+        case .transportFailed, .invalidHTTPStatus, .redirectRejected:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// A failure of the network fetch or of the fetched body itself, as opposed
+    /// to the local store or anchor state.
+    var isNetworkFeedFailure: Bool {
+        switch self {
+        case .storeFailed, .anchorMismatch, .cacheCorrupt, .missingFeed, .invalidOrigin:
+            return false
+        default:
+            return true
+        }
     }
 }

@@ -210,8 +210,6 @@ run_selector "$work/page-overflow-mixed.json" \
   || fail "overflow transport must not outrank a valid client-visible transport"
 [ "$(python3 "$page_state" --highest-transport-tag "$work/page-overflow-mixed.json")" = "$expected" ] \
   || fail "shared selector must ignore overflow transports"
-grep -Fq -- '--highest-transport-tag' "$root/.github/workflows/discovery-head-freshness-alarm.yml" \
-  || fail "freshness alarm must use the UInt64-bounded shared selector"
 grep -Fq 'no discovery transport within the client-visible listing bound' "$verifier" \
   || fail "anonymous verifier must fail without retrying once the page bound is exhausted"
 grep -Fq 'scripts/discovery_listing_page_state.py' "$verifier" \

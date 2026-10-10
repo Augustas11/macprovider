@@ -1,6 +1,19 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.3.6-draft
+**Status:** v0.3.7-draft
+**Amendment (v0.3.7, #1938 — no calendar expiry on live features):** Verified
+hardware evidence has no age-based expiry. FR-HG2's lookup drops the
+`generated_at ≥ now − autotune_evidence_ttl_days` cutoff; evidence stays current
+until the provider submits newer evidence (any status) whose
+`hardware.hardware_identity_hash` or `hardware.os_version` differs, i.e. until a
+hardware or OS change forces a re-benchmark, or until its trust root is revoked or
+its profile chip/memory tuple changes. The recorded `binary_version` is provenance:
+the gate no longer requires it to equal the hello's `binary_version` (evidence
+without the v2 protocol, binary and executable bindings is still
+`autotune_evidence_invalid`). `autotune_evidence_ttl_days` is accepted and ignored.
+FR-HG6's mid-session recheck keeps re-gating on revocation, tuple mismatch and
+ceiling regression, not on age. The item-10 verifier's 7-day `maxEvidenceAge` at
+verification time is unchanged.
 **Amendment (v0.3.6, #1816 round-1 fixes):** SPEC-032-R004's pool route
 predicate requires the SPEC-047-R003(iv) clause or the SPEC-047-R011 binding,
 as applicable. A native `mlx_cache` hello for an uncatalogued model whose
@@ -163,12 +176,12 @@ see FR-HG5.
 
 **FR-HG2 — Evidence requirement and lookup.** When active, buyer-routable admission
 MUST require a **verified, in-window** hardware-evidence record for the connecting provider. The
-lookup is keyed by **provider ID + TTL** (`LatestVerified(providerID, ttl)`); it
+lookup is keyed by **provider ID** (`LatestVerified(providerID)`, v0.3.7); it
 selects the provider's stored hardware profile joined to a historical
 `hardware_verification_jobs` row with `status = verified` and `decision_reason =
 hardware-verifier.v2:verified_trusted_hardware`, matching the stored profile's
-chip-normalized + unified-memory-GB tuple, and `generated_at ≥ now −
-autotune_evidence_ttl_days` (default 30 days). The lookup MUST use the
+chip-normalized + unified-memory-GB tuple, with no newer submission from a
+different hardware identity or OS build (v0.3.7: no age cutoff). The lookup MUST use the
 least-privilege column grants of migration-017. If the catalog or evidence store is
 not wired, **or the evidence lookup/decode/binding fails for any reason** (DB error,
 malformed envelope, immutable-binding mismatch), the gate MUST fail closed with
@@ -184,10 +197,10 @@ buyer-routable session.
 
 > **Binding limitation (not a current-session hardware proof).** The hello frame
 > carries **no** chip descriptor or hardware-identity hash (`messages.go`), and
-> `LatestVerified` receives only the provider ID and TTL. The gate therefore binds
+> `LatestVerified` receives only the provider ID. The gate therefore binds
 > verified evidence to the provider **credential/ID**, not to the *live hardware of
 > the current WS session*: a credential holder that moves to weaker hardware can
-> reuse prior evidence until the TTL lapses. Binding the gate to a
+> reuse prior evidence until it submits evidence from that hardware. Binding the gate to a
 > per-session-attested hardware identity is a limitation this spec records (§14) and
 > is properly the item-10 verifier's domain to strengthen.
 
@@ -338,13 +351,9 @@ capacity. Rather than ship that surface, v0.2.2 keeps the gate strict for buyer 
   it recovers to ≥2, not per rejected attempt — and (c) be **cooldown-bounded** per key.
 - **Emergency lever = the hot-reloadable gate (FR-CFG2).** An operator facing a
   redundancy emergency can **disable the gate** (`require_autotune_hello_gate: false`)
-  or **temporarily raise `autotune_evidence_ttl_days`** to admit older-but-verified
-  evidence — **without a coordinator restart** — the safe, auditable, human-in-the-loop
-  path, rather than the coordinator auto-admitting an unverified provider. (Note the
-  direction: the evidence cutoff is `now − ttl`, so **raising** the TTL *relaxes* the
-  gate and **lowering** it *tightens*. Any such relaxation MUST be recorded as an
-  explicit, time-boxed trust relaxation, and the gate re-tightened once redundancy
-  recovers.)
+  **without a coordinator restart** — the safe, auditable, human-in-the-loop
+  path, rather than the coordinator auto-admitting an unverified provider. (v0.3.7:
+  evidence no longer ages out, so there is no TTL lever.)
 
 The recorded incident-#2 `air5` case confirms this is the right scope: `air5` was
 **never verified** and a smaller (7B) box, so no admission-policy exemption could have
@@ -370,22 +379,16 @@ a second provider for the tier), which the below-two alert surfaces.
 > emits no redundancy alert). The "no automatic buyer-routable probation" posture
 > matches the shipped sandbox / hard-close behavior; the below-two alert remains the Gap.
 
-**FR-HG6 — Evidence freshness and bounded mid-session expiry.** Admission uses a
-30-day TTL (`autotune_evidence_ttl_days`) while the item-10 verifier applies a 7-day
-`maxEvidenceAge` at verification time; this asymmetry is intentional (verification is
-stricter than admission-reuse). Because the gate runs only at hello, a
-continuously-connected provider could otherwise serve **indefinitely on expired
-evidence** — the spec closes that window. It requires: (a) the coordinator MUST
-perform a **session-time freshness recheck** bounded by a **defined maximum** (a config
-value, e.g. `autotune_evidence_recheck_interval_s`, or — as a conservative default —
-the provider heartbeat interval, so the recheck happens at least once per heartbeat):
-when an admitted provider's evidence crosses the TTL mid-session it MUST be re-gated
-within that bound and, since v0.2.2 has no automatic buyer-routable probation (FR-HG5), moved
-**non-routable** (with the FR-HG5 below-two operator alert) — it MUST NOT continue
-serving at its pre-expiry ceiling past that bound; (b) a provider whose evidence
-expires MUST NOT be silently hard-killed mid-request; and (c) the coordinator SHOULD
-define a proactive re-verification cadence so evidence refreshes before the TTL lapses
-rather than at an expiry boundary.
+**FR-HG6 — Evidence currency and bounded mid-session re-gate.** (v0.3.7) Admission
+evidence has no age-based expiry; the item-10 verifier still applies a 7-day
+`maxEvidenceAge` at verification time. Evidence stops being current when the provider
+submits newer evidence from a different hardware identity or OS build, when its trust
+root is revoked, or when its profile chip/memory tuple changes. Because the gate runs
+only at hello, the coordinator MUST perform a **session-time recheck** bounded by a
+defined maximum (the 30s trust-revalidation sweep): when an admitted provider's
+evidence stops being current, or its tuple mismatches or its ceiling regresses, it
+MUST be re-gated within that bound and moved **non-routable** (with the FR-HG5
+below-two operator alert); it MUST NOT be silently hard-killed mid-request.
 
 **FR-HG7 — Capacity ceiling enforced on every model transition (not just hello).**
 The capacity ceiling (FR-HG3) MUST constrain routing eligibility on **every** model
@@ -599,7 +602,7 @@ the only live element of this spec.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `require_autotune_hello_gate` | bool | `false` (**explicitly false in the live overlay as of 2026-07-27; see §1**) | Master switch for Part A. |
-| `autotune_evidence_ttl_days` | int | `30` | Admission-reuse freshness window (cutoff = `now − ttl`; **raising** relaxes, **lowering** tightens); `>0` required when gate or drift enabled. |
+| `autotune_evidence_ttl_days` | int | `30` | Accepted and ignored since v0.3.7 (#1938); evidence has no age cutoff. Kept so existing overlays still parse. |
 | `telemetry_drift.enabled` | bool | `false` | Master switch for Part C. |
 | `telemetry_drift.tps_ratio_threshold` | float | `0.70` | (0,1]; TPS-below-baseline trigger. |
 | `telemetry_drift.tps_min_absolute` | float | `5.0` | absolute TPS floor. |
@@ -739,16 +742,14 @@ Implemented hardening criteria:
 - **AC-F2 (FR-HG7, CRITICAL — uncatalogued).** With `require_autotune_hello_gate:true`, a provider that heartbeat-switches to an
   **uncatalogued** model is **not** routing-eligible for that model (an uncatalogued
   target does not pass by default for lack of a `MinRAMGB` to compare).
-- **AC-F4 (FR-HG6).** With `require_autotune_hello_gate:true`, an admitted provider whose evidence crosses the TTL mid-session is
-  re-gated within the defined bound (the 30s trust-revalidation sweep) and moved
-  non-routable, and does not serve past that bound on expired evidence; it
-  is not hard-killed mid-request. This criterion now passes for stale /
-  tuple-mismatched evidence revalidation and for config hot-reload interactions;
-  proactive refresh remains forward work.
-- **AC-F5 (FR-CFG2).** `require_autotune_hello_gate`, **`autotune_evidence_ttl_days`**,
-  and the `telemetry_drift.*` keys can be changed without a coordinator restart. The TTL
-  direction is correct: **raising** `autotune_evidence_ttl_days` admits older-but-verified
-  evidence (relaxes the gate) and **lowering** it rejects more evidence (tightens). Enabling
+- **AC-F4 (FR-HG6).** With `require_autotune_hello_gate:true`, an admitted provider whose evidence
+  stops being current (newer evidence from different hardware or OS, revoked trust root,
+  tuple mismatch, ceiling regression) is re-gated within the 30s trust-revalidation sweep
+  and moved non-routable; it is not hard-killed mid-request. Evidence age alone never
+  re-gates (v0.3.7).
+- **AC-F5 (FR-CFG2).** `require_autotune_hello_gate` and the `telemetry_drift.*` keys can be
+  changed without a coordinator restart (`autotune_evidence_ttl_days` is ignored since
+  v0.3.7). Enabling
   the gate re-gates already-admitted sessions **atomically and fail-closed** — affected
   sessions are quarantined non-routable at/before the new config generation is published,
   the scan completes within a bound, an evidence-lookup error leaves a session

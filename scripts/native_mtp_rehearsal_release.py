@@ -157,6 +157,10 @@ def projection_manifest() -> bytes:
     })
 
 
+# Kept inside the 90-day window that CLIs built before #1938 still enforce.
+ADMISSION_VALIDITY = timedelta(days=80)
+
+
 def challenge_bank(release_id: str, issued: datetime) -> bytes:
     """The hardware-measured challenge of the G1 journey run (step 12)."""
     journey = json.loads(G1_JOURNEY.read_text())
@@ -168,7 +172,10 @@ def challenge_bank(release_id: str, issued: datetime) -> bytes:
         "schema_version": "macprovider.native-mtp-challenge-bank.v1",
         "release_id": release_id,
         "issued_at": stamp(issued),
-        "expires_at": stamp(issued + timedelta(days=7)),
+        # Structural window only (#1938): providers no longer stop running the
+        # bank after expires_at, so it shares the admission window instead of
+        # forcing a weekly re-sign.
+        "expires_at": stamp(issued + ADMISSION_VALIDITY),
         "signer_key_id": KEY_ID,
         "entries": entries,
     })
@@ -238,7 +245,7 @@ def build(facts: dict, work: pathlib.Path, now: datetime) -> dict:
             "schema_version": "macprovider.native-mtp-admission-release-input.v1",
             "release_id": release_id,
             "issued_at": generated_at,
-            "expires_at": stamp(now + timedelta(days=80)),
+            "expires_at": stamp(now + ADMISSION_VALIDITY),
             "signer_key_id": KEY_ID,
             "challenge_bank_signer_key_id": KEY_ID,
             "revocation_signer_key_id": KEY_ID,

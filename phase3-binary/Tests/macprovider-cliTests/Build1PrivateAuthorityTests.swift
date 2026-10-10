@@ -55,13 +55,27 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         }
     }
 
-    func testAuthorityRejectsExpiredRelease() throws {
+    // expires_at is structural only (#1938): the signed authority keeps
+    // verifying after its calendar date; only a future generated_at is refused.
+    func testAuthorityRemainsValidPastExpiresAt() throws {
         let fixture = Self.committedFixture()
+        let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(of: "published-2026-10-09-native-mtp-v224-v2", with: "published-2026-10-01-artifact-feed-activation-v1")
+            .replacingOccurrences(of: "2026-10-08T22:12:46Z", with: "2026-10-01T04:20:42Z").utf8)
+        let authority = try Build1PrivateAuthorityLoader.load(
+            authorityURL: fixture.authority,
+            signatureURL: fixture.signature,
+            now: Self.date("2027-06-01T00:00:00Z"),
+            candidateBytes: candidateBytes
+        )
+        XCTAssertEqual(authority.hash, Build1PrivatePrepareProfile.hash)
+
         XCTAssertThrowsError(
             try Build1PrivateAuthorityLoader.load(
                 authorityURL: fixture.authority,
                 signatureURL: fixture.signature,
-                now: Self.date("2026-10-16T00:00:00Z")
+                now: Self.date("2026-09-01T00:00:00Z"),
+                candidateBytes: candidateBytes
             )
         ) { error in
             XCTAssertEqual(error as? Build1PrivateAuthorityError, .invalid("release_or_freshness_invalid"))

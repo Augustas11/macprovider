@@ -94,6 +94,9 @@ type StatusRouteability struct {
 	RouteableUntilUTC       string `json:"routeable_until_utc,omitempty"`
 	CreatorGateReason       string `json:"creator_gate_reason,omitempty"`
 	CreatorGateExpiresAtUTC string `json:"creator_gate_expires_at_utc,omitempty"`
+	// Warnings lists calendar lapses that need attention but do not stop
+	// routing: creator_agreement_expired, oncall_readiness_expired (#1938).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type StatusSettlement struct {
@@ -198,9 +201,6 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 		routeableGeneration = p.RouteableSnapshotGeneration()
 	}
 	routeableUntilUTC := snapshot.RouteableUntilUTC
-	if routeableUntilUTC.IsZero() {
-		routeableUntilUTC = p.CreatorGateExpiresAtUTC
-	}
 	visibility := "authorized"
 	runtimeScope, runtimeDisclosure := policyRuntimeDisclosure(p)
 	disclosures := []string{
@@ -281,7 +281,8 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			RouteGateCheckedAtUTC:   formatOptionalTime(state.RouteGateCheckedAt),
 			RouteableUntilUTC:       formatOptionalTime(routeableUntilUTC),
 			CreatorGateReason:       routeabilityReason,
-			CreatorGateExpiresAtUTC: formatOptionalTime(routeableUntilUTC),
+			CreatorGateExpiresAtUTC: formatOptionalTime(p.CreatorGateExpiresAtUTC),
+			Warnings:                append([]string(nil), p.StatusWarnings...),
 		},
 		Settlement: StatusSettlement{
 			SplitExecutionStatus: policySplitExecutionStatus(p),
@@ -319,6 +320,7 @@ func redactPublicStatusDocument(doc StatusDocument) StatusDocument {
 	doc.Routeability.RouteableUntilUTC = ""
 	doc.Routeability.CreatorGateReason = ""
 	doc.Routeability.CreatorGateExpiresAtUTC = ""
+	doc.Routeability.Warnings = nil
 	return doc
 }
 
@@ -329,7 +331,7 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 	if registry != nil {
 		return registry.Snapshot(p.PoolID)
 	}
-	routeable, routeabilityReason := poolRouteability(p)
+	routeable, _ := poolRouteability(p)
 	members := map[string]bool{}
 	if routeable {
 		for id := range p.Members {
@@ -343,14 +345,12 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 		revision = state.Revision
 	}
 	return Snapshot{
-		PoolID:            p.PoolID,
-		Exists:            true,
-		Members:           members,
-		Routeable:         routeable,
-		Generation:        p.RouteableSnapshotGeneration(),
-		Revision:          revision,
-		RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
-		RouteableExpired:  routeabilityReason == "creator_agreement_expired",
+		PoolID:     p.PoolID,
+		Exists:     true,
+		Members:    members,
+		Routeable:  routeable,
+		Generation: p.RouteableSnapshotGeneration(),
+		Revision:   revision,
 	}
 }
 

@@ -22,7 +22,7 @@ type recordingConnectionEventStore struct {
 
 type blockingAutotuneEvidence struct{}
 
-func (blockingAutotuneEvidence) LatestVerified(ctx context.Context, _ string, _ time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (blockingAutotuneEvidence) LatestVerified(ctx context.Context, _ string) (autotune.VerifiedEvidence, bool, error) {
 	<-ctx.Done()
 	return autotune.VerifiedEvidence{}, false, ctx.Err()
 }
@@ -33,7 +33,7 @@ type staticAdmissionEvidence struct {
 	err      error
 }
 
-func (s staticAdmissionEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s staticAdmissionEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return s.evidence, s.ok, s.err
 }
 

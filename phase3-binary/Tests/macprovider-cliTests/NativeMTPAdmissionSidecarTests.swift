@@ -924,6 +924,33 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    // expires_at is structural only (#1938): an admission past its calendar
+    // date, signed with a window longer than the old 90-day cap, still loads.
+    func testReleaseEnvelopeAcceptsAdmissionPastExpiresAt() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            issuedAt: Date().addingTimeInterval(-400 * 86_400),
+            expiresAt: Date().addingTimeInterval(-200 * 86_400)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        ))
+    }
+
+    func testReleaseEnvelopeRejectsExpiresAtNotAfterIssuedAt() throws {
+        let issuedAt = Date().addingTimeInterval(-3600)
+        let fixture = try makeReleaseEnvelopeFixture(issuedAt: issuedAt, expiresAt: issuedAt)
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), .invalidValue("$.expires_at"))
+    }
+
     func testReleaseEnvelopeRejectsUnverifiedArtifactFeedMember() throws {
         let fixture = try makeReleaseEnvelopeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
@@ -1763,6 +1790,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     private func makeReleaseEnvelopeFixture(
         prepareSnapshot: ((Fixture) throws -> ReleaseLayout)? = nil,
         mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil,
+        issuedAt: Date = Date().addingTimeInterval(-3600),
+        expiresAt: Date = Date().addingTimeInterval(3600),
         entryEdit: ((inout [String: Any]) -> Void)? = nil
     ) throws -> ReleaseEnvelopeFixture {
         let base = try makeFixture()
@@ -1792,6 +1821,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             challengeBankSHA256: base.selfTestBankSHA256,
             signerKeyID: keyID,
             challengeBankSignerKeyID: base.selfTestSignerKeyID,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
             entryEdit: entryEdit
         )
         let context = NativeMTPAdmissionSidecar.RuntimeContext(
@@ -2104,6 +2135,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         challengeBankSHA256: String,
         signerKeyID: String,
         challengeBankSignerKeyID: String,
+        issuedAt: Date = Date().addingTimeInterval(-3600),
+        expiresAt: Date = Date().addingTimeInterval(3600),
         entryEdit: ((inout [String: Any]) -> Void)? = nil
     ) throws -> Data {
         var entry = releaseEntry(
@@ -2115,8 +2148,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         return try jsonData([
             "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
             "release_id": releaseID,
-            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
-            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
+            "issued_at": iso8601Seconds(issuedAt),
+            "expires_at": iso8601Seconds(expiresAt),
             "signer_key_id": signerKeyID,
             "challenge_bank_signer_key_id": challengeBankSignerKeyID,
             "revocation_signer_key_id": signerKeyID,

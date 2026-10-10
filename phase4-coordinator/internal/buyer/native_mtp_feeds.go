@@ -238,7 +238,9 @@ func sha256Hex(raw []byte) string {
 // nativeMTPRevocationSlots serves the emergency revocation feed from a
 // directory of pre-signed bodies, one per slot: `<generation>.json` and
 // `<generation>.json.sig`. The served body is the newest one already issued
-// (issued_at <= now) and not expired. The coordinator holds no signing key
+// (issued_at <= now). An elapsed expires_at does not stop serving it (#1938):
+// providers keep enforcing the newest verified revoked set they hold, so a
+// missed batch publish never turns native MTP off. The coordinator holds no signing key
 // (SPEC-023 §3.7.9); an emergency revocation is a replacement directory
 // signed off-host, whose higher generations and superset revoked set the
 // provider's monotonic checks accept.
@@ -281,7 +283,7 @@ func (r *nativeMTPRevocationSlots) current() (nativeMTPRevocationSlot, bool) {
 	var best *nativeMTPRevocationSlot
 	for i := range r.slots {
 		slot := &r.slots[i]
-		if slot.issuedAt.After(now) || !now.Before(slot.expiresAt) {
+		if slot.issuedAt.After(now) {
 			continue
 		}
 		if best == nil || slot.issuedAt.After(best.issuedAt) || (slot.issuedAt.Equal(best.issuedAt) && slot.generation > best.generation) {
@@ -379,8 +381,8 @@ func (s *Server) handleNativeMTPSelftestBankSig(w http.ResponseWriter, r *http.R
 }
 
 // handleNativeMTPRevocations serves `native-mtp-revocations.<key>.json` and
-// its `.sig` (SPEC-023 §12.5). Revocation bodies expire within an hour, so
-// they are served without shared caching.
+// its `.sig` (SPEC-023 §12.5). A newer slot replaces the served body at its
+// issued_at, so it is served without shared caching.
 func (s *Server) handleNativeMTPRevocations(w http.ResponseWriter, r *http.Request) {
 	if !s.allowReceiptKeys(r) {
 		w.Header().Set("Retry-After", "1")

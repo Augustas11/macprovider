@@ -1796,13 +1796,14 @@ func TestDurableStore_CreatorApprovalControlsRouteability(t *testing.T) {
 	if _, err := store.UpsertCreatorApproval(ctx, reEnable); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
 		t.Fatalf("valid re-enable without reactivation sweep err=%v, want ErrCreatorApprovalGate", err)
 	}
-	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(-time.Hour), trustpool.CreatorStatusEnabled)
-	reconstructed, err = store.Reconstruct(ctx)
-	if err != nil {
-		t.Fatalf("Reconstruct expired: %v", err)
-	}
-	if got := reconstructed.Pools[root.poolID].CreatorGateReason; got != "creator_agreement_expired" {
-		t.Fatalf("expired gate reason = %q, want creator_agreement_expired", got)
+	// #1938: re-enabling a suspended creator with an Agreement already past
+	// grace is still a reactivation (the pool would route again), so it is
+	// refused the same way; the grace end is not a routing gate.
+	lapsedReEnable := reEnable
+	lapsedReEnable.CreatorAgreementGraceEndsAtUTC = time.Now().Add(-time.Hour).UTC()
+	lapsedReEnable.CreatorAgreementExpiresAtUTC = lapsedReEnable.CreatorAgreementGraceEndsAtUTC.Add(-time.Hour)
+	if _, err := store.UpsertCreatorApproval(ctx, lapsedReEnable); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("lapsed re-enable without reactivation sweep err=%v, want ErrCreatorApprovalGate", err)
 	}
 }
 

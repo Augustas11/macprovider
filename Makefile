@@ -151,10 +151,9 @@ test-dist-release:
 	bash scripts/test-resolve-discovery-renewal-target.sh
 	bash scripts/test-select-discovery-renewal-base.sh
 	bash scripts/test-renew-release-discovery-head.sh
-	bash scripts/test-autotune-feed-freshness-alarm.sh
-	bash scripts/test-renew-autotune-static-feed-signed.sh
 	bash scripts/test-ops-alarm.sh
 	bash -n scripts/renew-autotune-static-feed.sh
+	bash scripts/test-renew-autotune-static-feed.sh
 	bash scripts/test-autotune-activate.sh
 	bash scripts/test-autotune-install-helpers.sh
 	bash -n scripts/lib/autotune-activate.sh

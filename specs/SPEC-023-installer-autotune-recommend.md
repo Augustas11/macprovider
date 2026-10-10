@@ -1,12 +1,49 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.19
+version: v0.22.23
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.23 (2026-10-10)** — The native-MTP emergency revocation feed fails
+  to last-known (#1938, AGENTS.md rule 10). A body past `expires_at` is still
+  accepted and stays in force; an unreachable origin or a rejected body keeps
+  the newest verified revoked set enforced and native MTP on. Generation
+  monotonicity, the same-generation equivocation check, the superset rule,
+  signature, signer and future-issued checks are unchanged, so a replayed
+  body cannot remove a revocation a provider holds. The 15-minute freshness
+  bound on an anchorless first fetch is removed (residual risk recorded in
+  §12.5). The coordinator serves the newest issued slot even after it
+  expires. Slots are published on demand; no scheduled signer remains.
+
+- **v0.22.22 (2026-10-10)** — Retires the scheduled calendar renewals
+  (#1938). The weekly signed autotune-feed restamp, its Tuesday watch and the
+  6-hourly feed freshness alarm are removed; a feed restamp is an on-demand
+  operator step.
+  Pre-v0.22.15 CLIs strand 30 days after the last restamp and pre-v0.22.20
+  CLIs stop native MTP at the live admission's `expires_at`; both are
+  expected to be off the fleet by then.
+
+- **v0.22.21 (2026-10-10)** — Feed age stops gating releases and private
+  prepare (#1938). The live coordinator release gate
+  (`verify-live-coordinator-release-gate.py`) no longer refuses a CLI release
+  because the live feed set's `generated_at` is more than 30 days old; the
+  10-minute future bound, pairing, signature and policy checks are unchanged.
+  The signed Build-1 private prepare authority's `expires_at` is structural
+  only (`generated_at < expires_at`, future-dated `generated_at` still
+  refused) and its 14-day window bound is removed; withdrawal is a new
+  `release_id` in a CLI release.
+
+- **v0.22.20 (2026-10-10)** — The native-MTP admission sidecar's
+  `expires_at` is structural only (#1938, AGENTS.md rule 10). The provider
+  drops its `expires_at > now` check and the 90-day window bound; signatures,
+  release/ledger binding, tuple identity, the emergency revocation feed and
+  emergency-off are unchanged. The self-test bank already kept only its
+  structural window (v0.22.14). Signers keep the 90-day window until CLIs
+  that predate this version leave the fleet.
 
 - **v0.22.19 (2026-10-10)** — #1880 catalog graduation: `SPEC-023-R026`
   is executable. The generator accepts `macprovider.intake-decision.v2`,
@@ -1707,7 +1744,7 @@ Stage A is a weaker binding than Stage B **for the compatibility-set manifest on
 governs how an already-signed, already-committed release becomes the live
 catalog on the coordinator host (`/opt/macprovider/autotune/current`), how the
 host retains older releases, and which operator lane may do it. Every writer
-named here (the coordinator deploy, the weekly freshness renewal, the host
+named here (the coordinator deploy, an on-demand freshness renewal, the host
 updater, and the catalog-content lane) is bound by the same rules. None of
 these rules signs anything: every lane activates bytes that were signed off-host,
 signing keys MUST NOT be present on the coordinator host, and no activation path
@@ -1792,10 +1829,11 @@ not in the resulting admissible set is **uncovered**.
   coverage is unknown. A renewal cannot keep its release id: the id is the
   candidate feed `version`, and §3.7.8 permanently rejects a `release_id`
   rebound to different bytes, so every renewal consumes a window slot. Blocking
-  the renewal would instead risk the 30-day feed expiry that stable CLIs predating
-  SPEC-023 v0.22.15 still enforce. The weekly renewal and the 6-hourly freshness
-  alarm stay until the CLI with advisory age (§3.7.6 rule 4, §3.5 rule 10) is
-  the fleet's stable release; after that they can be retired.
+  the renewal would instead risk the 30-day feed expiry that CLIs predating
+  SPEC-023 v0.22.15 still enforce. The scheduled weekly renewal, its Tuesday
+  watch and the 6-hourly freshness alarm are retired (v0.22.22, #1938): the CLI
+  with advisory age (§3.7.6 rule 4, §3.5 rule 10) is the fleet's stable
+  release, so a renewal is an on-demand operator step.
 
 Coverage is a point-in-time check over connected providers. A provider that is
 offline during activation and returns later on an older release is an accepted
@@ -3009,9 +3047,9 @@ with a different candidate sha, is uncovered. An uncovered pair, a missing or
 malformed `/poolz`, or an unloadable window entry refuses a catalog activation
 unless an override is logged. A freshness renewal with the same uncovered pair
 publishes, raises a warning, and appends a `renewal_coverage_loss` record; a
-provider parked on one release is uncovered on the fourth weekly renewal. A
+provider parked on one release is uncovered on the fourth renewal. A
 CLI with advisory static-feed age (SPEC-023 v0.22.15) is not uncovered by crossing 30
-days; the weekly renewal stays until that CLI is the fleet's stable release.
+days; renewals are on demand since v0.22.22.
 
 AC-CAT-26 (`SPEC-023-R016`, renewal continuity): A renewal whose only
 differences are the stripped restamp fields passes. A renewal that changes any
@@ -3316,12 +3354,23 @@ schema.
 schema_version = "macprovider.native-mtp-admission.v1"
 release_id: 1..128 printable non-space ASCII bytes (0x21-0x7e), equal to release.json version
 issued_at: RFC3339 UTC seconds
-expires_at: RFC3339 UTC seconds; issued_at < expires_at <= issued_at + 90 days
+expires_at: RFC3339 UTC seconds; issued_at < expires_at (structural only, v0.22.20)
 signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 challenge_bank_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 revocation_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 entries: array[1..256]
 ```
+
+`expires_at` is structural only (v0.22.20, #1938). The provider MUST NOT
+reject or disable an admission because the wall clock has passed it, and MUST
+NOT bound the `issued_at`..`expires_at` window. A signed admission keeps
+authorizing its tuples until a superseding release replaces it, the emergency
+revocation feed below revokes a tuple, or emergency-off is set. Signers and the
+coordinator still keep the window at 90 days or less while CLIs that predate
+v0.22.20 (which enforce `expires_at > now` and the 90-day bound) remain in the
+fleet. With the scheduled renewal retired (v0.22.22), an operator re-signs the
+admission on demand before its `expires_at` only if such CLIs still serve
+native MTP then.
 
 Every entry is the exact closed object below. `sha256` means lowercase 64-hex;
 `short_string` means 1..128 UTF-8 bytes with no control character; integers are
@@ -3535,7 +3584,7 @@ bridge. The exact target set depends on whether the artifact-feed pair has also
 completed its own Stage B; no implementation may hardcode an assumed 11- or
 13-file count outside the versioned exact-set manifest.
 
-The loader rejects cross-release replay, missing/expired sidecar, tuple-field
+The loader rejects cross-release replay, missing sidecar, tuple-field
 mismatch, unresolved/non-verified artifact, or evidence digest absent from the
 release evidence bundle. One entry whose tuple/evidence fails is tuple-scoped
 disabled; top-level schema, ordering/uniqueness, signature, signer equality, or
@@ -3543,7 +3592,7 @@ release/ledger binding failure rejects the entire sidecar. Journey and final
 three-lane review digests are deliberately not inside this pre-journey sidecar;
 SPEC-048-R014 binds them later, avoiding a self-hash cycle.
 
-**Emergency tuple revocation.** Native MTP additionally requires a current
+**Emergency tuple revocation.** Native MTP additionally requires a verified
 detached-signed `native-mtp-revocations.json` operator feed. Its decoded body is
 the exact closed object `{schema_version,generation,issued_at,expires_at,
 signer_key_id,revoked_admission_tuple_sha256}`:
@@ -3552,7 +3601,8 @@ signer_key_id,revoked_admission_tuple_sha256}`:
 - `generation` is an unsigned 64-bit integer that strictly increases whenever
   the body changes;
 - timestamps are RFC3339 UTC seconds with
-  `issued_at < expires_at <= issued_at + 1 hour`;
+  `issued_at < expires_at <= issued_at + 1 hour` (structural only since
+  v0.22.23: `expires_at` never stops a verified body from applying);
 - `signer_key_id` is 1..128 ASCII bytes; and
 - `revoked_admission_tuple_sha256` is a bytewise-sorted unique array of at most
   4096 lowercase 64-hex admission-tuple identities.
@@ -3566,8 +3616,13 @@ is fetched from the canonical operator origin under the key-id-qualified name
 signature by every other key, including a concurrently trusted bridge key, is
 an integrity failure. The provider MUST fetch it at startup and at least every
 15 minutes and reject a smaller generation, a revoked-set regression,
-duplicate-key or unknown-field body, invalid signature, signer mismatch,
-future-issued body, or expired body. A later accepted feed's revoked array MUST
+duplicate-key or unknown-field body, invalid signature, signer mismatch, or
+future-issued body. It MUST NOT reject a body, or turn native MTP off, because
+`expires_at` has passed (v0.22.23, #1938, AGENTS.md rule 10): it fails to
+last-known. When the origin is unreachable or a fetched body is rejected, the
+provider keeps enforcing the revoked set of the newest verified body it holds
+and keeps native MTP on; a newer verified generation replaces it at the next
+poll. A later accepted feed's revoked array MUST
 be a superset of the last accepted array for that signer: revocation of one
 admission identity is permanent. Restoration requires a new release/sidecar
 and therefore a new `native_mtp_admission_tuple_sha256`; omission from a later
@@ -3576,10 +3631,12 @@ feed never unrevokes the old identity.
 Publication: the canonical origin serves
 `/v1/native-mtp-revocations.<revocation_signer_key_id>.json` and `.sig` from a
 directory of pre-signed bodies, one per slot of at most 10 minutes with
-`issued_at` at the slot start, choosing the newest issued, unexpired,
-correctly signed slot (`Cache-Control: no-store`). Signing keys stay off the
-coordinator host. The signed weekly renewal signs at least 14 days of slots
-carrying the current revoked set. An emergency revocation is a replacement
+`issued_at` at the slot start, choosing the newest issued, correctly signed
+slot, also after its `expires_at` (`Cache-Control: no-store`). Signing keys
+stay off the coordinator host. Slots are published on demand
+(`scripts/publish-native-mtp-revocations.sh`, also run by a feed restamp of a
+native-bound release); there is no scheduled signer (v0.22.23). An emergency
+revocation is a replacement
 directory, signed off-host, whose generations exceed every served generation
 and whose revoked set is a superset; providers adopt it at their next poll.
 
@@ -3595,13 +3652,19 @@ cache may finish an interrupted Keychain update; an anchor ahead of, missing
 from, or inconsistent with the cache fails native MTP closed until a feed at
 least as new is freshly fetched. If the anchor is missing while an admission
 sidecar is installed, cached bytes are forbidden: recovery requires an online
-fetch from the canonical TLS origin whose `issued_at` is within the last 15
-minutes. Key rotation uses a separate account and cannot copy or lower the old
+fetch of a verified body from the canonical TLS origin, of any age (v0.22.23).
+Residual risk: a provider with no anchor (fresh install or lost Keychain item)
+trusts the newest body the authenticated origin serves, so an attacker who
+controls that origin can hand it an older signed revoked set; once a provider
+holds an anchor, no replayed body can remove a revocation it already enforces. Key rotation uses a separate account and cannot copy or lower the old
 account. Acceptance MUST cover crashes at every update boundary, restored
 filesystem snapshots, missing/corrupt Keychain or cache state, and old-key
-replay. A current cached body remains usable through its `expires_at`; if no
-current authenticated body is available, native MTP fails closed while
-ordinary and classic decode remain available.
+replay. The newest verified cached body stays usable after its `expires_at`.
+Native MTP stays off only while no usable authenticated state exists: no body
+has ever been verified (no anchor and no reachable origin), or the local store,
+cache or anchor fails its integrity checks; ordinary and classic decode remain
+available. An unreachable origin or a rejected network body is never such a
+state once a verified body is held.
 Decode-path selection MUST check the current revocation set immediately before
 admitting a native row. A listed identity disables only that exact admission
 tuple and prevents new native rows immediately. Already-admitted rows stop at

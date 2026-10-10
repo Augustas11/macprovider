@@ -445,16 +445,18 @@ func (r *runner) scenarioR002(ctx context.Context) error {
 		return err
 	}
 
-	if err := r.seedHardwareEvidence(ctx, r.subject.ProviderID, r.hardwareHash(r.subject.ProviderID), time.Now().UTC().Add(-31*24*time.Hour), false); err != nil {
+	// #1938 (SPEC-032 v0.3.7): evidence has no age cutoff; it stops being
+	// current when the provider submits newer evidence from other hardware.
+	// The step id stays r002-expired for the journey schema.
+	if err := r.appendHardwareEvidence(ctx, r.subject.ProviderID, r.hardwareHash(r.subject.ProviderID+":rebenchmark"), time.Now().UTC(), false); err != nil {
 		return err
 	}
-	after, control, err := r.waitForSweep(ctx, "autotune_evidence_expired", 45*time.Second)
+	after, control, err := r.waitForSweep(ctx, "autotune_evidence_not_current", 45*time.Second)
 	if err != nil {
 		return err
 	}
-	r.addStep("r002-expired", "SPEC-032-R002", "expired admitted evidence route-excludes only P_subject on the 30s sweep", before, after, control, publicEvidenceReasonR002, "autotune_evidence_expired", r.buyerSmoke(ctx, r.smallRow.ModelID, true), false, map[string]any{
-		"ttl_days":              30,
-		"evidence_generated_at": time.Now().UTC().Add(-31 * 24 * time.Hour).Format(time.RFC3339),
+	r.addStep("r002-expired", "SPEC-032-R002", "superseded admitted evidence route-excludes only P_subject on the 30s sweep", before, after, control, publicEvidenceReasonR002, "autotune_evidence_not_current", r.buyerSmoke(ctx, r.smallRow.ModelID, true), false, map[string]any{
+		"superseded_by": "newer submission with a different hardware_identity_hash",
 	})
 
 	if err := r.seedHardwareEvidence(ctx, r.subject.ProviderID, r.hardwareHash(r.subject.ProviderID), time.Now().UTC(), false); err != nil {

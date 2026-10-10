@@ -84,7 +84,6 @@ enum Build1PrivateAuthorityError: Error, Equatable, Sendable {
 enum Build1PrivateAuthorityLoader {
     private static let maxAuthorityBytes = 64 * 1024
     private static let maxSignatureBytes = 4 * 1024
-    private static let maxValidity: TimeInterval = 14 * 24 * 60 * 60
     private static let futureSkew: TimeInterval = 5 * 60
 
     static func load(
@@ -128,9 +127,10 @@ enum Build1PrivateAuthorityLoader {
               let generatedAt = timestamp(generatedRaw),
               let expiresAt = timestamp(expiresRaw),
               generatedAt <= now.addingTimeInterval(futureSkew),
-              expiresAt > now,
-              expiresAt > generatedAt,
-              expiresAt.timeIntervalSince(generatedAt) <= maxValidity + futureSkew
+              // expires_at is structural only (#1938): a signed authority keeps
+              // working after its calendar date; withdrawal is a new release_id
+              // in a CLI release.
+              expiresAt > generatedAt
         else {
             throw Build1PrivateAuthorityError.invalid("release_or_freshness_invalid")
         }

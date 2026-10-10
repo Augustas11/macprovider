@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
-# Fail-closed structural checks for protected autotune-feed signed renewal.
+# Fail-closed structural checks for the on-demand autotune-feed restamp
+# (scripts/renew-autotune-static-feed.sh). The scheduled signed workflow was
+# retired in #1938; the script, its Pearl publish/rollback bytes and the
+# runbook it follows stay under test.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-workflow="$root/.github/workflows/renew-autotune-static-feed-signed.yml"
 script="$root/scripts/renew-autotune-static-feed.sh"
 helper="$root/scripts/pearl_autotune_deploy_lock.py"
 lib="$root/scripts/lib/autotune-activate.sh"
 runbook="$root/docs/runbooks/autotune-feed-renewal.md"
-[[ -f "$workflow" ]] || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: missing signed renewal workflow\n' >&2
-  exit 1
-}
 [[ -f "$script" ]] || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: missing renew script\n' >&2
+  printf '[test-renew-autotune-static-feed] ERROR: missing renew script\n' >&2
   exit 1
 }
 [[ -f "$helper" ]] || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: missing Pearl lock validator\n' >&2
+  printf '[test-renew-autotune-static-feed] ERROR: missing Pearl lock validator\n' >&2
   exit 1
 }
 [[ -f "$runbook" ]] || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: missing renewal runbook\n' >&2
+  printf '[test-renew-autotune-static-feed] ERROR: missing renewal runbook\n' >&2
   exit 1
 }
 [[ -f "$lib" ]] || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: missing shared activation lib\n' >&2
+  printf '[test-renew-autotune-static-feed] ERROR: missing shared activation lib\n' >&2
   exit 1
 }
 
@@ -46,12 +44,11 @@ aa_render_publish_script > "$2/publish.sh"
 aa_render_rollback_script flock > "$2/rollback.sh"
 ' _ "$lib" "$render_dir"
 
-python3 - "$workflow" "$script" "$runbook" "$lib" "$render_dir/publish.sh" "$render_dir/rollback.sh" \
+python3 - /dev/null "$script" "$runbook" "$lib" "$render_dir/publish.sh" "$render_dir/rollback.sh" \
   "$root/scripts/tests/fixtures/renew-remote-publish.golden.sh" "$root/scripts/tests/fixtures/renew-remote-rollback.golden.sh" <<'PY'
 import pathlib
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 renew = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 runbook = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 lib = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
@@ -79,125 +76,6 @@ if renew.find("aa_install_helpers") > renew.find("\naa_publish"):
     raise SystemExit("renew must ship and verify helpers before the remote publish")
 # Renew-owned text plus the shared lib it sources.
 script = renew + "\n" + lib
-SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
-SEALED_RUNNER = "    runs-on: macos-15-intel"
-
-if workflow.count(SEALED_RUNNER) != 1:
-    raise SystemExit("signed renewal runner must match the reviewed Intel OpenSSL bottle")
-
-for requirement in (
-    "name: Renew signed autotune static feed",
-    "workflow_dispatch:",
-    "concurrency:",
-    "group: production-release",
-    "cancel-in-progress: false",
-    "environment: autotune-feed-renewal",
-    "POSTURE_PROFILE=unattended",
-    "autotune-feed-renewal 28995904",
-    "scripts/install-sealed-release-openssl.sh",
-    "/private/var/macprovider-openssl-autotune-renewal",
-    "AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64",
-    "PEARL_AUTOTUNE_DEPLOY_SSH_KEY",
-    "AUTOTUNE_STATIC_PRIVATE_KEY_PATH",
-    "PEARL_SSH_IDENTITY",
-    "PEARL_SSH_KNOWN_HOSTS",
-    'export PEARL_SSH="root@159.223.165.194"',
-    "scripts/dist/malibu-download-known_hosts",
-    "bash scripts/renew-autotune-static-feed.sh --deploy",
-    "persist-credentials: false",
-    "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "timeout-minutes: 20",
-    "unset AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 PEARL_AUTOTUNE_DEPLOY_SSH_KEY",
-    'chmod 600 "$key" "$ssh_key"',
-    """trap 'rm -f "$key" "$ssh_key"' EXIT""",
-    "scripts/verify-github-release-posture.sh",
-    "RELEASE_POSTURE_TOKEN",
-    'cron: "0 16 * * 3"',
-    "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
-    "go-version-file: phase4-coordinator/go.mod",
-    "cache: false",
-    "/private/var/macprovider-go-verifier",
-    "Seal the Tier-2 verifier toolchain",
-    'source_root="$(go env GOROOT)"',
-    "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
-    "sudo chown -R root:wheel /private/var/macprovider-go-verifier",
-):
-    if requirement not in workflow:
-        raise SystemExit(f"signed renewal workflow omits: {requirement}")
-
-if "environment: production-release" in workflow:
-    raise SystemExit("signed renewal must not gate on production-release")
-if "antfleet-ops approves" in workflow:
-    raise SystemExit("signed renewal must not require antfleet-ops approval")
-
-before_secrets = workflow.split("- name: Sign a freshness restamp and deploy to Pearl", 1)[0]
-if "POSTURE_PROFILE=unattended" not in before_secrets:
-    raise SystemExit("unattended posture must run before the secret-bearing deploy step")
-if "scripts/verify-github-release-posture.sh" not in before_secrets:
-    raise SystemExit("posture check must run before the secret-bearing deploy step")
-if "AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64: ${{ secrets.AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 }}" in before_secrets:
-    raise SystemExit("feed key must not be in env before the deploy step")
-seal_idx = workflow.find("- name: Seal reviewed OpenSSL 3")
-posture_idx = workflow.find("- name: Verify protected GitHub release posture")
-setup_go_idx = workflow.find("- name: Set up Go for the Tier-2 signature verifier")
-seal_go_idx = workflow.find("- name: Seal the Tier-2 verifier toolchain")
-if posture_idx < 0 or seal_idx < 0 or posture_idx > seal_idx:
-    raise SystemExit("posture check must run before OpenSSL seal")
-if min(setup_go_idx, seal_go_idx) < 0 or setup_go_idx > seal_go_idx:
-    raise SystemExit("setup-go must run before the Go verifier is sealed")
-if seal_go_idx > seal_idx:
-    raise SystemExit("sealed Go verifier must be installed before OpenSSL seal / deploy")
-if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" in before_secrets:
-    raise SystemExit("sealed Go requirement must be set only on the secret-bearing deploy step")
-
-if 'cron: "0 16 * * 1"' in workflow:
-    raise SystemExit("signed renewal must not share Monday 16:00 UTC with discovery-head")
-if 'cron: "0 16 * * 2"' in workflow:
-    raise SystemExit("signed renewal must not share Tuesday 16:00 UTC with the watch workflow")
-
-for forbidden in (
-    "MACPROVIDER_RELEASE_SIGNING_KEY_PEM",
-    "MALIBU_DOWNLOAD_SSH_KEY",
-    "contents: write",
-    "/etc/macprovider/keys",
-    "brew install openssl@3",
-    "brew --prefix openssl@3",
-    "GITHUB_ENV",
-    "autotune-feed-renewal.service",
-    "install-autotune-feed-renewal-pearl.sh",
-):
-    if forbidden in workflow:
-        raise SystemExit(f"signed renewal workflow must not contain {forbidden!r}")
-
-if "OPENSSL_BIN=" in workflow:
-    raise SystemExit("signed renewal must not publish mutable OpenSSL environment state")
-if workflow.count(SEALED_OUTPUT) != 1:
-    raise SystemExit("the deploy crypto consumer must bind the sealed step output once")
-
-for requirement in (
-    "- name: Seal reviewed OpenSSL 3",
-    "id: protected_openssl",
-    "printf 'bin=%s\\n' \"$sealed_bin\" >> \"$GITHUB_OUTPUT\"",
-):
-    if requirement not in workflow:
-        raise SystemExit(f"signed renewal OpenSSL seal omits: {requirement}")
-
-deploy = workflow.split("- name: Sign a freshness restamp and deploy to Pearl", 1)[1]
-if deploy.count(SEALED_OUTPUT) != 1:
-    raise SystemExit("deploy step does not bind the sealed OpenSSL output")
-if "cat \"$key\"" in deploy or "cat \"$ssh_key\"" in deploy:
-    raise SystemExit("deploy step must not print key material")
-if 'printf \'%s\\n\' "$AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64" > "$key"' not in deploy:
-    raise SystemExit("deploy step must materialize the feed key to a 0600 file")
-if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1" not in deploy:
-    raise SystemExit("deploy must require the sealed Go verifier")
-
-top_level, _, rest = workflow.partition("\njobs:\n")
-if "contents: write" in top_level or "contents: write" in rest:
-    raise SystemExit("signed autotune renewal must remain contents: read (no GitHub release publish)")
-if "contents: read" not in rest:
-    raise SystemExit("protected renewal job must request contents: read")
-
 for requirement in (
     "PEARL_SSH_IDENTITY",
     "IdentitiesOnly=yes",
@@ -407,16 +285,8 @@ if "not $expected" not in runbook:
     raise SystemExit("runbook manual rollback must skip unless current matches the failed renewal")
 if "orig_prev" not in runbook:
     raise SystemExit("runbook manual rollback must restore the pre-renewal .previous-target")
-if "environment: autotune-feed-renewal" not in runbook:
-    raise SystemExit("runbook must name the unattended autotune-feed-renewal environment")
 if "approval still pending" in runbook or "antfleet-ops approval" in runbook:
-    raise SystemExit("runbook must not describe a human approval gate for signed renewal")
-if "/private/var/macprovider-go-verifier" not in runbook:
-    raise SystemExit("runbook must name the sealed Go verifier path")
-if "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER" not in runbook:
-    raise SystemExit("runbook must require the sealed Go verifier on Actions")
-if "CATALOG_RELEASE_BASE_REF" not in runbook:
-    raise SystemExit("runbook must bind the Actions ledger base to GITHUB_SHA")
+    raise SystemExit("runbook must not describe a human approval gate for a restamp")
 PY
 
 python3 -m py_compile "$helper"
@@ -426,13 +296,12 @@ bash -n "$lib"
 # EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
 # verify, in both the CB-policy-bound five-feed state and the artifact-bound
 # six-feed state, against a throwaway catalog and key. Structural greps above
-# cannot tell whether the flow still COMPLETES, and this job runs unattended on a
-# 30-day freshness clock.
+# cannot tell whether the flow still COMPLETES.
 ( cd "$root" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
   scripts.tests.test_catalog_artifact_feed.RenewalFlowTest ) >/dev/null 2>&1 || {
-  printf '[test-renew-autotune-static-feed-signed] ERROR: renewal flow regression failed; re-run:\n' >&2
+  printf '[test-renew-autotune-static-feed] ERROR: renewal flow regression failed; re-run:\n' >&2
   printf '  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.tests.test_catalog_artifact_feed.RenewalFlowTest\n' >&2
   exit 1
 }
 
-printf '[test-renew-autotune-static-feed-signed] ok: protected autotune renewal fails closed\n'
+printf '[test-renew-autotune-static-feed] ok: on-demand autotune restamp fails closed\n'

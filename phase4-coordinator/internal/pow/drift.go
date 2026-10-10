@@ -76,17 +76,16 @@ type Alert struct {
 }
 
 type Evaluator struct {
-	cfg         TelemetryDriftConfig
-	catalog     *autotune.Catalog
-	evidence    autotune.EvidenceStore
-	evidenceTTL time.Duration
-	opoi        *rollingPassRate
-	lastAlert   map[string]time.Time
-	mu          sync.Mutex
-	now         func() time.Time
+	cfg       TelemetryDriftConfig
+	catalog   *autotune.Catalog
+	evidence  autotune.EvidenceStore
+	opoi      *rollingPassRate
+	lastAlert map[string]time.Time
+	mu        sync.Mutex
+	now       func() time.Time
 }
 
-func NewEvaluator(cfg TelemetryDriftConfig, catalog *autotune.Catalog, evidence autotune.EvidenceStore, evidenceTTL time.Duration) *Evaluator {
+func NewEvaluator(cfg TelemetryDriftConfig, catalog *autotune.Catalog, evidence autotune.EvidenceStore) *Evaluator {
 	if cfg.OPoIPassRateWindow <= 0 {
 		cfg.OPoIPassRateWindow = 10
 	}
@@ -103,13 +102,12 @@ func NewEvaluator(cfg TelemetryDriftConfig, catalog *autotune.Catalog, evidence 
 		cfg.AlertCooldown = 15 * time.Minute
 	}
 	return &Evaluator{
-		cfg:         cfg,
-		catalog:     catalog,
-		evidence:    evidence,
-		evidenceTTL: evidenceTTL,
-		opoi:        newRollingPassRate(cfg.OPoIPassRateWindow),
-		lastAlert:   make(map[string]time.Time),
-		now:         time.Now,
+		cfg:       cfg,
+		catalog:   catalog,
+		evidence:  evidence,
+		opoi:      newRollingPassRate(cfg.OPoIPassRateWindow),
+		lastAlert: make(map[string]time.Time),
+		now:       time.Now,
 	}
 }
 
@@ -155,7 +153,7 @@ func (e *Evaluator) EvaluateHeartbeatWithVerdict(ctx context.Context, provider p
 	if e == nil || !e.cfg.Enabled {
 		return nil, BenchmarkVerdictUnknown
 	}
-	evidence, ok, err := e.evidence.LatestVerified(ctx, provider.ProviderID, e.evidenceTTL)
+	evidence, ok, err := e.evidence.LatestVerified(ctx, provider.ProviderID)
 	if err != nil {
 		// Infrastructure failure, not a provider claim. Fail neutral: keep the
 		// previous verdict rather than quarantining (or releasing) on a blip.

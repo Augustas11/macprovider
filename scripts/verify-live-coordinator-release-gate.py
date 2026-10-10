@@ -104,7 +104,6 @@ LEDGER_SCHEMAS = {
     "macprovider.autotune-release-ledger.v3",
     "macprovider.autotune-release-ledger.v4",
 }
-STALE_AFTER = datetime.timedelta(days=30)
 
 _baselines_spec = importlib.util.spec_from_file_location(
     "cb_release_baselines", pathlib.Path(__file__).resolve().with_name("cb_release_baselines.py")
@@ -952,8 +951,8 @@ def main() -> int:
                     f"{name} generated_at {current_generated_at!r} is more than "
                     "10 minutes in the future"
                 )
-            if now - current_generated_at_instant > STALE_AFTER:
-                fail(f"{name} generated_at {current_generated_at!r} is more than 30 days old")
+            # Feed age is not a release gate (#1938): providers treat an old
+            # but validly signed feed as advisory-stale, so no renewal is due.
             if generated_at is None:
                 generated_at = current_generated_at
                 generated_at_instant = current_generated_at_instant
