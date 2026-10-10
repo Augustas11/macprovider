@@ -513,6 +513,14 @@ enum NativeMTPOnDeviceSelfCheck {
     static let minimumSpeedup = 1.15
     static let repetitions = 2
 
+    /// Scheduler request ids are durable replay keys (SPEC-038 AC-25): an
+    /// ordinary-decode run is claimed on disk and never released. The
+    /// reference therefore carries a per-run nonce, or every load after the
+    /// first would replay the previous process's claim and throw.
+    static func ordinaryReferenceRequestID(challengeID: String, runNonce: String, attempt: Int) -> String {
+        "native-mtp-selfcheck-ordinary-\(challengeID)-\(runNonce)-\(attempt)"
+    }
+
     struct Verdict: Equatable {
         let passed: Bool
         /// `passed`, `token_mismatch`, `no_net_gain`, `empty_output`.

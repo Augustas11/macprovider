@@ -456,4 +456,39 @@ final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
             "empty_output"
         )
     }
+
+    /// The ordinary reference is claimed in the durable replay store and never
+    /// released, so a restarted process must not reuse the previous run's
+    /// request ids: a replayed id throws and keeps native MTP unadmitted.
+    func testOrdinaryReferenceIDsDoNotReplayAcrossProcessRestart() throws {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-mtp-selfcheck-\(UUID().uuidString)")
+            .appendingPathComponent("claims", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+        let fingerprint = Data(repeating: 0x07, count: 32)
+        func claimRun(_ authority: ContinuousBatchRuntimeReplayAuthority, nonce: String) throws -> [ContinuousBatchSchedulerReplayClaim] {
+            try (0..<NativeMTPOnDeviceSelfCheck.repetitions).map { attempt in
+                try authority.claim(ContinuousBatchSchedulerReplayKey(
+                    requestID: NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(
+                        challengeID: "native-mtp-selftest-journey-0001",
+                        runNonce: nonce,
+                        attempt: attempt
+                    ),
+                    fingerprintSHA256: fingerprint
+                ))
+            }
+        }
+        let firstProcess = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        XCTAssertTrue(firstProcess.durableAvailable)
+        XCTAssertEqual(try claimRun(firstProcess, nonce: "aaaaaaaa"), [.claimed, .claimed])
+
+        let restarted = ContinuousBatchRuntimeReplayAuthority(storeURL: storeURL)
+        // The 1.8.238 failure: same ids after a restart are a durable replay.
+        XCTAssertEqual(try claimRun(restarted, nonce: "aaaaaaaa"), [.duplicateSameRequest, .duplicateSameRequest])
+        XCTAssertEqual(try claimRun(restarted, nonce: "bbbbbbbb"), [.claimed, .claimed])
+        XCTAssertNotEqual(
+            NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(challengeID: "c", runNonce: "aaaaaaaa", attempt: 0),
+            NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(challengeID: "c", runNonce: "aaaaaaaa", attempt: 1)
+        )
+    }
 }

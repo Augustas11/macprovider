@@ -2979,6 +2979,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
                     }
                 } catch {
+                    FileHandle.standardError.write(Data(
+                        "event=native_mtp_self_check result=execution_failed error=\(String(describing: error))\n".utf8
+                    ))
                     selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
                 }
             } else {
@@ -3697,8 +3700,13 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         var tokens: [Int] = []
         var seconds = Double.infinity
+        let runNonce = UUID().uuidString.prefix(8).lowercased()
         for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
-            let id = "native-mtp-selfcheck-ordinary-\(challenge.challengeID)-\(attempt)"
+            let id = NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(
+                challengeID: challenge.challengeID,
+                runNonce: runNonce,
+                attempt: attempt
+            )
             let start = Date()
             let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
                 id: id,
