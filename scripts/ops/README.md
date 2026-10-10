@@ -59,7 +59,10 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   policy comes from `/healthz` and must equal the applied config; any
   difference blocks every Pearl-mutating step. A runtime that reports no
   policy mode is pointed at `pearl-runtime.sh`, never at an `accepted_ids`
-  edit (that field is deprecated and ignored).
+  edit (that field is deprecated and ignored). Step `revocation_seed` applies
+  the checked-in one-time seed
+  (`phase4-coordinator/dist/compatibility-revoked-ids.txt`) to the live
+  `revoked_ids` with one restart, on a repository-mode runtime only.
 - Release tags count only with an approved signer: list SSH signers in
   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
   `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints

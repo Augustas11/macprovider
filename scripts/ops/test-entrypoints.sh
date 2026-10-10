@@ -67,8 +67,12 @@ mkdir -p "$tmp/keys"
 openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/keys/release.key" 2>/dev/null
 openssl ec -in "$tmp/keys/release.key" -pubout -out "$tmp/keys/release.pem" 2>/dev/null
 cp "$tmp/keys/release.pem" "$W/ops/pearl-updater/release-signing-public.pem"
+# The one-time revocation seed, in the fixture's repository.
+SEED1="test/repo:v1.0.1@$(printf '1%.0s' $(seq 40))"
+SEED2="test/repo:v1.0.2@$(printf '2%.0s' $(seq 40))"
+printf '# test seed\n# below: 1.0.3\n%s\n%s\n' "$SEED1" "$SEED2" > "$W/phase4-coordinator/dist/compatibility-revoked-ids.txt"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md \
-  ops/pearl-updater/release-signing-public.pem
+  ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
 printf 'package main\n' > "$W/phase4-coordinator/opsprobe.go"
@@ -213,7 +217,12 @@ pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROV
   {
     printf 'listen:\n  bind_address: 127.0.0.1\ncoordinator:\n  compatibility_set:\n    target_id: %s\n    accepted_ids:\n' "$OLD"
     for id in $1; do printf '    - %s\n' "$id"; done
-    [ -z "${REVOKED:-}" ] || printf '    revoked_ids:\n    - %s\n' "$REVOKED"
+    # The seed is applied unless NO_SEED is set; REVOKED adds one more id.
+    if [ -z "${NO_SEED:-}" ] || [ -n "${REVOKED:-}" ]; then
+      printf '    revoked_ids:\n'
+      [ -n "${NO_SEED:-}" ] || printf '    - %s\n    - %s\n' "$SEED1" "$SEED2"
+      [ -z "${REVOKED:-}" ] || printf '    - %s\n' "$REVOKED"
+    fi
     printf '  require_gateway_context: true\ncoordinator_advertised_version:\n  latest_binary_version: "%s"\n' "$LIVE"
     printf 'privacy_class:\n  enabled: true\n'
     [ -z "$2" ] || printf '  release_code_identities:\n    metadata_dir: %s\n    public_key_path: %s\n' "$2" "$tmp/keys/release.pem"
@@ -282,7 +291,7 @@ if [ "$(state_of privacy_release_identity)" = "done" ]; then ok; else bad "stage
 if [ "$(fact_of privacy_release_metadata_dir)" = "$META" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
 step_ids() { python3 -c 'import json,sys; print(" ".join(s["id"] for s in json.load(open(sys.argv[1]))["steps"]))' "$tmp/out"; }
 case " $(step_ids) " in
-  *" signed_byte_verification privacy_release_setup privacy_release_identity pearl_accepted_ids "*) ok ;;
+  *" signed_byte_verification revocation_seed privacy_release_setup privacy_release_identity pearl_accepted_ids "*) ok ;;
   *) bad "privacy_release_identity is not right after signed_byte_verification: $(step_ids)" ;;
 esac
 status_doc() {
@@ -397,6 +406,27 @@ case " $(step_ids) " in
   *" e2e_gate registrations release_tag promotion "*) ok ;;
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
 esac
+# The one-time revocation seed is a train step on a repository-mode runtime:
+# missing seed ids are added under the locks with one restart, then verified
+# on /healthz.
+NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "revocation seed not yet applied" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli-release.sh _revoke-seed:coordinator restart"*) ok ;; *) bad "seed command: $(next_field command)" ;; esac
+run_rc 3 "_revoke-seed refuses outside next --run" scripts/ops/cli-release.sh _revoke-seed
+before="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "revocation seed applied" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == sys.argv[2:] else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "seed not written as revoked_ids in one restart"; fi
+run_rc 0 "status after the seed" scripts/ops/cli-release.sh status
+if [ "$(state_of revocation_seed)" = done ]; then ok; else bad "seed not live"; fi
+# An old runtime never gets the seed step as next.
+NO_SEED=1 pearl_config "$OLD $COMPAT" "$META"; pearl_boot
+health_legacy v9.0.0 "$LIVE"
+run_rc 0 "old runtime without the seed" scripts/ops/cli-release.sh status
+if [ "$(state_of revocation_seed)" = pending ] && [ "$(next_field id)" != revocation_seed ]; then ok; else bad "seed offered on an old runtime"; fi
+health v9.0.0 "$LIVE"
 # Admission is by policy (SPEC-002-R004): the candidate is admitted without
 # being listed anywhere; an exact revocation refuses it by name.
 note_of() { python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }

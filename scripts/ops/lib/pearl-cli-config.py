@@ -3,7 +3,7 @@
 Pearl coordinator.yaml edits, with one coordinator restart.
 
   python3 - apply [layout flags] [--privacy-setup DIR KEY KEY_SHA256]
-                  [--recommend VERSION TARGET_ID]
+                  [--recommend VERSION TARGET_ID] [--revoke ID ...]
 
 Under both Pearl locks (the installed, sha256-pinned coordinator_config_guard
 LockSet: updater flock, coordinator deploy flock, refuse on a pricing
@@ -24,6 +24,8 @@ Admission needs no per-release edit (SPEC-002-R004): every well-formed
 release identity from compatibility_set.target_id's repository is admitted
 unless exactly listed in revoked_ids. --recommend moves only target_id and
 latest_binary_version, and refuses a target that is foreign or revoked.
+--revoke adds exact ids to compatibility_set.revoked_ids (the checked-in
+one-time seed); /healthz must then report every one of them.
 Nothing secret is printed.
 """
 import argparse
@@ -77,6 +79,29 @@ def compat_repo(item):
     return m.group(1)
 
 
+def add_revoked(text, ids):
+    """Append ids to the block-style compatibility_set.revoked_ids, creating
+    it right after target_id when absent."""
+    start, end = block(text, r"^ *compatibility_set:[ \t]*$")
+    body = text[start:end]
+    found = list(re.finditer(r"^( *)revoked_ids:[ \t]*\n((?:\1 *- .*\n)+)", body, re.M))
+    if found:
+        m = found[0]
+        if len(found) != 1:
+            raise Refused("compatibility_set.revoked_ids must be one block-style list")
+        prefix = m.group(2).splitlines()[0].split("- ", 1)[0]
+        new = body[:m.end()] + "".join("%s- %s\n" % (prefix, i) for i in ids) + body[m.end():]
+    else:
+        if re.search(r"^ +revoked_ids:", body, re.M):
+            raise Refused("compatibility_set.revoked_ids must be a block-style list")
+        t = list(re.finditer(r"^( +)target_id:.*\n", body, re.M))
+        if len(t) != 1:
+            raise Refused("expected exactly one compatibility_set.target_id anchor")
+        ind = t[0].group(1)
+        new = body[:t[0].end()] + "%srevoked_ids:\n" % ind + "".join("%s- %s\n" % (ind, i) for i in ids) + body[t[0].end():]
+    return text[:start] + new + text[end:]
+
+
 def set_scalar(text, header, key, value):
     start, end = block(text, header)
     body = text[start:end]
@@ -128,6 +153,19 @@ def plan(text, args, now):
         if latest != version:
             new = set_scalar(new, r"^coordinator_advertised_version:[ \t]*$", "latest_binary_version", version)
             summary["latest_binary_version"] = version
+    revoked_added = []
+    if args.revoke:
+        existing = [str(x) for x in compat.get("revoked_ids") or []]
+        for item in args.revoke:
+            if compat_repo(item) is None or compat_repo(item) != compat_repo(target):
+                raise Refused("revocation %s is malformed or not from the target's repository" % item)
+            if item == target or (args.recommend and item == args.recommend[1]):
+                raise Refused("refusing to revoke the target %s" % item)
+            if item not in existing and item not in revoked_added:
+                revoked_added.append(item)
+        if revoked_added:
+            new = add_revoked(new, revoked_added)
+            summary["revoked_added"] = revoked_added
     if args.privacy_setup:
         rel = ((doc.get("privacy_class") or {}).get("release_code_identities") or {})
         if not rel.get("metadata_dir"):
@@ -135,6 +173,9 @@ def plan(text, args, now):
             summary["release_code_identities"] = args.privacy_setup[0]
 
     def expected(d):
+        if revoked_added:
+            cs = d.setdefault("coordinator", {}).setdefault("compatibility_set", {})
+            cs["revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []] + revoked_added
         if args.recommend:
             cs = d.setdefault("coordinator", {}).setdefault("compatibility_set", {})
             cs["target_id"] = args.recommend[1]
@@ -158,7 +199,7 @@ def overlay_conflicts(overlay_path, args):
         return
     with open(overlay_path) as f:
         ov = yaml.safe_load(f) or {}
-    if args.recommend and "compatibility_set" in (ov.get("coordinator") or {}):
+    if (args.recommend or args.revoke) and "compatibility_set" in (ov.get("coordinator") or {}):
         raise Refused("the overlay sets coordinator.compatibility_set; reconcile it first")
     if args.recommend and "latest_binary_version" in (ov.get("coordinator_advertised_version") or {}):
         raise Refused("the overlay sets coordinator_advertised_version.latest_binary_version; reconcile it first")
@@ -286,6 +327,9 @@ def check_live(args, health):
     if args.recommend and health.get("compatibility_policy_target_id") != args.recommend[1]:
         raise Refused("/healthz compatibility_policy_target_id is %r, not %s" % (
             health.get("compatibility_policy_target_id"), args.recommend[1]))
+    live = health.get("compatibility_policy_revoked_ids")
+    if args.revoke and (not isinstance(live, list) or set(args.revoke) - set(live)):
+        raise Refused("/healthz compatibility_policy_revoked_ids does not list every requested revocation")
 
 
 def privacy_preflight(args, env, uid, gid):
@@ -396,6 +440,7 @@ def main(argv):
     p.add_argument("--proc", default="/proc")
     p.add_argument("--privacy-setup", nargs=3, metavar=("DIR", "KEY", "KEY_SHA256"))
     p.add_argument("--recommend", nargs=2, metavar=("VERSION", "TARGET_ID"))
+    p.add_argument("--revoke", nargs="+", metavar="ID")
     args = p.parse_args(argv)
     try:
         apply(args)

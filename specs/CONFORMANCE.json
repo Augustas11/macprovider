@@ -11781,7 +11781,9 @@
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
         "scripts/ops/cli-release.sh:load_registrations",
         "scripts/ops/lib/release-registrations.py:compat_verdict",
-        "scripts/ops/lib/release-registrations.py:live_policy"
+        "scripts/ops/lib/release-registrations.py:live_policy",
+        "scripts/legacy-compatibility-revocations.py:generate",
+        "scripts/ops/cli-release.sh:revoke_seed"
       ],
       "tests": [
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetAdmitsEveryWellFormedTargetRepositoryRelease",
@@ -11795,7 +11797,10 @@
         "phase4-coordinator/cmd/coordinator/main_test.go:TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState",
         "scripts/tests/test_release_registrations.py:CompatVerdictTest",
         "scripts/tests/test_pearl_cli_config.py:RecommendTest",
-        "scripts/ops/test-entrypoints.sh:health_legacy"
+        "scripts/ops/test-entrypoints.sh:health_legacy",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetCheckedInRevocationSeedValidates",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello",
+        "scripts/tests/test_pearl_cli_config.py:RevokeTest"
       ],
       "journeys": [],
       "evidence": [],

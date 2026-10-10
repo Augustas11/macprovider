@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -129,5 +130,36 @@ func TestUnconfiguredCompatibilitySetPolicyRetainsLegacyValidation(t *testing.T)
 	}
 	if !cfg.Coordinator.CompatibilitySet.Accepts("") {
 		t.Fatal("unconfigured policy keeps the legacy open hello")
+	}
+}
+
+// The checked-in one-time revocation seed (scripts/legacy-compatibility-
+// revocations.py) must validate as revoked_ids under the live target repository.
+func TestCompatibilitySetCheckedInRevocationSeedValidates(t *testing.T) {
+	raw, err := os.ReadFile("../../dist/compatibility-revoked-ids.txt")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	var ids []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			ids = append(ids, line)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("revocation seed is empty")
+	}
+	cfg := validTestConfig()
+	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
+		TargetID:   "Augustas11/macprovider:v1.8.232@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		RevokedIDs: ids,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("seed does not validate: %v", err)
+	}
+	for _, id := range ids {
+		if !cfg.Coordinator.CompatibilitySet.IsUpdateOnly(id) {
+			t.Fatalf("%s must connect update-only", id)
+		}
 	}
 }
