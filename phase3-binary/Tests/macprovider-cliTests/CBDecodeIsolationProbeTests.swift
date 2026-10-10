@@ -154,7 +154,8 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
     /// (its last token and `width - 1` proposals), so a shared verify feeds
     /// rows x width tokens into every quantized matmul. Each row's verify
     /// logits must be bit-identical to the same row verified alone.
-    /// `MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH` (default 3) sets the width.
+    /// `MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH` (default 2, one proposal, the
+    /// hybrid packed-verify maximum) sets the width.
     func testServedModelVerifyRowsMatchTheirLoneLogitsBitwise() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let directory = environment["MACPROVIDER_DECODE_ISOLATION_MODEL"], !directory.isEmpty,
@@ -168,7 +169,13 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
         let lengths = (environment["MACPROVIDER_DECODE_ISOLATION_LENGTHS"] ?? "600,901,1501,3000,9000")
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        let width = Int(environment["MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH"] ?? "") ?? 3
+        let width = Int(environment["MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH"] ?? "") ?? 2
+        // Target tokens per verify forward: the backend's device bound by
+        // default; MACPROVIDER_DECODE_ISOLATION_ROWS_PER_FORWARD=0 verifies
+        // every row in one forward (uncapped).
+        let verifyTokensPerForward = environment["MACPROVIDER_DECODE_ISOLATION_ROWS_PER_FORWARD"] == "0"
+            ? Int.max
+            : PagedKVSharedForwardBackend.deviceVerifyTokenBound
         let container = try await LLMModelFactory.shared.loadContainer(
             from: URL(fileURLWithPath: directory),
             using: #huggingFaceTokenizerLoader()
@@ -219,7 +226,18 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
                 // on whether they would be accepted.
                 tokenRows.append([first] + (1 ..< width).map { 2_000 + 37 * $0 + row })
             }
-            let logits = try await backend.sharedVerifyLogitsForTest(requestIDs: rows.map { ids[$0] }, tokenRows: tokenRows)
+            // The backend verifies a round in consecutive forwards of at most
+            // `verifyTokensPerForward` target tokens (rows x width).
+            var logits: [[Float]] = []
+            for group in PagedKVSharedForwardBackend.verifyGroups(
+                widths: tokenRows.map(\.count),
+                maxTokens: verifyTokensPerForward
+            ) {
+                logits += try await backend.sharedVerifyLogitsForTest(
+                    requestIDs: group.map { ids[rows[$0]] },
+                    tokenRows: Array(tokenRows[group])
+                )
+            }
             return Dictionary(uniqueKeysWithValues: zip(rows.map { ids[$0] }, logits))
         }
 
@@ -237,7 +255,7 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
                     return slice.indices.max { slice[$0] < slice[$1] }! - column * vocabulary
                 }
             }
-            print("verify-isolation rows=\(lengths.count) width=\(width) row=\(row) keys=\(lengths[row]) logits_bitwise=\(lone == shared) max_abs_diff=\(gap) lone_top=\(argmax(lone)) batched_top=\(argmax(shared))")
+            print("verify-isolation rows=\(lengths.count) tokens_per_forward=\(verifyTokensPerForward == Int.max ? "all" : String(verifyTokensPerForward)) width=\(width) row=\(row) keys=\(lengths[row]) logits_bitwise=\(lone == shared) max_abs_diff=\(gap) lone_top=\(argmax(lone)) batched_top=\(argmax(shared))")
             if lone != shared { failures.append("row \(row) (\(lengths[row]) keys): max |diff| \(gap)") }
         }
         XCTAssertEqual(failures, [], "batched verify rows differ from their lone runs")

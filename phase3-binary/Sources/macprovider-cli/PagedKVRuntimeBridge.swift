@@ -668,6 +668,47 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// the paged-KV accounting does not see, for long held completions.
     static let defaultNativeMTPDrafterColumnCap = 1024
     let nativeMTPDrafterColumnCap: Int
+    /// Most target tokens (rows x verify width) one packed native-MTP
+    /// verification forward carries. Every quantized projection of that
+    /// forward multiplies that many tokens, and MLX switches it from `qmv` to
+    /// `qmm` at the projection's vector limit (`ContinuousBatchDecodeRouteBound`),
+    /// so a larger round verifies in consecutive forwards and every row keeps
+    /// the kernel route of its lone verification (SPEC-038 FR-CB2).
+    let maxVerifyTokensPerForward: Int
+    static let deviceVerifyTokenBound: Int = {
+        let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(
+            architecture: PagedKVVectorAttentionRoute.deviceArchitecture
+        )
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only, shared with the decode row bound override.
+        return ProcessInfo.processInfo.environment["MACPROVIDER_LAB_DECODE_ROW_BOUND"]
+            .flatMap { Int($0) }
+            .flatMap { $0 >= 1 ? $0 : nil } ?? deviceBound
+        #else
+        return deviceBound
+        #endif
+    }()
+
+    /// Consecutive packed-verify groups in packed-row order, each carrying at
+    /// most `maxTokens` target tokens (rows x the group's widest row), and at
+    /// least one row.
+    static func verifyGroups(widths: [Int], maxTokens: Int) -> [Range<Int>] {
+        var groups: [Range<Int>] = []
+        var start = 0
+        var widest = 0
+        for (index, width) in widths.enumerated() {
+            let candidate = max(widest, width)
+            if index > start, candidate * (index - start + 1) > maxTokens {
+                groups.append(start ..< index)
+                start = index
+                widest = width
+            } else {
+                widest = candidate
+            }
+        }
+        if start < widths.count { groups.append(start ..< widths.count) }
+        return groups
+    }
     private var activeOperations = 0
     private var cancelRequested = false
     /// Set once a ragged prefill forward attended outside
@@ -696,11 +737,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        maxVerifyTokensPerForward: Int? = nil
     ) {
         self.container = container
         self.drafterContainer = drafterContainer
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
+        self.maxVerifyTokensPerForward = max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound)
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
@@ -1244,6 +1287,54 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         clearDecodeSession()
+        let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
+        let groups = Self.verifyGroups(
+            widths: ordered.map(\.verifiedInputTokenCount),
+            maxTokens: maxVerifyTokensPerForward
+        )
+        guard groups.count > 1 else {
+            return try await verifyNativeMTPPackedGroup(rows: inputs)
+        }
+        var verifiedRows: [NativeMTPVerifiedRow] = []
+        for group in groups {
+            // Each group verifies as its own packed round, rows re-indexed
+            // from 0; results keep the round's packed row indices.
+            let groupInputs = ordered[group].enumerated().map { index, input in
+                ContinuousBatchNativeMTPVerifyInput(
+                    requestID: input.requestID,
+                    currentToken: input.currentToken,
+                    proposalTokens: input.proposalTokens,
+                    generatedTokens: input.generatedTokens,
+                    samplerSeed: input.samplerSeed,
+                    binding: input.binding,
+                    blockTable: input.blockTable,
+                    committedKVTokenCount: input.committedKVTokenCount,
+                    verifiedInputTokenCount: input.verifiedInputTokenCount,
+                    targetKVTokenCount: input.targetKVTokenCount,
+                    packedRowIndex: index,
+                    samplerStep: input.samplerStep,
+                    temperature: input.temperature,
+                    topP: input.topP
+                )
+            }
+            let groupRows = try await verifyNativeMTPPackedGroup(rows: groupInputs)
+            verifiedRows += groupRows.map { row in
+                NativeMTPVerifiedRow(
+                    schedulerRowID: row.schedulerRowID,
+                    packedRowIndex: ordered[group.lowerBound + row.packedRowIndex].packedRowIndex,
+                    proposedTokenIDs: row.proposedTokenIDs,
+                    targetTopTokenIDs: row.targetTopTokenIDs
+                )
+            }
+        }
+        return verifiedRows.sorted { $0.packedRowIndex < $1.packedRowIndex }
+    }
+
+    /// One packed verification forward over `inputs` (packed row indices
+    /// `0 ..< inputs.count`).
+    private func verifyNativeMTPPackedGroup(
+        rows inputs: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
             let rowStates = inputs.map {
                 self.rowState(

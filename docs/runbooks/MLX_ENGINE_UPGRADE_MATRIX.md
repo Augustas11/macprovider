@@ -160,30 +160,34 @@ the call's shape:
   row alone. With head dimension 256 and more than 8 query tokens the unfused
   path runs batched GEMMs whose tile size follows `rows x heads x L x keys`;
   tiles change the blocking, not each element's K accumulation order.
-  Rows of different lengths do not share one attention call. Through it
-  each row would attend over keys zero-padded to the longest row, and the
-  route follows the padded length: the unfused prompt path (head dims
-  192/256) blocks its GEMMs by it (Studio, bfloat16: up to 2.4e-4 apart),
-  and the vector decode/verify kernels (`sdpa_vector`, `sdpa_vector_2pass`
-  in `scaled_dot_product_attention.cpp`) pick one or two passes (1024 keys
-  on Max/Ultra, 4096 with GQA elsewhere), the two-pass partition count
-  (Ultra with 6 or more query heads per KV head and token: 128 / 512 / 1024
-  at 16384 and 65536 keys), and the no-mask `_gqa` variant from it. Both
-  kernels assign key `i` to partition `i mod P` and skip masked keys, so
-  they are padding-invariant only while `P` and the pass count agree.
-  Measured on the Studio before the fix (head dim 256, 16/2 heads): rows of
-  600-1023 keys padded past 1024 and a 4095-key row padded to 16400 differed
-  by up to 2e-3. `PagedKVBatchLayerCache.updateAndAttend` attends each padded
-  row in its own call over exactly its own keys and query columns, with the
-  mask its lone call takes (none for decode, causal for a prompt chunk, its
-  slice of the packed mask for verification); equal-length rows keep one
-  call. `testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims` and
-  `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check this
-  bit for bit at head dims 128 and 256 through the batch caches. A model
-  that calls SDPA itself bypasses it: a ragged prefill forward that does is
-  failed before sampling and the backend stops forming ragged groups
-  (`event=continuous_batch_ragged_prefill_disabled`); its decode rows keep
-  the single padded call.
+  Rows of different lengths share one KV buffer padded to the longest row,
+  and attention routes follow the padded length. The unfused prompt path
+  (query length over 8, head dims 192/256) blocks its GEMMs by it (Studio,
+  bfloat16: up to 2.4e-4 apart), so every padded prompt row attends in its
+  own call over exactly its own keys with the causal mask. The vector
+  decode/verify kernels (query length at most 8) pick one or two passes
+  (1024 keys on Max/Ultra, 4096 with GQA elsewhere), the two-pass partition
+  count (Ultra with 6 or more simdgroups: 128 / 512 / 1024 at 16384 and
+  65536 keys) and the no-mask `_gqa` first pass from it; both kernels deal
+  key `i` to partition `i mod P` and skip masked keys, so a padded row keeps
+  its lone bits exactly when its own key length selects the padded call's
+  route. `PagedKVBatchLayerCache.updateAndAttend` keeps one padded call for
+  those rows and gives every other padded row its own call over exactly its
+  own keys and query columns, with the mask its lone call takes (none for
+  decode, its slice of the packed mask for verification); an unknown route
+  always splits. `PagedKVVectorAttentionRoute` ports the dispatch (core
+  `scaled_dot_product_attention.cpp` lines 469-473, 486-523, 812, 875 at
+  `v0.32.2-macprovider.2`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
+  pins every boundary, and `testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims`,
+  `testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep` and
+  `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check every
+  row bit for bit through the batch caches (Metal hosts only; run them on the
+  Studio at each rebase). Before the fix (Studio, head dim 256, 16/2 heads)
+  rows of 600-1023 keys padded past 1024 and a 4095-key row padded to 16400
+  differed by up to 2e-3. A model that calls SDPA itself bypasses this: a
+  ragged prefill forward that does is failed before sampling and the backend
+  stops forming ragged groups (`event=continuous_batch_ragged_prefill_disabled`);
+  its decode rows keep the single padded call.
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it
@@ -231,7 +235,7 @@ results in the evidence header.
 | Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
 | Weight-file discovery | Every `.safetensors` file the rebased mlx-swift-lm loader can consume (`safetensorWeightURLs`, index and additional files included) is inside the native-MTP observer's recursive scan (SPEC-048 MTP-2). |
-| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule` and the `get_qmv_batch_limit` port in `ContinuousBatchDecodeRouteBound`. |
+| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule` and the `get_qmv_batch_limit` port in `ContinuousBatchDecodeRouteBound` and the `sdpa_vector` dispatch port in `PagedKVVectorAttentionRoute` (their table tests and the Metal-host bitwise attention tests pass on the Studio). |
 | Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with keyed (`conv:`) prompts, whose generation-prompt tail chunk is below the 33-token bound. |
 
 ## Package and toolchain preflight

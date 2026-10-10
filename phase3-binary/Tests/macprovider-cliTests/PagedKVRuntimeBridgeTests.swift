@@ -1891,6 +1891,18 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(shared(verify.map { E(queryTokens: 12, keyTokens: $0.keyTokens) }, width: 12, padded: 9012), [], "prompt chunks never share")
     }
 
+    /// Packed verification splits into consecutive groups of at most the
+    /// token bound (rows x the group's widest row), never below one row.
+    func testPackedVerifyGroupsStayWithinTheTokenBound() {
+        typealias B = PagedKVSharedForwardBackend
+        XCTAssertEqual(B.verifyGroups(widths: [2, 2, 2, 2, 2], maxTokens: 11), [0 ..< 5])
+        XCTAssertEqual(B.verifyGroups(widths: Array(repeating: 2, count: 8), maxTokens: 11), [0 ..< 5, 5 ..< 8])
+        XCTAssertEqual(B.verifyGroups(widths: [1, 1, 2, 1, 2, 2, 1], maxTokens: 5), [0 ..< 2, 2 ..< 4, 4 ..< 6, 6 ..< 7])
+        XCTAssertEqual(B.verifyGroups(widths: [8, 1], maxTokens: 5), [0 ..< 1, 1 ..< 2], "a row wider than the bound verifies alone")
+        XCTAssertEqual(B.verifyGroups(widths: [], maxTokens: 5), [])
+        XCTAssertEqual(B.verifyGroups(widths: Array(repeating: 2, count: 16), maxTokens: .max), [0 ..< 16])
+    }
+
     /// Which batched attention calls split per row: only padded ones.
     func testRowAttentionExtentsSplitOnlyPaddedRows() {
         typealias Extent = PagedKVRowAttentionExtent
