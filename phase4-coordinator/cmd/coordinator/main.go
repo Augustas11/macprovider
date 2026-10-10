@@ -1497,6 +1497,7 @@ func runCoordinator() (exitCode int) {
 
 	var register http.HandlerFunc
 	var hardwareEvidence http.HandlerFunc
+	var appAttestChallenge, appAttestSubmit http.HandlerFunc
 	registerHandler := &onboarding.Handler{
 		StatsDB:                             onboardingStore,
 		AuthTokenStore:                      tokenStore,
@@ -1512,6 +1513,9 @@ func runCoordinator() (exitCode int) {
 		ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
 		HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
 		HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
+		AppAttestChallenges:                 onboarding.NewAppAttestChallengeStore(0),
+		AppAttestIPRateLimiter:              onboarding.NewMemoryRateLimiter(30, time.Minute),
+		AppAttestProviderRateLimiter:        onboarding.NewMemoryRateLimiter(10, time.Hour),
 		AppAttestVerifier: onboarding.AppleAppAttestVerifier{
 			Config: onboarding.AppAttestConfig{
 				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
@@ -1537,6 +1541,8 @@ func runCoordinator() (exitCode int) {
 		registerHandler.ASNResolver = asnResolver
 		register = registerHandler.HandleAppTrackRegister
 		hardwareEvidence = registerHandler.HandleHardwareEvidence
+		appAttestChallenge = registerHandler.HandleAppAttestChallenge
+		appAttestSubmit = registerHandler.HandleAppAttestSubmit
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
 	// Phase 2 Track P2-A: MDM enrollment profile endpoint.
@@ -1562,6 +1568,7 @@ func runCoordinator() (exitCode int) {
 		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
 	buyerHandler = withPortalSessionMe(buyerHandler, tokenStore)
+	buyerHandler = withProviderAppAttest(buyerHandler, appAttestChallenge, appAttestSubmit)
 	if liveMDAService != nil {
 		buyerHandler = withMDMDeviceBinding(buyerHandler, liveMDAService.HandleDeviceBinding)
 		logger.Info().Msg("Phase 3 device binding claim mounted at /v1/mdm/device-binding")
@@ -4000,6 +4007,19 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	if malibuRewardAudit != nil {
 		mux.Handle("/v1/provider/malibu-reward-audit", malibuRewardAudit)
 	}
+	mux.Handle("/", base)
+	return mux
+}
+
+// withProviderAppAttest mounts the SPEC-033 §5.7.1 provider App Attest
+// endpoints when the app-track routes are enabled.
+func withProviderAppAttest(base http.Handler, challenge, submit http.HandlerFunc) http.Handler {
+	if challenge == nil || submit == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/providers/app-attest/challenge", challenge)
+	mux.HandleFunc("/v1/providers/app-attest", submit)
 	mux.Handle("/", base)
 	return mux
 }

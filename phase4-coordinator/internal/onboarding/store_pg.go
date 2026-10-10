@@ -38,21 +38,55 @@ func (s *PGStore) AttachAppAttestRecorder(dsn string) error {
 	return nil
 }
 
+// AppAttestRecorderConfigured reports whether the app_attest_recorder
+// connection is attached.
+func (s *PGStore) AppAttestRecorderConfigured() bool {
+	return s != nil && s.appAttestRecordDB != nil
+}
+
+// AppAttestVerificationRecorded reports whether providerID already has a
+// recorded App Attest verification (SPEC-033 §5.7.1 step 1).
+func (s *PGStore) AppAttestVerificationRecorded(ctx context.Context, providerID string) (bool, error) {
+	if !s.AppAttestRecorderConfigured() {
+		return false, errors.New("app attest record postgres store is not configured")
+	}
+	var recorded bool
+	err := s.appAttestRecordDB.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM provider_app_attest_verifications WHERE provider_id = $1)`, providerID).Scan(&recorded)
+	return recorded, err
+}
+
 // RecordAppAttestVerification records that providerID's App Attest key passed
-// Apple verification at registration. The first record per provider and per
-// key wins; it is never updated.
-func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) error {
-	if s == nil || s.appAttestRecordDB == nil {
-		return errors.New("app attest record postgres store is not configured")
+// Apple verification (SPEC-033-R004). The first record per provider and per
+// key wins and is never updated: a provider that already has a row keeps its
+// first key, and a key recorded for another provider is not recorded again.
+func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) (AppAttestRecordOutcome, error) {
+	if !s.AppAttestRecorderConfigured() {
+		return 0, errors.New("app attest record postgres store is not configured")
 	}
 	if strings.TrimSpace(providerID) == "" || len(keyID) != 32 {
-		return errors.New("app attest record requires a provider id and a 32-byte key id")
+		return 0, errors.New("app attest record requires a provider id and a 32-byte key id")
 	}
-	_, err := s.appAttestRecordDB.ExecContext(ctx, `
+	res, err := s.appAttestRecordDB.ExecContext(ctx, `
 INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id)
 VALUES ($1, $2)
 ON CONFLICT DO NOTHING`, providerID, keyID)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 1 {
+		return AppAttestRecorded, nil
+	}
+	recorded, err := s.AppAttestVerificationRecorded(ctx, providerID)
+	if err != nil {
+		return 0, err
+	}
+	if recorded {
+		return AppAttestAlreadyRecorded, nil
+	}
+	return AppAttestKeyReused, nil
 }
 
 func OpenPGStore(dsn string) (*PGStore, error) {
@@ -286,9 +320,19 @@ SELECT j.generated_at, j.evidence
 		if currentUser != "app_attest_recorder" {
 			return fmt.Errorf("app_attest_recorder smoke current_user = %q, want app_attest_recorder", currentUser)
 		}
-		var canInsert bool
-		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')`).Scan(&canInsert); err != nil || !canInsert {
-			return fmt.Errorf("app_attest_recorder smoke lacks INSERT on provider_app_attest_verifications (err=%v)", err)
+		// Least privilege (SPEC-033 §2.7): exactly SELECT and INSERT on the
+		// verification table, and no inherited role.
+		for privilege, want := range map[string]bool{
+			"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false, "REFERENCES": false, "TRIGGER": false,
+		} {
+			var has bool
+			if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT has_table_privilege(current_user, 'provider_app_attest_verifications', $1)`, privilege).Scan(&has); err != nil || has != want {
+				return fmt.Errorf("app_attest_recorder smoke: %s on provider_app_attest_verifications = %v, want %v (err=%v)", privilege, has, want, err)
+			}
+		}
+		var memberships int
+		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT COUNT(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user`).Scan(&memberships); err != nil || memberships != 0 {
+			return fmt.Errorf("app_attest_recorder smoke: role memberships = %d, want 0 (err=%v)", memberships, err)
 		}
 	}
 	return nil
