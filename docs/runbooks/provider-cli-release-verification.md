@@ -15,7 +15,20 @@ is `compatibility_set.revoked_ids`, exact identities: a revoked build stays
 connected update-only (never routed) and still receives the recommendation.
 Revocation matches the identity a provider reports; it is a routing fence,
 not a binary ban. `accepted_ids` and `first_hop_bridge_ids` still parse but
-are ignored (startup warning). Fleet recommendation still requires the
+are ignored (startup warning). A hello whose `binary_version` differs from its
+set's version is rejected (`provider_binary_version_mismatch`).
+
+One-time revocation seed: every published release below v1.8.207 that ships
+`compatibility-set.json` is listed in
+`phase4-coordinator/dist/compatibility-revoked-ids.txt`, regenerated with
+`GH_TOKEN=$(gh auth token -u Augustas11) python3
+scripts/legacy-compatibility-revocations.py generate --below 1.8.207` (each id
+is the release's signed `compatibility_set_id`, cross-checked against the
+tag's commit) and checked offline by `... check`. After the
+repository-admission runtime ships, `cli-release.sh` step `revocation_seed`
+(`next --run`: `_revoke-seed`, one restart) adds any missing seed id to Pearl's
+`revoked_ids` and is done when `/healthz` lists them all. Those releases stay
+connected update-only and auto-update. Fleet recommendation still requires the
 matching target: a binary recommendation of 223 with compatibility target 207
 fails the consumer updater's exact manifest-target comparison.
 
