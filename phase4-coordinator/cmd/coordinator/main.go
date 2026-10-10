@@ -231,16 +231,12 @@ func runCoordinator() (exitCode int) {
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
-	compatibilityPolicyMode := "unconfigured"
-	if cfg.Coordinator.CompatibilitySet.Configured() {
-		compatibilityPolicyMode = "configured"
-	}
 	logger.Info().
-		Str("compatibility_policy", compatibilityPolicyMode).
+		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
 		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
-		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
-		Int("first_hop_bridge_set_count", len(cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs)).
+		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Msg("provider compatibility-set admission policy initialized")
+	warnDeprecatedCompatibilityFields(logger, cfg.Coordinator.CompatibilitySet)
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
 		os.Exit(1)
@@ -4314,6 +4310,24 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
 
+func compatibilityPolicyModeForConfig(policy config.CompatibilitySetConfig) string {
+	if !policy.Configured() {
+		return "unconfigured"
+	}
+	return "repository"
+}
+
+// warnDeprecatedCompatibilityFields keeps old configs loading while saying
+// that accepted_ids / first_hop_bridge_ids no longer affect admission
+// (SPEC-002-R004: target repository plus exact revocations).
+func warnDeprecatedCompatibilityFields(logger zerolog.Logger, policy config.CompatibilitySetConfig) {
+	if fields := policy.DeprecatedFields(); len(fields) != 0 {
+		logger.Warn().
+			Strs("deprecated_fields", fields).
+			Msg("coordinator.compatibility_set fields are deprecated and ignored; admission is the target_id repository minus exact revoked_ids")
+	}
+}
+
 func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, trustPoolAdminReloader trustpool.CreatorAdminConfigReloader, billingStores ...*billing.Store) {
 	// SPEC-016 v0.1.23 §6.5: the general SIGHUP reload must not parse,
 	// env-resolve, or validate payout.security.*, and a payout.* key
@@ -4403,6 +4417,19 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("autotune runtime economics reload rejected")
 		return
 	}
+	warnDeprecatedCompatibilityFields(logger, cfg.Coordinator.CompatibilitySet)
+	compatibilityReload, err := wsServer.BeginCompatibilitySetPolicyReload(cfg.Coordinator.CompatibilitySet)
+	if err != nil {
+		logger.Error().Err(err).Msg("compatibility_set config reload rejected")
+		return
+	}
+	compatibilityPublished := false
+	defer func() {
+		if !compatibilityPublished {
+			compatibilityReload.Abort()
+		}
+	}()
+
 	// M3-8d (audit TEST-4): build a fresh *Catalog and atomically swap the
 	// package singleton, rather than mutating the in-place global. A reader
 	// holding the old pointer mid-VerifyProviderHash completes against the
@@ -4506,6 +4533,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	} else if billingSnapshotCommitted {
 		buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, nil)
 	}
+	compatibilityClosed := compatibilityReload.Publish()
+	compatibilityPublished = true
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
 	benchmarkQuarantinesCleared := 0
@@ -4523,6 +4552,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
 		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Int("compatibility_policy_sessions_closed", compatibilityClosed).
+		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
+		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Str("config_sha256", configDigests.ConfigSHA256).
 		Str("overlay_sha256", configDigests.OverlaySHA256).
 		Msg("tier2/proof_of_weights config reloaded")

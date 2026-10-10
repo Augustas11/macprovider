@@ -262,9 +262,10 @@ are consumed and must not be reused.
 
 Candidate **207** was promoted from exact accepted commit `d98b74a6` on
 2026-09-29. The Studio serving canary now runs the signed public 207 payload
-with `qwen/qwen3.6-35b-a3b`, and Pearl recommends compatibility set 207 while
-retaining promoted 117 and 123 in `accepted_ids` for the older fleet. Private
-candidate 202 was removed from the accepted set after the 207 cut.
+with `qwen/qwen3.6-35b-a3b`, and Pearl recommends compatibility set 207.
+Private candidate 202 was removed from the accepted set after the 207 cut.
+(Since SPEC-002-R004, 117 and 123 are not in the live allowlist and are in
+the one-time revocation seed: they connect update-only and auto-update.)
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -797,9 +798,8 @@ mainland-provider installer handoff.
    `privacy_class.release_code_identities.metadata_dir` as `v<ver>.json`
    (hot, no restart). While Pearl has no `metadata_dir`, step
    `privacy_release_setup` comes first and `next --run` performs the one-time
-   setup (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup"),
-   sharing its single coordinator restart with the `pearl_accepted_ids` edit
-   and staging the identity right after. CLI 1.8.230 shipped without this and
+   setup (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup")
+   with one coordinator restart, staging the identity right after. CLI 1.8.230 shipped without this and
    every upgraded provider's privacy advertisement was refused for ~12 h.
 5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
@@ -813,7 +813,9 @@ mainland-provider installer handoff.
    on every status, also after publication, so it gates promotion, the
    recommendation bump and rollout verification. It passes only when the
    RUNNING coordinator holds every registration: the candidate
-   `compatibility_set_id` is in `accepted_ids` and the on-disk config's
+   `compatibility_set_id` is admitted by the live policy (SPEC-002-R004:
+   well-formed, from the `target_id` repository, not in `revoked_ids`;
+   `/healthz` must equal the applied config) and the on-disk config's
    sha256 equals the running process's boot `coordinator_config_applied`
    digests (restart-only fields), `privacy_class.enabled` is true, and the
    candidate `code_cdhash` is approved either by a `v<ver>.json` that
@@ -881,21 +883,15 @@ mainland-provider installer handoff.
 - Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).
-- Live-coordinator candidate test: `scripts/ops/cli-release.sh next --run`
-  at step `pearl_accepted_ids` adds its `compatibility_set_id` to
-  `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
-  a value copy — SIGHUP does not reload compatibility_set). The list is
-  capped at 8 and must include `target_id`; the step also runs after
-  publication, so a lost acceptance of a published release is re-added
-  (target unchanged); at the cap the step evicts the oldest accepted version that is not the
-  target, not the previous target/stable and not in use, where a version is
-  in use when it is the latest connection version of some provider seen in
-  the last 14 days (`_anonymous` excluded). It prints the per-version table
-  (latest-version provider counts, last seen) and refuses with it when
-  nothing is evictable. Keep the id while it is the Studio serving canary;
-  revert after a throwaway test. An unaccepted set is closed 4001
-  `compatibility_set_unaccepted`; the CLI reports that as
-  `Expected auth_challenge v2`.
+- Live-coordinator candidate test: no Pearl admission edit. Since
+  SPEC-002-R004 the coordinator admits every well-formed release identity
+  from the `target_id` repository; step `pearl_accepted_ids` only checks that
+  the running policy admits the candidate. `accepted_ids` is deprecated and
+  ignored. To keep a bad build off buyer traffic, add its exact identity to
+  `compatibility_set.revoked_ids` (SIGHUP-reloadable): it reconnects
+  update-only and still receives the recommendation. A foreign-repository or
+  malformed set is closed 4001 with its code, and a v2 CLI reports that code
+  instead of `Expected auth_challenge v2`.
 - Every new CLI version needs two Pearl registrations, not one: the
   compatibility set above and the privacy code identity. Stage the identity
   with `scripts/ops/cli-release.sh next --run` at step

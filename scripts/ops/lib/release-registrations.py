@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Coordinator-side registrations of a provider CLI release (cli-release.sh).
 
-A new CLI binary is served only when Pearl knows it in two places:
-compatibility_set.accepted_ids (restart-only config) and a privacy-class code
+A new CLI binary is served only when Pearl admits its compatibility_set_id
+and knows its privacy code identity. Admission (SPEC-002-R004) is by
+repository: the id is well-formed, from compatibility_set.target_id's
+repository and not in revoked_ids, as the RUNNING coordinator reports on
+/healthz (compatibility_policy_mode "repository", target, revocations), which
+must equal the applied config. A runtime that reports no mode predates
+repository admission and admits only its exact accepted_ids. Privacy needs a
+privacy-class code
 identity approval, either a signed `v<ver>.json` in
 privacy_class.release_code_identities.metadata_dir (hot, re-read every
 challenge interval) or a privacy_class.approved_code_identities entry
@@ -29,9 +35,11 @@ file`) and print JSON; they never print credentials or the full config.
       invocation; "source" says which. Four arguments: journal lines since
       SINCE (journalctl syntax), naming PROVIDER_ID unless it is "-".
 
-  evaluate FACTS_JSON VERSION COMPAT_ID PEARL_RELEASE_JSON PEARL_RELEASE_SIG
+  evaluate FACTS_JSON VERSION COMPAT_ID PEARL_RELEASE_JSON PEARL_RELEASE_SIG HEALTHZ_JSON
       local: decide the metadata state and whether the candidate is fully
-      registered; prints a JSON verdict.
+      registered; prints a JSON verdict. HEALTHZ_JSON is the live coordinator
+      /healthz body; unreadable, or a policy that differs from the applied
+      config, fails closed (policy_mismatch).
 """
 import base64
 import datetime
@@ -48,6 +56,10 @@ import urllib.request
 UNAPPROVED = "posture_unapproved_code_identity"
 CONTEXT = {"file": ""}
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# Canonical release identity, as config.ValidateCompatibilitySetID: no leading
+# zeros, every component within int64, at most 256 bytes.
+COMPAT_ID = re.compile(r"^([A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}):v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))@[0-9a-f]{40}$")
+INT64_MAX = 2 ** 63 - 1
 MAX_FILE = 1 << 20
 
 
@@ -153,6 +165,7 @@ def facts(cfg_path, overlay_path, unit, version, metrics_url):
     doc = {
         "target_id": str(compat.get("target_id") or ""),
         "accepted_ids": [str(x) for x in compat.get("accepted_ids") or []],
+        "revoked_ids": [str(x) for x in compat.get("revoked_ids") or []],
         "privacy_class_enabled": bool(pc.get("enabled")),
         "approved_code_identities": approved,
         "denied_code_cdhashes": [str(x) for x in pc.get("denied_code_cdhashes") or []],
@@ -324,7 +337,82 @@ def expired(value, now):
     return parsed.timestamp() <= now
 
 
-def evaluate(facts_path, version, compat_id, prj, prjsig):
+def compat_repo(item):
+    m = COMPAT_ID.fullmatch(item) if isinstance(item, str) else None
+    if not m or len(item) > 256 or any(int(x) > INT64_MAX for x in m.group(2).split(".")):
+        return None
+    return m.group(1)
+
+
+def compat_verdict(target, revoked, compat_id):
+    """SPEC-002-R004 buyer-serving rejection of compat_id, or ''
+    (config.CompatibilitySetConfig.RejectionCode)."""
+    if not compat_id:
+        return "compatibility_set_required"
+    repo = compat_repo(compat_id)
+    if repo is None:
+        return "compatibility_set_invalid"
+    if compat_repo(target) != repo:
+        return "compatibility_set_repository_mismatch"
+    if compat_id in revoked:
+        return "provider_release_revoked"
+    return ""
+
+
+def read_seed(path):
+    if not path:
+        return set()
+    try:
+        return {l.strip() for l in open(path) if l.strip() and not l.startswith("#")}
+    except OSError:
+        return set()
+
+
+def live_policy(f, health_path, applied, compat_id, seed):
+    """(mode, live, mismatch, pending): the running coordinator's policy mode
+    and (target, revoked) as /healthz reports it, why it cannot be trusted
+    ('' when it equals the disk config), and the pending train edit that
+    explains a difference while a restart is due ('' when none).
+
+    A difference is a pending edit only when the disk config is not the
+    running one AND the disk policy differs from the live one exactly by
+    train edits: target_id moved to the candidate (recommendation_bump)
+    and/or seed ids added to revoked_ids (revocation_seed), every live
+    revocation kept. Anything else fails closed."""
+    try:
+        health = json.load(open(health_path)) if health_path else None
+    except (OSError, ValueError):
+        health = None
+    if not isinstance(health, dict):
+        return "", None, "live /healthz is unreadable", ""
+    mode = health.get("compatibility_policy_mode")
+    if mode is None:
+        return "legacy_exact", None, "", ""
+    if mode != "repository":
+        return str(mode), None, "live /healthz reports compatibility_policy_mode %r, not repository" % mode, ""
+    target, revoked = health.get("compatibility_policy_target_id"), health.get("compatibility_policy_revoked_ids")
+    if compat_repo(target) is None or not isinstance(revoked, list) or any(compat_repo(x) is None for x in revoked):
+        return mode, None, "live /healthz compatibility policy is malformed", ""
+    live = (target, set(revoked))
+    disk_target, disk_revoked = f.get("target_id"), set(f.get("revoked_ids", []))
+    if (disk_target, disk_revoked) == live:
+        return mode, live, "", ""
+    if not applied:
+        target_ok = disk_target == target or (bool(compat_id) and disk_target == compat_id)
+        extra = disk_revoked - live[1]
+        if target_ok and live[1] <= disk_revoked and extra <= seed:
+            edits = []
+            if disk_target != target:
+                edits.append("target_id -> %s" % disk_target)
+            if extra:
+                edits.append("%d seed revocation(s)" % len(extra))
+            return mode, live, "", "; ".join(edits)
+    if disk_target != target:
+        return mode, live, "live /healthz target %r differs from the applied config target %r" % (target, disk_target), ""
+    return mode, live, "live /healthz revoked_ids differ from the applied config", ""
+
+
+def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_path=""):
     f = json.load(open(facts_path))
     local = local_sig = None
     if prj and prjsig and os.path.isfile(prj) and os.path.isfile(prjsig):
@@ -354,15 +442,29 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
                     "with (or its boot digest is unreadable): restart-only registrations are not proven live")
     if not f.get("privacy_class_enabled"):
         miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
-    listed = bool(compat_id) and (compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", []))
-    out["compat_accepted"] = listed and out["config_applied"]
-    out["target_applied"] = bool(compat_id) and compat_id == f.get("target_id") and out["config_applied"]
+    mode, live, mismatch, pending = live_policy(f, health_path, out["config_applied"], compat_id, read_seed(seed_path))
+    out["compat_mode"], out["policy_mismatch"], out["pending_policy_edit"] = mode, mismatch, pending
+    if mismatch:
+        miss.append("compatibility policy not provable: %s" % mismatch)
+        rejection = "policy_mismatch"
+    elif mode == "legacy_exact":
+        listed = compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", [])
+        rejection = "" if compat_id and listed else "compatibility_set_unaccepted"
+    else:
+        # Revocation is judged only against the running coordinator's policy.
+        rejection = compat_verdict(live[0], live[1], compat_id or "")
+    out["compat_rejection"] = rejection if compat_id else ""
+    out["compat_accepted"] = bool(compat_id) and not rejection and out["config_applied"]
+    out["target_applied"] = bool(compat_id) and compat_id == f.get("target_id") and out["config_applied"] and not mismatch
     if not compat_id:
         # Without the candidate's own id, acceptance cannot be proven: fail closed.
         miss.append("the candidate compatibility_set_id is unknown (no signed_byte_verification record and no "
                     "verified v%s tag to derive it from), so its compatibility acceptance cannot be proven" % version)
-    elif not listed:
-        miss.append("compatibility_set.accepted_ids lacks %s (pearl_accepted_ids step)" % compat_id)
+    elif rejection == "compatibility_set_unaccepted":
+        miss.append("the running coordinator predates repository admission (SPEC-002-R004) and its accepted_ids "
+                    "lacks %s: ship the coordinator runtime (scripts/ops/pearl-runtime.sh)" % compat_id)
+    elif rejection and rejection != "policy_mismatch":
+        miss.append("the compatibility policy does not admit %s: %s" % (compat_id, rejection))
     if local is None and remote is not None and f.get("public_key_pem") and verify_sig(f["public_key_pem"], remote, remote_sig):
         # A published release with no local bytes: the signed file names the identity.
         local, local_sig = remote, remote_sig
@@ -431,7 +533,7 @@ def main(argv):
         stage(*args)
     elif cmd == "unapproved" and len(args) in (2, 4):
         unapproved(*args)
-    elif cmd == "evaluate" and len(args) == 5:
+    elif cmd == "evaluate" and len(args) in (5, 6, 7):
         evaluate(*args)
     else:
         fail("bad arguments for %s" % cmd)

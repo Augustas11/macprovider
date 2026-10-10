@@ -28,16 +28,10 @@ import (
 
 var lowerHex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-const (
-	maxCompatibilitySetIDBytes   = 256
-	maxAcceptedCompatibilitySets = 8
-	// maxFirstHopBridgeSets bounds the temporary pre-fix update bridge
-	// (#610). It is intentionally smaller than accepted_ids so production
-	// cannot silently widen buyer-serving admission via the bridge list.
-	maxFirstHopBridgeSets = 4
-)
+const maxCompatibilitySetIDBytes = 256
 
-var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$`)
+var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)@[0-9a-f]{40}$`)
+var compatibilitySetVersionPattern = regexp.MustCompile(`^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$`)
 
 // ValidateProviderID is the canonical validator for ProviderID across every
 // registration path. Issue #274: WS self-serve registration previously
@@ -53,14 +47,54 @@ func ValidateProviderID(s string) error {
 }
 
 // ValidateCompatibilitySetID applies the signed release-manifest identifier
-// grammar at the coordinator trust boundary. Admission compares the complete
-// identifier exactly; the grammar and byte cap prevent attacker-controlled
-// handshake metadata from becoming an unbounded policy or logging input.
+// grammar at the coordinator trust boundary: canonical numeric version
+// components (no leading zeros, no int64 overflow) and a byte cap, so
+// attacker-controlled handshake metadata never becomes an unbounded policy or
+// logging input.
 func ValidateCompatibilitySetID(s string) error {
 	if len([]byte(s)) == 0 || len([]byte(s)) > maxCompatibilitySetIDBytes || !compatibilitySetIDPattern.MatchString(s) {
 		return fmt.Errorf("invalid compatibility_set_id %q", s)
 	}
+	if _, version, ok := splitCompatibilitySetID(s); !ok || !versionfloor.Valid(version) {
+		return fmt.Errorf("invalid compatibility_set_id %q", s)
+	}
 	return nil
+}
+
+func splitCompatibilitySetID(id string) (repo string, version string, ok bool) {
+	at := strings.LastIndexByte(id, '@')
+	if at < 0 {
+		return "", "", false
+	}
+	colon := strings.LastIndexByte(id[:at], ':')
+	if colon < 0 || colon+2 >= at || id[colon+1] != 'v' {
+		return "", "", false
+	}
+	return id[:colon], id[colon+2 : at], true
+}
+
+// CompatibilitySetIDRepository returns the owner/repo of a valid id.
+func CompatibilitySetIDRepository(id string) (string, bool) {
+	if ValidateCompatibilitySetID(id) != nil {
+		return "", false
+	}
+	repo, _, ok := splitCompatibilitySetID(id)
+	return repo, ok
+}
+
+// CompatibilitySetIDVersion returns the MAJOR.MINOR.PATCH a valid id encodes.
+func CompatibilitySetIDVersion(id string) (string, bool) {
+	if ValidateCompatibilitySetID(id) != nil {
+		return "", false
+	}
+	_, version, ok := splitCompatibilitySetID(id)
+	return version, ok
+}
+
+// ValidCompatibilitySetVersion reports a canonical, non-overflowing
+// MAJOR.MINOR.PATCH (the form a compatibility_set_id carries).
+func ValidCompatibilitySetVersion(version string) bool {
+	return compatibilitySetVersionPattern.MatchString(version) && versionfloor.Valid(version)
 }
 
 // minAuditLogRetentionDays is the compliance floor for audit_log retention.
@@ -288,59 +322,98 @@ type CoordinatorConfig struct {
 	CompatibilitySet      CompatibilitySetConfig `yaml:"compatibility_set"`
 }
 
-// CompatibilitySetConfig is an exact coordinator admission contract. TargetID
-// is the set providers should converge on; AcceptedIDs includes that target and
-// at least one distinct rollback set so a rollout can be reversed without
-// disabling strict compatibility admission.
+// CompatibilitySetConfig is the coordinator release admission contract
+// (SPEC-002-R004). TargetID is the recommended signed release identity that
+// every session is told to converge on; its repository is the admitted
+// repository. Any well-formed identity from that repository opens a session
+// and serves buyers, except an exact identity in RevokedIDs, which opens an
+// update-only (never buyer-routable) session that still receives the
+// recommendation. Foreign-repository and malformed identities are rejected.
 //
-// FirstHopBridgeIDs is the production #610 pre-fix bootstrap: exact set IDs
-// (for example the last public pre-fix CLI set v1.8.48) that may open a
-// session solely to receive the recommended target admission. Bridge-only
-// sessions are never buyer-routable. They are distinct from AcceptedIDs.
+// AcceptedIDs (the former exact allowlist) and FirstHopBridgeIDs (the former
+// #610 update bridge) still parse so existing configs load, but they are
+// ignored; DeprecatedFields names them for a startup warning.
 type CompatibilitySetConfig struct {
 	TargetID          string   `yaml:"target_id"`
+	RevokedIDs        []string `yaml:"revoked_ids"`
 	AcceptedIDs       []string `yaml:"accepted_ids"`
 	FirstHopBridgeIDs []string `yaml:"first_hop_bridge_ids"`
 }
 
-// Configured distinguishes an explicit strict policy from the legacy
-// unconfigured mode. Partial configurations fail validation.
+// Configured distinguishes an explicit policy from the legacy unconfigured
+// mode. Partial configurations fail validation.
 func (c CompatibilitySetConfig) Configured() bool {
-	return c.TargetID != "" || len(c.AcceptedIDs) != 0 || len(c.FirstHopBridgeIDs) != 0
+	return c.TargetID != "" || len(c.RevokedIDs) != 0 || len(c.AcceptedIDs) != 0 || len(c.FirstHopBridgeIDs) != 0
 }
 
-// Accepts performs the exact, case-sensitive compatibility-set comparison for
-// buyer-serving admission.
+// DeprecatedFields lists configured fields that no longer affect admission.
+func (c CompatibilitySetConfig) DeprecatedFields() []string {
+	var fields []string
+	if len(c.AcceptedIDs) != 0 {
+		fields = append(fields, "accepted_ids")
+	}
+	if len(c.FirstHopBridgeIDs) != 0 {
+		fields = append(fields, "first_hop_bridge_ids")
+	}
+	return fields
+}
+
+// IsRevoked reports an exact revocation.
+func (c CompatibilitySetConfig) IsRevoked(id string) bool {
+	for _, revoked := range c.RevokedIDs {
+		if id == revoked {
+			return true
+		}
+	}
+	return false
+}
+
+// SessionRejectionCode returns why id may not open a session at all, or "".
+func (c CompatibilitySetConfig) SessionRejectionCode(id string) string {
+	if !c.Configured() {
+		return ""
+	}
+	if id == "" {
+		return "compatibility_set_required"
+	}
+	if ValidateCompatibilitySetID(id) != nil {
+		return "compatibility_set_invalid"
+	}
+	repo, _ := CompatibilitySetIDRepository(id)
+	targetRepo, ok := CompatibilitySetIDRepository(c.TargetID)
+	if !ok || repo != targetRepo {
+		return "compatibility_set_repository_mismatch"
+	}
+	return ""
+}
+
+// RejectionCode returns why id may not serve buyers, or "": the session
+// rejection, else provider_release_revoked for an exact revocation.
+func (c CompatibilitySetConfig) RejectionCode(id string) string {
+	if code := c.SessionRejectionCode(id); code != "" {
+		return code
+	}
+	if c.Configured() && c.IsRevoked(id) {
+		return "provider_release_revoked"
+	}
+	return ""
+}
+
+// Accepts reports buyer-serving admission.
 func (c CompatibilitySetConfig) Accepts(id string) bool {
-	for _, accepted := range c.AcceptedIDs {
-		if id == accepted {
-			return true
-		}
-	}
-	return false
+	return c.RejectionCode(id) == ""
 }
 
-// IsFirstHopBridge reports whether id is listed for the temporary pre-fix
-// update bootstrap. Bridge membership alone never implies Accepts.
-func (c CompatibilitySetConfig) IsFirstHopBridge(id string) bool {
-	for _, bridge := range c.FirstHopBridgeIDs {
-		if id == bridge {
-			return true
-		}
-	}
-	return false
-}
-
-// IsFirstHopBridgeOnly is true when the set may open an update-only session
-// but is not part of the buyer-serving accepted set.
-func (c CompatibilitySetConfig) IsFirstHopBridgeOnly(id string) bool {
-	return c.IsFirstHopBridge(id) && !c.Accepts(id)
-}
-
-// AllowsSession admits either a buyer-serving accepted set or a first-hop
-// bridge set through the hello/auth compatibility gate.
+// AllowsSession reports whether id may open a session (buyer-serving or
+// update-only).
 func (c CompatibilitySetConfig) AllowsSession(id string) bool {
-	return c.Accepts(id) || c.IsFirstHopBridge(id)
+	return c.SessionRejectionCode(id) == ""
+}
+
+// IsUpdateOnly is true for a session that may connect and receive the
+// recommendation but never serve buyers: an exactly revoked release.
+func (c CompatibilitySetConfig) IsUpdateOnly(id string) bool {
+	return c.Configured() && c.AllowsSession(id) && c.IsRevoked(id)
 }
 
 // OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
@@ -3713,42 +3786,21 @@ func (c Config) validateCompatibilitySet() error {
 	if err := ValidateCompatibilitySetID(policy.TargetID); err != nil {
 		return fmt.Errorf("coordinator.compatibility_set.target_id: %w", err)
 	}
-	if len(policy.AcceptedIDs) < 2 {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain the target and at least one rollback set")
-	}
-	if len(policy.AcceptedIDs) > maxAcceptedCompatibilitySets {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain at most %d entries", maxAcceptedCompatibilitySets)
-	}
-	seen := make(map[string]struct{}, len(policy.AcceptedIDs))
-	for i, id := range policy.AcceptedIDs {
+	targetRepo, _ := CompatibilitySetIDRepository(policy.TargetID)
+	seen := make(map[string]struct{}, len(policy.RevokedIDs))
+	for i, id := range policy.RevokedIDs {
 		if err := ValidateCompatibilitySetID(id); err != nil {
-			return fmt.Errorf("coordinator.compatibility_set.accepted_ids[%d]: %w", i, err)
+			return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d]: %w", i, err)
 		}
 		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("coordinator.compatibility_set.accepted_ids contains duplicate %q", id)
+			return fmt.Errorf("coordinator.compatibility_set.revoked_ids contains duplicate %q", id)
 		}
 		seen[id] = struct{}{}
-	}
-	if _, ok := seen[policy.TargetID]; !ok {
-		return fmt.Errorf("coordinator.compatibility_set.accepted_ids must contain target_id")
-	}
-	if len(policy.FirstHopBridgeIDs) > maxFirstHopBridgeSets {
-		return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must contain at most %d entries", maxFirstHopBridgeSets)
-	}
-	bridgeSeen := make(map[string]struct{}, len(policy.FirstHopBridgeIDs))
-	for i, id := range policy.FirstHopBridgeIDs {
-		if err := ValidateCompatibilitySetID(id); err != nil {
-			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids[%d]: %w", i, err)
+		if repo, _ := CompatibilitySetIDRepository(id); repo != targetRepo {
+			return fmt.Errorf("coordinator.compatibility_set.revoked_ids[%d] repository must match target_id", i)
 		}
-		if _, duplicate := bridgeSeen[id]; duplicate {
-			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids contains duplicate %q", id)
-		}
-		bridgeSeen[id] = struct{}{}
 		if id == policy.TargetID {
-			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not contain target_id")
-		}
-		if _, overlap := seen[id]; overlap {
-			return fmt.Errorf("coordinator.compatibility_set.first_hop_bridge_ids must not overlap accepted_ids (%q)", id)
+			return fmt.Errorf("coordinator.compatibility_set.revoked_ids must not contain target_id")
 		}
 	}
 	return nil

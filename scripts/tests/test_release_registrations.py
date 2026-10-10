@@ -17,6 +17,7 @@ spec.loader.exec_module(rr)
 VERSION = "1.8.240"
 CDHASH = "cd" * 20
 COMPAT = "test/repo:v%s@%s" % (VERSION, "ab" * 20)
+TARGET = "test/repo:v1.8.230@%s" % ("cd" * 20)
 
 
 class ExpiryTest(unittest.TestCase):
@@ -49,7 +50,7 @@ class EvaluateTest(unittest.TestCase):
         subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key), "-out", str(self.prj) + ".sig", str(self.prj)], check=True)
         digests = {"config_sha256": "a" * 64, "overlay_sha256": "b" * 64}
         self.facts = {
-            "target_id": "old", "accepted_ids": [COMPAT], "privacy_class_enabled": True,
+            "target_id": TARGET, "accepted_ids": [], "revoked_ids": [], "privacy_class_enabled": True,
             "approved_code_identities": [], "denied_code_cdhashes": [],
             "metadata_dir": "/m", "public_key_path": "/k.pem", "public_key_pem": pub.decode(),
             "disk_digests": dict(digests), "boot_digests": dict(digests), "loaded_versions": [VERSION],
@@ -58,13 +59,78 @@ class EvaluateTest(unittest.TestCase):
             "metadata_error": "",
         }
 
-    def verdict(self, compat=COMPAT, **changes):
+    def verdict(self, compat=COMPAT, health=None, seed=(), **changes):
         facts = dict(self.facts, **changes)
         path = self.dir / "facts.json"
         path.write_text(json.dumps(facts))
+        if health is None:
+            health = {"compatibility_policy_mode": "repository", "compatibility_policy_target_id": facts["target_id"],
+                      "compatibility_policy_revoked_ids": facts["revoked_ids"]}
+        hpath = self.dir / "healthz.json"
+        hpath.write_text(json.dumps(health))
+        spath = self.dir / "seed.txt"
+        spath.write_text("# below: 1.0.3\n" + "".join(i + "\n" for i in seed))
         out = subprocess.run([sys.executable, str(SCRIPT), "evaluate", str(path), VERSION, compat,
-                              str(self.prj), str(self.prj) + ".sig"], check=True, capture_output=True, text=True)
+                              str(self.prj), str(self.prj) + ".sig", str(hpath), str(spath)],
+                             check=True, capture_output=True, text=True)
         return json.loads(out.stdout)
+
+    def test_admission_is_by_policy_not_by_listing(self):
+        v = self.verdict()
+        self.assertTrue(v["compat_accepted"])
+        self.assertEqual(v["compat_rejection"], "")
+
+    def test_exact_revocation_refuses(self):
+        v = self.verdict(revoked_ids=[COMPAT])
+        self.assertFalse(v["compat_accepted"])
+        self.assertEqual(v["compat_rejection"], "provider_release_revoked")
+
+    def test_live_policy_must_equal_the_applied_config(self):
+        # The running coordinator holds a stricter policy than the disk config.
+        stale = {"compatibility_policy_mode": "repository", "compatibility_policy_target_id": TARGET,
+                 "compatibility_policy_revoked_ids": [COMPAT]}
+        v = self.verdict(health=stale)
+        self.assertFalse(v["compat_accepted"])
+        self.assertIn("revoked_ids differ", v["policy_mismatch"])
+        moved = dict(stale, compatibility_policy_revoked_ids=[], compatibility_policy_target_id=COMPAT)
+        self.assertIn("target", self.verdict(health=moved)["policy_mismatch"])
+        self.assertIn("not repository", self.verdict(health={"compatibility_policy_mode": "unconfigured"})["policy_mismatch"])
+        self.assertIn("unreadable", self.verdict(health=[])["policy_mismatch"])
+
+    def live(self, target=TARGET, revoked=()):
+        return {"compatibility_policy_mode": "repository", "compatibility_policy_target_id": target,
+                "compatibility_policy_revoked_ids": list(revoked)}
+
+    def test_unapplied_disk_config_never_hides_a_live_revocation(self):
+        # Running coordinator revokes the candidate; stale disk config does not.
+        v = self.verdict(health=self.live(revoked=[COMPAT]), boot_digests=None)
+        self.assertIn("revoked_ids differ", v["policy_mismatch"])
+        self.assertFalse(v["compat_accepted"])
+        self.assertEqual(v["pending_policy_edit"], "")
+
+    def test_pending_train_edits_are_the_only_tolerated_difference(self):
+        seed_id = "test/repo:v1.0.1@%s" % ("11" * 20)
+        # recommendation_bump stopped before its restart: disk target is the candidate.
+        v = self.verdict(health=self.live(), boot_digests=None, target_id=COMPAT)
+        self.assertEqual((v["policy_mismatch"], v["pending_policy_edit"]), ("", "target_id -> %s" % COMPAT))
+        # revocation_seed stopped before its restart: disk adds seed ids only.
+        v = self.verdict(health=self.live(), boot_digests=None, revoked_ids=[seed_id], seed=[seed_id])
+        self.assertEqual((v["policy_mismatch"], v["pending_policy_edit"]), ("", "1 seed revocation(s)"))
+        # A non-seed revocation, an unrelated target, or an applied config: fail closed.
+        other = "test/repo:v1.0.9@%s" % ("99" * 20)
+        self.assertTrue(self.verdict(health=self.live(), boot_digests=None, revoked_ids=[other], seed=[seed_id])["policy_mismatch"])
+        self.assertTrue(self.verdict(health=self.live(), boot_digests=None, target_id=other)["policy_mismatch"])
+        self.assertTrue(self.verdict(health=self.live(), target_id=COMPAT)["policy_mismatch"])
+
+    def test_repository_health_without_policy_fields_fails_closed(self):
+        v = self.verdict(health={"compatibility_policy_mode": "repository"}, boot_digests=None)
+        self.assertIn("malformed", v["policy_mismatch"])
+
+    def test_runtime_without_a_mode_admits_only_its_exact_list(self):
+        v = self.verdict(health={"status": "ok"})
+        self.assertEqual((v["compat_mode"], v["compat_rejection"]), ("legacy_exact", "compatibility_set_unaccepted"))
+        self.assertIn("pearl-runtime.sh", " ".join(v["missing"]))
+        self.assertTrue(self.verdict(health={"status": "ok"}, accepted_ids=[COMPAT])["compat_accepted"])
 
     def test_live_release_approval(self):
         v = self.verdict()
@@ -107,6 +173,20 @@ class EvaluateTest(unittest.TestCase):
 
     def test_privacy_class_disabled_fails(self):
         self.assertIn("privacy_class.enabled", " ".join(self.verdict(privacy_class_enabled=False)["missing"]))
+
+
+class CompatVerdictTest(unittest.TestCase):
+    def test_parity_with_the_coordinator(self):
+        target = TARGET
+        self.assertEqual(rr.compat_verdict(target, [], "test/repo:v1.0.0@%s" % ("ab" * 20)), "")
+        self.assertEqual(rr.compat_verdict(target, [], "other/repo:v1.8.240@%s" % ("ab" * 20)),
+                         "compatibility_set_repository_mismatch")
+        for bad in ("test/repo:v1.8.0240@%s" % ("ab" * 20), "test/repo:v9223372036854775808.0.0@%s" % ("ab" * 20),
+                    "test/repo:v1.8.240@%s" % ("AB" * 20), ""):
+            self.assertIn(rr.compat_verdict(target, [], bad), ("compatibility_set_invalid", "compatibility_set_required"))
+        self.assertEqual(rr.compat_verdict(target, [], "test/repo:v9223372036854775807.0.0@%s" % ("ab" * 20)), "")
+        # A trailing newline is not a valid identity (Go anchors the whole string).
+        self.assertEqual(rr.compat_verdict(target, [], "test/repo:v1.8.240@%s\n" % ("ab" * 20)), "compatibility_set_invalid")
 
 
 if __name__ == "__main__":

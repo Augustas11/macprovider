@@ -1,5 +1,11 @@
 # Entry 610 — Production first-hop recovery (public CLI 1.8.48)
 
+> **Superseded by SPEC-002-R004 (#1914).** `first_hop_bridge_ids` is now parsed
+> but ignored. A pre-fix release from the target repository connects through
+> repository admission and receives the recommendation; to keep it off buyer
+> traffic, list its exact id in `compatibility_set.revoked_ids` (it then
+> connects update-only). The procedure below is historical.
+
 ## Status
 
 **Partial #610 — issue OPEN.** Code and automated tests land the production-supported

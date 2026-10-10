@@ -170,6 +170,7 @@ type Provider struct {
 	forwardedInFlight     int
 	ConnectedAt           time.Time  `json:"connected_at"`
 	BinaryVersion         string     `json:"binary_version"`
+	CompatibilitySetID    string     `json:"compatibility_set_id,omitempty"`
 	ModelHash             string     `json:"model_hash,omitempty"`
 	ModelHashAlgorithm    string     `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256 string     `json:"weights_manifest_sha256,omitempty"`
@@ -1683,6 +1684,23 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 		return false
 	}
 	r.setStateLocked(p, state)
+	return true
+}
+
+// FenceCompatibilityPolicy makes a policy-rejected session immediately
+// unroutable. HandshakeAckPending is reused as the registry route hold: for a
+// pending handshake it preserves credential delivery, and for an already-acked
+// session it prevents provider-originated Busy/Ready updates from reviving buyer
+// routing during the WebSocket close grace window.
+func (r *Registry) FenceCompatibilityPolicy(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.HandshakeAckPending = true
+	r.setStateLocked(p, StateUnavailable)
 	return true
 }
 

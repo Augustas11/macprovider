@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.11",
+      "version": "1.6.12",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -11766,6 +11766,50 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
         "rationale": "GET /admin/model-admission/pool-proven and the closed model_admission_pool_proven.v1 frame are not implemented: no materialized build over pool-manifest route snapshots and final settlement rows, k-anonymity suppression, licence agreement, probe-evidence currency, ceilings, or pool_proven_unavailable handling."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R004",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:CompatibilitySetConfig",
+        "phase4-coordinator/internal/config/config.go:SessionRejectionCode",
+        "phase4-coordinator/internal/ws/server.go:requireCompatibleSet",
+        "phase4-coordinator/internal/ws/server.go:compatibilitySetPolicyReloadErrorLocked",
+        "phase4-coordinator/cmd/coordinator/main.go:reloadCoordinatorConfig",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
+        "scripts/ops/cli-release.sh:load_registrations",
+        "scripts/ops/lib/release-registrations.py:compat_verdict",
+        "scripts/ops/lib/release-registrations.py:live_policy",
+        "scripts/legacy-compatibility-revocations.py:generate",
+        "scripts/ops/cli-release.sh:revoke_seed"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetAdmitsEveryWellFormedTargetRepositoryRelease",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetDeprecatedFieldsStillLoadAndAreIgnored",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestOldReleaseConnectsRoutableAndReceivesRecommendation",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRevokedReleaseGetsUpdateOnlySessionWithRecommendation",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadRefusesRepositoryDrift",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadFencesActiveRevokedSession",
+        "phase4-coordinator/internal/ws/autotune_catalog_reload_test.go:TestCompatibilityReloadCatalogPublishDoesNotDeadlockParallelRegistration",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testTier2PreChallengeRejectedAuthResponseKeepsCoordinatorError",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState",
+        "scripts/tests/test_release_registrations.py:CompatVerdictTest",
+        "scripts/tests/test_pearl_cli_config.py:RecommendTest",
+        "scripts/ops/test-entrypoints.sh:health_legacy",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetCheckedInRevocationSeedValidates",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello",
+        "scripts/tests/test_pearl_cli_config.py:RevokeTest",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestBelowRequiredReleaseConnectsUpdateOnlyWithRecommendation"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1914",
+        "rationale": "Repository admission with exact revocations, update-only revoked sessions, deprecated allowlist parsing, reload refusal and the release-train policy check are implemented and tested; the coordinator runtime that carries them is pending deployment."
       }
     }
   ]

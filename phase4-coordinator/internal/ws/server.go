@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"math/big"
@@ -102,6 +103,8 @@ type Server struct {
 	proofOfWeightsLastAt      time.Time
 	tier2Mu                   sync.RWMutex
 	tier2                     config.Tier2Config
+	compatibilitySetMu        sync.RWMutex
+	compatibilitySet          config.CompatibilitySetConfig
 	modelHashLegacyMu         sync.Mutex
 	modelHashLegacyTimer      *time.Timer
 	modelHashLegacyGeneration uint64
@@ -1235,6 +1238,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		cfg:                           cfg,
 		proofOfWeights:                cfg.ProofOfWeights,
 		tier2:                         cfg.Tier2,
+		compatibilitySet:              cloneCompatibilitySetPolicy(cfg.Coordinator.CompatibilitySet),
 		pool:                          registry,
 		log:                           logger,
 		now:                           func() time.Time { return time.Now().UTC() },
@@ -1323,6 +1327,80 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		go s.runTrustRevalidationLoop()
 	}
 	return s
+}
+
+func cloneCompatibilitySetPolicy(policy config.CompatibilitySetConfig) config.CompatibilitySetConfig {
+	policy.AcceptedIDs = append([]string(nil), policy.AcceptedIDs...)
+	policy.RevokedIDs = append([]string(nil), policy.RevokedIDs...)
+	policy.FirstHopBridgeIDs = append([]string(nil), policy.FirstHopBridgeIDs...)
+	return policy
+}
+
+func (s *Server) compatibilitySetPolicy() config.CompatibilitySetConfig {
+	s.compatibilitySetMu.RLock()
+	defer s.compatibilitySetMu.RUnlock()
+	return cloneCompatibilitySetPolicy(s.compatibilitySet)
+}
+
+// CompatibilitySetPolicyReload reserves the compatibility admission/publication
+// lane for a validated SIGHUP policy. Call Publish to commit the policy or Abort
+// to release the reservation after a later reload preparation failure.
+type CompatibilitySetPolicyReload struct {
+	server   *Server
+	policy   config.CompatibilitySetConfig
+	released bool
+}
+
+// BeginCompatibilitySetPolicyReload refuses reload policies that would strand
+// currently connected sessions through accidental floor/repository/allowlist
+// drift. The server keeps compatibilitySetMu locked until Publish or Abort, so
+// admission verdicts, final ack release, and policy publication are serialized.
+func (s *Server) BeginCompatibilitySetPolicyReload(policy config.CompatibilitySetConfig) (*CompatibilitySetPolicyReload, error) {
+	policy = cloneCompatibilitySetPolicy(policy)
+	s.compatibilitySetMu.Lock()
+	if err := s.compatibilitySetPolicyReloadErrorLocked(policy); err != nil {
+		s.compatibilitySetMu.Unlock()
+		return nil, err
+	}
+	return &CompatibilitySetPolicyReload{server: s, policy: policy}, nil
+}
+
+// SetCompatibilitySetPolicy publishes the already-validated SIGHUP policy and
+// immediately fences live sessions that are no longer admitted by it.
+func (s *Server) SetCompatibilitySetPolicy(policy config.CompatibilitySetConfig) (int, error) {
+	reload, err := s.BeginCompatibilitySetPolicyReload(policy)
+	if err != nil {
+		return 0, err
+	}
+	return reload.Publish(), nil
+}
+
+func (r *CompatibilitySetPolicyReload) Publish() int {
+	if r == nil || r.released {
+		return 0
+	}
+	s := r.server
+	s.compatibilitySet = r.policy
+	closed, pendingCloses := s.closeCompatibilitySetRejectedSessionsLocked(r.policy)
+	r.released = true
+	s.compatibilitySetMu.Unlock()
+	for _, pending := range pendingCloses {
+		s.closeSession(pending.session, CloseInvalidHello, pending.reason)
+	}
+	return closed
+}
+
+func (r *CompatibilitySetPolicyReload) Abort() {
+	if r == nil || r.released {
+		return
+	}
+	r.released = true
+	r.server.compatibilitySetMu.Unlock()
+}
+
+type compatibilitySetPendingClose struct {
+	session *providerSession
+	reason  string
 }
 
 // canaryBuyerServing reports whether p passes the coordinator's REQUEST-INDEPENDENT
@@ -2377,7 +2455,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseTierUnsupported, "tier_unsupported: tier "+itoa(hello.Tier)+" not supported")
 		return "", ""
 	}
-	if !s.requireCompatibleSet(conn, hello.CompatibilitySetID, false) {
+	if !s.requireCompatibleSet(conn, hello.CompatibilitySetID, hello.BinaryVersion, false) {
 		return "", ""
 	}
 	if s.tier2Config().RequireEncryptedLeg {
@@ -2520,7 +2598,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		// handleDisconnect for exactly this session.
 		return entry.ProviderID, entry.AssignedID
 	}
-	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
+		return entry.ProviderID, entry.AssignedID
+	}
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
@@ -2566,7 +2646,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		binaryVersion:    initial.BinaryVersion,
 		identityVerified: connectionAuth.validated && connectionAuth.providerID != "" && connectionAuth.providerID == initial.ProviderID,
 	})
-	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, true) {
+	if !s.requireCompatibleSet(conn, initial.CompatibilitySetID, initial.BinaryVersion, true) {
 		return "", ""
 	}
 	initialTranscriptHash, err := initialAuthTranscriptHash(payload)
@@ -3162,7 +3242,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		// See handleV1Conn: handleConn tears down this registered session.
 		return entry.ProviderID, entry.AssignedID
 	}
-	s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
+		return entry.ProviderID, entry.AssignedID
+	}
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords, initial.PrivacyEnrollment)
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -3287,17 +3369,23 @@ func (s *Server) prepareProviderAdmissionDeferredQuota(conn net.Conn, auth provi
 }
 
 func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth providerAuth, hello Hello, checkQuota bool) (*pool.Provider, bool) {
-	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
-	// update-only session so public 1.8.48 can persist coordinator
-	// compatibility admission and run ordinary `macprovider-cli update`
-	// (#610). They never become buyer-routable.
-	firstHopOnly := s.cfg.Coordinator.CompatibilitySet.IsFirstHopBridgeOnly(hello.CompatibilitySetID)
+	// An exactly revoked release opens an update-only session: it receives
+	// the recommended set and binary version so its updater moves it forward,
+	// and it never becomes buyer-routable (SPEC-002-R004).
+	policy := s.compatibilitySetPolicy()
+	firstHopOnly := policy.IsUpdateOnly(hello.CompatibilitySetID)
 	if !firstHopOnly {
 		if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 			cmp, ok := compareSemver(hello.BinaryVersion, required)
 			if !ok || cmp < 0 {
-				s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
-				return nil, false
+				if !policy.Configured() {
+					s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+					return nil, false
+				}
+				// SPEC-002-R004 has no admission floor: an admitted release
+				// below required_binary_version connects update-only, so it
+				// still receives the recommendation and updates itself.
+				firstHopOnly = true
 			}
 		}
 	}
@@ -3446,10 +3534,11 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 	if firstHopOnly {
 		s.log.Info().
 			Str("provider_id", hello.ProviderID).
-			Str("event", "compatibility_set_first_hop_bridge").
+			Str("event", "compatibility_set_update_only").
 			Str("compatibility_set_id", hello.CompatibilitySetID).
-			Str("recommended_compatibility_set_id", s.cfg.Coordinator.CompatibilitySet.TargetID).
-			Msg("admitting update-only first-hop bridge session")
+			Str("binary_version", hello.BinaryVersion).
+			Str("recommended_compatibility_set_id", policy.TargetID).
+			Msg("admitting update-only session for a revoked or below-required release")
 	} else {
 		var gateOK bool
 		gateCatalog := resolveAdmissionCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
@@ -3513,6 +3602,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		LastActivityAt:         now,
 		ConnectedAt:            now,
 		BinaryVersion:          hello.BinaryVersion,
+		CompatibilitySetID:     hello.CompatibilitySetID,
 		ModelHash:              hello.ModelHash,
 		ModelHashAlgorithm:     hello.ModelHashAlgorithm,
 		WeightsManifestSHA256:  hello.WeightsManifestSHA256,
@@ -3875,6 +3965,88 @@ func (s *Server) closeCatalogDivergedSessions() int {
 	return closed
 }
 
+func (s *Server) releaseAckedSessionIfCompatibilityAllowed(session *providerSession, entry *pool.Provider) bool {
+	s.compatibilitySetMu.RLock()
+	code := compatibilitySetProviderRejectionLocked(s.compatibilitySet, entry.CompatibilitySetID, entry.BinaryVersion, entry.CatalogAdmissionMode)
+	if code == "" {
+		s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+		s.compatibilitySetMu.RUnlock()
+		return true
+	}
+	policy := cloneCompatibilitySetPolicy(s.compatibilitySet)
+	s.pool.FenceCompatibilityPolicy(entry.ProviderID, entry.AssignedID)
+	s.compatibilitySetMu.RUnlock()
+	s.log.Info().
+		Str("provider_id", entry.ProviderID).
+		Str("assigned_id", entry.AssignedID).
+		Str("compatibility_set_id", entry.CompatibilitySetID).
+		Str("compatibility_rejection", code).
+		Msg("provider session closed after credential delivery by reloaded compatibility policy")
+	s.closeSessionAndWait(session, CloseInvalidHello, compatibilitySetCloseReason(policy, code))
+	return false
+}
+
+func (s *Server) compatibilitySetPolicyReloadErrorLocked(policy config.CompatibilitySetConfig) error {
+	if s.pool == nil {
+		return nil
+	}
+	for _, provider := range s.pool.Snapshot() {
+		if !s.isProviderTransportConnected(provider) {
+			continue
+		}
+		code := compatibilitySetProviderRejectionLocked(policy, provider.CompatibilitySetID, provider.BinaryVersion, provider.CatalogAdmissionMode)
+		if code == "" || compatibilitySetExactRevocation(policy, provider.CompatibilitySetID, code) {
+			continue
+		}
+		return fmt.Errorf("compatibility policy reload would reject connected provider %s/%s set %q binary %q: %s", provider.ProviderID, provider.AssignedID, provider.CompatibilitySetID, provider.BinaryVersion, code)
+	}
+	return nil
+}
+
+func compatibilitySetExactRevocation(policy config.CompatibilitySetConfig, id, code string) bool {
+	if code != "provider_release_revoked" {
+		return false
+	}
+	for _, revoked := range policy.RevokedIDs {
+		if id == revoked {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) closeCompatibilitySetRejectedSessionsLocked(policy config.CompatibilitySetConfig) (int, []compatibilitySetPendingClose) {
+	if s.pool == nil {
+		return 0, nil
+	}
+	closed := 0
+	pendingCloses := []compatibilitySetPendingClose{}
+	for _, provider := range s.pool.Snapshot() {
+		code := compatibilitySetProviderRejectionLocked(policy, provider.CompatibilitySetID, provider.BinaryVersion, provider.CatalogAdmissionMode)
+		if code == "" {
+			continue
+		}
+		wasHandshakeAckPending := provider.HandshakeAckPending
+		s.pool.FenceCompatibilityPolicy(provider.ProviderID, provider.AssignedID)
+		event := s.log.Warn().
+			Str("provider_id", provider.ProviderID).
+			Str("assigned_id", provider.AssignedID).
+			Str("compatibility_set_id", provider.CompatibilitySetID).
+			Str("binary_version", provider.BinaryVersion).
+			Str("compatibility_rejection", code)
+		if wasHandshakeAckPending {
+			event.Msg("provider compatibility policy reloaded; session held unavailable until handshake ack")
+			continue
+		}
+		event.Msg("provider compatibility policy reloaded; closing session")
+		if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
+			pendingCloses = append(pendingCloses, compatibilitySetPendingClose{session: session, reason: compatibilitySetCloseReason(policy, code)})
+		}
+		closed++
+	}
+	return closed, pendingCloses
+}
+
 // fenceCatalogDivergedSession makes one diverged session unroutable at once,
 // then closes it catalog_incompatible; closeSession's delayed teardown must
 // not leave a routable window. It reports whether the session was fenced.
@@ -3968,38 +4140,77 @@ func (s *Server) populateCatalogAuthResponse(response *AuthResponse) {
 	response.CatalogSignerKeyID = catalog.SignerKeyID
 }
 
-func (s *Server) requireCompatibleSet(conn net.Conn, providedID string, authV2 bool) bool {
-	policy := s.cfg.Coordinator.CompatibilitySet
-	if !policy.Configured() {
+func (s *Server) requireCompatibleSet(conn net.Conn, providedID, binaryVersion string, authV2 bool) bool {
+	policy := s.compatibilitySetPolicy()
+	code := compatibilitySetRejectionLocked(policy, providedID, binaryVersion)
+	if code == "" {
 		return true
 	}
+	message := compatibilitySetRejectionMessage(policy, code)
 	reject := func(code string) bool {
 		if authV2 {
-			s.sendAuthRejection(conn, code, code)
+			s.sendAuthRejection(conn, code, message)
 		}
 		s.close(conn, CloseInvalidHello, code)
 		return false
 	}
+	return reject(code)
+}
+
+func compatibilitySetRejectionLocked(policy config.CompatibilitySetConfig, providedID, binaryVersion string) string {
+	if !policy.Configured() {
+		return ""
+	}
 	if providedID == "" {
-		return reject("compatibility_set_required")
+		return "compatibility_set_required"
 	}
 	if err := config.ValidateCompatibilitySetID(providedID); err != nil {
-		return reject("compatibility_set_invalid")
+		return "compatibility_set_invalid"
 	}
-	// Buyer-serving accepted sets and the temporary #610 first-hop bridge both
-	// pass the hello/auth gate. Bridge-only sessions still receive the
-	// recommended target admission but are marked non-routable later.
-	if !policy.AllowsSession(providedID) {
-		return reject("compatibility_set_unaccepted")
+	// Every well-formed target-repository release passes the hello/auth gate.
+	// Revoked releases still receive the recommended target admission but are
+	// marked update-only (non-routable) at admission.
+	if code := policy.SessionRejectionCode(providedID); code != "" {
+		return code
 	}
-	return true
+	// Sanity check: the hello's binary_version must be exactly the version
+	// its compatibility_set_id encodes.
+	if version, ok := config.CompatibilitySetIDVersion(providedID); !ok || binaryVersion != version {
+		return "provider_binary_version_mismatch"
+	}
+	return ""
+}
+
+func compatibilitySetProviderRejectionLocked(policy config.CompatibilitySetConfig, providedID, binaryVersion, admissionMode string) string {
+	if code := compatibilitySetRejectionLocked(policy, providedID, binaryVersion); code != "" {
+		return code
+	}
+	if policy.IsUpdateOnly(providedID) && admissionMode != "update_bridge" {
+		return "provider_release_revoked"
+	}
+	return ""
+}
+
+func compatibilitySetRejectionMessage(policy config.CompatibilitySetConfig, code string) string {
+	switch code {
+	case "provider_binary_version_mismatch":
+		return "provider_binary_version_mismatch: binary_version must equal the compatibility_set_id version"
+	case "provider_release_revoked":
+		return "provider_release_revoked: reconnect to receive the update to " + policy.TargetID
+	default:
+		return code + ": install the current release " + policy.TargetID
+	}
+}
+
+func compatibilitySetCloseReason(_ config.CompatibilitySetConfig, code string) string {
+	return code
 }
 
 func (s *Server) populateCompatibilityHelloAck(ack *HelloAck, acceptedID string) {
 	if ack == nil {
 		return
 	}
-	policy := s.cfg.Coordinator.CompatibilitySet
+	policy := s.compatibilitySetPolicy()
 	if !policy.Configured() {
 		ack.CompatibilityPolicy = "unconfigured"
 		return
@@ -4013,7 +4224,7 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 	if response == nil {
 		return
 	}
-	policy := s.cfg.Coordinator.CompatibilitySet
+	policy := s.compatibilitySetPolicy()
 	if !policy.Configured() {
 		response.CompatibilityPolicy = "unconfigured"
 		return
@@ -4021,6 +4232,13 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 	response.CompatibilityPolicy = "configured"
 	response.AcceptedCompatibilitySetID = acceptedID
 	response.RecommendedCompatibilitySetID = policy.TargetID
+}
+
+func compatibilityPolicyMode(policy config.CompatibilitySetConfig) string {
+	if !policy.Configured() {
+		return "unconfigured"
+	}
+	return "repository"
 }
 
 // gatedRecommendedBinaryVersion is a per-connection capability gate for the
@@ -4139,6 +4357,12 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		session *providerSession
 		refusal pool.RegisterRefusal
 	)
+	// Hold the compatibility-policy read lock across the provider-section,
+	// registry publication, and session storage. SIGHUP publication takes the
+	// write lock before its sweep, so reload and admission share one lock order:
+	// compatibility policy → provider section → registry/session.
+	s.compatibilitySetMu.RLock()
+	defer s.compatibilitySetMu.RUnlock()
 	// A catalog-bound session is published held out of routing and released
 	// only after the catalog re-check below, so no buyer route can observe it
 	// between registration and that check. The hold is a registry flag, not a
@@ -4337,6 +4561,14 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 // close(session.conn, ...) once runWriter is running — i.e. after
 // registerProviderSession has returned.
 func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
+	s.closeSessionInternal(session, code, reason, false)
+}
+
+func (s *Server) closeSessionAndWait(session *providerSession, code gobwas.StatusCode, reason string) {
+	s.closeSessionInternal(session, code, reason, true)
+}
+
+func (s *Server) closeSessionInternal(session *providerSession, code gobwas.StatusCode, reason string, waitForClose bool) {
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	if session != nil {
 		session.closeEventOnce.Do(func() {
@@ -4361,6 +4593,19 @@ func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, 
 	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
 		// Writing to bytes.Buffer cannot realistically fail; fall back to a
 		// hard conn.Close so the session still tears down.
+		_ = session.conn.Close()
+		return
+	}
+	if waitForClose {
+		result := make(chan error, 1)
+		if err := session.enqueueFrame(providerFrame{raw: true, payload: buf.Bytes(), result: result}); err != nil {
+			_ = session.conn.Close()
+			return
+		}
+		select {
+		case <-result:
+		case <-time.After(100 * time.Millisecond):
+		}
 		_ = session.conn.Close()
 		return
 	}
@@ -7074,6 +7319,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providers := s.pool.Snapshot()
+	compatibilityPolicy := s.compatibilitySetPolicy()
+	compatibilityPolicyMode := compatibilityPolicyMode(compatibilityPolicy)
+	compatibilityPolicyRevokedIDs := append([]string{}, compatibilityPolicy.RevokedIDs...)
 	resp := struct {
 		Status                   string `json:"status"`
 		UptimeS                  int64  `json:"uptime_s"`
@@ -7100,7 +7348,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// gated sessions are being quarantined because trust can no longer be
 		// verified — the bound on the sweep's fail-open. Always false when the
 		// hardware-trust hello gate (and thus the sweep) is not enabled.
-		TrustAuthorityDegraded bool `json:"trust_authority_degraded"`
+		TrustAuthorityDegraded        bool     `json:"trust_authority_degraded"`
+		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id,omitempty"`
+		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7114,9 +7365,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// updates to (SPEC-020-R006), so gating, renaming, or authenticating
 		// it strands those Macs (SPEC-003-R004). Those CLIs still accept the
 		// bytes only through the signed release checks.
-		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
-		RequiredBinaryVersion:    strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
-		TrustAuthorityDegraded:   s.trustAuthorityDegraded.Load(),
+		RecommendedBinaryVersion:      s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:         strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
+		TrustAuthorityDegraded:        s.trustAuthorityDegraded.Load(),
+		CompatibilityPolicyMode:       compatibilityPolicyMode,
+		CompatibilityPolicyTargetID:   compatibilityPolicy.TargetID,
+		CompatibilityPolicyRevokedIDs: compatibilityPolicyRevokedIDs,
 	}
 	for _, p := range providers {
 		switch p.State {

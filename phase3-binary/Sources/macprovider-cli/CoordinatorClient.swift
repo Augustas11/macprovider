@@ -3870,12 +3870,29 @@ actor CoordinatorClient {
 
     private func receiveAuthChallenge(from socket: ProviderWebSocketTask) async throws -> [String: Any] {
         let challenge = try await Self.receiveJSONObject(from: socket)
+        if let rejected = Self.rejectedAuthResponseError(from: challenge) {
+            throw rejected
+        }
         guard challenge["type"] as? String == "auth_challenge",
               Self.intValue(challenge["version"]) == 2
         else {
             throw CoordinatorAuthError.invalidMessage("Expected auth_challenge v2")
         }
         return challenge
+    }
+
+    private static func rejectedAuthResponseError(from message: [String: Any]) -> CoordinatorAuthError? {
+        guard message["type"] as? String == "auth_response",
+              Self.intValue(message["version"]) == 2,
+              message["status"] as? String == "rejected"
+        else {
+            return nil
+        }
+        let error = message["error"] as? [String: Any]
+        return CoordinatorAuthError.rejected(
+            code: error?["code"] as? String ?? "auth_rejected",
+            message: error?["message"] as? String ?? "Coordinator rejected auth_response"
+        )
     }
 
     private func receiveAuthResponse(from socket: ProviderWebSocketTask) async throws -> [String: Any] {

@@ -199,7 +199,8 @@ func TestConfiguredCompatibilitySetHelloAckStillRecommendsBinaryVersion(t *testi
 
 	hello := validHello("m4-anon")
 	hello["binary_version"] = "1.8.33"
-	hello["compatibility_set_id"] = compatibilityRollbackSet
+	// binary_version must equal the set's version (SPEC-002-R004).
+	hello["compatibility_set_id"] = "Augustas11/macprovider:v1.8.33@3333333333333333333333333333333333333333"
 	ack := sendHelloReadAck(t, conn, hello)
 	if ack.RecommendedBinaryVersion != gateAdvertisedVersion {
 		t.Fatalf("configured-policy hello_ack recommended_binary_version = %q, want %q", ack.RecommendedBinaryVersion, gateAdvertisedVersion)

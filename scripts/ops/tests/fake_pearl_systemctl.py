@@ -7,7 +7,8 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   show -p MainPID --value U        current fake main pid
   restart U                        new pid and /proc entry, boot.txt digests of
                                    the files now on disk, /healthz recommending
-                                   the config's latest_binary_version
+                                   the config's latest_binary_version; the
+                                   config becomes svc/running.yaml
   _init                            create the first /proc entry
 Anything else exits 1. A file svc/restart_fail makes restart fail.
 """
@@ -65,6 +66,7 @@ elif args[:1] == ["restart"]:
     open(os.path.join(svc, "boot.txt"), "w").write(json.dumps({
         "config_sha256": digest(cfg), "overlay_sha256": digest(ov), "source": "boot",
         "event": "coordinator_config_applied"}) + "\n")
+    open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
     m = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
     h = os.path.join(svc, "healthz.json")
     health = json.load(open(h)) if os.path.exists(h) else {"status": "ok"}

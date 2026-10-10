@@ -2,8 +2,8 @@
 """Sent over SSH by scripts/ops/cli-release.sh `next --run`: the CLI train's
 Pearl coordinator.yaml edits, with one coordinator restart.
 
-  python3 - apply [layout flags] [--accepted-id ID] [--privacy-setup DIR KEY KEY_SHA256]
-                  [--recommend VERSION TARGET_ID]
+  python3 - apply [layout flags] [--privacy-setup DIR KEY KEY_SHA256]
+                  [--recommend VERSION TARGET_ID] [--revoke ID ...]
 
 Under both Pearl locks (the installed, sha256-pinned coordinator_config_guard
 LockSet: updater flock, coordinator deploy flock, refuse on a pricing
@@ -20,13 +20,13 @@ transaction journal) it:
      bytes it wrote, it puts back the bytes it read under the same locks
      (never a whole-file backup) and restarts again.
 
-accepted_ids is capped at 8. At the cap it evicts the oldest accepted version
-that is not the target, not the previous target/stable, and not in use: a
-version is in use when it is the binary_version of the most recent connection
-event of some provider seen in the last 14 days (`_anonymous` excluded;
-provider_connection_events.db, read-only). It prints the per-version table
-(latest-version provider counts, last seen) and refuses with it when nothing
-is evictable. Nothing secret is printed.
+Admission needs no per-release edit (SPEC-002-R004): every well-formed
+release identity from compatibility_set.target_id's repository is admitted
+unless exactly listed in revoked_ids. --recommend moves only target_id and
+latest_binary_version, and refuses a target that is foreign or revoked.
+--revoke adds exact ids to compatibility_set.revoked_ids (the checked-in
+one-time seed); /healthz must then report every one of them.
+Nothing secret is printed.
 """
 import argparse
 import copy
@@ -37,17 +37,17 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 
-ACCEPTED_CAP = 8
-IN_USE_WINDOW = datetime.timedelta(days=14)
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-COMPAT_VERSION = re.compile(r":v([0-9]+\.[0-9]+\.[0-9]+)@[0-9a-f]{40}$")
+# Canonical release identity: no leading zeros, components within int64 (the
+# coordinator's config.ValidateCompatibilitySetID).
+COMPAT_ID = re.compile(r"^([A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}):v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))@[0-9a-f]{40}$")
+INT64_MAX = 2 ** 63 - 1
 
 
 class Refused(Exception):
@@ -71,30 +71,35 @@ def block(text, header):
     return start, end
 
 
-def scalar(value):
-    return value.strip().strip("'\"")
+def compat_repo(item):
+    """owner/repo of a canonical compatibility_set_id, or None."""
+    m = COMPAT_ID.fullmatch(item) if isinstance(item, str) else None
+    if not m or len(item) > 256 or any(int(x) > INT64_MAX for x in m.group(2).split(".")):
+        return None
+    return m.group(1)
 
 
-def compat_items(text):
+def add_revoked(text, ids):
+    """Append ids to the block-style compatibility_set.revoked_ids, creating
+    it right after target_id when absent."""
     start, end = block(text, r"^ *compatibility_set:[ \t]*$")
     body = text[start:end]
-    found = list(re.finditer(r"^( *)accepted_ids:[ \t]*\n((?:\1 *- .*\n)+)", body, re.M))
-    if len(found) != 1:
-        raise Refused("compatibility_set.accepted_ids must be one block-style list")
-    m = found[0]
-    lines = m.group(2).splitlines(keepends=True)
-    return start + m.start(2), start + m.end(2), lines
-
-
-def set_accepted(text, add, remove):
-    a, b, lines = compat_items(text)
-    kept = [l for l in lines if scalar(l.split("- ", 1)[1]) != remove] if remove else list(lines)
-    if remove and len(kept) != len(lines) - 1:
-        raise Refused("eviction anchor did not match exactly one accepted id")
-    if add:
-        prefix = lines[0].split("- ", 1)[0]
-        kept.append("%s- %s\n" % (prefix, add))
-    return text[:a] + "".join(kept) + text[b:]
+    found = list(re.finditer(r"^( *)revoked_ids:[ \t]*\n((?:\1 *- .*\n)+)", body, re.M))
+    if found:
+        m = found[0]
+        if len(found) != 1:
+            raise Refused("compatibility_set.revoked_ids must be one block-style list")
+        prefix = m.group(2).splitlines()[0].split("- ", 1)[0]
+        new = body[:m.end()] + "".join("%s- %s\n" % (prefix, i) for i in ids) + body[m.end():]
+    else:
+        if re.search(r"^ +revoked_ids:", body, re.M):
+            raise Refused("compatibility_set.revoked_ids must be a block-style list")
+        t = list(re.finditer(r"^( +)target_id:.*\n", body, re.M))
+        if len(t) != 1:
+            raise Refused("expected exactly one compatibility_set.target_id anchor")
+        ind = t[0].group(1)
+        new = body[:t[0].end()] + "%srevoked_ids:\n" % ind + "".join("%s- %s\n" % (ind, i) for i in ids) + body[t[0].end():]
+    return text[:start] + new + text[end:]
 
 
 def set_scalar(text, header, key, value):
@@ -123,111 +128,24 @@ def add_release_identities(text, metadata_dir, key_path):
     return text[:start] + insert + text[start:]
 
 
-def parse_time(value):
-    # Pearl writes RFC3339 with up to nanoseconds; Python takes microseconds.
-    value = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00")
-    parsed = datetime.datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
-
-
-def version_key(version):
-    return tuple(int(x) for x in version.split("."))
-
-
-def latest_versions(db_path, now):
-    """{version: (providers whose latest connection uses it, last seen)} over
-    providers seen in the last IN_USE_WINDOW, read-only. A provider's version
-    is the binary_version of its most recent connection event that names one."""
-    since = now - IN_USE_WINDOW
-    latest = {}
-    with sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=5) as db:
-        rows = db.execute("SELECT id, provider_id, binary_version, occurred_at_utc FROM provider_connection_events "
-                          "WHERE binary_version != '' AND provider_id NOT IN ('', '_anonymous')")
-        for row_id, provider, version, stamp in rows:
-            try:
-                when = parse_time(stamp)
-            except ValueError:
-                continue
-            if when < since:
-                continue
-            key = (when, row_id)
-            if provider not in latest or key > latest[provider][0]:
-                latest[provider] = (key, version)
-    out = {}
-    for (when, _), version in latest.values():
-        count, seen = out.get(version, (0, None))
-        out[version] = (count + 1, when if seen is None or when > seen else seen)
-    return out
-
-
-def eviction_table(accepted, target, protected, usage):
-    lines = ["%-72s %-9s %9s  %s" % ("accepted id", "version", "providers", "last seen (latest-version providers)")]
-    for item in accepted:
-        m = COMPAT_VERSION.search(item)
-        version = m.group(1) if m else "?"
-        count, seen = usage.get(version, (0, None))
-        role = " target" if item == target else " protected" if item in protected else ""
-        lines.append("%-72s %-9s %9d  %s%s" % (item, version, count, seen.isoformat() if seen else "-", role))
-    return "\n".join(lines)
-
-
-def choose_eviction(accepted, target, keep, db_path, now):
-    """Evict the oldest accepted version that is not the target, not the
-    previous target/stable, not kept, and that no provider (seen in the last
-    14 days) has as its latest connection version."""
-    versions = {}
-    for item in accepted:
-        m = COMPAT_VERSION.search(item)
-        versions[item] = m.group(1) if m else None
-    usage = latest_versions(db_path, now)
-    protected = {target, *keep}
-    target_version = versions.get(target)
-    if target_version:
-        older = [i for i in accepted if versions[i] and version_key(versions[i]) < version_key(target_version)]
-        if older:
-            protected.add(max(older, key=lambda i: version_key(versions[i])))  # the previous target/stable
-    table = eviction_table(accepted, target, protected, usage)
-    sys.stderr.write("accepted_ids by providers' latest connection version (last 14 days):\n%s\n" % table)
-    candidates = [i for i in accepted if i not in protected and versions[i] and versions[i] not in usage]
-    if not candidates:
-        raise Refused("accepted_ids is at the cap of %d and no id is evictable: every non-protected version is "
-                      "some provider's latest connection version (table above)" % ACCEPTED_CAP)
-    return min(candidates, key=lambda i: version_key(versions[i])), table
-
-
 def plan(text, args, now):
     """Return (new_text, expected_mutation(dict) -> None, summary)."""
     import yaml
 
     doc = yaml.safe_load(text) or {}
     compat = ((doc.get("coordinator") or {}).get("compatibility_set") or {})
-    accepted = [str(x) for x in compat.get("accepted_ids") or []]
     target = str(compat.get("target_id") or "")
-    mutations, summary, new = [], {}, text
+    summary, new = {}, text
 
-    def add_accepted(item, keep):
-        nonlocal new, accepted
-        if item in accepted:
-            return
-        evict = None
-        if len(accepted) >= ACCEPTED_CAP:
-            evict, table = choose_eviction(accepted, target, keep, args.events_db, now)
-            summary["eviction_table"] = table.splitlines()
-        new = set_accepted(new, item, evict)
-        accepted = [a for a in accepted if a != evict] + [item]
-        summary.setdefault("accepted_added", []).append(item)
-        if evict:
-            summary.setdefault("accepted_evicted", []).append(evict)
-
-    if args.accepted_id:
-        add_accepted(args.accepted_id, [args.accepted_id])
     if args.recommend:
         version, new_target = args.recommend
         if not VERSION.match(version):
             raise Refused("bad version")
-        if target and target != new_target:
-            add_accepted(target, [new_target])  # the prior target stays accepted
-        add_accepted(new_target, [target])
+        repo = compat_repo(new_target)
+        if repo is None or repo != compat_repo(target):
+            raise Refused("the new target %s is malformed or not from the current target's repository" % new_target)
+        if new_target in [str(x) for x in compat.get("revoked_ids") or []]:
+            raise Refused("the new target %s is in compatibility_set.revoked_ids" % new_target)
         if target != new_target:
             new = set_scalar(new, r"^ *compatibility_set:[ \t]*$", "target_id", new_target)
             summary["target_id"] = new_target
@@ -235,6 +153,19 @@ def plan(text, args, now):
         if latest != version:
             new = set_scalar(new, r"^coordinator_advertised_version:[ \t]*$", "latest_binary_version", version)
             summary["latest_binary_version"] = version
+    revoked_added = []
+    if args.revoke:
+        existing = [str(x) for x in compat.get("revoked_ids") or []]
+        for item in args.revoke:
+            if compat_repo(item) is None or compat_repo(item) != compat_repo(target):
+                raise Refused("revocation %s is malformed or not from the target's repository" % item)
+            if item == target or (args.recommend and item == args.recommend[1]):
+                raise Refused("refusing to revoke the target %s" % item)
+            if item not in existing and item not in revoked_added:
+                revoked_added.append(item)
+        if revoked_added:
+            new = add_revoked(new, revoked_added)
+            summary["revoked_added"] = revoked_added
     if args.privacy_setup:
         rel = ((doc.get("privacy_class") or {}).get("release_code_identities") or {})
         if not rel.get("metadata_dir"):
@@ -242,10 +173,11 @@ def plan(text, args, now):
             summary["release_code_identities"] = args.privacy_setup[0]
 
     def expected(d):
-        if args.accepted_id or args.recommend:
+        if revoked_added:
             cs = d.setdefault("coordinator", {}).setdefault("compatibility_set", {})
-            cs["accepted_ids"] = accepted
+            cs["revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []] + revoked_added
         if args.recommend:
+            cs = d.setdefault("coordinator", {}).setdefault("compatibility_set", {})
             cs["target_id"] = args.recommend[1]
             d.setdefault("coordinator_advertised_version", {})["latest_binary_version"] = args.recommend[0]
         if "release_code_identities" in summary:
@@ -257,8 +189,6 @@ def plan(text, args, now):
         expected(want)
         if yaml.safe_load(new) != want:
             raise Refused("the anchored edit did not produce exactly the intended YAML change")
-        if len(accepted) > ACCEPTED_CAP:
-            raise Refused("accepted_ids would exceed the cap")
     return new, summary
 
 
@@ -269,7 +199,7 @@ def overlay_conflicts(overlay_path, args):
         return
     with open(overlay_path) as f:
         ov = yaml.safe_load(f) or {}
-    if (args.accepted_id or args.recommend) and "compatibility_set" in (ov.get("coordinator") or {}):
+    if (args.recommend or args.revoke) and "compatibility_set" in (ov.get("coordinator") or {}):
         raise Refused("the overlay sets coordinator.compatibility_set; reconcile it first")
     if args.recommend and "latest_binary_version" in (ov.get("coordinator_advertised_version") or {}):
         raise Refused("the overlay sets coordinator_advertised_version.latest_binary_version; reconcile it first")
@@ -394,6 +324,12 @@ def restart(args, old_pid):
 def check_live(args, health):
     if args.recommend and health.get("recommended_binary_version") != args.recommend[0]:
         raise Refused("/healthz recommends %r, not %s" % (health.get("recommended_binary_version"), args.recommend[0]))
+    if args.recommend and health.get("compatibility_policy_target_id") != args.recommend[1]:
+        raise Refused("/healthz compatibility_policy_target_id is %r, not %s" % (
+            health.get("compatibility_policy_target_id"), args.recommend[1]))
+    live = health.get("compatibility_policy_revoked_ids")
+    if args.revoke and (not isinstance(live, list) or set(args.revoke) - set(live)):
+        raise Refused("/healthz compatibility_policy_revoked_ids does not list every requested revocation")
 
 
 def privacy_preflight(args, env, uid, gid):
@@ -499,13 +435,12 @@ def main(argv):
     p.add_argument("--guard", required=True)
     p.add_argument("--guard-sha256", required=True)
     p.add_argument("--updater-lock", required=True)
-    p.add_argument("--events-db", required=True)
     p.add_argument("--backup-root", required=True)
     p.add_argument("--healthz", required=True)
     p.add_argument("--proc", default="/proc")
-    p.add_argument("--accepted-id")
     p.add_argument("--privacy-setup", nargs=3, metavar=("DIR", "KEY", "KEY_SHA256"))
     p.add_argument("--recommend", nargs=2, metavar=("VERSION", "TARGET_ID"))
+    p.add_argument("--revoke", nargs="+", metavar="ID")
     args = p.parse_args(argv)
     try:
         apply(args)

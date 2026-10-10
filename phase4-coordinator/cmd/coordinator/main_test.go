@@ -2079,6 +2079,144 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	}
 }
 
+func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState(t *testing.T) {
+	defer tier2.ResetForTest()
+	statePath := useAppliedConfigStatePath(t)
+	startup := config.Default()
+	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID: "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+	}
+	startup, registry, wsServer, buyerServer := reloadTestServers(startup)
+	registry.Register(&pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "session-a",
+		ModelID:              "model-a",
+		Tier:                 pool.TierProvisional,
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		MaxContextTokens:     8192,
+		EndpointURL:          "https://provider-a.example.test",
+		InferencePath:        pool.InferencePathHTTPForwarding,
+		BinaryVersion:        "1.8.12",
+		CompatibilitySetID:   "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		CatalogAdmissionMode: "not_required",
+	}, nil)
+	server := httptest.NewServer(wsServer.Handler())
+	defer server.Close()
+
+	reloadCoordinatorConfig(writeReloadConfig(t, startup), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	beforeRecord, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("baseline applied-config record: %v", err)
+	}
+	beforeHealth := fetchReloadCompatibilityHealth(t, server.URL)
+	beforeTier2 := fetchReloadTier2Metadata(t, buyerServer)
+
+	next := startup
+	next.Tier2.ObserveEnabled = true
+	// A repository change would reject the connected provider: refused.
+	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID: "Augustas11/other:v1.8.13@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil, nil, nil)
+	if !strings.Contains(logs.String(), "compatibility_set config reload rejected") {
+		t.Fatalf("expected compatibility guard rejection, logs=%s", logs.String())
+	}
+
+	afterHealth := fetchReloadCompatibilityHealth(t, server.URL)
+	if !reflect.DeepEqual(afterHealth, beforeHealth) {
+		t.Fatalf("rejected compatibility reload changed health policy: before=%+v after=%+v", beforeHealth, afterHealth)
+	}
+	afterTier2 := fetchReloadTier2Metadata(t, buyerServer)
+	if afterTier2 != beforeTier2 || afterTier2.ModelHash.Active {
+		t.Fatalf("rejected compatibility reload published tier2 state: before=%+v after=%+v", beforeTier2, afterTier2)
+	}
+	afterRecord, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("applied-config record after rejected reload: %v", err)
+	}
+	if !bytes.Equal(beforeRecord, afterRecord) {
+		t.Fatalf("rejected compatibility reload rewrote the applied-config record: before=%s after=%s", beforeRecord, afterRecord)
+	}
+	if provider, ok := registry.Resolve("provider-a", "session-a"); !ok || provider.State != pool.StateReady || !provider.RoutingEligible() {
+		t.Fatalf("unsafe compatibility reload disrupted connected provider: ok=%v provider=%+v", ok, provider)
+	}
+}
+
+func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *testing.T) {
+	defer tier2.ResetForTest()
+	startup := config.Default()
+	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:    "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		AcceptedIDs: []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd", "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+	}
+	startup, registry, wsServer, buyerServer := reloadTestServers(startup)
+	registry.Register(&pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "session-a",
+		ModelID:              "model-a",
+		Tier:                 pool.TierProvisional,
+		State:                pool.StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		MaxConcurrency:       1,
+		BinaryVersion:        "1.8.12",
+		CompatibilitySetID:   "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
+		CatalogAdmissionMode: "not_required",
+	}, nil)
+	server := httptest.NewServer(wsServer.Handler())
+	defer server.Close()
+
+	next := startup
+	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+		TargetID:   "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		RevokedIDs: []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"},
+	}
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	if provider, ok := registry.Resolve("provider-a", "session-a"); !ok || provider.State != pool.StateUnavailable || provider.RoutingEligible() {
+		t.Fatalf("revoked compatibility session not fenced after reload: ok=%v provider=%+v", ok, provider)
+	}
+	health := fetchReloadCompatibilityHealth(t, server.URL)
+	if health.CompatibilityPolicyMode != "repository" || len(health.CompatibilityPolicyRevokedIDs) != 1 {
+		t.Fatalf("valid reload healthz compatibility policy = %+v", health)
+	}
+
+	invalid := next
+	invalid.Coordinator.CompatibilitySet.RevokedIDs = []string{"Augustas11/macprovider:v1.8=bad"}
+	reloadCoordinatorConfig(writeReloadConfig(t, invalid), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
+	after := fetchReloadCompatibilityHealth(t, server.URL)
+	if after.CompatibilityPolicyMode != health.CompatibilityPolicyMode ||
+		after.CompatibilityPolicyTargetID != health.CompatibilityPolicyTargetID ||
+		!reflect.DeepEqual(after.CompatibilityPolicyRevokedIDs, health.CompatibilityPolicyRevokedIDs) {
+		t.Fatalf("rejected reload changed compatibility health: before=%+v after=%+v", health, after)
+	}
+}
+
+func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
+	CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
+	CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
+	CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+} {
+	t.Helper()
+	resp, err := http.Get(baseURL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
+		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode healthz: %v", err)
+	}
+	return body
+}
+
 func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	defer tier2.ResetForTest()
 	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())

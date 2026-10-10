@@ -4,29 +4,51 @@
 
 For each signed provider CLI release recommended to the fleet, read the exact
 `compatibility_set_id` from its verified signed manifest. Before advancing the
-advertised recommendation, ensure Pearl's `compatibility_set.accepted_ids`
-contains that identity and `compatibility_set.target_id` names that same
-release. Preserve the prior target as an accepted rollback identity and the
-other active accepted sets; the accepted list is capped at eight.
+advertised recommendation, ensure Pearl's running compatibility policy admits
+that identity and `compatibility_set.target_id` names that same release.
 
-An isolated live candidate test adds its identity to `accepted_ids` while
-keeping the existing target. Fleet recommendation additionally requires the
-matching target: a binary recommendation of 223 with compatibility target
-207 fails the consumer updater's exact manifest-target comparison.
+Admission (SPEC-002-R004) needs no per-release edit: the coordinator admits
+every well-formed release identity from the `target_id` repository, at any
+version, and every session receives the recommended set and
+`latest_binary_version` so its updater moves forward. The only routing block
+is `compatibility_set.revoked_ids`, exact identities: a revoked build stays
+connected update-only (never routed) and still receives the recommendation.
+Revocation matches the identity a provider reports; it is a routing fence,
+not a binary ban. `accepted_ids` and `first_hop_bridge_ids` still parse but
+are ignored (startup warning). A hello whose `binary_version` differs from its
+set's version is rejected (`provider_binary_version_mismatch`).
 
-Both edits are `scripts/ops/cli-release.sh` steps that `next --run` executes:
-`pearl_accepted_ids` (add the candidate id; at the cap evict the oldest
-accepted version that is not the target, not the previous target/stable, and
-not the latest connection version of any provider seen in the last 14 days,
-`_anonymous` excluded; the step prints that per-version table and refuses with
-it when nothing is evictable) and
-`recommendation_bump` (`latest_binary_version` and `target_id` to the release,
-prior target kept accepted). Each prints the expected downtime first, holds
+One-time revocation seed: every published release below v1.8.207 that ships
+`compatibility-set.json` is listed in
+`phase4-coordinator/dist/compatibility-revoked-ids.txt`, regenerated with
+`GH_TOKEN=$(gh auth token -u Augustas11) python3
+scripts/legacy-compatibility-revocations.py generate --below 1.8.207` (each id
+is the release's signed `compatibility_set_id`, cross-checked against the
+tag's commit) and checked offline by `... check`. After the
+repository-admission runtime ships, `cli-release.sh` step `revocation_seed`
+(`next --run`: `_revoke-seed`, one restart) adds any missing seed id to Pearl's
+`revoked_ids` and is done when `/healthz` lists them all. Those releases stay
+connected update-only and auto-update. A seed id that is the current target
+cannot be revoked, so it is deferred (the step is done with a note) and the
+same step revokes it once `recommendation_bump` has moved the target off it. Fleet recommendation still requires the
+matching target: a binary recommendation of 223 with compatibility target 207
+fails the consumer updater's exact manifest-target comparison.
+
+`pearl_accepted_ids` is a read-only check that the running policy admits the
+candidate. The policy is read from `/healthz` (`compatibility_policy_mode`
+`repository`, target, revocations) and must equal the applied config; any
+difference blocks every Pearl-mutating step. A coordinator runtime that
+reports no mode predates repository admission: the train then points at the
+runtime release (`scripts/ops/pearl-runtime.sh`), never at an `accepted_ids`
+edit. The Pearl edit is the `scripts/ops/cli-release.sh` step that
+`next --run` executes:
+`recommendation_bump` (`latest_binary_version` and `target_id` to the
+release). It prints the expected downtime first, holds
 the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
 an anchored transform, backs it up under `/root/macprovider-backups`,
 validates the new file with the running coordinator's binary, user and exact
-environment, restarts the coordinator (SIGHUP does not reload this policy),
-waits for `/healthz`, checks that the restarted coordinator logged the on-disk
+environment, restarts the coordinator (`latest_binary_version` does not
+reload on SIGHUP), waits for `/healthz`, checks that the restarted coordinator logged the on-disk
 config as its boot config, and records the step. `recommendation_bump` is
 complete only when `/healthz` recommends the release AND the applied
 `compatibility_set.target_id` names it. When the requested edit is already on

@@ -8,9 +8,10 @@
 # Covers: pearl-runtime refusal on an unknown code comparison and on unsafe
 # versions, the clean-origin/main precondition, the re-decision after taking
 # the lock; cli-release structured evidence for canary_smoke and e2e_gate and
-# the gated promotion; the runnable Pearl config steps (one-time privacy setup
-# with accepted_ids in one restart, eviction at the accepted_ids cap, the
-# recommendation bump, pricing-journal / validation / restart-failure refusals)
+# the gated promotion; the runnable Pearl config steps (one-time privacy setup,
+# the recommendation bump, pricing-journal / validation / restart-failure
+# refusals) and repository admission (SPEC-002-R004: exact revocation, an old
+# runtime, a live policy that differs from the applied config)
 # against a fake Pearl (tests/fake_pearl_systemctl.py); catalog-activate's
 # provider-tied gateway proof and its 24 h expiry.
 # Usage: bash scripts/ops/test-entrypoints.sh
@@ -66,8 +67,12 @@ mkdir -p "$tmp/keys"
 openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/keys/release.key" 2>/dev/null
 openssl ec -in "$tmp/keys/release.key" -pubout -out "$tmp/keys/release.pem" 2>/dev/null
 cp "$tmp/keys/release.pem" "$W/ops/pearl-updater/release-signing-public.pem"
+# The one-time revocation seed, in the fixture's repository.
+SEED1="test/repo:v1.0.1@$(printf '1%.0s' $(seq 40))"
+SEED2="test/repo:v1.0.2@$(printf '2%.0s' $(seq 40))"
+printf '# test seed\n# below: 1.0.3\n%s\n%s\n' "$SEED1" "$SEED2" > "$W/phase4-coordinator/dist/compatibility-revoked-ids.txt"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md \
-  ops/pearl-updater/release-signing-public.pem
+  ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
 printf 'package main\n' > "$W/phase4-coordinator/opsprobe.go"
@@ -110,7 +115,7 @@ export PROOF_POLL_SECONDS=0
 export PEARL_COORDINATOR_CONFIG="$tmp/pearl/coordinator.yaml" PEARL_COORDINATOR_OVERLAY="$tmp/pearl/overlay.yaml"
 export FAKE_PEARL="$tmp" PEARL_PROC_ROOT="$tmp/proc" PEARL_INSTALL_ROOT="$tmp/pearl/root"
 export PEARL_CONFIG_GUARD="$SRC_REPO/scripts/lib/coordinator_config_guard.py" PEARL_UPDATER_LOCK="$tmp/pearl/updater.lock"
-export PEARL_CONNECTION_EVENTS_DB="$tmp/pearl/events.db" PEARL_BACKUP_ROOT="$tmp/pearl/backups"
+export PEARL_BACKUP_ROOT="$tmp/pearl/backups"
 export PEARL_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PORT/healthz"
 export PEARL_PRIVACY_METADATA_DIR="$tmp/pearl/privacy-release-identities" PEARL_RELEASE_PUBLIC_KEY_PATH="$tmp/keys/release.pem"
 mkdir -p "$tmp/pearl/root" "$tmp/proc"
@@ -120,7 +125,10 @@ export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINAT
 unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
-health() { printf '{"status":"ok","version":"%s","recommended_binary_version":"%s","uptime_s":100}' "$1" "$2" > "$tmp/svc/healthz.json"; }
+# health: a repository-admission runtime (its /healthz reports the running
+# config's compatibility policy); health_legacy: a runtime that reports none.
+health() { printf '{"status":"ok","version":"%s","recommended_binary_version":"%s","uptime_s":100,"_policy":"running"}' "$1" "$2" > "$tmp/svc/healthz.json"; }
+health_legacy() { printf '{"status":"ok","version":"%s","recommended_binary_version":"%s","uptime_s":100}' "$1" "$2" > "$tmp/svc/healthz.json"; }
 
 # run_rc WANT DESC CMD... (in the clone)
 run_rc() {
@@ -207,8 +215,14 @@ printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","
 OLD="test/repo:v$LIVE@$(printf '0%.0s' $(seq 40))"
 pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROVED_CDHASH]
   {
-    printf 'listen:\n  bind_address: 127.0.0.1\ncoordinator:\n  compatibility_set:\n    target_id: %s\n    accepted_ids:\n' "$OLD"
+    printf 'listen:\n  bind_address: 127.0.0.1\ncoordinator:\n  compatibility_set:\n    target_id: %s\n    accepted_ids:\n' "${TARGET_ID:-$OLD}"
     for id in $1; do printf '    - %s\n' "$id"; done
+    # The seed is applied unless NO_SEED is set; REVOKED adds one more id.
+    if [ -z "${NO_SEED:-}" ] || [ -n "${REVOKED:-}" ]; then
+      printf '    revoked_ids:\n'
+      [ -n "${NO_SEED:-}" ] || printf '    - %s\n    - %s\n' "$SEED1" "$SEED2"
+      [ -z "${REVOKED:-}" ] || printf '    - %s\n' "$REVOKED"
+    fi
     printf '  require_gateway_context: true\ncoordinator_advertised_version:\n  latest_binary_version: "%s"\n' "$LIVE"
     printf 'privacy_class:\n  enabled: true\n'
     [ -z "$2" ] || printf '  release_code_identities:\n    metadata_dir: %s\n    public_key_path: %s\n' "$2" "$tmp/keys/release.pem"
@@ -219,30 +233,17 @@ pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROV
 }
 # pearl_boot: the running coordinator (re)starts with the config now on disk.
 pearl_boot() {
+  cp "$tmp/pearl/coordinator.yaml" "$tmp/svc/running.yaml"
   printf '{"level":"info","config_sha256":"%s","overlay_sha256":"%s","source":"boot","event":"coordinator_config_applied","message":"coordinator config applied"}\n' \
     "$(shasum -a 256 "$tmp/pearl/coordinator.yaml" | awk '{print $1}')" "$(shasum -a 256 "$tmp/pearl/overlay.yaml" | awk '{print $1}')" > "$tmp/svc/boot.txt"
 }
 # loaded VERSION...: the release versions the running coordinator reports as loaded.
 loaded() { for v in "$@"; do printf 'relayblind_privacy_release_identity_loaded{binary_version="%s"} 1\n' "$v"; done > "$tmp/svc/loaded.txt"; }
-# event PROVIDER VERSION ISO8601...: provider connection events Pearl recorded.
-event() {
-  python3 - "$tmp/pearl/events.db" "$@" <<'PYDB'
-import sqlite3, sys
-db = sqlite3.connect(sys.argv[1])
-db.execute("CREATE TABLE IF NOT EXISTS provider_connection_events (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT, binary_version TEXT, occurred_at_utc TEXT, kind TEXT)")
-args = sys.argv[2:]
-for i in range(0, len(args), 3):
-    db.execute("INSERT INTO provider_connection_events (provider_id, binary_version, occurred_at_utc, kind) VALUES (?, ?, ?, 'auth_accepted')", args[i:i + 3])
-db.commit()
-PYDB
-}
-event p0 0.0.0 2000-01-01T00:00:00Z
 COMPAT="test/repo:v$CAND@$B"
 META="$tmp/pearl/privacy-release-identities"
 restarts() { cat "$tmp/svc/restarts" 2>/dev/null || echo 0; }
 
-# One run: the one-time setup, the accepted_ids edit (one shared restart) and the
-# identity staging, under the live lock with the downtime banner.
+# One run: the one-time setup (one restart) and the identity staging, under the live lock with the downtime banner.
 pearl_config "$OLD" ""
 pearl_boot
 # A config Pearl cannot parse never echoes its bytes (secrets included).
@@ -255,14 +256,15 @@ cp "$tmp/pearl/good.yaml" "$tmp/pearl/coordinator.yaml"
 run_rc 0 "cli status without a Pearl metadata_dir" scripts/ops/cli-release.sh status
 expect_next privacy_release_setup:mutate
 case "$(next_field command)" in
-  *"_pearl-config --privacy-setup $META "*"--accepted-id $COMPAT"*"_stage-privacy-identity $CAND"*) ok ;;
+  *"--accepted-id"*) bad "setup still edits accepted_ids: $(next_field command)" ;;
+  *"_pearl-config --privacy-setup $META "*"_stage-privacy-identity $CAND"*) ok ;;
   *) bad "setup command: $(next_field command)" ;;
 esac
 case "$(next_field expected_downtime)" in *"coordinator restart"*) ok ;; *) bad "no downtime banner for the setup" ;; esac
 if [ "$(fact_of privacy_release_metadata_dir)" = "unset" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
 run_rc 3 "privacy step refuses without a metadata_dir" scripts/ops/cli-release.sh _stage-privacy-identity "$CAND"
 expect_err "privacy_release_setup"
-run_rc 3 "_pearl-config refuses outside next --run" scripts/ops/cli-release.sh _pearl-config --accepted-id "$COMPAT"
+run_rc 3 "_pearl-config refuses outside next --run" scripts/ops/cli-release.sh _pearl-config --recommend "$CAND" "$COMPAT"
 expect_err "runs only from"
 touch "$tmp/pearl/root/.pricing-txn"
 MACPROVIDER_OPS_OWNER=t run_rc 1 "a pricing transaction journal refuses the edit" scripts/ops/cli-release.sh next --run
@@ -275,11 +277,11 @@ bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 expect_err "rejects the edited config"
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml" && [ "$(restarts)" = 0 ]; then ok; else bad "a rejected edit changed the config or restarted"; fi
 pearl_config "$OLD" ""; pearl_boot; cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
-MACPROVIDER_OPS_OWNER=t run_rc 0 "setup, accepted_ids and staging in one run" scripts/ops/cli-release.sh next --run
+MACPROVIDER_OPS_OWNER=t run_rc 0 "setup and staging in one run" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 grep -q "EXPECTED DOWNTIME" "$tmp/out" && ok || bad "no downtime banner printed"
 if [ "$(restarts)" = 1 ]; then ok; else bad "want one shared restart, got $(restarts)"; fi
-if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; r=d["privacy_class"]["release_code_identities"]; sys.exit(0 if sys.argv[2] in c["accepted_ids"] and sys.argv[3] in c["accepted_ids"] and r["metadata_dir"] == sys.argv[4] else 1)' \
+if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; r=d["privacy_class"]["release_code_identities"]; sys.exit(0 if sys.argv[2] not in c["accepted_ids"] and sys.argv[3] in c["accepted_ids"] and r["metadata_dir"] == sys.argv[4] else 1)' \
   "$tmp/pearl/coordinator.yaml" "$COMPAT" "$OLD" "$META"; then ok; else bad "config edit not applied as intended"; fi
 if [ -n "$(ls "$tmp/pearl/backups" 2>/dev/null)" ]; then ok; else bad "no backup under the backup root"; fi
 if diff <(grep -v -e "$COMPAT" -e release_code_identities -e "metadata_dir:" -e "public_key_path:" "$tmp/pearl/coordinator.yaml") "$tmp/pearl/before.yaml" >/dev/null; then ok; else bad "the edit touched other lines"; fi
@@ -289,7 +291,7 @@ if [ "$(state_of privacy_release_identity)" = "done" ]; then ok; else bad "stage
 if [ "$(fact_of privacy_release_metadata_dir)" = "$META" ]; then ok; else bad "privacy_release_metadata_dir fact: $(fact_of privacy_release_metadata_dir)"; fi
 step_ids() { python3 -c 'import json,sys; print(" ".join(s["id"] for s in json.load(open(sys.argv[1]))["steps"]))' "$tmp/out"; }
 case " $(step_ids) " in
-  *" signed_byte_verification privacy_release_setup privacy_release_identity pearl_accepted_ids "*) ok ;;
+  *" signed_byte_verification revocation_seed privacy_release_setup privacy_release_identity pearl_accepted_ids "*) ok ;;
   *) bad "privacy_release_identity is not right after signed_byte_verification: $(step_ids)" ;;
 esac
 status_doc() {
@@ -404,42 +406,95 @@ case " $(step_ids) " in
   *" e2e_gate registrations release_tag promotion "*) ok ;;
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
 esac
-# Registrations gate: each missing Pearl registration refuses promotion by name.
-pearl_config "$OLD" "$META"
-pearl_boot
-run_rc 0 "cli status without the candidate in accepted_ids" scripts/ops/cli-release.sh status
-expect_next pearl_accepted_ids:mutate
-case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
-  *"accepted_ids lacks $COMPAT"*) ok ;; *) bad "registrations does not name the missing accepted id" ;;
-esac
-# pearl_accepted_ids at the cap: a version is in use when it is the latest
-# connection version of a provider seen in the last 14 days (_anonymous
-# excluded). Evict the oldest accepted version that is not the target, not the
-# previous stable (v1.0.7 here) and not in use; refuse with the table otherwise.
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-EARLIER="$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)"
-STALE="$(date -u -v-20d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-20 days' +%Y-%m-%dT%H:%M:%SZ)"
-IDS="$OLD"; for n in 1 2 3 4 5 6 7; do IDS="$IDS test/repo:v1.0.$n@$(printf "$n%.0s" $(seq 40))"; done
-event p1 1.0.1 "$NOW" p2 1.0.2 "$NOW" p3 1.0.3 "$NOW" p4 1.0.4 "$NOW" \
-  p5 1.0.5 "$EARLIER" p5 "$LIVE" "$NOW" p6 1.0.6 "$EARLIER" p6 "$LIVE" "$NOW" \
-  _anonymous 1.0.6 "$NOW" p7 1.0.6 "$STALE"
-pearl_config "$IDS" "$META"; pearl_boot
+# The one-time revocation seed is a train step on a repository-mode runtime:
+# missing seed ids are added under the locks with one restart, then verified
+# on /healthz.
+NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "revocation seed not yet applied" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli-release.sh _revoke-seed:coordinator restart"*) ok ;; *) bad "seed command: $(next_field command)" ;; esac
+run_rc 3 "_revoke-seed refuses outside next --run" scripts/ops/cli-release.sh _revoke-seed
 before="$(restarts)"
-MACPROVIDER_OPS_OWNER=t run_rc 0 "accepted_ids at the cap evicts the oldest unused version" scripts/ops/cli-release.sh next --run
+MACPROVIDER_OPS_OWNER=t run_rc 0 "revocation seed applied" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-if grep -q -- "- $COMPAT" "$tmp/pearl/coordinator.yaml" && ! grep -q "v1.0.5@" "$tmp/pearl/coordinator.yaml" &&
-  grep -q "v1.0.6@" "$tmp/pearl/coordinator.yaml" && grep -q "v1.0.7@" "$tmp/pearl/coordinator.yaml" &&
-  [ "$(grep -c '^    - ' "$tmp/pearl/coordinator.yaml")" = 8 ] && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "eviction did not replace v1.0.5 with the candidate"; fi
-expect_err "latest connection version"
-run_rc 0 "cli status after the accepted_ids run" scripts/ops/cli-release.sh status
-if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "accepted id not detected live"; fi
-event p8 1.0.5 "$NOW" p9 1.0.6 "$NOW"
-pearl_config "$IDS" "$META"; pearl_boot
-MACPROVIDER_OPS_OWNER=t run_rc 3 "accepted_ids at the cap with nothing evictable is refused" scripts/ops/cli-release.sh next --run
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == sys.argv[2:] else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "seed not written as revoked_ids in one restart"; fi
+run_rc 0 "status after the seed" scripts/ops/cli-release.sh status
+if [ "$(state_of revocation_seed)" = done ]; then ok; else bad "seed not live"; fi
+# A seed id that is the current target is deferred, never a looping refusal:
+# the rest is revoked; after the target moves off it, the step revokes it.
+TARGET_ID="$SEED1" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "seed with the incumbent target in it" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "seed applied except the deferred target" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-expect_err "no id is evictable"
-expect_err "test/repo:v1.0.7@"
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == [sys.argv[2]] and c["target_id"] == sys.argv[3] else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED2" "$SEED1"; then ok; else bad "deferred target was revoked or the rest was not"; fi
+run_rc 0 "status with the deferred target" scripts/ops/cli-release.sh status
+case "$(state_of revocation_seed):$(next_field id)" in done:revocation_seed) bad "seed step loops on the deferred target" ;; done:*) ok ;; *) bad "deferred seed not done: $(state_of revocation_seed)" ;; esac
+REVOKED="$SEED2" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot   # recommendation_bump moved the target
+run_rc 0 "deferred seed id after the target moved" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "deferred seed id revoked" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if sorted(c["revoked_ids"]) == sorted(sys.argv[2:]) else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2"; then ok; else bad "deferred seed id not revoked after the target moved"; fi
+# An old runtime never gets the seed step as next.
+NO_SEED=1 pearl_config "$OLD $COMPAT" "$META"; pearl_boot
+health_legacy v9.0.0 "$LIVE"
+run_rc 0 "old runtime without the seed" scripts/ops/cli-release.sh status
+if [ "$(state_of revocation_seed)" = pending ] && [ "$(next_field id)" != revocation_seed ]; then ok; else bad "seed offered on an old runtime"; fi
+health v9.0.0 "$LIVE"
+# Admission is by policy (SPEC-002-R004): the candidate is admitted without
+# being listed anywhere; an exact revocation refuses it by name.
+note_of() { python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
+pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "candidate admitted by policy without an accepted_ids entry" scripts/ops/cli-release.sh status
+if [ "$(state_of pearl_accepted_ids)" = done ] && [ "$(state_of registrations)" = done ]; then ok; else bad "policy admission not proven: $(note_of registrations)"; fi
+REVOKED="$COMPAT" pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "revoked candidate" scripts/ops/cli-release.sh status
+expect_next pearl_accepted_ids:blocked
+case "$(note_of registrations)" in *"provider_release_revoked"*) ok ;; *) bad "revocation not named: $(note_of registrations)" ;; esac
+# A runtime that reports no policy mode predates repository admission: only its
+# exact accepted_ids count, and the train points at the runtime release, never
+# at an accepted_ids edit.
+pearl_config "$OLD" "$META"; pearl_boot
+health_legacy v9.0.0 "$LIVE"
+run_rc 0 "old runtime without the candidate listed" scripts/ops/cli-release.sh status
+expect_next pearl_accepted_ids:blocked
+case "$(next_field command):$(next_field reason)" in "scripts/ops/pearl-runtime.sh status:"*"predates SPEC-002-R004"*) ok ;; *) bad "old runtime reason: $(next_field reason)" ;; esac
+pearl_config "$OLD $COMPAT" "$META"; pearl_boot
+run_rc 0 "old runtime with the candidate listed" scripts/ops/cli-release.sh status
+if [ "$(state_of pearl_accepted_ids)" = done ]; then ok; else bad "listed candidate on an old runtime not admitted"; fi
+health v9.0.0 "$LIVE"
+# A live policy that differs from the applied config (here: a revocation the
+# running coordinator holds but the on-disk config lost) blocks every
+# Pearl-mutating step, including the one-time privacy setup.
+pearl_config "$OLD" ""; pearl_boot
+REVOKED="$COMPAT" pearl_config "$OLD" ""; cp "$tmp/pearl/coordinator.yaml" "$tmp/svc/running.yaml"
+pearl_config "$OLD" ""
+run_rc 0 "live policy differs from the applied config" scripts/ops/cli-release.sh status
+expect_next compatibility_policy:blocked
+case "$(next_field reason)" in *"revoked_ids differ"*) ok ;; *) bad "mismatch reason: $(next_field reason)" ;; esac
+# The same live revocation with an unapplied on-disk edit is not a pending
+# train edit: still blocked, never a restart that would drop the revocation.
+printf '# unapplied\n' >> "$tmp/pearl/coordinator.yaml"
+run_rc 0 "live revocation hidden by an unapplied disk config" scripts/ops/cli-release.sh status
+expect_next compatibility_policy:blocked
+health_policy_mode() { python3 - "$tmp/svc/healthz.json" "$1" <<'PYH'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("_policy", None); d["compatibility_policy_mode"] = sys.argv[2]
+json.dump(d, open(sys.argv[1], "w"))
+PYH
+}
+pearl_config "$OLD" "$META"; pearl_boot
+health_policy_mode unconfigured
+run_rc 0 "live policy mode other than repository" scripts/ops/cli-release.sh status
+expect_next compatibility_policy:blocked
+health v9.0.0 "$LIVE"
 pearl_config "$OLD $COMPAT" "$META"
+pearl_boot
+# A verifying filepearl_config "$OLD $COMPAT" "$META"
 pearl_boot
 # A verifying file the running coordinator has not loaded is not approval.
 loaded 1.0.0
@@ -474,17 +529,12 @@ run_rc 3 "_check-registrations refuses a registration lost after status" scripts
 expect_err "is not registered in the running coordinator"
 loaded "$CAND"
 run_rc 0 "_check-registrations passes when everything is live" scripts/ops/cli-release.sh _check-registrations "$CAND"
-# An edit already on disk but not applied (a run stopped before its restart)
-# is recovered: validate, restart, verify; the bytes stay as they are.
+# A registration on disk but not applied (a restart still due) is not live.
 pearl_config "$OLD" "$META"; pearl_boot
-pearl_config "$OLD $COMPAT" "$META"
-cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
-run_rc 0 "cli status with accepted_ids edited on disk but not applied" scripts/ops/cli-release.sh status
-expect_next pearl_accepted_ids:mutate
-before="$(restarts)"
-MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk edit is recovered with a restart" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied edit not recovered by one restart"; fi
+pearl_config "$OLD" "$META" "$CDHASH"
+run_rc 0 "cli status with an approval edited on disk but not applied" scripts/ops/cli-release.sh status
+case "$(note_of registrations)" in *"booted with"*) ok ;; *) bad "unapplied on-disk edit counted as live" ;; esac
+pearl_config "$OLD" "$META"; pearl_boot
 run_rc 0 "cli status after the recovery" scripts/ops/cli-release.sh status
 expect_next promotion:mutate
 rm -f "$SCOPE/e2e_gate.json"
@@ -496,8 +546,9 @@ expect_next e2e_gate:manual
 fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
   "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
   "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]}}'
-# recommendation_bump runs through next --run: target and latest move, the prior
-# target stays accepted, /healthz must then recommend the release.
+# recommendation_bump runs through next --run: target and latest move (the
+# deprecated accepted_ids is left as it is), /healthz must then recommend the
+# release and report the new target.
 health v9.0.0 "$LIVE"
 pearl_config "$OLD $COMPAT" "$META"; pearl_boot; loaded "$CAND"
 run_rc 0 "cli status before the bump" scripts/ops/cli-release.sh status
@@ -533,19 +584,38 @@ bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 if grep -q "target_id: $COMPAT" "$tmp/pearl/coordinator.yaml"; then ok; else bad "target_id not repaired"; fi
 run_rc 0 "cli status after the target repair" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "bump not complete after the target repair"; fi
-# After publication a lost acceptance is repaired through the train, keeping
-# the target; the stale target is then repaired by recommendation_bump.
+# After publication with the target left on the previous release, admission
+# needs no edit and recommendation_bump repairs the target.
 pearl_config "$OLD" "$META"; pearl_boot
-run_rc 0 "published release whose acceptance was lost" scripts/ops/cli-release.sh status
-expect_next pearl_accepted_ids:mutate
-MACPROVIDER_OPS_OWNER=t run_rc 0 "accepted_ids repaired after publication" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-if grep -q -- "- $COMPAT" "$tmp/pearl/coordinator.yaml" && grep -q "target_id: $OLD" "$tmp/pearl/coordinator.yaml"; then ok; else bad "acceptance not repaired or target moved"; fi
-run_rc 0 "cli status after the published repair" scripts/ops/cli-release.sh status
-if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "published repair not live"; fi
+run_rc 0 "published release with the old target" scripts/ops/cli-release.sh status
+if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "published release not admitted by policy"; fi
 expect_next recommendation_bump:mutate
-MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump after the published repair" scripts/ops/cli-release.sh next --run
+# An on-disk bump the running coordinator never applied is recovered with one
+# validated restart; the bytes stay as they are.
+python3 - "$tmp/pearl/coordinator.yaml" "$CAND" "$COMPAT" <<'PYCFG'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+s = re.sub(r'latest_binary_version: "[^"]*"', 'latest_binary_version: "%s"' % sys.argv[2], s)
+open(p, "w").write(re.sub(r'target_id: \S+', 'target_id: %s' % sys.argv[3], s))
+PYCFG
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
+before="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk bump is recovered with a restart" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied bump not recovered by one restart"; fi
+run_rc 0 "cli status after the recovered bump" scripts/ops/cli-release.sh status
+if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "recovered bump not live"; fi
+# An old runtime that already lists the candidate admits it, but the bump is
+# verified on /healthz fields only a repository runtime reports: stop with
+# "ship the runtime first", never offer the impossible bump.
+mkdir -p "$tmp/saved" && cp "$tmp/pearl/coordinator.yaml" "$tmp/svc/boot.txt" "$tmp/svc/running.yaml" "$tmp/svc/healthz.json" "$tmp/saved/"
+pearl_config "$OLD $COMPAT" "$META"; pearl_boot
+health_legacy v9.0.0 "$LIVE"
+run_rc 0 "old runtime: no recommendation bump" scripts/ops/cli-release.sh status
+expect_next recommendation_bump:blocked
+case "$(next_field command):$(next_field reason)" in "scripts/ops/pearl-runtime.sh status:"*"not repository"*) ok ;; *) bad "old-runtime bump reason: $(next_field reason)" ;; esac
+cp "$tmp/saved/coordinator.yaml" "$tmp/pearl/"; cp "$tmp/saved/boot.txt" "$tmp/saved/running.yaml" "$tmp/saved/healthz.json" "$tmp/svc/"
 # Fresh ops state (no verification record): the compatibility id comes from
 # the verified v<ver> tag, or the gate fails closed.
 mkdir -p "$tmp/state-fresh"
