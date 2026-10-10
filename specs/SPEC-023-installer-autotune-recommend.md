@@ -8,6 +8,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.19 (2026-10-10)** — The native-MTP admission sidecar's
+  `expires_at` is structural only (#1938, AGENTS.md rule 10). The provider
+  drops its `expires_at > now` check and the 90-day window bound; signatures,
+  release/ledger binding, tuple identity, the emergency revocation feed and
+  emergency-off are unchanged. The self-test bank already kept only its
+  structural window (v0.22.14). Signers keep the 90-day window until CLIs
+  that predate this version leave the fleet.
+
 - **v0.22.19 (2026-10-10)** — #1880 catalog graduation: `SPEC-023-R026`
   is executable. The generator accepts `macprovider.intake-decision.v2`,
   re-derives every `pool_proven_evidence` value from the retained
@@ -3316,12 +3324,21 @@ schema.
 schema_version = "macprovider.native-mtp-admission.v1"
 release_id: 1..128 printable non-space ASCII bytes (0x21-0x7e), equal to release.json version
 issued_at: RFC3339 UTC seconds
-expires_at: RFC3339 UTC seconds; issued_at < expires_at <= issued_at + 90 days
+expires_at: RFC3339 UTC seconds; issued_at < expires_at (structural only, v0.22.19)
 signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 challenge_bank_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 revocation_signer_key_id: 1..128 printable non-space ASCII bytes (0x21-0x7e)
 entries: array[1..256]
 ```
+
+`expires_at` is structural only (v0.22.19, #1938). The provider MUST NOT
+reject or disable an admission because the wall clock has passed it, and MUST
+NOT bound the `issued_at`..`expires_at` window. A signed admission keeps
+authorizing its tuples until a superseding release replaces it, the emergency
+revocation feed below revokes a tuple, or emergency-off is set. Signers and the
+coordinator still keep the window at 90 days or less, and the weekly feed
+renewal keeps re-signing it, while CLIs that predate v0.22.19 (which enforce
+`expires_at > now` and the 90-day bound) remain in the fleet.
 
 Every entry is the exact closed object below. `sha256` means lowercase 64-hex;
 `short_string` means 1..128 UTF-8 bytes with no control character; integers are
@@ -3535,7 +3552,7 @@ bridge. The exact target set depends on whether the artifact-feed pair has also
 completed its own Stage B; no implementation may hardcode an assumed 11- or
 13-file count outside the versioned exact-set manifest.
 
-The loader rejects cross-release replay, missing/expired sidecar, tuple-field
+The loader rejects cross-release replay, missing sidecar, tuple-field
 mismatch, unresolved/non-verified artifact, or evidence digest absent from the
 release evidence bundle. One entry whose tuple/evidence fails is tuple-scoped
 disabled; top-level schema, ordering/uniqueness, signature, signer equality, or

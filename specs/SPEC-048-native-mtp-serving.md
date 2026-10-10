@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.29
+**Version:** 0.1.30
 
 ```json
 {
@@ -995,9 +995,11 @@ For each qualified tuple, production enablement requires all of the following:
 6. A signed `JOURNEY-NATIVE-MTP-SERVING` result covers every requirement mapped
    to it: `SPEC-023-R024`, `SPEC-030-R021`, `SPEC-031-R033`, `SPEC-036-R018`,
    `SPEC-038-R018`, `SPEC-039-R015`, and `SPEC-048-R001..R013/R015/R016`, for
-   that exact tuple and is no older than 90 days. CONFORMANCE state is repository-wide and therefore
+   that exact tuple, captured on the tuple's current decode path (AGENTS.md
+   rule 2: a new run is needed only when a decode-path input changed, never
+   because of age). CONFORMANCE state is repository-wide and therefore
    necessary but never sufficient for another tuple; each advertised tuple
-   requires its own unexpired sidecar and journey result.
+   requires its own unrevoked sidecar and journey result.
 7. The frozen implementation/evidence diff passes code, security, and
    architecture review with zero Critical, High, or Medium findings.
 8. After merge and final signing, the exact release candidate is revalidated
@@ -1010,21 +1012,22 @@ For each qualified tuple, production enablement requires all of the following:
    promote it to conformant.
 9. No unreleased local binary is connected to the live coordinator.
 
-Failure or expiry of any tuple-specific gate MUST remove or disable only that
+Failure or revocation of any tuple-specific gate MUST remove or disable only that
 tuple's native-MTP eligibility and MUST preserve ordinary decode. No partial
 Phase 0/1 implementation may claim issue completion or a production MTP
 multiplier.
 
 `activation` means the first production configuration load at which an exact
-tuple becomes selectable. Sidecars and serving-journey results expire after 90
-days. Renewal creates a new immutable release/sidecar, reruns the local
-self-test and signed serving journey, the 30-minute sustained cell, ordinary
-and MTP parity sample, and post-gateway eligibility sample. The full matrix may
-be reused for at most 180 days only when hardware, OS/toolchain, provider/MLX,
-model/artifact/tokenizer/MTP manifest, quantization, cache/state topology,
-depth, slots, thresholds, and benchmark policy are byte-identical; any change
-or regression forces the full matrix. This lifecycle is independent of
-SPEC-032 hardware-attestation TTL.
+tuple becomes selectable. A sidecar's and a serving-journey result's
+`expires_at` is structural only (0.1.30, #1938): once activated, a tuple stays
+selectable until a superseding release replaces its sidecar, the emergency
+revocation feed revokes it, or emergency-off is set. Requalification creates a
+new immutable release/sidecar and reruns the local self-test and signed serving
+journey, the 30-minute sustained cell, ordinary and MTP parity sample, and
+post-gateway eligibility sample. It is required when hardware, OS/toolchain,
+provider/MLX, model/artifact/tokenizer/MTP manifest, quantization, cache/state
+topology, depth, slots, thresholds, or benchmark policy changes, never because
+of calendar age.
 
 ### MTP-15 — preregistered Studio and tier benchmark gate (SPEC-048-R015)
 
@@ -1384,6 +1387,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.30 (2026-10-10)** — No calendar expiry on native MTP (#1938, AGENTS.md
+  rule 10). MTP-14: the admission sidecar's and the serving journey's
+  `expires_at` are structural only; an activated tuple stays selectable until
+  a superseding release, a revocation, or emergency-off. Requalification is
+  triggered by a decode-path change, not by age; the 180-day matrix reuse
+  limit and the 90-day sidecar/journey lifetime are removed. Follows SPEC-023
+  v0.22.19.
 - **0.1.29 (2026-10-10)** — MTP-2 names the R003-authorized loader instead
   of the retired 3.31.4 loader (#1906). The observer must inspect every weight
   file the authorized mlx-swift-lm loader can consume; at
