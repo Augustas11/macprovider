@@ -194,6 +194,7 @@ results in the evidence header.
 | Cross-thread model reload | A reload loop that frees and rebuilds models across threads shows zero stale trace replays (every replay bit-exact to a fresh trace). |
 | Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
+| Weight-file discovery | Every `.safetensors` file the rebased mlx-swift-lm loader can consume (`safetensorWeightURLs`, index and additional files included) is inside the native-MTP observer's recursive scan (SPEC-048 MTP-2). |
 | Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule`. |
 | Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with prompts below and above the 33-token bound. |
 

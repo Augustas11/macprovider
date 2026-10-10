@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.28
+**Version:** 0.1.29
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -299,9 +299,17 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 `separate_artifact` layout with the matching
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
 
-The observer MUST inspect the same recursive set of `.safetensors` files that
-the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
-files, scan every parsed tensor name before representation filters, and reject
+The observer MUST inspect every `.safetensors` file that the R003-authorized
+mlx-swift-lm loader can consume. At `3.32.3-macprovider.6` the loader
+(`safetensorWeightURLs`) takes the files named by
+`model.safetensors.index.json`, which may sit in subdirectories, else the
+top-level conventional names, plus files the model declares as additional
+weights; the observer inspects every `.safetensors` file under the snapshot
+root recursively, a superset of that set. Each fork rebase MUST re-establish,
+under the per-rebase acceptance gate, that every file the rebased loader can
+consume is in the observer's set; a loader that can reach a file the observer
+does not inspect blocks the rebase. The observer MUST reject symlinked or
+hidden weight files, scan every parsed tensor name before representation filters, and reject
 every target tensor the family sanitizer would silently discard, including any
 target name containing the `mtp.` namespace when `source_layout` is
 `separate_artifact`.
@@ -1376,6 +1384,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.29 (2026-10-10)** — MTP-2 names the R003-authorized loader instead
+  of the retired 3.31.4 loader (#1906). The observer must inspect every weight
+  file the authorized mlx-swift-lm loader can consume; at
+  `3.32.3-macprovider.6` its recursive scan is a superset of the loader's
+  index-or-top-level selection. Every fork rebase re-establishes that
+  containment under the per-rebase acceptance gate.
 - **0.1.28 (2026-10-10)** — MTP-3 adopts the operator's permanent fork model
   (#1906). The Augustas11 forks of mlx-swift-lm, mlx-swift, and MLX core are
   the production runtime; MacProvider makes no upstream contributions and
