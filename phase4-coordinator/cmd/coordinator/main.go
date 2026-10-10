@@ -805,6 +805,11 @@ func runCoordinator() (exitCode int) {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("open onboarding postgres store")
 		}
+		if cfg.Onboarding.AppTrackRegisterEnabled && strings.TrimSpace(cfg.Onboarding.AppAttestRecordDSN) != "" {
+			if err := onboardingStore.AttachAppAttestRecorder(cfg.Onboarding.AppAttestRecordDSN); err != nil {
+				logger.Fatal().Err(err).Msg("open app attest record postgres store")
+			}
+		}
 		defer onboardingStore.Close()
 		if err := onboardingStore.Smoke(context.Background()); err != nil {
 			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")

@@ -21,6 +21,38 @@ type PGStore struct {
 	authPolicyCutoverDB    *sql.DB
 	hardwareTrustRequestDB *sql.DB
 	hardwareTrustApproveDB *sql.DB
+	// appAttestRecordDB connects as app_attest_recorder (SPEC-033 §5.7); nil
+	// means App Attest verifications are not recorded.
+	appAttestRecordDB *sql.DB
+}
+
+// AttachAppAttestRecorder opens the app_attest_recorder connection. The
+// provider_onboarding role cannot write provider_app_attest_verifications, so
+// a compromise of that role alone cannot make hardware trusted automatically.
+func (s *PGStore) AttachAppAttestRecorder(dsn string) error {
+	db, err := openPostgresDB(dsn, "app attest record")
+	if err != nil {
+		return err
+	}
+	s.appAttestRecordDB = db
+	return nil
+}
+
+// RecordAppAttestVerification records that providerID's App Attest key passed
+// Apple verification at registration. The first record per provider and per
+// key wins; it is never updated.
+func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) error {
+	if s == nil || s.appAttestRecordDB == nil {
+		return errors.New("app attest record postgres store is not configured")
+	}
+	if strings.TrimSpace(providerID) == "" || len(keyID) != 32 {
+		return errors.New("app attest record requires a provider id and a 32-byte key id")
+	}
+	_, err := s.appAttestRecordDB.ExecContext(ctx, `
+INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING`, providerID, keyID)
+	return err
 }
 
 func OpenPGStore(dsn string) (*PGStore, error) {
@@ -110,7 +142,7 @@ func (s *PGStore) Close() error {
 	}
 	var err error
 	seen := map[*sql.DB]bool{}
-	for _, db := range []*sql.DB{s.db, s.authPolicyRequestDB, s.authPolicyApproveDB, s.authPolicyCutoverDB, s.hardwareTrustRequestDB, s.hardwareTrustApproveDB} {
+	for _, db := range []*sql.DB{s.db, s.authPolicyRequestDB, s.authPolicyApproveDB, s.authPolicyCutoverDB, s.hardwareTrustRequestDB, s.hardwareTrustApproveDB, s.appAttestRecordDB} {
 		if db == nil || seen[db] {
 			continue
 		}
@@ -244,6 +276,19 @@ SELECT j.generated_at, j.evidence
 			},
 			"request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)"); err != nil {
 			return err
+		}
+	}
+	if s.appAttestRecordDB != nil {
+		var currentUser string
+		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT current_user`).Scan(&currentUser); err != nil {
+			return fmt.Errorf("app_attest_recorder smoke current_user: %w", err)
+		}
+		if currentUser != "app_attest_recorder" {
+			return fmt.Errorf("app_attest_recorder smoke current_user = %q, want app_attest_recorder", currentUser)
+		}
+		var canInsert bool
+		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')`).Scan(&canInsert); err != nil || !canInsert {
+			return fmt.Errorf("app_attest_recorder smoke lacks INSERT on provider_app_attest_verifications (err=%v)", err)
 		}
 	}
 	return nil

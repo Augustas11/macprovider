@@ -2421,7 +2421,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let mlxCacheRoot: URL
     /// The native durable model store scanned beside the HF cache; nil ⇒ not scanned.
     let durableModelRoot: URL?
-    let ollamaOrigin: String?
+    var ollamaOrigin: String?
     /// Operator-supplied OpenAI-compatible loopback origin. SPEC-046-R002 allows
     /// an adapter endpoint to be either a well-known loopback default for that
     /// runtime or an operator-supplied loopback origin; a generic
@@ -2430,9 +2430,9 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let openAICompatibleOrigin: String?
     /// #1478: LM Studio loopback origin. Has a well-known default like Ollama
     /// (nil only when the operator skips the adapter).
-    let lmstudioOrigin: String?
+    var lmstudioOrigin: String?
     /// #1478: llama.cpp `llama-server` loopback origin (well-known default).
-    let llamacppOrigin: String?
+    var llamacppOrigin: String?
     /// SPEC-010 v1.7 R007(a): the local Ollama store the served GGUF blob is
     /// resolved from, and the digest cache keyed by exact file identity.
     let ollamaModelsRoot: URL
@@ -2455,13 +2455,17 @@ struct BYOMDiscoveryEnvironment: Sendable {
     var mlxlmApprovedRoots: MLXLMLoopbackServeModel.ApprovedSnapshotRoots?
     /// The provider's own serve port, never probed for mlx_lm.server.
     var mlxlmExcludedPort: Int?
+    /// An mlx_lm.server whose listed snapshot is outside the approved roots,
+    /// skipped instead of aborting the command (#1880); discovery reports it
+    /// as an unavailable mlxlm_loopback adapter.
+    var mlxlmSkippedOrigin: String?
     /// LM Studio's `/api/v1/models`, fetched by `withLoopbackRuntimeProbes`;
     /// narrows the LM Studio store's file resolution (see BYOMLMStudioModelStore).
     var lmstudioServedModels: [LMStudioLoopbackServeModel.Model]?
     /// SPEC-046 v0.5.0 `omlx_loopback` (#1690 M9): the operator-named oMLX
     /// origin and the MLX snapshot directory it serves; attempted only when
     /// both are set.
-    let omlxOrigin: String?
+    var omlxOrigin: String?
     let omlxModelPath: URL?
     let artifactDigestCacheURL: URL
     /// #1816: the catalog matcher every adapter of one command shares. Nil
@@ -2567,6 +2571,7 @@ struct BYOMDiscoveryEnvironment: Sendable {
         llamacppOrigin: String? = nil,
         llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
         servePort: Int? = nil,
+        configuredLoopback: ConfiguredLoopback? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> BYOMDiscoveryEnvironment {
@@ -2594,7 +2599,80 @@ struct BYOMDiscoveryEnvironment: Sendable {
         }
         production.mlxlmApprovedRoots = MLXLMLoopbackServeModel.ApprovedSnapshotRoots.default(environment: environment, homeDirectory: homeDirectory)
         production.mlxlmExcludedPort = servePort
+        production.applyConfiguredLoopback(configuredLoopback)
         return production
+    }
+
+    /// `production` for a `models` command: the serve port and the configured
+    /// loopback engine origin both come from the same provider config, so
+    /// discover, evaluate, propose, offer, admission status/withdraw and
+    /// catalog-economics resolve engines identically (#1880 audit R2).
+    static func productionForConfig(
+        configPath: String?,
+        namespacePath: String?,
+        mlxCacheDir: String?,
+        ollamaOrigin: String?,
+        openAICompatibleOrigin: String? = nil,
+        lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
+        llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> BYOMDiscoveryEnvironment {
+        production(
+            namespacePath: namespacePath,
+            mlxCacheDir: mlxCacheDir,
+            ollamaOrigin: ollamaOrigin,
+            openAICompatibleOrigin: openAICompatibleOrigin,
+            lmstudioOrigin: lmstudioOrigin,
+            llamacppOrigin: llamacppOrigin,
+            llamacppSelector: llamacppSelector,
+            servePort: configuredServePort(configPath: configPath),
+            configuredLoopback: configuredLoopback(configPath: configPath),
+            environment: environment,
+            homeDirectory: homeDirectory
+        )
+    }
+
+    /// The loopback engine the provider config serves: its served model ref
+    /// (`model`) and `loopback_origin`.
+    struct ConfiguredLoopback: Equatable, Sendable {
+        let modelRef: String?
+        let origin: String?
+    }
+
+    /// Reads the served model ref and `loopback_origin` from the provider
+    /// config. Nil when the config cannot be read.
+    static func configuredLoopback(configPath: String? = nil) -> ConfiguredLoopback? {
+        guard let config = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath)) else { return nil }
+        return ConfiguredLoopback(modelRef: config.model, origin: config.loopbackOrigin)
+    }
+
+    /// When the config serves a loopback engine on a configured origin, the
+    /// BYOM commands probe that origin for the engine instead of its default
+    /// port, so a non-default port needs no --ollama-origin/--lmstudio-origin.
+    /// An origin the operator passed explicitly (anything but the engine's
+    /// default) and a skipped adapter (nil) are left alone. The origin still
+    /// passes the loopback validator before any request.
+    mutating func applyConfiguredLoopback(_ configured: ConfiguredLoopback?) {
+        guard let configured,
+              let origin = LoopbackServeSelection.nonEmpty(configured.origin),
+              let engine = LoopbackServeSelection.select(configured.modelRef)
+        else {
+            return
+        }
+        switch engine {
+        case .ollama:
+            if ollamaOrigin == OllamaLoopbackServeModel.defaultOrigin { ollamaOrigin = origin }
+        case .lmStudio:
+            if lmstudioOrigin == BYOMLMStudioDiscovery.defaultOrigin { lmstudioOrigin = origin }
+        case .llamaCpp:
+            if llamacppOrigin == BYOMLlamaCppDiscovery.defaultOrigin { llamacppOrigin = origin }
+        case .mlxLM:
+            if mlxlmOrigin == nil { mlxlmOrigin = origin }
+        case .oMLX:
+            if omlxOrigin == nil { omlxOrigin = origin }
+        }
     }
 
     /// The port the provider's serve listens on per its config (default
@@ -2607,14 +2685,22 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// mlx_lm.server on its probe origins and binds the adapter to the
     /// snapshot directory that server reports loading, when that directory
     /// is inside the approved roots. Explicit settings win; a malformed
-    /// declared path or a detected directory outside the roots throws.
-    func withInferredMLXLMSnapshot(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
+    /// declared path throws. A detected directory outside the roots throws
+    /// only when the command targets mlx_lm (`requireMLXLM`); otherwise that
+    /// server is skipped and recorded in `mlxlmSkippedOrigin`, so an
+    /// unrelated mlx_lm.server cannot stop discovery for every other engine.
+    /// The skip carries no path: discovery output stays redacted.
+    func withInferredMLXLMSnapshot(
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        requireMLXLM: Bool = false
+    ) async throws -> BYOMDiscoveryEnvironment {
         if let mlxlmSelectionError { throw mlxlmSelectionError }
         guard mlxlmModelPath == nil else { return self }
         let roots = mlxlmApprovedRoots ?? MLXLMLoopbackServeModel.ApprovedSnapshotRoots(
             durableModelRoot: durableModelRoot ?? Self.defaultDurableModelRoot(),
             hubCacheRoot: mlxCacheRoot
         )
+        var skippedOrigin: String?
         for origin in MLXLMLoopbackServeModel.discoveryOrigins(configured: mlxlmOrigin, excludingPort: mlxlmExcludedPort) {
             guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else { continue }
             switch await MLXLMLoopbackServeModel.inferSnapshotDirectory(httpClient, origin: baseURL, roots: roots) {
@@ -2626,16 +2712,27 @@ struct BYOMDiscoveryEnvironment: Sendable {
                 copy.mlxlmModelPath = directory
                 return copy
             case .outsideApprovedRoots(let directory):
-                throw MLXLMSnapshotSelectionError.outsideApprovedRoots(origin: origin, directory: directory.path)
+                if requireMLXLM {
+                    throw MLXLMSnapshotSelectionError.outsideApprovedRoots(origin: origin, directory: directory.path)
+                }
+                skippedOrigin = skippedOrigin ?? origin
             }
         }
-        return self
+        var copy = self
+        copy.mlxlmSkippedOrigin = skippedOrigin
+        return copy
     }
 
     /// The read-only runtime probes the BYOM commands run before resolving
     /// candidates: mlx_lm.server inference and LM Studio's model list.
-    func withLoopbackRuntimeProbes(httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()) async throws -> BYOMDiscoveryEnvironment {
-        var copy = try await withInferredMLXLMSnapshot(httpClient: httpClient)
+    /// `target` is the candidate the command names, if any; an `mlxlm:` target
+    /// keeps an unusable mlx_lm.server a hard error.
+    func withLoopbackRuntimeProbes(
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        target: String? = nil
+    ) async throws -> BYOMDiscoveryEnvironment {
+        let requireMLXLM = target.map { MLXLMLoopbackServeModel.isMLXLMLoopbackRef($0) } ?? false
+        var copy = try await withInferredMLXLMSnapshot(httpClient: httpClient, requireMLXLM: requireMLXLM)
         if copy.lmstudioServedModels == nil, let origin = lmstudioOrigin,
            let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) {
             copy.lmstudioServedModels = await LMStudioLoopbackServeModel.fetchModels(httpClient, origin: baseURL)
@@ -4838,7 +4935,7 @@ extension BYOMDiscoveryRunner {
     func discoverIncludingMLXLM() async -> BYOMDiscoveryWire {
         let base = await discover()
         let configured = environment.mlxSnapshotLoopbacks
-        guard !configured.isEmpty else {
+        guard !configured.isEmpty || environment.mlxlmSkippedOrigin != nil else {
             return base
         }
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager).readNamespace(at: environment.namespaceURL)
@@ -4860,6 +4957,17 @@ extension BYOMDiscoveryRunner {
             }
             candidates += found.candidates
             adapters.append(found.adapter)
+        }
+        if environment.mlxlmSkippedOrigin != nil {
+            // #1880: an mlx_lm.server serving a snapshot outside the approved
+            // roots is reported, not fatal; MACPROVIDER_MLXLM_MODEL_PATH opts in.
+            adapters.append(BYOMDiscoveryWire.Adapter(
+                runtimeSource: MLXLMLoopbackServeModel.runtimeSource,
+                status: "unavailable",
+                originClass: "loopback_http",
+                warningCodes: [BYOMDiscoveryWarning.adapterUnavailable.rawValue]
+            ))
+            warnings.insert(BYOMDiscoveryWarning.adapterUnavailable.rawValue)
         }
         candidates.sort {
             $0.runtimeSource == $1.runtimeSource ? $0.servedModelRef < $1.servedModelRef : $0.runtimeSource < $1.runtimeSource

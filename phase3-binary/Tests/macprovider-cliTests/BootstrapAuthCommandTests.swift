@@ -170,6 +170,30 @@ final class BootstrapAuthCommandTests: XCTestCase {
         }
     }
 
+    // #1880: bootstrap-auth on a fresh Mac must not fail with
+    // referral_unavailable just because ~/.config/macprovider does not exist.
+    func testReferralJournalCreatesMissingConfigDirectoriesOwnerOnly() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = try makeReferralInput(in: directory, name: "fresh", code: "MAL1-S-key-fresh-tag")
+        let home = directory.appendingPathComponent("home", isDirectory: true)
+        let journal = ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL(home: home))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.path))
+
+        let attempt = try journal.prepare(
+            providerID: "mp-0123456789abcdef0123456789abcdef",
+            receiptPublicKey: "receipt-public-key",
+            input: input,
+            now: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(attempt.state, .pending)
+        for relative in [".config", ".config/macprovider", ".config/macprovider/onboarding"] {
+            let attributes = try FileManager.default.attributesOfItem(atPath: home.appendingPathComponent(relative).path)
+            XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o700, relative)
+        }
+    }
+
     func testReplacementReferralJournalIsProviderScopedAndPreservesDefaultJournal() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

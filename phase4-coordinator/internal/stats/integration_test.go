@@ -39,7 +39,9 @@ package stats_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -112,6 +114,12 @@ func startPostgres(t *testing.T) *pgFixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
+	// Docker-less hosts may point the suite at a disposable local cluster
+	// (superuser "postgres", trust auth). Each test gets a fresh database.
+	if hostPort := strings.TrimSpace(os.Getenv("MACPROVIDER_STATS_TEST_PG_HOSTPORT")); hostPort != "" {
+		return startLocalPostgresDatabase(t, ctx, hostPort)
+	}
+
 	var c *tcpg.PostgresContainer
 	var err error
 	func() {
@@ -165,6 +173,34 @@ func startPostgres(t *testing.T) *pgFixture {
 		fx.Close(bg)
 	})
 	return fx
+}
+
+func startLocalPostgresDatabase(t *testing.T, ctx context.Context, hostPort string) *pgFixture {
+	t.Helper()
+	host, port, ok := strings.Cut(hostPort, ":")
+	if !ok || host == "" || port == "" {
+		t.Fatalf("MACPROVIDER_STATS_TEST_PG_HOSTPORT must be host:port, got %q", hostPort)
+	}
+	dbName := fmt.Sprintf("stats_test_%d", time.Now().UnixNano())
+	maintenance, err := sql.Open("postgres", fmt.Sprintf("postgres://postgres:%s@%s:%s/postgres?sslmode=disable", roleAdminPassword, host, port))
+	if err != nil {
+		t.Fatalf("open local postgres: %v", err)
+	}
+	defer maintenance.Close()
+	if _, err := maintenance.ExecContext(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create local test database: %v", err)
+	}
+	t.Cleanup(func() {
+		bg, c2 := context.WithTimeout(context.Background(), 30*time.Second)
+		defer c2()
+		db, err := sql.Open("postgres", fmt.Sprintf("postgres://postgres:%s@%s:%s/postgres?sslmode=disable", roleAdminPassword, host, port))
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		_, _ = db.ExecContext(bg, "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)")
+	})
+	return &pgFixture{host: host, port: port, dbName: dbName}
 }
 
 func runningInCI() bool {
@@ -1708,6 +1744,29 @@ RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err
 	if _, err := store.InsertHardwareVerificationJob(ctx, providerID, changedEvidence, generatedAt); !errors.Is(err, onboarding.ErrHardwareEvidenceRateLimited) {
 		t.Fatalf("changed hardware error=%v, want rate limited", err)
 	}
+
+	// SPEC-033-R003: the column-limited onboarding role can see the pending job
+	// so the handler answers hardware_evidence_pending instead of a flood 429.
+	active, found, err := store.ExistingActiveHardwareVerificationJob(ctx, providerID)
+	if err != nil || !found || active.JobID != oldJobID || active.Status != "waiting_trust" || active.EvidenceSHA != oldEvidenceSHA {
+		t.Fatalf("active job lookup = %+v found=%v err=%v, want waiting_trust job %d", active, found, err, oldJobID)
+	}
+	if _, found, err := store.ExistingActiveHardwareVerificationJob(ctx, "p-no-jobs"); err != nil || found {
+		t.Fatalf("active job lookup for provider without jobs found=%v err=%v", found, err)
+	}
+
+	// A recent job that already finished still throttles a different
+	// submission, but it is not pending: the handler answers the distinct
+	// hardware_evidence_rate_limited cooldown code for this case.
+	if _, err := adminDB.ExecContext(ctx, `UPDATE hardware_verification_jobs SET status = 'rejected' WHERE id = $1`, oldJobID); err != nil {
+		t.Fatalf("finish job: %v", err)
+	}
+	if _, err := store.InsertHardwareVerificationJob(ctx, providerID, changedEvidence, generatedAt); !errors.Is(err, onboarding.ErrHardwareEvidenceRateLimited) {
+		t.Fatalf("recent rejected job error=%v, want rate limited", err)
+	}
+	if _, found, err := store.ExistingActiveHardwareVerificationJob(ctx, providerID); err != nil || found {
+		t.Fatalf("finished job reported as pending: found=%v err=%v", found, err)
+	}
 }
 
 func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, binaryVersion string, generatedAt time.Time) onboarding.HardwareEvidenceRequest {
@@ -2038,24 +2097,13 @@ func TestHardwareTrustMigrationUpDownReapply(t *testing.T) {
 		t.Fatal("post-apply: schema_migrations_spec017 missing version 18 (apptrack)")
 	}
 
-	// Run the down artifact. It ships psql meta-commands (\set) that database/sql
-	// cannot execute; strip backslash lines and run the remaining SQL (the
-	// BEGIN/COMMIT transaction body executes fine over the simple query protocol).
-	downRaw, err := os.ReadFile("migrations/019_hardware_trust_operator_approval.down.sql")
-	if err != nil {
-		t.Fatalf("read 019 down artifact: %v", err)
+	// Migration 031 owns a function and grants held by hardware_trust_definer,
+	// so its rollback runs first (its header documents that order).
+	applyDownArtifact(t, ctx, adminDB, "migrations/031_hardware_trust_app_attest_auto.down.sql")
+	if funcExists("auto_trust_attested_hardware") || versionPresent(31) {
+		t.Fatal("post-031-down: automatic trust function or version 31 still present")
 	}
-	var downSQL strings.Builder
-	for _, line := range strings.Split(string(downRaw), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), `\`) {
-			continue
-		}
-		downSQL.WriteString(line)
-		downSQL.WriteByte('\n')
-	}
-	if _, err := adminDB.ExecContext(ctx, downSQL.String()); err != nil {
-		t.Fatalf("apply 019 down artifact: %v", err)
-	}
+	applyDownArtifact(t, ctx, adminDB, "migrations/019_hardware_trust_operator_approval.down.sql")
 
 	// Post-down: every 019 object removed; version 19 gone; version 18 untouched.
 	for _, fn := range []string{"request_hardware_trust_approval", "approve_hardware_trust_approval", "revoke_hardware_trust_approval"} {
@@ -2102,6 +2150,29 @@ func TestHardwareTrustMigrationUpDownReapply(t *testing.T) {
 	}
 	if roleCount() != 3 {
 		t.Fatalf("post-reapply: trust roles present = %d, want 3", roleCount())
+	}
+}
+
+// applyDownArtifact runs an operator rollback artifact. The artifacts ship psql
+// meta-commands (\set) that database/sql cannot execute; strip backslash lines
+// and run the remaining SQL (the BEGIN/COMMIT body runs over the simple query
+// protocol).
+func applyDownArtifact(t *testing.T, ctx context.Context, db *sql.DB, path string) {
+	t.Helper()
+	downRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read down artifact %s: %v", path, err)
+	}
+	var downSQL strings.Builder
+	for _, line := range strings.Split(string(downRaw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), `\`) {
+			continue
+		}
+		downSQL.WriteString(line)
+		downSQL.WriteByte('\n')
+	}
+	if _, err := db.ExecContext(ctx, downSQL.String()); err != nil {
+		t.Fatalf("apply down artifact %s: %v", path, err)
 	}
 }
 
@@ -2594,4 +2665,404 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// seedAutoTrustJob inserts a pending job whose evidence passes every verifier
+// reject gate, so only the trust gate decides its outcome.
+func seedAutoTrustJob(t *testing.T, ctx context.Context, adminDB *sql.DB, providerID, hash string, generatedAt time.Time) (int64, string) {
+	t.Helper()
+	catalogSHA := strings.Repeat("b", 64)
+	stamp := generatedAt.UTC().Format(time.RFC3339)
+	evidence := hardwareverify.Evidence{
+		SchemaVersion:          "hardware_evidence.autotune.v2",
+		ProviderID:             providerID,
+		GeneratedAt:            stamp,
+		CandidateCatalogSHA256: catalogSHA,
+		RecommendedModel:       "mlx-community/model",
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		Hardware: hardwareverify.Hardware{
+			Chip:                 "Apple M5",
+			MemoryGB:             32,
+			BandwidthTier:        "C",
+			Detected:             true,
+			OSVersion:            "26.0",
+			BinaryVersion:        "1.8.233",
+			HardwareIdentityHash: hash,
+			ExecutableSHA256:     strings.Repeat("e", 64),
+		},
+		Benchmarks: []hardwareverify.Benchmark{{
+			ModelKey:               "model",
+			ModelID:                "mlx-community/model",
+			SustainedTPS:           42.5,
+			TTFTMS:                 1200,
+			ArtifactSHA256:         strings.Repeat("d", 64),
+			CandidateCatalogSHA256: catalogSHA,
+			GeneratedAt:            stamp,
+			BinaryVersion:          "1.8.233",
+			HardwareIdentityHash:   hash,
+			CandidateRowIdentity:   strings.Repeat("f", 64),
+		}},
+	}
+	raw, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal evidence: %v", err)
+	}
+	evidenceSHA := fmt.Sprintf("%x", sha256.Sum256(raw))
+	var jobID int64
+	if err := adminDB.QueryRowContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, evidence, evidence_sha256)
+        VALUES ($1, 'autotune', 'pending', 'Apple M5', 'apple m5', 32,
+                'C', '26.0', '1.8.233', 1, 42.5, $2, $3::jsonb, $4)
+        RETURNING id`, providerID, generatedAt.UTC(), string(raw), evidenceSHA).Scan(&jobID); err != nil {
+		t.Fatalf("seed auto-trust job: %v", err)
+	}
+	return jobID, evidenceSHA
+}
+
+// TestHardwareTrustAppAttestAutoTrust drives SPEC-033 R002 through the real
+// verifier against Postgres: an App Attest verified provider's hardware is
+// trusted and promoted on the first run with one audit row, an unattested
+// provider parks for dual control, a repeat grants nothing new, and an operator
+// revoke is final for the automatic path.
+func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m5', 'Apple M5', 153, 0.03, 10, 10)
+        ON CONFLICT (chip_normalized) DO NOTHING`); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+	keyID := []byte(strings.Repeat("k", 32))
+	// p-plain carries an attested flag the onboarding role could fabricate;
+	// only the recorder-written verification row counts (security R1 HIGH).
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_identities (provider_id, identity_pubkey, attested, app_attest_key_id)
+        VALUES ('p-attested', '\x01'::bytea, TRUE, $1), ('p-plain', '\x02'::bytea, TRUE, $2)`, keyID, []byte(strings.Repeat("p", 32))); err != nil {
+		t.Fatalf("seed provider identities: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(`ALTER ROLE app_attest_recorder WITH LOGIN PASSWORD '%s'`, roleRuntimePassword)); err != nil {
+		t.Fatalf("rotate app_attest_recorder: %v", err)
+	}
+	onboardingStore, err := onboarding.OpenPGStore(fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open onboarding store: %v", err)
+	}
+	defer onboardingStore.Close()
+	if err := onboardingStore.RecordAppAttestVerification(ctx, "p-plain", []byte(strings.Repeat("p", 32))); err == nil {
+		t.Fatal("recording without the app_attest_recorder connection must fail")
+	}
+	onboardingDB := openRoleDB(t, fx, roleProviderOnboard)
+	if _, err := onboardingDB.ExecContext(ctx, `
+        INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id) VALUES ('p-plain', $1)`,
+		[]byte(strings.Repeat("p", 32))); err == nil || !contains(err.Error(), "permission denied") {
+		t.Fatalf("provider_onboarding insert into verifications err = %v, want permission denied", err)
+	}
+	if err := onboardingStore.AttachAppAttestRecorder(fx.roleDSN("app_attest_recorder")); err != nil {
+		t.Fatalf("attach recorder: %v", err)
+	}
+	if err := onboardingStore.RecordAppAttestVerification(ctx, "p-attested", keyID); err != nil {
+		t.Fatalf("record verification: %v", err)
+	}
+	// The same key cannot be recorded for a second provider.
+	if err := onboardingStore.RecordAppAttestVerification(ctx, "p-attested-clone", keyID); err != nil {
+		t.Fatalf("record duplicate key: %v", err)
+	}
+	var clones int
+	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_app_attest_verifications WHERE provider_id = 'p-attested-clone'`).Scan(&clones); err != nil || clones != 0 {
+		t.Fatalf("duplicate key recorded for a second provider: n=%d err=%v", clones, err)
+	}
+
+	const attestedHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const plainHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	attestedJob, attestedSHA := seedAutoTrustJob(t, ctx, adminDB, "p-attested", attestedHash, base)
+	plainJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-plain", plainHash, base)
+
+	verifier, err := hardwareverify.Open(fx.roleDSN(roleHardwareVerifier))
+	if err != nil {
+		t.Fatalf("open verifier: %v", err)
+	}
+	t.Cleanup(func() { _ = verifier.Close() })
+	if err := verifier.Smoke(ctx); err != nil {
+		t.Fatalf("verifier smoke: %v", err)
+	}
+	processed, err := verifier.ProcessPending(ctx, 100)
+	if err != nil {
+		t.Fatalf("process pending: %v", err)
+	}
+	if processed.Verified != 1 || processed.Waiting != 1 || processed.Rejected != 0 {
+		t.Fatalf("processed = %+v, want 1 verified, 1 waiting", processed)
+	}
+
+	jobState := func(id int64) (string, string) {
+		var status, reason string
+		if err := adminDB.QueryRowContext(ctx, `SELECT status, decision_reason FROM hardware_verification_jobs WHERE id = $1`, id).Scan(&status, &reason); err != nil {
+			t.Fatalf("read job %d: %v", id, err)
+		}
+		return status, reason
+	}
+	if status, reason := jobState(attestedJob); status != "verified" || reason != hardwareverify.VerifiedDecisionReason {
+		t.Fatalf("attested job = %s/%s, want verified", status, reason)
+	}
+	if status, reason := jobState(plainJob); status != "waiting_trust" || reason != "hardware-verifier.v2:missing_trusted_hardware_identity" {
+		t.Fatalf("unattested job = %s/%s, want waiting_trust missing_trusted_hardware_identity", status, reason)
+	}
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-attested'`).Scan(&verified); err != nil || !verified {
+		t.Fatalf("attested profile verified = %v err = %v, want true", verified, err)
+	}
+
+	var trustedBy string
+	var expiresAt sql.NullTime
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT trusted_by, expires_at FROM hardware_verification_trust
+         WHERE provider_id = 'p-attested' AND hardware_identity_hash = $1 AND source = 'app_attest'`, attestedHash).Scan(&trustedBy, &expiresAt); err != nil {
+		t.Fatalf("read app_attest trust root: %v", err)
+	}
+	if trustedBy != "system:app_attest" || expiresAt.Valid {
+		t.Fatalf("app_attest root trusted_by=%q expires_at=%v, want system:app_attest with no expiry", trustedBy, expiresAt)
+	}
+	var plainRoots int
+	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM hardware_verification_trust WHERE provider_id = 'p-plain'`).Scan(&plainRoots); err != nil || plainRoots != 0 {
+		t.Fatalf("unattested trust roots = %d err = %v, want 0", plainRoots, err)
+	}
+
+	auditRows := func() int {
+		var n int
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT COUNT(*) FROM hardware_trust_grants
+             WHERE provider_id = 'p-attested' AND grant_source = 'app_attest' AND action = 'grant'`).Scan(&n); err != nil {
+			t.Fatalf("count audit rows: %v", err)
+		}
+		return n
+	}
+	var auditJob int64
+	var auditSHA, auditBasis, auditDigest, auditActor string
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT job_id, evidence_sha256, attestation_basis, attestation_digest, approved_by
+          FROM hardware_trust_grants
+         WHERE provider_id = 'p-attested' AND grant_source = 'app_attest'`).Scan(&auditJob, &auditSHA, &auditBasis, &auditDigest, &auditActor); err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	wantDigest := fmt.Sprintf("%x", sha256.Sum256(keyID))
+	if auditJob != attestedJob || auditSHA != attestedSHA || auditBasis != "apple_app_attest" || auditDigest != wantDigest || auditActor != "system:app_attest" {
+		t.Fatalf("audit row = job %d sha %s basis %s digest %s actor %s", auditJob, auditSHA, auditBasis, auditDigest, auditActor)
+	}
+
+	// Idempotent: newer evidence for the same attested hardware promotes on the
+	// existing root without a second audit row.
+	secondJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-attested", attestedHash, base.Add(10*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("second process pending: %v", err)
+	}
+	if status, _ := jobState(secondJob); status != "verified" {
+		t.Fatalf("second attested job status = %s, want verified", status)
+	}
+	if n := auditRows(); n != 1 {
+		t.Fatalf("audit rows after re-run = %d, want 1", n)
+	}
+
+	// provider_onboarding can never call the automatic path.
+	assertCannotExecuteFunction(t, ctx, onboardingDB, roleProviderOnboard, "auto_trust_attested_hardware(bigint)")
+
+	// Operator revoke expires the app_attest root, demotes, and is final.
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	var nowUntrusted bool
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_now_untrusted
+          FROM revoke_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		"44444444-4444-4444-4444-444444444444", "p-attested", attestedHash, "operator:bob", "revoke automatic trust").Scan(&nowUntrusted); err != nil {
+		t.Fatalf("revoke app_attest root: %v", err)
+	}
+	if !nowUntrusted {
+		t.Fatal("revoke out_now_untrusted = false, want true")
+	}
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-attested'`).Scan(&verified); err != nil || verified {
+		t.Fatalf("profile verified after revoke = %v err = %v, want false", verified, err)
+	}
+	thirdJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-attested", attestedHash, base.Add(20*time.Minute))
+	// security R1 HIGH: a new self-reported hash must not escape the revoke.
+	const reportedAgainHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	fourthJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-attested", reportedAgainHash, base.Add(21*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("third process pending: %v", err)
+	}
+	for _, id := range []int64{thirdJob, fourthJob} {
+		if status, reason := jobState(id); status != "waiting_trust" || reason != "hardware-verifier.v2:missing_trusted_hardware_identity" {
+			t.Fatalf("post-revoke job %d = %s/%s, want waiting_trust for dual control", id, status, reason)
+		}
+	}
+	var newHashRoots int
+	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM hardware_verification_trust WHERE provider_id = 'p-attested' AND hardware_identity_hash = $1`, reportedAgainHash).Scan(&newHashRoots); err != nil || newHashRoots != 0 {
+		t.Fatalf("revoked device got a root under a new hash: n=%d err=%v", newHashRoots, err)
+	}
+	if n := auditRows(); n != 1 {
+		t.Fatalf("audit rows after revoke = %d, want 1 (no automatic re-grant)", n)
+	}
+}
+
+// TestHardwareTrustAppAttestAutoTrustFunctionIsIdempotent calls the definer
+// function directly as the verifier, so a repeat run, an expired root and a
+// differently bound root are exercised against the function itself (code R1
+// LOW), not skipped by the verifier's trust pre-check.
+func TestHardwareTrustAppAttestAutoTrustFunctionIsIdempotent(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i, provider := range []string{"p-direct", "p-expired", "p-bound"} {
+		if _, err := adminDB.ExecContext(ctx, `
+            INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id) VALUES ($1, $2)`,
+			provider, []byte(strings.Repeat(string(rune('a'+i)), 32))); err != nil {
+			t.Fatalf("seed verification %s: %v", provider, err)
+		}
+	}
+	const hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	directJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-direct", hash, base)
+	expiredJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-expired", hash, base)
+	boundJob, _ := seedAutoTrustJob(t, ctx, adminDB, "p-bound", hash, base)
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_trust
+            (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, trusted_by, trusted_at, expires_at, notes, source)
+        VALUES ('p-expired', $1, 'apple m5', 32, 'system:app_attest', now() - interval '2 days', now() - interval '1 day', 'revoked', 'app_attest'),
+               ('p-bound',   $1, 'apple m5', 64, 'system:app_attest', now(), NULL, 'other tuple', 'app_attest')`, hash); err != nil {
+		t.Fatalf("seed existing roots: %v", err)
+	}
+
+	verifierDB := openRoleDB(t, fx, roleHardwareVerifier)
+	call := func(jobID int64) bool {
+		var granted bool
+		if err := verifierDB.QueryRowContext(ctx, `SELECT auto_trust_attested_hardware($1)`, jobID).Scan(&granted); err != nil {
+			t.Fatalf("auto_trust_attested_hardware(%d): %v", jobID, err)
+		}
+		return granted
+	}
+	snapshot := func(provider string) string {
+		var out string
+		if err := adminDB.QueryRowContext(ctx, `
+            SELECT COALESCE(string_agg(t.trusted_at::text || '|' || COALESCE(t.expires_at::text, 'none') || '|' || t.unified_memory_gb::text, ','), '') ||
+                   '#' || (SELECT COUNT(*) FROM hardware_trust_grants g WHERE g.provider_id = $1)::text
+              FROM hardware_verification_trust t WHERE t.provider_id = $1`, provider).Scan(&out); err != nil {
+			t.Fatalf("snapshot %s: %v", provider, err)
+		}
+		return out
+	}
+
+	if !call(directJob) {
+		t.Fatal("first call for an attested provider = false, want true")
+	}
+	first := snapshot("p-direct")
+	if !call(directJob) {
+		t.Fatal("second call = false, want true (existing active root)")
+	}
+	if got := snapshot("p-direct"); got != first || !strings.HasSuffix(got, "#1") {
+		t.Fatalf("repeat call changed state: %q -> %q, want one root and one audit row", first, got)
+	}
+
+	expiredBefore := snapshot("p-expired")
+	if call(expiredJob) {
+		t.Fatal("expired app_attest root must not be revived")
+	}
+	if got := snapshot("p-expired"); got != expiredBefore {
+		t.Fatalf("expired root changed: %q -> %q", expiredBefore, got)
+	}
+
+	boundBefore := snapshot("p-bound")
+	if call(boundJob) {
+		t.Fatal("a root bound to another tuple must not trust this job")
+	}
+	if got := snapshot("p-bound"); got != boundBefore {
+		t.Fatalf("differently bound root changed: %q -> %q", boundBefore, got)
+	}
+}
+
+// TestHardwareTrustRevokeEndsEveryAutomaticRootOfTheDevice is the security R2
+// HIGH scenario: an attested provider obtains automatic roots for H and H'
+// before any revoke; revoking H must expire H' too, demote the profile it
+// backs, and keep fresh H' evidence on the operator path.
+func TestHardwareTrustRevokeEndsEveryAutomaticRootOfTheDevice(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m5', 'Apple M5', 153, 0.03, 10, 10)
+        ON CONFLICT (chip_normalized) DO NOTHING`); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id) VALUES ('p-device', $1)`,
+		[]byte(strings.Repeat("v", 32))); err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	const hashH = "1111111111111111111111111111111111111111111111111111111111111111"
+	const hashHPrime = "2222222222222222222222222222222222222222222222222222222222222222"
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+
+	verifier, err := hardwareverify.Open(fx.roleDSN(roleHardwareVerifier))
+	if err != nil {
+		t.Fatalf("open verifier: %v", err)
+	}
+	t.Cleanup(func() { _ = verifier.Close() })
+	jobState := func(id int64) string {
+		var status string
+		if err := adminDB.QueryRowContext(ctx, `SELECT status FROM hardware_verification_jobs WHERE id = $1`, id).Scan(&status); err != nil {
+			t.Fatalf("read job %d: %v", id, err)
+		}
+		return status
+	}
+	jobH, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashH, base)
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process H: %v", err)
+	}
+	jobHPrime, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashHPrime, base.Add(5*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process H': %v", err)
+	}
+	if jobState(jobH) != "verified" || jobState(jobHPrime) != "verified" {
+		t.Fatalf("pre-revoke jobs = %s/%s, want both verified", jobState(jobH), jobState(jobHPrime))
+	}
+
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	var nowUntrusted bool
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_now_untrusted FROM revoke_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		"55555555-5555-5555-5555-555555555555", "p-device", hashH, "operator:bob", "revoke device").Scan(&nowUntrusted); err != nil {
+		t.Fatalf("revoke H: %v", err)
+	}
+	var activeAutomatic int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = 'p-device' AND source = 'app_attest'
+           AND (expires_at IS NULL OR expires_at > now())`).Scan(&activeAutomatic); err != nil || activeAutomatic != 0 {
+		t.Fatalf("active automatic roots after revoking H = %d err = %v, want 0 (H' included)", activeAutomatic, err)
+	}
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-device'`).Scan(&verified); err != nil || verified {
+		t.Fatalf("profile backed by H' verified = %v err = %v, want demoted", verified, err)
+	}
+
+	freshHPrime, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashHPrime, base.Add(10*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process fresh H': %v", err)
+	}
+	if got := jobState(freshHPrime); got != "waiting_trust" {
+		t.Fatalf("fresh H' job after revoke = %s, want waiting_trust", got)
+	}
 }

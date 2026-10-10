@@ -34,6 +34,10 @@ enum AutotuneHardwareEvidenceContract {
 enum AutotuneHardwareEvidenceSubmission: Equatable {
     case submitted
     case skipped(String)
+    /// Evidence is already on file and waiting for the verifier (SPEC-033-R003).
+    /// Not an error: install, update and freshness checks continue and the next
+    /// run resubmits.
+    case pending(String)
     case failed(String)
 }
 
@@ -112,6 +116,13 @@ struct AutotuneHardwareEvidenceSubmitter {
                     expectedEvidenceSHA: payload.evidenceSHA
                 )
             }
+            if let pending = Self.pendingReason(
+                statusCode: http.statusCode,
+                responseData: responseData,
+                retryAfterHeader: http.value(forHTTPHeaderField: "Retry-After")
+            ) {
+                return .pending(pending)
+            }
             return .failed(Self.failureReason(
                 statusCode: http.statusCode,
                 responseData: responseData,
@@ -132,6 +143,29 @@ struct AutotuneHardwareEvidenceSubmitter {
             return "transport error (\(type(of: error)))"
         }
         return "transport error (URLError code \(urlError.errorCode))"
+    }
+
+    /// SPEC-033-R003: a 429 carrying `hardware_evidence_pending` means a job is
+    /// queued for this provider, so it is pending, not a failure. Every other
+    /// 429 stays a failure: the IP and per-provider flood limits, the
+    /// `hardware_evidence_rate_limited` cooldown after a finished job, and an
+    /// older coordinator's `rate_limited` queue message, which cannot tell a
+    /// queued job from a finished one.
+    static func pendingReason(statusCode: Int, responseData: Data, retryAfterHeader: String?) -> String? {
+        guard statusCode == 429,
+              !responseData.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: responseData),
+              let dictionary = object as? [String: Any],
+              let error = dictionary["error"] as? [String: Any]
+        else {
+            return nil
+        }
+        guard safeCoordinatorErrorCode(error["code"]) == "hardware_evidence_pending" else { return nil }
+        var reason = "hardware evidence already submitted; verification pending"
+        if let retry = retryAfterSeconds(retryAfterHeader) {
+            reason += " (retry in \(retry) seconds)"
+        }
+        return reason
     }
 
     static func failureReason(statusCode: Int, responseData: Data, retryAfterHeader: String?) -> String {
@@ -173,8 +207,12 @@ struct AutotuneHardwareEvidenceSubmitter {
         else {
             return nil
         }
-        guard safeCoordinatorErrorCode(error["code"]) == "rate_limited" else { return nil }
-        let code = "rate_limited"
+        let code: String
+        switch safeCoordinatorErrorCode(error["code"]) {
+        case "rate_limited": code = "rate_limited"
+        case "hardware_evidence_rate_limited": code = "hardware_evidence_rate_limited"
+        default: return nil
+        }
         guard let message = safeKnownRateLimitMessage(error["message"]) else { return code }
         return "\(code): \(message)"
     }
@@ -193,7 +231,8 @@ struct AutotuneHardwareEvidenceSubmitter {
         switch raw {
         case "hardware evidence ip rate limit exceeded",
              "hardware evidence provider rate limit exceeded",
-             "hardware evidence queue already has a recent job":
+             "hardware evidence queue already has a recent job",
+             "hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later":
             return raw
         default:
             return nil

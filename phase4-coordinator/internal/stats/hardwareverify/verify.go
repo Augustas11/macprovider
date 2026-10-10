@@ -152,6 +152,16 @@ func (s *Store) Smoke(ctx context.Context) error {
 	if _, err := s.db.ExecContext(timeout, `SELECT chip_normalized FROM chip_hardware_profiles LIMIT 1`); err != nil {
 		return fmt.Errorf("stats_hardware_verifier smoke chip_hardware_profiles read: %w", err)
 	}
+	// Migration 031 (SPEC-033 R002): without EXECUTE on the automatic-trust
+	// function every batch that meets an attested job would roll back, so refuse
+	// to start instead.
+	var canAutoTrust bool
+	if err := s.db.QueryRowContext(timeout, `SELECT has_function_privilege('auto_trust_attested_hardware(bigint)', 'EXECUTE')`).Scan(&canAutoTrust); err != nil {
+		return fmt.Errorf("stats_hardware_verifier smoke auto_trust_attested_hardware: %w", err)
+	}
+	if !canAutoTrust {
+		return errors.New("stats_hardware_verifier smoke: EXECUTE on auto_trust_attested_hardware is not granted")
+	}
 	return nil
 }
 
@@ -225,6 +235,25 @@ SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
 	var processed Processed
 	for _, job := range jobs {
 		decision := Evaluate(job)
+		if decision.Reason == "missing_trusted_hardware_identity" {
+			// SPEC-033 §5.7 (R002): every reject gate passed and only the trust
+			// root is missing. Hardware of an App Attest verified provider gets an
+			// automatic, audited app_attest root; anything else keeps the
+			// dual-control waiting_trust path below.
+			granted, err := autoTrustAttestedHardware(ctx, tx, job.ID)
+			if err != nil {
+				return Processed{}, err
+			}
+			if granted {
+				job.TrustMatched = true
+				decision = Evaluate(job)
+				fmt.Printf(
+					"hardware_trust_auto_granted job_id=%d provider_id=%s basis=apple_app_attest\n",
+					job.ID,
+					job.ProviderID,
+				)
+			}
+		}
 		if decision.Verified {
 			promoted, err := promoteJob(ctx, tx, job, decision)
 			if err != nil {
@@ -503,6 +532,19 @@ UPDATE hardware_verification_jobs
 		return false, err
 	}
 	return true, nil
+}
+
+// autoTrustAttestedHardware asks the migration-031 SECURITY DEFINER function to
+// grant an app_attest trust root for the job. It returns true only when an
+// active app_attest root for the job's exact hardware tuple exists afterwards;
+// every refusal (not attested, revoked before, lock busy, tuple mismatch) is
+// false and leaves the job on the operator approval path.
+func autoTrustAttestedHardware(ctx context.Context, tx *sql.Tx, jobID int64) (bool, error) {
+	var granted bool
+	if err := tx.QueryRowContext(ctx, `SELECT auto_trust_attested_hardware($1)`, jobID).Scan(&granted); err != nil {
+		return false, fmt.Errorf("auto_trust_attested_hardware job %d: %w", jobID, err)
+	}
+	return granted, nil
 }
 
 func waitTrustJob(ctx context.Context, tx *sql.Tx, id int64, reason string) error {

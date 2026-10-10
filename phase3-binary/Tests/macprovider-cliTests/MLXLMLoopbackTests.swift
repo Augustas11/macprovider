@@ -241,10 +241,28 @@ final class MLXLMLoopbackTests: XCTestCase {
             namespaceURL: URL(fileURLWithPath: "/nonexistent/ns"), mlxCacheRoot: URL(fileURLWithPath: "/nonexistent/hub"), ollamaOrigin: nil,
             durableModelRoot: storeRoot
         )
+        // #1880: discovery skips that server with a warning instead of
+        // aborting every engine; a command that targets mlx_lm still refuses.
+        let skippedOutside = try await base.withInferredMLXLMSnapshot(httpClient: wrong)
+        XCTAssertNil(skippedOutside.mlxlmModelPath)
+        XCTAssertTrue(skippedOutside.mlxSnapshotLoopbacks.isEmpty)
+        XCTAssertEqual(skippedOutside.mlxlmSkippedOrigin, "http://127.0.0.1:8081")
+        let skippedDocument = await BYOMDiscoveryRunner(environment: skippedOutside, httpClient: wrong).discoverIncludingMLXLM()
+        let skippedAdapter = skippedDocument.adapters.first { $0.runtimeSource == "mlxlm_loopback" }
+        XCTAssertEqual(skippedAdapter?.status, "unavailable")
+        XCTAssertEqual(skippedAdapter?.warningCodes, ["adapter_unavailable"])
+        XCTAssertTrue(skippedDocument.warnings.contains("adapter_unavailable"))
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(skippedDocument), as: UTF8.self).contains(snapshot.path))
         do {
-            _ = try await base.withInferredMLXLMSnapshot(httpClient: wrong)
-            XCTFail("discovery must refuse an outside-root directory")
+            _ = try await base.withInferredMLXLMSnapshot(httpClient: wrong, requireMLXLM: true)
+            XCTFail("a command targeting mlx_lm must refuse an outside-root directory")
         } catch is MLXLMSnapshotSelectionError {}
+        do {
+            _ = try await base.withLoopbackRuntimeProbes(httpClient: wrong, target: "mlxlm:Some-Snapshot")
+            XCTFail("an mlxlm: target must keep the outside-root refusal")
+        } catch is MLXLMSnapshotSelectionError {}
+        let otherTarget = try await base.withLoopbackRuntimeProbes(httpClient: wrong, target: "ollama:llama3.2")
+        XCTAssertNil(otherTarget.mlxlmModelPath)
 
         // A symlink inside the store that escapes it resolves outside: refused.
         let link = storeRoot.appendingPathComponent("escape")

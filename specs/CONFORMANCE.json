@@ -954,7 +954,7 @@
     {
       "spec_id": "SPEC-033",
       "title": "Hardware-Evidence Verifier (`hardware-verifier.v2`)",
-      "version": "v0.6.3",
+      "version": "v0.7.2",
       "path": "specs/SPEC-033-hardware-verifier.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3645,6 +3645,62 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-033-R002",
+      "spec_id": "SPEC-033",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/hardwareverify/verify.go:func (s *Store) ProcessPending",
+        "phase4-coordinator/internal/stats/hardwareverify/verify.go:func autoTrustAttestedHardware",
+        "phase4-coordinator/internal/onboarding/store_pg.go:RecordAppAttestVerification",
+        "phase4-coordinator/internal/onboarding/apptrack.go:recordAppAttestVerification",
+        "phase4-coordinator/internal/ws/admin_hardware_trust.go:func (s *Server) handleHardwareTrustRevoke"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust",
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrustFunctionIsIdempotent",
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustRevokeEndsEveryAutomaticRootOfTheDevice",
+        "phase4-coordinator/internal/stats/migrations/migrations_test.go::TestHardwareTrustAppAttestAutoMigrationShape",
+        "phase4-coordinator/internal/ws/admin_hardware_trust_test.go::TestHardwareTrustRevokeInactivatesOperatorRoot"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "SPEC-033 v0.7.0 adds automatic trust for App Attest verified hardware (migration 031 plus the verifier call). Covered by Postgres integration and unit tests; pending until the coordinator runtime carrying migration 031 is live and an attested provider's job promotes without operator action."
+      }
+    },
+    {
+      "requirement_id": "SPEC-033-R003",
+      "spec_id": "SPEC-033",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:ExistingActiveHardwareVerificationJob",
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:hasPendingHardwareEvidence",
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:writeHardwareEvidencePending",
+        "phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift:static func pendingReason(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func requiredHardwareEvidenceBlockReason(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func freshRecommendationEvidenceOutcome("
+      ],
+      "tests": [
+        "phase4-coordinator/internal/onboarding/apptrack_test.go::TestHandleHardwareEvidenceReportsPendingJobBeforeProviderRateLimit",
+        "phase4-coordinator/internal/onboarding/apptrack_test.go::TestHandleHardwareEvidenceReportsPendingWhenJobRacesInsert",
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareEvidenceSameIdentityDoesNotBypassAdmissionCap",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testPendingEvidenceJobIsReportedAsPendingNotFailure",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testPendingClassificationAcceptsOnlyQueuedJobRefusals",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testFreshRecommendationContinuesWhenEvidenceIsPending"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "SPEC-033 v0.7.0 makes an outstanding evidence job a pending, non-fatal outcome on both sides. Covered by coordinator unit and Postgres integration tests and CLI unit tests; pending until a released CLI and the coordinator runtime carrying it complete an install with a job already queued."
+      }
     },
     {
       "requirement_id": "SPEC-034-R001",

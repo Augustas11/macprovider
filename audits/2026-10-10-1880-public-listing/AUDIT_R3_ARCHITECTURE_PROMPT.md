@@ -1,0 +1,9 @@
+You are the ARCHITECTURE lane auditor, round 3 (final), for PR #1937 (Augustas11/macprovider), branch campaign/1880-public-listing, checkout /Users/augstar/macprovider-1880-listing. Review the COMPLETE diff `git diff origin/main...HEAD` and the code it touches. Do not edit files and do not contact any live host.
+
+Context: #1880 step 4 campaign — SPEC-033 v0.7.0 auto-trust for App Attest verified hardware (dual control otherwise), pending hardware evidence non-fatal (429 hardware_evidence_pending), CLI fixes from the engine run (discovery adapter skip, bootstrap-auth dirs, loopback_origin), docs, and the operator-pause-survives-coordinator-drain fix in CoordinatorClient.swift.
+
+Lane focus: architecture/spec: SPEC-033 v0.7.0 R002/R003 text vs implementation, trust-tier change rules in AGENTS.md (SPEC first), mixed-version behaviour (old CLI vs new coordinator 429 code, new CLI vs old coordinator), migration ordering and rollback (031 before the new verifier; 031 rollback before 019), deploy order (runtime before CLI), and whether the campaign actually removes the operator from the outsider path given no client submits App Attest.
+
+Output: findings with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), file:line, failure scenario, fix; say "pre-existing" when relevant. End with "C/H/M/L = n/n/n/n". Gate: 0 C/H/M.
+
+Round 2 findings are in /Users/augstar/macprovider-poc/audits/2026-10-10-1880-public-listing/R2_FINDINGS.md; fixes are commits a8de46a49 (revoke expires every automatic root for the provider in the same transaction; app_attest_record_failed logging; SPEC-033 v0.7.2) and 1ae0b80ec (pause fence checked at heartbeat send time; local-only and restored pauses set the fence; shared engine-origin resolution for all seven models commands). First state FIXED / NOT FIXED for each round-2 finding in your lane, then report new issues.

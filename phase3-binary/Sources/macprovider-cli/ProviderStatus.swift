@@ -986,8 +986,27 @@ actor ProviderStatus {
         )
     }
 
+    /// Operator pause fence (#1880 audit R1). While set, no path inside this
+    /// actor (model swap completion, request accounting, any setState caller)
+    /// can make the provider ready or busy; only clearing the fence, which
+    /// CoordinatorClient does on resume alone, re-opens routing.
+    private(set) var operatorPauseFence = false
+
+    func setOperatorPauseFence(_ paused: Bool) {
+        operatorPauseFence = paused
+        if paused {
+            transition(to: .unavailable, reason: "operator_paused")
+        }
+    }
+
     @discardableResult
-    private func transition(to newState: ProviderHealthState, reason: String) -> Bool {
+    private func transition(to requestedState: ProviderHealthState, reason requestedReason: String) -> Bool {
+        var newState = requestedState
+        var reason = requestedReason
+        if operatorPauseFence, newState == .ready || newState == .busy {
+            newState = .unavailable
+            reason = "operator_paused"
+        }
         guard status != newState else { return false }
         status = newState
         transitionID = UUID().uuidString.lowercased()

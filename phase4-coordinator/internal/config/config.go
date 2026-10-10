@@ -347,17 +347,22 @@ func (c CompatibilitySetConfig) AllowsSession(id string) bool {
 // Default-off preserves backward-compatible binary rollout; production
 // traffic enablement waits for the SPEC-026 §4.3 proof-stage verifier.
 type OnboardingConfig struct {
-	AppTrackRegisterEnabled bool              `yaml:"app_track_register_enabled"`
-	PostgresDSN             string            `yaml:"postgres_dsn"`
-	AuthPolicyRequestDSN    string            `yaml:"auth_policy_request_dsn"`
-	AuthPolicyApproveDSN    string            `yaml:"auth_policy_approve_dsn"`
-	AuthPolicyCutoverDSN    string            `yaml:"auth_policy_cutover_dsn"`
-	HardwareTrustRequestDSN string            `yaml:"hardware_trust_request_dsn"`
-	HardwareTrustApproveDSN string            `yaml:"hardware_trust_approve_dsn"`
-	BundleID                string            `yaml:"bundle_id"`
-	AppleTeamID             string            `yaml:"apple_team_id"`
-	CoordinatorDomain       string            `yaml:"coordinator_domain"`
-	ASNPrefixes             map[string]string `yaml:"asn_prefixes"`
+	AppTrackRegisterEnabled bool   `yaml:"app_track_register_enabled"`
+	PostgresDSN             string `yaml:"postgres_dsn"`
+	AuthPolicyRequestDSN    string `yaml:"auth_policy_request_dsn"`
+	AuthPolicyApproveDSN    string `yaml:"auth_policy_approve_dsn"`
+	AuthPolicyCutoverDSN    string `yaml:"auth_policy_cutover_dsn"`
+	HardwareTrustRequestDSN string `yaml:"hardware_trust_request_dsn"`
+	HardwareTrustApproveDSN string `yaml:"hardware_trust_approve_dsn"`
+	// AppAttestRecordDSN connects as app_attest_recorder, the only role that
+	// may record an Apple App Attest verification (SPEC-033 §5.7). Optional:
+	// without it no verification is recorded and no hardware is trusted
+	// automatically.
+	AppAttestRecordDSN string            `yaml:"app_attest_record_dsn"`
+	BundleID           string            `yaml:"bundle_id"`
+	AppleTeamID        string            `yaml:"apple_team_id"`
+	CoordinatorDomain  string            `yaml:"coordinator_domain"`
+	ASNPrefixes        map[string]string `yaml:"asn_prefixes"`
 }
 
 // MalibuEmissionConfig gates SPEC-MALIBU-EMISSION-LEDGER bootstrap accrual.
@@ -2415,6 +2420,7 @@ func (c *Config) resolveEnv() error {
 		{"onboarding.auth_policy_cutover_dsn", &c.Onboarding.AuthPolicyCutoverDSN},
 		{"onboarding.hardware_trust_request_dsn", &c.Onboarding.HardwareTrustRequestDSN},
 		{"onboarding.hardware_trust_approve_dsn", &c.Onboarding.HardwareTrustApproveDSN},
+		{"onboarding.app_attest_record_dsn", &c.Onboarding.AppAttestRecordDSN},
 		{"onboarding.apple_team_id", &c.Onboarding.AppleTeamID},
 	}
 	for _, f := range onboardingSecrets {

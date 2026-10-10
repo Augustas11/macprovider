@@ -1100,6 +1100,11 @@ actor CoordinatorClient {
     }
 
     func start() async {
+        if operatorPaused {
+            // A pause restored from the lifecycle state fences local admission
+            // before any session or model swap can mark the provider ready.
+            await providerStatus.setOperatorPauseFence(true)
+        }
         if !AutoUpdater.defaultHeadlessOperatorManagedTopology(config: appConfig),
            appConfig.autoUpdateEnabled != false,
            appConfig.autoupdateEnabled != false {
@@ -1200,7 +1205,8 @@ actor CoordinatorClient {
     private func enqueueRequestCapacityStateUpdate(_ transition: RequestCapacityTransitionSnapshot, generation: Int) async {
         guard generation == requestCapacityTransitionGeneration,
               coordinatorSessionAccepted,
-              !stopped
+              !stopped,
+              !operatorPaused
         else { return }
         if let nextSequence = nextRequestCapacityTransitionSequence,
            transition.sequence < nextSequence {
@@ -2649,6 +2655,11 @@ actor CoordinatorClient {
             try await drainFromCoordinator(reason: "coordinator drain requested")
             throw CoordinatorDrainComplete()
         case "warm_up":
+            guard !operatorPaused else {
+                // A paused provider is not warmed back into routing; restate the pause.
+                try await sendStateUpdate(state: .unavailable, reason: "operator_paused")
+                return
+            }
             try await sendStateUpdate(state: .degraded, reason: "coordinator warm_up requested")
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         case "se_liveness_challenge":
@@ -4313,7 +4324,14 @@ actor CoordinatorClient {
         }
         await installRequestCapacityStateUpdateHandler()
         startHeartbeat(intervalSeconds: interval)
-        try await sendStateUpdate(state: nil, reason: reason)
+        if operatorPaused {
+            // The first wire state of a fresh session must already carry the
+            // pause; a stale local `ready` (e.g. left by a coordinator drain)
+            // would otherwise route buyer traffic to a paused provider.
+            await providerStatus.setOperatorPauseFence(true)
+            await providerStatus.setState(.unavailable, reason: "operator_paused")
+        }
+        try await sendStateUpdate(state: nil, reason: operatorPaused ? "operator_paused" : reason)
         if operatorPaused {
             _ = try recordLifecycleTransition(
                 to: .pausedByOperator,
@@ -5925,6 +5943,7 @@ actor CoordinatorClient {
         // A paused provider is fenced from buyer work and is not serving, so it
         // must be allowed to sleep: drop the keep-awake assertion until resume.
         setSleepAssertionDesired(false)
+        await providerStatus.setOperatorPauseFence(true)
         await providerStatus.setState(.unavailable, reason: "operator_paused")
         do {
             try await sendStateUpdate(state: nil, reason: "operator_paused")
@@ -5954,6 +5973,7 @@ actor CoordinatorClient {
         }
 
         operatorPaused = false
+        await providerStatus.setOperatorPauseFence(false)
         // Resuming means the provider intends to serve again: re-arm keep-awake
         // so the reconnect/serving path cannot let the Mac sleep. The canServe
         // gate makes this a no-op if the loop already exited terminally (e.g.
@@ -6059,8 +6079,22 @@ actor CoordinatorClient {
         // sleep during the drain grace window and stall the reconnect. The loop
         // releases it on terminal exit; stop() releases it on shutdown.
         // v1.1.4: reset local state for the next coordinator session.
-        // Local HTTP server kept serving throughout drain; provider is ready.
-        await providerStatus.setState(.ready, reason: "drain_complete")
+        // Local HTTP server kept serving throughout drain; provider is ready,
+        // unless the operator paused it: the pause must survive the drain so
+        // the next session's first state_update is not a routable `ready`.
+        await setReadyUnlessOperatorPaused(reason: "drain_complete")
+    }
+
+    /// The single local "back to ready" reset for drain, warm-up and autoupdate
+    /// reconcile paths. An operator pause is durable intent that only
+    /// resumeByOperator() clears, so while paused these resets land on
+    /// `unavailable` instead of re-entering buyer routing.
+    private func setReadyUnlessOperatorPaused(reason: String) async {
+        if operatorPaused {
+            await providerStatus.setState(.unavailable, reason: "operator_paused")
+        } else {
+            await providerStatus.setState(.ready, reason: reason)
+        }
     }
 
     private func runAutoupdateIfEligible(_ recommended: String) async {
@@ -6739,7 +6773,7 @@ actor CoordinatorClient {
         ))
         let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
         if !hardDrained {
-            await providerStatus.setState(.ready, reason: "autoupdate_drain_timeout")
+            await setReadyUnlessOperatorPaused(reason: "autoupdate_drain_timeout")
         }
         return hardDrained
     }
@@ -6797,7 +6831,7 @@ actor CoordinatorClient {
             return true
         } catch {
             Self.keepaliveDebug("signed_recovery_ready_send_failed error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
-            await providerStatus.setState(.ready, reason: reason)
+            await setReadyUnlessOperatorPaused(reason: reason)
             return false
         }
     }
@@ -6811,7 +6845,7 @@ actor CoordinatorClient {
                 Self.keepaliveDebug("signed_recovery_coordinator_ready_fallback error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
             }
         }
-        await providerStatus.setState(.ready, reason: "autoupdate_timeout_skipped_ready")
+        await setReadyUnlessOperatorPaused(reason: "autoupdate_timeout_skipped_ready")
     }
 
     func signedRecoveryDrainForTest(target: String) async -> Bool {
@@ -6939,7 +6973,26 @@ actor CoordinatorClient {
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
         )
+        if let heartbeatBeforeSendForTest {
+            await heartbeatBeforeSendForTest()
+        }
+        // Clamp at send time, after every await above: a pause accepted while
+        // this heartbeat was being built must not be overtaken by a stale
+        // ready/busy (#1880 audit R2).
+        if operatorPaused,
+           let status = payload["status"] as? String,
+           status == ProviderHealthState.ready.rawValue || status == ProviderHealthState.busy.rawValue {
+            payload["status"] = ProviderHealthState.unavailable.rawValue
+        }
         try await send(payload)
+    }
+
+    /// Test seam: runs inside sendHeartbeat after the payload is built and
+    /// before the send-time pause clamp.
+    private var heartbeatBeforeSendForTest: (@Sendable () async -> Void)?
+
+    func setHeartbeatBeforeSendForTest(_ hook: (@Sendable () async -> Void)?) {
+        heartbeatBeforeSendForTest = hook
     }
 
     private func applyAdmissionCanaryHeartbeatOverride(to payload: inout [String: Any]) throws {
@@ -7068,7 +7121,15 @@ actor CoordinatorClient {
         #endif
     }
 
-    private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {
+    private func sendStateUpdate(state requestedState: ProviderHealthState?, reason requestedReason: String) async throws {
+        var newState = requestedState
+        var reason = requestedReason
+        if operatorPaused, newState == .ready || newState == .busy {
+            // Backstop for every caller that publishes `ready`: only
+            // resumeByOperator() (which clears operatorPaused first) may lift a pause.
+            newState = .unavailable
+            reason = "operator_paused"
+        }
         if let newState {
             await providerStatus.setState(newState, reason: reason)
         }
@@ -7224,7 +7285,8 @@ actor CoordinatorClient {
             return
         }
         let finalSnapshot = await providerStatus.snapshot()
-        guard finalSnapshot.status == .ready || finalSnapshot.status == .busy else {
+        guard !operatorPaused,
+              finalSnapshot.status == .ready || finalSnapshot.status == .busy else {
             return
         }
         let wireSlotsFree = finalSnapshot.slotsFree
@@ -7247,6 +7309,7 @@ actor CoordinatorClient {
         guard generation == requestCapacityTransitionGeneration,
               coordinatorSessionAccepted,
               !stopped,
+              !operatorPaused,
               finalSnapshot.status == .ready || finalSnapshot.status == .busy
         else { return }
         try await sendCapacityStateUpdateBounded(payload)

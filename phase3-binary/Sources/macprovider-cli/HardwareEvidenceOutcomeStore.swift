@@ -16,7 +16,7 @@ import Foundation
 /// admission, trust, or retry decision, so a missing, stale, or unreadable
 /// record degrades to "unknown" and never to a permissive default.
 struct HardwareEvidenceOutcome: Codable, Equatable, Sendable {
-    /// `submitted`, `skipped`, or `failed` — the submission case that occurred.
+    /// `submitted`, `skipped`, `pending`, or `failed` — the submission case that occurred.
     let outcome: String
     /// Human-readable detail. Already sanitized on write (see `sanitize`):
     /// coordinator-derived text reaches this only through the allowlisted
@@ -70,6 +70,12 @@ enum HardwareEvidenceOutcomeStore {
         case .skipped(let reason):
             outcome = HardwareEvidenceOutcome(
                 outcome: "skipped",
+                reason: sanitize(reason),
+                recordedAt: ISO8601DateFormatter.autotuneInternet.string(from: now)
+            )
+        case .pending(let reason):
+            outcome = HardwareEvidenceOutcome(
+                outcome: "pending",
                 reason: sanitize(reason),
                 recordedAt: ISO8601DateFormatter.autotuneInternet.string(from: now)
             )
