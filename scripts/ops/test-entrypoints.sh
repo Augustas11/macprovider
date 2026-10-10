@@ -416,6 +416,17 @@ run_rc 0 "revocation seed not yet applied" scripts/ops/cli-release.sh status
 expect_next revocation_seed:mutate
 case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli-release.sh _revoke-seed:coordinator restart"*) ok ;; *) bad "seed command: $(next_field command)" ;; esac
 run_rc 3 "_revoke-seed refuses outside next --run" scripts/ops/cli-release.sh _revoke-seed
+# 2026-10-10: the default --healthz was the buyer listener, whose /healthz has
+# no compatibility policy; the seed was written, restarted, refused, restored.
+# The default is the provider listener, and a policy-less /healthz refuses
+# before any edit or restart.
+if grep -qx 'PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8444/healthz}"' "$W/scripts/ops/cli-release.sh"; then ok; else bad "default Pearl healthz URL is not the provider listener"; fi
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; before="$(restarts)"
+PEARL_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PORT/buyer/healthz" MACPROVIDER_OPS_OWNER=t \
+  run_rc 3 "seed refused when --healthz reports no policy" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "reports no compatibility_policy_mode"
+if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml" && [ "$(restarts)" = "$before" ]; then ok; else bad "a policy-less /healthz still edited or restarted"; fi
 before="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "revocation seed applied" scripts/ops/cli-release.sh next --run
 expect_lock_free
