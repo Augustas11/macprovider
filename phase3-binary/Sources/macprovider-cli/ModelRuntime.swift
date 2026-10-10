@@ -1620,11 +1620,14 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private var inferenceGate: AsyncSemaphore
-    /// SPEC-038-R011: the served slot count. `inferenceGate` is sized to it
-    /// and every buyer request takes one of its permits, batched rows
-    /// included (relay and direct HTTP), so all buyer work together never
-    /// exceeds it. Scheduler rows (`maxBatch`) may be larger.
+    /// SPEC-038-R011: the served slot count. The serial `inferenceGate` and
+    /// the scheduler's buyer-row limit are sized to it (the scheduler keeps
+    /// its own bounded queue, token budget, wait timeout and cancellation),
+    /// so batched buyer rows never exceed the verified count on any surface.
+    /// Scheduler rows (`maxBatch`) may be larger for the self-check.
     private var servedSlotLimit: Int
+    /// Bumped on every swap: a self-check target from before it never matches.
+    private var selfCheckGeneration = 0
     /// Set by `serve` when the self-check owns the served count; a swap then
     /// serves the owner pin or one slot until the new model's check decides.
     private var servedSlotsManaged = false
@@ -4443,30 +4446,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let served = min(max(1, slots), maxBatch)
         servedSlotLimit = served
         await inferenceGate.resize(to: served)
-    }
-
-    private static func servedSlotPassthrough<T>(_ operation: () async throws -> T) async rethrows -> T {
-        try await operation()
-    }
-
-    /// Buyer CB rows wait for a served slot in a bounded, timed queue (the
-    /// scheduler's own queue limit and wait timeout for that slot count), so
-    /// excess requests are refused as queue pressure instead of piling up.
-    private func withBuyerBatchAdmission<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        let gate = inferenceGate
-        let maxWaiters = ContinuousBatchingPolicy.queueLimit(
-            configured: continuousBatchQueueLimit,
-            maxActiveRows: servedSlotLimit
-        )
-        do {
-            return try await gate.withBoundedPermit(
-                maxWaiters: maxWaiters,
-                timeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(continuousBatchQueueWaitTimeoutMS),
-                operation
-            )
-        } catch is AsyncSemaphore.AdmissionError {
-            throw ContinuousBatchSchedulerError.backpressure
-        }
+        await continuousBatchScheduler?.setBuyerRowLimit(served)
     }
 
     func configureServedSlots(
@@ -4503,7 +4483,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 hardwareClass: tuple.hardwareClass,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild
             ),
-            maxRows: maxBatch
+            maxRows: maxBatch,
+            generation: selfCheckGeneration
         )
     }
 
@@ -4524,9 +4505,9 @@ actor ModelRuntime: ModelRuntimeServing {
     func applyContinuousBatchingSelfCheck(
         _ state: ContinuousBatchingSelfCheckState,
         servedSlots: Int,
-        expected: ContinuousBatchingSelfCheckKey? = nil
+        expected: ContinuousBatchingSelfCheckTarget? = nil
     ) async -> Bool {
-        if let expected, continuousBatchingSelfCheckTarget(includeDecided: true)?.key != expected {
+        if let expected, continuousBatchingSelfCheckTarget(includeDecided: true) != expected {
             return false
         }
         continuousBatchingSelfCheck = state
@@ -4620,7 +4601,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             maxOutputTokens: maxOutputTokens,
                             samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
                             temperature: 0,
-                            topP: 1
+                            topP: 1,
+                            selfCheckProbe: true
                         ))
                         return (index, result.generatedTokens)
                     }
@@ -5396,6 +5378,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async {
         let target = targetModelID ?? modelID
         // SPEC-038 v0.3.15: a new model or runtime is re-checked.
+        selfCheckGeneration += 1
         continuousBatchingSelfCheck = .pending
         continuousBatchingSelfCheckReport = nil
         if let adoptionKnobs {
@@ -5533,6 +5516,10 @@ actor ModelRuntime: ModelRuntimeServing {
             servedSlotLimit = resolution.servedSlots
             await inferenceGate.resize(to: resolution.servedSlots)
             swapAdvertisedSlots = resolution.servedSlots
+        }
+        // The rebuilt scheduler starts unlimited; cap buyer rows at once.
+        if let swapAdvertisedSlots {
+            await continuousBatchScheduler?.setBuyerRowLimit(swapAdvertisedSlots)
         }
         await providerStatus?.completeTargetSwap(
             modelID: modelID,
@@ -6797,10 +6784,8 @@ actor ModelRuntime: ModelRuntimeServing {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
-            result = try await withBuyerBatchAdmission {
-                try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                    try await scheduler.submit(submission.schedulerRequest)
-                }
+            result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+                try await scheduler.submit(submission.schedulerRequest)
             }
         } catch {
             if let lease {
@@ -7252,35 +7237,32 @@ actor ModelRuntime: ModelRuntimeServing {
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
-            result = try await withBuyerBatchAdmission { try await Self.withDrainAndClientCancellation(
+            result = try await Self.withDrainAndClientCancellation(
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await Self.servedSlotPassthrough {
-                    try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
-                        guard !drainCancelled.isFired,
-                              !shouldCancel(),
-                              !idleCancellation.isFired
-                        else {
-                            Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
-                            return
-                        }
-                        // Receipt TTFT is the first buyer-visible chunk this row
-                        // emits, after stop/UTF-8/tool filtering. A duplicate or
-                        // replay waiter's catch-up events never define it.
-                        if streamState.step(
-                            eventTokens: event.replayTokens ?? [event.token],
-                            stopTokenFilter: stopTokenFilter,
-                            requestStops: requestStops,
-                            structuredAccumulator: structuredAccumulator,
-                            idleState: idleState,
-                            onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
-                        ) {
-                            Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
-                        }
-                    })
-                }
-            }
+                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                    guard !drainCancelled.isFired,
+                          !shouldCancel(),
+                          !idleCancellation.isFired
+                    else {
+                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                        return
+                    }
+                    // Receipt TTFT is the first buyer-visible chunk this row
+                    // emits, after stop/UTF-8/tool filtering. A duplicate or
+                    // replay waiter's catch-up events never define it.
+                    if streamState.step(
+                        eventTokens: event.replayTokens ?? [event.token],
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: requestStops,
+                        structuredAccumulator: structuredAccumulator,
+                        idleState: idleState,
+                        onChunk: firstTokenClock.markingFirstChunk(replay: event.replayTokens != nil, onChunk)
+                    ) {
+                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                    }
+                })
             }
         } catch {
             if let lease {

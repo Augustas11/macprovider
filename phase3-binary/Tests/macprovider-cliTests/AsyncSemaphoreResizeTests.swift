@@ -45,32 +45,6 @@ final class AsyncSemaphoreResizeTests: XCTestCase {
         try await second.value
     }
 
-    func testBoundedAdmissionRefusesAFullQueueAndTimesOut() async throws {
-        let gate = AsyncSemaphore(value: 1)
-        let release = Release()
-        let holder = Task { try await gate.withPermit { await release.wait() } }
-        try await Task.sleep(nanoseconds: 20_000_000)
-        // One waiter allowed; it times out after 50 ms.
-        let waiter = Task { try await gate.withBoundedPermit(maxWaiters: 1, timeoutNanoseconds: 50_000_000) { } }
-        try await Task.sleep(nanoseconds: 10_000_000)
-        do {
-            try await gate.withBoundedPermit(maxWaiters: 1, timeoutNanoseconds: 1_000_000_000) { }
-            XCTFail("a full queue must refuse")
-        } catch let error as AsyncSemaphore.AdmissionError {
-            XCTAssertEqual(error, .queueFull)
-        }
-        do {
-            try await waiter.value
-            XCTFail("the waiter must time out")
-        } catch let error as AsyncSemaphore.AdmissionError {
-            XCTAssertEqual(error, .timedOut)
-        }
-        await release.open()
-        try await holder.value
-        // With the permit free, admission is immediate.
-        try await gate.withBoundedPermit(maxWaiters: 0, timeoutNanoseconds: 1_000_000) { }
-    }
-
     private func waitUntil(_ condition: @escaping () async -> Bool) async throws {
         for _ in 0..<200 {
             if await condition() { return }

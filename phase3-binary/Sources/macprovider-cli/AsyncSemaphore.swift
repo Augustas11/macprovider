@@ -31,52 +31,6 @@ actor AsyncSemaphore {
 
     func currentLimit() -> Int { limit }
 
-    enum AdmissionError: Error, Equatable {
-        case queueFull
-        case timedOut
-    }
-
-    /// Bounded, timed admission: refuses at once when `maxWaiters` callers
-    /// are already waiting, and gives up after `timeoutNanoseconds`. Nothing
-    /// runs before admission, so both refusals are safe to retry.
-    func withBoundedPermit<T>(
-        maxWaiters: Int,
-        timeoutNanoseconds: UInt64,
-        _ operation: @Sendable () async throws -> T
-    ) async throws -> T {
-        if permits > 0 {
-            permits -= 1
-        } else {
-            guard waiters.count < max(0, maxWaiters) else { throw AdmissionError.queueFull }
-            let id = UUID()
-            let timer = Task { [weak self] in
-                try await Task.sleep(nanoseconds: timeoutNanoseconds)
-                await self?.expireWaiter(id)
-            }
-            defer { timer.cancel() }
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    waiters.append(Waiter(id: id, continuation: continuation))
-                }
-            } onCancel: {
-                Task { await self.cancelWaiter(id) }
-            }
-        }
-        do {
-            let result = try await operation()
-            signal()
-            return result
-        } catch {
-            signal()
-            throw error
-        }
-    }
-
-    private func expireWaiter(_ id: UUID) {
-        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
-        waiters.remove(at: index).continuation.resume(throwing: AdmissionError.timedOut)
-    }
-
     func withPermit<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
         try await wait()
         do {

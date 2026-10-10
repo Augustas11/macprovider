@@ -1108,13 +1108,14 @@ NOT change `slots_total`.
    provisional grant's configured count) and becomes the FR-CB10 self-check's
    k, applied live: the serial-path gate and the advertised capacity change;
    the scheduler is not rebuilt, and the relay admits at most `slots_total`
-   requests and every buyer request (relay or direct HTTP, batched or
-   serial) takes a permit of one served-slot gate sized to `slots_total`, so
-   buyer work together never exceeds it. Batched rows wait for a permit in a
-   bounded queue (the scheduler queue limit for `slots_total`, and its wait
-   timeout) and are refused as queue pressure beyond it. The gate resizes in
-   place: holders keep their permits and nobody new is admitted above a
-   lowered limit. A capacity change is published at once. A
+   requests; the scheduler admits at most `slots_total` buyer rows (relay
+   or direct HTTP) through its own bounded queue, retained-token budget,
+   wait timeout and cancellation, so batched buyer rows never exceed the
+   verified count. Self-check rows may use every scheduler row, and a buyer
+   row is not admitted beside self-check rows (the self-check yields to the
+   buyer). The serial gate is sized to `slots_total` too; both limits change
+   in place: holders keep their rows or permits and nobody new is admitted
+   above a lowered limit. A capacity change is published at once. A
    stored self-check result for the loaded tuple applies at startup before
    the first advertisement, clamped to the rows after the startup memory
    bound; a provisional grant never exceeds a computable memory fit. A warm

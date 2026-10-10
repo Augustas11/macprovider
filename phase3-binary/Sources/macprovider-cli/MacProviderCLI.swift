@@ -2680,9 +2680,11 @@ struct ServeCommand: AsyncParsableCommand {
         // one (or a provisional grant) and the on-device self-check sets it.
         // Loopback runtimes and autotune children keep their configured count.
         var autoServedSlots: AutoServedSlots.Plan?
+        var configuredSlotsForProvisional: Int?
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
             let configuredSlots = resolved.maxConcurrencyOverride
+            configuredSlotsForProvisional = configuredSlots
             let servedContextTokens = ProviderCapacity(
                 maxContextOverride: resolved.maxContextOverride,
                 maxConcurrencyOverride: nil
@@ -2980,10 +2982,17 @@ struct ServeCommand: AsyncParsableCommand {
                 served = 1
                 source = "cb_unavailable_for_loaded_tuple"
             }
-            let provisional = plan.reason == "provisional_policy_entry"
-                ? resolved.modelArtifactSHA256.map {
-                    ContinuousBatchingSelfCheckDriver.Provisional(modelSHA256: $0, slots: plan.initialServed)
-                }
+            // Every model artifact with a signed positive entry keeps the
+            // configured count until its own self-check decides (startup and
+            // warm-swap targets alike).
+            let provisionalModels = Set(
+                continuousBatchingPolicy.selection.entries.filter { $0.rollout != .off }.map(\.tuple.modelSHA256)
+            )
+            let provisional: ContinuousBatchingSelfCheckDriver.Provisional? = plan.ownerPinned == nil && !provisionalModels.isEmpty
+                ? .init(
+                    modelSHA256s: provisionalModels,
+                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlotsForProvisional)
+                )
                 : nil
             cbProvisional = provisional
             let ownerPinned = plan.ownerPinned

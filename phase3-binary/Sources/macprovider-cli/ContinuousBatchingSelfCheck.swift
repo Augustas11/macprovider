@@ -59,6 +59,9 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     let key: ContinuousBatchingSelfCheckKey
     /// Scheduler rows built at load: the most this check may grant.
     let maxRows: Int
+    /// The runtime's swap generation: a result measured before a swap never
+    /// applies after it, even to the same model.
+    var generation: Int = 0
 }
 
 struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
@@ -365,7 +368,7 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
             )
         }
         guard ownerPinned == nil else { return nil }
-        let provisionalSlots = provisional.flatMap { $0.modelSHA256 == target.key.modelSHA256 ? $0.slots : nil }
+        let provisionalSlots = provisional?.slots(for: target.key.modelSHA256)
         guard let prior = [provisionalSlots, store.priorGrant(for: target.key)].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
             return nil
         }
@@ -388,6 +391,9 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
     static let fileName = "cb-self-check.json"
     static let maxEntries = 64
     static let maxFileBytes: off_t = 8 << 20
+    /// v5 (an earlier candidate) decodes as v6: v6 only adds the optional
+    /// crash boundary, and an unfinished v5 step is still recovered as a crash.
+    static let readableSchemaVersions: Set<String> = [schemaVersion, "macprovider.cb-self-check.v5"]
 
     let url: URL
 
@@ -485,7 +491,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
               st.st_size <= Self.maxFileBytes,
               let data = try? handle.readToEnd(),
               let document = try? JSONDecoder().decode(Document.self, from: data),
-              document.schemaVersion == Self.schemaVersion
+              Self.readableSchemaVersions.contains(document.schemaVersion)
         else { return [] }
         return document.records
     }
@@ -521,9 +527,23 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 /// (`ContinuousBatchingSelfCheck.reconcile`). Never blocks serving.
 actor ContinuousBatchingSelfCheckDriver {
     struct Provisional: Sendable, Equatable {
-        /// The signed positive policy entry's model artifact.
-        let modelSHA256: String
+        /// Model artifacts with a signed positive policy entry (the served
+        /// model and any warm-swap target).
+        let modelSHA256s: Set<String>
         let slots: Int
+
+        init(modelSHA256s: Set<String>, slots: Int) {
+            self.modelSHA256s = modelSHA256s
+            self.slots = slots
+        }
+
+        init(modelSHA256: String, slots: Int) {
+            self.init(modelSHA256s: [modelSHA256], slots: slots)
+        }
+
+        func slots(for modelSHA256: String) -> Int? {
+            modelSHA256s.contains(modelSHA256) ? slots : nil
+        }
     }
 
     private let runtime: ModelRuntime
@@ -566,7 +586,7 @@ actor ContinuousBatchingSelfCheckDriver {
     /// provisional grant for the same artifact, or a stored grant under an
     /// older runtime identity on the same hardware.
     private func priorGrant(for key: ContinuousBatchingSelfCheckKey) -> Int? {
-        let provisionalSlots = provisional.flatMap { $0.modelSHA256 == key.modelSHA256 ? $0.slots : nil }
+        let provisionalSlots = provisional?.slots(for: key.modelSHA256)
         return [provisionalSlots, store.priorGrant(for: key)].compactMap { $0 }.filter { $0 > 1 }.max()
     }
 
@@ -871,7 +891,7 @@ actor ContinuousBatchingSelfCheckDriver {
             decision: decision, ownerPinned: ownerPinnedSlots, maxRows: target.maxRows
         )
         // Fenced: a result for one model never lands on a swapped-in one.
-        guard await runtime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: slots, expected: target.key) else {
+        guard await runtime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: slots, expected: target) else {
             log("event=cb_self_check action=apply_skipped reason=target_changed")
             return
         }
@@ -882,7 +902,7 @@ actor ContinuousBatchingSelfCheckDriver {
             deferrals: deferrals,
             key: target.key
         ))
-        guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true)?.key == target.key else { return }
+        guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
         await providerStatus.updateServedSlots(slots)
         log("event=cb_self_check action=applied source=\(source) reason=\(decision.reason) slots=\(slots) verified_k=\(decision.verifiedSlots) model_sha256=\(target.key.modelSHA256)")
     }
