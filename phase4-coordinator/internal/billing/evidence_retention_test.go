@@ -1228,7 +1228,13 @@ func TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal(t 
 	pool := f.seed(t, "pool")
 	f.seed(t, "plain")
 	f.settle(t)
-	if _, err := f.store.db.Exec(`DROP TRIGGER trg_srs_immutable`); err != nil {
+	// This exercises retention's own guard, independent of the pool-proven
+	// rollup's schema and freeze triggers when that branch is present.
+	if _, err := f.store.db.Exec(`
+DROP TRIGGER trg_srs_immutable;
+DROP TRIGGER IF EXISTS trg_ppr_srs_delete;
+DROP TRIGGER IF EXISTS trg_ppr_srv_delete;
+DROP TABLE IF EXISTS pool_proven_rollup_attempts;`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.db.Exec(`UPDATE settlement_route_snapshots SET pool_id = 'pool-a' WHERE request_id = ?`, pool.RequestID); err != nil {
