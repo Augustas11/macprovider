@@ -31,7 +31,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-020 | Provider autoupdate | v0.1.24 | normative | pending | pending: 7 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.3.1 | draft | complete | conformant: 1, pending: 13 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
-| SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.23 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
+| SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.24 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.10 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.29 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
@@ -39,15 +39,15 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-028 | Classic External-Draft MLX Speculative Decoding for Provider Serve | 0.3-draft | draft | pending | pending corpus migration | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | draft | pending | pending corpus migration | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 | SPEC-030 | Losslessness Probe | v0.1.1 | draft | pending | pending: 1 | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
-| SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.3.6 | draft | pending | pending: 1 | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
+| SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.3.7 | draft | pending | pending: 1 | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
 | SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.3.7 | draft | complete | conformant: 1, pending: 3 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.7.2 | draft | pending | conformant: 1, pending: 2 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1.2 | draft | complete | pending: 18 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.5 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
-| SPEC-038 | Continuous batching for concurrent provider inference | v0.3.14 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
-| SPEC-039 | Paged KV / paged-attention engine | v0.1.14 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
+| SPEC-038 | Continuous batching for concurrent provider inference | v0.3.15 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
+| SPEC-039 | Paged KV / paged-attention engine | v0.1.15 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.5.1 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.42 | draft | complete | conformant: 2, pending: 14 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
@@ -56,7 +56,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.1 | draft | complete | conformant: 3, pending: 5 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | pending: 9 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.9 | draft | complete | conformant: 5, pending: 7 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
-| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.31 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
+| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.32 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
 | SPEC-049 | Operator-Constrained Privacy Class | 0.2.5 | draft | complete | pending: 28 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
 

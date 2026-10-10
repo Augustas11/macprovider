@@ -343,6 +343,7 @@ type Heartbeat struct {
 	ServiceInstanceID       string                             `json:"service_instance_id,omitempty"`
 	HardwareSummary         *HardwareSummary                   `json:"hardware_summary,omitempty"`
 	SafetyTelemetry         *pool.ProviderSafetyTelemetry      `json:"safety_telemetry,omitempty"`
+	CBSelfCheck             *pool.ProviderCBSelfCheck          `json:"cb_self_check,omitempty"`
 	RelayBlindKeyRecords    []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment       *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
@@ -1588,6 +1589,41 @@ func parseModelIdentityMetadata(
 	return "", nil
 }
 
+// parseCBSelfCheck validates the optional SPEC-038 v0.3.15 heartbeat object.
+// It is bounded observability, never a routing input.
+func parseCBSelfCheck(v json.RawMessage) (*pool.ProviderCBSelfCheck, error) {
+	if len(v) > 2048 {
+		return nil, fmt.Errorf("cb_self_check exceeds 2048 bytes")
+	}
+	var selfCheck pool.ProviderCBSelfCheck
+	if err := json.Unmarshal(v, &selfCheck); err != nil {
+		return nil, err
+	}
+	if selfCheck.Decision == "" || len(selfCheck.Decision) > 64 || !isPrintableASCII(selfCheck.Decision) {
+		return nil, fmt.Errorf("cb_self_check.decision must be 1..64 printable ASCII bytes")
+	}
+	for _, n := range []int{selfCheck.ServedSlots, selfCheck.VerifiedK, selfCheck.Deferrals} {
+		if n < 0 || n > 1_000_000 {
+			return nil, fmt.Errorf("cb_self_check counts must be in 0..1000000")
+		}
+	}
+	for _, s := range []*string{selfCheck.ModelSHA256, selfCheck.MetallibSHA256, selfCheck.KernelIdentifier, selfCheck.HardwareClass, selfCheck.OSBuild, selfCheck.RuntimeBuild} {
+		if s != nil && (len(*s) > 256 || !isPrintableASCII(*s)) {
+			return nil, fmt.Errorf("cb_self_check identity fields must be at most 256 printable ASCII bytes")
+		}
+	}
+	return &selfCheck, nil
+}
+
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -1847,6 +1883,13 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "safety_telemetry.observed_at", err
 		}
 		hb.SafetyTelemetry = &telemetry
+	}
+	if v, ok := raw["cb_self_check"]; ok && string(v) != "null" {
+		selfCheck, err := parseCBSelfCheck(v)
+		if err != nil {
+			return Heartbeat{}, presence, "cb_self_check", err
+		}
+		hb.CBSelfCheck = selfCheck
 	}
 	if field, err := parseRelayBlindKeyRecords(raw, &hb.RelayBlindKeyRecords); err != nil {
 		return Heartbeat{}, presence, field, err

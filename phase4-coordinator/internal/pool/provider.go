@@ -298,6 +298,11 @@ type Provider struct {
 	// operators so remote canaries can enforce queue, memory, thermal, restart,
 	// and runtime invariants without a provider-local network route.
 	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
+	// CBSelfCheck is the provider's latest SPEC-038 v0.3.15 on-device
+	// continuous-batching self-check state, reported on heartbeats. It is
+	// observability for operators and release canaries; routing still uses
+	// the advertised slots and the pool concurrency ceiling.
+	CBSelfCheck *ProviderCBSelfCheck `json:"cb_self_check,omitempty"`
 	// Proof of Weights W2 — coordinator-side autotune admission cap derived
 	// from latest verified hardware-evidence benchmarks. Empty/zero when
 	// evidence observation is not wired or provider admitted before W2 rollout.
@@ -480,6 +485,44 @@ type AdmissionGateFlags struct {
 	AdmissionCeilingExcluded bool
 	AdmissionEvidenceStale   bool
 	AdmissionSandboxed       bool
+}
+
+// ProviderCBSelfCheck mirrors the provider's `cb_self_check` heartbeat object.
+type ProviderCBSelfCheck struct {
+	Decision         string  `json:"decision"`
+	ServedSlots      int     `json:"served_slots"`
+	VerifiedK        int     `json:"verified_k"`
+	Deferrals        int     `json:"deferrals"`
+	ModelSHA256      *string `json:"model_sha256"`
+	MetallibSHA256   *string `json:"metallib_sha256"`
+	KernelIdentifier *string `json:"kernel_identifier"`
+	HardwareClass    *string `json:"hardware_class"`
+	OSBuild          *string `json:"os_build"`
+	RuntimeBuild     *string `json:"runtime_build,omitempty"`
+}
+
+// SetCBSelfCheck records the self-check state carried on the heartbeat just
+// applied for this provider session. Nil clears it.
+func (r *Registry) SetCBSelfCheck(providerID string, selfCheck *ProviderCBSelfCheck) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.providers[providerID]; ok {
+		p.CBSelfCheck = cloneProviderCBSelfCheck(selfCheck)
+	}
+}
+
+func cloneProviderCBSelfCheck(in *ProviderCBSelfCheck) *ProviderCBSelfCheck {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	for _, field := range []**string{&out.ModelSHA256, &out.MetallibSHA256, &out.KernelIdentifier, &out.HardwareClass, &out.OSBuild, &out.RuntimeBuild} {
+		if *field != nil {
+			value := **field
+			*field = &value
+		}
+	}
+	return &out
 }
 
 type ProviderSafetyTelemetry struct {
@@ -3426,6 +3469,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp.conn = nil
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
+		cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
 		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 		out = append(out, cp)
 	}

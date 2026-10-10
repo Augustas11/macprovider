@@ -7077,6 +7077,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// SPEC-038-R011 (v0.3.15): buyer rows never exceed the served slot
+    /// count (the self-check's verified grant); self-check rows may use every
+    /// scheduler row, and a buyer never batches beside self-check rows.
+    func testBuyerRowLimitCapsBatchDepthBelowSchedulerRows() async throws {
+        let backend = ScriptedBackend(scripts: ["b1": [1, 2, 3], "b2": [4, 5, 6], "b3": [7, 8, 9]])
+        let scheduler = try await makeScheduler(maxActiveRows: 3, maxPrefillRowsPerIteration: 3, backend: backend)
+        await scheduler.setBuyerRowLimit(1)
+        async let r1 = scheduler.submit(.init(id: "b1", conversationKey: "", promptTokens: [1], maxOutputTokens: 3))
+        async let r2 = scheduler.submit(.init(id: "b2", conversationKey: "", promptTokens: [2], maxOutputTokens: 3))
+        async let r3 = scheduler.submit(.init(id: "b3", conversationKey: "", promptTokens: [3], maxOutputTokens: 3))
+        let results = try await [r1, r2, r3]
+        XCTAssertEqual(results.map(\.terminalStatus), [.length, .length, .length])
+        let depth = await scheduler.metrics().maxObservedBatchDepth
+        XCTAssertEqual(depth, 1)
+        let limit = await scheduler.buyerRowLimitForTest()
+        XCTAssertEqual(limit, 1)
+    }
+
+    func testSelfCheckRowsUseEverySchedulerRow() async throws {
+        let backend = ScriptedBackend(scripts: ["p1": [1, 2, 3], "p2": [4, 5, 6], "p3": [7, 8, 9]])
+        let scheduler = try await makeScheduler(maxActiveRows: 3, maxPrefillRowsPerIteration: 3, backend: backend)
+        await scheduler.setBuyerRowLimit(1)
+        async let r1 = scheduler.submit(.init(id: "p1", conversationKey: "", promptTokens: [1], maxOutputTokens: 3, selfCheckProbe: true))
+        async let r2 = scheduler.submit(.init(id: "p2", conversationKey: "", promptTokens: [2], maxOutputTokens: 3, selfCheckProbe: true))
+        async let r3 = scheduler.submit(.init(id: "p3", conversationKey: "", promptTokens: [3], maxOutputTokens: 3, selfCheckProbe: true))
+        let results = try await [r1, r2, r3]
+        XCTAssertEqual(results.map(\.outputTokens), [[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        let depth = await scheduler.metrics().maxObservedBatchDepth
+        XCTAssertEqual(depth, 3)
+    }
+
     private func makeScheduler(
         descriptor: PagedKVDescriptor = descriptor(),
         tuple: ContinuousBatchingRequestedTuple = tuple(),

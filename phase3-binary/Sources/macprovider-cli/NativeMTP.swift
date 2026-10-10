@@ -504,3 +504,41 @@ private extension ChatCompletionPromptSource {
     var minPValue: JSONValue? { minP }
     var repetitionPenaltyValue: JSONValue? { repetitionPenalty }
 }
+
+/// SPEC-048-R016 (v0.1.32) on-device native-MTP qualification: MTP-on greedy
+/// tokens must equal ordinary decode on the same paged engine (same kernels,
+/// so near-tied logits resolve the same way), and MTP must beat ordinary
+/// decode by the SPEC-048-R015 decode-throughput bar.
+enum NativeMTPOnDeviceSelfCheck {
+    static let minimumSpeedup = 1.15
+    static let repetitions = 2
+
+    struct Verdict: Equatable {
+        let passed: Bool
+        /// `passed`, `token_mismatch`, `no_net_gain`, `empty_output`.
+        let reason: String
+        let speedup: Double
+    }
+
+    static func decide(
+        mtpTokens: [Int],
+        mtpSeconds: Double,
+        ordinaryTokens: [Int],
+        ordinarySeconds: Double
+    ) -> Verdict {
+        guard !ordinaryTokens.isEmpty else {
+            return Verdict(passed: false, reason: "empty_output", speedup: 0)
+        }
+        guard mtpTokens == ordinaryTokens else {
+            return Verdict(passed: false, reason: "token_mismatch", speedup: 0)
+        }
+        guard mtpSeconds > 0, mtpSeconds.isFinite, ordinarySeconds.isFinite else {
+            return Verdict(passed: false, reason: "no_net_gain", speedup: 0)
+        }
+        let speedup = ordinarySeconds / mtpSeconds
+        guard speedup >= minimumSpeedup else {
+            return Verdict(passed: false, reason: "no_net_gain", speedup: speedup)
+        }
+        return Verdict(passed: true, reason: "passed", speedup: speedup)
+    }
+}

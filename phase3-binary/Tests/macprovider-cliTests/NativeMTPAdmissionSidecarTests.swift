@@ -592,9 +592,29 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             revokedTupleSHA256: []
         )
 
+        // SPEC-048-R013 (v0.1.32): the runtime revision is provenance; a new
+        // MLX fork revision keeps the model admitted (the on-device self-check
+        // qualifies it). The model identity still binds.
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signature(for: fixture.sidecarData),
+            snapshotRoot: fixture.snapshot,
+            context: drifted,
+            trustedKeyring: fixture.trustedKeyring
+        ))
+        let otherModel = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: fixture.context.modelID,
+            modelRevision: String(repeating: "0", count: 64),
+            upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
+            hardwareChip: fixture.context.hardwareChip,
+            ramGB: fixture.context.ramGB,
+            osVersion: fixture.context.osVersion,
+            slotCount: fixture.context.slotCount,
+            revokedTupleSHA256: []
+        )
         XCTAssertEqual(
-            try rejectedError(fixture.sidecarData, fixture: fixture, context: drifted),
-            .liveTupleMismatch("$.revisions.upstream_mlx_swift_lm")
+            try rejectedError(fixture.sidecarData, fixture: fixture, context: otherModel),
+            .liveTupleMismatch("$.model.revision")
         )
         XCTAssertEqual(
             try rejectedError(fixture.mutatingRoot({ $0["admission_enabled"] = false }, recomputeTuple: true), fixture: fixture),
@@ -823,7 +843,15 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             revokedTupleSHA256: [fixture.tupleSHA]
         )
 
-        XCTAssertEqual(try rejectedError(fixture.sidecarData, fixture: fixture, context: unavailable), .revocationUnavailable)
+        // SPEC-048-R014 (v0.1.32): unknown revocation state revokes nothing;
+        // only a feed naming the tuple blocks it.
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signature(for: fixture.sidecarData),
+            snapshotRoot: fixture.snapshot,
+            context: unavailable,
+            trustedKeyring: fixture.trustedKeyring
+        ))
         XCTAssertEqual(try rejectedError(fixture.sidecarData, fixture: fixture, context: revoked), .tupleRevoked(fixture.tupleSHA))
     }
 
@@ -1013,7 +1041,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
-    func testReleaseEnvelopeRejectsCanonicalHardwareMismatch() throws {
+    /// SPEC-048-R013 (v0.1.32): hardware, RAM, slots and runtime revision
+    /// only pick the closest entry; another Mac running the same model is
+    /// admitted and qualifies itself on device. A different model is not.
+    func testReleaseEnvelopeAdmitsTheModelOnOtherHardwareAndRuntime() throws {
         let fixture = try makeReleaseEnvelopeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
         let wrongHardware = NativeMTPAdmissionSidecar.RuntimeContext(
@@ -1021,14 +1052,43 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             modelRevision: fixture.context.modelRevision,
             upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
             hardwareChip: "M1 Max",
+            ramGB: 16,
+            osVersion: fixture.context.osVersion,
+            slotCount: fixture.context.slotCount + 3,
+            revokedTupleSHA256: []
+        )
+        let otherRuntime = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: fixture.context.modelID,
+            modelRevision: fixture.context.modelRevision,
+            upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40),
+            hardwareChip: fixture.context.hardwareChip,
+            ramGB: fixture.context.ramGB,
+            osVersion: fixture.context.osVersion,
+            slotCount: fixture.context.slotCount,
+            revokedTupleSHA256: nil
+        )
+        for context in [wrongHardware, otherRuntime] {
+            XCTAssertNoThrow(try NativeMTPAdmissionSidecar.load(
+                sidecarData: fixture.sidecarData,
+                signatureData: fixture.signatureData,
+                snapshotRoot: fixture.base.snapshot,
+                context: context,
+                trustedKeyring: fixture.base.trustedKeyring,
+                resolvedArtifactAuthority: fixture.authority
+            ))
+        }
+        let otherModel = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: "other/model",
+            modelRevision: fixture.context.modelRevision,
+            upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
+            hardwareChip: fixture.context.hardwareChip,
             ramGB: fixture.context.ramGB,
             osVersion: fixture.context.osVersion,
             slotCount: fixture.context.slotCount,
             revokedTupleSHA256: []
         )
-
         XCTAssertEqual(
-            try rejectedReleaseEnvelopeError(fixture, context: wrongHardware),
+            try rejectedReleaseEnvelopeError(fixture, context: otherModel),
             .liveTupleMismatch("$.entries")
         )
     }

@@ -1,6 +1,6 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.3.6
+**Status:** v0.3.7
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
@@ -849,6 +849,15 @@ The dedicated interval defaults to 3,600 seconds, has a 900-second minimum,
 and uses FR-CAN1's 0.5–1.5 jitter. Freshness expires after twice the configured
 interval.
 
+**[v0.3.7]** The canary stays the cross-runtime correctness signal: a result
+whose actual token IDs, terminal reason, counters or committed-state digest
+differ from the bank record still fails and disables only that tuple. SPEC-048
+v0.1.32 qualifies native MTP per Mac on device, but that does not relax this
+check. When a provider release changes MLX numerics so that the expected
+values legitimately change, the challenge bank MUST be re-baselined on the new
+runtime and recorded and signed through the normal release path before that
+release serves native MTP.
+
 A result passes only when identity/generation/tuple bindings match,
 `actual_decode_path == "native_mtp"`, `fallback_used == false`, and every
 expected digest/counter/terminal value matches. Failure or expiry disables only
@@ -1131,6 +1140,9 @@ before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
+- **v0.3.7 (2026-10-10):** FR-CAN33 notes SPEC-048 v0.1.32: the native-MTP
+  canary's expected-value comparison stays a failure; a release that changes
+  MLX numerics re-baselines the signed challenge bank on the new runtime.
 - **v0.3.6 (2026-10-09):** The native-MTP challenge bank's `issued_at` must
   precede its `expires_at`, but a provider no longer refuses a bank because
   the current time is outside that window. The bank bytes are pinned by the

@@ -593,6 +593,9 @@ struct ConfigApplier {
                 : nil,
             "donor_mode": donorMode ? "true" : nil,
             MaxContextProvenance.configKey: provenance?.yamlFlowValue,
+            // An apply writes a recommendation, so it drops any owner pin and
+            // serve recomputes the slots (SPEC-023-R009).
+            AppConfig.maxConcurrencySourceKey: nil,
         ]
         let ownedKeys = Self.recommendationOwnedKeys
 
@@ -694,6 +697,7 @@ struct ConfigApplier {
         "max_context_override",
         "max_concurrency_override",
         AppConfig.maxConcurrencyDepthOverrideKey,
+        AppConfig.maxConcurrencySourceKey,
         "donor_mode",
         MaxContextProvenance.configKey,
     ]

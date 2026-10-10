@@ -1957,6 +1957,38 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
+    /// SPEC-038 v0.3.15: production coverage is default-on; only a signed
+    /// revocation of the model on this runtime revision serial-routes.
+    func testDefaultOnCoverageBatchesUnlessRevoked() {
+        let tuple = Self.continuousBatchingTuple()
+        func capability(_ coverage: ContinuousBatchingAcceptanceCoverage) -> ContinuousBatchingCapability {
+            ContinuousBatchingPolicy.capability(
+                mode: .canary,
+                maxBatch: 4,
+                queueLimit: nil,
+                kvBits: nil,
+                draftConfigured: false,
+                schedulerBackendAvailable: true,
+                pagedKVDecision: .attached(Self.pagedKVDescriptor()),
+                requestedTuple: tuple,
+                acceptanceCoverage: coverage
+            )
+        }
+        let open = capability(.defaultOn(revocations: []))
+        XCTAssertNil(open.unsupportedReason)
+        XCTAssertFalse(open.shouldUseSerialPath)
+        let revoked = capability(.defaultOn(revocations: [
+            ContinuousBatchingRevocation(
+                modelKey: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
+            ),
+        ]))
+        XCTAssertEqual(revoked.unsupportedReason, .tupleAcceptanceCoverageUnavailable)
+        XCTAssertTrue(revoked.shouldUseSerialPath)
+    }
+
     func testStrictOnFailsClosedOnUncoveredTuple() {
         let capability = ContinuousBatchingPolicy.capability(
             mode: .on,

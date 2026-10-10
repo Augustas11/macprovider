@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.23
+version: v0.22.24
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,26 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.24 (2026-10-10)** — The provider sets its own served slots and the
+  CB policy only revokes (with SPEC-038 v0.3.15). `max_concurrency_override`
+  was written once by `autotune --recommend --apply` at install and never
+  recomputed, and CB needed a signed per-tuple entry, so providers stayed at
+  their install-time slots and new models never batched. The config now
+  records who owns the value in `max_concurrency_source` (`owner` or
+  `autotune`; absent means `autotune`, which covers every existing install).
+  Unless the owner pinned it, serve builds the scheduler with the R009
+  recommendation for the Mac as row capacity and serves the count chosen by
+  the SPEC-038 FR-CB10 on-device self-check (1 until it decides, a draft
+  model or the emergency off). §12.6/R025: the signed CB policy is
+  revocation-only. An apply removes `max_concurrency_source` in the same
+  write, and rollback restores it with the other recommendation-owned keys.
+  Older CLIs ignore the key.
+  Serve resolves the slot count at each start with the precedence of
+  SPEC-038 FR-CB11 (v0.3.12): owner pin, then draft model = 1, then the
+  R009 recommendation for this Mac when the signed policy authorizes
+  batching for the served tuple, else 1. An apply removes
+  `max_concurrency_source` in the same write, and rollback restores it with
+  the other recommendation-owned keys. Older CLIs ignore the key.
 - **v0.22.23 (2026-10-10)** — The native-MTP emergency revocation feed fails
   to last-known (#1938, AGENTS.md rule 10). A body past `expires_at` is still
   accepted and stays in force; an unreachable origin or a rejected body keeps
@@ -2660,6 +2680,8 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
 7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, minimum aggregate-gain fraction, calibration context, probe prompt tokens, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements (aggregate tokens/sec, per-stream p95 TTFT, informational median per-stream decode rate, pass/fail and reason), and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied served depth MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged. A served depth above 8 MUST be written as `max_concurrency_override: 8` plus `max_concurrency_depth_override: <depth>` (v0.22.18), because pre-#1906 CLIs reject `max_concurrency_override` above 8 at startup and ignore unknown keys; an apply at 8 or below MUST remove `max_concurrency_depth_override`. The v2 record MUST also carry `ttft_regression_factor` fixed at 1.5 after `ttft_ceiling_ms` so a pre-v2 decoder can still load stored state; it gates nothing. Served slots above the coordinator's `pool.max_concurrency_ceiling` (default 8) are clamped there, so a deeper calibrated depth routes only after an operator raises that ceiling.
 
+**Automatic application (v0.22.24).** The applied `max_concurrency_override` is a recommendation, not an owner setting. Ownership is the config key `max_concurrency_source` (`owner` | `autotune`); a config without it is autotune-derived, and a value from `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` or `--max-batch` is an owner value. An apply MUST remove `max_concurrency_source`, and an unknown value MUST fail config load. An owner value is served as written. For an autotune-derived value, `serve` MUST serve 1 with a draft model configured (SPEC-028 FR-4) or the CB emergency off set; otherwise it MUST size the scheduler at the step-1 bound for this Mac (`memory_fit_cap` at the served context, else the tier constant), capped at 5 on Apple M1/M2 GPUs other than Ultra and at `max_concurrency_override_limit`, and serve the slot count the SPEC-038 FR-CB10 on-device self-check grants (1 until it decides, unless a signed positive policy entry gives a provisional grant at the configured count). It MUST NOT exceed `memory_fit_cap` when that is computable. The self-check result applies live and is stored per model, Metal library, kernel, hardware class and macOS build.
+
 Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 
 Automatic installer use of this requirement is not authorized by v0.13.0. It remains pending signed physical-hardware evidence (including a `JOURNEY-PROVIDER-PREBETA-ADMISSION`-class result on a representative multi-slot box, such as the live 256 GB M3 Ultra) and an owner decision under issue #1589. The pre-existing default path — the tier constant — is unchanged and remains the fleet default until that evidence and decision land.
@@ -3759,6 +3781,19 @@ A mutable, rollback-protected remote revocation feed is outside v1 rather than
 being implied by an unauthenticated notion of a "later" replacement.
 SPEC-038 local parity, row-isolation, and load-time attach probes remain
 mandatory and fail closed.
+
+**[v0.22.24] Revocation-only policy (SPEC-038 v0.3.15).** The schema is
+unchanged and old policy files still parse, but the policy no longer grants
+CB. Every tuple the local SPEC-039 engine admits is covered unless an entry
+with `rollout: "off"` names its `model_sha256`, `metallib_sha256` and
+`kernel_identifier` (hardware class does not narrow a revocation); each Mac
+then qualifies batching with the SPEC-038 FR-CB10 on-device self-check. A
+positive entry is only a provisional grant for its model artifact until that
+Mac's self-check decides, plus the exact-tuple `cached_turns_accepted` grant.
+A missing, stale, unsigned, wrong-signer, malformed, future-dated or
+catalog-mismatched policy revokes nothing (it no longer means "CB off").
+`catalog-release.py` writes the structural `expires_at` as
+`9999-12-31T23:59:59Z`.
 
 ## 13. Open questions / v0.2 candidates
 

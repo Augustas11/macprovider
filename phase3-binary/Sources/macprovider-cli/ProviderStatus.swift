@@ -703,6 +703,29 @@ actor ProviderStatus {
         resetSpecDecodeWindow()
     }
 
+    /// SPEC-038-R011: the continuous-batching self-check changed the served
+    /// slot count; heartbeats and relay admission read it from here.
+    /// `stamp` (the runtime's swap generation) orders concurrent updates: an
+    /// update stamped older than one already applied is ignored.
+    private var servedSlotsStamp: Int?
+
+    func updateServedSlots(_ slots: Int, stamp: Int? = nil) async {
+        if let stamp {
+            if let applied = servedSlotsStamp, stamp < applied { return }
+            servedSlotsStamp = stamp
+        }
+        capacity = ProviderCapacity(
+            maxContextOverride: capacity.maxContextTokens,
+            maxConcurrencyOverride: max(1, slots),
+            throughputTPSEstimate: capacity.throughputTPSEstimate,
+            maxContextSource: capacity.maxContextSource,
+            throughputProbe: capacity.throughputProbe
+        )
+        // Publish the new slot count at once (request-capacity handler), so
+        // coordinator routing does not keep the old count until a heartbeat.
+        await refreshAvailabilityState()
+    }
+
     func completeTargetSwap(
         modelID: String,
         modelHash: String?,
@@ -712,12 +735,24 @@ actor ProviderStatus {
         maxContextSource: MaxContextSource? = nil,
         maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
-        specDecodeNumDraftTokens: Int? = nil
+        specDecodeNumDraftTokens: Int? = nil,
+        servedSlotsStamp stamp: Int? = nil
     ) async {
         self.modelID = modelID
         self.modelHash = modelHash
         self.modelHashAlgorithm = modelHashAlgorithm
         self.weightsManifestSHA256 = weightsManifestSHA256
+        // SPEC-038-R011: the swap's served count and its generation land
+        // together, before any await; a count stamped older than one already
+        // applied is ignored.
+        var maxConcurrency = maxConcurrency
+        if let stamp {
+            if let applied = servedSlotsStamp, stamp < applied {
+                maxConcurrency = nil
+            } else {
+                servedSlotsStamp = stamp
+            }
+        }
         if maxContextTokens != nil || maxConcurrency != nil {
             // The startup probe is not re-run on swap, so its model id keeps
             // showing which model the carried estimate was measured on.

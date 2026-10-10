@@ -487,6 +487,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// packed target verification at depth zero.
     let nativeMTPProposalTokens: [Int]
     let nativeMTPAdaptationDirective: NativeMTPAdaptationDirective?
+    /// Runtime-only: an on-device self-check row (SPEC-038 FR-CB10). Buyer
+    /// rows are capped at the served slot count and are not admitted beside
+    /// self-check rows; self-check rows may use every scheduler row. Excluded
+    /// from the idempotency fingerprint.
+    let selfCheckProbe: Bool
 
     init(
         id: String,
@@ -513,7 +518,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
-        nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil
+        nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
+        selfCheckProbe: Bool = false
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -540,6 +546,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
+        self.selfCheckProbe = selfCheckProbe
     }
 
     enum CodingKeys: String, CodingKey {
@@ -4850,6 +4857,12 @@ actor ContinuousBatchScheduler {
         while attempts < configuration.maxPrefillRowsPerIteration,
               occupiedSlots < configuration.maxActiveRows,
               !waiting.isEmpty {
+            // A buyer head waits (in the bounded queue, with its own timeout)
+            // while the served limit is full or self-check rows are active.
+            if !headMayTakeRow(waiting[0]),
+               !(queueWaitDeadlines[waiting[0].id].map { DispatchTime.now().uptimeNanoseconds >= $0 } ?? false) {
+                break
+            }
             attempts += 1
             // SPEC-038 AC-25: a request already past its absolute admission
             // deadline (for example re-queued by a `capacityExceeded` bounce
@@ -5661,6 +5674,34 @@ actor ContinuousBatchScheduler {
 
     private var occupiedSlots: Int {
         admittingRequests.count + activePrompt.count + activeDecode.count
+    }
+
+    /// SPEC-038-R011: buyer rows never exceed the served slot count (the
+    /// self-check's verified grant), even though the scheduler has more rows.
+    private var buyerRowLimit: Int?
+
+    private var selfCheckRowsOccupied: Int {
+        admittingRequests.values.filter(\.selfCheckProbe).count
+            + activePrompt.values.filter(\.request.selfCheckProbe).count
+            + activeDecode.values.filter(\.request.selfCheckProbe).count
+    }
+
+    func setBuyerRowLimit(_ limit: Int) {
+        buyerRowLimit = min(max(1, limit), configuration.maxActiveRows)
+        if !waiting.isEmpty { ensurePump() }
+    }
+
+    func buyerRowLimitForTest() -> Int {
+        buyerRowLimit ?? configuration.maxActiveRows
+    }
+
+    /// Whether the FCFS head may take a row now.
+    private func headMayTakeRow(_ request: ContinuousBatchSchedulerRequest) -> Bool {
+        guard occupiedSlots < configuration.maxActiveRows else { return false }
+        if request.selfCheckProbe { return true }
+        let probeRows = selfCheckRowsOccupied
+        guard probeRows == 0 else { return false }
+        return occupiedSlots < (buyerRowLimit ?? configuration.maxActiveRows)
     }
 
     private func schedulerConversationKey(for request: ContinuousBatchSchedulerRequest) -> String {

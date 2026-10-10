@@ -2018,12 +2018,12 @@ extension ModelsAdoptRecommendationCommand {
         guard trustedStrings.allSatisfy(isSafeConfigString) else {
             throw ValidationError("recommendation contains unsafe strings")
         }
-        // The provenance record is written by the apply itself, never taken
-        // from a recommendation.
+        // The provenance record and the slot owner are written by the apply
+        // itself, never taken from a recommendation.
         let allowedKeys = Set(ConfigApplier.recommendationOwnedKeys + [
             "draft_model",
             "draft_model_artifact_sha256",
-        ]).subtracting([MaxContextProvenance.configKey])
+        ]).subtracting([MaxContextProvenance.configKey, AppConfig.maxConcurrencySourceKey])
         let unknownKeys = Set(serveConfig.keys).subtracting(allowedKeys)
         guard unknownKeys.isEmpty else {
             throw ValidationError("serve_config contains unsupported keys: \(unknownKeys.sorted().joined(separator: ", "))")

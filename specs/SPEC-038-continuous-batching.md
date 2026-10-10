@@ -1,11 +1,30 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.14
-Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
+Version: v0.3.15
+Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.15 (2026-10-10, default-on CB qualified per Mac):**
+Follows SPEC-023 v0.22.24, SPEC-039 v0.1.15 and SPEC-048 v0.1.32. Continuous
+batching is on by default for every model the local SPEC-039 engine admits.
+Each Mac qualifies itself (FR-CB10): the load-time SPEC-039 parity and
+isolation probes stay the quality gate against stock serial decode, and a new
+on-device self-check proves that every row of a k-row batch produces the same
+greedy tokens as that prompt alone on the same paged engine, at every k it may
+grant, and that the batch beats stock serial decode by more than 20% aggregate.
+It runs only while the provider is idle, yields to real requests, and stores
+its result per (model SHA-256, Metal library SHA-256, kernel identifier,
+hardware class, macOS version and build). The served slot count (FR-CB11) is that result, bounded by
+the memory-fit recommendation for the Mac; an owner pin keeps its count. The
+signed SPEC-023 policy becomes revocation-only: a `rollout: off` entry forces
+serial for its model artifact on its Metal library and kernel; positive
+entries are a provisional grant until the self-check decides and keep the
+AC-26 cached-turn grant; an absent, stale or invalid policy revokes nothing;
+`expires_at` stays structural. The FR-CB15 per-tuple Studio campaign is no
+longer the activation gate. The emergency `continuous_batching: off` override
+is unchanged.
 **Change log v0.3.14 (2026-10-10, route-invariant ragged prefill groups):**
 FR-CB2: the kernel-route rule (v0.3.12/v0.3.13) applies to ragged groups as
 well as equal-offset groups. A grouped row now always prefills its own
@@ -306,8 +325,10 @@ accounting is the load-bearing invariant of this SPEC (FR-CB6). A single
 mis-attributed token is a billing and provider-earnings defect, not merely a
 serving glitch.
 
-The feature is **disabled by default** and enables nothing on merge of either
-this SPEC or its IMPL. When the flag is off, the provider MUST behave
+**(v0.3.15)** The feature is on by default for every model the local engine
+admits, gated per Mac by the FR-CB10 on-device self-check; the rest of this
+paragraph describes the pre-v0.3.15 posture. The feature was **disabled by
+default** and enabled nothing on merge of either this SPEC or its IMPL. When the flag is off, the provider MUST behave
 byte-for-byte as it does today (FR-CB9). Turning it on for real traffic is
 gated on the acceptance criteria of §7 and, decisively, on the real-hardware
 enable gate of FR-CB15. A green CI/audit/unit-test pass is not the enable gate
@@ -959,6 +980,95 @@ parity/isolation probes also pass. A missing,
 stale, malformed, unsigned, wrong-signer, revoked, catalog-mismatched, or
 identity-mismatched policy is equivalent to no acceptance coverage.
 
+**(v0.3.15) Default-on with on-device qualification.** The two paragraphs
+above are superseded where they conflict:
+
+1. Acceptance coverage for a coordinator-joined provider is every tuple the
+   local SPEC-039 descriptor admits, minus signed revocations. A signed policy
+   entry with `rollout: off` revokes its model artifact (`model_sha256`) on its
+   runtime revision (`metallib_sha256` plus `kernel_identifier`) on every Mac;
+   hardware class and the other recorded fields do not narrow it. An absent,
+   stale, malformed, unsigned, wrong-signer or catalog-mismatched policy
+   revokes nothing. Old policy files parse unchanged.
+2. Batching runs for a non-revoked tuple only after this Mac's self-check
+   grants it. The check runs automatically when a model loads or swaps and
+   whenever the (model SHA-256, Metal library SHA-256, kernel identifier,
+   hardware class, macOS version and build, pinned MLX fork identity) key has
+   no stored result; an OS upgrade or MLX pin change therefore re-runs it. It
+   runs through the production scheduler, so it probes at the serve path's
+   own decode lockstep window, and its prompts have unequal lengths (short to
+   about 1.5k tokens) because batched decode pads keys to the longest row,
+   which can change a neighbour's attention route. Every slot count k from 2 to
+   the scheduler rows is checked (a grant covers every row count below it):
+   it submits k distinct fixed greedy prompts together. Every row MUST equal
+   that prompt run
+   alone on the same paged engine, or first differ only at a numerical
+   near-tie judged by the load-time isolation probe's own rule: at the first
+   differing position both tokens are the stock serial top two for the
+   shared prefix, within `batchedArgmaxLogitTolerance` (1.0 logit), and the
+   batched token is not another row's token at that position unless it is
+   the stock argmax. A row that fails stops the ladder; that k and above are
+   not granted. Batched and contiguous serial decode reduce attention in a
+   different order and MoE gathers group rows differently, so exact
+   serial-vs-batched token identity is not required; the load-time SPEC-039
+   parity and isolation probes remain the quality gate against stock serial
+   decode. On the SPEC-023-R009 ladder rungs each k runs three repeats of
+   stock serial decode then the batch, back to back on the same prompts; the
+   gain is the median batch/serial ratio (widths between rungs are verified
+   for isolation but not picked). It grants the rung with the highest gain, preferring the lowest k
+   within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
+   Mac serves serially. The highest k whose rows all passed is recorded as
+   `verified_k`.
+   **Throughput noise never switches batching off.** On a Mac that already
+   batches the model (a signed provisional grant, the previous result on this
+   key, or a grant under an older Metal library, kernel or macOS build for the
+   same model and hardware), only a correctness result (a divergence or leak
+   beyond the probe rule, or a crashed step) may revoke or lower the grant,
+   and never below `verified_k`. A throughput result may raise it but not
+   lower it. A no-gain result keeps the grant (`kept_prior_grant_*`, logged)
+   and schedules a re-measurement (1 h, doubling with each consecutive clear
+   loss, i.e. best exact gain below 1.0x); throughput alone never lowers or
+   removes the grant. While a new
+   runtime identity is checked, a Mac with an older grant for the same model
+   and hardware keeps serving it (`prior_grant_pending_recheck`).
+3. The check MUST NOT block serving. It runs only while no request is in
+   flight after an idle interval and abandons a step when a request arrives;
+   completed steps persist, so a busy Mac resumes where it stopped, and
+   consecutive deferrals back off (doubling, at most 15 minutes). Each width
+   is journaled before any inference for it runs (its alone runs included),
+   and a width whose journal write fails is not run: a step found unfinished
+   on restart (the process died, e.g. a Metal OOM at a high k), including
+   during a re-measurement of a kept grant, is never retried on that key, and
+   the decision uses the widths that passed below it (`crashed_at_<k>` when
+   none); the lowest crashed width is stored with the key and neither it nor
+   any wider count is measured again on that key. Self-check serial runs stop
+   generating as soon as a request arrives.
+   Until it decides, the provider serves one slot serially, except that a
+   signed positive entry for the served model artifact is a provisional grant
+   that keeps its configured count and batching (so an already-enabled model
+   never drops on a new build).
+Accepted limits (security review): a party able to block the policy or
+revocation feed can keep a revoked tuple eligible, because an absent policy
+revokes nothing (operator decision; a verified revocation is enforced); and
+the near-tie rule is a heuristic, so contamination that lands on a row's own
+top-two token without matching another row's token at that position is not
+detected by it. The load-time isolation probe and the per-width checks bound
+both.
+
+4. The served count MUST NOT exceed `verified_k`, including an owner pin
+   (a pin may lower the count, never raise it past what was verified). The
+   decision (`granted`, `no_net_gain`, `row_divergence_at_<k>`,
+   `crashed_at_<k>`, `serial_baseline_unavailable`, `kept_prior_grant_*`,
+   `prior_grant_pending_recheck`, or `pending`/`deferred`
+   before one exists), served slots, `verified_k`, deferral count and the
+   runtime identity it was measured on are reported in `/v1/status`
+   `continuous_batching.self_check` and on heartbeats as `cb_self_check`
+   (coordinator observability; routing still uses advertised slots and the
+   pool concurrency ceiling).
+5. Positive entries authorize nothing else, except the per-tuple
+   `cached_turns_accepted` grant below. The emergency `continuous_batching:
+   off` override still forces serial.
+
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at
 configuration load). It is the per-tuple, revision-bound AC-26 grant for
@@ -978,6 +1088,48 @@ NOT inflate `slots_total`. `slots_free` MUST be derived from validated active
 capacity minus active accepted/runnable work. Internal prompt-batch,
 decode-batch, microbatch, paged-engine, and queue limits MAY differ but MUST
 NOT change `slots_total`.
+
+**(v0.3.15)** The Entry 110 concurrency is resolved by the provider itself
+(SPEC-023-R009, automatic application):
+
+1. An owner-pinned `max_concurrency_override` (config with
+   `max_concurrency_source: owner`, `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE`, or
+   `--max-batch`) MUST be served as written; the FR-CB10 self-check then only
+   turns batching on or off. A config value without `max_concurrency_source`,
+   or with `autotune`, is autotune-derived.
+2. Otherwise, with a draft model configured or the emergency off set, the
+   count MUST be 1 (FR-CB12).
+3. Otherwise the scheduler is built with the SPEC-023-R009 recommendation for
+   this Mac as its row capacity: `memory_fit_cap` at the served context when
+   the model geometry is readable, else the chip/RAM tier constant; at most 5
+   on Apple M1/M2 GPUs other than Ultra (MLX quantized matmul switches from
+   the vector to the matrix kernel above 5 rows); and at most
+   `max_concurrency_override_limit`. `slots_total` starts at 1 (or the
+   provisional grant's configured count) and becomes the FR-CB10 self-check's
+   k, applied live: the serial-path gate and the advertised capacity change;
+   the scheduler is not rebuilt, and the relay admits at most `slots_total`
+   requests; the scheduler admits at most `slots_total` buyer rows (relay
+   or direct HTTP) through its own bounded queue, retained-token budget,
+   wait timeout and cancellation, so batched buyer rows never exceed the
+   verified count. Self-check rows may use every scheduler row, and a buyer
+   row is not admitted beside self-check rows (the self-check yields to the
+   buyer). Serial-routed buyer requests (features the batch cannot
+   represent) keep their own gate, also sized to `slots_total`, as before
+   v0.3.15. Both limits change in place, and each step of a live change
+   re-checks the swap generation so a stale result never resizes a gate or
+   caps a swapped-in scheduler. An owner-pinned provider with a signed
+   positive entry also keeps its pin while its self-check runs; an
+   older-runtime grant is never widened by a pin before re-verification. A capacity change is published at once. A
+   stored self-check result for the loaded tuple applies at startup before
+   the first advertisement, clamped to the rows after the startup memory
+   bound; a provisional grant never exceeds a computable memory fit. A warm
+   swap or adoption serves the owner pin or one slot until the new model's
+   stored result, prior grant or self-check applies.
+4. A tuple that cannot batch at all (no attached engine, revoked) serves 1.
+
+Loopback runtimes (SPEC-046) and autotune children keep their configured
+count. The coordinator's `pool.max_concurrency_ceiling` still clamps routed
+slots.
 
 ### FR-CB12 - SPEC-028 classic-draft mutual exclusion (SPEC-038-R012)
 
@@ -1073,7 +1225,12 @@ complete a real-Mac exercise on that tuple demonstrating, at minimum:
   within the defined bound, warm-swap/receipt/model-hash parity (FR-CB13), and
   `SPEC-039` paged-engine support for the tuple.
 
-Absent this evidence the flag MUST remain off for real traffic. This mirrors
+**(v0.3.15)** Activation is no longer gated on this per-tuple campaign: each
+Mac's FR-CB10 on-device self-check (row isolation at every granted k, measured
+aggregate gain over serial) is the activation gate, and the signed policy only
+revokes. The campaign above remains the evidence standard for release review
+and for Gate A5 promotion below. Before v0.3.15: absent this evidence the flag
+MUST remain off for real traffic. This mirrors
 the Entry-199 lesson: a dormant, default-off feature with green gates is not a
 production-enabled feature. The step-by-step enable-gate procedure for
 operators is captured in a provider runbook (forward reference:
