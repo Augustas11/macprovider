@@ -507,8 +507,11 @@ providers:
 # legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
 # must not, re-arm the legacy binary-only updater.
 #
-# `required_binary_version` (issue #767) is the HARD admission floor: a hello
-# below it is closed with 4004 version_unsupported. Prior to #767 it was set
+# `required_binary_version` (issue #767) is the HARD admission floor only
+# without a configured compatibility_set: a hello below it is closed with 4004
+# version_unsupported. With compatibility_set configured (SPEC-002-R004, no
+# floor) an admitted release below it connects update-only and receives the
+# recommendation instead; fresh credential bootstrap still closes. Prior to #767 it was set
 # nowhere in prod, so seam 5's floor existed only in code.
 #
 # WHY 1.8.33 and not something higher: 1.8.33 is the first release that

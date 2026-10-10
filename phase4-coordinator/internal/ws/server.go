@@ -3378,8 +3378,14 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 			cmp, ok := compareSemver(hello.BinaryVersion, required)
 			if !ok || cmp < 0 {
-				s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
-				return nil, false
+				if !policy.Configured() {
+					s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+					return nil, false
+				}
+				// SPEC-002-R004 has no admission floor: an admitted release
+				// below required_binary_version connects update-only, so it
+				// still receives the recommendation and updates itself.
+				firstHopOnly = true
 			}
 		}
 	}
@@ -3530,8 +3536,9 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Str("provider_id", hello.ProviderID).
 			Str("event", "compatibility_set_update_only").
 			Str("compatibility_set_id", hello.CompatibilitySetID).
+			Str("binary_version", hello.BinaryVersion).
 			Str("recommended_compatibility_set_id", policy.TargetID).
-			Msg("admitting update-only session for a revoked release")
+			Msg("admitting update-only session for a revoked or below-required release")
 	} else {
 		var gateOK bool
 		gateCatalog := resolveAdmissionCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)

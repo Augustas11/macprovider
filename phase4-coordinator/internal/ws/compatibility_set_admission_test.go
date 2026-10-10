@@ -600,3 +600,28 @@ func TestRevokedReleaseGetsUpdateOnlySessionWithRecommendation(t *testing.T) {
 		t.Fatalf("revoked release must be update-only and non-routable: ok=%v provider=%+v", ok, provider)
 	}
 }
+
+// SPEC-002-R004 has no admission floor: under a configured policy a
+// non-revoked release below required_binary_version connects update-only and
+// receives the recommendation instead of being closed version_unsupported.
+func TestBelowRequiredReleaseConnectsUpdateOnlyWithRecommendation(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{TargetID: compatibilityFutureSet}
+		cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
+		cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.8.12"
+	})
+	defer h.HTTP.Close()
+	ack, done := helloAckFor(t, h.HTTP.URL, compatibilityRevokedSet, "1.8.10")
+	defer done()
+	if ack.Type != "hello_ack" || ack.RecommendedCompatibilitySetID != compatibilityFutureSet || ack.RecommendedBinaryVersion != "1.8.12" {
+		t.Fatalf("below-required hello_ack = %+v", ack)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+		return ok && !provider.HandshakeAckPending
+	})
+	provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+	if !ok || provider.CatalogAdmissionMode != "update_bridge" || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("below-required release must be update-only: ok=%v provider=%+v", ok, provider)
+	}
+}
