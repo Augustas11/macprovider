@@ -4166,6 +4166,11 @@ func compatibilitySetRejectionLocked(policy config.CompatibilitySetConfig, provi
 	if code := policy.SessionRejectionCode(providedID); code != "" {
 		return code
 	}
+	// Sanity check: the hello's binary_version must be exactly the version
+	// its compatibility_set_id encodes.
+	if version, ok := config.CompatibilitySetIDVersion(providedID); !ok || binaryVersion != version {
+		return "provider_binary_version_mismatch"
+	}
 	return ""
 }
 
@@ -4181,6 +4186,8 @@ func compatibilitySetProviderRejectionLocked(policy config.CompatibilitySetConfi
 
 func compatibilitySetRejectionMessage(policy config.CompatibilitySetConfig, code string) string {
 	switch code {
+	case "provider_binary_version_mismatch":
+		return "provider_binary_version_mismatch: binary_version must equal the compatibility_set_id version"
 	case "provider_release_revoked":
 		return "provider_release_revoked: reconnect to receive the update to " + policy.TargetID
 	default:

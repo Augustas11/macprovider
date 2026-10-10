@@ -82,6 +82,15 @@ func CompatibilitySetIDRepository(id string) (string, bool) {
 	return repo, ok
 }
 
+// CompatibilitySetIDVersion returns the MAJOR.MINOR.PATCH a valid id encodes.
+func CompatibilitySetIDVersion(id string) (string, bool) {
+	if ValidateCompatibilitySetID(id) != nil {
+		return "", false
+	}
+	_, version, ok := splitCompatibilitySetID(id)
+	return version, ok
+}
+
 // ValidCompatibilitySetVersion reports a canonical, non-overflowing
 // MAJOR.MINOR.PATCH (the form a compatibility_set_id carries).
 func ValidCompatibilitySetVersion(version string) bool {

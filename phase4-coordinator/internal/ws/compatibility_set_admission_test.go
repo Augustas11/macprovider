@@ -85,6 +85,7 @@ func TestConfiguredCompatibilitySetAcceptsRollbackHelloAndRecommendsTarget(t *te
 	defer conn.Close()
 	hello := validHello("m4-anon")
 	hello["compatibility_set_id"] = compatibilityRollbackSet
+	hello["binary_version"] = "1.8.3"
 	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
@@ -146,6 +147,9 @@ func TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello(t *testing.T)
 		reason  string
 	}{
 		{name: "foreign repository", setID: compatibilityOtherRepo, version: "1.8.12", reason: "compatibility_set_repository_mismatch"},
+		{name: "binary version differs from the set version", setID: compatibilityFutureSet, version: "1.8.11", reason: "provider_binary_version_mismatch"},
+		{name: "leading-zero binary version", setID: compatibilityFutureSet, version: "01.8.12", reason: "provider_binary_version_mismatch"},
+		{name: "revoked set with a different binary version", setID: compatibilityRevokedSet, version: "1.8.12", reason: "provider_binary_version_mismatch"},
 		{name: "leading-zero release identity", setID: "Augustas11/macprovider:v1.8.012@dddddddddddddddddddddddddddddddddddddddd", version: "1.8.12", reason: "compatibility_set_invalid"},
 	}
 	for _, test := range tests {
@@ -486,6 +490,7 @@ func TestConfiguredCompatibilitySetEchoesAcceptedAuthSetAndTarget(t *testing.T) 
 	}
 	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
 	initial["compatibility_set_id"] = compatibilityRollbackSet
+	initial["binary_version"] = "1.8.3"
 	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
 		t.Fatalf("write auth initial: %v", err)
 	}
