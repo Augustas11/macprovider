@@ -214,7 +214,8 @@ END;
 $$;
 
 -- Revoke now covers both operator-revocable sources: the dual-control
--- operator_api root and the automatic app_attest root. The body is the 019
+-- operator_api root and the automatic app_attest root, and it expires every
+-- other app_attest root of the provider as well. The body is the 019
 -- function with the source predicate widened; the UPDATE runs in a CTE because
 -- it can now expire two rows and PL/pgSQL rejects a multi-row RETURNING INTO.
 -- The signature and output columns are unchanged.
@@ -278,6 +279,17 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'active operator_api trust root not found';
     END IF;
+
+    -- A revoke ends automatic trust for the whole attested device: every
+    -- app_attest root the provider holds, under any self-reported hash, is
+    -- expired too, so an automatic root obtained earlier for another hash
+    -- cannot keep serving (audit R2). Operator and inventory roots for other
+    -- hashes are separate approvals and stay as they are.
+    UPDATE hardware_verification_trust t
+       SET expires_at = revoke_time
+     WHERE t.provider_id = BTRIM(p_provider_id)
+       AND t.source = 'app_attest'
+       AND (t.expires_at IS NULL OR t.expires_at > revoke_time);
 
     INSERT INTO hardware_trust_grants (
         grant_id, pending_id, provider_id, hardware_identity_hash, chip_normalized,

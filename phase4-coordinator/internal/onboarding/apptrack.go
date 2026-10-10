@@ -632,7 +632,11 @@ func (h *Handler) recordAppAttestVerification(providerID string, keyID []byte) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = recorder.RecordAppAttestVerification(ctx, providerID, keyID)
+	if err := recorder.RecordAppAttestVerification(ctx, providerID, keyID); err != nil {
+		// Fail-safe (the Mac stays on operator approval) but never silent:
+		// a structured line for journald alerting, without the error text.
+		fmt.Printf("app_attest_record_failed provider_id=%s\n", providerID)
+	}
 }
 
 func writeAppTrackRegisterSuccess(w http.ResponseWriter, providerID, token string, attested bool, coordinatorWSURL string) {

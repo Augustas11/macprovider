@@ -1006,6 +1006,7 @@ func TestHardwareTrustAppAttestAutoMigrationShape(t *testing.T) {
 		"ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_inserted = ROW_COUNT;",
 		"encode(sha256(v_key_id), 'hex')",
 		"AND t.source IN ('operator_api', 'app_attest')",
+		"WHERE t.provider_id = BTRIM(p_provider_id)\n       AND t.source = 'app_attest'\n       AND (t.expires_at IS NULL OR t.expires_at > revoke_time);",
 		"REVOKE ALL ON FUNCTION auto_trust_attested_hardware(BIGINT) FROM PUBLIC;",
 		"REVOKE ALL ON FUNCTION auto_trust_attested_hardware(BIGINT) FROM provider_onboarding;",
 		"GRANT EXECUTE ON FUNCTION auto_trust_attested_hardware(BIGINT) TO stats_hardware_verifier;",

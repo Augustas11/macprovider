@@ -1,6 +1,6 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.7.1-draft
+**Status:** v0.7.2-draft
 **Date:** 2026-10-10
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
@@ -499,8 +499,11 @@ row, inserts nothing, and writes no second audit row.
 
 **Revocation.** `revoke_hardware_trust_approval` (replaced by migration 031) expires an active
 `operator_api` **or** `app_attest` root for the named `(provider_id, hardware_identity_hash)` and
-ledgers `action='revoke'`; step 5 then keeps the automatic path from re-granting that provider
-under any hash.
+ledgers `action='revoke'`. In the same transaction it expires **every** active `app_attest` root
+the provider holds, under any hardware hash, so an automatic root obtained before the revoke for
+another self-reported hash cannot keep serving; operator and inventory roots for other hashes are
+separate approvals and are left alone. Step 5 then keeps the automatic path from re-granting that
+provider under any hash.
 
 **SPEC-033-R002 — Attested hardware is trusted without operator approval.** A hardware-evidence job
 that passes every §5.1–§5.4 gate and whose provider has a verified attestation (a
@@ -511,7 +514,8 @@ action. It MUST promote on that verifier run when the chip-profile gate (§5.5) 
 provider advisory lock was free; otherwise it stays `waiting_trust` and is retried on later runs.
 The grant MUST be idempotent, MUST NOT override an expired or differently-bound `app_attest` row,
 and MUST NOT trust automatically any job of a provider for which an operator revoke is recorded,
-whatever hardware hash the job reports. A job whose provider lacks a verified attestation MUST keep
+whatever hardware hash the job reports. An operator revoke MUST expire every `app_attest` root of
+that provider, including roots for hashes other than the one revoked. A job whose provider lacks a verified attestation MUST keep
 the existing `waiting_trust` + dual-control path.
 
 ---
@@ -813,6 +817,10 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.7.2-draft (2026-10-10) — audit round 2 (#1880).**
+- **§5.7 / R002**: an operator revoke also expires every other `app_attest` root of the provider,
+  so automatic roots obtained before the revoke under another hash stop serving.
 
 **v0.7.1-draft (2026-10-10) — audit round 1 (#1880).**
 - **§5.7 / §10.1 / R002**: the attestation input moves from `provider_identities.attested`

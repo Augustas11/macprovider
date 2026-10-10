@@ -2987,3 +2987,82 @@ func TestHardwareTrustAppAttestAutoTrustFunctionIsIdempotent(t *testing.T) {
 		t.Fatalf("differently bound root changed: %q -> %q", boundBefore, got)
 	}
 }
+
+// TestHardwareTrustRevokeEndsEveryAutomaticRootOfTheDevice is the security R2
+// HIGH scenario: an attested provider obtains automatic roots for H and H'
+// before any revoke; revoking H must expire H' too, demote the profile it
+// backs, and keep fresh H' evidence on the operator path.
+func TestHardwareTrustRevokeEndsEveryAutomaticRootOfTheDevice(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m5', 'Apple M5', 153, 0.03, 10, 10)
+        ON CONFLICT (chip_normalized) DO NOTHING`); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id) VALUES ('p-device', $1)`,
+		[]byte(strings.Repeat("v", 32))); err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	const hashH = "1111111111111111111111111111111111111111111111111111111111111111"
+	const hashHPrime = "2222222222222222222222222222222222222222222222222222222222222222"
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+
+	verifier, err := hardwareverify.Open(fx.roleDSN(roleHardwareVerifier))
+	if err != nil {
+		t.Fatalf("open verifier: %v", err)
+	}
+	t.Cleanup(func() { _ = verifier.Close() })
+	jobState := func(id int64) string {
+		var status string
+		if err := adminDB.QueryRowContext(ctx, `SELECT status FROM hardware_verification_jobs WHERE id = $1`, id).Scan(&status); err != nil {
+			t.Fatalf("read job %d: %v", id, err)
+		}
+		return status
+	}
+	jobH, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashH, base)
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process H: %v", err)
+	}
+	jobHPrime, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashHPrime, base.Add(5*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process H': %v", err)
+	}
+	if jobState(jobH) != "verified" || jobState(jobHPrime) != "verified" {
+		t.Fatalf("pre-revoke jobs = %s/%s, want both verified", jobState(jobH), jobState(jobHPrime))
+	}
+
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+	var nowUntrusted bool
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_now_untrusted FROM revoke_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		"55555555-5555-5555-5555-555555555555", "p-device", hashH, "operator:bob", "revoke device").Scan(&nowUntrusted); err != nil {
+		t.Fatalf("revoke H: %v", err)
+	}
+	var activeAutomatic int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM hardware_verification_trust
+         WHERE provider_id = 'p-device' AND source = 'app_attest'
+           AND (expires_at IS NULL OR expires_at > now())`).Scan(&activeAutomatic); err != nil || activeAutomatic != 0 {
+		t.Fatalf("active automatic roots after revoking H = %d err = %v, want 0 (H' included)", activeAutomatic, err)
+	}
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx, `SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-device'`).Scan(&verified); err != nil || verified {
+		t.Fatalf("profile backed by H' verified = %v err = %v, want demoted", verified, err)
+	}
+
+	freshHPrime, _ := seedAutoTrustJob(t, ctx, adminDB, "p-device", hashHPrime, base.Add(10*time.Minute))
+	if _, err := verifier.ProcessPending(ctx, 100); err != nil {
+		t.Fatalf("process fresh H': %v", err)
+	}
+	if got := jobState(freshHPrime); got != "waiting_trust" {
+		t.Fatalf("fresh H' job after revoke = %s, want waiting_trust", got)
+	}
+}
