@@ -205,6 +205,7 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	t.Setenv("ONBOARDING_AUTH_POLICY_CUTOVER_DSN", "postgres://cutover@localhost/macprovider")
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_REQUEST_DSN", "postgres://hwtrust_requester@localhost/macprovider")
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_APPROVE_DSN", "postgres://hwtrust_approver@localhost/macprovider")
+	t.Setenv("ONBOARDING_APP_ATTEST_RECORD_DSN", "postgres://app_attest_recorder@localhost/macprovider")
 	t.Setenv("APPLE_TEAM_ID", "TEAMID1234")
 	t.Setenv("MAL_REFERRAL_HMAC_K1", strings.Repeat("r", 32))
 	t.Setenv("MODEL_HASH_LEGACY_UNTIL", "2099-07-19T00:00:00Z")
@@ -215,6 +216,9 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	}
 	if !cfg.Stats.Enabled {
 		t.Fatal("Stats.Enabled=false, want true")
+	}
+	if cfg.Onboarding.AppAttestRecordDSN != "postgres://app_attest_recorder@localhost/macprovider" {
+		t.Fatalf("Onboarding.AppAttestRecordDSN=%q, want the env-provided recorder DSN", cfg.Onboarding.AppAttestRecordDSN)
 	}
 	if cfg.Stats.ReaderDSN != "postgres://reader@localhost/macprovider" {
 		t.Fatalf("Stats.ReaderDSN=%q", cfg.Stats.ReaderDSN)
@@ -413,5 +417,34 @@ tier2:
 	}
 	if cfg.Tier2.MDM.MDARefreshIntervalHours != 168 {
 		t.Fatalf("MDARefreshIntervalHours=%d want 168 (R4-M5 clamp)", cfg.Tier2.MDM.MDARefreshIntervalHours)
+	}
+}
+
+// TestLoadReadsAppAttestRecordDSNFromEnvWhenUnset covers SPEC-033 §2.7: Pearl's
+// live config is edited in place, so the recorder DSN also comes from its env
+// var when the config omits the field; an explicit value wins.
+func TestLoadReadsAppAttestRecordDSNFromEnvWhenUnset(t *testing.T) {
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("M3_2_TEST_GATEWAY_TOKEN_DEFAULT", "fedcba9876543210FEDCBAzyxwvutsrq")
+	base := `
+auth:
+  operator_key: env:M3_2_TEST_OPERATOR_KEY
+  gateway_service_token: env:M3_2_TEST_GATEWAY_TOKEN_DEFAULT
+`
+	t.Setenv(AppAttestRecordDSNEnv, "")
+	if cfg := writeMinimalConfig(t, base); cfg.Onboarding.AppAttestRecordDSN != "" {
+		t.Fatalf("unset env: AppAttestRecordDSN=%q, want empty", cfg.Onboarding.AppAttestRecordDSN)
+	}
+	t.Setenv(AppAttestRecordDSNEnv, " postgres://app_attest_recorder@localhost/macprovider ")
+	if cfg := writeMinimalConfig(t, base); cfg.Onboarding.AppAttestRecordDSN != "postgres://app_attest_recorder@localhost/macprovider" {
+		t.Fatalf("env fallback: AppAttestRecordDSN=%q", cfg.Onboarding.AppAttestRecordDSN)
+	}
+	t.Setenv("M3_2_TEST_EXPLICIT_RECORDER", "postgres://explicit@localhost/macprovider")
+	cfg := writeMinimalConfig(t, base+`
+onboarding:
+  app_attest_record_dsn: env:M3_2_TEST_EXPLICIT_RECORDER
+`)
+	if cfg.Onboarding.AppAttestRecordDSN != "postgres://explicit@localhost/macprovider" {
+		t.Fatalf("explicit config: AppAttestRecordDSN=%q", cfg.Onboarding.AppAttestRecordDSN)
 	}
 }

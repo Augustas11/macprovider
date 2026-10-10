@@ -1,256 +1,183 @@
 package onboarding
 
 import (
-	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/asn1"
-	"encoding/binary"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"math/big"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/appattest/appattesttest"
 )
 
-func TestAppleAppAttestVerifierAcceptsValidObject(t *testing.T) {
-	fixture := newAppAttestFixture(t)
-	ok, err := fixture.verifier.Verify(t.Context(), fixture.evidence)
+const realStudioFixturePath = "../appattest/testdata/macos27-studio-2026-10-04.json"
+
+// realStudioTime is inside the real leaf's validity
+// (2026-10-03T11:04:37Z .. 2026-10-06T11:04:37Z).
+var realStudioTime = time.Date(2026, 10, 4, 23, 0, 0, 0, time.UTC)
+
+// realStudioEvidence loads the #1840 spike: a Developer ID Malibu.app
+// (team YF7XNRJUG4) on macOS 27.0.1. Its clientDataHash is SHA-256 of the
+// 32 nonce bytes.
+func realStudioEvidence(t *testing.T) AppAttestEvidence {
+	t.Helper()
+	raw, err := os.ReadFile(realStudioFixturePath)
 	if err != nil {
-		t.Fatalf("Verify error: %v", err)
+		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("Verify returned false")
+	var fixture struct {
+		AttestationB64 string `json:"attestation_b64"`
+		KeyID          string `json:"key_id"`
+		NonceB64       string `json:"nonce_b64"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	decode := func(s string) []byte {
+		out, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	return AppAttestEvidence{
+		Object:         decode(fixture.AttestationB64),
+		KeyID:          decode(fixture.KeyID),
+		ClientDataHash: sha256.Sum256(decode(fixture.NonceB64)),
 	}
 }
 
-func TestAppleAppAttestationRootPEMParses(t *testing.T) {
-	cert, err := parseSinglePEMCert([]byte(appleAppAttestationRootCAPEM))
-	if err != nil {
-		t.Fatalf("parse Apple App Attestation Root CA: %v", err)
-	}
-	if cert.Subject.CommonName != "Apple App Attestation Root CA" || !cert.IsCA {
-		t.Fatalf("unexpected root certificate subject=%q isCA=%v", cert.Subject.CommonName, cert.IsCA)
+func realStudioVerifier() AppleAppAttestVerifier {
+	return AppleAppAttestVerifier{
+		Config: AppAttestConfig{TeamID: "YF7XNRJUG4", BundleID: "tech.malibu.app", CoordinatorDomain: "coordinator.malibu.tech"},
+		Now:    func() time.Time { return realStudioTime },
 	}
 }
 
-func TestAppleAppAttestVerifierRejectsBindingFailures(t *testing.T) {
-	fixture := newAppAttestFixture(t)
-	for _, tc := range []struct {
-		name   string
-		mutate func(*AppAttestEvidence, *AppleAppAttestVerifier)
-	}{
-		{
-			name: "key id mismatch",
-			mutate: func(e *AppAttestEvidence, v *AppleAppAttestVerifier) {
-				e.KeyID = bytes.Repeat([]byte{0x99}, 32)
-			},
+// TestAppleAppAttestVerifierAcceptsRealMacOS27Attestation is the regression
+// for the pre-v0.8.0 verifier, which refused this attestation (corrupt root,
+// misparsed nonce extension).
+func TestAppleAppAttestVerifierAcceptsRealMacOS27Attestation(t *testing.T) {
+	ok, err := realStudioVerifier().Verify(t.Context(), realStudioEvidence(t))
+	if err != nil || !ok {
+		t.Fatalf("real macOS 27 attestation: ok=%v err=%v", ok, err)
+	}
+
+	// The same attestation is refused for another binding.
+	for name, mutate := range map[string]func(*AppAttestEvidence, *AppleAppAttestVerifier){
+		"client data": func(e *AppAttestEvidence, _ *AppleAppAttestVerifier) { e.ClientDataHash[0] ^= 1 },
+		"key id": func(e *AppAttestEvidence, _ *AppleAppAttestVerifier) {
+			e.KeyID = append([]byte(nil), e.KeyID...)
+			e.KeyID[0] ^= 1
 		},
-		{
-			name: "client data hash mismatch",
-			mutate: func(e *AppAttestEvidence, v *AppleAppAttestVerifier) {
-				e.ClientDataHash = sha256.Sum256([]byte("different request binding"))
-			},
-		},
-		{
-			name: "app id hash mismatch",
-			mutate: func(e *AppAttestEvidence, v *AppleAppAttestVerifier) {
-				v.Config.TeamID = "OTHERTEAM"
-			},
-		},
-		{
-			name: "malformed cbor",
-			mutate: func(e *AppAttestEvidence, v *AppleAppAttestVerifier) {
-				e.Object = []byte{0xbf}
-			},
+		"team":   func(_ *AppAttestEvidence, v *AppleAppAttestVerifier) { v.Config.TeamID = "ZZZZZ99999" },
+		"bundle": func(_ *AppAttestEvidence, v *AppleAppAttestVerifier) { v.Config.BundleID = "tech.malibu.other" },
+		"after expiry": func(_ *AppAttestEvidence, v *AppleAppAttestVerifier) {
+			v.Now = func() time.Time { return realStudioTime.AddDate(0, 0, 3) }
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			evidence := fixture.evidence
-			evidence.Object = append([]byte(nil), evidence.Object...)
-			evidence.KeyID = append([]byte(nil), evidence.KeyID...)
-			verifier := fixture.verifier
-			tc.mutate(&evidence, &verifier)
-			ok, err := verifier.Verify(t.Context(), evidence)
-			if ok || !errors.Is(err, ErrAppAttestBinding) {
-				t.Fatalf("Verify ok=%v err=%v, want binding failure", ok, err)
-			}
-		})
+		evidence, verifier := realStudioEvidence(t), realStudioVerifier()
+		mutate(&evidence, &verifier)
+		if ok, err := verifier.Verify(t.Context(), evidence); ok || !errors.Is(err, ErrAppAttestBinding) {
+			t.Fatalf("%s: ok=%v err=%v, want ErrAppAttestBinding", name, ok, err)
+		}
 	}
 }
 
-func TestAppAttestCBORRejectsDepthNine(t *testing.T) {
-	raw := cborText("leaf")
-	for i := 0; i < cborMaxDepth+1; i++ {
-		raw = cborArray(raw)
+// TestAppleAppAttestVerifierRejectsCorruptRoot pins the regression: with the
+// root main embedded before v0.8.0, the real attestation does not verify.
+func TestAppleAppAttestVerifierRejectsCorruptRoot(t *testing.T) {
+	block, _ := pem.Decode([]byte(preV080CorruptRootPEM))
+	if block == nil {
+		t.Fatal("corrupt root PEM")
 	}
-	if _, _, err := newCBORDecoder(raw).parse(); err == nil {
-		t.Fatal("depth-9 CBOR parsed successfully")
-	}
-}
-
-type appAttestFixture struct {
-	verifier AppleAppAttestVerifier
-	evidence AppAttestEvidence
-}
-
-func newAppAttestFixture(t *testing.T) appAttestFixture {
-	t.Helper()
-	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
-	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	corrupt, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		t.Fatalf("generate root key: %v", err)
+		t.Fatal(err)
 	}
-	rootTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Test App Attestation Root"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(24 * time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	verifier := realStudioVerifier()
+	verifier.Root = corrupt
+	if ok, err := verifier.Verify(t.Context(), realStudioEvidence(t)); ok || !errors.Is(err, ErrAppAttestBinding) {
+		t.Fatalf("corrupt root: ok=%v err=%v, want ErrAppAttestBinding", ok, err)
 	}
-	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+}
+
+func TestAppleAppAttestVerifierPolicy(t *testing.T) {
+	now := time.Now()
+	fixture, err := appattesttest.NewFixtureAt(now)
 	if err != nil {
-		t.Fatalf("create root cert: %v", err)
+		t.Fatal(err)
 	}
-	attestKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate attest key: %v", err)
+	const appID = "TEAM123456.tech.malibu.app"
+	clientDataHash := sha256.Sum256([]byte("client data"))
+	verifier := AppleAppAttestVerifier{
+		Config: AppAttestConfig{TeamID: "TEAM123456", BundleID: "tech.malibu.app"},
+		Root:   fixture.Root,
+		Now:    func() time.Time { return now },
 	}
-	keyID := bytes.Repeat([]byte{0x42}, 32)
-	clientHash := sha256.Sum256([]byte("SPEC-026 request binding"))
-	authData := buildTestAuthData(t, "TEAM12345.tech.malibu.app", keyID, attestKey)
-	nonceInput := append(append([]byte(nil), authData...), clientHash[:]...)
-	nonce := sha256.Sum256(nonceInput)
-	nonceDER, err := asn1.Marshal(nonce[:])
-	if err != nil {
-		t.Fatalf("marshal nonce extension: %v", err)
+	attest := func(opts appattesttest.AttestOptions) AppAttestEvidence {
+		t.Helper()
+		opts.AppID = appID
+		opts.ClientDataHash = clientDataHash[:]
+		att, err := fixture.Attest(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return AppAttestEvidence{Object: att.Object, KeyID: att.KeyID, ClientDataHash: clientDataHash}
 	}
-	leafTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "Test App Attestation Leaf"},
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtraExtensions: []pkix.Extension{
-			{Id: appleAppAttestNonceOID, Value: nonceDER},
-		},
+
+	if ok, err := verifier.Verify(t.Context(), attest(appattesttest.AttestOptions{})); !ok || err != nil {
+		t.Fatalf("valid: ok=%v err=%v", ok, err)
 	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, rootTemplate, &attestKey.PublicKey, rootKey)
-	if err != nil {
-		t.Fatalf("create leaf cert: %v", err)
+	// A genuine key on a Mac without SIP and Full Security is not attested,
+	// and not a binding failure.
+	if ok, err := verifier.Verify(t.Context(), attest(appattesttest.AttestOptions{ACLInner: []byte{0x30, 0x00}})); ok || err != nil {
+		t.Fatalf("acl mismatch: ok=%v err=%v, want (false, nil)", ok, err)
 	}
-	object := cborMap(
-		cborText("fmt"), cborText("apple-appattest"),
-		cborText("authData"), cborBytes(authData),
-		cborText("attStmt"), cborMap(
-			cborText("x5c"), cborArray(cborBytes(leafDER)),
-		),
-	)
-	rootPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
-	return appAttestFixture{
-		verifier: AppleAppAttestVerifier{
-			Config: AppAttestConfig{
-				TeamID:   "TEAM12345",
-				BundleID: "tech.malibu.app",
-			},
-			RootCertPEM: rootPEM,
-			Now: func() time.Time {
-				return now
-			},
-		},
-		evidence: AppAttestEvidence{
-			Object:         object,
-			KeyID:          keyID,
-			ClientDataHash: clientHash,
-		},
+	dev := appattesttest.DevelopmentAAGUID
+	for name, opts := range map[string]appattesttest.AttestOptions{
+		"development aaguid": {AAGUID: &dev},
+		"wrong nonce":        {WrongNonce: true},
+		"no nonce":           {NoNonce: true},
+		"counter":            {Counter: 1},
+		"other credential":   {OtherCredential: true},
+		"expired leaf":       {LeafExpired: true},
+		"no intermediate":    {NoIntermediate: true},
+	} {
+		if ok, err := verifier.Verify(t.Context(), attest(opts)); ok || !errors.Is(err, ErrAppAttestBinding) {
+			t.Fatalf("%s: ok=%v err=%v, want ErrAppAttestBinding", name, ok, err)
+		}
+	}
+	// The pinned Apple root does not anchor the synthetic chain.
+	pinned := verifier
+	pinned.Root = nil
+	if ok, err := pinned.Verify(t.Context(), attest(appattesttest.AttestOptions{})); ok || !errors.Is(err, ErrAppAttestBinding) {
+		t.Fatalf("synthetic chain under the Apple root: ok=%v err=%v", ok, err)
+	}
+	unpinned := verifier
+	unpinned.Config.TeamID = ""
+	if _, err := unpinned.Verify(t.Context(), attest(appattesttest.AttestOptions{})); !errors.Is(err, ErrAppAttestTransient) {
+		t.Fatalf("missing team pin: err=%v, want ErrAppAttestTransient", err)
 	}
 }
 
-func buildTestAuthData(t *testing.T, appID string, keyID []byte, key *ecdsa.PrivateKey) []byte {
-	t.Helper()
-	appIDHash := sha256.Sum256([]byte(appID))
-	coseKey := cborMap(
-		cborInt(1), cborInt(2),
-		cborInt(3), cborInt(-7),
-		cborInt(-1), cborInt(1),
-		cborInt(-2), cborBytes(leftPad32(key.X.Bytes())),
-		cborInt(-3), cborBytes(leftPad32(key.Y.Bytes())),
-	)
-	out := make([]byte, 0, 37+16+2+len(keyID)+len(coseKey))
-	out = append(out, appIDHash[:]...)
-	out = append(out, authDataFlagAttestedCredential)
-	out = append(out, 0, 0, 0, 0)
-	out = append(out, []byte("appattest")...)
-	out = append(out, make([]byte, 7)...)
-	lenBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(lenBuf, uint16(len(keyID)))
-	out = append(out, lenBuf...)
-	out = append(out, keyID...)
-	out = append(out, coseKey...)
-	return out
-}
-
-func leftPad32(in []byte) []byte {
-	out := make([]byte, 32)
-	copy(out[32-len(in):], in)
-	return out
-}
-
-func cborMap(parts ...[]byte) []byte {
-	out := cborTypeLen(5, uint64(len(parts)/2))
-	for _, part := range parts {
-		out = append(out, part...)
-	}
-	return out
-}
-
-func cborArray(parts ...[]byte) []byte {
-	out := cborTypeLen(4, uint64(len(parts)))
-	for _, part := range parts {
-		out = append(out, part...)
-	}
-	return out
-}
-
-func cborText(s string) []byte {
-	return append(cborTypeLen(3, uint64(len(s))), []byte(s)...)
-}
-
-func cborBytes(b []byte) []byte {
-	return append(cborTypeLen(2, uint64(len(b))), b...)
-}
-
-func cborInt(n int64) []byte {
-	if n >= 0 {
-		return cborTypeLen(0, uint64(n))
-	}
-	return cborTypeLen(1, uint64(-1-n))
-}
-
-func cborTypeLen(major byte, n uint64) []byte {
-	prefix := major << 5
-	switch {
-	case n <= 23:
-		return []byte{prefix | byte(n)}
-	case n <= 0xff:
-		return []byte{prefix | 24, byte(n)}
-	case n <= 0xffff:
-		out := []byte{prefix | 25, 0, 0}
-		binary.BigEndian.PutUint16(out[1:], uint16(n))
-		return out
-	case n <= 0xffffffff:
-		out := []byte{prefix | 26, 0, 0, 0, 0}
-		binary.BigEndian.PutUint32(out[1:], uint32(n))
-		return out
-	default:
-		out := []byte{prefix | 27, 0, 0, 0, 0, 0, 0, 0, 0}
-		binary.BigEndian.PutUint64(out[1:], n)
-		return out
-	}
-}
+// preV080CorruptRootPEM is the root main embedded before SPEC-033 v0.8.0
+// (subject "Apple Aps.", self-signature invalid).
+const preV080CorruptRootPEM = `-----BEGIN CERTIFICATE-----
+MIICITCCAaegAwIBAgIQC/O+DvHN0uD7jG5yH2IXmDAKBggqhkjOPQQDAzBSMSYw
+JAYDVQQDDB1BcHBsZSBBcHAgQXR0ZXN0YXRpb24gUm9vdCBDQTETMBEGA1UECgwK
+QXBwbGUgSW5jLjETMBEGA1UECAwKQ2FsaWZvcm5pYTAeFw0yMDAzMTgxODMyNTNa
+Fw00NTAzMTUwMDAwMDBaMFIxJjAkBgNVBAMMHUFwcGxlIEFwcCBBdHRlc3RhdGlv
+biBSb290IENBMRMwEQYDVQQKDApBcHBsZSBBcHMuMRMwEQYDVQQIDApDYWxpZm9y
+bmlhMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAERTHhmLW07ATaFQIEVwTtT4dyctdh
+NbJhFs/Ii2FdCgAHGbpphY3+d8qjuDngIN3WVhQUBHAoMeQ/cLiP1sOUtgjqK9au
+Yen1mMEvRq9Sk3Jm5X8U62H+xTD3FE9TgS41o0IwQDAPBgNVHRMBAf8EBTADAQH/
+MB0GA1UdDgQWBBSskRBTM72+aEH/pwyp5frq5eWKoTAOBgNVHQ8BAf8EBAMCAQYw
+CgYIKoZIzj0EAwMDaAAwZQIwQgFGnByvsiVbpTKwSga0kP0e8EeDS4+sQmTvb7vn
+53O5+FRXgeLhpJ06ysC5PrOyAjEAp5U4xDgEgllF7En3VcE3iexZZtKeYnpqtijV
+oyFraWVIyd/dganmrduC1bmTBGwD
+-----END CERTIFICATE-----`

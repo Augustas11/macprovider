@@ -1826,6 +1826,27 @@ func TestNginxProviderRoutesBeforeV1CatchAll(t *testing.T) {
 			t.Fatalf("hardware evidence route missing %q", needle)
 		}
 	}
+	for route, maxBody := range map[string]string{
+		"/v1/providers/app-attest/challenge": "1k",
+		"/v1/providers/app-attest":           "32k",
+	} {
+		start := strings.Index(cfg, "location = "+route+" {")
+		if start < 0 || start > catchAll {
+			t.Fatalf("%s route missing or after the /v1/ catch-all", route)
+		}
+		end := start + strings.Index(cfg[start:], "\n    }")
+		for _, needle := range []string{
+			"proxy_pass http://127.0.0.1:8443" + route + ";",
+			"limit_req zone=ws_provider_rate burst=5 nodelay;",
+			"proxy_set_header Authorization $http_authorization;",
+			"client_max_body_size " + maxBody + ";",
+			"add_header Cache-Control \"no-store\" always;",
+		} {
+			if !strings.Contains(cfg[start:end], needle) {
+				t.Fatalf("%s route missing %q", route, needle)
+			}
+		}
+	}
 }
 
 func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
@@ -3010,5 +3031,30 @@ func TestProviderMuxServesPoolCheckBesideWebsocketCatchall(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ws", nil))
 	if rec.Code != 599 {
 		t.Fatalf("catchall status=%d want 599", rec.Code)
+	}
+}
+
+func TestWithProviderAppAttestMountsBothRoutes(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	if got := withProviderAppAttest(base, nil, nil); got == nil {
+		t.Fatal("nil handler")
+	}
+	challenge := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	submit := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	for _, tc := range []struct {
+		handler http.Handler
+		path    string
+		want    int
+	}{
+		{withProviderAppAttest(base, nil, nil), "/v1/providers/app-attest", http.StatusTeapot},
+		{withProviderAppAttest(base, challenge, submit), "/v1/providers/app-attest/challenge", http.StatusCreated},
+		{withProviderAppAttest(base, challenge, submit), "/v1/providers/app-attest", http.StatusAccepted},
+		{withProviderAppAttest(base, challenge, submit), "/v1/providers/app-attest/other", http.StatusTeapot},
+	} {
+		rr := httptest.NewRecorder()
+		tc.handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, tc.path, nil))
+		if rr.Code != tc.want {
+			t.Fatalf("%s: status=%d want %d", tc.path, rr.Code, tc.want)
+		}
 	}
 }

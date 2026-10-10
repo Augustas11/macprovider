@@ -869,4 +869,32 @@ else
   fail "sidecar deploy artifacts contain trailing whitespace"
 fi
 
+# SPEC-033 §2.7: app_attest_recorder provisioning and its deploy preflight.
+APP_ATTEST_BOOTSTRAP="$DIST_DIR/app-attest-recorder-bootstrap.sql"
+APP_ATTEST_PROVISION="$DIST_DIR/provision-app-attest-recorder.py"
+[ -f "$APP_ATTEST_BOOTSTRAP" ] && [ -f "$APP_ATTEST_PROVISION" ] || fail "missing app_attest_recorder provisioning files"
+grep -qF 'ONBOARDING_APP_ATTEST_RECORD_DSN="$(require_env_value "$env_file" ONBOARDING_APP_ATTEST_RECORD_DSN)"' "$DEPLOY_SH" ||
+  fail "deploy script must require the app attest record DSN env var"
+grep -qF 'psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_ATTEST_RECORD_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight the app attest record DSN through a root-only service file"
+grep -qF "current_user = 'app_attest_recorder'" "$DEPLOY_SH" ||
+  fail "deploy script must validate the app_attest_recorder role identity"
+grep -qF 'if [ "$app_attest_policy_ok" != "t" ]; then' "$DEPLOY_SH" ||
+  fail "deploy script must abort unless the recorder passes the least-privilege policy"
+grep -qF "has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')" "$DEPLOY_SH" ||
+  fail "deploy script must refuse column-level recorder writes"
+if grep -qE '^[[:space:]]+app_attest_record_dsn:' "$DIST_DIR/coordinator.yaml"; then
+  fail "coordinator.yaml must leave app_attest_record_dsn unset (a missing env reference would fail config load)"
+fi
+grep -qF '\getenv recorder_scram APP_ATTEST_RECORDER_PASSWORD_SCRAM' "$APP_ATTEST_BOOTSTRAP" ||
+  fail "recorder bootstrap must read the SCRAM verifier with \\getenv"
+if grep -qE '^[[:space:]]*\\quit' "$APP_ATTEST_BOOTSTRAP"; then
+  fail "recorder bootstrap refusals must raise, \\quit exits 0"
+fi
+grep -qF "GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;" "$APP_ATTEST_BOOTSTRAP" ||
+  fail "recorder bootstrap must grant exactly SELECT, INSERT"
+if LC_ALL=C grep -q $'\r' "$APP_ATTEST_BOOTSTRAP" "$APP_ATTEST_PROVISION"; then
+  fail "recorder provisioning files contain CRLF line endings"
+fi
+
 echo "ok: stats inventory sidecar deploy wiring"

@@ -19,6 +19,11 @@
 #   2 signed_tag        signed annotated tag on origin/main HEAD
 #   3 dispatch          pearl-runtime-release.yml on main (one in flight at most)
 #   4 env_approval      production-release approval (owner account)
+#   4a app_attest_recorder  one-time: app_attest_recorder login and
+#                       ONBOARDING_APP_ATTEST_RECORD_DSN in the Pearl coordinator env
+#                       (SPEC-033 §2.7). No restart and no downtime of its own: the
+#                       apply's coordinator restart loads it; a full deploy refuses
+#                       without it.
 #   5 plan              Pearl preflight + macprovider-pearl-update --plan (read-only)
 #   6 apply             systemd-run updater --apply (15-20 min network down)
 #   7 wait_updater      bounded wait for the updater unit to exit
@@ -26,6 +31,7 @@
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
+# PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
 # MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
@@ -210,6 +216,37 @@ git push origin refs/tags/$T"
         fi
       fi ;;
   esac
+
+  # 4a. one-time recorder provisioning (SPEC-033 §2.7). Read-only check on
+  # Pearl: the provisioner's --check logs in with the DSN and applies the
+  # least-privilege policy; only valid/absent/invalid comes back.
+  local pearl_env="${PEARL_COORDINATOR_ENV:-/etc/macprovider/coordinator.env}" rec_rc=0
+  local provisioner="phase4-coordinator/dist/provision-app-attest-recorder.py"
+  [[ "$pearl_env" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_ENV must be an absolute path"
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step app_attest_recorder pending "PEARL_SSH is unset"
+  else
+    ssh "$PEARL_SSH" "python3 -I - --check --env-file '$pearl_env'" < "$REPO_ROOT/$provisioner" >/dev/null 2>&1 || rec_rc=$?
+    local rotate="" why=""
+    case "$rec_rc" in
+      0) step app_attest_recorder "done" "ONBOARDING_APP_ATTEST_RECORD_DSN logs in with least privilege on Pearl" ;;
+      10|11)
+        if [ "$rec_rc" = 11 ]; then
+          rotate=" --rotate"; why="ONBOARDING_APP_ATTEST_RECORD_DSN is set on Pearl but fails the recorder login or least-privilege check"
+        else
+          why="ONBOARDING_APP_ATTEST_RECORD_DSN is not set on Pearl"
+        fi
+        step app_attest_recorder pending "$why"
+        set_next app_attest_recorder mutate "Provision the app_attest_recorder login on Pearl (one-time)" \
+"tar -C phase4-coordinator/dist -cf - app-attest-recorder-bootstrap.sql provision-app-attest-recorder.py |
+  ssh \"\$PEARL_SSH\" 'set -e; d=\$(mktemp -d); trap \"rm -rf \$d\" EXIT; tar -C \$d -xf -; python3 -I \$d/provision-app-attest-recorder.py --env-file $pearl_env --sql \$d/app-attest-recorder-bootstrap.sql$rotate'" "$why"
+        next_meta app_attest_recorder "$ROLLOUT_DOC#app-attest-recorder-one-time" "" ;;
+      *)
+        step app_attest_recorder blocked "cannot check the recorder DSN on Pearl (rc=$rec_rc)"
+        set_next app_attest_recorder blocked "Check the app_attest_recorder DSN on Pearl" "" \
+          "the recorder check over ssh failed (rc=$rec_rc); the apply needs a working ONBOARDING_APP_ATTEST_RECORD_DSN" ;;
+    esac
+  fi
 
   # 5. preflight + plan (read-only on Pearl).
   local plan_fresh=false

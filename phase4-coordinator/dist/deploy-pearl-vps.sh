@@ -2467,6 +2467,9 @@ PY
     ONBOARDING_AUTH_POLICY_CUTOVER_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_CUTOVER_DSN)"
     ONBOARDING_HARDWARE_TRUST_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_REQUEST_DSN)"
     ONBOARDING_HARDWARE_TRUST_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_APPROVE_DSN)"
+    # SPEC-033 §2.7: dist/coordinator.yaml references this DSN; provision it with
+    # scripts/ops/pearl-runtime.sh step app_attest_recorder before the apply.
+    ONBOARDING_APP_ATTEST_RECORD_DSN="$(require_env_value "$env_file" ONBOARDING_APP_ATTEST_RECORD_DSN)"
     echo "  ok: required onboarding DSN env vars are present in coordinator.env"
     # Issue #582 MIGRATION-019 ORDERING (self-enforcing standard path) — apply the
     # embedded stats migrations, INCLUDING 019's hardware_verification_trust PRIMARY
@@ -2711,6 +2714,34 @@ END
 \$\$;
 SQL
     echo "  ok: hardware-trust split DSN roles have expected EXECUTE privileges"
+    # SPEC-033 §2.7 / §5.7.1: the recorder DSN must log in as exactly
+    # app_attest_recorder with SELECT and INSERT on the verification table and
+    # nothing else (no other privilege on it, no trust-table access, no role
+    # memberships, no elevated attributes).
+    # The predicate is onboarding.AppAttestRecorderPolicySQL verbatim (a Go
+    # test keeps the copies identical); a login failure or any drift aborts.
+    app_attest_policy_ok="$(psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_ATTEST_RECORD_DSN" <<'SQL' 2>/dev/null || true
+SELECT current_user = 'app_attest_recorder'
+   AND session_user = current_user
+   AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user OR g.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE r.rolname = current_user)
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(name) WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.name))
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND has_function_privilege(current_user, p.oid, 'EXECUTE'));
+SQL
+)"
+    if [ "$app_attest_policy_ok" != "t" ]; then
+      echo "aborting deploy: ONBOARDING_APP_ATTEST_RECORD_DSN does not log in as the least-privilege app_attest_recorder role" >&2
+      echo "  repair it with scripts/ops/pearl-runtime.sh step app_attest_recorder (provision-app-attest-recorder.py --rotate)" >&2
+      exit 12
+    fi
+    echo "  ok: app_attest_recorder DSN logs in with SELECT, INSERT only"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
     # FIX 8 (issue #582): reaching here means hardware-trust approval is enabled
     # (ONBOARDING_HARDWARE_TRUST_REQUEST_DSN/APPROVE_DSN are required above), so

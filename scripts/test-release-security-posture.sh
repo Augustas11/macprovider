@@ -777,7 +777,9 @@ compatibility_copy = app_sign.find(
 anchor_prepare = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py prepare")
 anchor_verify = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py verify")
 nested_payload_sign = app_sign.find("Sign nested copied payloads explicitly")
-app_codesign = app_sign.find("--entitlements phase3-binary/app/Malibu.entitlements")
+app_attest_prepare = app_sign.find("prepare-malibu-app-attest-signing.py prepare")
+app_codesign = app_sign.find('--entitlements "$MALIBU_ENTITLEMENTS"')
+app_attest_verify = app_sign.find("prepare-malibu-app-attest-signing.py verify")
 if min(
     first_bundle_write,
     compatibility_copy,
@@ -799,6 +801,27 @@ if min(
     )
 if "codesign --force --deep" in app_sign:
     raise SystemExit("Malibu app signing must not recursively re-sign the embedded provider CLI")
+# The App Attest profile is embedded and validated before the outer codesign,
+# the outer codesign uses the derived entitlements, and the signed set is
+# verified before any later step. The CLI stays entitlement-free.
+if min(app_attest_prepare, app_codesign, app_attest_verify) < 0 or not (
+    nested_payload_sign < app_attest_prepare < app_codesign < app_attest_verify
+):
+    raise SystemExit("Malibu app must embed the App Attest profile before outer codesign and verify it after")
+for requirement in (
+    "MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}",
+    "--base phase3-binary/app/Malibu.entitlements",
+    '--team "$APPLE_NOTARY_TEAM_ID"',
+    'rm -f "$APP_ATTEST_PROFILE"',
+):
+    if requirement not in app_sign:
+        raise SystemExit(f"Malibu signing omits App Attest profile control: {requirement}")
+if "--entitlements phase3-binary/app/Malibu.entitlements" in app_sign:
+    raise SystemExit("Malibu outer codesign must use the profile-derived entitlements, not the bare base")
+if app_sign.find("require-cli-se-entitlements.sh") < app_codesign:
+    raise SystemExit("embedded CLI entitlement proof must run after the outer Malibu codesign")
+if "MALIBU_APP_ATTEST_PROFILE_BASE64" in build:
+    raise SystemExit("the unprivileged build job must not see the App Attest profile")
 if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py prepare") != 1:
     raise SystemExit("Malibu signing must prepare the one-time trust anchor exactly once")
 if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py verify") != 1:

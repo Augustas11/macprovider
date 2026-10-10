@@ -94,6 +94,8 @@ final class MalibuAgent: ObservableObject {
     ) throws -> URL
     private var lastReferralRefreshRequestedAt: Date?
     private let latestReleaseTTL: TimeInterval = 3600
+    private let appAttestEnrollment: AppAttestEnrollment
+    private var appAttestEnrollmentTask: Task<Void, Never>?
 
     init(
         initialSnapshot: AgentSnapshot = .empty,
@@ -133,8 +135,10 @@ final class MalibuAgent: ObservableObject {
                 launchdNeedsRepair: launchdNeedsRepair,
                 appVersion: appVersion
             )
-        }
+        },
+        appAttestEnrollment: AppAttestEnrollment = .live
     ) {
+        self.appAttestEnrollment = appAttestEnrollment
         snapshot = initialSnapshot
         providerProjectionEligible = projectionEligibleForMetrics
         self.cliUpdateRunner = cliUpdateRunner
@@ -711,6 +715,7 @@ final class MalibuAgent: ObservableObject {
                 await refreshAdmissionIdentityRecoveryDiagnosis()
                 await attachInstalledProviderControlIfAvailable()
                 startHealthPolling(port: port)
+                scheduleAppAttestEnrollment()
                 return snapshot.state == .serving
             }
             if let failure = diagnosedProviderFailure() {
@@ -1153,6 +1158,10 @@ final class MalibuAgent: ObservableObject {
                     try? await self.control?.send(.metricsRequest)
                     try? await self.control?.send(.statusRequest)
                     await self.requestReferralStatusIfDue()
+                    // Retries a failed App Attest enrollment while Malibu stays
+                    // open; the enrollment's own persisted backoff and the
+                    // single-task guard bound how often it runs.
+                    await self.scheduleAppAttestEnrollment()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
                         let pidGone = InstalledProviderMonitor.launchdServicePID() == nil
@@ -2070,6 +2079,22 @@ final class MalibuAgent: ObservableObject {
             return nil
         }
         return ProviderLogDiagnostics.staleLaunchAgentMessage
+    }
+
+    /// One-time App Attest enrollment once the installed provider answers
+    /// locally. Detached and best effort: it never gates start or serving.
+    private func scheduleAppAttestEnrollment() {
+        guard appAttestEnrollmentTask == nil, !isShuttingDown,
+              let providerID = ProviderConfig.readProviderID() else { return }
+        let enrollment = appAttestEnrollment
+        appAttestEnrollmentTask = Task.detached(priority: .utility) { [weak self] in
+            _ = await enrollment.run(providerID: providerID)
+            await self?.finishAppAttestEnrollment()
+        }
+    }
+
+    private func finishAppAttestEnrollment() {
+        appAttestEnrollmentTask = nil
     }
 
     private func scheduleReconnect() async {

@@ -252,6 +252,16 @@ if "--entitlements phase3-binary/dist/macprovider-cli.entitlements" in signer:
     raise SystemExit("acceptance signer must not attach CLI keychain-access-groups entitlements")
 if "require-cli-se-entitlements.sh" not in signer:
     raise SystemExit("acceptance signer must prove the signed CLI has no restricted entitlements")
+# The candidate Malibu.app carries the App Attest profile.
+attest_prepare = signer.find("prepare-malibu-app-attest-signing.py\" prepare")
+attest_codesign = signer.find('--entitlements "$malibu_entitlements"')
+attest_verify = signer.find("prepare-malibu-app-attest-signing.py\" verify")
+if min(attest_prepare, attest_codesign, attest_verify) < 0 or not (attest_prepare < attest_codesign < attest_verify):
+    raise SystemExit("acceptance signer must embed and verify the App Attest profile around the outer codesign")
+if "--entitlements \"$root/phase3-binary/app/Malibu.entitlements\"" in signer:
+    raise SystemExit("acceptance Malibu codesign must use the profile-derived entitlements")
+if "MALIBU_APP_ATTEST_PROFILE_BASE64" not in signer or "MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}" not in protected:
+    raise SystemExit("acceptance signer must require the App Attest profile secret")
 if signer.count('shasum -a 256 "$app/Contents/MacOS/macprovider-cli"') != 2:
     raise SystemExit("acceptance signer must prove embedded CLI bytes before and after outer app signing")
 for value in (

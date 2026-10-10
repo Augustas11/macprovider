@@ -203,6 +203,42 @@ PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 3 "state change afte
 expect_err "live state changed after taking the lock"
 expect_lock_free
 
+# One-time app_attest_recorder provisioning (SPEC-033 §2.7) comes before the
+# plan once the release exists, and runs the dist provisioner on Pearl.
+fixture '{"runs": {"pearl-runtime-release.yml": []}, "releases": {"v9.0.1": {"assets": [{"name": "pearl-release.json"}]}}}'
+mkdir -p "$tmp/pearl/etc"
+export PEARL_COORDINATOR_ENV="$tmp/pearl/etc/coordinator.env"
+printf 'COORDINATOR_PARTNER_KEYS_ADMIN_DSN=postgres://admin:adminpw@127.0.0.1:5432/stats\nONBOARDING_POSTGRES_DSN=postgres://provider_onboarding:obpw@127.0.0.1:5432/stats\n' > "$PEARL_COORDINATOR_ENV"
+chmod 600 "$PEARL_COORDINATOR_ENV"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status without the recorder DSN" scripts/ops/pearl-runtime.sh status
+expect_next app_attest_recorder:mutate
+case "$(next_field command)" in *"provision-app-attest-recorder.py --env-file $PEARL_COORDINATOR_ENV"*) ok ;; *) bad "recorder command: $(next_field command)" ;; esac
+case "$(next_field command)" in *adminpw*|*obpw*) bad "recorder command carries a secret" ;; *) ok ;; esac
+# A fake psql on "Pearl": accepts the bootstrap and answers the login check.
+cat > "$tmp/bin/psql" <<'FAKEPSQL'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = -f ] && exit 0; done
+cat >/dev/null
+echo "${FAKE_PSQL_VERIFY:-t}"
+FAKEPSQL
+chmod +x "$tmp/bin/psql"
+PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "recorder provisioning runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -Eq '^ONBOARDING_APP_ATTEST_RECORD_DSN=postgres://app_attest_recorder:[^@]{40,}@127\.0\.0\.1:5432/stats$' "$PEARL_COORDINATOR_ENV"; then ok; else bad "recorder DSN not written"; fi
+pw="$(sed -n 's#^ONBOARDING_APP_ATTEST_RECORD_DSN=postgres://app_attest_recorder:\([^@]*\)@.*#\1#p' "$PEARL_COORDINATOR_ENV")"
+if [ -n "$pw" ] && ! grep -qF -- "$pw" "$tmp/out" "$tmp/err"; then ok; else bad "recorder password printed"; fi
+# (An https COORDINATOR_URL keeps the plan command renderable; /healthz is then
+# unreadable, which leaves the recorder step's own state to check.)
+COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the recorder DSN" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of app_attest_recorder)" = "done" ]; then ok; else bad "recorder step state: $(state_of app_attest_recorder)"; fi
+case "$(next_field id)" in app_attest_recorder) bad "recorder step offered again" ;; *) ok ;; esac
+# A DSN that no longer passes the login/least-privilege check is offered for repair.
+FAKE_PSQL_VERIFY=f PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a failing recorder DSN" scripts/ops/pearl-runtime.sh status
+expect_next app_attest_recorder:mutate
+case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --rotate"*) ok ;; *) bad "repair command lacks --rotate: $(next_field command)" ;; esac
+rm -f "$tmp/bin/psql"
+unset PEARL_COORDINATOR_ENV
+
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE
 J='"path": ".github/workflows/promote-signed-native-mtp-release-journey.yml"'

@@ -49,6 +49,49 @@ ssh pearl 'df -h /; du -sh /var/lib/macprovider-pearl-updater/transactions;
   `/opt/macprovider/.coordinator-deploy.lock` must both be free
   (`flock -n <lock> true`).
 
+## App Attest recorder one-time
+
+The coordinator records App Attest verifications through the
+`app_attest_recorder` role (SPEC-033 §2.7, §5.7.1). It reads the DSN from
+`onboarding.app_attest_record_dsn`, or from `ONBOARDING_APP_ATTEST_RECORD_DSN` in
+`/etc/macprovider/coordinator.env` when the config leaves it unset, which is the
+case on Pearl. A full deploy (`deploy-pearl-vps.sh`) refuses without it.
+Provision it once, before the first runtime apply that carries the App Attest
+endpoints. `scripts/ops/pearl-runtime.sh` shows this as step
+`app_attest_recorder`, before the plan, and runs it with `next --run`. The step
+itself restarts nothing and causes no downtime; the apply's coordinator restart
+loads the new variable.
+
+The step copies `app-attest-recorder-bootstrap.sql` and
+`provision-app-attest-recorder.py` to a temporary directory on Pearl and runs
+the script as root. The script:
+
+- reads `COORDINATOR_PARTNER_KEYS_ADMIN_DSN` and `ONBOARDING_POSTGRES_DSN` from
+  `/etc/macprovider/coordinator.env` as data;
+- generates the password on Pearl and passes only its SCRAM-SHA-256 verifier to
+  the bootstrap SQL (through `\getenv`), which first switches off statement
+  logging for its session; the admin role must be a superuser or hold `SET` on
+  those logging parameters, otherwise the bootstrap stops before any credential
+  is sent;
+- writes `ONBOARDING_APP_ATTEST_RECORD_DSN` into the env file atomically, keeping
+  its mode and owner;
+- checks that the new DSN logs in as `app_attest_recorder` with only `SELECT` and
+  `INSERT` on `provider_app_attest_verifications`.
+
+Nothing secret is printed. A rerun with a working DSN changes nothing. A DSN
+that is set but fails the check is refused; rerun the script with `--rotate` to
+replace it.
+
+**nginx is a manual, additive step**, as for the catalog-artifact routes
+(`docs/runbooks/catalog-artifact-feed-release.md`). Before the runtime apply,
+copy only the `location = /v1/providers/app-attest/challenge` and
+`location = /v1/providers/app-attest` blocks from
+`phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` into Pearl's
+coordinator vhost, before its `location /v1/ { return 404; }`, then run
+`nginx -t && systemctl reload nginx`. Both blocks use the existing
+`ws_provider_rate` zone. Never copy the whole repo site file over Pearl's.
+Until the new runtime is live, the routes answer 404 from the coordinator.
+
 ## Runtime apply (signed updater)
 
 ```bash

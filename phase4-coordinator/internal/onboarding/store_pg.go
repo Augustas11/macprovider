@@ -38,21 +38,109 @@ func (s *PGStore) AttachAppAttestRecorder(dsn string) error {
 	return nil
 }
 
-// RecordAppAttestVerification records that providerID's App Attest key passed
-// Apple verification at registration. The first record per provider and per
-// key wins; it is never updated.
-func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) error {
+// AppAttestRecorderPolicySQL is the one least-privilege policy for the
+// app_attest_recorder login (SPEC-033 §2.7). It returns true only for exactly
+// that role with LOGIN and no elevated attributes, no role memberships, no
+// owned relations or functions, SELECT and INSERT (and nothing else, at table
+// or column level) on provider_app_attest_verifications, no privilege at any
+// level on the trust, job, identity and profile tables, and no EXECUTE on any
+// SECURITY DEFINER function in the public schema (the trust-workflow
+// request/approve/revoke functions and auto_trust_attested_hardware). The deploy preflight
+// (dist/deploy-pearl-vps.sh) and the provisioner
+// (dist/provision-app-attest-recorder.py) carry this exact text; a test keeps
+// them identical.
+const AppAttestRecorderPolicySQL = `SELECT current_user = 'app_attest_recorder'
+   AND session_user = current_user
+   AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user OR g.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE r.rolname = current_user)
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(name) WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.name))
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND has_function_privilege(current_user, p.oid, 'EXECUTE'))`
+
+// SmokeAppAttestRecorder checks the attached recorder against
+// AppAttestRecorderPolicySQL. On failure the caller detaches it: the
+// coordinator keeps running with App Attest recording unavailable
+// (SPEC-033-R004 failure isolation).
+func (s *PGStore) SmokeAppAttestRecorder(ctx context.Context) error {
+	if !s.AppAttestRecorderConfigured() {
+		return nil
+	}
+	timeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var ok bool
+	if err := s.appAttestRecordDB.QueryRowContext(timeout, AppAttestRecorderPolicySQL).Scan(&ok); err != nil {
+		return errors.New("app_attest_recorder smoke query failed")
+	}
+	if !ok {
+		return errors.New("app_attest_recorder DSN does not map to the least-privilege app_attest_recorder role")
+	}
+	return nil
+}
+
+// DetachAppAttestRecorder closes and drops the recorder connection.
+func (s *PGStore) DetachAppAttestRecorder() {
 	if s == nil || s.appAttestRecordDB == nil {
-		return errors.New("app attest record postgres store is not configured")
+		return
+	}
+	_ = s.appAttestRecordDB.Close()
+	s.appAttestRecordDB = nil
+}
+
+// AppAttestRecorderConfigured reports whether the app_attest_recorder
+// connection is attached.
+func (s *PGStore) AppAttestRecorderConfigured() bool {
+	return s != nil && s.appAttestRecordDB != nil
+}
+
+// AppAttestVerificationRecorded reports whether providerID already has a
+// recorded App Attest verification (SPEC-033 §5.7.1 step 1).
+func (s *PGStore) AppAttestVerificationRecorded(ctx context.Context, providerID string) (bool, error) {
+	if !s.AppAttestRecorderConfigured() {
+		return false, errors.New("app attest record postgres store is not configured")
+	}
+	var recorded bool
+	err := s.appAttestRecordDB.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM provider_app_attest_verifications WHERE provider_id = $1)`, providerID).Scan(&recorded)
+	return recorded, err
+}
+
+// RecordAppAttestVerification records that providerID's App Attest key passed
+// Apple verification (SPEC-033-R004). The first record per provider and per
+// key wins and is never updated: a provider that already has a row keeps its
+// first key, and a key recorded for another provider is not recorded again.
+func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) (AppAttestRecordOutcome, error) {
+	if !s.AppAttestRecorderConfigured() {
+		return 0, errors.New("app attest record postgres store is not configured")
 	}
 	if strings.TrimSpace(providerID) == "" || len(keyID) != 32 {
-		return errors.New("app attest record requires a provider id and a 32-byte key id")
+		return 0, errors.New("app attest record requires a provider id and a 32-byte key id")
 	}
-	_, err := s.appAttestRecordDB.ExecContext(ctx, `
+	res, err := s.appAttestRecordDB.ExecContext(ctx, `
 INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id)
 VALUES ($1, $2)
 ON CONFLICT DO NOTHING`, providerID, keyID)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, err
+	} else if n == 1 {
+		return AppAttestRecorded, nil
+	}
+	recorded, err := s.AppAttestVerificationRecorded(ctx, providerID)
+	if err != nil {
+		return 0, err
+	}
+	if recorded {
+		return AppAttestAlreadyRecorded, nil
+	}
+	return AppAttestKeyReused, nil
 }
 
 func OpenPGStore(dsn string) (*PGStore, error) {
@@ -276,19 +364,6 @@ SELECT j.generated_at, j.evidence
 			},
 			"request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)"); err != nil {
 			return err
-		}
-	}
-	if s.appAttestRecordDB != nil {
-		var currentUser string
-		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT current_user`).Scan(&currentUser); err != nil {
-			return fmt.Errorf("app_attest_recorder smoke current_user: %w", err)
-		}
-		if currentUser != "app_attest_recorder" {
-			return fmt.Errorf("app_attest_recorder smoke current_user = %q, want app_attest_recorder", currentUser)
-		}
-		var canInsert bool
-		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')`).Scan(&canInsert); err != nil || !canInsert {
-			return fmt.Errorf("app_attest_recorder smoke lacks INSERT on provider_app_attest_verifications (err=%v)", err)
 		}
 	}
 	return nil

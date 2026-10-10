@@ -29,3 +29,14 @@ if [[ -s "$ents" ]] && grep -Fq "com.apple.application-identifier" "$ents"; then
   printf '[require-cli-se-entitlements] ERROR: %s carries restricted application-identifier\n' "$binary" >&2
   exit 1
 fi
+# App Attest belongs to Malibu.app only; the CLI never holds,
+# requests, or emulates an App Attest key.
+if [[ -s "$ents" ]] && grep -Fq "com.apple.developer.devicecheck" "$ents"; then
+  printf '[require-cli-se-entitlements] ERROR: %s carries the restricted App Attest entitlement\n' "$binary" >&2
+  exit 1
+fi
+# The CLI ships with an empty entitlement set; any key is a regression.
+if [[ -s "$ents" ]] && grep -Fq "<key>" "$ents"; then
+  printf '[require-cli-se-entitlements] ERROR: %s carries entitlements; the CLI must sign with none\n' "$binary" >&2
+  exit 1
+fi

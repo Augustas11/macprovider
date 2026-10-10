@@ -244,6 +244,12 @@ struct AutotuneHardwareEvidenceSubmitter {
     }
 
     static func hardwareEvidenceEndpoint(from raw: String) -> URL? {
+        coordinatorEndpoint(from: raw, path: endpointPath)
+    }
+
+    /// The https coordinator endpoint at `path` for a configured coordinator_url
+    /// (wss or https). Also used by `app-attest`.
+    static func coordinatorEndpoint(from raw: String, path: String) -> URL? {
         guard var components = URLComponents(string: raw) else { return nil }
         // Match every other coordinator URL builder (CoordinatorReadinessClient,
         // DoctorRunner.healthzURL): a coordinator_url carrying userinfo is
@@ -258,7 +264,7 @@ struct AutotuneHardwareEvidenceSubmitter {
         default:
             return nil
         }
-        components.path = endpointPath
+        components.path = path
         components.query = nil
         components.fragment = nil
         return components.url

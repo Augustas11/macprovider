@@ -1,0 +1,7 @@
+You are the CODE lane auditor, round 4: a verification-only round with a narrow scope. Work in this checkout (repository root, branch trust/app-attest-auto-trust). This is a first-party software-correctness review: do not edit files, do not contact any live host, do not construct attack payloads; read source and optionally run existing tests.
+
+Scope: only the round-3 code-lane MEDIUM in audits/2026-10-11-app-attest-auto-trust/R3_CODE_FINDINGS.md (Malibu.app's App Attest enrollment runner wrote the attestation into the CLI's stdin pipe before launching the CLI, which could block before the child and its timeout existed) and its fix in commit 1dfd499 (`git show 1dfd499`): phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift (runProviderCLI -> runProcess: launch first, F_SETNOSIGPIPE on the write end, stdin written on its own queue with the throwing FileHandle.write(contentsOf:) then closed, stdout/stderr drained, timeout after launch) and the two new tests in phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift.
+
+Answer only: (1) is the fix correct and complete for that finding; (2) does it add any regression in the changed lines (deadlock, crash on early child exit / EPIPE, SIGPIPE, leaked descriptors or tasks, continuation resumed zero or twice, timeout behaviour, data race).. Do not review anything outside these changed lines.
+
+Output: findings with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), file:line, failure scenario, fix. End with exactly one line "C/H/M/L = n/n/n/n" and "VERDICT: PASS" (0 C/H/M) or "VERDICT: FAIL".

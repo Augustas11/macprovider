@@ -69,7 +69,8 @@ for secret in \
   APPLE_NOTARY_PASSWORD \
   APPLE_NOTARY_TEAM_ID \
   MACPROVIDER_RELEASE_SIGNING_KEY_PEM \
-  MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM; do
+  MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM \
+  MALIBU_APP_ATTEST_PROFILE_BASE64; do
   [[ -n "${!secret:-}" ]] || die "protected secret is required: $secret"
 done
 
@@ -327,13 +328,29 @@ while IFS= read -r -d '' nested_bundle; do
     "$nested_bundle"
 done < <(find "$app/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
 embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+# Embed the App Attest profile and sign Malibu.app with the entitlements
+# derived from it. The embedded CLI keeps no entitlements.
+app_attest_profile="$signing_tmp/malibu-app-attest.provisionprofile"
+malibu_entitlements="$signing_tmp/Malibu-release.entitlements"
+( umask 077; printf '%s' "$MALIBU_APP_ATTEST_PROFILE_BASE64" | base64 -d > "$app_attest_profile" )
+python3 "$root/scripts/prepare-malibu-app-attest-signing.py" prepare \
+  --profile "$app_attest_profile" \
+  --team "$APPLE_NOTARY_TEAM_ID" \
+  --base "$root/phase3-binary/app/Malibu.entitlements" \
+  --app "$app" \
+  --out "$malibu_entitlements"
 codesign --force \
   --options runtime \
   --timestamp \
-  --entitlements "$root/phase3-binary/app/Malibu.entitlements" \
+  --entitlements "$malibu_entitlements" \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$app"
+python3 "$root/scripts/prepare-malibu-app-attest-signing.py" verify \
+  --app "$app" \
+  --team "$APPLE_NOTARY_TEAM_ID" \
+  --entitlements "$malibu_entitlements" \
+  --profile "$app_attest_profile"
 [[ "$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')" == "$embedded_cli_sha256" ]] ||
   die "outer Malibu signing changed the already-signed embedded CLI"
 "$root/scripts/require-cli-se-entitlements.sh" "$app/Contents/MacOS/macprovider-cli"
