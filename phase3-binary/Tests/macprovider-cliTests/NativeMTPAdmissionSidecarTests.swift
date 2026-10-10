@@ -592,7 +592,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             revokedTupleSHA256: []
         )
 
-        // SPEC-048-R013 (v0.1.30): the runtime revision is provenance; a new
+        // SPEC-048-R013 (v0.1.32): the runtime revision is provenance; a new
         // MLX fork revision keeps the model admitted (the on-device self-check
         // qualifies it). The model identity still binds.
         XCTAssertNoThrow(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
@@ -843,7 +843,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             revokedTupleSHA256: [fixture.tupleSHA]
         )
 
-        // SPEC-048-R014 (v0.1.30): unknown revocation state revokes nothing;
+        // SPEC-048-R014 (v0.1.32): unknown revocation state revokes nothing;
         // only a feed naming the tuple blocks it.
         XCTAssertNoThrow(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: fixture.sidecarData,
@@ -1041,7 +1041,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
-    /// SPEC-048-R013 (v0.1.30): hardware, RAM, slots and runtime revision
+    /// SPEC-048-R013 (v0.1.32): hardware, RAM, slots and runtime revision
     /// only pick the closest entry; another Mac running the same model is
     /// admitted and qualifies itself on device. A different model is not.
     func testReleaseEnvelopeAdmitsTheModelOnOtherHardwareAndRuntime() throws {

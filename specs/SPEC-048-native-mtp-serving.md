@@ -6,7 +6,7 @@
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -954,12 +954,12 @@ malformed. The provider revision, source commit, reproducible-build digest, and
 live executable CDHash are recorded provenance of the qualifying build
 (SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
 provider CLI, so a signed admission keeps serving across signed CLI releases.
-**(0.1.30)** Admission is model-keyed: only the model key and target
+**(0.1.32)** Admission is model-keyed: only the model key and target
 artifact bind. The upstream MLX runtime revision, hardware class, RAM and
 qualified slot count are recorded provenance of the qualifying run; a sidecar
 entry matching them exactly is preferred, otherwise the first entry for the
 model is used, and the MTP-16 on-device self-check qualifies the running
-runtime on this Mac. Before 0.1.30 the upstream MLX runtime revision stayed
+runtime on this Mac. Before 0.1.32 the upstream MLX runtime revision stayed
 bound to the running build. Loader
 The MLX runtime (fork) revision and target artifact remain bound to the
 running build. Regressions under a new CLI are caught by the SPEC-031-R033
@@ -1026,10 +1026,11 @@ Phase 0/1 implementation may claim issue completion or a production MTP
 multiplier.
 
 `activation` means the first production configuration load at which an exact
-tuple becomes selectable. **(0.1.30)** A sidecar's `expires_at` is structural
+tuple becomes selectable. **(0.1.32)** A sidecar's `expires_at` is structural
 only (it must follow `issued_at`); an admitted model keeps native MTP past the
-date, and revocation is the off switch. An absent, stale or unreachable
-revocation feed revokes nothing; the provider keeps polling and disables the
+date, and revocation is the off switch. A stale or unreachable revocation
+feed keeps the last-known verified revocations (0.1.31); with no feed ever
+verified, nothing is revoked. The provider keeps polling and disables the
 tuple only when a verified feed names it. Before 0.1.30: sidecars and
 serving-journey results expire after 90 days. Renewal creates a new immutable release/sidecar, reruns the local
 self-test and signed serving journey, the 30-minute sustained cell, ordinary
@@ -1275,7 +1276,7 @@ state digest with the signed synthetic challenge record. Failure disables only
 that tuple. This is provider-local health evidence, not coordinator-issued
 integrity evidence and not a SPEC-031 canary result.
 
-**(0.1.30)** The self-test reference is on-device: the provider runs the
+**(0.1.32)** The self-test reference is on-device: the provider runs the
 challenge prompt through native MTP and through ordinary decode on the same
 paged engine (same kernels, so near-tied logits resolve identically) at
 greedy, requires identical token IDs, and requires the native run to be at
@@ -1423,7 +1424,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.30 (2026-10-10)** — Model-keyed admission, revocation-only policy,
+- **0.1.32 (2026-10-10)** — Model-keyed admission, revocation-only policy,
   on-device qualification (follows SPEC-038 v0.3.15). MTP-13: admission keys
   on the model and its target artifact; the upstream MLX runtime revision,
   hardware class, RAM and qualified slots are recorded provenance that only

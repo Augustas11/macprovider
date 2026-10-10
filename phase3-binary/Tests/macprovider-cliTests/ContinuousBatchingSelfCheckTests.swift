@@ -369,7 +369,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     }
 }
 
-/// SPEC-048-R016 (v0.1.30) on-device native-MTP qualification.
+/// SPEC-048-R016 (v0.1.32) on-device native-MTP qualification.
 final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
     func testIdenticalOutputWithAGainPasses() {
         let verdict = NativeMTPOnDeviceSelfCheck.decide(
