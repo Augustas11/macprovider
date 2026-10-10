@@ -1176,6 +1176,106 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertTrue(result.stopped)
     }
 
+    func testSerialDecodeRequestStopObserverStopsAtCrossTokenStop() throws {
+        let decoded = [
+            1: "answer ",
+            2: "ST",
+            3: "OP",
+            4: " ignored",
+        ]
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["STOP"],
+            decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() }
+        )
+
+        var stoppedTokens: [Int] = []
+        for tokenID in [1, 2, 3, 4] {
+            stoppedTokens.append(tokenID)
+            if try observer.observe(generatedTokenIDs: stoppedTokens) {
+                break
+            }
+        }
+        XCTAssertEqual(stoppedTokens, [1, 2, 3])
+        XCTAssertEqual(stoppedTokens.count, 3)
+
+        let filtered = ModelRuntime.applyOutputFilters(
+            decoded[1]! + decoded[2]! + decoded[3]!,
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["STOP"]
+        )
+        XCTAssertEqual(filtered.text, "answer ")
+        let parsed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: filtered.text,
+            generatedTokenIDs: stoppedTokens,
+            decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() },
+            request: makeRequest(model: "mlx-community/Qwen3-32B-4bit"),
+            mode: .complete(finishReason: "request_stop"),
+            defaultCompletionTokens: stoppedTokens.count
+        )
+        XCTAssertEqual(parsed.content, "answer ")
+        XCTAssertEqual(parsed.completionTokens, stoppedTokens.count)
+        XCTAssertEqual(parsed.generatedCompletionTokens, stoppedTokens.count)
+        let completion = CompletionResult(
+            content: parsed.content,
+            finishReason: "stop",
+            promptTokens: 1,
+            completionTokens: parsed.completionTokens,
+            generatedCompletionTokens: parsed.generatedCompletionTokens,
+            settlementDisposition: .eligibleOwner
+        )
+        XCTAssertEqual(completion.content, "answer ")
+        XCTAssertEqual(completion.completionTokens, stoppedTokens.count)
+        XCTAssertEqual(completion.generatedCompletionTokens, stoppedTokens.count)
+    }
+
+    func testSerialDecodeRequestStopObserverHandlesUnicodeAndMultipleStops() throws {
+        let decoded = [
+            1: "hello ",
+            2: "🙂",
+            3: " ignored",
+            4: "prefix ",
+            5: "β",
+            6: "ST",
+            7: "OP",
+        ]
+        let decode: ([Int]) -> String = { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() }
+        var emojiObserver = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["🙂", "βSTOP"],
+            decode: decode
+        )
+        XCTAssertFalse(try emojiObserver.observe(generatedTokenIDs: [1]))
+        XCTAssertTrue(try emojiObserver.observe(generatedTokenIDs: [1, 2]))
+
+        var betaObserver = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: ["🙂", "βSTOP"],
+            decode: decode
+        )
+        XCTAssertFalse(try betaObserver.observe(generatedTokenIDs: [4, 5, 6]))
+        XCTAssertTrue(try betaObserver.observe(generatedTokenIDs: [4, 5, 6, 7]))
+    }
+
+    func testSerialDecodeRequestStopObserverIsInertWithoutRequestStops() throws {
+        var decodeCalls = 0
+        var observer = ModelRuntime.SerialDecodeRequestStopObserver(
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            stopTokenFilter: StopTokenFilter(tokens: []),
+            requestStops: [],
+            decode: { tokenIDs in
+                decodeCalls += 1
+                return tokenIDs.map(String.init).joined()
+            }
+        )
+
+        XCTAssertFalse(try observer.observe(generatedTokenIDs: [1, 2, 3]))
+        XCTAssertEqual(decodeCalls, 0)
+    }
+
     func testBlockingInferenceExecutorDoesNotStarveRuntimeActor() async throws {
         let runtime = makeRuntime(modelID: "model-a", warmSwapEnabled: false)
         let task = Task {
