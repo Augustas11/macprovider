@@ -111,12 +111,15 @@ class RehearsalRelease(artifact_feed.HermeticRelease):
 def runtime_revision() -> str:
     """The mlx-swift-lm revision the provider resolves.
 
-    Read through the reviewed-pin reader, which fails closed unless
-    Package.resolved names the SPEC-048 fork at its reviewed revision, so the
-    rehearsal can never stamp an identity the build does not resolve.
+    Read through the production pin gate, which fails closed unless
+    Package.resolved names the complete SPEC-048 fork tuple (mlx-swift-lm and
+    mlx-swift forks at their reviewed revisions), so the rehearsal can never
+    stamp an identity the build does not resolve.
     """
     try:
-        revision = read_swiftpm_pins.read_pins(PACKAGE_RESOLVED).get("mlx_swift_lm_revision")
+        revision = read_swiftpm_pins.read_production_pins(PACKAGE_RESOLVED).get(
+            "mlx_swift_lm_revision"
+        )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(f"cannot read the mlx-swift-lm pin from {PACKAGE_RESOLVED}: {error}")
     if not isinstance(revision, str) or len(revision) != 40:

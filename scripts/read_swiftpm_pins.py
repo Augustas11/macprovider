@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Read the reviewed MLX dependency versions from SwiftPM Package.resolved."""
+"""Read the reviewed MLX dependency versions from SwiftPM Package.resolved.
+
+Two entry points:
+
+* ``read_pins`` parses pins for reporting (the upstream watch). It accepts an
+  upstream source at any version, or a SPEC-048 fork at its reviewed revision,
+  so it can describe historical and mixed graphs.
+* ``read_production_pins`` is the production gate. It requires the complete
+  authorized SPEC-048 fork tuple: mlx-swift-lm AND mlx-swift both resolved from
+  the Augustas11 forks at their exact reviewed revisions. Upstream or mixed
+  stacks fail closed, because either half alone silently drops fork patches.
+
+Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
+mlx-swift fork revision pins it: at ca2f61d2 the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at c9196eb7 (the batch-invariant core fork),
+so requiring that exact mlx-swift revision transitively pins the core fork.
+
+The CLI runs the production gate; ``--historical`` selects ``read_pins``.
+"""
 
 import json
 import sys
@@ -49,8 +67,24 @@ def is_reviewed_fork_pin(identity: str, location: str, revision: object) -> bool
 
 
 def read_pins(path: Path) -> dict[str, str]:
+    return _read(path)[0]
+
+
+def read_production_pins(path: Path) -> dict[str, str]:
+    pins, fork_identities = _read(path)
+    missing_forks = sorted(set(REVIEWED_FORK_PINS) - fork_identities)
+    if missing_forks:
+        raise ValueError(
+            "production requires the SPEC-048 fork tuple; not resolved from the "
+            f"reviewed fork: {', '.join(missing_forks)}"
+        )
+    return pins
+
+
+def _read(path: Path) -> tuple[dict[str, str], set[str]]:
     data = json.loads(path.read_text())
     pins: dict[str, str] = {}
+    fork_identities: set[str] = set()
     for pin in data.get("pins", []):
         identity = pin.get("identity", "")
         output_name = REQUIRED_PINS.get(identity)
@@ -66,6 +100,7 @@ def read_pins(path: Path) -> dict[str, str]:
             if is_reviewed_fork_pin(identity, location, revision) and version is None:
                 pins[output_name] = revision
                 pins[f"{output_name}_revision"] = revision
+                fork_identities.add(identity)
                 continue
             raise ValueError(f"unexpected SwiftPM source location for {identity}")
         if isinstance(version, str) and version and isinstance(revision, str) and revision:
@@ -78,15 +113,23 @@ def read_pins(path: Path) -> dict[str, str]:
     missing = sorted(required_fields - pins.keys())
     if missing:
         raise ValueError(f"missing required SwiftPM pins: {', '.join(missing)}")
-    return pins
+    return pins, fork_identities
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {Path(sys.argv[0]).name} PACKAGE.RESOLVED", file=sys.stderr)
+    args = sys.argv[1:]
+    reader = read_production_pins
+    if args[:1] == ["--historical"]:
+        reader = read_pins
+        args = args[1:]
+    if len(args) != 1:
+        print(
+            f"usage: {Path(sys.argv[0]).name} [--historical] PACKAGE.RESOLVED",
+            file=sys.stderr,
+        )
         return 2
     try:
-        print(json.dumps(read_pins(Path(sys.argv[1])), sort_keys=True))
+        print(json.dumps(reader(Path(args[0])), sort_keys=True))
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"failed to read SwiftPM pins: {error}", file=sys.stderr)
         return 1

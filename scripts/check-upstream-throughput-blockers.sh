@@ -34,7 +34,9 @@ need python3
 need curl
 
 read_pin() {
-  python3 "$ROOT/scripts/read_swiftpm_pins.py" "$ROOT/phase3-binary/Package.resolved"
+  # Reporting only: the watch describes whatever graph is pinned and records
+  # local_pin_matches itself; production consumers use the strict default.
+  python3 "$ROOT/scripts/read_swiftpm_pins.py" --historical "$ROOT/phase3-binary/Package.resolved"
 }
 
 PINS="$(read_pin)"

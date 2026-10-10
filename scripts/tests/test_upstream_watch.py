@@ -1,9 +1,18 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.read_swiftpm_pins import read_pins
+from scripts.read_swiftpm_pins import (
+    SPEC048_MLX_SWIFT_FORK,
+    SPEC048_MLX_SWIFT_LM_FORK,
+    SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_REVISION,
+    read_pins,
+    read_production_pins,
+)
 from scripts.compare_upstream_watch import material_changes, merge_snapshot
 
 
@@ -185,6 +194,80 @@ class SwiftPMPinParsingTests(unittest.TestCase):
             resolved.write_text(json.dumps(payload))
             with self.assertRaisesRegex(ValueError, "missing required SwiftPM pins"):
                 read_pins(resolved)
+
+
+class ProductionForkTupleTests(unittest.TestCase):
+    """read_production_pins accepts only the complete SPEC-048 fork tuple."""
+
+    LM_FORK = (SPEC048_MLX_SWIFT_LM_FORK + ".git", SPEC048_MLX_SWIFT_LM_REVISION)
+    SWIFT_FORK = (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION)
+
+    def resolve(self, lm=None, swift=None):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        for index, fork in ((0, swift), (1, lm)):
+            if fork is not None:
+                payload["pins"][index]["location"] = fork[0]
+                payload["pins"][index]["state"] = {"revision": fork[1]}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        resolved = Path(temporary.name) / "Package.resolved"
+        resolved.write_text(json.dumps(payload))
+        return resolved
+
+    def test_accepts_full_fork_tuple(self):
+        pins = read_production_pins(self.resolve(lm=self.LM_FORK, swift=self.SWIFT_FORK))
+
+        self.assertEqual(pins["mlx_swift_lm_revision"], SPEC048_MLX_SWIFT_LM_REVISION)
+        self.assertEqual(pins["mlx_swift_revision"], SPEC048_MLX_SWIFT_REVISION)
+
+    def test_accepts_checked_in_package_resolved(self):
+        resolved = Path(__file__).parents[2] / "phase3-binary" / "Package.resolved"
+
+        pins = read_production_pins(resolved)
+
+        self.assertEqual(pins["mlx_swift_lm_revision"], SPEC048_MLX_SWIFT_LM_REVISION)
+        self.assertEqual(pins["mlx_swift_revision"], SPEC048_MLX_SWIFT_REVISION)
+
+    def test_rejects_lm_fork_with_upstream_mlx_swift(self):
+        resolved = self.resolve(lm=self.LM_FORK)
+        self.assertIn("mlx_swift", read_pins(resolved))
+        with self.assertRaisesRegex(ValueError, "fork tuple.*: mlx-swift$"):
+            read_production_pins(resolved)
+
+    def test_rejects_upstream_lm_with_mlx_swift_fork(self):
+        resolved = self.resolve(swift=self.SWIFT_FORK)
+        self.assertIn("mlx_swift_lm", read_pins(resolved))
+        with self.assertRaisesRegex(ValueError, "fork tuple.*: mlx-swift-lm$"):
+            read_production_pins(resolved)
+
+    def test_rejects_fully_upstream_stack(self):
+        with self.assertRaisesRegex(ValueError, "fork tuple"):
+            read_production_pins(self.resolve())
+
+    def test_rejects_wrong_fork_revision(self):
+        for lm, swift in (
+            ((self.LM_FORK[0], "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"), self.SWIFT_FORK),
+            (self.LM_FORK, (self.SWIFT_FORK[0], "19601207e9a0de51e03ee6ec0c3c5f3784275075")),
+        ):
+            with self.subTest(lm=lm, swift=swift):
+                with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                    read_production_pins(self.resolve(lm=lm, swift=swift))
+
+    def test_cli_defaults_to_production_gate(self):
+        script = Path(__file__).parents[1] / "read_swiftpm_pins.py"
+        resolved = self.resolve(lm=self.LM_FORK)
+        strict = subprocess.run(
+            [sys.executable, str(script), str(resolved)], capture_output=True, text=True
+        )
+        historical = subprocess.run(
+            [sys.executable, str(script), "--historical", str(resolved)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(strict.returncode, 1, strict.stdout)
+        self.assertIn("fork tuple", strict.stderr)
+        self.assertEqual(historical.returncode, 0, historical.stderr)
 
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
