@@ -3700,7 +3700,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         var tokens: [Int] = []
         var seconds = Double.infinity
-        let runNonce = UUID().uuidString.prefix(8).lowercased()
+        let runNonce = UUID().uuidString.lowercased()
         for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
             let id = NativeMTPOnDeviceSelfCheck.ordinaryReferenceRequestID(
                 challengeID: challenge.challengeID,
