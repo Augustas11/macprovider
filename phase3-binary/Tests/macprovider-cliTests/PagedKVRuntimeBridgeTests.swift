@@ -1983,6 +1983,33 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             mask: .array(allTrue[0 ..< 1, 0..., 0..., ..<600])
         )
         XCTAssertTrue(arrayEqual(permissive[0 ..< 1], shortLone).item(Bool.self), "a foreign mask never admits padding")
+
+        // The same for packed verification: two width-2 rows on one route
+        // under an all-true foreign mask.
+        let verifyQueries = MLXRandom.normal([2, queryHeads, 2, headDim]).asType(.bfloat16)
+        let verifyKeys = MLXRandom.normal([2, kvHeads, 2, headDim]).asType(.bfloat16)
+        let verifyValues = MLXRandom.normal([2, kvHeads, 2, headDim]).asType(.bfloat16)
+        eval(verifyQueries, verifyKeys, verifyValues)
+        let packedAllTrue = MLXArray.ones([2, 1, 2, 902], dtype: .bool)
+        let packedPermissive = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: sameRoute.indices.map { Self.attentionRowCache(history: sameKeys[$0], sameValues[$0]) },
+            queries: verifyQueries, keys: verifyKeys, values: verifyValues, scale: scale,
+            mtpPackedRowMaps: sameRoute.enumerated().map {
+                MTPPackedVerificationRowMap(rowIndex: $0.offset, queryOffset: $0.element, inputCount: 2, proposalCount: 1)
+            },
+            maskOverride: .array(packedAllTrue)
+        )
+        let packedShortLone = MLXFast.scaledDotProductAttention(
+            queries: verifyQueries[0 ..< 1],
+            keys: concatenated([sameKeys[0], verifyKeys[0 ..< 1]], axis: 2),
+            values: concatenated([sameValues[0], verifyValues[0 ..< 1]], axis: 2),
+            scale: scale,
+            mask: .array(packedAllTrue[0 ..< 1, 0..., 0..., ..<601])
+        )
+        XCTAssertTrue(
+            arrayEqual(packedPermissive[0 ..< 1], packedShortLone).item(Bool.self),
+            "a foreign mask never admits padding in packed verification"
+        )
     }
 
     /// Sliding-window decode rows of different lengths attend over their own

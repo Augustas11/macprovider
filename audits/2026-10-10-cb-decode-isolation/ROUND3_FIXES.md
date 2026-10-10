@@ -15,7 +15,18 @@ an explicit forward bound instead of creating a Metal device. Creating the
 device inside `ContinuousBatchSchedulerTests` perturbed the timing-sensitive
 `testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation`
 (5 of 14 suite runs failed; 0 of 16 on main). After the change: 0 of 8, with
-main also 0 of 8, interleaved.
+main also 0 of 8, interleaved. One later failure was seen on the first suite
+run right after a rebuild; 10 further interleaved runs: main 0, branch 0.
+The test is load-sensitive on both trees.
+
+## Closure check (code lane)
+
+First closure check on `e6da2fd21`: 0 C / 0 H / 1 M. The packed
+verification path still shared the padded call under any array mask
+(`packedRows != nil` was trusted as provenance). Fixed: the packed
+verification mask the cache builds is registered as plain like the others,
+and sharing requires a plain mask on every path; a packed all-true foreign
+mask regression was added to the same test.
 
 Carried: none above LOW. The architecture LOW is fixed; the INFO is the
 agreed SPEC landing dependency.
