@@ -3223,6 +3223,36 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
     }
 
+    /// One uncompiled shared decode step over retained rows, as
+    /// `performDecode` runs it (batch caches, prepared cache, model forward,
+    /// row sync), returning each row's last-position logits as float32.
+    /// Rows advance by one token. Decode-isolation probes compare these bits
+    /// against the same rows decoded alone.
+    func sharedDecodeLogitsForTest(requestIDs: [String], tokens: [Int]) async throws -> [[Float]] {
+        try await container.perform { context in
+            let states = try requestIDs.map { id -> RowState in
+                guard let state = self.existingRowState(for: id), state.state == nil else {
+                    throw ContinuousBatchSchedulerError.unsupported("decode_probe_missing_row")
+                }
+                return state
+            }
+            let batchedCaches = try self.makeBatchedCaches(from: states.map(\.caches))
+            let caches = batchedCaches.map(\.cache)
+            let text = LMInput.Text(tokens: MLXArray(tokens.map(Int32.init)).reshaped([tokens.count, 1]))
+            let output = withPreparedCache(caches, lengths: text.sequenceLengths) {
+                context.model(text, cache: caches, state: nil)
+            }
+            try batchedCaches.forEach { try $0.validateBatchState() }
+            let logits = output.logits[0..., -1, 0...].asType(.float32)
+            eval(logits)
+            batchedCaches.forEach { $0.syncRowsFromBatch() }
+            eval(states.flatMap(\.caches))
+            let vocabulary = logits.dim(1)
+            let flat = logits.asArray(Float.self)
+            return (0 ..< requestIDs.count).map { Array(flat[$0 * vocabulary ..< ($0 + 1) * vocabulary]) }
+        }
+    }
+
     static func exerciseMTPPackedCacheForTest(
         rowCaches: [PagedKVCache],
         rowMaps: [MTPPackedVerificationRowMap],
