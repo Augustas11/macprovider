@@ -3129,6 +3129,7 @@ struct ServeCommand: AsyncParsableCommand {
                 providerStatus: providerStatus,
                 store: cbSelfCheckStore,
                 ownerPinnedSlots: plan.ownerPinned,
+                provisionalSlots: plan.reason == "provisional_policy_entry" ? plan.initialServed : nil,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

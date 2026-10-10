@@ -65,6 +65,87 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(none, .init(slots: 1, reason: "crashed_at_2", verifiedSlots: 1))
     }
 
+    // MARK: - Throughput noise never switches a batching Mac off
+
+    func testProvisionalEightWithNoisyNoGainKeepsEight() {
+        // Exact rows, gain 1.1x: below 1.2 but not a clear loss.
+        let measurements = [m(2, tps: 50), m(4, tps: 55), m(8, tps: 55)]
+        let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: measurements)
+        XCTAssertEqual(fresh.reason, "no_net_gain")
+        let kept = ContinuousBatchingSelfCheck.reconcile(
+            fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: measurements, previousStreak: 0
+        )
+        XCTAssertEqual(kept.decision.slots, 8)
+        XCTAssertEqual(kept.decision.state, .granted(slots: 8))
+        XCTAssertEqual(kept.streak, 0, "noise is not a clear loss")
+        XCTAssertNotNil(kept.remeasureAfterSeconds)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: kept.decision, ownerPinned: nil, maxRows: 16), 8)
+    }
+
+    func testOnlyRepeatedClearLossesTakeAPriorGrant() {
+        let losing = [m(2, tps: 30), m(4, tps: 35)]
+        let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: losing)
+        var streak = 0
+        for round in 1...ContinuousBatchingSelfCheck.confirmedNoGainStreak {
+            let result = ContinuousBatchingSelfCheck.reconcile(
+                fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: losing, previousStreak: streak
+            )
+            streak = result.streak
+            if round < ContinuousBatchingSelfCheck.confirmedNoGainStreak {
+                XCTAssertGreaterThan(result.decision.slots, 1, "round \(round) keeps batching")
+            } else {
+                XCTAssertEqual(result.decision.reason, "no_net_gain_confirmed")
+                XCTAssertEqual(result.decision.slots, 1)
+            }
+        }
+    }
+
+    func testCorrectnessStillRevokesOrLowersAPriorGrant() {
+        let divergent = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: [m(2, exact: false, tps: 90)])
+        XCTAssertEqual(ContinuousBatchingSelfCheck.reconcile(
+            fresh: divergent, priorGrant: 8, serialTPS: 50, measurements: [m(2, exact: false, tps: 90)], previousStreak: 0
+        ).decision.slots, 1)
+        // Verified only to 5: a prior 8 is lowered to 5, not kept at 8.
+        let capped = [m(2, tps: 90), m(3, tps: 100), m(4, tps: 110), m(5, tps: 120), m(6, exact: false, tps: 130)]
+        let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: capped)
+        let result = ContinuousBatchingSelfCheck.reconcile(
+            fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: capped, previousStreak: 0
+        )
+        XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: result.decision, ownerPinned: nil, maxRows: 16), 5)
+    }
+
+    func testThroughputCannotLowerAPriorGrantBelowWhatWasVerified() {
+        // Fresh pick is 2 by the tie band, prior grant 8, verified to 8: keep 8.
+        let flat = [m(2, tps: 100), m(4, tps: 101), m(8, tps: 102)]
+        let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: flat)
+        XCTAssertEqual(fresh.slots, 2)
+        let result = ContinuousBatchingSelfCheck.reconcile(
+            fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: flat, previousStreak: 0
+        )
+        XCTAssertEqual(result.decision.slots, 8)
+        // A fresh Mac with no prior grant keeps the 1.2x rule.
+        XCTAssertEqual(ContinuousBatchingSelfCheck.reconcile(
+            fresh: fresh, priorGrant: nil, serialTPS: 50, measurements: flat, previousStreak: 0
+        ).decision, fresh)
+    }
+
+    func testPriorGrantComesFromAnOlderRuntimeIdentity() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-prior-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let old = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "old", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o")
+        let new = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "new", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o")
+        let otherMac = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "new", kernelIdentifier: "k", hardwareClass: "x", osBuild: "o")
+        try store.store(.init(
+            key: old, decision: .init(slots: 8, reason: "granted", verifiedSlots: 8), serialTPS: 50,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertEqual(store.priorGrant(for: new), 8)
+        XCTAssertNil(store.priorGrant(for: otherMac))
+        XCTAssertNil(store.priorGrant(for: old))
+    }
+
     func testDeferralsBackOffToAtMostFifteenMinutes() {
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 0, base: 5), 0)
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 1, base: 5), 10)

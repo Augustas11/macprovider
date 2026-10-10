@@ -1019,11 +1019,21 @@ above are superseded where they conflict:
    different order and MoE gathers group rows differently, so exact
    serial-vs-batched token identity is not required; the load-time SPEC-039
    parity and isolation probes remain the quality gate against stock serial
-   decode. It grants the k with the highest aggregate tokens/s (faster
-   pass), preferring the lowest k within 15% of it, only when that aggregate
-   is at least 1.2x stock serial decode of the same prompts on the same Mac
-   (best of two passes after a warm-up); otherwise the Mac serves serially.
-   The highest k whose rows all passed is recorded as `verified_k`.
+   decode. Each k runs three repeats of stock serial decode then the batch,
+   back to back on the same prompts; the gain is the median batch/serial
+   ratio. It grants the k with the highest gain, preferring the lowest k
+   within 15% of it, only when that gain is at least 1.2x; otherwise a fresh
+   Mac serves serially. The highest k whose rows all passed is recorded as
+   `verified_k`.
+   **Throughput noise never switches batching off.** On a Mac that already
+   batches the model (a signed provisional grant, the previous result on this
+   key, or a grant under an older Metal library, kernel or macOS build for the
+   same model and hardware), only a correctness result (a divergence or leak
+   beyond the probe rule, or a crashed step) may revoke or lower the grant,
+   and never below `verified_k`. A throughput result may raise it but not
+   lower it. A no-gain result keeps the grant (`kept_prior_grant_*`, logged)
+   and schedules a re-measurement (1 h, doubling); only three consecutive
+   clear losses (best exact gain below 1.0x) end it (`no_net_gain_confirmed`).
 3. The check MUST NOT block serving. It runs only while no request is in
    flight after an idle interval and abandons a step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and

@@ -60,12 +60,17 @@ struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
     /// Rows that differed only at a near-tie.
     var nearTieRows: Int = 0
     let aggregateTPS: Double
+    /// Median over repeats of batched aggregate / stock serial tokens/s,
+    /// each repeat measured back to back on the same prompts. 0 means "use
+    /// aggregateTPS over the record's serial baseline".
+    var gain: Double = 0
 
     enum CodingKeys: String, CodingKey {
         case slots
         case conformant
         case nearTieRows = "near_tie_rows"
         case aggregateTPS = "aggregate_tps"
+        case gain
     }
 }
 
@@ -172,24 +177,70 @@ enum ContinuousBatchingSelfCheck {
             let first = measurements.first?.slots ?? 2
             return .init(slots: 1, reason: "row_divergence_at_\(first)", verifiedSlots: 1)
         }
-        let gaining = exactPrefix.filter {
-            $0.aggregateTPS.isFinite && $0.aggregateTPS >= serialTPS * minimumAggregateGain
-        }
+        let gaining = exactPrefix.filter { gain(of: $0, serialTPS: serialTPS) >= minimumAggregateGain }
         guard !gaining.isEmpty else {
             return .init(slots: 1, reason: "no_net_gain", verifiedSlots: verified)
         }
         let slots = AutotuneConcurrencyCalibrator.selectDepth(
             feasible: gaining.map {
+                // Rank by the noise-corrected gain (median serial/batch ratio).
                 AutotuneConcurrencyCalibrationMeasurement(
                     batchDepth: $0.slots,
                     streams: $0.slots,
-                    aggregateTPS: $0.aggregateTPS,
+                    aggregateTPS: gain(of: $0, serialTPS: serialTPS),
                     passed: true
                 )
             },
             minAggregateGainFraction: tieBandFraction
         )
         return .init(slots: slots, reason: "granted", verifiedSlots: verified)
+    }
+
+    static func gain(of measurement: ContinuousBatchingSelfCheckMeasurement, serialTPS: Double) -> Double {
+        let value = measurement.gain > 0 ? measurement.gain : measurement.aggregateTPS / serialTPS
+        return value.isFinite ? value : 0
+    }
+
+    /// Consecutive clear losses (best exact batch slower than serial) a Mac
+    /// that already batches needs before throughput alone may take its grant.
+    static let confirmedNoGainStreak = 3
+    static let remeasureBaseSeconds = 3_600.0
+
+    /// SPEC-038 FR-CB10 (v0.3.12): throughput noise never switches batching
+    /// off or lowers a Mac that already batches. Only a correctness result
+    /// (row divergence or leak beyond the probe rule, or a crash) lowers or
+    /// revokes `priorGrant`; a fresh Mac keeps the 1.2x rule. Returns the
+    /// decision to apply, the new no-gain streak, and when to re-measure.
+    static func reconcile(
+        fresh: ContinuousBatchingSelfCheckDecision,
+        priorGrant: Int?,
+        serialTPS: Double,
+        measurements: [ContinuousBatchingSelfCheckMeasurement],
+        previousStreak: Int
+    ) -> (decision: ContinuousBatchingSelfCheckDecision, streak: Int, remeasureAfterSeconds: Double?) {
+        guard let prior = priorGrant, prior > 1 else { return (fresh, 0, nil) }
+        switch fresh.reason {
+        case "granted":
+            let kept = min(prior, fresh.verifiedSlots)
+            return (.init(slots: max(fresh.slots, kept), reason: "granted", verifiedSlots: fresh.verifiedSlots), 0, nil)
+        case "no_net_gain", "serial_baseline_unavailable":
+            let exact = measurements.prefix { $0.conformant }
+            let best = exact.map { gain(of: $0, serialTPS: serialTPS) }.max() ?? 0
+            let clearLoss = fresh.reason == "no_net_gain" && best > 0 && best < 1.0
+            let streak = clearLoss ? previousStreak + 1 : 0
+            if streak >= confirmedNoGainStreak {
+                return (.init(slots: 1, reason: "no_net_gain_confirmed", verifiedSlots: fresh.verifiedSlots), streak, nil)
+            }
+            let keep = min(prior, max(fresh.verifiedSlots, 1))
+            return (
+                .init(slots: keep, reason: "kept_prior_grant_\(fresh.reason)", verifiedSlots: fresh.verifiedSlots),
+                streak,
+                remeasureBaseSeconds * pow(2, Double(min(streak, 6)))
+            )
+        default:
+            // Row divergence, leak, or crash: correctness rules.
+            return (fresh, 0, nil)
+        }
     }
 
     /// The count `serve` advertises: the decision (or the owner pin), never
@@ -260,7 +311,7 @@ enum ContinuousBatchingSelfCheck {
 /// process (e.g. a Metal OOM at a high slot count) is found on restart and
 /// never retried on the same key.
 struct ContinuousBatchingSelfCheckStore: Sendable {
-    static let schemaVersion = "macprovider.cb-self-check.v2"
+    static let schemaVersion = "macprovider.cb-self-check.v3"
     static let fileName = "cb-self-check.json"
     static let maxEntries = 64
 
@@ -277,6 +328,10 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// Set while a step runs; found set on load means that step crashed.
         var inProgressSlots: Int?
         var decidedAt: String?
+        /// Consecutive clear no-gain results while keeping a prior grant.
+        var noGainStreak: Int = 0
+        /// Kept prior grant: re-measure after this time (RFC 3339).
+        var remeasureAfter: String?
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -286,6 +341,8 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case aloneOutputs = "alone_outputs"
             case inProgressSlots = "in_progress_slots"
             case decidedAt = "decided_at"
+            case noGainStreak = "no_gain_streak"
+            case remeasureAfter = "remeasure_after"
         }
     }
 
@@ -310,6 +367,15 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
 
     func record(for key: ContinuousBatchingSelfCheckKey) -> Record? {
         read().last { $0.key == key }
+    }
+
+    /// The largest stored grant for this model on this hardware under any
+    /// other runtime identity (older Metal library, kernel or macOS build):
+    /// a Mac that already batched this model keeps batching through an update.
+    func priorGrant(for key: ContinuousBatchingSelfCheckKey) -> Int? {
+        read().filter {
+            $0.key != key && $0.key.modelSHA256 == key.modelSHA256 && $0.key.hardwareClass == key.hardwareClass
+        }.compactMap { $0.decision?.slots }.filter { $0 > 1 }.max()
     }
 
     func decision(for key: ContinuousBatchingSelfCheckKey) -> ContinuousBatchingSelfCheckDecision? {
@@ -363,12 +429,13 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
     }
 }
 
-/// Runs the self-check in the background of `serve`: polls the runtime for a
-/// pending target, applies a stored decision at once, and otherwise measures
-/// one ladder step at a time only while no request is in flight, abandoning a
-/// step the moment one arrives. Progress persists, consecutive deferrals back
-/// off, and a step that crashed the process is never retried on its key.
-/// Never blocks serving.
+/// Runs the self-check in the background of `serve`: applies a stored
+/// decision at once, and otherwise measures one ladder step at a time only
+/// while no request is in flight, abandoning a step the moment one arrives.
+/// Progress persists, consecutive deferrals back off, a step that crashed the
+/// process is never retried on its key, and throughput noise never takes a
+/// grant from a Mac that already batches (`ContinuousBatchingSelfCheck
+/// .reconcile`). Never blocks serving.
 actor ContinuousBatchingSelfCheckDriver {
     private let runtime: ModelRuntime
     private let providerStatus: ProviderStatus
@@ -376,17 +443,22 @@ actor ContinuousBatchingSelfCheckDriver {
     /// Owner-pinned served slots: the check decides batching on/off and may
     /// only lower the pin to the verified slot count.
     private let ownerPinnedSlots: Int?
+    /// Slots already batching before this check (a signed provisional grant).
+    private let provisionalSlots: Int?
     private let idleSeconds: Double
     private let pollSeconds: Double
     private let log: @Sendable (String) -> Void
     private var deferrals = 0
     private var nextAttemptAt = Date.distantPast
 
+    static let repeats = 3
+
     init(
         runtime: ModelRuntime,
         providerStatus: ProviderStatus,
         store: ContinuousBatchingSelfCheckStore,
         ownerPinnedSlots: Int?,
+        provisionalSlots: Int? = nil,
         idleSeconds: Double = 10,
         pollSeconds: Double = 5,
         log: @escaping @Sendable (String) -> Void
@@ -395,6 +467,7 @@ actor ContinuousBatchingSelfCheckDriver {
         self.providerStatus = providerStatus
         self.store = store
         self.ownerPinnedSlots = ownerPinnedSlots
+        self.provisionalSlots = provisionalSlots
         self.idleSeconds = idleSeconds
         self.pollSeconds = max(0.1, pollSeconds)
         self.log = log
@@ -403,10 +476,15 @@ actor ContinuousBatchingSelfCheckDriver {
     func run() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
-            guard let target = await runtime.continuousBatchingSelfCheckTarget() else { continue }
+            guard let target = await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) else { continue }
+            let pending = await runtime.continuousBatchingSelfCheckState() == .pending
             if let record = store.record(for: target.key) {
                 if let decision = record.decision {
-                    await apply(decision, target: target, source: "stored")
+                    if pending { await apply(decision, target: target, source: "stored") }
+                    if let due = record.remeasureAfter.flatMap(Self.parseDate), Date() >= due,
+                       Date() >= nextAttemptAt, await isIdle() {
+                        await measure(target, remeasureOf: record)
+                    }
                     continue
                 }
                 if let crashed = record.inProgressSlots {
@@ -416,10 +494,12 @@ actor ContinuousBatchingSelfCheckDriver {
                     continue
                 }
             }
-            guard Date() >= nextAttemptAt, await isIdle() else { continue }
-            await measure(target)
+            guard pending, Date() >= nextAttemptAt, await isIdle() else { continue }
+            await measure(target, remeasureOf: nil)
         }
     }
+
+    private static func parseDate(_ value: String) -> Date? { ISO8601DateFormatter().date(from: value) }
 
     private func isIdle() async -> Bool {
         let snapshot = await providerStatus.snapshot()
@@ -457,19 +537,40 @@ actor ContinuousBatchingSelfCheckDriver {
         }
     }
 
-    private func measure(_ target: ContinuousBatchingSelfCheckTarget) async {
+    private static func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted()
+        guard !sorted.isEmpty else { return 0 }
+        return sorted.count % 2 == 1
+            ? sorted[sorted.count / 2]
+            : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+    }
+
+    private func measure(
+        _ target: ContinuousBatchingSelfCheckTarget,
+        remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
+    ) async {
         let runtime = runtime
         let ladder = ContinuousBatchingSelfCheck.ladder(maxRows: ownerPinnedSlots.map { min($0, target.maxRows) } ?? target.maxRows)
-        var record = store.record(for: target.key) ?? .init(
-            key: target.key, decision: nil, serialTPS: 0, measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
-        )
+        var record: ContinuousBatchingSelfCheckStore.Record
+        if let previous {
+            // A kept grant is re-measured from scratch; its decision and
+            // no-gain streak carry until the new result is reconciled.
+            record = previous
+            record.measurements = []
+            record.serialTPS = 0
+        } else {
+            record = store.record(for: target.key) ?? .init(
+                key: target.key, decision: nil, serialTPS: 0, measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+            )
+        }
         guard let maxSlots = ladder.last else {
             record.decision = .init(slots: 1, reason: "single_row", verifiedSlots: 1)
-            await finish(record, crashedAt: nil, target: target)
+            save(record)
+            await apply(record.decision!, target: target, source: "measured")
             return
         }
-        await report(decision: deferrals > 0 ? "deferred" : "pending", target: target)
-        log("event=cb_self_check action=step max_slots=\(maxSlots) resumed_at=\(record.measurements.count) model_sha256=\(target.key.modelSHA256)")
+        if previous == nil { await report(decision: deferrals > 0 ? "deferred" : "pending", target: target) }
+        log("event=cb_self_check action=step max_slots=\(maxSlots) resumed_at=\(record.measurements.count) remeasure=\(previous != nil) model_sha256=\(target.key.modelSHA256)")
         do {
             let tokens = ContinuousBatchingSelfCheck.maxOutputTokens
             // Scheduler request ids are idempotency keys; never reuse one.
@@ -477,21 +578,9 @@ actor ContinuousBatchingSelfCheckDriver {
             let prompts = try await runtime.continuousBatchingSelfCheckPrompts(
                 ContinuousBatchingSelfCheck.promptTexts(count: maxSlots)
             )
-            if record.serialTPS <= 0 {
-                // Stock serial decode on the same prompts the batches use; a
-                // warm-up prompt first, then the best of two passes, so a slow
-                // first run cannot inflate the measured gain.
-                let serialPrompts = Array(prompts.prefix(ContinuousBatchingSelfCheck.serialBaselinePrompts))
-                _ = try await yieldingToRequests {
-                    try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: [prompts[0]], maxTokens: 8)
-                }
-                for _ in 0..<2 {
-                    let run = try await yieldingToRequests {
-                        try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
-                    }
-                    record.serialTPS = max(record.serialTPS, run)
-                }
-                save(record)
+            // Warm the stock serial path once so its first run is not counted.
+            _ = try await yieldingToRequests {
+                try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: [prompts[0]], maxTokens: 8)
             }
             for slots in ladder where !record.measurements.contains(where: { $0.slots == slots }) {
                 while record.aloneOutputs.count < slots {
@@ -505,18 +594,31 @@ actor ContinuousBatchingSelfCheckDriver {
                 }
                 record.inProgressSlots = slots
                 save(record)
-                // Two passes: the first also compiles kernels for this row
-                // count, so throughput is the faster pass; every distinct row
-                // output of both passes must pass the isolation check.
+                // Repeats of stock serial then batched, back to back on the
+                // same prompts; the gain is the median ratio, so a noisy
+                // window in either path does not decide the outcome.
+                let batchPrompts = Array(prompts.prefix(slots))
+                let serialPrompts = Array(batchPrompts.prefix(ContinuousBatchingSelfCheck.serialBaselinePrompts))
                 var passes: [(outputs: [[Int]], seconds: Double)] = []
-                for pass in 0..<2 {
-                    passes.append(try await yieldingToRequests {
+                var ratios: [Double] = []
+                var aggregates: [Double] = []
+                var serials: [Double] = []
+                for pass in 0..<Self.repeats {
+                    let serial = try await yieldingToRequests {
+                        try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: serialPrompts, maxTokens: tokens)
+                    }
+                    let batch = try await yieldingToRequests {
                         try await runtime.runContinuousBatchingSelfCheckBatch(
-                            prompts: Array(prompts.prefix(slots)), maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)"
+                            prompts: batchPrompts, maxOutputTokens: tokens, idPrefix: "cb-self-check-\(attempt)-k\(slots)-p\(pass)"
                         )
-                    })
+                    }
+                    passes.append(batch)
+                    let generated = batch.outputs.reduce(0) { $0 + $1.count }
+                    let aggregate = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
+                    aggregates.append(aggregate)
+                    serials.append(serial)
+                    if serial > 0 { ratios.append(aggregate / serial) }
                 }
-                let batch = passes.min { $0.seconds < $1.seconds }!
                 let alone = record.aloneOutputs
                 var conformant = true
                 var nearTieRows = 0
@@ -556,12 +658,15 @@ actor ContinuousBatchingSelfCheckDriver {
                     if nearTie { nearTieRows += 1 } else { conformant = false }
                     divergences.append("\(row)@\(index.map(String.init) ?? "len")/\(pair.1.count):\(verdictText):tokens=\(tokenText):margin=\(marginText)")
                 }
-                let generated = batch.outputs.reduce(0) { $0 + $1.count }
-                let aggregate = batch.seconds > 0 ? Double(generated) / batch.seconds : 0
-                record.measurements.append(.init(slots: slots, conformant: conformant, nearTieRows: nearTieRows, aggregateTPS: aggregate))
+                let gain = Self.median(ratios)
+                let aggregate = Self.median(aggregates)
+                record.serialTPS = max(record.serialTPS, Self.median(serials))
+                record.measurements.append(.init(
+                    slots: slots, conformant: conformant, nearTieRows: nearTieRows, aggregateTPS: aggregate, gain: gain
+                ))
                 record.inProgressSlots = nil
                 save(record)
-                log("event=cb_self_check action=measured slots=\(slots) conformant=\(conformant) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", record.serialTPS))")
+                log("event=cb_self_check action=measured slots=\(slots) conformant=\(conformant) divergent_rows=\(divergences.isEmpty ? "none" : divergences.joined(separator: ",")) aggregate_tps=\(String(format: "%.1f", aggregate)) serial_tps=\(String(format: "%.1f", Self.median(serials))) gain=\(String(format: "%.2f", gain))")
                 if !conformant { break }
             }
             deferrals = 0
@@ -570,13 +675,13 @@ actor ContinuousBatchingSelfCheckDriver {
         } catch {
             // Yielded to a real request or a transient failure: progress is kept
             // (the interrupted step was not completed, so it is not a crash) and
-            // the next attempt waits longer each time.
+            // the next attempt waits longer each time. A kept grant stays.
             record.inProgressSlots = nil
-            save(record)
+            if previous == nil { save(record) }
             deferrals += 1
             let wait = ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
             nextAttemptAt = Date().addingTimeInterval(wait)
-            await report(decision: "deferred", target: target)
+            if previous == nil { await report(decision: "deferred", target: target) }
             log("event=cb_self_check action=deferred deferrals=\(deferrals) retry_in_s=\(Int(wait)) reason=\(error is StepError ? "request_in_flight" : "step_failed error=\(String(describing: error).prefix(200))")")
         }
     }
@@ -587,17 +692,35 @@ actor ContinuousBatchingSelfCheckDriver {
         target: ContinuousBatchingSelfCheckTarget
     ) async {
         // A swap during the measurement changes the target; drop the result.
-        guard await runtime.continuousBatchingSelfCheckTarget() == target else { return }
-        var final = record
-        final.decision = record.decision ?? ContinuousBatchingSelfCheck.decide(
+        guard await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target else { return }
+        let fresh = ContinuousBatchingSelfCheck.decide(
             serialTPS: record.serialTPS, measurements: record.measurements, crashedAt: crashedAt
         )
+        // A Mac that already batches this model: the previous grant on this
+        // key, a grant under an older runtime identity, or a signed
+        // provisional grant.
+        let priorGrant = [record.decision?.slots, store.priorGrant(for: target.key), provisionalSlots]
+            .compactMap { $0 }.filter { $0 > 1 }.max()
+        let reconciled = ContinuousBatchingSelfCheck.reconcile(
+            fresh: fresh,
+            priorGrant: priorGrant,
+            serialTPS: record.serialTPS,
+            measurements: record.measurements,
+            previousStreak: record.noGainStreak
+        )
+        var final = record
+        final.decision = reconciled.decision
+        final.noGainStreak = reconciled.streak
+        final.remeasureAfter = reconciled.remeasureAfterSeconds.map {
+            ISO8601DateFormatter().string(from: Date().addingTimeInterval($0))
+        }
         final.inProgressSlots = nil
         final.decidedAt = ISO8601DateFormatter().string(from: Date())
         save(final)
-        if let decision = final.decision {
-            await apply(decision, target: target, source: crashedAt == nil ? "measured" : "crash_recovered")
+        if reconciled.decision != fresh {
+            log("event=cb_self_check action=kept_prior_grant fresh_reason=\(fresh.reason) fresh_slots=\(fresh.slots) prior_slots=\(priorGrant ?? 0) kept_slots=\(reconciled.decision.slots) no_gain_streak=\(reconciled.streak)")
         }
+        await apply(reconciled.decision, target: target, source: crashedAt == nil ? "measured" : "crash_recovered")
     }
 
     private func report(decision: String, target: ContinuousBatchingSelfCheckTarget) async {

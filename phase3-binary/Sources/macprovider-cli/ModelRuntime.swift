@@ -4430,8 +4430,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// nothing to check: a decision already exists, batching cannot run here
     /// (emergency off, draft model, no attached scheduler), or a signed
     /// revocation names this model on this runtime revision.
-    func continuousBatchingSelfCheckTarget() -> ContinuousBatchingSelfCheckTarget? {
-        guard continuousBatchingSelfCheck == .pending,
+    func continuousBatchingSelfCheckTarget(includeDecided: Bool = false) -> ContinuousBatchingSelfCheckTarget? {
+        guard includeDecided || continuousBatchingSelfCheck == .pending,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
               continuousBatchScheduler != nil,
