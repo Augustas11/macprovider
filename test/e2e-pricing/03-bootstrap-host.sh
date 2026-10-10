@@ -38,7 +38,7 @@ su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='macprovider
 install -m 0755 $S/coordinator-linux-amd64 /tmp/e2e-stats-migrate
 su postgres -c "/tmp/e2e-stats-migrate stats-migrate --admin-dsn 'host=/var/run/postgresql dbname=macprovider_stats sslmode=disable'" >/dev/null
 rm -f /tmp/e2e-stats-migrate
-for r in provider_onboarding provider_auth_policy_requester provider_auth_policy_approver provider_auth_policy_cutover hardware_trust_requester hardware_trust_approver stats_reader stats_rollup; do
+for r in provider_onboarding provider_auth_policy_requester provider_auth_policy_approver provider_auth_policy_cutover hardware_trust_requester hardware_trust_approver app_attest_recorder stats_reader stats_rollup; do
   su postgres -c "psql -v ON_ERROR_STOP=1 -q -d macprovider_stats -c \"ALTER ROLE $r LOGIN PASSWORD 'e2e-$r-local'\""
 done
 d() { echo "postgres://$1:e2e-$1-local@127.0.0.1:5432/macprovider_stats?sslmode=disable"; }
@@ -59,6 +59,7 @@ ONBOARDING_AUTH_POLICY_APPROVE_DSN=$(d provider_auth_policy_approver)
 ONBOARDING_AUTH_POLICY_CUTOVER_DSN=$(d provider_auth_policy_cutover)
 ONBOARDING_HARDWARE_TRUST_REQUEST_DSN=$(d hardware_trust_requester)
 ONBOARDING_HARDWARE_TRUST_APPROVE_DSN=$(d hardware_trust_approver)
+ONBOARDING_APP_ATTEST_RECORD_DSN=$(d app_attest_recorder)
 EOF
 chown root:macprovider /etc/macprovider/coordinator.env; chmod 0640 /etc/macprovider/coordinator.env
 cat >/etc/macprovider/gateway.env <<EOF

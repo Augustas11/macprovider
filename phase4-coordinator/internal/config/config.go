@@ -419,6 +419,10 @@ func (c CompatibilitySetConfig) IsUpdateOnly(id string) bool {
 	return c.Configured() && c.AllowsSession(id) && c.IsRevoked(id)
 }
 
+// AppAttestRecordDSNEnv is the coordinator env var that carries the
+// app_attest_recorder DSN (SPEC-033 §2.7).
+const AppAttestRecordDSNEnv = "ONBOARDING_APP_ATTEST_RECORD_DSN"
+
 // OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
 // Default-off preserves backward-compatible binary rollout; production
 // traffic enablement waits for the SPEC-026 §4.3 proof-stage verifier.
@@ -434,6 +438,7 @@ type OnboardingConfig struct {
 	// may record an Apple App Attest verification (SPEC-033 §5.7). Optional:
 	// without it no verification is recorded and no hardware is trusted
 	// automatically.
+	// When unset, the DSN is read from AppAttestRecordDSNEnv.
 	AppAttestRecordDSN string            `yaml:"app_attest_record_dsn"`
 	BundleID           string            `yaml:"bundle_id"`
 	AppleTeamID        string            `yaml:"apple_team_id"`
@@ -2579,6 +2584,13 @@ func (c *Config) resolveEnv() error {
 			return err
 		}
 		*f.dst = v
+	}
+	// SPEC-033 §2.7: Pearl's live coordinator.yaml is edited in place, never
+	// replaced by dist/coordinator.yaml, so the recorder DSN also comes from
+	// its documented env var when the config leaves the field unset. The
+	// variable lives only in the root-owned coordinator env file.
+	if strings.TrimSpace(c.Onboarding.AppAttestRecordDSN) == "" {
+		c.Onboarding.AppAttestRecordDSN = strings.TrimSpace(os.Getenv(AppAttestRecordDSNEnv))
 	}
 	if raw, ok := os.LookupEnv("GITHUB_OAUTH_ENABLED"); ok {
 		switch raw {

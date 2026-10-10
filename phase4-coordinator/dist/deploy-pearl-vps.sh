@@ -2467,6 +2467,9 @@ PY
     ONBOARDING_AUTH_POLICY_CUTOVER_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_CUTOVER_DSN)"
     ONBOARDING_HARDWARE_TRUST_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_REQUEST_DSN)"
     ONBOARDING_HARDWARE_TRUST_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_HARDWARE_TRUST_APPROVE_DSN)"
+    # SPEC-033 §2.7: dist/coordinator.yaml references this DSN; provision it with
+    # scripts/ops/pearl-runtime.sh step app_attest_recorder before the apply.
+    ONBOARDING_APP_ATTEST_RECORD_DSN="$(require_env_value "$env_file" ONBOARDING_APP_ATTEST_RECORD_DSN)"
     echo "  ok: required onboarding DSN env vars are present in coordinator.env"
     # Issue #582 MIGRATION-019 ORDERING (self-enforcing standard path) — apply the
     # embedded stats migrations, INCLUDING 019's hardware_verification_trust PRIMARY
@@ -2711,6 +2714,39 @@ END
 \$\$;
 SQL
     echo "  ok: hardware-trust split DSN roles have expected EXECUTE privileges"
+    # SPEC-033 §2.7 / §5.7.1: the recorder DSN must log in as exactly
+    # app_attest_recorder with SELECT and INSERT on the verification table and
+    # nothing else (no other privilege on it, no trust-table access, no role
+    # memberships, no elevated attributes).
+    psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_ATTEST_RECORD_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'app_attest_recorder'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
+    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.privilege_name)
+    )
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('hardware_verification_trust'), ('hardware_trust_grants'), ('hardware_trust_pending'), ('hardware_verification_jobs'), ('provider_identities'), ('provider_hardware_profiles')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND NOT has_function_privilege(current_user, 'auto_trust_attested_hardware(bigint)'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'app attest record DSN does not map to the least-privilege app_attest_recorder role';
+  END IF;
+END
+\$\$;
+SQL
+    echo "  ok: app_attest_recorder DSN logs in with SELECT, INSERT only"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
     # FIX 8 (issue #582): reaching here means hardware-trust approval is enabled
     # (ONBOARDING_HARDWARE_TRUST_REQUEST_DSN/APPROVE_DSN are required above), so
