@@ -110,15 +110,51 @@ type evidenceArchiveWriter struct {
 	cutoff    string
 }
 
+// countingWriter counts the compressed archive bytes. With a guard set, it
+// calls the guard before every guardStep bytes reach the file, splitting
+// writes at those boundaries, so a guard error stops the archive within one
+// step of output.
 type countingWriter struct {
-	w io.Writer
-	n int64
+	w          io.Writer
+	n          int64
+	guard      func() error
+	guardStep  int64
+	sinceGuard int64
 }
 
 func (c *countingWriter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	return n, err
+	written := 0
+	for len(p) > 0 {
+		chunk := p
+		if c.guard != nil && c.guardStep > 0 {
+			if c.sinceGuard >= c.guardStep {
+				if err := c.guard(); err != nil {
+					return written, err
+				}
+				c.sinceGuard = 0
+			}
+			if room := c.guardStep - c.sinceGuard; int64(len(chunk)) > room {
+				chunk = chunk[:room]
+			}
+		}
+		n, err := c.w.Write(chunk)
+		written += n
+		c.n += int64(n)
+		c.sinceGuard += int64(n)
+		p = p[n:]
+		if err != nil {
+			return written, err
+		}
+		if n < len(chunk) {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+// setSpaceGuard makes the writer call guard every step bytes of output.
+func (w *evidenceArchiveWriter) setSpaceGuard(step int64, guard func() error) {
+	w.counter.guard, w.counter.guardStep = guard, step
 }
 
 func newEvidenceArchiveWriter(dir string, now time.Time, cutoff string) (*evidenceArchiveWriter, error) {

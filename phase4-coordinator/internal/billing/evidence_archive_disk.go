@@ -9,9 +9,9 @@ import (
 	"syscall"
 )
 
-// evidenceArchiveSpaceCheckBytes is how much compressed archive output an
-// export writes between free-space re-reads. The writer buffers at most a
-// few MiB more before it reaches the file, far below any useful floor.
+// evidenceArchiveSpaceCheckBytes is how much compressed archive output
+// reaches the file between free-space re-reads (the archive writer checks
+// before every step, including while it flushes).
 // Tests lower it and replace archiveFilesystemSpaceFunc.
 var evidenceArchiveSpaceCheckBytes int64 = 4 << 20
 

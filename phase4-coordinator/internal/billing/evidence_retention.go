@@ -1132,23 +1132,7 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		// nor concurrent database growth can push the filesystem below the
 		// floor during export.
 		var w *evidenceArchiveWriter
-		var spaceCheckedAt int64
-		selected, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
-			if w == nil {
-				created, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
-				if err != nil {
-					return err
-				}
-				w = created
-			}
-			addRetentionStats(&report, b)
-			if err := w.writeRequest(b); err != nil {
-				return err
-			}
-			if w.counter.n-spaceCheckedAt < evidenceArchiveSpaceCheckBytes {
-				return nil
-			}
-			spaceCheckedAt = w.counter.n
+		spaceGuard := func() error {
 			free, total, err := archiveFilesystemSpaceFunc(opts.ArchiveDir)
 			if err != nil {
 				return err
@@ -1157,6 +1141,18 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 				return fmt.Errorf("%w: %s", errEvidenceArchiveDiskLow, reason)
 			}
 			return nil
+		}
+		selected, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
+			if w == nil {
+				created, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
+				if err != nil {
+					return err
+				}
+				created.setSpaceGuard(evidenceArchiveSpaceCheckBytes, spaceGuard)
+				w = created
+			}
+			addRetentionStats(&report, b)
+			return w.writeRequest(b)
 		})
 		if err == nil {
 			err = s.saveEvidenceRetentionCursor(ctx, nextCursor)
@@ -1179,6 +1175,13 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		}
 		report.EligibleRequests = selected
 		archive, err = s.recordEvidenceArchive(ctx, w)
+		if errors.Is(err, errEvidenceArchiveDiskLow) {
+			// finish() removed the partial archive; the cursor already moved
+			// past these requests and the scan wraps back to them.
+			report.Status = EvidenceRetentionStatusArchiveDiskLow
+			report.Error = err.Error()
+			return report, nil
+		}
 		if err != nil {
 			return report, err
 		}

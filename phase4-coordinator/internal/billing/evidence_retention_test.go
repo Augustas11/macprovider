@@ -1279,7 +1279,7 @@ func TestEvidenceRetentionStopsExportAtArchiveDiskFloor(t *testing.T) {
 	calls := 0
 	prevFn, prevStep := archiveFilesystemSpaceFunc, evidenceArchiveSpaceCheckBytes
 	t.Cleanup(func() { archiveFilesystemSpaceFunc, evidenceArchiveSpaceCheckBytes = prevFn, prevStep })
-	evidenceArchiveSpaceCheckBytes = 0
+	evidenceArchiveSpaceCheckBytes = 1
 	archiveFilesystemSpaceFunc = func(d string) (int64, int64, error) {
 		calls++
 		if calls == 1 {
