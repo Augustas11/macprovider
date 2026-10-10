@@ -72,7 +72,9 @@ Also merged: #1963 (privacy evidence scanner, #1959), the #1952 test fix
 ## Open issues (tracked)
 
 - #1971 CB self-check exactness probe too weak above the device's vector
-  limit (take after #1974 lands).
+  limit (take after #1974 lands). Lab evidence: on uncapped main the self-check
+  granted 16 while a 16-row forward flips 30–38/256 tokens; #1974's capped build
+  shows 0 divergent rows.
 - #1972 hardware-trust bootstrap SQL refusals don't fail (`\quit 3`).
 - #1973 flaky `TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup`
   (test-only; fix goes straight to main).
