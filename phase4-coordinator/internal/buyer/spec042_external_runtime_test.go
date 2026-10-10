@@ -350,6 +350,14 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 
 var externalRuntimeBody = []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)
 
+func externalRuntimePromptTokenUpperBound() int64 {
+	estimate := len(externalRuntimeBody) / 4
+	if estimate < 1 {
+		estimate = 1
+	}
+	return int64(estimate) + 64
+}
+
 // externalRuntimePoolHeaders are a pool route's headers from a gateway that
 // negotiated signed settlement finality, which an external-runtime member
 // requires (SPEC-022 R-12.8, E2E-F10), and route_snapshot_v2 settlement,
@@ -590,73 +598,102 @@ func TestSPEC042ExternalRuntimeUsageWithoutBoundReceiptIsZeroBilled(t *testing.T
 }
 
 // #1690 BUG-1 (SPEC-022-R012.4, R-3.4.2): a loopback engine's chat-template
-// prompt count exceeds the len(body)/4 anti-inflation bound. The ledger
-// charges the bound; the pool_operator_attested evidence keeps the runtime's
-// count, which the provider's v0.4 receipt signs, so the receipt verifies
-// instead of quarantining usage_mismatch, and the credit stays bounded.
+// prompt count can exceed the bare len(body)/4 estimator. The ledger charges
+// the request-bound prompt cap; the pool_operator_attested evidence keeps the
+// runtime's count, which the provider's v0.4 receipt signs, so the receipt
+// verifies instead of quarantining usage_mismatch, and the credit stays
+// bounded.
 func TestSPEC042ExternalRuntimeBoundedPromptReceiptVerifies(t *testing.T) {
-	const reportedPrompt = int64(69)
-	fx := defaultExternalRuntimeFixture()
-	var key ed25519.PrivateKey
-	fx.midFlight = func(h *externalRuntimeHarness) { key = h.key }
-	fx.upstream = func(w http.ResponseWriter, r *http.Request) {
-		if meta := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata")); meta != nil {
-			terminalTS := time.Now().UTC().UnixMilli()
-			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
-			w.Header().Set("X-MacProvider-Receipt", signedNormalDoneReceipt(t, key, meta, "ok", reportedPrompt, 1, terminalTS))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":      "cmpl-test",
-			"object":  "chat.completion",
-			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
-			"usage":   map[string]int64{"prompt_tokens": reportedPrompt, "completion_tokens": 1, "total_tokens": reportedPrompt + 1},
+	cap := externalRuntimePromptTokenUpperBound()
+	cases := []struct {
+		name           string
+		reportedPrompt int64
+		wantCharged    int64
+	}{
+		{name: "within headroom", reportedPrompt: 62, wantCharged: 62},
+		{name: "at cap", reportedPrompt: cap, wantCharged: cap},
+		{name: "over cap", reportedPrompt: cap + 1000, wantCharged: cap},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			fx := defaultExternalRuntimeFixture()
+			var key ed25519.PrivateKey
+			fx.midFlight = func(h *externalRuntimeHarness) { key = h.key }
+			fx.upstream = func(w http.ResponseWriter, r *http.Request) {
+				if meta := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata")); meta != nil {
+					terminalTS := time.Now().UTC().UnixMilli()
+					w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
+					w.Header().Set("X-MacProvider-Receipt", signedNormalDoneReceipt(t, key, meta, "ok", tc.reportedPrompt, 1, terminalTS))
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":      "cmpl-test",
+					"object":  "chat.completion",
+					"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+					"usage":   map[string]int64{"prompt_tokens": tc.reportedPrompt, "completion_tokens": 1, "total_tokens": tc.reportedPrompt + 1},
+				})
+			}
+			h := newExternalRuntimeHarness(t, fx)
+			rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var buyerResponse struct {
+				Usage struct {
+					PromptTokens     int64 `json:"prompt_tokens"`
+					CompletionTokens int64 `json:"completion_tokens"`
+					TotalTokens      int64 `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &buyerResponse); err != nil {
+				t.Fatalf("decode buyer response: %v", err)
+			}
+			if buyerResponse.Usage.PromptTokens != tc.reportedPrompt || buyerResponse.Usage.CompletionTokens != 1 ||
+				buyerResponse.Usage.TotalTokens != tc.reportedPrompt+1 {
+				t.Fatalf("buyer response usage=%+v, want provider-reported %d/1/%d", buyerResponse.Usage, tc.reportedPrompt, tc.reportedPrompt+1)
+			}
+			db, err := sql.Open("sqlite", h.dbPath)
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer db.Close()
+			var charged, reported, gross, quarantined int64
+			if err := db.QueryRow(`SELECT charged_prompt_tokens, provider_reported_prompt_tokens, gross_credits, quarantined FROM ledger_request_credits`).
+				Scan(&charged, &reported, &gross, &quarantined); err != nil {
+				t.Fatalf("ledger: %v", err)
+			}
+			if reported != tc.reportedPrompt || charged != tc.wantCharged || gross == 0 || quarantined != 0 {
+				t.Fatalf("ledger charged/reported/gross/quarantined=%d/%d/%d/%d, want %d/%d/credited/not quarantined", charged, reported, gross, quarantined, tc.wantCharged, tc.reportedPrompt)
+			}
+			var source, canonical string
+			if err := db.QueryRow(`SELECT usage_source, usage_canonical_json FROM settlement_attempt_outputs`).Scan(&source, &canonical); err != nil {
+				t.Fatalf("evidence: %v", err)
+			}
+			var usage struct {
+				BillableInputTokens int64 `json:"billable_input_tokens"`
+				ObservedInputTokens int64 `json:"observed_input_tokens"`
+			}
+			if err := json.Unmarshal([]byte(canonical), &usage); err != nil {
+				t.Fatalf("decode usage: %v", err)
+			}
+			if source != billing.UsageSourcePoolOperatorAttested || usage.BillableInputTokens != tc.reportedPrompt || usage.ObservedInputTokens != tc.reportedPrompt {
+				t.Fatalf("evidence source=%s billable/observed input=%d/%d, want pool_operator_attested %d/%d", source, usage.BillableInputTokens, usage.ObservedInputTokens, tc.reportedPrompt, tc.reportedPrompt)
+			}
+			var outcome, reason string
+			if err := db.QueryRow(`SELECT settlement_outcome, reason FROM settlement_receipt_verdicts`).Scan(&outcome, &reason); err != nil {
+				t.Fatalf("verdict: %v", err)
+			}
+			if outcome != billing.SettlementOutcomeVerified {
+				t.Fatalf("receipt signing the runtime prompt outcome=%s reason=%s, want verified", outcome, reason)
+			}
+			var grossAfter, chargedAfter int64
+			if err := db.QueryRow(`SELECT gross_credits, charged_prompt_tokens FROM ledger_request_credits`).Scan(&grossAfter, &chargedAfter); err != nil {
+				t.Fatalf("ledger after verdict: %v", err)
+			}
+			if grossAfter != gross || chargedAfter != charged {
+				t.Fatalf("verified receipt moved gross %d->%d charged %d->%d, want the bounded credit unchanged", gross, grossAfter, charged, chargedAfter)
+			}
 		})
-	}
-	h := newExternalRuntimeHarness(t, fx)
-	rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	db, err := sql.Open("sqlite", h.dbPath)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-	var charged, reported, gross, quarantined int64
-	if err := db.QueryRow(`SELECT charged_prompt_tokens, provider_reported_prompt_tokens, gross_credits, quarantined FROM ledger_request_credits`).
-		Scan(&charged, &reported, &gross, &quarantined); err != nil {
-		t.Fatalf("ledger: %v", err)
-	}
-	if reported != reportedPrompt || charged >= reportedPrompt || charged <= 0 || gross == 0 || quarantined != 0 {
-		t.Fatalf("ledger charged/reported/gross/quarantined=%d/%d/%d/%d, want the prompt bounded below %d and credited", charged, reported, gross, quarantined, reportedPrompt)
-	}
-	var source, canonical string
-	if err := db.QueryRow(`SELECT usage_source, usage_canonical_json FROM settlement_attempt_outputs`).Scan(&source, &canonical); err != nil {
-		t.Fatalf("evidence: %v", err)
-	}
-	var usage struct {
-		BillableInputTokens int64 `json:"billable_input_tokens"`
-		ObservedInputTokens int64 `json:"observed_input_tokens"`
-	}
-	if err := json.Unmarshal([]byte(canonical), &usage); err != nil {
-		t.Fatalf("decode usage: %v", err)
-	}
-	if source != billing.UsageSourcePoolOperatorAttested || usage.BillableInputTokens != reportedPrompt || usage.ObservedInputTokens != reportedPrompt {
-		t.Fatalf("evidence source=%s billable/observed input=%d/%d, want pool_operator_attested %d/%d", source, usage.BillableInputTokens, usage.ObservedInputTokens, reportedPrompt, reportedPrompt)
-	}
-	var outcome, reason string
-	if err := db.QueryRow(`SELECT settlement_outcome, reason FROM settlement_receipt_verdicts`).Scan(&outcome, &reason); err != nil {
-		t.Fatalf("verdict: %v", err)
-	}
-	if outcome != billing.SettlementOutcomeVerified {
-		t.Fatalf("receipt signing the runtime prompt outcome=%s reason=%s, want verified", outcome, reason)
-	}
-	var grossAfter, chargedAfter int64
-	if err := db.QueryRow(`SELECT gross_credits, charged_prompt_tokens FROM ledger_request_credits`).Scan(&grossAfter, &chargedAfter); err != nil {
-		t.Fatalf("ledger after verdict: %v", err)
-	}
-	if grossAfter != gross || chargedAfter != charged {
-		t.Fatalf("verified receipt moved gross %d->%d charged %d->%d, want the bounded credit unchanged", gross, grossAfter, charged, chargedAfter)
 	}
 }

@@ -1121,13 +1121,13 @@ func (b *billingRecorder) buildSettlementAttemptOutput(in billing.HotPathInput, 
 	// for the fully consumed prompt (== for normal_done; the delivered prefix on
 	// positive-money partial/error states also bills the whole input).
 	//
-	// The prompt-token upper bound is a byte-heuristic (len(body)/4, see
-	// estimateTokens) anti-inflation cap for the buyer LEDGER money amount
+	// The prompt-token upper bound is a byte heuristic with template headroom
+	// (see promptTokenUpperBound), an anti-inflation cap for the buyer LEDGER money amount
 	// (billing.boundProviderReportedPromptTokens). It MUST NOT be applied to the
 	// settlement evidence here: the provider cannot reproduce the coordinator's
-	// len(body)/4 value, so capping billable_input below observed_input produces a
+	// heuristic cap, so capping billable_input below observed_input produces a
 	// tuple no honest receipt can match -> usage_mismatch -> quarantine of EVERY
-	// settlement for models whose chat-template tokenization exceeds len(body)/4
+	// settlement for prompts whose tokenization exceeds the heuristic cap
 	// (Llama-3.2/3.1, gpt-oss). This is evidence-only and changes no credited
 	// amount: verified settlement credit sync re-bounds billable to the ledger
 	// prompt (syncVerifiedReceiptLedgerCreditForAttemptTx) and the ledger prompt is
