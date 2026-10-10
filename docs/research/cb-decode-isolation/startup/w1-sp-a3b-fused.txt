@@ -1,0 +1,36 @@
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=128
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+{
+ "scheduler": {
+  "active_decode_rows": 0,
+  "waiting_count": 0,
+  "max_observed_batch_depth": 0,
+  "slots_free": 16,
+  "shared_forward_calls": 0,
+  "slots_total": 16
+ },
+ "active": true,
+ "policy": {
+  "load_status": "absent_empty_off_fallback",
+  "tuple_sha256": null,
+  "authorization_source": "baked_empty_off",
+  "authorized": false,
+  "signer_key_id": null,
+  "cached_turns_authorized": false,
+  "policy_version": null,
+  "release_id": null,
+  "policy_sha256": null,
+  "rollout_mode": "off",
+  "local_proof_result": "passed",
+  "expires_at": null,
+  "emergency_off_override": false,
+  "decision_reason": "absent_empty_off_fallback"
+ },
+ "unsupported_reason": null,
+ "self_check": null,
+ "cache_class": "mixed",
+ "paged_kv_decision": "attached",
+ "mode": "canary"
+}

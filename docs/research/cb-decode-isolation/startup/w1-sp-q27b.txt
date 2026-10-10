@@ -1,0 +1,36 @@
+[paged-kv] parity model=qwen/qwen3.6-27b established=true nLayers=16 nNew=32 gatherKernelCalls=1024 expectCalls=1024 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=33
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+{
+ "paged_kv_decision": "attached",
+ "policy": {
+  "policy_sha256": null,
+  "policy_version": null,
+  "authorization_source": "baked_empty_off",
+  "rollout_mode": "off",
+  "release_id": null,
+  "expires_at": null,
+  "emergency_off_override": false,
+  "signer_key_id": null,
+  "authorized": false,
+  "local_proof_result": "passed",
+  "tuple_sha256": null,
+  "load_status": "absent_empty_off_fallback",
+  "cached_turns_authorized": false,
+  "decision_reason": "absent_empty_off_fallback"
+ },
+ "self_check": null,
+ "unsupported_reason": null,
+ "cache_class": "mixed",
+ "scheduler": {
+  "slots_free": 16,
+  "waiting_count": 0,
+  "max_observed_batch_depth": 0,
+  "shared_forward_calls": 0,
+  "active_decode_rows": 0,
+  "slots_total": 16
+ },
+ "active": true,
+ "mode": "canary"
+}

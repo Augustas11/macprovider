@@ -1,0 +1,6 @@
+part=a started_at=2026-10-10T22:26:37Z policy_sha256=75b90e0cc7fb5c08d27275ecf4457c052291bae7c76594c819c137ead2bde087 binary_sha256=98952ac604cb750082cbb72a775627a99684fd43a363f712717813d78cda4a0a metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 provider_commit=3db5fd811a2fc0e3da6044ddb28d8887272c4201 env=MLX_LM_QWEN35_COMPILED_VERIFY=unset(on)
+phase=hardware_e2e exit_code=0 at=2026-10-10T22:27:41Z
+phase=matrix exit_code=0 lines=     133 at=2026-10-10T22:50:01Z
+part=b started_at=2026-10-10T22:51:24Z policy_sha256=75b90e0cc7fb5c08d27275ecf4457c052291bae7c76594c819c137ead2bde087 binary_sha256=98952ac604cb750082cbb72a775627a99684fd43a363f712717813d78cda4a0a metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 provider_commit=3db5fd811a2fc0e3da6044ddb28d8887272c4201 env=MLX_LM_QWEN35_COMPILED_VERIFY=unset(on)
+phase=sustained exit_code=0 lines=     215 jsonl_sha256=3ddc8fe0978e49dd2f7159242e67003a67ccb3d29ce642f8b7b7c25ad42afb41 at=2026-10-10T23:22:14Z
+R015_DONE
