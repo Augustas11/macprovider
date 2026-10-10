@@ -685,6 +685,11 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {
 		return err
 	}
+	// After every table rebuild: it (re)creates its delete triggers on the
+	// snapshot and verdict tables.
+	if err := EnsurePoolProvenRollup(ctx, s.db); err != nil {
+		return err
+	}
 	// Last: it fingerprints the payable view rebuilt above and must see every
 	// table rebuild that could have dropped its triggers.
 	if err := s.ensureProviderEarningsRollup(ctx); err != nil {

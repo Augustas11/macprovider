@@ -1281,11 +1281,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		opt(s)
 	}
 	s.loadNativeMTPCanaryBank()
-	// SPEC-047-R012 reads the shared ledger database, preferring the
-	// read-only route-read handle.
-	if source, ok := s.modelAdmissionRouteReads.(PoolProvenSource); ok {
-		s.poolProven = source
-	} else if source, ok := s.modelAdmissions.(PoolProvenSource); ok {
+	// SPEC-047-R012 reads the shared ledger database through the read-only
+	// route-read handle when configured and writes its rollup on the writer.
+	if source, ok := newSQLitePoolProvenSource(s.modelAdmissions, s.modelAdmissionRouteReads); ok {
 		s.poolProven = source
 	}
 	s.modelAdmissions = splitModelAdmissionRouteReads(s.modelAdmissions, s.modelAdmissionRouteReads)
