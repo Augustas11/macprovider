@@ -24,40 +24,31 @@ const (
 	compatibilityTargetSet   = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	compatibilityRollbackSet = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	compatibilityUnknownSet  = "Augustas11/macprovider:v1.8.2@cccccccccccccccccccccccccccccccccccccccc"
-	// Exact public pre-fix set used by #610 first-hop production bootstrap.
-	compatibilityFirstHopSet = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
-	compatibilityFutureSet   = "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"
-	compatibilityRevokedSet  = "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	compatibilityLaterSet    = "Augustas11/macprovider:v1.8.13@ffffffffffffffffffffffffffffffffffffffff"
-	compatibilityOtherRepo   = "Augustas11/other:v1.8.12@1111111111111111111111111111111111111111"
+	// An old public release that no allowlist in these tests carries.
+	compatibilityOldSet     = "Augustas11/macprovider:v1.8.117@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
+	compatibilityFutureSet  = "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"
+	compatibilityRevokedSet = "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	compatibilityLaterSet   = "Augustas11/macprovider:v1.8.13@ffffffffffffffffffffffffffffffffffffffff"
+	compatibilityOtherRepo  = "Augustas11/other:v1.8.12@1111111111111111111111111111111111111111"
 )
 
 func strictCompatibilityPolicy(cfg *config.Config) {
 	cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
-		TargetID:    compatibilityTargetSet,
-		AcceptedIDs: []string{compatibilityTargetSet, compatibilityRollbackSet},
+		TargetID: compatibilityTargetSet,
 	}
 }
 
-func firstHopBridgeCompatibilityPolicy(cfg *config.Config) {
-	strictCompatibilityPolicy(cfg)
-	cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs = []string{compatibilityFirstHopSet}
-	// Raise the buyer-serving floor above the bridge cohort so the test proves
-	// first-hop sessions skip required_binary_version while still receiving the
-	// recommended target admission.
-	cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.8.56"
-	cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.56"
-}
-
-func versionFloorCompatibilityPolicy(cfg *config.Config) {
+// revocationCompatibilityPolicy: the target repository with one exact
+// revocation (SPEC-002-R004).
+func revocationCompatibilityPolicy(cfg *config.Config) {
 	cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
-		TargetID:       compatibilityFutureSet,
-		MinimumVersion: "1.8.4",
-		RevokedIDs:     []string{compatibilityRevokedSet},
+		TargetID:   compatibilityFutureSet,
+		RevokedIDs: []string{compatibilityRevokedSet},
 	}
+	cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
 }
 
-func TestConfiguredCompatibilitySetRejectsMissingMalformedAndUnacceptedHello(t *testing.T) {
+func TestConfiguredCompatibilitySetRejectsMissingMalformedAndForeignHello(t *testing.T) {
 	tests := []struct {
 		name   string
 		setID  any
@@ -65,7 +56,7 @@ func TestConfiguredCompatibilitySetRejectsMissingMalformedAndUnacceptedHello(t *
 	}{
 		{name: "missing", reason: "compatibility_set_required"},
 		{name: "malformed", setID: "not-a-signed-release-set", reason: "compatibility_set_invalid"},
-		{name: "unaccepted", setID: compatibilityUnknownSet, reason: "compatibility_set_unaccepted"},
+		{name: "foreign repository", setID: compatibilityOtherRepo, reason: "compatibility_set_repository_mismatch"},
 	}
 
 	for _, test := range tests {
@@ -115,8 +106,8 @@ func TestConfiguredCompatibilitySetAcceptsRollbackHelloAndRecommendsTarget(t *te
 	}
 }
 
-func TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap(t *testing.T) {
-	ts := newProviderServer(t, versionFloorCompatibilityPolicy)
+func TestRepositoryCompatibilitySetAcceptsFutureHelloWithoutAllowlist(t *testing.T) {
+	ts := newProviderServer(t, revocationCompatibilityPolicy)
 	defer ts.Close()
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
 	if err != nil {
@@ -147,21 +138,19 @@ func TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap(t *test
 	}
 }
 
-func TestVersionFloorCompatibilitySetRejectsRevokedAndMismatchedHello(t *testing.T) {
+func TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello(t *testing.T) {
 	tests := []struct {
 		name    string
 		setID   string
 		version string
 		reason  string
 	}{
-		{name: "below floor", setID: compatibilityRollbackSet, version: "1.8.3", reason: "provider_version_below_minimum"},
-		{name: "revoked", setID: compatibilityRevokedSet, version: "1.8.10", reason: "provider_release_revoked"},
-		{name: "binary mismatch", setID: compatibilityFutureSet, version: "1.8.11", reason: "provider_binary_version_mismatch"},
-		{name: "leading zero binary version", setID: compatibilityFutureSet, version: "01.8.12", reason: "provider_binary_version_mismatch"},
+		{name: "foreign repository", setID: compatibilityOtherRepo, version: "1.8.12", reason: "compatibility_set_repository_mismatch"},
+		{name: "leading-zero release identity", setID: "Augustas11/macprovider:v1.8.012@dddddddddddddddddddddddddddddddddddddddd", version: "1.8.12", reason: "compatibility_set_invalid"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ts := newProviderServer(t, versionFloorCompatibilityPolicy)
+			ts := newProviderServer(t, revocationCompatibilityPolicy)
 			defer ts.Close()
 			hello := validHello("m4-anon")
 			hello["compatibility_set_id"] = test.setID
@@ -177,8 +166,8 @@ func TestVersionFloorCompatibilitySetRejectsRevokedAndMismatchedHello(t *testing
 	}
 }
 
-func TestVersionFloorCompatibilityHealthzPublishesPolicy(t *testing.T) {
-	ts := newProviderServer(t, versionFloorCompatibilityPolicy)
+func TestRepositoryCompatibilityHealthzPublishesPolicy(t *testing.T) {
+	ts := newProviderServer(t, revocationCompatibilityPolicy)
 	defer ts.Close()
 	resp, err := http.Get(ts.URL + "/healthz")
 	if err != nil {
@@ -186,28 +175,25 @@ func TestVersionFloorCompatibilityHealthzPublishesPolicy(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var body struct {
-		CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
-		CompatibilityPolicyTargetID       string   `json:"compatibility_policy_target_id"`
-		CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version"`
-		CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
+		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
+		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode healthz: %v", err)
 	}
-	if body.CompatibilityPolicyMode != "version_floor" ||
+	if body.CompatibilityPolicyMode != "repository" ||
 		body.CompatibilityPolicyTargetID != compatibilityFutureSet ||
-		body.CompatibilityPolicyMinimumVersion != "1.8.4" ||
 		len(body.CompatibilityPolicyRevokedIDs) != 1 ||
 		body.CompatibilityPolicyRevokedIDs[0] != compatibilityRevokedSet {
 		t.Fatalf("flattened compatibility policy = %+v", body)
 	}
 }
 
-func TestVersionFloorCompatibilityHealthzPublishesEmptyRevokedIDs(t *testing.T) {
+func TestRepositoryCompatibilityHealthzPublishesEmptyRevokedIDs(t *testing.T) {
 	ts := newProviderServer(t, func(cfg *config.Config) {
 		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
-			TargetID:       compatibilityFutureSet,
-			MinimumVersion: "1.8.4",
+			TargetID: compatibilityFutureSet,
 		}
 	})
 	defer ts.Close()
@@ -247,9 +233,8 @@ func TestCompatibilityPolicyReloadDuringAckWindowDeliversAckThenCloses(t *testin
 		providerws.WithBeforeHandshakeAckSendForTest(func() {
 			once.Do(func() {
 				closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
-					TargetID:       compatibilityTargetSet,
-					MinimumVersion: "1.8.4",
-					RevokedIDs:     []string{compatibilityFutureSet},
+					TargetID:   compatibilityTargetSet,
+					RevokedIDs: []string{compatibilityFutureSet},
 				})
 				if err != nil {
 					t.Errorf("SetCompatibilitySetPolicy error = %v", err)
@@ -262,8 +247,7 @@ func TestCompatibilityPolicyReloadDuringAckWindowDeliversAckThenCloses(t *testin
 	}, func(cfg *config.Config) {
 		cfg.Auth.RequireProviderTokens = false
 		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
-			TargetID:       compatibilityFutureSet,
-			MinimumVersion: "1.8.4",
+			TargetID: compatibilityFutureSet,
 		}
 	})
 	defer h.HTTP.Close()
@@ -309,7 +293,7 @@ func TestCompatibilityPolicyReloadDuringAckWindowDeliversAckThenCloses(t *testin
 }
 
 func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
-	h := newProviderHarness(t, versionFloorCompatibilityPolicy)
+	h := newProviderHarness(t, revocationCompatibilityPolicy)
 	defer h.HTTP.Close()
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
@@ -336,9 +320,8 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 		return ok && provider.RoutingEligible()
 	})
 	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
-		TargetID:       compatibilityTargetSet,
-		MinimumVersion: "1.8.4",
-		RevokedIDs:     []string{compatibilityFutureSet},
+		TargetID:   compatibilityTargetSet,
+		RevokedIDs: []string{compatibilityFutureSet},
 	})
 	if err != nil {
 		t.Fatalf("SetCompatibilitySetPolicy error = %v", err)
@@ -375,7 +358,7 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 	}
 }
 
-func TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift(t *testing.T) {
+func TestCompatibilityPolicyReloadRefusesRepositoryDrift(t *testing.T) {
 	tests := []struct {
 		name       string
 		configure  func(*config.Config)
@@ -385,37 +368,14 @@ func TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift(t *tes
 		wantReason string
 	}{
 		{
-			name:      "floor raise",
-			configure: versionFloorCompatibilityPolicy,
-			setID:     compatibilityFutureSet,
-			version:   "1.8.12",
-			reload: config.CompatibilitySetConfig{
-				TargetID:       compatibilityLaterSet,
-				MinimumVersion: "1.8.13",
-			},
-			wantReason: "provider_version_below_minimum",
-		},
-		{
 			name:      "repository drift",
-			configure: versionFloorCompatibilityPolicy,
+			configure: revocationCompatibilityPolicy,
 			setID:     compatibilityFutureSet,
 			version:   "1.8.12",
 			reload: config.CompatibilitySetConfig{
-				TargetID:       compatibilityOtherRepo,
-				MinimumVersion: "1.8.4",
+				TargetID: compatibilityOtherRepo,
 			},
 			wantReason: "compatibility_set_repository_mismatch",
-		},
-		{
-			name:      "legacy allowlist drift",
-			configure: strictCompatibilityPolicy,
-			setID:     compatibilityRollbackSet,
-			version:   "1.8.3",
-			reload: config.CompatibilitySetConfig{
-				TargetID:    compatibilityTargetSet,
-				AcceptedIDs: []string{compatibilityTargetSet, compatibilityFutureSet},
-			},
-			wantReason: "compatibility_set_unaccepted",
 		},
 	}
 	for _, test := range tests {
@@ -460,8 +420,8 @@ func TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift(t *tes
 	}
 }
 
-func TestCompatibilityPolicyReloadRefusesFloorDriftForHTTPForwardingProvider(t *testing.T) {
-	h := newProviderHarness(t, versionFloorCompatibilityPolicy)
+func TestCompatibilityPolicyReloadRefusesRepositoryDriftForHTTPForwardingProvider(t *testing.T) {
+	h := newProviderHarness(t, revocationCompatibilityPolicy)
 	defer h.HTTP.Close()
 	provider := &pool.Provider{
 		ProviderID:           "http-live",
@@ -481,65 +441,16 @@ func TestCompatibilityPolicyReloadRefusesFloorDriftForHTTPForwardingProvider(t *
 		t.Fatal("register HTTP provider failed")
 	}
 	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
-		TargetID:       compatibilityLaterSet,
-		MinimumVersion: "1.8.13",
+		TargetID: compatibilityOtherRepo,
 	})
-	if err == nil || !strings.Contains(err.Error(), "provider_version_below_minimum") {
-		t.Fatalf("SetCompatibilitySetPolicy error = %v, want provider_version_below_minimum", err)
+	if err == nil || !strings.Contains(err.Error(), "compatibility_set_repository_mismatch") {
+		t.Fatalf("SetCompatibilitySetPolicy error = %v, want compatibility_set_repository_mismatch", err)
 	}
 	if closed != 0 {
 		t.Fatalf("closed sessions = %d, want 0", closed)
 	}
 	if got, ok := h.Registry.Resolve("http-live", "http-session"); !ok || got.State != pool.StateReady || !got.RoutingEligible() {
 		t.Fatalf("HTTP provider should remain routable after refused reload: ok=%v provider=%+v", ok, got)
-	}
-}
-
-func TestCompatibilityPolicyReloadRefusesBuyerServingSessionDemotedToBridgeOnly(t *testing.T) {
-	h := newProviderHarness(t, func(cfg *config.Config) {
-		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
-			TargetID:       compatibilityFutureSet,
-			MinimumVersion: "1.8.4",
-		}
-	})
-	defer h.HTTP.Close()
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-	hello := validHello("m4-anon")
-	hello["compatibility_set_id"] = compatibilityRevokedSet
-	hello["binary_version"] = "1.8.10"
-	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-	payload, _, err := wsutil.ReadServerData(conn)
-	if err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
-	var ack providerws.HelloAck
-	if err := json.Unmarshal(payload, &ack); err != nil {
-		t.Fatalf("decode hello_ack: %v", err)
-	}
-	// The routing hold is released just after the hello_ack write.
-	eventually(t, func() bool {
-		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
-		return ok && provider.CatalogAdmissionMode != "update_bridge" && provider.RoutingEligible()
-	})
-	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
-		TargetID:          compatibilityFutureSet,
-		MinimumVersion:    "1.8.12",
-		FirstHopBridgeIDs: []string{compatibilityRevokedSet},
-	})
-	if err == nil || !strings.Contains(err.Error(), "compatibility_set_bridge_only") {
-		t.Fatalf("SetCompatibilitySetPolicy error = %v, want bridge-only rejection", err)
-	}
-	if closed != 0 {
-		t.Fatalf("closed sessions = %d, want 0", closed)
-	}
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.State == "unavailable" || !provider.RoutingEligible() {
-		t.Fatalf("provider should remain routable after refused bridge demotion: ok=%v provider=%+v", ok, provider)
 	}
 }
 
@@ -589,66 +500,6 @@ func TestConfiguredCompatibilitySetEchoesAcceptedAuthSetAndTarget(t *testing.T) 
 	}
 }
 
-func TestFirstHopBridgeHelloRecommendsTargetWithoutBuyerRouting(t *testing.T) {
-	h := newProviderHarness(t, firstHopBridgeCompatibilityPolicy)
-	defer h.HTTP.Close()
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-	hello := validHello("m4-anon")
-	hello["compatibility_set_id"] = compatibilityFirstHopSet
-	hello["binary_version"] = "1.8.48"
-	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-	payload, op, err := wsutil.ReadServerData(conn)
-	if err != nil {
-		t.Fatalf("read hello_ack: %v", err)
-	}
-	if op != gobwas.OpText {
-		t.Fatalf("op = %v, want text", op)
-	}
-	var ack providerws.HelloAck
-	if err := json.Unmarshal(payload, &ack); err != nil {
-		t.Fatalf("decode hello_ack: %v", err)
-	}
-	if ack.CompatibilityPolicy != "configured" ||
-		ack.AcceptedCompatibilitySetID != compatibilityFirstHopSet ||
-		ack.RecommendedCompatibilitySetID != compatibilityTargetSet {
-		t.Fatalf("first-hop compatibility contract = %+v", ack)
-	}
-	if ack.RecommendedBinaryVersion != "1.8.56" {
-		t.Fatalf("recommended_binary_version = %q, want 1.8.56", ack.RecommendedBinaryVersion)
-	}
-	provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
-	if !ok {
-		t.Fatal("first-hop bridge provider was not registered")
-	}
-	if provider.CatalogAdmissionMode != "update_bridge" {
-		t.Fatalf("CatalogAdmissionMode = %q, want update_bridge", provider.CatalogAdmissionMode)
-	}
-	if provider.BinaryVersion != "1.8.48" {
-		t.Fatalf("BinaryVersion = %q, want 1.8.48", provider.BinaryVersion)
-	}
-	if provider.RoutingEligible() || provider.ServingCapable() {
-		t.Fatalf("first-hop bridge provider must not be buyer-routable: %+v", provider)
-	}
-}
-
-func TestFirstHopBridgeRejectsUnknownSets(t *testing.T) {
-	ts := newProviderServer(t, firstHopBridgeCompatibilityPolicy)
-	defer ts.Close()
-	hello := validHello("m4-anon")
-	hello["compatibility_set_id"] = compatibilityUnknownSet
-	hello["binary_version"] = "1.8.48"
-	code, reason := sendHelloExpectClose(t, ts.URL, hello)
-	if code != providerws.CloseInvalidHello || reason != "compatibility_set_unaccepted" {
-		t.Fatalf("close = %d %q, want %d compatibility_set_unaccepted", code, reason, providerws.CloseInvalidHello)
-	}
-}
-
 func TestUnconfiguredCompatibilitySetExplicitlyRetainsLegacyHello(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -671,5 +522,76 @@ func TestUnconfiguredCompatibilitySetExplicitlyRetainsLegacyHello(t *testing.T) 
 	if ack.Type != "hello_ack" || ack.CompatibilityPolicy != "unconfigured" ||
 		ack.AcceptedCompatibilitySetID != "" || ack.RecommendedCompatibilitySetID != "" {
 		t.Fatalf("legacy compatibility contract = %+v", ack)
+	}
+}
+
+// helloAckFor sends a hello with setID/version and returns the hello_ack.
+func helloAckFor(t *testing.T, url string, setID, version string) (providerws.HelloAck, func()) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(url))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	hello := validHello("m4-anon")
+	hello["compatibility_set_id"] = setID
+	hello["binary_version"] = version
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil || op != gobwas.OpText {
+		t.Fatalf("read hello_ack: op=%v err=%v", op, err)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("decode hello_ack: %v", err)
+	}
+	return ack, func() { conn.Close() }
+}
+
+// An old, valid release from the target repository connects, serves buyers
+// and receives the recommendation; deprecated accepted_ids /
+// first_hop_bridge_ids in the config are ignored (SPEC-002-R004).
+func TestOldReleaseConnectsRoutableAndReceivesRecommendation(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+			TargetID:          compatibilityFutureSet,
+			AcceptedIDs:       []string{compatibilityFutureSet, compatibilityLaterSet},
+			FirstHopBridgeIDs: []string{compatibilityTargetSet},
+		}
+		cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
+	})
+	defer h.HTTP.Close()
+	ack, done := helloAckFor(t, h.HTTP.URL, compatibilityOldSet, "1.8.117")
+	defer done()
+	if ack.Type != "hello_ack" || ack.CompatibilityPolicy != "configured" ||
+		ack.AcceptedCompatibilitySetID != compatibilityOldSet ||
+		ack.RecommendedCompatibilitySetID != compatibilityFutureSet || ack.RecommendedBinaryVersion != "1.8.12" {
+		t.Fatalf("old release hello_ack = %+v", ack)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+		return ok && provider.CatalogAdmissionMode != "update_bridge" && provider.RoutingEligible()
+	})
+}
+
+// An exactly revoked release keeps an update-only session that receives the
+// recommendation, so its updater can move it forward; it never serves buyers.
+func TestRevokedReleaseGetsUpdateOnlySessionWithRecommendation(t *testing.T) {
+	h := newProviderHarness(t, revocationCompatibilityPolicy)
+	defer h.HTTP.Close()
+	ack, done := helloAckFor(t, h.HTTP.URL, compatibilityRevokedSet, "1.8.10")
+	defer done()
+	if ack.Type != "hello_ack" || ack.AcceptedCompatibilitySetID != compatibilityRevokedSet ||
+		ack.RecommendedCompatibilitySetID != compatibilityFutureSet || ack.RecommendedBinaryVersion != "1.8.12" {
+		t.Fatalf("revoked release hello_ack = %+v", ack)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+		return ok && !provider.HandshakeAckPending
+	})
+	provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+	if !ok || provider.CatalogAdmissionMode != "update_bridge" || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("revoked release must be update-only and non-routable: ok=%v provider=%+v", ok, provider)
 	}
 }

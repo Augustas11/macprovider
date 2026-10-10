@@ -231,22 +231,12 @@ func runCoordinator() (exitCode int) {
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
-	compatibilityPolicyMode := "unconfigured"
-	if cfg.Coordinator.CompatibilitySet.Configured() {
-		if strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion) != "" {
-			compatibilityPolicyMode = "version_floor"
-		} else {
-			compatibilityPolicyMode = "legacy_allowlist"
-		}
-	}
 	logger.Info().
-		Str("compatibility_policy", compatibilityPolicyMode).
+		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
 		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
-		Str("minimum_compatibility_version", strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion)).
-		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
 		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
-		Int("first_hop_bridge_set_count", len(cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs)).
 		Msg("provider compatibility-set admission policy initialized")
+	warnDeprecatedCompatibilityFields(logger, cfg.Coordinator.CompatibilitySet)
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
 		os.Exit(1)
@@ -4321,13 +4311,20 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 }
 
 func compatibilityPolicyModeForConfig(policy config.CompatibilitySetConfig) string {
-	switch {
-	case !policy.Configured():
+	if !policy.Configured() {
 		return "unconfigured"
-	case strings.TrimSpace(policy.MinimumVersion) != "":
-		return "version_floor"
-	default:
-		return "legacy_allowlist"
+	}
+	return "repository"
+}
+
+// warnDeprecatedCompatibilityFields keeps old configs loading while saying
+// that accepted_ids / first_hop_bridge_ids no longer affect admission
+// (SPEC-002-R004: target repository plus exact revocations).
+func warnDeprecatedCompatibilityFields(logger zerolog.Logger, policy config.CompatibilitySetConfig) {
+	if fields := policy.DeprecatedFields(); len(fields) != 0 {
+		logger.Warn().
+			Strs("deprecated_fields", fields).
+			Msg("coordinator.compatibility_set fields are deprecated and ignored; admission is the target_id repository minus exact revoked_ids")
 	}
 }
 
@@ -4420,6 +4417,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("autotune runtime economics reload rejected")
 		return
 	}
+	warnDeprecatedCompatibilityFields(logger, cfg.Coordinator.CompatibilitySet)
 	compatibilityReload, err := wsServer.BeginCompatibilitySetPolicyReload(cfg.Coordinator.CompatibilitySet)
 	if err != nil {
 		logger.Error().Err(err).Msg("compatibility_set config reload rejected")
@@ -4556,7 +4554,6 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
 		Int("compatibility_policy_sessions_closed", compatibilityClosed).
 		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
-		Str("minimum_compatibility_version", strings.TrimSpace(cfg.Coordinator.CompatibilitySet.MinimumVersion)).
 		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Str("config_sha256", configDigests.ConfigSHA256).
 		Str("overlay_sha256", configDigests.OverlaySHA256).

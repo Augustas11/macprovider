@@ -13,27 +13,21 @@ coordinator:
   # before accepting buyer chat completions directly on the coordinator.
   require_gateway_context: true
   #
-  # Live Pearl overlays supply an exact compatibility_set.target_id plus the
-  # version-floor admission policy. target_id remains the recommendation
-  # identity; minimum_version admits future signed releases from that same repo
-  # without a per-release allowlist edit, and revoked_ids removes a bad exact
-  # release identity. Do not combine accepted_ids with minimum_version; the
-  # legacy accepted_ids mode is retained only for deployment migration before
-  # the floor is live.
-  # Optional temporary #610 first-hop bootstrap (not buyer-serving):
+  # Live Pearl supplies compatibility_set (SPEC-002-R004). target_id is the
+  # recommended release every session is told to update to; any well-formed
+  # release identity from its repository is admitted and serves buyers, except
+  # an exact entry in revoked_ids, which connects update-only (never routed)
+  # and still receives the recommendation. Foreign-repository and malformed
+  # identities are rejected. accepted_ids and first_hop_bridge_ids are
+  # deprecated: they still parse but are ignored (startup warning).
   #
   #   compatibility_set:
   #     target_id: "Augustas11/macprovider:vX.Y.Z@<40-hex>"
-  #     minimum_version: "X.Y.Z"
   #     revoked_ids:
   #       - "Augustas11/macprovider:vA.B.C@<40-hex>"
-  #     first_hop_bridge_ids:
-  #       - "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
   #
-  # Bridge-only sessions receive recommended_compatibility_set_id=target_id so
-  # public CLI 1.8.48 can persist admission and run ordinary
-  # `macprovider-cli update`, then are marked catalog_admission_mode=update_bridge
-  # (never RoutingEligible). See ops/runbooks/entry-610-first-hop-recovery.md.
+  # Update-only (revoked) sessions are marked
+  # catalog_admission_mode=update_bridge and are never RoutingEligible.
 
 pool:
   heartbeat_interval_s: 30

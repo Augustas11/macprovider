@@ -3369,12 +3369,11 @@ func (s *Server) prepareProviderAdmissionDeferredQuota(conn net.Conn, auth provi
 }
 
 func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth providerAuth, hello Hello, checkQuota bool) (*pool.Provider, bool) {
-	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
-	// update-only session so public 1.8.48 can persist coordinator
-	// compatibility admission and run ordinary `macprovider-cli update`
-	// (#610). They never become buyer-routable.
+	// An exactly revoked release opens an update-only session: it receives
+	// the recommended set and binary version so its updater moves it forward,
+	// and it never becomes buyer-routable (SPEC-002-R004).
 	policy := s.compatibilitySetPolicy()
-	firstHopOnly := policy.IsFirstHopBridgeOnly(hello.CompatibilitySetID)
+	firstHopOnly := policy.IsUpdateOnly(hello.CompatibilitySetID)
 	if !firstHopOnly {
 		if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 			cmp, ok := compareSemver(hello.BinaryVersion, required)
@@ -3529,10 +3528,10 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 	if firstHopOnly {
 		s.log.Info().
 			Str("provider_id", hello.ProviderID).
-			Str("event", "compatibility_set_first_hop_bridge").
+			Str("event", "compatibility_set_update_only").
 			Str("compatibility_set_id", hello.CompatibilitySetID).
 			Str("recommended_compatibility_set_id", policy.TargetID).
-			Msg("admitting update-only first-hop bridge session")
+			Msg("admitting update-only session for a revoked release")
 	} else {
 		var gateOK bool
 		gateCatalog := resolveAdmissionCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
@@ -4145,7 +4144,7 @@ func (s *Server) requireCompatibleSet(conn net.Conn, providedID, binaryVersion s
 		if authV2 {
 			s.sendAuthRejection(conn, code, message)
 		}
-		s.close(conn, CloseInvalidHello, message)
+		s.close(conn, CloseInvalidHello, code)
 		return false
 	}
 	return reject(code)
@@ -4161,26 +4160,11 @@ func compatibilitySetRejectionLocked(policy config.CompatibilitySetConfig, provi
 	if err := config.ValidateCompatibilitySetID(providedID); err != nil {
 		return "compatibility_set_invalid"
 	}
-	// Buyer-serving accepted sets and the temporary #610 first-hop bridge both
-	// pass the hello/auth gate. Bridge-only sessions still receive the
-	// recommended target admission but are marked non-routable later.
-	if !policy.AllowsSession(providedID) {
-		if code := policy.RejectionCode(providedID); code != "" {
-			return code
-		}
-		return "compatibility_set_unaccepted"
-	}
-	if policy.MinimumVersion != "" && policy.Accepts(providedID) {
-		tagVersion := compatibilitySetTagVersion(providedID)
-		if tagVersion == "" {
-			return "compatibility_set_invalid"
-		}
-		if !config.ValidCompatibilitySetVersion(binaryVersion) {
-			return "provider_binary_version_mismatch"
-		}
-		if cmp, ok := versionfloor.Compare(strings.TrimSpace(binaryVersion), tagVersion); !ok || cmp != 0 {
-			return "provider_binary_version_mismatch"
-		}
+	// Every well-formed target-repository release passes the hello/auth gate.
+	// Revoked releases still receive the recommended target admission but are
+	// marked update-only (non-routable) at admission.
+	if code := policy.SessionRejectionCode(providedID); code != "" {
+		return code
 	}
 	return ""
 }
@@ -4189,37 +4173,22 @@ func compatibilitySetProviderRejectionLocked(policy config.CompatibilitySetConfi
 	if code := compatibilitySetRejectionLocked(policy, providedID, binaryVersion); code != "" {
 		return code
 	}
-	if policy.IsFirstHopBridgeOnly(providedID) && admissionMode != "update_bridge" {
-		return "compatibility_set_bridge_only"
+	if policy.IsUpdateOnly(providedID) && admissionMode != "update_bridge" {
+		return "provider_release_revoked"
 	}
 	return ""
 }
 
 func compatibilitySetRejectionMessage(policy config.CompatibilitySetConfig, code string) string {
-	if policy.MinimumVersion == "" {
-		return code
-	}
 	switch code {
-	case "provider_version_below_minimum":
-		return "provider_version_below_minimum: update macprovider-cli to " + policy.MinimumVersion + " or newer"
 	case "provider_release_revoked":
-		return "provider_release_revoked: update macprovider-cli to the current release " + policy.TargetID
-	case "provider_binary_version_mismatch":
-		return "provider_binary_version_mismatch: binary_version must match compatibility_set_id tag version"
-	case "compatibility_set_bridge_only":
-		return "compatibility_set_bridge_only: reconnect with the current release before serving buyers"
+		return "provider_release_revoked: reconnect to receive the update to " + policy.TargetID
 	default:
-		return code + ": update macprovider-cli to the current release " + policy.TargetID
+		return code + ": install the current release " + policy.TargetID
 	}
 }
 
-func compatibilitySetCloseReason(policy config.CompatibilitySetConfig, code string) string {
-	if policy.MinimumVersion == "" {
-		return code
-	}
-	if code == "provider_version_below_minimum" && policy.MinimumVersion != "" {
-		return "provider_version_below_minimum: update to " + policy.MinimumVersion
-	}
+func compatibilitySetCloseReason(_ config.CompatibilitySetConfig, code string) string {
 	return code
 }
 
@@ -4252,27 +4221,10 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 }
 
 func compatibilityPolicyMode(policy config.CompatibilitySetConfig) string {
-	switch {
-	case !policy.Configured():
+	if !policy.Configured() {
 		return "unconfigured"
-	case policy.MinimumVersion != "":
-		return "version_floor"
-	default:
-		return "legacy_allowlist"
 	}
-}
-
-func compatibilitySetTagVersion(id string) string {
-	id = strings.TrimSpace(id)
-	at := strings.LastIndexByte(id, '@')
-	if at < 0 {
-		return ""
-	}
-	colon := strings.LastIndexByte(id[:at], ':')
-	if colon < 0 || colon+2 >= at || id[colon+1] != 'v' {
-		return ""
-	}
-	return id[colon+2 : at]
+	return "repository"
 }
 
 // gatedRecommendedBinaryVersion is a per-connection capability gate for the
@@ -7355,7 +7307,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	providers := s.pool.Snapshot()
 	compatibilityPolicy := s.compatibilitySetPolicy()
 	compatibilityPolicyMode := compatibilityPolicyMode(compatibilityPolicy)
-	compatibilityPolicyMinimumVersion := strings.TrimSpace(compatibilityPolicy.MinimumVersion)
 	compatibilityPolicyRevokedIDs := append([]string{}, compatibilityPolicy.RevokedIDs...)
 	resp := struct {
 		Status                   string `json:"status"`
@@ -7383,11 +7334,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// gated sessions are being quarantined because trust can no longer be
 		// verified — the bound on the sweep's fail-open. Always false when the
 		// hardware-trust hello gate (and thus the sweep) is not enabled.
-		TrustAuthorityDegraded            bool     `json:"trust_authority_degraded"`
-		CompatibilityPolicyMode           string   `json:"compatibility_policy_mode"`
-		CompatibilityPolicyTargetID       string   `json:"compatibility_policy_target_id,omitempty"`
-		CompatibilityPolicyMinimumVersion string   `json:"compatibility_policy_minimum_version,omitempty"`
-		CompatibilityPolicyRevokedIDs     []string `json:"compatibility_policy_revoked_ids"`
+		TrustAuthorityDegraded        bool     `json:"trust_authority_degraded"`
+		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id,omitempty"`
+		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7401,13 +7351,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// updates to (SPEC-020-R006), so gating, renaming, or authenticating
 		// it strands those Macs (SPEC-003-R004). Those CLIs still accept the
 		// bytes only through the signed release checks.
-		RecommendedBinaryVersion:          s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
-		RequiredBinaryVersion:             strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
-		TrustAuthorityDegraded:            s.trustAuthorityDegraded.Load(),
-		CompatibilityPolicyMode:           compatibilityPolicyMode,
-		CompatibilityPolicyTargetID:       compatibilityPolicy.TargetID,
-		CompatibilityPolicyMinimumVersion: compatibilityPolicyMinimumVersion,
-		CompatibilityPolicyRevokedIDs:     compatibilityPolicyRevokedIDs,
+		RecommendedBinaryVersion:      s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:         strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
+		TrustAuthorityDegraded:        s.trustAuthorityDegraded.Load(),
+		CompatibilityPolicyMode:       compatibilityPolicyMode,
+		CompatibilityPolicyTargetID:   compatibilityPolicy.TargetID,
+		CompatibilityPolicyRevokedIDs: compatibilityPolicyRevokedIDs,
 	}
 	for _, p := range providers {
 		switch p.State {

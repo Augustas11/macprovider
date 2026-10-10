@@ -6,250 +6,107 @@ import (
 )
 
 const (
-	compatibilitySetTarget    = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	compatibilitySetRollback  = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	compatibilitySetFuture    = "Augustas11/macprovider:v1.8.99@cccccccccccccccccccccccccccccccccccccccc"
-	compatibilitySetBelow     = "Augustas11/macprovider:v1.8.2@dddddddddddddddddddddddddddddddddddddddd"
-	compatibilitySetOtherRepo = "Augustas11/other:v1.8.99@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	compatibilitySetTarget   = "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	compatibilitySetRollback = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	compatibilitySetOld      = "Augustas11/macprovider:v1.8.117@cccccccccccccccccccccccccccccccccccccccc"
+	compatibilitySetFuture   = "Augustas11/macprovider:v1.9.0@dddddddddddddddddddddddddddddddddddddddd"
+	compatibilitySetRevoked  = "Augustas11/macprovider:v1.8.2@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	compatibilitySetForeign  = "Augustas11/other:v1.8.4@ffffffffffffffffffffffffffffffffffffffff"
 )
 
-func TestCompatibilitySetPolicyRequiresTargetAndRollbackSet(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:    compatibilitySetTarget,
-		AcceptedIDs: []string{compatibilitySetTarget},
-	}
-
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "at least one rollback set") {
-		t.Fatalf("Validate() error = %v, want rollback-set requirement", err)
-	}
+func repositoryPolicy() CompatibilitySetConfig {
+	return CompatibilitySetConfig{TargetID: compatibilitySetTarget, RevokedIDs: []string{compatibilitySetRevoked}}
 }
 
-func TestCompatibilitySetPolicyAcceptsExactTargetAndRollbackSet(t *testing.T) {
+// SPEC-002-R004: any well-formed target-repository release serves buyers,
+// older or newer than the target, without an allowlist or floor.
+func TestCompatibilitySetAdmitsEveryWellFormedTargetRepositoryRelease(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:    compatibilitySetTarget,
-		AcceptedIDs: []string{compatibilitySetTarget, compatibilitySetRollback},
-	}
-
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	if !cfg.Coordinator.CompatibilitySet.Accepts(compatibilitySetRollback) {
-		t.Fatal("rollback compatibility set was not accepted")
-	}
-	if cfg.Coordinator.CompatibilitySet.Accepts(strings.ToUpper(compatibilitySetRollback)) {
-		t.Fatal("compatibility-set admission must be exact and case-sensitive")
-	}
-}
-
-func TestCompatibilitySetMinimumVersionAcceptsFutureSameRepoWithoutAllowlist(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:       compatibilitySetTarget,
-		MinimumVersion: "1.8.4",
-	}
-
+	cfg.Coordinator.CompatibilitySet = repositoryPolicy()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	policy := cfg.Coordinator.CompatibilitySet
-	if !policy.Accepts(compatibilitySetTarget) {
-		t.Fatal("target compatibility set was not accepted")
-	}
-	if !policy.Accepts(compatibilitySetFuture) {
-		t.Fatal("future same-repo compatibility set was not accepted")
-	}
-	if code := policy.RejectionCode(compatibilitySetFuture); code != "" {
-		t.Fatalf("RejectionCode(future) = %q, want accepted", code)
-	}
-	if !policy.AllowsSession(compatibilitySetFuture) {
-		t.Fatal("future same-repo compatibility set must allow a session")
+	for _, id := range []string{compatibilitySetTarget, compatibilitySetRollback, compatibilitySetOld, compatibilitySetFuture} {
+		if !policy.Accepts(id) || !policy.AllowsSession(id) || policy.IsUpdateOnly(id) {
+			t.Fatalf("%s: Accepts=%v AllowsSession=%v IsUpdateOnly=%v, want buyer-serving", id,
+				policy.Accepts(id), policy.AllowsSession(id), policy.IsUpdateOnly(id))
+		}
 	}
 }
 
-func TestCompatibilitySetMinimumVersionRejectsBelowFloorRevokedAndOtherRepo(t *testing.T) {
-	revoked := "Augustas11/macprovider:v1.8.8@ffffffffffffffffffffffffffffffffffffffff"
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:       compatibilitySetTarget,
-		MinimumVersion: "1.8.4",
-		RevokedIDs:     []string{revoked},
+func TestCompatibilitySetRevokedReleaseIsUpdateOnly(t *testing.T) {
+	policy := repositoryPolicy()
+	if policy.Accepts(compatibilitySetRevoked) {
+		t.Fatal("revoked release must not serve buyers")
 	}
+	if !policy.AllowsSession(compatibilitySetRevoked) || !policy.IsUpdateOnly(compatibilitySetRevoked) {
+		t.Fatal("revoked release must keep an update-only session")
+	}
+	if got := policy.RejectionCode(compatibilitySetRevoked); got != "provider_release_revoked" {
+		t.Fatalf("RejectionCode = %q, want provider_release_revoked", got)
+	}
+	// Revocation is exact: another commit at the same version still serves.
+	sameVersion := "Augustas11/macprovider:v1.8.2@1111111111111111111111111111111111111111"
+	if !policy.Accepts(sameVersion) {
+		t.Fatal("revocation must match the exact identity only")
+	}
+}
 
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	policy := cfg.Coordinator.CompatibilitySet
-	for _, test := range []struct {
-		name string
-		id   string
-		want string
-	}{
-		{name: "below floor", id: compatibilitySetBelow, want: "provider_version_below_minimum"},
-		{name: "revoked", id: revoked, want: "provider_release_revoked"},
-		{name: "other repo", id: compatibilitySetOtherRepo, want: "compatibility_set_repository_mismatch"},
-		{name: "malformed", id: "not-a-signed-release-set", want: "compatibility_set_invalid"},
-		{name: "missing", id: "", want: "compatibility_set_required"},
+func TestCompatibilitySetRejectsForeignMalformedAndNoncanonicalIDs(t *testing.T) {
+	policy := repositoryPolicy()
+	for id, want := range map[string]string{
+		"":                                      "compatibility_set_required",
+		"not-a-signed-release":                  "compatibility_set_invalid",
+		compatibilitySetForeign:                 "compatibility_set_repository_mismatch",
+		strings.ToUpper(compatibilitySetTarget): "compatibility_set_invalid",
+		"Augustas11/macprovider:v1.8.0224@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":                "compatibility_set_invalid",
+		"Augustas11/macprovider:v9223372036854775808.0.0@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "compatibility_set_invalid",
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			if policy.Accepts(test.id) {
-				t.Fatalf("Accepts(%q) = true, want false", test.id)
-			}
-			if got := policy.RejectionCode(test.id); got != test.want {
-				t.Fatalf("RejectionCode(%q) = %q, want %q", test.id, got, test.want)
-			}
-		})
+		if got := policy.RejectionCode(id); got != want {
+			t.Errorf("RejectionCode(%q) = %q, want %q", id, got, want)
+		}
+		if policy.AllowsSession(id) {
+			t.Errorf("AllowsSession(%q) = true, want rejected", id)
+		}
 	}
 }
 
-func TestCompatibilitySetMinimumVersionRejectsUnsafeConfig(t *testing.T) {
-	overflowID := "Augustas11/macprovider:v999999999999999999999.0.0@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+// Existing coordinator.yaml files with the former allowlist and #610 bridge
+// list still load; those fields are reported as deprecated and ignored.
+func TestCompatibilitySetDeprecatedFieldsStillLoadAndAreIgnored(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
+		TargetID:          compatibilitySetTarget,
+		AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
+		FirstHopBridgeIDs: []string{"Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	policy := cfg.Coordinator.CompatibilitySet
+	if got := policy.DeprecatedFields(); len(got) != 2 || got[0] != "accepted_ids" || got[1] != "first_hop_bridge_ids" {
+		t.Fatalf("DeprecatedFields() = %v", got)
+	}
+	if !policy.Accepts(compatibilitySetOld) {
+		t.Fatal("accepted_ids must no longer restrict admission")
+	}
+}
+
+func TestCompatibilitySetRejectsUnsafeConfiguration(t *testing.T) {
 	tests := []struct {
 		name   string
 		policy CompatibilitySetConfig
 		want   string
 	}{
-		{
-			name: "accepted ids mixed with floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8.4",
-				AcceptedIDs:    []string{compatibilitySetTarget, compatibilitySetRollback},
-			},
-			want: "must not be combined with accepted_ids",
-		},
-		{
-			name: "revoked ids without floor",
-			policy: CompatibilitySetConfig{
-				TargetID:    compatibilitySetTarget,
-				AcceptedIDs: []string{compatibilitySetTarget, compatibilitySetRollback},
-				RevokedIDs:  []string{compatibilitySetFuture},
-			},
-			want: "revoked_ids require minimum_version",
-		},
-		{
-			name: "partial floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8",
-			},
-			want: "strict three-component numeric version",
-		},
-		{
-			name: "whitespace floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: " 1.8.4 ",
-			},
-			want: "strict three-component numeric version",
-		},
-		{
-			name: "overflow floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "999999999999999999999.0.0",
-			},
-			want: "strict three-component numeric version",
-		},
-		{
-			name: "leading zero floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "01.8.4",
-			},
-			want: "strict three-component numeric version",
-		},
-		{
-			name: "leading zero target",
-			policy: CompatibilitySetConfig{
-				TargetID:       "Augustas11/macprovider:v01.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				MinimumVersion: "1.8.4",
-			},
-			want: "invalid compatibility_set_id",
-		},
-		{
-			name: "target below floor",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8.5",
-			},
-			want: "provider_version_below_minimum",
-		},
-		{
-			name: "revoked other repo",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8.4",
-				RevokedIDs:     []string{compatibilitySetOtherRepo},
-			},
-			want: "repository must match target_id",
-		},
-		{
-			name: "revoked overflow version",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8.4",
-				RevokedIDs:     []string{overflowID},
-			},
-			want: "invalid numeric version",
-		},
-		{
-			name: "duplicate revoked",
-			policy: CompatibilitySetConfig{
-				TargetID:       compatibilitySetTarget,
-				MinimumVersion: "1.8.4",
-				RevokedIDs:     []string{compatibilitySetFuture, compatibilitySetFuture},
-			},
-			want: "duplicate",
-		},
+		{"accepted IDs without target", CompatibilitySetConfig{AcceptedIDs: []string{compatibilitySetTarget}}, "target_id"},
+		{"revocations without target", CompatibilitySetConfig{RevokedIDs: []string{compatibilitySetRevoked}}, "target_id"},
+		{"malformed revocation", CompatibilitySetConfig{TargetID: compatibilitySetTarget, RevokedIDs: []string{"bad"}}, "invalid compatibility_set_id"},
+		{"duplicate revocation", CompatibilitySetConfig{TargetID: compatibilitySetTarget, RevokedIDs: []string{compatibilitySetRevoked, compatibilitySetRevoked}}, "duplicate"},
+		{"foreign revocation", CompatibilitySetConfig{TargetID: compatibilitySetTarget, RevokedIDs: []string{compatibilitySetForeign}}, "repository must match"},
+		{"revoked target", CompatibilitySetConfig{TargetID: compatibilitySetTarget, RevokedIDs: []string{compatibilitySetTarget}}, "must not contain target_id"},
+		{"leading-zero target", CompatibilitySetConfig{TargetID: "Augustas11/macprovider:v1.08.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "invalid compatibility_set_id"},
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := validTestConfig()
-			cfg.Coordinator.CompatibilitySet = test.policy
-			err := cfg.Validate()
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestCompatibilitySetPolicyRejectsMalformedAndPartialConfiguration(t *testing.T) {
-	tests := []struct {
-		name   string
-		policy CompatibilitySetConfig
-		want   string
-	}{
-		{
-			name:   "accepted IDs without target",
-			policy: CompatibilitySetConfig{AcceptedIDs: []string{compatibilitySetTarget, compatibilitySetRollback}},
-			want:   "target_id",
-		},
-		{
-			name: "target omitted from accepted IDs",
-			policy: CompatibilitySetConfig{
-				TargetID: compatibilitySetTarget,
-				AcceptedIDs: []string{
-					compatibilitySetRollback,
-					"Augustas11/macprovider:v1.8.2@cccccccccccccccccccccccccccccccccccccccc",
-				},
-			},
-			want: "must contain target_id",
-		},
-		{
-			name: "malformed accepted ID",
-			policy: CompatibilitySetConfig{
-				TargetID:    compatibilitySetTarget,
-				AcceptedIDs: []string{compatibilitySetTarget, "not-a-signed-release-set"},
-			},
-			want: "invalid compatibility_set_id",
-		},
-	}
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := validTestConfig()
@@ -270,167 +127,7 @@ func TestUnconfiguredCompatibilitySetPolicyRetainsLegacyValidation(t *testing.T)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-}
-
-func TestCompatibilitySetConfiguredIncludesVersionPolicyFields(t *testing.T) {
-	for _, policy := range []CompatibilitySetConfig{
-		{MinimumVersion: "1.8.4"},
-		{RevokedIDs: []string{compatibilitySetFuture}},
-	} {
-		if !policy.Configured() {
-			t.Fatalf("Configured() = false for %+v", policy)
-		}
-	}
-}
-
-const compatibilitySetFirstHop = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
-
-func TestCompatibilitySetFirstHopBridgeAllowsSessionWithoutBuyerAcceptance(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:          compatibilitySetTarget,
-		AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
-		FirstHopBridgeIDs: []string{compatibilitySetFirstHop},
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	policy := cfg.Coordinator.CompatibilitySet
-	if policy.Accepts(compatibilitySetFirstHop) {
-		t.Fatal("first-hop bridge must not imply buyer-serving Accepts")
-	}
-	if !policy.IsFirstHopBridge(compatibilitySetFirstHop) {
-		t.Fatal("first-hop bridge id was not recognized")
-	}
-	if !policy.IsFirstHopBridgeOnly(compatibilitySetFirstHop) {
-		t.Fatal("first-hop bridge-only predicate failed")
-	}
-	if !policy.AllowsSession(compatibilitySetFirstHop) {
-		t.Fatal("first-hop bridge must allow an update session")
-	}
-	if !policy.AllowsSession(compatibilitySetRollback) {
-		t.Fatal("accepted rollback set must still allow a session")
-	}
-	if policy.AllowsSession(strings.ToUpper(compatibilitySetFirstHop)) {
-		t.Fatal("first-hop bridge admission must be exact and case-sensitive")
-	}
-}
-
-func TestCompatibilitySetMinimumVersionBridgeRemainsUpdateOnly(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
-		TargetID:          compatibilitySetTarget,
-		MinimumVersion:    "1.8.4",
-		FirstHopBridgeIDs: []string{compatibilitySetBelow},
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-	policy := cfg.Coordinator.CompatibilitySet
-	if policy.Accepts(compatibilitySetBelow) {
-		t.Fatal("below-floor bridge must not satisfy buyer-serving admission")
-	}
-	if !policy.IsFirstHopBridgeOnly(compatibilitySetBelow) {
-		t.Fatal("below-floor bridge must remain bridge-only")
-	}
-	if !policy.AllowsSession(compatibilitySetBelow) {
-		t.Fatal("below-floor bridge must allow update session")
-	}
-}
-
-func TestCompatibilitySetFirstHopBridgeRejectsOverlapAndTarget(t *testing.T) {
-	overflowBridge := "Augustas11/macprovider:v999999999999999999999.0.0@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	tests := []struct {
-		name   string
-		policy CompatibilitySetConfig
-		want   string
-	}{
-		{
-			name: "overlap accepted",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
-				FirstHopBridgeIDs: []string{compatibilitySetRollback},
-			},
-			want: "must not overlap accepted_ids",
-		},
-		{
-			name: "contains target",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
-				FirstHopBridgeIDs: []string{compatibilitySetTarget},
-			},
-			want: "must not contain target_id",
-		},
-		{
-			name: "duplicate bridge",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
-				FirstHopBridgeIDs: []string{compatibilitySetFirstHop, compatibilitySetFirstHop},
-			},
-			want: "duplicate",
-		},
-		{
-			name: "overlap revoked",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				MinimumVersion:    "1.8.4",
-				RevokedIDs:        []string{compatibilitySetBelow},
-				FirstHopBridgeIDs: []string{compatibilitySetBelow},
-			},
-			want: "must not overlap revoked_ids",
-		},
-		{
-			name: "bridge satisfies floor",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				MinimumVersion:    "1.8.4",
-				FirstHopBridgeIDs: []string{compatibilitySetFuture},
-			},
-			want: "must remain update-only",
-		},
-		{
-			name: "bridge other repo",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				MinimumVersion:    "1.8.4",
-				FirstHopBridgeIDs: []string{compatibilitySetOtherRepo},
-			},
-			want: "repository must match target_id",
-		},
-		{
-			name: "bridge overflow version",
-			policy: CompatibilitySetConfig{
-				TargetID:          compatibilitySetTarget,
-				MinimumVersion:    "1.8.4",
-				FirstHopBridgeIDs: []string{overflowBridge},
-			},
-			want: "invalid numeric version",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := validTestConfig()
-			cfg.Coordinator.CompatibilitySet = test.policy
-			err := cfg.Validate()
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestCompatibilitySetRevocationPreservesOtherCommitAtSameVersion(t *testing.T) {
-	revoked := "Augustas11/macprovider:v1.8.8@ffffffffffffffffffffffffffffffffffffffff"
-	alternate := "Augustas11/macprovider:v1.8.8@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	cfg := validTestConfig()
-	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{TargetID: compatibilitySetTarget, MinimumVersion: "1.8.4", RevokedIDs: []string{revoked}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Coordinator.CompatibilitySet.Accepts(revoked) || !cfg.Coordinator.CompatibilitySet.Accepts(alternate) {
-		t.Fatal("revocation must deny only the exact release identity, preserving other commits at the same version")
+	if !cfg.Coordinator.CompatibilitySet.Accepts("") {
+		t.Fatal("unconfigured policy keeps the legacy open hello")
 	}
 }
