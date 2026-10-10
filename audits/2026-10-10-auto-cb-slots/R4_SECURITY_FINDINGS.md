@@ -1,0 +1,38 @@
+
+codex
+Security gate **FAILS: 1 MEDIUM**, plus the carried LOW.
+
+Reviewed the complete local `origin/main...HEAD` range: **9 commits**, through `928200167`, including `8703497e4`. No edits, builds, tests, or network calls.
+
+Round-3 confirmation:
+
+| Concern | Status | Evidence |
+|---|---|---|
+| Skipped isolation widths | **FIXED** | [SelfCheck:717](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:717) checks every integer width. |
+| Blocking cache open / parent protection | **PARTIAL** | [read():483](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:483) retains nonblocking, no-follow descriptor validation. **Carried LOW, pre-existing to this commit:** [write():499](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:499) still trusts the parent path. Someone able to modify a non-sticky parent can delete the journal and permit crash-step retries. Fix: validate a private, provider-owned parent and use descriptor-relative operations. |
+| Revocation suppression | **FIXED as documented acceptance** | [SPEC-038:1050](/Users/augstar/macprovider-auto-slots/specs/SPEC-038-continuous-batching.md:1050) explicitly accepts feed suppression preserving eligibility. This is threat acceptance, not mitigation. |
+| Near-tie limitation | **FIXED as documented acceptance** | [divergence():4559](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:4559) retains the other-row guard and top-two checks; the residual contamination case remains documented. |
+| CB admission queue bounds/timeouts | **FIXED** | [submit():2226](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:2226) bounds admission; [admitWaitingRows():4862](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:4862) leaves blocked buyers in the scheduler queue with deadlines. |
+| Prior-grant preservation | **FIXED for the reported migration concern** | [reconcile():244](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:244) preserves grants through throughput losses; v5 now decodes. |
+| Swap fencing / grant resolution | **FIXED for the summarized concern** | [apply():4508](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:4508) compares the full generation-bearing target; [swap resolution:5509](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:5509) resolves grants before publishing readiness. |
+| Serial/batched admission accounting | **NOT FIXED — regressed** | CB submissions no longer acquire the semaphore used by serial inference. See the new finding below. |
+| Crash/progress handling | **FIXED for the reported migration concern** | [run():599](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:599) recovers unfinished steps; [finish():863](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:863) persists the crash boundary. |
+| v5 schema rejection | **FIXED** | [readableSchemaVersions:396](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:396) accepts v5. Its missing optional `crashed_slots` decodes without discarding decisions or unfinished-step markers. |
+
+**NEW — MEDIUM: Separate serial and CB limits permit combined buyer work beyond the served memory envelope.**
+
+Locations: [ModelRuntime.swift:6787](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:6787), [ContinuousBatchScheduler.swift:5704](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:5704), [ModelRuntime.swift:7711](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:7711).
+
+The commit removes CB’s shared `inferenceGate` acquisition. The replacement counts only scheduler rows, while serial fallback independently acquires up to the same served limit. Direct HTTP admission [checks pause/drain state only](/Users/augstar/macprovider-auto-slots/phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:651).
+
+**Exploit scenario:** On a canary/default-on provider serving k slots, a caller with direct HTTP access fills k CB rows, then submits serial-routed work—for example, Harmony structured/tool requests or qualifying cached-turn fallbacks. Serial inference can allocate its contiguous KV cache while the admitted CB rows retain theirs. Model execution serialization does not release those resident caches. Combined residency can therefore exceed the k-slot memory-fit envelope, creating memory-pressure/OOM denial of service. This is introduced by `8703497e4`; the preceding candidate shared the permit count.
+
+**Fix:** Account serial fallback reservations and CB buyer rows against one shared, bounded admission budget, while preserving scheduler queue deadlines, cancellation, and safe conversation-lease ordering. Add a mixed serial/CB regression check.
+
+No other new security findings from that commit.
+
+C/H/M/L = 0/0/1/1
+hook: Stop
+hook: Stop
+hook: Stop Completed
+hook: Stop Completed
