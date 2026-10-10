@@ -69,7 +69,10 @@ the script as root. The script:
 - reads `COORDINATOR_PARTNER_KEYS_ADMIN_DSN` and `ONBOARDING_POSTGRES_DSN` from
   `/etc/macprovider/coordinator.env` as data;
 - generates the password on Pearl and passes only its SCRAM-SHA-256 verifier to
-  the bootstrap SQL (through `\getenv`);
+  the bootstrap SQL (through `\getenv`), which first switches off statement
+  logging for its session; the admin role must be a superuser or hold `SET` on
+  those logging parameters, otherwise the bootstrap stops before any credential
+  is sent;
 - writes `ONBOARDING_APP_ATTEST_RECORD_DSN` into the env file atomically, keeping
   its mode and owner;
 - checks that the new DSN logs in as `app_attest_recorder` with only `SELECT` and

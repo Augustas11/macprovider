@@ -14,21 +14,23 @@
 --
 -- Every refusal raises, so psql exits non-zero under ON_ERROR_STOP (\quit takes
 -- no exit status). The verifier is read with \getenv, never from argv, and the plaintext
--- password never reaches this session, the server log or any output; for a
--- superuser session statement logging is also switched off, so the verifier
--- is not logged either. The grants are re-asserted so a drifted role ends with
+-- password never reaches this session, the server log or any output, and
+-- statement logging is switched off for the session first, so the verifier is
+-- not logged either. The grants are re-asserted so a drifted role ends with
 -- exactly SELECT, INSERT on that one table, no access to the trust tables and
 -- no role memberships (dist/provision-app-attest-recorder.py then checks
 -- onboarding.AppAttestRecorderPolicySQL).
 
 \set ON_ERROR_STOP on
 
-SELECT rolsuper AS bootstrap_is_superuser FROM pg_roles WHERE rolname = current_user \gset
-\if :bootstrap_is_superuser
-  SET log_statement = 'none';
-  SET log_min_duration_statement = -1;
-  SET log_min_error_statement = 'panic';
-\endif
+-- Before any credential material is interpolated, switch off every server
+-- statement-logging path for this session (PostgreSQL 13+). These settings
+-- need a superuser or GRANT SET; without them the session stops here.
+SET log_statement = 'none';
+SET log_min_duration_statement = -1;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
+SET log_min_error_statement = 'panic';
 
 \getenv recorder_scram APP_ATTEST_RECORDER_PASSWORD_SCRAM
 \if :{?recorder_scram}
@@ -64,9 +66,15 @@ BEGIN
             EXECUTE format('REVOKE ALL ON %I FROM app_attest_recorder', t);
         END IF;
     END LOOP;
-    IF to_regprocedure('auto_trust_attested_hardware(bigint)') IS NOT NULL THEN
-        REVOKE ALL ON FUNCTION auto_trust_attested_hardware(bigint) FROM app_attest_recorder;
-    END IF;
+    -- No SECURITY DEFINER function (trust request/approve/revoke,
+    -- auto_trust_attested_hardware) is executable by the recorder.
+    FOR t IN
+        SELECT p.oid::regprocedure::text
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public' AND p.prosecdef
+    LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM app_attest_recorder', t);
+    END LOOP;
 END
 $$;
 GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;

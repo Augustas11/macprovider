@@ -2780,6 +2780,7 @@ func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
 		{`GRANT UPDATE (trusted_by) ON hardware_verification_trust TO app_attest_recorder`, `REVOKE ALL ON hardware_verification_trust FROM app_attest_recorder`},
 		{`GRANT UPDATE ON provider_app_attest_verifications TO app_attest_recorder`, `REVOKE UPDATE ON provider_app_attest_verifications FROM app_attest_recorder`},
 		{`GRANT SELECT (provider_id) ON provider_identities TO app_attest_recorder`, `REVOKE ALL ON provider_identities FROM app_attest_recorder`},
+		{`GRANT EXECUTE ON FUNCTION approve_hardware_trust_approval(uuid,text) TO app_attest_recorder`, `REVOKE EXECUTE ON FUNCTION approve_hardware_trust_approval(uuid,text) FROM app_attest_recorder`},
 	} {
 		if _, err := adminDB.ExecContext(ctx, drift.grant); err != nil {
 			t.Fatalf("%s: %v", drift.grant, err)

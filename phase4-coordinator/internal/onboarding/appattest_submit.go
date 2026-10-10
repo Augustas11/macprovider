@@ -256,7 +256,8 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "challenge, key_id and attestation must be standard base64 of the required sizes")
 		return
 	}
-	if !h.AppAttestChallenges.Consume(providerID, challenge, now) {
+	// Expiry is judged after the body has been read, not when it started.
+	if !h.AppAttestChallenges.Consume(providerID, challenge, h.appAttestNow()) {
 		writeJSONError(w, http.StatusConflict, "challenge_invalid", "challenge is unknown, used, expired, or issued to another provider")
 		return
 	}

@@ -2733,7 +2733,7 @@ SELECT current_user = 'app_attest_recorder'
    AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
    AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
-   AND (to_regprocedure('auto_trust_attested_hardware(bigint)') IS NULL OR NOT has_function_privilege(current_user, to_regprocedure('auto_trust_attested_hardware(bigint)'), 'EXECUTE'));
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND has_function_privilege(current_user, p.oid, 'EXECUTE'));
 SQL
 )"
     if [ "$app_attest_policy_ok" != "t" ]; then

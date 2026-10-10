@@ -304,3 +304,24 @@ func TestAppAttestRecorderPolicyCopiesAreIdentical(t *testing.T) {
 		}
 	}
 }
+
+// TestAppAttestChallengeExpiryIsJudgedAfterTheBody: a submit that starts
+// before expiry but whose body completes after it is refused.
+func TestAppAttestChallengeExpiryIsJudgedAfterTheBody(t *testing.T) {
+	h := newAppAttestHarness(t)
+	ch := h.challenge("tok-a")
+	att := h.attest(ch.ClientData, appattesttest.AttestOptions{})
+	start := h.now
+	calls := 0
+	h.handler.Now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return start
+		}
+		return start.Add(appAttestChallengeTTL)
+	}
+	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusConflict, "challenge_invalid")
+	if len(h.recorder.byProvider) != 0 {
+		t.Fatal("recorded after expiry")
+	}
+}

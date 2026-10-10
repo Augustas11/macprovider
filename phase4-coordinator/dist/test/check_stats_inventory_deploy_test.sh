@@ -883,8 +883,9 @@ grep -qF 'if [ "$app_attest_policy_ok" != "t" ]; then' "$DEPLOY_SH" ||
   fail "deploy script must abort unless the recorder passes the least-privilege policy"
 grep -qF "has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')" "$DEPLOY_SH" ||
   fail "deploy script must refuse column-level recorder writes"
-grep -qF 'app_attest_record_dsn: env:ONBOARDING_APP_ATTEST_RECORD_DSN' "$DIST_DIR/coordinator.yaml" ||
-  fail "coordinator.yaml must reference the recorder DSN through env:"
+if grep -qE '^[[:space:]]+app_attest_record_dsn:' "$DIST_DIR/coordinator.yaml"; then
+  fail "coordinator.yaml must leave app_attest_record_dsn unset (a missing env reference would fail config load)"
+fi
 grep -qF '\getenv recorder_scram APP_ATTEST_RECORDER_PASSWORD_SCRAM' "$APP_ATTEST_BOOTSTRAP" ||
   fail "recorder bootstrap must read the SCRAM verifier with \\getenv"
 if grep -qE '^[[:space:]]*\\quit' "$APP_ATTEST_BOOTSTRAP"; then

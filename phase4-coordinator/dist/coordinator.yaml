@@ -278,9 +278,11 @@ onboarding:
   auth_policy_cutover_dsn: env:ONBOARDING_AUTH_POLICY_CUTOVER_DSN
   hardware_trust_request_dsn: env:ONBOARDING_HARDWARE_TRUST_REQUEST_DSN
   hardware_trust_approve_dsn: env:ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
-  # SPEC-033 §5.7.1: the only role that records App Attest verifications.
-  # Provisioned by scripts/ops/pearl-runtime.sh step app_attest_recorder.
-  app_attest_record_dsn: env:ONBOARDING_APP_ATTEST_RECORD_DSN
+  # app_attest_record_dsn is deliberately unset: the coordinator reads the
+  # app_attest_recorder DSN from ONBOARDING_APP_ATTEST_RECORD_DSN when present
+  # (SPEC-033 §2.7), so a missing variable disables App Attest recording only
+  # and never fails config load. Provisioned by scripts/ops/pearl-runtime.sh
+  # step app_attest_recorder.
   bundle_id: "tech.malibu.app"
   apple_team_id: env:APPLE_TEAM_ID
   coordinator_domain: "coordinator.malibu.tech"

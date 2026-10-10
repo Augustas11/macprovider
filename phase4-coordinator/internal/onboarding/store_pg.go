@@ -43,8 +43,9 @@ func (s *PGStore) AttachAppAttestRecorder(dsn string) error {
 // that role with LOGIN and no elevated attributes, no role memberships, no
 // owned relations or functions, SELECT and INSERT (and nothing else, at table
 // or column level) on provider_app_attest_verifications, no privilege at any
-// level on the trust, job, identity and profile tables, and no EXECUTE on
-// auto_trust_attested_hardware. The deploy preflight
+// level on the trust, job, identity and profile tables, and no EXECUTE on any
+// SECURITY DEFINER function in the public schema (the trust-workflow
+// request/approve/revoke functions and auto_trust_attested_hardware). The deploy preflight
 // (dist/deploy-pearl-vps.sh) and the provisioner
 // (dist/provision-app-attest-recorder.py) carry this exact text; a test keeps
 // them identical.
@@ -60,7 +61,7 @@ const AppAttestRecorderPolicySQL = `SELECT current_user = 'app_attest_recorder'
    AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
    AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
-   AND (to_regprocedure('auto_trust_attested_hardware(bigint)') IS NULL OR NOT has_function_privilege(current_user, to_regprocedure('auto_trust_attested_hardware(bigint)'), 'EXECUTE'))`
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prosecdef AND has_function_privilege(current_user, p.oid, 'EXECUTE'))`
 
 // SmokeAppAttestRecorder checks the attached recorder against
 // AppAttestRecorderPolicySQL. On failure the caller detaches it: the
