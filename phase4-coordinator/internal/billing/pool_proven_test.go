@@ -67,9 +67,6 @@ func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
 
 	final := time.UnixMilli(counted.ReceiptReceivedUnixMS).UTC()
 	since, until := final.Add(-time.Hour), final.Add(time.Hour)
-	if err := EnsurePoolProvenRollup(ctx, store.db); err != nil {
-		t.Fatal(err)
-	}
 	if err := RefreshPoolProvenRollup(ctx, store.db, store.db, since); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -98,21 +95,63 @@ func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
 	}
 }
 
-// SPEC-047-R012 rollup: a counted attempt keeps counting after SPEC-022 R-15
-// retention removes its snapshot, verdict, and output rows from the hot
-// database; a later quarantine of a still-hot credit stops it counting; a
-// verdict that closed before the window start is not re-read; and the rollup
-// rebuilds from hot evidence after a version change.
+// simulateEvidenceRetentionView adds the SPEC-022 R-15 (#1909) payable-view
+// clause that keeps an archived settled credit payable once its evidence
+// rows are deleted, so these tests see the view retention will ship.
+func simulateEvidenceRetentionView(t *testing.T, store *Store) {
+	t.Helper()
+	var viewSQL string
+	if err := store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='view' AND name='spec022_payable_request_credits'`).Scan(&viewSQL); err != nil {
+		t.Fatal(err)
+	}
+	const anchor = "COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')"
+	if !strings.Contains(viewSQL, anchor) {
+		t.Fatalf("payable view changed shape:\n%s", viewSQL)
+	}
+	viewSQL = strings.Replace(viewSQL, anchor, anchor+`
+       OR (lrc.settled = 1 AND EXISTS (SELECT 1 FROM settlement_evidence_archived_credits archived WHERE archived.request_credit_id = lrc.id))`, 1)
+	for _, stmt := range []string{
+		`CREATE TABLE settlement_evidence_archived_credits (request_credit_id INTEGER PRIMARY KEY)`,
+		`DROP VIEW spec022_payable_request_credits`,
+		viewSQL,
+	} {
+		if _, err := store.db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+}
+
+// archiveEvidence deletes a request's evidence rows the way retention does
+// (outputs, verdicts, snapshots) and keeps its settled credit payable.
+func archiveEvidence(t *testing.T, store *Store, requestID string) {
+	t.Helper()
+	for _, stmt := range []string{
+		`UPDATE ledger_request_credits SET settled = 1 WHERE request_id = ?`,
+		`INSERT INTO settlement_evidence_archived_credits(request_credit_id) SELECT id FROM ledger_request_credits WHERE request_id = ?`,
+		`DELETE FROM settlement_attempt_outputs WHERE request_id = ?`,
+		`DELETE FROM settlement_receipt_verdicts WHERE request_id = ?`,
+		`DELETE FROM settlement_route_snapshots WHERE request_id = ?`,
+	} {
+		if _, err := store.db.Exec(stmt, requestID); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+}
+
+// SPEC-047-R012 rollup across SPEC-022 R-15 retention: an archived counted
+// attempt keeps counting; one archived before any refresh is still captured;
+// a label dispute between the last refresh and archival is what freezes; a
+// quarantine of an archived attempt's credit stops it counting; a verdict
+// that closed before the window start is not re-read; and a cursor reset
+// rebuilds without losing archived attempts.
 func TestPoolProvenRollupPersistsAcrossArchivingAndReevaluates(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
 	base := settlementVerifierInputFromFixture(t, fixtures, firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done"), pubkey)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
+	simulateEvidenceRetentionView(t, store)
 	ctx := context.Background()
-	if err := EnsurePoolProvenRollup(ctx, store.db); err != nil {
-		t.Fatal(err)
-	}
 	seed := func(requestID string) SettlementVerifyInput {
 		t.Helper()
 		in := base
@@ -125,48 +164,69 @@ func TestPoolProvenRollupPersistsAcrossArchivingAndReevaluates(t *testing.T) {
 		seedSettlementReceiptEvidence(t, store, in)
 		insertSPEC022LedgerCredit(t, store.db, in, 600)
 		markSPEC022ReceiptVerified(t, store.db, in)
-		if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'verified' WHERE request_id = ?`, requestID); err != nil {
+		if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_id = ?, pool_label_status = 'verified' WHERE request_id = ?`, testPoolID, requestID); err != nil {
 			t.Fatal(err)
 		}
 		return in
 	}
 	archived := seed("pp-archived")
-	reversed := seed("pp-reversed")
+	disputed := seed("pp-disputed-then-archived")
+	reversed := seed("pp-archived-then-reversed")
+	hot := seed("pp-hot")
 	final := time.UnixMilli(archived.ReceiptReceivedUnixMS).UTC()
 	since, until := final.Add(-time.Hour), final.Add(time.Hour)
-	count := func() int {
+	counted := func() map[string]bool {
 		t.Helper()
 		if err := RefreshPoolProvenRollup(ctx, store.db, store.db, since); err != nil {
 			t.Fatalf("refresh: %v", err)
 		}
-		attempts, err := QueryPoolProvenAttempts(ctx, store.db, since, until, 10)
+		if _, err := QueryPoolProvenAttempts(ctx, store.db, since, until, 10); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := store.db.Query(`SELECT request_id FROM pool_proven_rollup_attempts WHERE counted = 1 AND julianday(finality_at_utc) BETWEEN julianday(?) AND julianday(?)`,
+			since.Format(time.RFC3339Nano), until.Format(time.RFC3339Nano))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(attempts)
+		defer rows.Close()
+		out := map[string]bool{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			out[id] = true
+		}
+		return out
 	}
-	if got := count(); got != 2 {
-		t.Fatalf("counted = %d, want 2", got)
-	}
-	// Retention moves the evidence out of the hot tables; the ledger credit
-	// stays. The archived attempt still counts.
-	for _, table := range []string{"settlement_attempt_outputs", "settlement_receipt_verdicts", "settlement_route_snapshots"} {
-		if _, err := store.db.Exec(`DELETE FROM `+table+` WHERE request_id = ?`, archived.RequestID); err != nil {
-			t.Fatalf("archive %s: %v", table, err)
+	want := func(got map[string]bool, ids ...string) {
+		t.Helper()
+		if len(got) != len(ids) {
+			t.Fatalf("counted = %v, want %v", got, ids)
+		}
+		for _, id := range ids {
+			if !got[id] {
+				t.Fatalf("counted = %v, want %v", got, ids)
+			}
 		}
 	}
-	if got := count(); got != 2 {
-		t.Fatalf("after archiving counted = %d, want 2", got)
+	// Archived before any refresh: the delete trigger captures it.
+	archiveEvidence(t, store, archived.RequestID)
+	want(counted(), archived.RequestID, disputed.RequestID, reversed.RequestID, hot.RequestID)
+	// Disputed after the last refresh, then archived: the trigger freezes the
+	// disputed state, not the earlier verified sample.
+	if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'label_disputed' WHERE request_id = ?`, disputed.RequestID); err != nil {
+		t.Fatal(err)
 	}
-	// A quarantine of a hot credit is a reversal: it stops counting.
+	archiveEvidence(t, store, disputed.RequestID)
+	archiveEvidence(t, store, reversed.RequestID)
+	want(counted(), archived.RequestID, reversed.RequestID, hot.RequestID)
+	// The credit of an archived attempt stays live: a quarantine reverses it.
 	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 1, quarantine_reason = 'test' WHERE request_id = ?`, reversed.RequestID); err != nil {
 		t.Fatal(err)
 	}
-	if got := count(); got != 1 {
-		t.Fatalf("after reversal counted = %d, want 1", got)
-	}
-	// A window that starts after every finality time leaves both rows
-	// unread: re-evaluation is bounded to the open window.
+	want(counted(), archived.RequestID, hot.RequestID)
+	// A window that starts after every finality time leaves rows unread.
 	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 0 WHERE request_id = ?`, reversed.RequestID); err != nil {
 		t.Fatal(err)
 	}
@@ -177,34 +237,29 @@ func TestPoolProvenRollupPersistsAcrossArchivingAndReevaluates(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT counted FROM pool_proven_rollup_attempts WHERE request_id = ?`, reversed.RequestID).Scan(&stillOff); err != nil || stillOff != 0 {
 		t.Fatalf("closed-before-window row re-read: counted=%d err=%v", stillOff, err)
 	}
-	// A version change rebuilds from hot evidence only.
-	if _, err := store.db.Exec(`UPDATE pool_proven_rollup_cursor SET rollup_version = 0`); err != nil {
+	// A cursor reset rebuilds from hot rows and keeps the archived ones.
+	if _, err := store.db.Exec(`UPDATE pool_proven_rollup_cursor SET last_route_snapshot_id = 0`); err != nil {
 		t.Fatal(err)
 	}
 	if err := EnsurePoolProvenRollup(ctx, store.db); err != nil {
 		t.Fatal(err)
 	}
-	if got := count(); got != 1 {
-		t.Fatalf("after rebuild counted = %d, want the hot attempt only", got)
-	}
+	want(counted(), archived.RequestID, reversed.RequestID, hot.RequestID)
 }
 
 // The rollup's reads never scan the ledger, snapshot, or verdict tables: the
 // capture reads a rowid range and every evaluation join is a key lookup. The
 // pre-rollup query drove the payable view over every enforce-mode credit and
-// timed out on the production ledger.
+// timed out on a production-size ledger.
 func TestPoolProvenRollupQueryPlansAvoidFullScans(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	ctx := context.Background()
-	if err := EnsurePoolProvenRollup(ctx, store.db); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := store.db.Exec(`ANALYZE`); err != nil {
 		t.Fatal(err)
 	}
 	plans := map[string][]any{
-		"capture":  {`SELECT id FROM settlement_route_snapshots WHERE id > ? AND id <= ? AND pool_id IS NOT NULL AND pool_id <> '' AND route_snapshot_mode = 'enforce' AND json_extract(route_snapshot_json, '$.expected_model_hash_source') = ? ORDER BY id`, 0, 10, ExpectedModelHashSourcePoolManifest},
-		"evaluate": {poolProvenEvaluateSQL(), PoolLabelStatusVerified, 0, time.Now().UTC().Format(time.RFC3339Nano), poolProvenEvaluateBatch},
+		"capture":  {poolProvenCaptureSQL(), 0, 10},
+		"evaluate": {poolProvenEvaluateSQL(), 0, time.Now().UTC().Format(time.RFC3339Nano), poolProvenEvaluateBatch},
 	}
 	for name, p := range plans {
 		rows, err := store.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+p[0].(string), p[1:]...)
@@ -221,11 +276,12 @@ func TestPoolProvenRollupQueryPlansAvoidFullScans(t *testing.T) {
 			plan = append(plan, detail)
 		}
 		rows.Close()
+		if len(plan) == 0 {
+			t.Fatalf("%s: empty plan", name)
+		}
 		for _, line := range plan {
-			for _, table := range []string{"settlement_route_snapshots", "settlement_receipt_verdicts", "ledger_request_credits", "lrc", "srs", "srv", "settlement_attempt_outputs", "sao"} {
-				if strings.HasPrefix(line, "SCAN "+table) {
-					t.Fatalf("%s plan scans %s:\n%s", name, table, strings.Join(plan, "\n"))
-				}
+			if strings.HasPrefix(line, "SCAN ") || strings.Contains(line, "TEMP B-TREE") {
+				t.Fatalf("%s plan has %q:\n%s", name, line, strings.Join(plan, "\n"))
 			}
 		}
 	}

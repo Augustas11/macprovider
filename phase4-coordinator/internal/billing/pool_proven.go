@@ -15,41 +15,161 @@ import (
 // the build deadline on a production-size ledger, and would silently shrink
 // once SPEC-022 R-15 retention archives settled evidence out of the hot
 // database. Instead the coordinator keeps one rollup row per pool-manifest
-// attempt:
+// attempt, and the aggregate reads only that table:
 //
 //   - Capture: settlement_route_snapshots is append-only (trg_srs_immutable)
 //     with AUTOINCREMENT ids allocated under SQLite's single writer, so ids
 //     commit in order. A high-water mark over its rowid captures each new
 //     enforce-mode pool_manifest snapshot exactly once, with the immutable
-//     provenance the aggregate needs (pool, entry, core, pair, owner inputs).
-//   - Evaluate: each pass recomputes the counting predicate for every
-//     captured attempt whose finality is unknown or not before the window
-//     start, by primary/unique-key lookups only, and stores whether it counts
-//     and its finality time. A verdict that closed before the window start
-//     can never count in a later window, so its row is no longer re-read.
-//   - Persist: when an attempt's snapshot or verdict row is no longer in the
-//     hot database, its stored state is kept, so archived attempts keep
-//     counting for the rest of their window.
+//     provenance the aggregate needs (pool, entry, core, pair, owner inputs,
+//     settlement policy).
+//   - Evaluate: each pass recomputes, for every captured attempt whose
+//     finality is unknown or not before the window start, the verdict half
+//     of the counting predicate (enforce snapshot, closed payable verdict
+//     against it, verified pool label) and its finality time while the
+//     snapshot and verdict rows are hot, and the credit half (a payable
+//     enforce credit with positive debit and credit) always: ledger credits
+//     never leave the hot database. All joins are key lookups. A verdict that
+//     closed before the window start can never count in a later window, so
+//     its row is no longer re-read.
+//   - Freeze: deleting a pool snapshot or a pool-labelled verdict (retention)
+//     fires a BEFORE DELETE trigger that captures the attempt if it was not
+//     captured yet and records its verdict half and finality from the rows
+//     being deleted, in the deleting transaction. So the frozen state is the
+//     state at deletion, never an older sample.
 //
-// The aggregate reads only this table. Bumping poolProvenRollupVersion clears
-// it and rebuilds it from the hot evidence.
-const poolProvenRollupVersion = 1
+// Rows are never deleted: re-running the capture from id 0 (cursor reset)
+// rebuilds every hot attempt and keeps every frozen one.
 
 const (
 	// poolProvenCaptureBatch bounds the snapshot ids one capture read covers.
 	poolProvenCaptureBatch = 20_000
-	// poolProvenEvaluateBatch bounds the rollup rows one evaluation read and
-	// its write transaction cover.
+	// poolProvenEvaluateBatch bounds the rollup rows one evaluation read covers.
 	poolProvenEvaluateBatch = 2_000
+	// poolProvenWriteBatch bounds the rows one write transaction touches, so
+	// the shared writer connection is held for milliseconds.
+	poolProvenWriteBatch = 200
+	// poolProvenQueryTimeout is the R009 per-query limit, applied to every
+	// refresh read.
+	poolProvenQueryTimeout = 10 * time.Second
+	// poolProvenWriteTimeout bounds one write transaction, including the wait
+	// for the shared writer connection.
+	poolProvenWriteTimeout = 2 * time.Second
 )
 
-// EnsurePoolProvenRollup creates the rollup tables, and clears the rollup
-// when it was written under a different rollup version.
+// poolProvenCaptureColumns are the rollup columns a capture fills, in the
+// order poolProvenCaptureValuesSQL produces them.
+const poolProvenCaptureColumns = `route_snapshot_id, account_scope_hash, request_id, attempt_n, provider_id,
+    pool_id, pool_model_id, manifest_version, manifest_core_digest,
+    artifact_hash_algorithm, artifact_hash, runtime_source,
+    pool_member_account_id, pool_operator_account_id, settlement_policy_version`
+
+// poolProvenCaptureValuesSQL renders the captured values of snapshot row s;
+// accountScope is the expression for the second column (SQL cannot compute
+// the scope hash, so the Go capture reads the raw scope and hashes it).
+func poolProvenCaptureValuesSQL(s, accountScope string) string {
+	mv := `json_extract(` + s + `.route_snapshot_json, '$.manifest_version')`
+	return s + `.id, ` + accountScope + `, ` + s + `.request_id, ` + s + `.attempt_n, ` + s + `.provider_id,
+       ` + s + `.pool_id,
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.pool_model_id'), ''),
+       CASE WHEN typeof(` + mv + `) = 'integer' AND ` + mv + ` > 0 THEN ` + mv + ` ELSE 0 END,
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.manifest_core_digest'), ''),
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.expected_catalog_model_hash_algorithm'), ''),
+       ` + s + `.expected_catalog_model_hash,
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.runtime_source'), ''),
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.pool_member_account_id'), ''),
+       COALESCE(json_extract(` + s + `.route_snapshot_json, '$.pool_operator_account_id'), ''),
+       ` + s + `.route_snapshot_policy_version`
+}
+
+// poolProvenSnapshotSQL selects the snapshots the rollup captures.
+func poolProvenSnapshotSQL(s string) string {
+	return s + `.pool_id IS NOT NULL AND ` + s + `.pool_id <> ''
+   AND ` + s + `.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
+   AND json_extract(` + s + `.route_snapshot_json, '$.expected_model_hash_source') = '` + ExpectedModelHashSourcePoolManifest + `'`
+}
+
+// poolProvenVerdictSQL is the verdict half of the SPEC-047-R012 v0.2.9
+// counting predicate for verdict v against snapshot s.
+func poolProvenVerdictSQL(v, s string) string {
+	return `(` + s + `.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
+             AND ` + v + `.route_snapshot_digest = ` + s + `.route_snapshot_digest
+             AND ` + v + `.closed = 1
+             AND ` + payableSettlementOutcomeSQL(v, s) + `
+             AND ` + v + `.pool_label_status = '` + PoolLabelStatusVerified + `')`
+}
+
+// poolProvenFinalitySQL is the coordinator-assigned finality time: when the
+// verdict closed.
+func poolProvenFinalitySQL(v string) string {
+	return `CASE WHEN ` + v + `.closed = 1 THEN COALESCE(` + v + `.updated_at_utc, ` + v + `.created_at_utc) END`
+}
+
+// poolProvenTriggers freeze an attempt's verdict half at deletion. Each
+// updates only while both of the attempt's rows still exist (the row being
+// deleted is still visible in a BEFORE trigger), so whichever row retention
+// deletes first records the state; the second leaves it unchanged.
+func poolProvenTriggers() []string {
+	srvForOld := `srv.account_scope_hash = pool_proven_rollup_attempts.account_scope_hash
+                            AND srv.request_id = OLD.request_id
+                            AND srv.attempt_n = OLD.attempt_n
+                            AND srv.provider_id = OLD.provider_id`
+	return []string{`
+CREATE TRIGGER trg_ppr_srs_delete BEFORE DELETE ON settlement_route_snapshots
+WHEN OLD.pool_id IS NOT NULL AND OLD.pool_id <> ''
+BEGIN
+    INSERT OR IGNORE INTO pool_proven_rollup_attempts (` + poolProvenCaptureColumns + `)
+    SELECT ` + poolProvenCaptureValuesSQL("OLD", "srv.account_scope_hash") + `
+      FROM settlement_receipt_verdicts srv
+     WHERE srv.request_id = OLD.request_id
+       AND srv.attempt_n = OLD.attempt_n
+       AND srv.provider_id = OLD.provider_id
+       AND srv.route_snapshot_digest = OLD.route_snapshot_digest
+       AND ` + poolProvenSnapshotSQL("OLD") + `;
+    UPDATE pool_proven_rollup_attempts
+       SET verdict_ok = (SELECT ` + poolProvenVerdictSQL("srv", "OLD") + `
+                           FROM settlement_receipt_verdicts srv
+                          WHERE ` + srvForOld + `),
+           finality_at_utc = (SELECT ` + poolProvenFinalitySQL("srv") + `
+                                FROM settlement_receipt_verdicts srv
+                               WHERE ` + srvForOld + `)
+     WHERE route_snapshot_id = OLD.id
+       AND EXISTS (SELECT 1 FROM settlement_receipt_verdicts srv WHERE ` + srvForOld + `);
+END`, `
+CREATE TRIGGER trg_ppr_srv_delete BEFORE DELETE ON settlement_receipt_verdicts
+WHEN OLD.pool_id IS NOT NULL AND OLD.pool_id <> ''
+BEGIN
+    INSERT OR IGNORE INTO pool_proven_rollup_attempts (` + poolProvenCaptureColumns + `)
+    SELECT ` + poolProvenCaptureValuesSQL("srs", "OLD.account_scope_hash") + `
+      FROM settlement_route_snapshots srs
+     WHERE srs.request_id = OLD.request_id
+       AND srs.attempt_n = OLD.attempt_n
+       AND srs.provider_id = OLD.provider_id
+       AND srs.route_snapshot_digest = OLD.route_snapshot_digest
+       AND ` + poolProvenSnapshotSQL("srs") + `;
+    UPDATE pool_proven_rollup_attempts
+       SET verdict_ok = (SELECT ` + poolProvenVerdictSQL("OLD", "srs") + `
+                           FROM settlement_route_snapshots srs
+                          WHERE srs.id = pool_proven_rollup_attempts.route_snapshot_id),
+           finality_at_utc = ` + poolProvenFinalitySQL("OLD") + `
+     WHERE account_scope_hash = OLD.account_scope_hash
+       AND request_id = OLD.request_id
+       AND attempt_n = OLD.attempt_n
+       AND provider_id = OLD.provider_id
+       AND EXISTS (SELECT 1 FROM settlement_route_snapshots srs
+                    WHERE srs.id = pool_proven_rollup_attempts.route_snapshot_id);
+END`}
+}
+
+// EnsurePoolProvenRollup creates the rollup tables and (re)creates its
+// freeze triggers. The billing migration runs it after every table rebuild,
+// so a rebuild that dropped a trigger gets it back. No index is built on any
+// evidence table.
 func EnsurePoolProvenRollup(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return errors.New("billing: ledger handle unavailable")
 	}
-	if _, err := db.ExecContext(ctx, `
+	stmts := append([]string{`
 CREATE TABLE IF NOT EXISTS pool_proven_rollup_attempts (
     route_snapshot_id INTEGER PRIMARY KEY,
     account_scope_hash TEXT NOT NULL,
@@ -65,41 +185,41 @@ CREATE TABLE IF NOT EXISTS pool_proven_rollup_attempts (
     runtime_source TEXT NOT NULL,
     pool_member_account_id TEXT NOT NULL,
     pool_operator_account_id TEXT NOT NULL,
+    settlement_policy_version TEXT NOT NULL,
+    verdict_ok INTEGER NOT NULL DEFAULT 0 CHECK(verdict_ok IN (0,1)),
     counted INTEGER NOT NULL DEFAULT 0 CHECK(counted IN (0,1)),
     finality_at_utc TEXT NULL
-);
+)`, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ppr_attempt
+    ON pool_proven_rollup_attempts(account_scope_hash, request_id, attempt_n, provider_id)`, `
 CREATE TABLE IF NOT EXISTS pool_proven_rollup_cursor (
     id INTEGER PRIMARY KEY CHECK(id = 1),
-    rollup_version INTEGER NOT NULL,
     last_route_snapshot_id INTEGER NOT NULL
-);`); err != nil {
+)`,
+		`INSERT OR IGNORE INTO pool_proven_rollup_cursor(id, last_route_snapshot_id) VALUES (1, 0)`,
+		`DROP TRIGGER IF EXISTS trg_ppr_srs_delete`,
+		`DROP TRIGGER IF EXISTS trg_ppr_srv_delete`,
+	}, poolProvenTriggers()...)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	return withPoolProvenTx(ctx, db, func(tx *sql.Tx) error {
-		var version int64
-		err := tx.QueryRowContext(ctx, `SELECT rollup_version FROM pool_proven_rollup_cursor WHERE id = 1`).Scan(&version)
-		if err == nil && version == poolProvenRollupVersion {
-			return nil
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("pool-proven rollup schema: %w", err)
 		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pool_proven_rollup_attempts`); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `
-INSERT INTO pool_proven_rollup_cursor(id, rollup_version, last_route_snapshot_id) VALUES (1, ?, 0)
-ON CONFLICT(id) DO UPDATE SET rollup_version = excluded.rollup_version, last_route_snapshot_id = 0`, poolProvenRollupVersion)
-		return err
-	})
+	}
+	return tx.Commit()
 }
 
 // RefreshPoolProvenRollup brings the rollup current: it captures every
-// pool-manifest route snapshot past the high-water mark, then re-evaluates the
-// counting predicate of each captured attempt whose finality is unknown or not
-// before windowStart. Reads go through reader, so they never hold the
-// writer connection; each write is one short transaction on writer. Progress
-// commits as it goes; an error leaves the rollup consistent but not current.
+// pool-manifest route snapshot past the high-water mark, then re-evaluates
+// each captured attempt whose finality is unknown or not before windowStart.
+// Reads go through reader, each under the R009 query timeout, so they never
+// hold the writer connection; writes are short transactions on writer.
+// Progress commits as it goes; an error leaves the rollup consistent but not
+// current.
 func RefreshPoolProvenRollup(ctx context.Context, reader, writer *sql.DB, windowStart time.Time) error {
 	if reader == nil || writer == nil {
 		return errors.New("billing: ledger handle unavailable")
@@ -114,56 +234,47 @@ func RefreshPoolProvenRollup(ctx context.Context, reader, writer *sql.DB, window
 }
 
 type poolProvenCapturedRow struct {
-	id                                   int64
-	accountScope, requestID              string
-	attemptN                             int64
-	providerID, poolID, poolModelID      string
-	manifestVersion                      sql.NullInt64
-	coreDigest, algorithm, hash, runtime string
-	memberAccountID, operatorAccountID   string
+	id                                 int64
+	accountScope, requestID            string
+	attemptN                           int64
+	providerID, poolID, poolModelID    string
+	manifestVersion                    int64
+	coreDigest, algorithm, hash        string
+	runtime                            string
+	memberAccountID, operatorAccountID string
+	policyVersion                      string
 }
 
 func capturePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB) error {
 	var cursor, maxID int64
-	if err := reader.QueryRowContext(ctx, `SELECT last_route_snapshot_id FROM pool_proven_rollup_cursor WHERE id = 1`).Scan(&cursor); err != nil {
-		return fmt.Errorf("cursor: %w", err)
-	}
-	if err := reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM settlement_route_snapshots`).Scan(&maxID); err != nil {
+	err := withPoolProvenRead(ctx, func(ctx context.Context) error {
+		if err := reader.QueryRowContext(ctx, `SELECT last_route_snapshot_id FROM pool_proven_rollup_cursor WHERE id = 1`).Scan(&cursor); err != nil {
+			return fmt.Errorf("cursor: %w", err)
+		}
+		return reader.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM settlement_route_snapshots`).Scan(&maxID)
+	})
+	if err != nil {
 		return err
 	}
 	for cursor < maxID {
 		upper := min(cursor+poolProvenCaptureBatch, maxID)
-		rows, err := readPoolProvenSnapshots(ctx, reader, cursor, upper)
-		if err != nil {
-			return err
-		}
-		if err := withPoolProvenTx(ctx, writer, func(tx *sql.Tx) error {
-			for _, r := range rows {
-				var version int64
-				if r.manifestVersion.Valid && r.manifestVersion.Int64 > 0 {
-					version = r.manifestVersion.Int64
-				}
-				if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO pool_proven_rollup_attempts (
-    route_snapshot_id, account_scope_hash, request_id, attempt_n, provider_id,
-    pool_id, pool_model_id, manifest_version, manifest_core_digest,
-    artifact_hash_algorithm, artifact_hash, runtime_source,
-    pool_member_account_id, pool_operator_account_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					r.id, SettlementAccountScopeHash(r.accountScope), r.requestID, r.attemptN, r.providerID,
-					r.poolID, r.poolModelID, version, r.coreDigest,
-					r.algorithm, r.hash, r.runtime,
-					r.memberAccountID, r.operatorAccountID); err != nil {
-					return err
-				}
-			}
-			// The cursor only moves forward, so a concurrent pass cannot
-			// rewind it.
-			_, err := tx.ExecContext(ctx, `
-UPDATE pool_proven_rollup_cursor SET last_route_snapshot_id = ?
- WHERE id = 1 AND last_route_snapshot_id < ?`, upper, upper)
+		var rows []poolProvenCapturedRow
+		if err := withPoolProvenRead(ctx, func(ctx context.Context) error {
+			var err error
+			rows, err = readPoolProvenSnapshots(ctx, reader, cursor, upper)
 			return err
 		}); err != nil {
+			return err
+		}
+		for len(rows) > poolProvenWriteBatch {
+			if err := insertPoolProvenRows(ctx, writer, rows[:poolProvenWriteBatch], 0); err != nil {
+				return err
+			}
+			rows = rows[poolProvenWriteBatch:]
+		}
+		// The cursor moves with the range's last rows, only after every
+		// earlier row of the range committed, and only forward.
+		if err := insertPoolProvenRows(ctx, writer, rows, upper); err != nil {
 			return err
 		}
 		cursor = upper
@@ -171,25 +282,42 @@ UPDATE pool_proven_rollup_cursor SET last_route_snapshot_id = ?
 	return nil
 }
 
-// readPoolProvenSnapshots reads the enforce-mode pool_manifest snapshots with
-// id in (after, upto] by a rowid range search.
+func insertPoolProvenRows(ctx context.Context, writer *sql.DB, rows []poolProvenCapturedRow, cursor int64) error {
+	return withPoolProvenTx(ctx, writer, func(ctx context.Context, tx *sql.Tx) error {
+		for _, r := range rows {
+			if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO pool_proven_rollup_attempts (`+poolProvenCaptureColumns+`)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				r.id, SettlementAccountScopeHash(r.accountScope), r.requestID, r.attemptN, r.providerID,
+				r.poolID, r.poolModelID, r.manifestVersion, r.coreDigest,
+				r.algorithm, r.hash, r.runtime,
+				r.memberAccountID, r.operatorAccountID, r.policyVersion); err != nil {
+				return err
+			}
+		}
+		if cursor == 0 {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, `
+UPDATE pool_proven_rollup_cursor SET last_route_snapshot_id = ?
+ WHERE id = 1 AND last_route_snapshot_id < ?`, cursor, cursor)
+		return err
+	})
+}
+
+func poolProvenCaptureSQL() string {
+	return `
+SELECT ` + poolProvenCaptureValuesSQL("srs", "srs.account_scope") + `
+  FROM settlement_route_snapshots srs
+ WHERE srs.id > ? AND srs.id <= ?
+   AND ` + poolProvenSnapshotSQL("srs") + `
+ ORDER BY srs.id`
+}
+
+// readPoolProvenSnapshots reads the captured snapshots with id in
+// (after, upto] by a rowid range search.
 func readPoolProvenSnapshots(ctx context.Context, reader *sql.DB, after, upto int64) ([]poolProvenCapturedRow, error) {
-	rows, err := reader.QueryContext(ctx, `
-SELECT id, account_scope, request_id, attempt_n, provider_id, pool_id,
-       COALESCE(json_extract(route_snapshot_json, '$.pool_model_id'), ''),
-       json_extract(route_snapshot_json, '$.manifest_version'),
-       COALESCE(json_extract(route_snapshot_json, '$.manifest_core_digest'), ''),
-       COALESCE(json_extract(route_snapshot_json, '$.expected_catalog_model_hash_algorithm'), ''),
-       expected_catalog_model_hash,
-       COALESCE(json_extract(route_snapshot_json, '$.runtime_source'), ''),
-       COALESCE(json_extract(route_snapshot_json, '$.pool_member_account_id'), ''),
-       COALESCE(json_extract(route_snapshot_json, '$.pool_operator_account_id'), '')
-  FROM settlement_route_snapshots
- WHERE id > ? AND id <= ?
-   AND pool_id IS NOT NULL AND pool_id <> ''
-   AND route_snapshot_mode = 'enforce'
-   AND json_extract(route_snapshot_json, '$.expected_model_hash_source') = ?
- ORDER BY id`, after, upto, ExpectedModelHashSourcePoolManifest)
+	rows, err := reader.QueryContext(ctx, poolProvenCaptureSQL(), after, upto)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +327,7 @@ SELECT id, account_scope, request_id, attempt_n, provider_id, pool_id,
 		var r poolProvenCapturedRow
 		if err := rows.Scan(&r.id, &r.accountScope, &r.requestID, &r.attemptN, &r.providerID, &r.poolID,
 			&r.poolModelID, &r.manifestVersion, &r.coreDigest, &r.algorithm, &r.hash, &r.runtime,
-			&r.memberAccountID, &r.operatorAccountID); err != nil {
+			&r.memberAccountID, &r.operatorAccountID, &r.policyVersion); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -208,42 +336,54 @@ SELECT id, account_scope, request_id, attempt_n, provider_id, pool_id,
 }
 
 type poolProvenEvaluation struct {
-	id              int64
-	counted         bool
-	finality        sql.NullString
-	storedCounted   bool
-	storedFinality  sql.NullString
-	evidencePresent bool
+	id                           int64
+	storedVerdict, storedCounted bool
+	storedFinality               sql.NullString
+	hot, verdict, creditPayable  bool
+	finality                     sql.NullString
+}
+
+type poolProvenChange struct {
+	id               int64
+	verdict, counted bool
+	finality         sql.NullString
 }
 
 func evaluatePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB, windowStart time.Time) error {
-	query := poolProvenEvaluateSQL()
 	since := windowStart.UTC().Format(time.RFC3339Nano)
 	var after int64
 	for {
-		batch, err := readPoolProvenEvaluations(ctx, reader, query, after, since)
-		if err != nil {
+		var batch []poolProvenEvaluation
+		if err := withPoolProvenRead(ctx, func(ctx context.Context) error {
+			var err error
+			batch, err = readPoolProvenEvaluations(ctx, reader, after, since)
+			return err
+		}); err != nil {
 			return err
 		}
 		if len(batch) == 0 {
 			return nil
 		}
 		after = batch[len(batch)-1].id
-		if err := withPoolProvenTx(ctx, writer, func(tx *sql.Tx) error {
-			for _, e := range batch {
-				// Archived evidence keeps the state last computed from it.
-				if !e.evidencePresent || (e.counted == e.storedCounted && e.finality == e.storedFinality) {
-					continue
-				}
-				if _, err := tx.ExecContext(ctx, `
-UPDATE pool_proven_rollup_attempts SET counted = ?, finality_at_utc = ? WHERE route_snapshot_id = ?`,
-					e.counted, e.finality, e.id); err != nil {
-					return err
-				}
+		var changes []poolProvenChange
+		for _, e := range batch {
+			// Without both hot rows the verdict half stays as frozen at
+			// deletion; the credit half is always current.
+			verdict, finality := e.storedVerdict, e.storedFinality
+			if e.hot {
+				verdict, finality = e.verdict, e.finality
 			}
-			return nil
-		}); err != nil {
-			return err
+			counted := verdict && e.creditPayable
+			if verdict != e.storedVerdict || counted != e.storedCounted || finality != e.storedFinality {
+				changes = append(changes, poolProvenChange{e.id, verdict, counted, finality})
+			}
+		}
+		for len(changes) > 0 {
+			n := min(len(changes), poolProvenWriteBatch)
+			if err := updatePoolProvenRows(ctx, writer, changes[:n]); err != nil {
+				return err
+			}
+			changes = changes[n:]
 		}
 		if len(batch) < poolProvenEvaluateBatch {
 			return nil
@@ -251,36 +391,44 @@ UPDATE pool_proven_rollup_attempts SET counted = ?, finality_at_utc = ? WHERE ro
 	}
 }
 
-// poolProvenEvaluateSQL is the SPEC-047-R012 v0.2.9 counting predicate per
-// captured attempt: an enforce-mode snapshot whose verdict closed payable
-// with a verified pool label against that snapshot, and an enforce-mode
-// payable credit under the snapshot's policy with positive buyer debit and
-// provider credit. Every join is a primary-key or unique-key lookup.
+func updatePoolProvenRows(ctx context.Context, writer *sql.DB, changes []poolProvenChange) error {
+	return withPoolProvenTx(ctx, writer, func(ctx context.Context, tx *sql.Tx) error {
+		for _, c := range changes {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE pool_proven_rollup_attempts SET verdict_ok = ?, counted = ?, finality_at_utc = ? WHERE route_snapshot_id = ?`,
+				c.verdict, c.counted, c.finality, c.id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// poolProvenEvaluateSQL reads, per captured attempt, its stored state, the
+// verdict half and finality from the hot rows (when both exist), and the
+// credit half: an enforce-mode payable credit under the snapshot's policy
+// with positive buyer debit and provider credit. Every join is a primary-key
+// or unique-key lookup.
 func poolProvenEvaluateSQL() string {
 	return `
 SELECT a.route_snapshot_id,
+       a.verdict_ok,
        a.counted,
        a.finality_at_utc,
        srs.id IS NOT NULL AND srv.id IS NOT NULL,
-       CASE WHEN srv.closed = 1 THEN COALESCE(srv.updated_at_utc, srv.created_at_utc) END,
-       CASE WHEN srs.id IS NOT NULL AND srv.id IS NOT NULL
-             AND srs.route_snapshot_mode = 'enforce'
-             AND srv.route_snapshot_digest = srs.route_snapshot_digest
-             AND srv.closed = 1
-             AND ` + payableSettlementOutcomeSQL("srv", "srs") + `
-             AND srv.pool_label_status = ?
-             AND EXISTS (
-                 SELECT 1
-                   FROM spec022_payable_request_credits p
-                  WHERE p.request_id = a.request_id
-                    AND p.attempt_n = a.attempt_n
-                    AND p.provider_id = a.provider_id
-                    AND p.settlement_policy_mode = 'enforce'
-                    AND p.settlement_account_scope_hash = a.account_scope_hash
-                    AND p.settlement_policy_version = srs.route_snapshot_policy_version
-                    AND p.gross_credits > 0
-                    AND p.provider_credits > 0)
-            THEN 1 ELSE 0 END
+       COALESCE(` + poolProvenVerdictSQL("srv", "srs") + `, 0),
+       ` + poolProvenFinalitySQL("srv") + `,
+       EXISTS (
+           SELECT 1
+             FROM spec022_payable_request_credits p
+            WHERE p.request_id = a.request_id
+              AND p.attempt_n = a.attempt_n
+              AND p.provider_id = a.provider_id
+              AND p.settlement_policy_mode = '` + RouteSnapshotModeEnforce + `'
+              AND p.settlement_account_scope_hash = a.account_scope_hash
+              AND p.settlement_policy_version = a.settlement_policy_version
+              AND p.gross_credits > 0
+              AND p.provider_credits > 0)
   FROM pool_proven_rollup_attempts a
   LEFT JOIN settlement_route_snapshots srs ON srs.id = a.route_snapshot_id
   LEFT JOIN settlement_receipt_verdicts srv
@@ -294,8 +442,8 @@ SELECT a.route_snapshot_id,
  LIMIT ?`
 }
 
-func readPoolProvenEvaluations(ctx context.Context, reader *sql.DB, query string, after int64, since string) ([]poolProvenEvaluation, error) {
-	rows, err := reader.QueryContext(ctx, query, PoolLabelStatusVerified, after, since, poolProvenEvaluateBatch)
+func readPoolProvenEvaluations(ctx context.Context, reader *sql.DB, after int64, since string) ([]poolProvenEvaluation, error) {
+	rows, err := reader.QueryContext(ctx, poolProvenEvaluateSQL(), after, since, poolProvenEvaluateBatch)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +451,8 @@ func readPoolProvenEvaluations(ctx context.Context, reader *sql.DB, query string
 	var out []poolProvenEvaluation
 	for rows.Next() {
 		var e poolProvenEvaluation
-		if err := rows.Scan(&e.id, &e.storedCounted, &e.storedFinality, &e.evidencePresent, &e.finality, &e.counted); err != nil {
+		if err := rows.Scan(&e.id, &e.storedVerdict, &e.storedCounted, &e.storedFinality,
+			&e.hot, &e.verdict, &e.finality, &e.creditPayable); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -311,12 +460,20 @@ func readPoolProvenEvaluations(ctx context.Context, reader *sql.DB, query string
 	return out, rows.Err()
 }
 
-func withPoolProvenTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
+func withPoolProvenRead(ctx context.Context, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, poolProvenQueryTimeout)
+	defer cancel()
+	return fn(ctx)
+}
+
+func withPoolProvenTx(ctx context.Context, db *sql.DB, fn func(context.Context, *sql.Tx) error) error {
+	ctx, cancel := context.WithTimeout(ctx, poolProvenWriteTimeout)
+	defer cancel()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

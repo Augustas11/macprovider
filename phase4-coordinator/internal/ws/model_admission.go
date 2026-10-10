@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"io"
 	"log"
 	"net"
@@ -648,9 +647,6 @@ CREATE TABLE IF NOT EXISTS model_admission_events (
 		return nil, err
 	}
 	if err := ensureSQLiteModelAdmissionProbeEvidenceTable(db); err != nil {
-		return nil, err
-	}
-	if err := billing.EnsurePoolProvenRollup(context.Background(), db); err != nil {
 		return nil, err
 	}
 	if _, err := db.ExecContext(context.Background(), `
