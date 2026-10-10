@@ -92,6 +92,33 @@ def v2_bundle(manifest_name: str, summary: dict, sources: dict[str, bytes | dict
     return contract.Bundle("fixture", files, b"")
 
 
+class PrivacyClassBetaSignatureRedactionTests(unittest.TestCase):
+    def test_bounded_public_signatures_allow_hostname_shaped_random_bytes(self) -> None:
+        for path in (
+            "primary/v2/sources/release_signature.sig",
+            "primary/v2/sources/release_invalid_signature.sig",
+        ):
+            for data in (b"random.example", b"\xffrandom.example", b"random.example".ljust(512, b"\x00")):
+                with self.subTest(path=path, data=data):
+                    contract.assert_bundle_redacted(contract.Bundle("fixture", {path: data}, b""))
+
+    def test_hostname_exemption_requires_exact_path_and_bounded_size(self) -> None:
+        for path, data in (
+            ("primary/v2/sources/other.sig", b"random.example"),
+            ("primary/v2/sources/release_signature.sig.txt", b"random.example"),
+            ("primary/v2/sources/release_signature.sig", b"random.example".ljust(513, b"\x00")),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(contract.PrivacyEvidenceError, "hostname-shaped token"):
+                    contract.assert_bundle_redacted(contract.Bundle("fixture", {path: data}, b""))
+
+    def test_public_signatures_still_reject_operator_material(self) -> None:
+        for data in (b"/Users/operator/private", b"-----BEGIN EC " + b"PRIVATE KEY-----", b"operator@example.com", b"10.1.2.3", b"2001:db8::1", b"https://random.example"):
+            with self.subTest(data=data):
+                with self.assertRaises(contract.PrivacyEvidenceError):
+                    contract.assert_bundle_redacted(contract.Bundle("fixture", {"primary/v2/sources/release_signature.sig": data}, b""))
+
+
 class PrivacyClassBetaEvidenceTests(unittest.TestCase):
     pristine: tempfile.TemporaryDirectory | None = None
 

@@ -577,10 +577,11 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
         "primary/v2/sources/release_invalid_signature.sig",
     }
     for path, data in sorted(bundle.files.items()):
+        public_binary_signature = path in public_binary_signatures and 1 <= len(data) <= 512
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            if path in public_binary_signatures and 1 <= len(data) <= 512:
+            if public_binary_signature:
                 # Exact ECDSA signature bytes are public cryptographic evidence,
                 # not operator material. Still run the textual secret/path
                 # patterns over replacement-decoded bytes; every other reviewed
@@ -596,6 +597,10 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
             if all(octet <= 255 for octet in octets) and octets[0] != 127 and octets != [0, 0, 0, 0]:
                 fail(f"reviewed bundle file {path} contains a non-loopback IPv4 literal")
         for match in DNS_TOKEN_RE.finditer(text):
+            # Random signature bytes can spell DNS-shaped text. Only these
+            # bounded public artifacts are exempt; secret/path checks still run.
+            if public_binary_signature:
+                continue
             token, suffix = match.group(1), match.group(2)
             if suffix.lower() in NON_HOST_SUFFIXES or token in NON_HOST_TOKENS or token == "com.apple" or token.startswith("com.apple."):
                 continue
