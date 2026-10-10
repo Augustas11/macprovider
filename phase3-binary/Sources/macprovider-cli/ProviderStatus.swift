@@ -735,12 +735,24 @@ actor ProviderStatus {
         maxContextSource: MaxContextSource? = nil,
         maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
-        specDecodeNumDraftTokens: Int? = nil
+        specDecodeNumDraftTokens: Int? = nil,
+        servedSlotsStamp stamp: Int? = nil
     ) async {
         self.modelID = modelID
         self.modelHash = modelHash
         self.modelHashAlgorithm = modelHashAlgorithm
         self.weightsManifestSHA256 = weightsManifestSHA256
+        // SPEC-038-R011: the swap's served count and its generation land
+        // together, before any await; a count stamped older than one already
+        // applied is ignored.
+        var maxConcurrency = maxConcurrency
+        if let stamp {
+            if let applied = servedSlotsStamp, stamp < applied {
+                maxConcurrency = nil
+            } else {
+                servedSlotsStamp = stamp
+            }
+        }
         if maxContextTokens != nil || maxConcurrency != nil {
             // The startup probe is not re-run on swap, so its model id keeps
             // showing which model the carried estimate was measured on.

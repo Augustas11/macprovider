@@ -101,4 +101,16 @@ final class ProviderStatusServedSlotsStampTests: XCTestCase {
         let current = await status.snapshot().capacity.maxConcurrency
         XCTAssertEqual(current, 5)
     }
+
+    /// A swap's count and generation land together; an older swap finishing
+    /// late, or an older self-check publication, cannot overwrite it.
+    func testSwapCountIsStampedAtomically() async {
+        let capacity = ProviderCapacity(maxContextOverride: 4_000, maxConcurrencyOverride: 8)
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: capacity)
+        await status.completeTargetSwap(modelID: "model-b", modelHash: nil, maxConcurrency: 1, servedSlotsStamp: 5)
+        await status.updateServedSlots(8, stamp: 4)
+        await status.completeTargetSwap(modelID: "model-a", modelHash: nil, maxConcurrency: 8, servedSlotsStamp: 4)
+        let advertised = await status.snapshot().capacity.maxConcurrency
+        XCTAssertEqual(advertised, 1)
+    }
 }

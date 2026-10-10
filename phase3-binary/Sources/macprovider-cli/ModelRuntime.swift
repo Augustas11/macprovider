@@ -5396,6 +5396,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let target = targetModelID ?? modelID
         // SPEC-038 v0.3.15: a new model or runtime is re-checked.
         selfCheckGeneration += 1
+        let swapGeneration = selfCheckGeneration
         continuousBatchingSelfCheck = .pending
         continuousBatchingSelfCheckReport = nil
         if let adoptionKnobs {
@@ -5410,7 +5411,7 @@ actor ModelRuntime: ModelRuntimeServing {
             : adoptionKnobs?.maxBatch
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
-            await inferenceGate.resize(to: swapServedSlots, stamp: selfCheckGeneration)
+            await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
         currentContainer = container
         currentModelID = modelID
@@ -5525,18 +5526,19 @@ actor ModelRuntime: ModelRuntimeServing {
         // The swapped-in model's stored or prior grant applies before the
         // swap is published, so a qualified model keeps batching.
         var swapAdvertisedSlots = swapServedSlots
-        if servedSlotsManaged, let resolver = servedSlotsResolver,
+        if servedSlotsManaged, selfCheckGeneration == swapGeneration, let resolver = servedSlotsResolver,
            let target = continuousBatchingSelfCheckTarget(includeDecided: true),
            let resolution = resolver(target) {
             continuousBatchingSelfCheck = resolution.state
             continuousBatchingSelfCheckReport = resolution.report
             servedSlotLimit = resolution.servedSlots
-            await inferenceGate.resize(to: resolution.servedSlots, stamp: selfCheckGeneration)
+            await inferenceGate.resize(to: resolution.servedSlots, stamp: swapGeneration)
             swapAdvertisedSlots = resolution.servedSlots
         }
         // The rebuilt scheduler starts unlimited; cap buyer rows at once.
-        if let swapAdvertisedSlots {
-            await continuousBatchScheduler?.setBuyerRowLimit(swapAdvertisedSlots)
+        if let swapAdvertisedSlots, selfCheckGeneration == swapGeneration {
+            let rebuiltScheduler = continuousBatchScheduler
+            await rebuiltScheduler?.setBuyerRowLimit(swapAdvertisedSlots)
         }
         await providerStatus?.completeTargetSwap(
             modelID: modelID,
@@ -5547,13 +5549,9 @@ actor ModelRuntime: ModelRuntimeServing {
             maxContextSource: adoptionKnobs?.contextSource,
             maxConcurrency: swapAdvertisedSlots,
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
-            specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
+            specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil,
+            servedSlotsStamp: servedSlotsManaged ? swapGeneration : nil
         )
-        // Stamp the swap's count so a pending older self-check publication
-        // cannot overwrite it.
-        if servedSlotsManaged, let swapAdvertisedSlots {
-            await providerStatus?.updateServedSlots(swapAdvertisedSlots, stamp: selfCheckGeneration)
-        }
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
     }
 
