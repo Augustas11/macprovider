@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.5: upstream mlx-swift-lm 3.32.3 plus the
+        // Fork tag 3.32.3-macprovider.6: upstream mlx-swift-lm 3.32.3 plus the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
@@ -29,7 +29,7 @@ let package = Package(
         // cache so a model reload cannot replay a dead trace.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "5203b732c451344aef936958ef3f765480cf6a9a"
+            revision: "72c4ab082a08f291ba270a7303880e90036742e3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

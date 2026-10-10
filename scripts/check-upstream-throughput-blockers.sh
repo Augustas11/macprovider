@@ -148,8 +148,8 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-# mlx-swift-lm fork tag 3.32.3-macprovider.5 on upstream tag 3.32.3.
-native_mtp_exception_revision = "5203b732c451344aef936958ef3f765480cf6a9a"
+# mlx-swift-lm fork tag 3.32.3-macprovider.6 on upstream tag 3.32.3.
+native_mtp_exception_revision = "72c4ab082a08f291ba270a7303880e90036742e3"
 native_mtp_exception_base = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 # mlx-swift fork tag 0.32.3-macprovider.2 on upstream tag 0.32.3; its MLX core
@@ -445,7 +445,7 @@ out = {
         ),
         "note": (
             "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
-            "(3.32.3-macprovider.5) with mlx-swift 0.32.3 on a batch-invariant "
+            "(3.32.3-macprovider.6) with mlx-swift 0.32.3 on a batch-invariant "
             "small-M quantized matmul MLX core fork (0.32.3-macprovider.2); it is "
             "not approved until Studio validation and the freeze audits pass; "
             "native MTP stays default-off; upstream #645 remains the tagged-release "
