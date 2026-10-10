@@ -82,23 +82,39 @@ MLX core (`v0.32.2..v0.32.2-macprovider.2`):
 ### Bounded routing exceptions
 
 The batch-invariant routing covers `QuantizedMatmul`. These routes still
-depend on the call's shape. None is a demonstrated token divergence:
+depend on the call's shape:
 
 - `GatherQMM` (`mlx/backend/metal/quantized.cpp` ~1901) takes
   `gather_qmm_rhs` for sorted gathers when `M == 1`, `B >= 16` and
   `B / E >= 4`, otherwise `gather_qmv`. MoE expert projections sort once a
-  call carries 64 or more expert selections, with `B` = tokens x top-k.
-  Decode stays below the switch: A3B (256 experts, top-8) at 8 rows is
-  `B / E = 0.25`, and decode/verify widths of at most seven tokens per row
-  take the fused path anyway. Prefill does not always stay below it: a single
-  A3B chunk crosses at 128 tokens, and continuous batching groups up to four
-  prefill rows with the same cursor and chunk length into one forward. Rows
-  of 32-127 tokens can therefore take `gather_qmv` alone and
-  `gather_qmm_rhs` when grouped (for example two 64-token chunks). The
-  startup batched-isolation probe uses 513-token prompts and does not cover
-  this case. The CB-vs-serial deterministic parity row was already an open
-  gate row on 1.8.230 (see
-  `docs/research/mlx-swift-lm-3.32.3/README.md`).
+  call carries 64 or more expert selections (`SwitchGLU`), with `B` =
+  tokens x top-k; Qwen3.5 then also takes the direct weighted reduction.
+  Decode stays below the `gather_qmm_rhs` switch: A3B (256 experts, top-8) at
+  8 rows is `B / E = 0.25`, and decode/verify widths of at most seven tokens
+  per row take the fused path when it is on. With `MLX_LM_QWEN35_FUSED_MOE=0`,
+  8 decode rows reach 64 selections and switch to the sorted gather and the
+  direct reduction (still `gather_qmv`); the 2026-10-10 grouped-prefill probe
+  (`audits/2026-10-10-mlx-swift-lm-332/ROUND1_FIXES.md`) found 14/14 rows
+  token-identical to their lone runs at 8 rows.
+  **Prefill is enforced by the CB grouping rule.** Continuous batching groups
+  up to four prefill rows with the same cursor and chunk length into one
+  forward, and a group carries every row's selections. Before the rule, a
+  32-127-token A3B chunk took `gather_qmv` alone and `gather_qmm_rhs` when
+  grouped, and greedy outputs depended on the neighbours (Studio, build
+  `38aff2880`: 69 of 108 grouped rows differed from their lone runs, exactly
+  in the groups whose combined selections reach 1024). Now
+  `ContinuousBatchPrefillGroupingRule` (`ContinuousBatchScheduler.swift`,
+  SPEC-038 FR-CB2 v0.3.11) co-batches a chunk only when
+  `chunk x top-k >= max(16, 64, 4 x experts)`, read from the loaded model's
+  `config.json` (A3B: 128 tokens). Shorter chunks prefill alone; an MoE
+  configuration without both counts prefills every chunk alone. The serve log
+  prints `event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=N`
+  at scheduler build. At the default 512-token chunk the scheduler balances
+  the chunks of an uncached prompt of 128 or more tokens to at least 128
+  tokens each, so long prompts still group (R015: 1536/4096 tokens in
+  512-token chunks).
+  The rule's constants are the fork's routing bounds: a rebase that changes
+  the `GatherQMM` condition or the `SwitchGLU` sort threshold updates them.
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it
@@ -135,7 +151,8 @@ results in the evidence header.
 | Cross-thread model reload | A reload loop that frees and rebuilds models across threads shows zero stale trace replays (every replay bit-exact to a fresh trace). |
 | Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
-| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream. |
+| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule`. |
+| Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. |
 
 ## Package and toolchain preflight
 
