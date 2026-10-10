@@ -95,7 +95,11 @@ the call's shape:
   rule** below: a chunk co-batches only at 33 tokens or more, where it
   already takes `qmm` alone. Before that bound, on the Studio every
   Qwen3.6-27B projection has limit 12, so a 6-11-token chunk took `qmv` alone
-  and `qmm` beside a second row. Decode carries one token per row, so `M` is
+  and `qmm` beside a second row. Keyed hybrid rows prefill their generation
+  prompt (about 5 tokens after the last `<|im_start|>` checkpoint) as their own
+  final chunk, so equal-length keyed rows grouped it: on build `af3144ee9`
+  12 of 126 grouped 27B rows differed from their lone greedy runs, and 0 of
+  126 on the fix (`audits/2026-10-10-mlx-swift-lm-332/ROUND3_FIXES.md`). Decode carries one token per row, so `M` is
   the decode row count (at most 8). That stays below the limit on the Studio
   (smallest limit 12) and on every Ultra and M3-or-later device, but M1/M2
   non-Ultra devices have limit 6 for K or N above 4096, where 6-8 decode rows
@@ -196,7 +200,7 @@ results in the evidence header.
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
 | Weight-file discovery | Every `.safetensors` file the rebased mlx-swift-lm loader can consume (`safetensorWeightURLs`, index and additional files included) is inside the native-MTP observer's recursive scan (SPEC-048 MTP-2). |
 | Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule`. |
-| Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with prompts below and above the 33-token bound. |
+| Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with keyed (`conv:`) prompts, whose generation-prompt tail chunk is below the 33-token bound. |
 
 ## Package and toolchain preflight
 
