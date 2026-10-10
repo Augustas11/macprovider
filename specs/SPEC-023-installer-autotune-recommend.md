@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.21
+version: v0.22.22
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,11 +8,21 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.22 (2026-10-10)** — The native-MTP emergency revocation feed fails
+  to last-known (#1938, AGENTS.md rule 10). A body past `expires_at` is still
+  accepted and stays in force; an unreachable origin or a rejected body keeps
+  the newest verified revoked set enforced and native MTP on. Generation
+  monotonicity, the same-generation equivocation check, the superset rule,
+  signature, signer and future-issued checks are unchanged, so a replayed
+  body cannot remove a revocation a provider holds. The 15-minute freshness
+  bound on an anchorless first fetch is removed (residual risk recorded in
+  §12.5). The coordinator serves the newest issued slot even after it
+  expires. Slots are published on demand; no scheduled signer remains.
+
 - **v0.22.21 (2026-10-10)** — Retires the scheduled calendar renewals
   (#1938). The weekly signed autotune-feed restamp, its Tuesday watch and the
   6-hourly feed freshness alarm are removed; a feed restamp is an on-demand
-  operator step. Native-MTP revocation slots keep a weekly publish job of
-  their own, because providers still require a current revocation body.
+  operator step.
   Pre-v0.22.15 CLIs strand 30 days after the last restamp and pre-v0.22.19
   CLIs stop native MTP at the live admission's `expires_at`; both are
   expected to be off the fleet by then.
@@ -3582,7 +3592,7 @@ release/ledger binding failure rejects the entire sidecar. Journey and final
 three-lane review digests are deliberately not inside this pre-journey sidecar;
 SPEC-048-R014 binds them later, avoiding a self-hash cycle.
 
-**Emergency tuple revocation.** Native MTP additionally requires a current
+**Emergency tuple revocation.** Native MTP additionally requires a verified
 detached-signed `native-mtp-revocations.json` operator feed. Its decoded body is
 the exact closed object `{schema_version,generation,issued_at,expires_at,
 signer_key_id,revoked_admission_tuple_sha256}`:
@@ -3591,7 +3601,8 @@ signer_key_id,revoked_admission_tuple_sha256}`:
 - `generation` is an unsigned 64-bit integer that strictly increases whenever
   the body changes;
 - timestamps are RFC3339 UTC seconds with
-  `issued_at < expires_at <= issued_at + 1 hour`;
+  `issued_at < expires_at <= issued_at + 1 hour` (structural only since
+  v0.22.22: `expires_at` never stops a verified body from applying);
 - `signer_key_id` is 1..128 ASCII bytes; and
 - `revoked_admission_tuple_sha256` is a bytewise-sorted unique array of at most
   4096 lowercase 64-hex admission-tuple identities.
@@ -3605,8 +3616,13 @@ is fetched from the canonical operator origin under the key-id-qualified name
 signature by every other key, including a concurrently trusted bridge key, is
 an integrity failure. The provider MUST fetch it at startup and at least every
 15 minutes and reject a smaller generation, a revoked-set regression,
-duplicate-key or unknown-field body, invalid signature, signer mismatch,
-future-issued body, or expired body. A later accepted feed's revoked array MUST
+duplicate-key or unknown-field body, invalid signature, signer mismatch, or
+future-issued body. It MUST NOT reject a body, or turn native MTP off, because
+`expires_at` has passed (v0.22.22, #1938, AGENTS.md rule 10): it fails to
+last-known. When the origin is unreachable or a fetched body is rejected, the
+provider keeps enforcing the revoked set of the newest verified body it holds
+and keeps native MTP on; a newer verified generation replaces it at the next
+poll. A later accepted feed's revoked array MUST
 be a superset of the last accepted array for that signer: revocation of one
 admission identity is permanent. Restoration requires a new release/sidecar
 and therefore a new `native_mtp_admission_tuple_sha256`; omission from a later
@@ -3615,12 +3631,12 @@ feed never unrevokes the old identity.
 Publication: the canonical origin serves
 `/v1/native-mtp-revocations.<revocation_signer_key_id>.json` and `.sig` from a
 directory of pre-signed bodies, one per slot of at most 10 minutes with
-`issued_at` at the slot start, choosing the newest issued, unexpired,
-correctly signed slot (`Cache-Control: no-store`). Signing keys stay off the
-coordinator host. The weekly `publish-native-mtp-revocations.yml` job (an
-on-demand freshness renewal also republishes them) signs at least 14 days of
-slots carrying the current revoked set; it is the one scheduled signer left
-after v0.22.21. An emergency revocation is a replacement
+`issued_at` at the slot start, choosing the newest issued, correctly signed
+slot, also after its `expires_at` (`Cache-Control: no-store`). Signing keys
+stay off the coordinator host. Slots are published on demand
+(`scripts/publish-native-mtp-revocations.sh`, also run by a feed restamp of a
+native-bound release); there is no scheduled signer (v0.22.22). An emergency
+revocation is a replacement
 directory, signed off-host, whose generations exceed every served generation
 and whose revoked set is a superset; providers adopt it at their next poll.
 
@@ -3636,13 +3652,17 @@ cache may finish an interrupted Keychain update; an anchor ahead of, missing
 from, or inconsistent with the cache fails native MTP closed until a feed at
 least as new is freshly fetched. If the anchor is missing while an admission
 sidecar is installed, cached bytes are forbidden: recovery requires an online
-fetch from the canonical TLS origin whose `issued_at` is within the last 15
-minutes. Key rotation uses a separate account and cannot copy or lower the old
+fetch of a verified body from the canonical TLS origin, of any age (v0.22.22).
+Residual risk: a provider with no anchor (fresh install or lost Keychain item)
+trusts the newest body the authenticated origin serves, so an attacker who
+controls that origin can hand it an older signed revoked set; once a provider
+holds an anchor, no replayed body can remove a revocation it already enforces. Key rotation uses a separate account and cannot copy or lower the old
 account. Acceptance MUST cover crashes at every update boundary, restored
 filesystem snapshots, missing/corrupt Keychain or cache state, and old-key
-replay. A current cached body remains usable through its `expires_at`; if no
-current authenticated body is available, native MTP fails closed while
-ordinary and classic decode remain available.
+replay. The newest verified cached body stays usable after its `expires_at`;
+only when no verified body has ever been accepted (no anchor and no reachable
+origin) does native MTP stay off, while ordinary and classic decode remain
+available.
 Decode-path selection MUST check the current revocation set immediately before
 admitting a native row. A listed identity disables only that exact admission
 tuple and prevents new native rows immediately. Already-admitted rows stop at

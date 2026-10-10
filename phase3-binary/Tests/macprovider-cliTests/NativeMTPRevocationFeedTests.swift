@@ -102,7 +102,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
     }
 
-    func testRejectsSignerMismatchBadSignatureFutureAndExpired() throws {
+    func testRejectsSignerMismatchBadSignatureAndFutureButAcceptsAgedBodies() throws {
         let signer = Curve25519.Signing.PrivateKey()
         let wrongSigner = Curve25519.Signing.PrivateKey()
         let store = MemoryRevocationStore()
@@ -140,9 +140,8 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
             now: now.addingTimeInterval(-7200),
             expiresAt: now.addingTimeInterval(-3600)
         )
-        XCTAssertThrowsError(try Self.accept(expired, signer: signer, store: store, now: now)) {
-            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .expired)
-        }
+        // #1938: expires_at is structural only; an aged body is still accepted.
+        XCTAssertNoThrow(try Self.accept(expired, signer: signer, store: MemoryRevocationStore(), now: now))
         let staleInitial = try Self.feedData(
             generation: 1,
             signerKeyID: "revoker-a",
@@ -150,8 +149,16 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
             now: now.addingTimeInterval(-16 * 60),
             expiresAt: now.addingTimeInterval(40 * 60)
         )
-        XCTAssertThrowsError(try Self.accept(staleInitial, signer: signer, store: MemoryRevocationStore(), now: now)) {
-            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .expired)
+        XCTAssertNoThrow(try Self.accept(staleInitial, signer: signer, store: MemoryRevocationStore(), now: now))
+        let overlongWindow = try Self.feedData(
+            generation: 1,
+            signerKeyID: "revoker-a",
+            tuples: [],
+            now: now.addingTimeInterval(-60),
+            expiresAt: now.addingTimeInterval(2 * 3600)
+        )
+        XCTAssertThrowsError(try Self.accept(overlongWindow, signer: signer, store: MemoryRevocationStore(), now: now)) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidField("expires_at"))
         }
     }
 
@@ -767,7 +774,8 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         XCTAssertEqual(sleepValues, [UInt64(15 * 60 * 1_000_000_000)])
     }
 
-    func testPollingIntervalIsCappedByCurrentFeedExpiryBeforeFifteenMinutes() async throws {
+    // #1938: the poll interval no longer shrinks toward the body's expires_at.
+    func testPollingIntervalIgnoresCurrentFeedExpiry() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let probe = SleepProbe()
         let now = Self.date("2026-09-28T12:00:00Z")
@@ -791,33 +799,95 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         )
 
         let sleepValues = await probe.values
-        XCTAssertEqual(sleepValues, [UInt64(5 * 60 * 1_000_000_000)])
+        XCTAssertEqual(sleepValues, [UInt64(15 * 60 * 1_000_000_000)])
     }
 
-    func testPollingFailsClosedImmediatelyWhenCurrentFeedIsExpired() async throws {
+    // #1938: an aged last-known body keeps native MTP on; the poll keeps going
+    // and never reports the revocation state unavailable.
+    func testPollingStaysOnWithAgedLastKnownFeedWhenOffline() async throws {
         let signer = Curve25519.Signing.PrivateKey()
+        let store = MemoryRevocationStore()
         let probe = SleepProbe()
         let unavailable = AsyncFlag()
-        let now = Self.date("2026-09-28T12:00:00Z")
+        let issued = Self.date("2026-09-28T12:00:00Z")
+        let feed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [Self.digest("02")], now: issued)
+        _ = try Self.accept(feed, signer: signer, store: store, now: issued)
+        let later = issued.addingTimeInterval(30 * 24 * 3600)
 
         await NativeMTPRevocationFeedManager.pollWhileActive(
             pinnedSignerKeyID: "revoker-a",
             tupleSHA256: Self.digest("01"),
             verifier: Self.verifier(signer: signer),
-            store: MemoryRevocationStore(),
+            store: store,
             origin: URL(string: "https://example.test/v1/")!,
             fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
-            sleeper: { nanoseconds in await probe.record(nanoseconds) },
-            now: { now },
-            initialExpiresAt: now,
+            sleeper: { nanoseconds in
+                await probe.record(nanoseconds)
+                if await probe.values.count >= 3 { throw CancellationError() }
+            },
+            now: { later },
+            initialExpiresAt: issued.addingTimeInterval(3600),
             onRevoked: { _ in },
             onUnavailable: { await unavailable.mark() }
         )
 
         let wasUnavailable = await unavailable.value
         let sleepValues = await probe.values
-        XCTAssertTrue(wasUnavailable)
-        XCTAssertEqual(sleepValues, [])
+        XCTAssertFalse(wasUnavailable)
+        XCTAssertEqual(sleepValues.count, 3)
+    }
+
+    // #1938: a replayed or regressed network body is refused and the newest
+    // verified revoked set stays in force.
+    func testNetworkFirstKeepsLastKnownRevocationsWhenNetworkBodyIsRejected() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let store = MemoryRevocationStore()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let revoked = Self.digest("01")
+        let current = try Self.feedData(generation: 5, signerKeyID: "revoker-a", tuples: [revoked], now: now)
+        _ = try Self.accept(current, signer: signer, store: store, now: now)
+        let later = now.addingTimeInterval(7 * 24 * 3600)
+
+        for replay in [
+            try Self.feedData(generation: 4, signerKeyID: "revoker-a", tuples: [], now: now.addingTimeInterval(-60)),
+            try Self.feedData(generation: 6, signerKeyID: "revoker-a", tuples: [], now: later),
+        ] {
+            let replaySignature = Self.signature(for: replay, signer: signer, keyID: "revoker-a")
+            let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: store,
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { url, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: url.lastPathComponent.hasSuffix(".json.sig") ? replaySignature : replay
+                    )
+                },
+                now: later
+            )
+            XCTAssertEqual(state.source, .cache)
+            XCTAssertEqual(state.feed.generation, 5)
+            XCTAssertTrue(state.isRevoked(tupleSHA256: revoked))
+        }
+
+        let newer = try Self.feedData(generation: 7, signerKeyID: "revoker-a", tuples: [revoked, Self.digest("02")], now: later)
+        let newerSignature = Self.signature(for: newer, signer: signer, keyID: "revoker-a")
+        let newerState = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: Self.verifier(signer: signer),
+            store: store,
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { url, _ in
+                NativeMTPRevocationFetchResponse(
+                    statusCode: 200,
+                    body: url.lastPathComponent.hasSuffix(".json.sig") ? newerSignature : newer
+                )
+            },
+            now: later
+        )
+        XCTAssertEqual(newerState.source, .network)
+        XCTAssertEqual(newerState.feed.generation, 7)
     }
 
     private static func accept(

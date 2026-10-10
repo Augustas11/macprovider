@@ -13,9 +13,9 @@
 # the key lives — operator laptop or a production-release GitHub Actions runner),
 # pushes only signed bytes to Pearl, and does the symlink swap + SIGHUP over SSH.
 #
-# There is no scheduled signer. Native-MTP revocation slots, which this script
-# also republishes for a native-bound release, have their own weekly job
-# (.github/workflows/publish-native-mtp-revocations.yml). Do not install a
+# There is no scheduled signer. For a native-bound release this script also
+# republishes the native-MTP revocation slots; providers keep enforcing the
+# newest verified slot after it ages out (SPEC-023 v0.22.22). Do not install a
 # Pearl systemd signer or a laptop LaunchAgent.
 #
 # Default is DRY-RUN: build + verify a re-dated release locally and stop. Pass

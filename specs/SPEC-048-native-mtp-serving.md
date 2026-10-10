@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.30
+**Version:** 0.1.31
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.29",
+  "version": "0.1.31",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -983,7 +983,8 @@ For each qualified tuple, production enablement requires all of the following:
    `SPEC-031-R033`, `SPEC-036-R018`, `SPEC-038-R018`, and `SPEC-039-R015` are
    also `conformant`. Their signed result and sidecar must bind the exact
    SPEC-023-R024 `native_mtp_admission_tuple_sha256`, and that identity MUST be
-   absent from the current authenticated emergency-revocation feed;
+   absent from the newest verified emergency-revocation feed the provider
+   holds (SPEC-023 §12.5; an aged body still applies, 0.1.31);
    repository-wide conformance alone is insufficient. `pending` is insufficient
    for enablement.
 2. The immutable upstream dependency and row-mapped API pass SPEC-048-R003.
@@ -1387,6 +1388,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.31 (2026-10-10)** — The emergency revocation feed fails to last-known
+  (#1938, follows SPEC-023 v0.22.22). `revocation_state_unavailable` now means
+  no verified revocation body has ever been accepted; an aged or unreachable
+  feed keeps the newest verified revoked set in force and native MTP on.
 - **0.1.30 (2026-10-10)** — No calendar expiry on native MTP (#1938, AGENTS.md
   rule 10). MTP-14: the admission sidecar's and the serving journey's
   `expires_at` are structural only; an activated tuple stays selectable until

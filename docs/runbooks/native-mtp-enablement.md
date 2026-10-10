@@ -137,10 +137,11 @@ window, and `continuity-check` accepts exactly that change. Run one before the
 live admission's `expires_at` only if CLIs older than SPEC-023 v0.22.19 still
 serve native MTP then.
 
-Revocation slots must stay current:
-`.github/workflows/publish-native-mtp-revocations.yml` publishes 14 days of
-slots every Wednesday. If one run is missed, the previous batch still covers at
-least one more week.
+Revocation slots are published on demand
+(`scripts/publish-native-mtp-revocations.sh --deploy`). Providers keep
+enforcing the newest verified revoked set they hold after the batch ages out,
+and the coordinator keeps serving the newest issued slot (SPEC-023 v0.22.22),
+so a missed publish never turns native MTP off.
 
 ## Emergency revocation
 

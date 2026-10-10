@@ -48,11 +48,9 @@ jobs:
         run: |
           set -euo pipefail
           # workflow file | max hours since the last run | extra flags
-          # Weekly jobs: a run older than 8 days means the schedule stopped.
           # The 6-hourly alarms cancel superseded runs by design, so only
           # check that they keep running.
           watched="
-          publish-native-mtp-revocations.yml|192|
           openrouter-catalog-propose.yml|30|
           install-sh-parity-alarm.yml|24|--stale-only
           install-sh-consumer-health-alarm.yml|24|--stale-only

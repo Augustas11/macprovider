@@ -574,9 +574,8 @@ Pearl may be serving the new release, the old one, or a mixed window.
 steps below. They do not restore `coordinator.yaml`, and a hand swap of
 `current` leaves a mixed yaml/card pair. Follow [Pricing txn](#pricing-txn).
 
-1. **Freeze writers.** Disable the revocation publish workflow
-   (`publish-native-mtp-revocations.yml`), make sure no operator restamp is
-   running, and stop
+1. **Freeze writers.** Make sure no operator restamp or revocation
+   publish is running, and stop
    `macprovider-pearl-updater.timer`. On Pearl, open and hold both locks,
    `/run/lock/macprovider-pearl-updater.lock` and
    `/opt/macprovider/.coordinator-deploy.lock` (`flock -n`), for the whole
@@ -753,9 +752,8 @@ on a journal), so a pre-#1693 deploy tag or a hand change ran during a pricing
 transaction. Two operators; never rename the journal or edit the snapshot by
 hand.
 
-1. **Freeze.** Disable the revocation publish workflow
-   (`publish-native-mtp-revocations.yml`), make sure no operator restamp is
-   running, and stop
+1. **Freeze.** Make sure no operator restamp or revocation
+   publish is running, and stop
    `macprovider-pearl-updater.timer`. Do not take the Pearl locks yourself:
    the command in step 3 takes and holds them. Leave the coordinator stopped.
    Delete neither the snapshot nor the journal.

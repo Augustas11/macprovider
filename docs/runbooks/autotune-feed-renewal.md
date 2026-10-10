@@ -8,11 +8,11 @@ step, for example when a provider still runs a CLI that predates v0.22.15
 (those fail closed 30 days after `generated_at`) or a native-MTP admission must
 be re-signed for a CLI that predates v0.22.19 before its `expires_at`.
 
-Native-MTP revocation slots are the exception: providers still need a current
-revocation body, so `.github/workflows/publish-native-mtp-revocations.yml`
-publishes a 14-day batch every Wednesday (environment `autotune-feed-renewal`,
-same secrets as below). A restamp of a native-bound release republishes them
-too.
+Native-MTP revocation slots are published on demand too. Providers keep
+enforcing the newest verified revocation body they hold after it ages out
+(SPEC-023 v0.22.22), so a missed publish never turns native MTP off.
+`scripts/publish-native-mtp-revocations.sh --deploy` publishes a batch, and a
+restamp of a native-bound release runs it.
 
 Since #1268 the coordinator hot-reloads the feed on `SIGHUP`
 (`reloadCoordinatorConfig` swaps the WS admission catalog and the buyer-served
@@ -47,9 +47,7 @@ live on Pearl. A Pearl-root signer that mints client-trusted feeds and retargets
 A restamp runs where the key already lives (an operator machine). It signs with
 Swift CryptoKit, authenticates the previous signed release with the Go
 verifier, verifies signatures with OpenSSL 3, and rsyncs **only signed bytes**
-to Pearl. The weekly revocation job uses the `autotune-feed-renewal`
-environment secret and a sealed OpenSSL 3 bottle. The private key is never a
-file on the coordinator host. `catalog-release.py` does not take Go from PATH.
+to Pearl. The private key is never a file on the coordinator host. `catalog-release.py` does not take Go from PATH.
 
 A Pearl compromise therefore still cannot mint a validly-signed feed.
 
@@ -204,12 +202,9 @@ unchanged, so they recover without a restart.
 
 ## Schedule
 
-| When (UTC) | What |
-| --- | --- |
-| Wednesday 16:00 | native-MTP revocation batch (`publish-native-mtp-revocations.yml`, `autotune-feed-renewal`, unattended) |
-
-There is no scheduled feed restamp and no discovery-head renewal (SPEC-020
-v0.1.22). Do **not** install a laptop LaunchAgent or a Pearl signer.
+None. There is no scheduled feed restamp, revocation publish, or discovery-head
+renewal (SPEC-020 v0.1.22, SPEC-023 v0.22.22). Do **not** install a laptop
+LaunchAgent or a Pearl signer.
 
 ## Running a restamp
 
