@@ -84,6 +84,27 @@ final class ProviderLifecycleLeaseTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty)
     }
 
+    func testOperatorResumeGraceExpiresAndNewCycleRenewsWithoutChangingMainLease() throws {
+        let fixture = try makeFixture()
+        let maintenance = try fixture.store.acquire(kind: .maintenance, operationID: "update", duration: 120)
+        let resumeStore = ProviderLifecycleLeaseStore(
+            url: fixture.directory.appendingPathComponent("operator-resume-lease.json"),
+            environment: fixture.environment.value
+        )
+        let first = try resumeStore.acquireOperatorResumeGrace()
+        XCTAssertEqual(first.expiresWallMilliseconds - first.issuedWallMilliseconds, 60_000)
+        fixture.environment.advance(wallMilliseconds: 3_000, monotonicNanoseconds: 3_000_000_000)
+        XCTAssertEqual(resumeStore.inspect(), .valid(first))
+        let renewed = try resumeStore.acquireOperatorResumeGrace()
+        XCTAssertEqual(renewed.leaseID, first.leaseID)
+        XCTAssertEqual(renewed.issuedWallMilliseconds, first.issuedWallMilliseconds + 3_000)
+        fixture.environment.advance(wallMilliseconds: 60_000, monotonicNanoseconds: 60_000_000_000)
+        guard case .invalidOrExpired = resumeStore.inspect() else { return XCTFail("grace must expire at 60 seconds") }
+        XCTAssertEqual(fixture.store.inspect(), .valid(maintenance))
+        let newCycle = try resumeStore.acquireOperatorResumeGrace()
+        XCTAssertNotEqual(newCycle.leaseID, first.leaseID)
+    }
+
     func testDurationCapsAreEnforcedForBothLeaseKinds() throws {
         let fixture = try makeFixture()
 
