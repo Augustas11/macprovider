@@ -164,15 +164,17 @@ spec index/governance, and all three full-diff audits passed (0 Critical/High/Me
 Required GitHub CI and independent PR review remain pending. This code is not
 in v1.8.220, so the deployed privacy CLI still needs the prepared effective YAML.
 
-Probed 2026-10-06 (`/healthz`). Older rollout narrative below is historical.
+Probed 2026-10-10 (`/healthz`). Older rollout narrative below is historical.
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.220** @ `6d49a4f16`. Signed runtime updater completed 2026-10-06 at 13:18:43Z; public `/healthz` reports `v1.8.220`. |
-| Gateway | **v1.8.220**. The live nginx configuration was preserved. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
-| Release | [Pearl runtime v1.8.220](https://github.com/Augustas11/macprovider/releases/tag/v1.8.220), immutable runtime-only prerelease; build run [37468267969](https://github.com/Augustas11/macprovider/actions/runs/37468267969). The apply preserved the live October 1 artifact-feed catalog; no full deploy followed it. |
-| `recommended_binary_version` | 1.8.207 (CLI train owns this) |
-| Includes | Reviewed `main` through `6d49a4f16`, including #1872 relay-blind capacity waiting. |
+| Coordinator | **v1.8.236** @ `bb17a3ab4`. Signed runtime updater completed 2026-10-10 (installed 04:12Z, updater unit `Result=success`); public `/healthz` reports `v1.8.236`. |
+| Gateway | **v1.8.236**. **Never run the gateway `deploy-pearl-vps.sh`**; use the signed runtime updater for binary-only releases. |
+| Release | [Pearl runtime v1.8.236](https://github.com/Augustas11/macprovider/releases/tag/v1.8.236), immutable runtime-only prerelease, applied through `scripts/ops/pearl-runtime.sh`. |
+| Compatibility admission | `compatibility_policy_mode: repository` (#1919): any well-formed release from this repository connects; 42 exact revocations (the v1.8.34–v1.8.123 seed) applied by the CLI train's `revocation_seed` step on 2026-10-10 04:51Z. |
+| `recommended_binary_version` | 1.8.232 (CLI train owns this) |
+| Updater snapshot retention | 1 (only the newest rollback snapshot is kept; set 2026-10-10, see #1793) |
+| Includes | Reviewed `main` through `bb17a3ab4`: #1919 repository admission, #1934 release-identity automation, #1937 attested-hardware auto-trust, plus everything in v1.8.231–v1.8.235. |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -198,7 +200,18 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.220 | `6d49a4f16` | #1872 privacy capacity waiting — **live**, loaded buyer success still unproven |
+| v1.8.236 | `bb17a3ab4` | #1919 repository admission (exact revocations), #1934 release-identity automation, #1937 attested-hardware auto-trust — **live** |
+| v1.8.235 | `74e6f3684` | #1935 per-provider earnings rollup (#1925) |
+| v1.8.234 | `702c33788` | #1910 |
+| v1.8.233 | `06713f727` | #1926 provider read timeouts (#1925) |
+| v1.8.231 | `bb42c3d16` | #1923 BYOM polish, #1916 coordinator teardown, #1921 |
+| v1.8.229 | `9e8751b72` | #1908 BYOM creator self-serve |
+| v1.8.228 | `78cd2868c` | #1900 |
+| v1.8.227 | `fbb96363e` | runtime re-cut, no coordinator/gateway source change vs v1.8.226 |
+| v1.8.226 | `c05002c9b` | runtime re-cut, no coordinator/gateway source change vs v1.8.225 |
+| v1.8.225 | `c51c45dcc` | #1749 privacy, #1770, #1871, #1875, #1876, #1883, #1890, #1892, #1894 |
+| v1.8.221 | `2fa09b09a` | #1874 |
+| v1.8.220 | `6d49a4f16` | #1872 privacy capacity waiting |
 | v1.8.218 | `e158347ef` | Previous live runtime; October 1 artifact-feed activation |
 | v1.8.211 | `5550efd4` | #1833 crash-safe bounded settlement maintenance — **live** |
 | v1.8.210 | `6756706b` | #1831 bounded SQLite evidence maintenance; also #1801, #1812, #1818 and runtime dependency updates |
@@ -295,7 +308,25 @@ around 2026-10-23. The fix took effect at the next renewal. The scheduled
 renewal has since been retired (#1938); a restamp is on demand
 (`scripts/renew-autotune-static-feed.sh`).
 
-## Next coordinator release — tag unassigned, net changes vs v1.8.211
+## Next coordinator release — tag unassigned, net changes vs v1.8.236
+
+One runtime train, applied **after** the next CLI release (#1944's deploy order puts the CLI first). Expected downtime: one signed-updater apply (15–20 min worst case, about 3 min with the short-quiesce updater).
+
+Merged, waiting for this train:
+- [x] #1942 — coordinator honors `logging.level` (default `info`); stops debug lines flooding host logs. Related: #1940 (close after the live check shows no debug lines).
+
+To bundle when merged:
+- [ ] #1944 — calendar-expiry removal, coordinator side (Tier-2 catalog expiry shape-only, autotune evidence supersession, trusted-pool on-call / grace warnings instead of unrouting).
+- [ ] CB/MTP self-check bundle (branch `cli/auto-cb-slots`) — coordinator side of the native-MTP canary.
+- [ ] #1945 — BYOM catalog graduation (#1880 step 5), only if audited and merged in time; otherwise the following train.
+
+Configuration riding the same restart:
+- [ ] `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256` from #1943 in the coordinator launch environment, then sign and upsert the on-call readiness record (`build-signed-oncall-readiness.yml`, `coordinator-cli trust-pool-oncall upsert`).
+- [ ] `production_activation` (#1880 step 4), after the M1 candidate pool is retired or migrated.
+
+Not in this train: #1909 settlement-evidence retention (own train when ready).
+
+## Earlier: net changes vs v1.8.211 (historical)
 
 `v1.8.211` was applied through the signed runtime-only updater on 2026-10-02.
 The 24-hour baseline window completed after **2026-10-03 13:12:23 UTC** and was
