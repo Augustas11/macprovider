@@ -15,8 +15,11 @@ matching target: a binary recommendation of 223 with compatibility target
 207 fails the consumer updater's exact manifest-target comparison.
 
 Both edits are `scripts/ops/cli-release.sh` steps that `next --run` executes:
-`pearl_accepted_ids` (add the candidate id; at the cap evict the least
-recently seen non-target id with no provider connected in 7 days) and
+`pearl_accepted_ids` (add the candidate id; at the cap evict the oldest
+accepted version that is not the target, not the previous target/stable, and
+not the latest connection version of any provider seen in the last 14 days,
+`_anonymous` excluded; the step prints that per-version table and refuses with
+it when nothing is evictable) and
 `recommendation_bump` (`latest_binary_version` and `target_id` to the release,
 prior target kept accepted). Each prints the expected downtime first, holds
 the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with

@@ -223,20 +223,19 @@ pearl_boot() {
 }
 # loaded VERSION...: the release versions the running coordinator reports as loaded.
 loaded() { for v in "$@"; do printf 'relayblind_privacy_release_identity_loaded{binary_version="%s"} 1\n' "$v"; done > "$tmp/svc/loaded.txt"; }
-# seen VERSION ISO8601...: provider connections Pearl recorded per binary version.
-seen() {
+# event PROVIDER VERSION ISO8601...: provider connection events Pearl recorded.
+event() {
   python3 - "$tmp/pearl/events.db" "$@" <<'PYDB'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
-db.execute("CREATE TABLE IF NOT EXISTS provider_last_known (provider_id TEXT PRIMARY KEY, binary_version TEXT, last_seen_at_utc TEXT)")
-db.execute("CREATE TABLE IF NOT EXISTS provider_connection_events (id INTEGER PRIMARY KEY, binary_version TEXT, occurred_at_utc TEXT, kind TEXT)")
+db.execute("CREATE TABLE IF NOT EXISTS provider_connection_events (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT, binary_version TEXT, occurred_at_utc TEXT, kind TEXT)")
 args = sys.argv[2:]
-for i in range(0, len(args), 2):
-    db.execute("INSERT OR REPLACE INTO provider_last_known VALUES (?, ?, ?)", ("p-" + args[i], args[i], args[i + 1]))
+for i in range(0, len(args), 3):
+    db.execute("INSERT INTO provider_connection_events (provider_id, binary_version, occurred_at_utc, kind) VALUES (?, ?, ?, 'auth_accepted')", args[i:i + 3])
 db.commit()
 PYDB
 }
-seen 0.0.0 2000-01-01T00:00:00Z
+event p0 0.0.0 2000-01-01T00:00:00Z
 COMPAT="test/repo:v$CAND@$B"
 META="$tmp/pearl/privacy-release-identities"
 fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
@@ -398,24 +397,33 @@ expect_next pearl_accepted_ids:mutate
 case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "registrations"))' "$tmp/out")" in
   *"accepted_ids lacks $COMPAT"*) ok ;; *) bad "registrations does not name the missing accepted id" ;;
 esac
-# pearl_accepted_ids at the cap: evict the least recently seen non-target id
-# that no provider used in 7 days; refuse with the list when none is evictable.
+# pearl_accepted_ids at the cap: a version is in use when it is the latest
+# connection version of a provider seen in the last 14 days (_anonymous
+# excluded). Evict the oldest accepted version that is not the target, not the
+# previous stable (v1.0.7 here) and not in use; refuse with the table otherwise.
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EARLIER="$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+STALE="$(date -u -v-20d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-20 days' +%Y-%m-%dT%H:%M:%SZ)"
 IDS="$OLD"; for n in 1 2 3 4 5 6 7; do IDS="$IDS test/repo:v1.0.$n@$(printf "$n%.0s" $(seq 40))"; done
-seen "$LIVE" "$NOW" 1.0.1 "$NOW" 1.0.2 "$NOW" 1.0.3 "$NOW" 1.0.4 "$NOW" 1.0.5 "$NOW" 1.0.6 2026-01-01T00:00:00Z 1.0.7 "$NOW"
+event p1 1.0.1 "$NOW" p2 1.0.2 "$NOW" p3 1.0.3 "$NOW" p4 1.0.4 "$NOW" \
+  p5 1.0.5 "$EARLIER" p5 "$LIVE" "$NOW" p6 1.0.6 "$EARLIER" p6 "$LIVE" "$NOW" \
+  _anonymous 1.0.6 "$NOW" p7 1.0.6 "$STALE"
 pearl_config "$IDS" "$META"; pearl_boot
 before="$(restarts)"
-MACPROVIDER_OPS_OWNER=t run_rc 0 "accepted_ids at the cap evicts the stale id" scripts/ops/cli-release.sh next --run
+MACPROVIDER_OPS_OWNER=t run_rc 0 "accepted_ids at the cap evicts the oldest unused version" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
-if grep -q -- "- $COMPAT" "$tmp/pearl/coordinator.yaml" && ! grep -q "v1.0.6@" "$tmp/pearl/coordinator.yaml" &&
-  [ "$(grep -c '^    - ' "$tmp/pearl/coordinator.yaml")" = 8 ] && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "eviction did not replace v1.0.6 with the candidate"; fi
+if grep -q -- "- $COMPAT" "$tmp/pearl/coordinator.yaml" && ! grep -q "v1.0.5@" "$tmp/pearl/coordinator.yaml" &&
+  grep -q "v1.0.6@" "$tmp/pearl/coordinator.yaml" && grep -q "v1.0.7@" "$tmp/pearl/coordinator.yaml" &&
+  [ "$(grep -c '^    - ' "$tmp/pearl/coordinator.yaml")" = 8 ] && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "eviction did not replace v1.0.5 with the candidate"; fi
+expect_err "latest connection version"
 run_rc 0 "cli status after the accepted_ids run" scripts/ops/cli-release.sh status
 if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "accepted id not detected live"; fi
-seen 1.0.6 "$NOW"
+event p8 1.0.5 "$NOW" p9 1.0.6 "$NOW"
 pearl_config "$IDS" "$META"; pearl_boot
 MACPROVIDER_OPS_OWNER=t run_rc 3 "accepted_ids at the cap with nothing evictable is refused" scripts/ops/cli-release.sh next --run
 bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 expect_err "no id is evictable"
+expect_err "test/repo:v1.0.7@"
 pearl_config "$OLD $COMPAT" "$META"
 pearl_boot
 # A verifying file the running coordinator has not loaded is not approval.

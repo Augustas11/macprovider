@@ -20,10 +20,13 @@ transaction journal) it:
      bytes it wrote, it puts back the bytes it read under the same locks
      (never a whole-file backup) and restarts again.
 
-accepted_ids is capped at 8. At the cap it evicts the least recently seen
-accepted id that is not the target and whose binary version no provider has
-connected with in 7 days (provider_connection_events.db, read-only); with
-none evictable it refuses and lists them. Nothing secret is printed.
+accepted_ids is capped at 8. At the cap it evicts the oldest accepted version
+that is not the target, not the previous target/stable, and not in use: a
+version is in use when it is the binary_version of the most recent connection
+event of some provider seen in the last 14 days (`_anonymous` excluded;
+provider_connection_events.db, read-only). It prints the per-version table
+(latest-version provider counts, last seen) and refuses with it when nothing
+is evictable. Nothing secret is printed.
 """
 import argparse
 import copy
@@ -42,7 +45,7 @@ import time
 import urllib.request
 
 ACCEPTED_CAP = 8
-EVICT_AFTER = datetime.timedelta(days=7)
+IN_USE_WINDOW = datetime.timedelta(days=14)
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMPAT_VERSION = re.compile(r":v([0-9]+\.[0-9]+\.[0-9]+)@[0-9a-f]{40}$")
 
@@ -121,46 +124,75 @@ def add_release_identities(text, metadata_dir, key_path):
 
 
 def parse_time(value):
-    value = value.strip().replace("Z", "+00:00")
+    # Pearl writes RFC3339 with up to nanoseconds; Python takes microseconds.
+    value = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00")
     parsed = datetime.datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
 
 
-def last_seen(db_path, versions):
-    """Most recent connection per binary version (read-only)."""
-    out = {v: None for v in versions}
+def version_key(version):
+    return tuple(int(x) for x in version.split("."))
+
+
+def latest_versions(db_path, now):
+    """{version: (providers whose latest connection uses it, last seen)} over
+    providers seen in the last IN_USE_WINDOW, read-only. A provider's version
+    is the binary_version of its most recent connection event that names one."""
+    since = now - IN_USE_WINDOW
+    latest = {}
     with sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=5) as db:
-        rows = list(db.execute("SELECT binary_version, MAX(last_seen_at_utc) FROM provider_last_known "
-                               "WHERE binary_version != '' GROUP BY binary_version"))
-        rows += list(db.execute("SELECT binary_version, MAX(occurred_at_utc) FROM provider_connection_events "
-                                "WHERE binary_version != '' AND kind = 'auth_accepted' GROUP BY binary_version"))
-    for version, stamp in rows:
-        if version in out and stamp:
-            seen = parse_time(stamp)
-            if out[version] is None or seen > out[version]:
-                out[version] = seen
+        rows = db.execute("SELECT id, provider_id, binary_version, occurred_at_utc FROM provider_connection_events "
+                          "WHERE binary_version != '' AND provider_id NOT IN ('', '_anonymous')")
+        for row_id, provider, version, stamp in rows:
+            try:
+                when = parse_time(stamp)
+            except ValueError:
+                continue
+            if when < since:
+                continue
+            key = (when, row_id)
+            if provider not in latest or key > latest[provider][0]:
+                latest[provider] = (key, version)
+    out = {}
+    for (when, _), version in latest.values():
+        count, seen = out.get(version, (0, None))
+        out[version] = (count + 1, when if seen is None or when > seen else seen)
     return out
 
 
+def eviction_table(accepted, target, protected, usage):
+    lines = ["%-72s %-9s %9s  %s" % ("accepted id", "version", "providers", "last seen (latest-version providers)")]
+    for item in accepted:
+        m = COMPAT_VERSION.search(item)
+        version = m.group(1) if m else "?"
+        count, seen = usage.get(version, (0, None))
+        role = " target" if item == target else " protected" if item in protected else ""
+        lines.append("%-72s %-9s %9d  %s%s" % (item, version, count, seen.isoformat() if seen else "-", role))
+    return "\n".join(lines)
+
+
 def choose_eviction(accepted, target, keep, db_path, now):
+    """Evict the oldest accepted version that is not the target, not the
+    previous target/stable, not kept, and that no provider (seen in the last
+    14 days) has as its latest connection version."""
     versions = {}
     for item in accepted:
         m = COMPAT_VERSION.search(item)
         versions[item] = m.group(1) if m else None
-    seen = last_seen(db_path, {v for v in versions.values() if v})
-    candidates, report = [], []
-    for item in accepted:
-        version = versions[item]
-        when = seen.get(version) if version else None
-        report.append("%s (last seen %s)" % (item, when.isoformat() if when else "never" if version else "unknown"))
-        if item in (target, *keep) or version is None:
-            continue
-        if when is None or now - when > EVICT_AFTER:
-            candidates.append((when or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), item))
+    usage = latest_versions(db_path, now)
+    protected = {target, *keep}
+    target_version = versions.get(target)
+    if target_version:
+        older = [i for i in accepted if versions[i] and version_key(versions[i]) < version_key(target_version)]
+        if older:
+            protected.add(max(older, key=lambda i: version_key(versions[i])))  # the previous target/stable
+    table = eviction_table(accepted, target, protected, usage)
+    sys.stderr.write("accepted_ids by providers' latest connection version (last 14 days):\n%s\n" % table)
+    candidates = [i for i in accepted if i not in protected and versions[i] and versions[i] not in usage]
     if not candidates:
-        raise Refused("accepted_ids is at the cap of %d and no id is evictable (target, kept, or a provider "
-                      "connected in the last 7 days): %s" % (ACCEPTED_CAP, "; ".join(report)))
-    return min(candidates)[1]
+        raise Refused("accepted_ids is at the cap of %d and no id is evictable: every non-protected version is "
+                      "some provider's latest connection version (table above)" % ACCEPTED_CAP)
+    return min(candidates, key=lambda i: version_key(versions[i])), table
 
 
 def plan(text, args, now):
@@ -179,7 +211,8 @@ def plan(text, args, now):
             return
         evict = None
         if len(accepted) >= ACCEPTED_CAP:
-            evict = choose_eviction(accepted, target, keep, args.events_db, now)
+            evict, table = choose_eviction(accepted, target, keep, args.events_db, now)
+            summary["eviction_table"] = table.splitlines()
         new = set_accepted(new, item, evict)
         accepted = [a for a in accepted if a != evict] + [item]
         summary.setdefault("accepted_added", []).append(item)

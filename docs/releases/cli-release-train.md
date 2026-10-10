@@ -873,9 +873,12 @@ mainland-provider installer handoff.
   at step `pearl_accepted_ids` adds its `compatibility_set_id` to
   `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
   a value copy — SIGHUP does not reload compatibility_set). The list is
-  capped at 8 and must include `target_id`; at the cap the step evicts the
-  least recently seen non-target id that no provider has connected with in
-  7 days, and refuses with the list when none qualifies. Keep the id while it is the Studio serving canary;
+  capped at 8 and must include `target_id`; at the cap the step evicts the oldest accepted version that is not the
+  target, not the previous target/stable and not in use, where a version is
+  in use when it is the latest connection version of some provider seen in
+  the last 14 days (`_anonymous` excluded). It prints the per-version table
+  (latest-version provider counts, last seen) and refuses with it when
+  nothing is evictable. Keep the id while it is the Studio serving canary;
   revert after a throwaway test. An unaccepted set is closed 4001
   `compatibility_set_unaccepted`; the CLI reports that as
   `Expected auth_challenge v2`.

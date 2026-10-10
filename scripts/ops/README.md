@@ -49,7 +49,10 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   on a pricing transaction journal): anchored in-place edit, backup under
   `/root/macprovider-backups`, validation with the running coordinator's
   binary, user and exact environment, atomic replace, one restart,
-  `/healthz` and the live postcondition, then the step is recorded. Steps that
+  `/healthz` and the live postcondition, then the step is recorded. At the
+  `accepted_ids` cap of 8 it evicts the oldest version that is not the
+  target, not the previous stable, and not the latest connection version of
+  any provider seen in 14 days, printing the per-version table. Steps that
   can share a restart do (setup plus accepted_ids). No step asks anyone to
   paste a restart; the ops guard still blocks a typed restart and a direct
   `_pearl-config`.

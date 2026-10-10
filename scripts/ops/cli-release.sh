@@ -26,8 +26,9 @@
 #                           Pearl's privacy_class.release_code_identities.metadata_dir as
 #                           v<ver>.json/.sig (hot: re-read every ~60 s, no restart)
 #   5 pearl_accepted_ids    next --run: _pearl-config adds the candidate compatibility_set_id
-#                           (keep target_id; at the cap of 8 evict the least recently seen id
-#                           with no provider connected in 7 days) and restarts; done when the
+#                           (keep target_id; at the cap of 8 evict the oldest version that is not
+#                           the target, not the previous stable, and not the latest connection
+#                           version of any provider seen in 14 days) and restarts; done when the
 #                           running coordinator's applied config lists it
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
