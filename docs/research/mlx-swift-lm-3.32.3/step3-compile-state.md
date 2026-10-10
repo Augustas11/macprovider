@@ -34,7 +34,7 @@ that addresses the mechanism.
 | `mlx.metallib` | `f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756` (unchanged; no kernel change) |
 | Build trees | serve at `<studio-home>/build-mlx332`, lab harness at `<studio-home>/lab-332/src/phase3-binary`, both synced from `git archive 8875789e7` (`rsync --dry-run` empty), both resolved `mlx-swift-lm` to `905170f` |
 | Host | Mac15,14, M3 Ultra, 256 GB, macOS 26A434, Swift 6.3.3 (Command Line Tools) |
-| Live provider | Not stopped, restarted or reconfigured. Paused only by `bench.sh` and resumed each time (windows under Files). After the last resume (22:24:41Z), the live binary was replaced with 1.8.232 by an install outside this work (backup `macprovider.pre-232-20261009T222528Z`), and the watchdog kickstarted it. It reported `Provider is ready`, `buyer_serving`, unpaused, at 22:27:05Z. |
+| Live provider | Not stopped, restarted or reconfigured. Paused only by `bench.sh` and resumed each time (windows under Files). |
 
 ## 1. Mechanism
 

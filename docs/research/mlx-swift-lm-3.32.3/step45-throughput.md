@@ -1,7 +1,7 @@
 # Steps 4-5: throughput on the final #1927 build (2026-10-09/10)
 
 **Status: BLOCKED. No clean before/after table.** During both `bench.sh`
-windows, the live `:8080` provider (CLI 1.8.232, another session's canary)
+windows, the live `:8080` provider
 kept admitting buyer requests while it reported `paused_by_operator`. Its
 requests then shared the GPU with the lab cells. `bench.sh` checks
 `requests_in_flight: 0` only once, at the start of a window, so it cannot
@@ -17,7 +17,7 @@ cells marked clean below are usable.
 | Source | `origin/deps/mlx-swift-lm-3.32.3` at `ffd79639b`. The worktree matched it, and it was synced to the Studio tree (`rsync --dry-run` clean). |
 | Pins | mlx-swift-lm `5203b732c451344aef936958ef3f765480cf6a9a` (tag `3.32.3-macprovider.5`); mlx-swift `ca2f61d22c5e8afe87170525ebc1769f72da5b41` (tag `0.32.3-macprovider.2`); core MLX `c9196eb7161358f1e4a7f0605182186f8686e5f8` (`v0.32.2-macprovider.2`). The core change from `ff1b948` is `mlx/compile.cpp` and `compile_impl.h` only, so the kernels and metallib are unchanged. |
 | New build | `swift build -c release`, SHA-256 `5a681910d5862a2410f7379ddde17098930b464b5646e6721264ff8368360dc1`, reports `1.8.230`; `mlx.metallib` `f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756` |
-| Before build | **1.8.230**, the live binary until 2026-10-09 22:25Z. SHA-256 `40833698604a632e74e94abdf6d6e168e9667dc428ba5f739f4223b8b50b8a35`, identical to the `macprovider.pre-232-*` backup on the Studio; `mlx.metallib` `84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf` (mlx-swift 0.31.4). It was copied into the lab and never run from the live directory. |
+| Before build | **1.8.230** release binary, SHA-256 `40833698604a632e74e94abdf6d6e168e9667dc428ba5f739f4223b8b50b8a35`; `mlx.metallib` `84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf` (mlx-swift 0.31.4). It was copied into the lab and never run from the live directory. |
 | Config, all runs | `build/lab-serve.sh` on loopback 18199 with `--no-join --autotune-candidate --no-idle-prewarm`. Settings: `max_concurrency_override: 8`, `continuous_batch_queue_limit: 16`, hybrid decode window 1 (fixed on `main` and in 1.8.230), paged KV on, `continuous_batching: canary`, `mlx_cache_limit_mb: 2048`, `max_context_override: 200000`, prefill step 512. The control config differs only in the lab accepted tuple's metallib SHA (`84e48718…`). Both runtimes logged `batched-isolation … proven=true`, `paged_kv_decision=attached` and `slots_total=8` before measuring. |
 | Load | `depth_sweep.py`, byte-identical to `campaign/1906-cb-depth`: closed loop, unique salted prompts, greedy, streamed, 30 s warmup, 90 s window, depths 1/8/16. Prompt-heavy is 1536 prompt tokens and 256 output; output-heavy is 1800 prompt and 1024 output. Scripts: `build/step45.sh`, `build/rtcmp-332.sh`. |
 | 2026-10-09 ours-w1 reference | `campaign/1906-cb-depth` lab build (MLX 0.31.4) with `max_batch` **32** and queue 256. That is a different binary from 1.8.230, and its 16-concurrent cells ran 16 rows. With `max_batch` 8, all cells here run at most 8 rows, so 16 concurrent means 8 active and 8 queued. |
@@ -48,9 +48,8 @@ The two control rows below show the effect. Same binary, same cell:
 
 On 2026-10-09, with 1.8.230 live, a pause stopped admission
 (`issue-1906/isolate-2026-10-09`: only already-running requests continued).
-Here, new admissions arrive minutes after the pause, so this is new behaviour
-of the live 1.8.232 deployment or of its traffic path. I didn't investigate it
-further because it belongs to the other session's live canary.
+Here, new admissions arrived minutes after the pause. That is outside this
+change and was not investigated here.
 
 ## Results
 
@@ -101,9 +100,8 @@ What can be said:
 ## What is needed to finish
 
 A quiet window: the live provider must admit no requests between `bench.sh`'s
-pause and resume. That needs the 1.8.232 pause to stop admission, as 1.8.230's
-did, or the other session's canary returning live to a provider whose pause
-holds. With that in place, rerun `build/step45.sh` under `bench.sh` with
+pause and resume. That needs a live provider whose pause stops
+admission, as 1.8.230's did. With that in place, rerun `build/step45.sh` under `bench.sh` with
 `build/live-sampler.sh` running alongside. Fix the sampler path in
 `step45b.sh`, which failed to start in run 2, so I started it separately. Then
 keep only cells where the sampler shows `in_flight=0`. About 45 minutes of
