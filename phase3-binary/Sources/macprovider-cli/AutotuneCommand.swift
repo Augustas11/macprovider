@@ -1194,6 +1194,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("hardware evidence submitted for stats verification\n".utf8))
             case .skipped:
                 break
+            case .pending(let reason):
+                FileHandle.standardError.write(Data("\(reason)\n".utf8))
             case .failed(let reason):
                 FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
             }
@@ -1971,6 +1973,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                     let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig)
                         .submit(snapshot: evidence)
                     HardwareEvidenceOutcomeStore.record(submission)
+                    if case .pending(let reason) = submission {
+                        FileHandle.standardError.write(Data("\(reason)\n".utf8))
+                    }
                     return submission
                 }
             )
@@ -2045,6 +2050,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         switch await submit(storedEvidence) {
         case .submitted:
             return .ready(submitted: true)
+        case .pending:
+            // Evidence is already queued for this provider; admission waits on
+            // the verifier, not on this install or update (SPEC-033-R003).
+            return .ready(submitted: false)
         case .skipped(let reason):
             return .blocked(reason)
         case .failed(let reason):
@@ -2058,7 +2067,7 @@ struct AutotuneCommand: AsyncParsableCommand {
     ) -> String? {
         guard required else { return nil }
         switch submission {
-        case .submitted:
+        case .submitted, .pending:
             return nil
         case .skipped(let reason), .failed(let reason):
             return reason

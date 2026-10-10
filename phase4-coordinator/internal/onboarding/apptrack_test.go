@@ -586,6 +586,71 @@ func TestHandleHardwareEvidenceMapsDBAdmissionCap(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	if !strings.Contains(rr.Body.String(), `"code":"rate_limited"`) {
+		t.Fatalf("body=%s, want rate_limited when no job is pending", rr.Body.String())
+	}
+}
+
+// SPEC-033-R003: evidence for other hardware already queued answers a distinct
+// hardware_evidence_pending 429 before the flood limiter and inserts nothing.
+func TestHandleHardwareEvidenceReportsPendingJobBeforeProviderRateLimit(t *testing.T) {
+	stats := &fakeStatsDB{
+		activeJobFound:  true,
+		activeJobRecord: HardwareEvidenceJobRecord{JobID: 41, Status: hardwareEvidenceJobWaitingTrust},
+	}
+	handler := testRegisterHandler(stats, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	handler.HardwareEvidenceProviderRateLimiter = denyLimiter{}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(validHardwareEvidenceBody(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Retry-After"); got != "600" {
+		t.Fatalf("Retry-After=%q, want 600", got)
+	}
+	if !strings.Contains(rr.Body.String(), `"code":"hardware_evidence_pending"`) {
+		t.Fatalf("body=%s, want hardware_evidence_pending code", rr.Body.String())
+	}
+	if stats.evidenceInsertCalls != 0 {
+		t.Fatalf("insert calls=%d, want 0 while a job is pending", stats.evidenceInsertCalls)
+	}
+}
+
+func TestHandleHardwareEvidenceReportsPendingWhenJobRacesInsert(t *testing.T) {
+	stats := &fakeStatsDB{
+		evidenceErr:               ErrHardwareEvidenceRateLimited,
+		activeJobFoundAfterInsert: true,
+	}
+	handler := testRegisterHandler(stats, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(validHardwareEvidenceBody(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests || !strings.Contains(rr.Body.String(), `"code":"hardware_evidence_pending"`) {
+		t.Fatalf("status=%d body=%s, want 429 hardware_evidence_pending", rr.Code, rr.Body.String())
+	}
 }
 
 func TestHandleHardwareEvidenceReturnsExistingReplayBeforeProviderRateLimit(t *testing.T) {
@@ -1454,6 +1519,11 @@ type fakeStatsDB struct {
 	identityReplayRecord       HardwareEvidenceJobRecord
 	identityReplayFound        bool
 	identityReplayErr          error
+	activeJobRecord            HardwareEvidenceJobRecord
+	activeJobFound             bool
+	activeJobFoundAfterInsert  bool
+	activeJobErr               error
+	evidenceInsertCalls        int
 	prepareErr                 error
 	prepared                   bool
 	preparedErr                error
@@ -1526,6 +1596,10 @@ func (f *fakeStatsDB) InsertHardwareVerificationJob(ctx context.Context, provide
 	f.evidenceProviderID = providerID
 	f.evidenceRequest = evidence
 	f.evidenceGeneratedAt = generatedAt
+	f.evidenceInsertCalls++
+	if f.activeJobFoundAfterInsert {
+		f.activeJobFound = true
+	}
 	if f.evidenceErr != nil {
 		return HardwareEvidenceJobRecord{}, f.evidenceErr
 	}
@@ -1547,6 +1621,10 @@ func (f *fakeStatsDB) ExistingHardwareVerificationJob(ctx context.Context, provi
 	f.existingEvidenceProviderID = providerID
 	f.existingEvidenceSHA = evidenceSHA
 	return f.existingEvidenceRecord, f.existingEvidenceFound, f.existingEvidenceErr
+}
+
+func (f *fakeStatsDB) ExistingActiveHardwareVerificationJob(ctx context.Context, providerID string) (HardwareEvidenceJobRecord, bool, error) {
+	return f.activeJobRecord, f.activeJobFound, f.activeJobErr
 }
 
 func (f *fakeStatsDB) ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {

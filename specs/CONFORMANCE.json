@@ -3670,6 +3670,35 @@
       }
     },
     {
+      "requirement_id": "SPEC-033-R003",
+      "spec_id": "SPEC-033",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:ExistingActiveHardwareVerificationJob",
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:hasPendingHardwareEvidence",
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:writeHardwareEvidencePending",
+        "phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift:static func pendingReason(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func requiredHardwareEvidenceBlockReason(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func freshRecommendationEvidenceOutcome("
+      ],
+      "tests": [
+        "phase4-coordinator/internal/onboarding/apptrack_test.go::TestHandleHardwareEvidenceReportsPendingJobBeforeProviderRateLimit",
+        "phase4-coordinator/internal/onboarding/apptrack_test.go::TestHandleHardwareEvidenceReportsPendingWhenJobRacesInsert",
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareEvidenceSameIdentityDoesNotBypassAdmissionCap",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testPendingEvidenceJobIsReportedAsPendingNotFailure",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testPendingClassificationAcceptsOnlyQueuedJobRefusals",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneHardwareEvidenceTests.swift::testFreshRecommendationContinuesWhenEvidenceIsPending"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "SPEC-033 v0.7.0 makes an outstanding evidence job a pending, non-fatal outcome on both sides. Covered by coordinator unit and Postgres integration tests and CLI unit tests; pending until a released CLI and the coordinator runtime carrying it complete an install with a job already queued."
+      }
+    },
+    {
       "requirement_id": "SPEC-034-R001",
       "spec_id": "SPEC-034",
       "state": "conformant",

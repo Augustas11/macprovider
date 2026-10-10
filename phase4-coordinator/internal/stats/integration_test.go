@@ -1744,6 +1744,16 @@ RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err
 	if _, err := store.InsertHardwareVerificationJob(ctx, providerID, changedEvidence, generatedAt); !errors.Is(err, onboarding.ErrHardwareEvidenceRateLimited) {
 		t.Fatalf("changed hardware error=%v, want rate limited", err)
 	}
+
+	// SPEC-033-R003: the column-limited onboarding role can see the pending job
+	// so the handler answers hardware_evidence_pending instead of a flood 429.
+	active, found, err := store.ExistingActiveHardwareVerificationJob(ctx, providerID)
+	if err != nil || !found || active.JobID != oldJobID || active.Status != "waiting_trust" || active.EvidenceSHA != oldEvidenceSHA {
+		t.Fatalf("active job lookup = %+v found=%v err=%v, want waiting_trust job %d", active, found, err, oldJobID)
+	}
+	if _, found, err := store.ExistingActiveHardwareVerificationJob(ctx, "p-no-jobs"); err != nil || found {
+		t.Fatalf("active job lookup for provider without jobs found=%v err=%v", found, err)
+	}
 }
 
 func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, binaryVersion string, generatedAt time.Time) onboarding.HardwareEvidenceRequest {
