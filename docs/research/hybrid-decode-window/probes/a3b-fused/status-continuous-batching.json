@@ -1,0 +1,35 @@
+{
+  "continuous_batching": {
+    "mode": "canary",
+    "paged_kv_decision": "attached",
+    "unsupported_reason": null,
+    "active": true,
+    "cache_class": "mixed",
+    "scheduler": {
+      "shared_forward_calls": 0,
+      "waiting_count": 0,
+      "max_observed_batch_depth": 0,
+      "slots_total": 8,
+      "slots_free": 8,
+      "active_decode_rows": 0
+    },
+    "policy": {
+      "emergency_off_override": false,
+      "signer_key_id": null,
+      "release_id": null,
+      "tuple_sha256": null,
+      "expires_at": null,
+      "decision_reason": "absent_empty_off_fallback",
+      "policy_version": null,
+      "policy_sha256": null,
+      "authorized": false,
+      "load_status": "absent_empty_off_fallback",
+      "cached_turns_authorized": false,
+      "authorization_source": "baked_empty_off",
+      "rollout_mode": "off",
+      "local_proof_result": "passed"
+    }
+  },
+  "binary_version": "1.8.232",
+  "model": "qwen/qwen3.6-35b-a3b"
+}

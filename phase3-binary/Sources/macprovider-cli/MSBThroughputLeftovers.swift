@@ -13,6 +13,42 @@ enum MSBThroughputScenario: String, Codable, ExpressibleByArgument, CaseIterable
     case drain
     case leftovers
     case raggedPrefill = "ragged-prefill"
+    case hybridWindow = "hybrid-window"
+}
+
+/// `--scenario hybrid-window`: SPEC-038 FR-CB2 hybrid decode-window proof on
+/// a fixed greedy batch. `pass` requires window 1 to repeat itself exactly
+/// and every row's candidate-window tokens to equal its window-1 tokens.
+struct MSBHybridWindowReport: Codable, Sendable {
+    let schemaVersion: Int
+    let modelID: String
+    let modelTag: String
+    let mlxSwiftLMPin: String
+    let scenario: String
+    let rows: Int
+    let promptTokenLengths: [Int]
+    let promptChunkTokens: Int
+    let decodeTokensPerRow: Int
+    let blockSizeTokens: Int
+    let maxPhysicalBlocks: Int
+    let runs: Int
+    let referenceWindow: Int
+    let candidateWindow: Int
+    let referenceWindowCalls: Int
+    let candidateWindowCalls: Int
+    let referenceRepeatsExactly: Bool
+    let rowMatches: [Bool]
+    let firstDivergenceIndex: [Int?]
+    let referenceTokenSHA256: [String]
+    let referenceAggregateTPSRuns: [Double]
+    let candidateAggregateTPSRuns: [Double]
+    let referenceAggregateTPSp50: Double
+    let candidateAggregateTPSp50: Double
+    let candidateSpeedup: Double
+    let peakRSSMB: Int
+    let promptTokenSHA256: [String]
+    let timestamp: String
+    let pass: Bool
 }
 
 struct MSBUsageRow: Codable, Sendable, Equatable {

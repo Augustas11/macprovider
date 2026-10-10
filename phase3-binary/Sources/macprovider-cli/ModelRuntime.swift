@@ -4486,7 +4486,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
-              continuousBatchScheduler != nil,
+              let scheduler = continuousBatchScheduler,
               let tuple = continuousBatchingRequestedTuple(),
               !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
         else { return nil }
@@ -4496,7 +4496,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 metallibSHA256: tuple.metallibSHA256,
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
-                osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild
+                osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
+                decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
             generation: selfCheckGeneration
@@ -5128,23 +5129,26 @@ actor ModelRuntime: ModelRuntimeServing {
         return rule
     }
 
-    /// Hybrid recurrent state is split/repacked only at decode window
-    /// boundaries. Keep production windows to one token until the Qwen35/38
-    /// shared-state path proves exact beyond the 512-token prompt boundary.
+    /// Every cache layout, hybrid (recurrent + attention) included, decodes
+    /// in the 16-step window (SPEC-038 FR-CB2). Hybrid recurrent state is
+    /// packed once per window, advances one token per step inside it, and is
+    /// split back to rows at the window end; a row that stops mid-window keeps
+    /// recurrent checkpoints at its stop boundary. Exactness against one-step
+    /// windows: `HybridDecodeWindowExactnessTests` (tiny Qwen3.5, prompts past
+    /// the 512-token chunk) and `msb-throughput --scenario hybrid-window` on
+    /// the served artifact.
     nonisolated static func servePathDecodeLockstepWindow(
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) -> Int {
         #if MACPROVIDER_LAB_HARNESS
-        // #1906 lab measurement only: hybrid multi-step decode windows.
+        // Lab A/B measurement only (#1906): a smaller hybrid window, down to 1.
         if cacheKinds.contains(.recurrentMamba),
            let raw = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_HYBRID_DECODE_WINDOW"],
            let window = Int(raw), window >= 1 {
             return min(window, ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow)
         }
         #endif
-        return cacheKinds.contains(.recurrentMamba)
-            ? 1
-            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        return ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
     }
 
     /// An injected real paged-KV backend (native-MTP bench / hardware E2E)

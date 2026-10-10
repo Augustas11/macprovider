@@ -219,9 +219,10 @@ enum PagedKVRuntimeParityProbe {
 
     /// AC-3 MoE input-isolation self-test: prefill two distinct prompts as two rows,
     /// sample each row's first token from the final prompt position, then run a batched
-    /// `[B,1]` shared-forward decode step. Recurrent mixed-cache
-    /// layouts additionally remove one peer, join a fresh peer, and run a second batched
-    /// `[B,1]` shared-forward step. Each sampled token is compared to an independent
+    /// `[B,1]` shared-forward decode step. Recurrent mixed-cache layouts run that first
+    /// decode as one lockstep window of the serve path's length
+    /// (`ModelRuntime.servePathDecodeLockstepWindow`), then remove one peer, join a fresh
+    /// peer, and run a second batched `[B,1]` shared-forward step. Each sampled token is compared to an independent
     /// production `TokenIterator` reference for the exact row continuation being decoded.
     ///
     /// `PagedKVSharedForwardBackend.decode` returns ALL `.rowFailure` if the multi-row
@@ -272,10 +273,12 @@ enum PagedKVRuntimeParityProbe {
             )
 
             let needsRecurrentMembershipProbe = cacheKinds?.contains(.recurrentMamba) == true
-            // Production hybrid scheduling splits and writes recurrent state back at
-            // every token boundary. Exercise one shared decode before the leave/join
-            // transition instead of the non-production multi-token packed-cache window.
-            let firstSteps = 1
+            // Hybrids run the first shared decode in the serve path's lockstep
+            // window, the multi-step packed recurrent window production serves,
+            // then hand row state back across the leave/join transition.
+            let firstSteps = cacheKinds.flatMap { kinds in
+                needsRecurrentMembershipProbe ? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: kinds) : nil
+            } ?? 1
             let rowA = try await Self.makeMoEProbeRow(
                 requestID: "moe-probe-a",
                 prompt: promptA,
@@ -402,7 +405,13 @@ enum PagedKVRuntimeParityProbe {
                     "moe-probe-b": referenceB1,
                 ]
             ) + prefillDivergences
-            let firstChallengeDistinguishing = Self.challengeDistinguishing([referenceA1, referenceB1])
+            // Distinct references at the window's first step give the same
+            // leak-detecting challenge as a one-step window; every later window
+            // step must still equal the row's own serial reference.
+            let firstChallengeDistinguishing = Self.challengeDistinguishing([
+                Array(referenceA1.prefix(1)),
+                Array(referenceB1.prefix(1)),
+            ])
 
             guard needsRecurrentMembershipProbe else {
                 let proven = firstChallengeDistinguishing
@@ -658,10 +667,14 @@ enum PagedKVRuntimeParityProbe {
             return generated
         }
 
-        let hybrid = cacheKinds?.contains(.recurrentMamba) == true
+        // Hybrids decode in the serve path's window so the parity covers the
+        // served multi-step recurrent windows (SPEC-038 FR-CB2).
+        let hybridWindow = cacheKinds.flatMap { kinds in
+            kinds.contains(.recurrentMamba) ? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: kinds) : nil
+        }
         var remaining = nNew - 1
         while remaining > 0 {
-            let window = hybrid ? 1 : remaining
+            let window = min(hybridWindow ?? remaining, remaining)
             var decodeInputs: [ContinuousBatchDecodeInput] = []
             for row in rows {
                 guard let handle = handles[row.id],

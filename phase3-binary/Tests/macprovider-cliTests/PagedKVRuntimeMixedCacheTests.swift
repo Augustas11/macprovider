@@ -8,10 +8,8 @@ import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     /// The native-MTP bench and hardware E2E inject a real paged-KV backend.
-    /// That path must use the serve path's decode window: a hybrid (Qwen3.6)
-    /// row decodes one token per hop and streams per token, so a 16-step
-    /// window there made the bench's ordinary path deliver 16-token bursts
-    /// production never emits.
+    /// That path must use the serve path's decode window, which is the same
+    /// 16-step window for hybrid (Qwen3.6) and KV-only layouts.
     func testInjectedPagedBackendUsesServePathDecodeWindow() {
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
@@ -34,7 +32,10 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
             poolEpoch: 1,
             layerCount: 2
         )
-        XCTAssertEqual(ModelRuntime.decodeLockstepWindow(backendOverride: hybrid), 1)
+        XCTAssertEqual(
+            ModelRuntime.decodeLockstepWindow(backendOverride: hybrid),
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
         XCTAssertEqual(
             ModelRuntime.decodeLockstepWindow(backendOverride: hybrid),
             ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention])
@@ -61,7 +62,11 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
                     5: 6,
                     12: 7,
                     7: 8,
-                ]
+                ],
+                // The probe packs row A after a decode window with row B'
+                // after a two-token prefill, which only packs when recurrent
+                // state has a fixed shape.
+                fixedShapeRecurrentState: true
             ),
             processor: MixedCacheUserInputProcessor(),
             tokenizer: MixedCacheTokenizer()
@@ -84,8 +89,15 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(result.crossRowDivergences, 0)
         XCTAssertTrue(result.challengeDistinguishing)
         XCTAssertGreaterThanOrEqual(recorder.forwardBatchSizes().filter { $0 == 2 }.count, 2)
+        // The probe decodes row A through one serve-path window: inputs 4, 5,
+        // then 6 for every later step, so A's state records 6. The rejoined
+        // row B prefilled [11, 12].
+        XCTAssertEqual(
+            ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention]),
+            ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+        )
         XCTAssertTrue(
-            recorder.previousMambaSnapshots().contains([204, 211]),
+            recorder.previousMambaSnapshots().contains([206, 212]),
             "peer-rejoin decode must retain row A's post-window state while admitting the rejoined row B state"
         )
     }
@@ -814,17 +826,23 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     private let vocabularySize = 64
     private let attentionDType: DType
     private let returnsBackendStateForBatches: Bool
+    /// Off: the recurrent state records every input token, so its shape
+    /// follows the forward's length and tests can read a prefill's full
+    /// input back from it. On: one value per row, as real recurrent state.
+    private let fixedShapeRecurrentState: Bool
 
     init(
         recorder: MixedCacheRecorder,
         nextTokenByInput: [Int: Int],
         attentionDType: DType = .float32,
-        returnsBackendStateForBatches: Bool = false
+        returnsBackendStateForBatches: Bool = false,
+        fixedShapeRecurrentState: Bool = false
     ) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
         self.attentionDType = attentionDType
         self.returnsBackendStateForBatches = returnsBackendStateForBatches
+        self.fixedShapeRecurrentState = fixedShapeRecurrentState
         super.init()
     }
 
@@ -855,9 +873,20 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
                     eval(previous)
                     recorder.recordPreviousMambaState(previous.asArray(Float.self))
                 }
-                let stateValues = flatTokens.map { Float($0 + 200) }
-                mamba[0] = MLXArray(stateValues, [batch, sequenceLength, 1])
-                mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, sequenceLength, 1])
+                if fixedShapeRecurrentState {
+                    // Real conv/SSM state has one shape whatever the forward's
+                    // length, so a row that prefilled packs with a row that
+                    // decoded. This records the row's last input token.
+                    let stateValues = (0 ..< batch).map { row in
+                        Float(flatTokens[row * sequenceLength + sequenceLength - 1] + 200)
+                    }
+                    mamba[0] = MLXArray(stateValues, [batch, 1, 1])
+                    mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, 1, 1])
+                } else {
+                    let stateValues = flatTokens.map { Float($0 + 200) }
+                    mamba[0] = MLXArray(stateValues, [batch, sequenceLength, 1])
+                    mamba[1] = MLXArray(stateValues.map { $0 + 1 }, [batch, sequenceLength, 1])
+                }
             } else {
                 recorder.recordBadLayout()
             }

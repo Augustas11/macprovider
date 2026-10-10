@@ -1,0 +1,14 @@
+w16 prompt-heavy 1 1 1791617613 1791617736 CONTAMINATED samples=50 live_nonzero=2 other_busy=0 other_max_cpu=0
+w16 prompt-heavy 1 2 1791617759 1791617881 CLEAN samples=51 live_nonzero=0 other_busy=0 other_max_cpu=0
+w16 prompt-heavy 8 1 1791617881 1791618008 CLEAN samples=53 live_nonzero=0 other_busy=0 other_max_cpu=0
+w16 prompt-heavy 16 1 1791618008 1791618153 CLEAN samples=60 live_nonzero=0 other_busy=0 other_max_cpu=0
+w16 output-heavy 1 1 1791618153 1791618280 CLEAN samples=53 live_nonzero=0 other_busy=0 other_max_cpu=0
+w16 output-heavy 8 1 1791618280 1791618430 CLEAN samples=62 live_nonzero=0 other_busy=0 other_max_cpu=0
+w16 output-heavy 16 1 1791618430 1791618567 CLEAN samples=56 live_nonzero=0 other_busy=0 other_max_cpu=0
+w1 prompt-heavy 1 1 1791618610 1791618731 CONTAMINATED samples=49 live_nonzero=2 other_busy=0 other_max_cpu=0
+w1 prompt-heavy 1 2 1791618731 1791618852 CLEAN samples=50 live_nonzero=0 other_busy=0 other_max_cpu=3
+w1 prompt-heavy 8 1 1791618852 1791618979 CLEAN samples=53 live_nonzero=0 other_busy=0 other_max_cpu=0
+w1 prompt-heavy 16 1 1791618979 1791619123 CLEAN samples=60 live_nonzero=0 other_busy=0 other_max_cpu=0
+w1 output-heavy 1 1 1791619123 1791619245 CLEAN samples=51 live_nonzero=0 other_busy=0 other_max_cpu=0
+w1 output-heavy 8 1 1791619245 1791619384 CLEAN samples=58 live_nonzero=0 other_busy=0 other_max_cpu=0
+w1 output-heavy 16 1 1791619384 1791619523 CLEAN samples=58 live_nonzero=0 other_busy=0 other_max_cpu=3

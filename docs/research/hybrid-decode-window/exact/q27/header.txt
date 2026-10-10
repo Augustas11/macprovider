@@ -1,0 +1,4 @@
+binary_sha256 a2df4cf76ffa1ed6cbcdaae2acc9e39b49a0ff6ed5c96ea1f3695369cf5a9f3f
+model <studio-home>/Library/Application Support/macprovider/models/mlx-community--Qwen3.6-27B-4bit/c000ac2c2057d94be3fa931000c31723aac53282/518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931
+MLX_LM_QWEN35_FUSED_MOE=unset
+rows=16 prompt_tokens=1536 decode_tokens=256 window=16 runs=3
