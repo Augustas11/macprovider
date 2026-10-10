@@ -367,11 +367,14 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
                 report: .init(decision: decision.reason, servedSlots: slots, verifiedSlots: decision.verifiedSlots, key: target.key)
             )
         }
-        let provisionalSlots = provisional?.slots(for: target.key.modelSHA256)
-        guard let prior = [provisionalSlots, store.priorGrant(for: target.key)].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
+        // A signed provisional grant carries the configured (or pinned) count;
+        // an older-runtime grant never carries more than it verified.
+        let provisionalSlots = provisional?.slots(for: target.key.modelSHA256).map { ownerPinned ?? $0 }
+        let storedSlots = store.priorGrant(for: target.key).map { min(ownerPinned ?? $0, $0) }
+        guard let prior = [provisionalSlots, storedSlots].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
             return nil
         }
-        let slots = min(ownerPinned ?? prior, target.maxRows)
+        let slots = min(prior, target.maxRows)
         return .init(
             state: .granted(slots: slots),
             servedSlots: slots,

@@ -1113,12 +1113,13 @@ NOT change `slots_total`.
    wait timeout and cancellation, so batched buyer rows never exceed the
    verified count. Self-check rows may use every scheduler row, and a buyer
    row is not admitted beside self-check rows (the self-check yields to the
-   buyer). Serial-routed buyer requests take a slot of the same budget
-   before running, so batched and serial buyer work together never exceed
-   `slots_total`; serial and batched buyers are served in arrival order. The
-   limit changes in place: holders keep their rows and nobody new is
-   admitted above a lowered limit. An owner-pinned provider with a signed
-   positive entry also keeps its pin while its self-check runs. A capacity change is published at once. A
+   buyer). Serial-routed buyer requests (features the batch cannot
+   represent) keep their own gate, also sized to `slots_total`, as before
+   v0.3.15. Both limits change in place, and each step of a live change
+   re-checks the swap generation so a stale result never resizes a gate or
+   caps a swapped-in scheduler. An owner-pinned provider with a signed
+   positive entry also keeps its pin while its self-check runs; an
+   older-runtime grant is never widened by a pin before re-verification. A capacity change is published at once. A
    stored self-check result for the loaded tuple applies at startup before
    the first advertisement, clamped to the rows after the startup memory
    bound; a provisional grant never exceeds a computable memory fit. A warm

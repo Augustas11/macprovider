@@ -217,6 +217,26 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(resolution.state, .granted(slots: 6))
     }
 
+    /// An owner pin above an older-runtime grant never widens it before the
+    /// new runtime is verified.
+    func testOwnerPinDoesNotWidenAnOlderRuntimeGrant() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-pin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "new", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o")
+        var older = key
+        older.runtimeBuild = "old-pin"
+        try store.store(.init(
+            key: older, decision: .init(slots: 4, reason: "granted", verifiedSlots: 4), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        let resolution = try XCTUnwrap(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: .init(key: key, maxRows: 8), ownerPinned: 8, provisional: nil
+        ))
+        XCTAssertEqual(resolution.servedSlots, 4)
+    }
+
     /// Records from the earlier v5 candidate still load, crash marker included.
     func testV5StoreRecordsStillLoad() throws {
         let directory = FileManager.default.temporaryDirectory

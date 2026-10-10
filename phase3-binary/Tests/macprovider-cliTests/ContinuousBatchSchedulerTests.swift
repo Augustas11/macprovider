@@ -7095,29 +7095,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(limit, 1)
     }
 
-    /// Serial-routed buyer work shares the served budget with batched rows.
-    func testSerialBuyerWorkSharesTheServedBudget() async throws {
-        let backend = ScriptedBackend(scripts: ["b1": [1, 2, 3]])
-        let scheduler = try await makeScheduler(maxActiveRows: 3, backend: backend)
-        await scheduler.setBuyerRowLimit(1)
-        try await scheduler.acquireExternalBuyerRow()
-        // The batched buyer waits while the serial request holds the slot.
-        let batched = Task { try await scheduler.submit(.init(id: "b1", conversationKey: "", promptTokens: [1], maxOutputTokens: 3)) }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        let waitingBefore = await scheduler.metrics().waitingCount
-        XCTAssertEqual(waitingBefore, 1)
-        // A second serial request waits too, behind the budget.
-        let second = Task { try await scheduler.acquireExternalBuyerRow() }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        await scheduler.releaseExternalBuyerRow()
-        let result = try await batched.value
-        XCTAssertEqual(result.terminalStatus, .length)
-        try await second.value
-        await scheduler.releaseExternalBuyerRow()
-        let depth = await scheduler.metrics().maxObservedBatchDepth
-        XCTAssertEqual(depth, 1)
-    }
-
     func testSelfCheckRowsUseEverySchedulerRow() async throws {
         let backend = ScriptedBackend(scripts: ["p1": [1, 2, 3], "p2": [4, 5, 6], "p3": [7, 8, 9]])
         let scheduler = try await makeScheduler(maxActiveRows: 3, maxPrefillRowsPerIteration: 3, backend: backend)

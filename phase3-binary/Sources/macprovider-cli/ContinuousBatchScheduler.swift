@@ -2886,15 +2886,12 @@ actor ContinuousBatchScheduler {
     private func pumpUntilIdle() async {
         defer {
             pumpRunning = false
-            resumeExternalBuyerWaiters()
             if pumpRestartRequested {
                 pumpRestartRequested = false
                 ensurePump()
             }
         }
         while true {
-            // Rows that finished free served buyer slots for serial work too.
-            resumeExternalBuyerWaiters()
             if backendCancellationPending { break }
             if cleanupFailedClosed {
                 await processCancellations()
@@ -5692,69 +5689,6 @@ actor ContinuousBatchScheduler {
     func setBuyerRowLimit(_ limit: Int) {
         buyerRowLimit = min(max(1, limit), configuration.maxActiveRows)
         if !waiting.isEmpty { ensurePump() }
-        resumeExternalBuyerWaiters()
-    }
-
-    /// Serial-routed buyer requests (outside the scheduler) share the served
-    /// buyer budget with batched rows, so batched and serial buyer work
-    /// together never exceeds `buyerRowLimit`.
-    private var externalBuyerRows = 0
-    private var externalBuyerWaiters: [(id: UUID, arrival: UInt64, continuation: CheckedContinuation<Void, Error>)] = []
-
-    /// Arrival time of the oldest waiting buyer row (its queue deadline less
-    /// the wait timeout), so serial and batched buyers are served in order.
-    private var oldestWaitingBuyerArrival: UInt64? {
-        let timeout = configuration.queueWaitTimeoutNanoseconds
-        return waiting.filter { !$0.selfCheckProbe }.compactMap { request -> UInt64? in
-            guard let deadline = queueWaitDeadlines[request.id] else { return 0 }
-            return deadline >= timeout ? deadline - timeout : 0
-        }.min()
-    }
-
-    private var buyerRowsOccupied: Int {
-        occupiedSlots - selfCheckRowsOccupied + externalBuyerRows
-    }
-
-    private var buyerBudgetAvailable: Bool {
-        buyerRowsOccupied < (buyerRowLimit ?? configuration.maxActiveRows)
-    }
-
-    /// Waits for a served buyer slot without a scheduler row. Cancellable.
-    func acquireExternalBuyerRow() async throws {
-        if externalBuyerWaiters.isEmpty, oldestWaitingBuyerArrival == nil,
-           buyerBudgetAvailable, selfCheckRowsOccupied == 0 {
-            externalBuyerRows += 1
-            return
-        }
-        let id = UUID()
-        let arrival = DispatchTime.now().uptimeNanoseconds
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                externalBuyerWaiters.append((id, arrival, continuation))
-            }
-        } onCancel: {
-            Task { await self.cancelExternalBuyerWaiter(id) }
-        }
-    }
-
-    func releaseExternalBuyerRow() {
-        externalBuyerRows = max(0, externalBuyerRows - 1)
-        if !waiting.isEmpty { ensurePump() }
-        resumeExternalBuyerWaiters()
-    }
-
-    private func cancelExternalBuyerWaiter(_ id: UUID) {
-        guard let index = externalBuyerWaiters.firstIndex(where: { $0.id == id }) else { return }
-        externalBuyerWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
-    }
-
-    private func resumeExternalBuyerWaiters() {
-        while let first = externalBuyerWaiters.first, buyerBudgetAvailable, selfCheckRowsOccupied == 0 {
-            // A batched buyer that arrived earlier goes first.
-            if let batched = oldestWaitingBuyerArrival, batched < first.arrival { break }
-            externalBuyerRows += 1
-            externalBuyerWaiters.removeFirst().continuation.resume()
-        }
     }
 
     func buyerRowLimitForTest() -> Int {
@@ -5766,15 +5700,8 @@ actor ContinuousBatchScheduler {
         guard occupiedSlots < configuration.maxActiveRows else { return false }
         if request.selfCheckProbe { return true }
         let probeRows = selfCheckRowsOccupied
-        guard probeRows == 0, buyerBudgetAvailable else { return false }
-        // A serial buyer that arrived earlier goes first.
-        if let serial = externalBuyerWaiters.first?.arrival,
-           let deadline = queueWaitDeadlines[request.id] {
-            let timeout = configuration.queueWaitTimeoutNanoseconds
-            let arrival = deadline >= timeout ? deadline - timeout : 0
-            if serial < arrival { return false }
-        }
-        return true
+        guard probeRows == 0 else { return false }
+        return occupiedSlots < (buyerRowLimit ?? configuration.maxActiveRows)
     }
 
     private func schedulerConversationKey(for request: ContinuousBatchSchedulerRequest) -> String {

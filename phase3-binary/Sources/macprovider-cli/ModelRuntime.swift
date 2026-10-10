@@ -4442,11 +4442,18 @@ actor ModelRuntime: ModelRuntimeServing {
     /// grant, and the relay admits at most the advertised slots. Never above
     /// `maxBatch`: the memory envelope and scheduler were sized for it. A
     /// request already holding a permit of the replaced gate releases it there.
-    func applyServedSlots(_ slots: Int) async {
+    /// Every step after an await re-checks the swap generation, so a stale
+    /// application never resizes the gate or caps a swapped-in scheduler.
+    @discardableResult
+    func applyServedSlots(_ slots: Int) async -> Bool {
+        let generation = selfCheckGeneration
         let served = min(max(1, slots), maxBatch)
+        let scheduler = continuousBatchScheduler
         servedSlotLimit = served
         await inferenceGate.resize(to: served)
-        await continuousBatchScheduler?.setBuyerRowLimit(served)
+        guard selfCheckGeneration == generation else { return false }
+        await scheduler?.setBuyerRowLimit(served)
+        return selfCheckGeneration == generation
     }
 
     func configureServedSlots(
@@ -4518,8 +4525,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let generation = selfCheckGeneration
         continuousBatchingSelfCheck = state
         if let report { continuousBatchingSelfCheckReport = report }
-        await applyServedSlots(servedSlots)
-        guard selfCheckGeneration == generation else { return false }
+        guard await applyServedSlots(servedSlots), selfCheckGeneration == generation else { return false }
         if publishCapacity {
             await providerStatus?.updateServedSlots(min(max(1, servedSlots), maxBatch))
         }
@@ -7718,15 +7724,10 @@ actor ModelRuntime: ModelRuntimeServing {
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
-        let buyerBudgetScheduler = servedSlotsManaged ? continuousBatchScheduler : nil
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
-                // SPEC-038-R011: serial buyer work shares the served budget
-                // with batched rows (acquired outside the model container).
-                try await buyerBudgetScheduler?.acquireExternalBuyerRow()
-                defer { if let buyerBudgetScheduler { Task { await buyerBudgetScheduler.releaseExternalBuyerRow() } } }
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
@@ -8428,7 +8429,6 @@ actor ModelRuntime: ModelRuntimeServing {
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
-        let buyerBudgetScheduler = servedSlotsManaged ? continuousBatchScheduler : nil
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
@@ -8447,8 +8447,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 try await inferenceGate.withPermit { () async throws -> CompletionResult in
                 try drainCancelled.check()
                 try Task.checkCancellation()
-                try await buyerBudgetScheduler?.acquireExternalBuyerRow()
-                defer { if let buyerBudgetScheduler { Task { await buyerBudgetScheduler.releaseExternalBuyerRow() } } }
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
