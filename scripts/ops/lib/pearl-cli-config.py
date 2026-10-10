@@ -332,6 +332,14 @@ def check_live(args, health):
         raise Refused("/healthz compatibility_policy_revoked_ids does not list every requested revocation")
 
 
+def policy_preflight(args):
+    """Before any edit: the --healthz listener must report the compatibility
+    policy, or check_live can never pass and the restart is wasted (the
+    buyer listener's /healthz has no compatibility_policy_* fields)."""
+    if (args.recommend or args.revoke) and "compatibility_policy_mode" not in healthz(args.healthz):
+        raise Refused("%s reports no compatibility_policy_mode; point --healthz at the provider listener" % args.healthz)
+
+
 def privacy_preflight(args, env, uid, gid):
     metadata_dir, key_path, key_sha = args.privacy_setup
     for path in (metadata_dir, key_path):
@@ -370,6 +378,7 @@ def apply(args):
     with guard(args):
         pid, binary, env, uid, gid = running(args)
         overlay_conflicts(args.overlay, args)
+        policy_preflight(args)
         if args.privacy_setup:
             privacy_preflight(args, env, uid, gid)
         with open(args.config, "rb") as f:
