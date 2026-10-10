@@ -237,11 +237,15 @@ func (q *slotQueue) hasWaiters(providerID string) bool {
 	return len(q.queues[providerID]) > 0
 }
 
+// hasStandardWaiters reports waiters admitted during a zero-slot
+// observation: standard and pinned waiters, not reservation overflow. A
+// pinned waiter was standard before the lanes split, so plaintext still
+// joins a queue that is draining pinned waiters.
 func (q *slotQueue) hasStandardWaiters(providerID string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, waiter := range q.queues[providerID] {
-		if waiter.kind == slotWaiterStandard {
+		if waiter.kind != slotWaiterReservationOverflow {
 			return true
 		}
 	}

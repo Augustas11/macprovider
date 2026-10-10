@@ -2856,7 +2856,7 @@ A provider `error_queue_full` refusal means no inference ran. The coordinator MU
 
 **Pinned lane.** Relay-blind and privacy-class chats wait only on their reserved session, in a second lane of the same per-provider queue (SPEC-049-R029). Its cap is half the plaintext cap, at least 1. Neither lane counts against the other's cap. While both lanes wait, queue grants alternate between them, so each gets at least every other grant.
 
-Pinned provider or session requests MUST NOT enter this queue. If the pinned target is full or reservation-blocked, return the capacity shed. If it is otherwise not routable, return 503.
+Plaintext requests pinned by provider or session routing headers MUST NOT enter this queue. This does not cover relay-blind and privacy-class chats bound to a reservation, which use the pinned lane above. If the pinned target is full or reservation-blocked, return the capacity shed. If it is otherwise not routable, return 503.
 
 Wholesale partner accounts (`auth.wholesale_account_ids`) MAY enter this queue because they are non-pinned traffic. A coordinator capacity shed reaches them as the same `429`. A coordinator `503 no_provider_available` MUST still be translated at the gateway to `429` with `retryable: true` and a `Retry-After` hint. OpenRouter scores HTTP 503 against uptime; 429 is capacity-shed.
 

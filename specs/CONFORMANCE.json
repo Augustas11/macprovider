@@ -11685,10 +11685,13 @@
         "phase4-coordinator/internal/buyer/relay_blind.go:notePending",
         "phase4-coordinator/internal/buyer/slot_queue.go:nextLocked",
         "phase4-coordinator/internal/buyer/slot_queue.go:enterPinned",
-        "phase4-coordinator/internal/buyer/slot_queue.go:reserveHead"
+        "phase4-coordinator/internal/buyer/slot_queue.go:reserveHead",
+        "phase4-coordinator/internal/buyer/relay_blind.go:lockAccountSelection",
+        "phase4-coordinator/internal/buyer/slot_queue.go:hasStandardWaiters"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionSpreadsUndispatchedReservations",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionSpreadsSimultaneousReservations",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionRotatesAndNeverChoosesIneligible",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionPrefersFreeEnrolledProvider",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionIgnoresOtherAccountsPending",
@@ -11698,12 +11701,11 @@
         "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueSustainedPlaintextLoadGivesPinnedFairShare",
         "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueSustainedPinnedLoadDoesNotStarvePlaintext",
         "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueLanesHaveSeparateCaps",
+        "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueuePinnedWaitersCountAsDraining",
         "phase4-coordinator/internal/buyer/relay_blind_capacity_test.go:TestRelayBlindSlotWaitersAreCappedPerProvider",
         "test/integration/privacy_capacity_integration_test.go:TestPrivacyClassSpreadsAcrossEnrolledProviders"
       ],
-      "journeys": [
-        "JOURNEY-PRIVACY-CLASS-BETA-V2"
-      ],
+      "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",

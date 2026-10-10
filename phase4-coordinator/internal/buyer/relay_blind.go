@@ -51,6 +51,10 @@ type relayBlindService struct {
 	// orders candidates only; it is never an eligibility input.
 	pending      map[string]map[string]map[string]int64
 	pendingCount int
+	pendingSwept time.Time
+	// selecting serializes one account's selection through notePending, so
+	// two concurrent reservations of that account see each other.
+	selecting map[string]*relayBlindAccountGate
 	// pick chooses the start of a candidate tier; nil means uniform random.
 	// Random needs no shared state, so no interleaving of models, key classes
 	// or request sizes can concentrate reservations on one provider.
@@ -61,13 +65,50 @@ type relayBlindService struct {
 // after the buyer disconnects.
 const relayBlindDurableWriteTimeout = 5 * time.Second
 
-// relayBlindPendingLimit bounds the in-memory pending-reservation index,
-// and relayBlindPendingPerAccount bounds one account's share of it. Past
-// either, new reservations are not tracked, which only weakens spreading.
+// relayBlindPendingPerAccount bounds one account's share of the pending
+// index; past it new reservations of that account are not tracked, which
+// only weakens that account's own spreading. There is no shared cap, so one
+// account's tracking never depends on another's. Every entry mirrors an
+// unexpired reservation row the store already holds, and a full sweep runs
+// at least once per relayBlindPendingSweep, so memory follows the store.
 const (
-	relayBlindPendingLimit      = 4096
 	relayBlindPendingPerAccount = 64
+	relayBlindPendingSweep      = 30 * time.Second
 )
+
+type relayBlindAccountGate struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockAccountSelection serializes reservation selection for accountID until
+// the returned function runs. Other accounts are not blocked.
+func (r *relayBlindService) lockAccountSelection(accountID string) func() {
+	if r == nil {
+		return func() {}
+	}
+	r.mu.Lock()
+	if r.selecting == nil {
+		r.selecting = map[string]*relayBlindAccountGate{}
+	}
+	gate := r.selecting[accountID]
+	if gate == nil {
+		gate = &relayBlindAccountGate{}
+		r.selecting[accountID] = gate
+	}
+	gate.refs++
+	r.mu.Unlock()
+	gate.mu.Lock()
+	return func() {
+		gate.mu.Unlock()
+		r.mu.Lock()
+		gate.refs--
+		if gate.refs == 0 {
+			delete(r.selecting, accountID)
+		}
+		r.mu.Unlock()
+	}
+}
 
 // notePending records a reservation of accountID that has not dispatched.
 func (r *relayBlindService) notePending(accountID, providerID, binding string, expiresAtUnix int64, now time.Time) {
@@ -77,19 +118,19 @@ func (r *relayBlindService) notePending(accountID, providerID, binding string, e
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prunePendingLocked(accountID, now)
-	if r.pendingCount >= relayBlindPendingLimit {
-		// Entries of idle accounts are pruned only here, so a full index
-		// never stays full of expired reservations.
+	if now.Sub(r.pendingSwept) >= relayBlindPendingSweep {
+		// Idle accounts are pruned only here.
 		for other := range r.pending {
 			r.prunePendingLocked(other, now)
 		}
+		r.pendingSwept = now
 	}
 	account := r.pending[accountID]
 	held := 0
 	for _, bindings := range account {
 		held += len(bindings)
 	}
-	if r.pendingCount >= relayBlindPendingLimit || held >= relayBlindPendingPerAccount {
+	if held >= relayBlindPendingPerAccount {
 		return
 	}
 	if r.pending == nil {
@@ -380,6 +421,8 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
+	unlockSelection := s.relayBlind.lockAccountSelection(account.ID())
+	defer func() { unlockSelection() }()
 	provider, key, found := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind)
 	if !found {
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "No relay-blind provider is available")
@@ -405,6 +448,8 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.relayBlind.notePending(account.ID(), provider.ProviderID, reservation.ProviderBinding, expires, s.now())
+	unlockSelection()
+	unlockSelection = func() {}
 	response := relayblind.ReservationResponse{
 		Version: relayblind.ReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
 		KeyRecordDigest: key.KeyRecordDigest, KeyRecord: key, KID: key.KID, EndpointFamily: relayblind.EndpointChatCompletions,

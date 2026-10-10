@@ -251,6 +251,8 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
+	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
+	defer func() { unlockSelection() }()
 	selected, code := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes)
 	if code != "" {
 		writePrivacyClassError(w, privacyObservedCode(code, true), "")
@@ -288,6 +290,8 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.relayBlind.notePending(accountID, selected.provider.ProviderID, reservation.ProviderBinding, expires, s.now())
+	unlockSelection()
+	unlockSelection = func() {}
 	response := relayblind.ReservationResponse{
 		Version: relayblind.PrivacyReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
 		KeyRecordDigest: selected.key.KeyRecordDigest, KeyRecord: selected.key, KID: selected.key.KID, EndpointFamily: relayblind.EndpointChatCompletions,

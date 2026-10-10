@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -169,6 +170,50 @@ func TestPrivacySelectionSpreadsUndispatchedReservations(t *testing.T) {
 	}
 }
 
+// Simultaneous reservations of one account still land on distinct
+// providers: selection through pending publication is serialized per account.
+func TestPrivacySelectionSpreadsSimultaneousReservations(t *testing.T) {
+	f := newPrivacyFleet(t, fleetMembers(4))
+	f.server.relayBlind.pick = func(int) int { return 0 }
+	for round := range 10 {
+		results := make(chan [2]string, 4)
+		start := make(chan struct{})
+		for range 4 {
+			go func() {
+				<-start
+				raw, _ := json.Marshal(relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048})
+				response := f.privacyRequest(t, http.MethodPost, "/v1/relay-blind/route-reservations", raw, "", nil)
+				parsed, err := relayblind.ParseReservationResponse(response.Body.Bytes())
+				if err != nil {
+					results <- [2]string{"", fmt.Sprintf("status=%d body=%s", response.Code, response.Body.String())}
+					return
+				}
+				row, err := f.store.LookupReservation(context.Background(), parsed.ProviderBinding)
+				if err != nil {
+					results <- [2]string{"", err.Error()}
+					return
+				}
+				results <- [2]string{row.ProviderID, parsed.ProviderBinding}
+			}()
+		}
+		close(start)
+		seen := map[string]string{}
+		for range 4 {
+			got := <-results
+			if got[0] == "" {
+				t.Fatalf("round %d: reservation failed: %s", round, got[1])
+			}
+			if _, dup := seen[got[0]]; dup {
+				t.Fatalf("round %d: two simultaneous reservations bound %s while another provider was idle", round, got[0])
+			}
+			seen[got[0]] = got[1]
+		}
+		for providerID, binding := range seen {
+			f.server.relayBlind.clearPending("account-a", providerID, binding)
+		}
+	}
+}
+
 // Rotation spreads load across N enrolled providers, and providers without
 // a verified posture or without a privacy key are never chosen, even when
 // they are the only ones with a free slot.
@@ -246,17 +291,20 @@ func TestRelayBlindPendingExpiresAndIsBounded(t *testing.T) {
 	if r.pendingCount != relayBlindPendingPerAccount {
 		t.Fatalf("pending count=%d, want one account capped at %d", r.pendingCount, relayBlindPendingPerAccount)
 	}
-	for i := range relayBlindPendingLimit + 10 {
+	// Other accounts holding many entries never stop this account's
+	// tracking: there is no shared cap.
+	for i := range 5000 {
 		r.notePending(fmt.Sprintf("acct-%d", i), "p", "b", now.Add(time.Minute).Unix(), now)
 	}
-	if r.pendingCount != relayBlindPendingLimit {
-		t.Fatalf("pending count=%d, want capped at %d", r.pendingCount, relayBlindPendingLimit)
+	r.notePending("mine", "q", "mine", now.Add(time.Minute).Unix(), now)
+	if got := r.pendingOn("mine", "q", now); got != 1 {
+		t.Fatalf("pending=%d, want this account tracked whatever other accounts hold", got)
 	}
-	// Once those expire, a full index is pruned instead of refusing.
+	// Once those expire, the periodic sweep prunes idle accounts.
 	later := now.Add(2 * time.Minute)
 	r.notePending("fresh", "p", "b", later.Add(time.Minute).Unix(), later)
-	if got := r.pendingOn("fresh", "p", later); got != 1 || r.pendingCount != 1 {
-		t.Fatalf("pending=%d count=%d after expiry, want the expired index pruned", got, r.pendingCount)
+	if r.pendingCount != 1 || len(r.pending) != 1 {
+		t.Fatalf("pending count=%d accounts=%d after expiry, want idle accounts swept", r.pendingCount, len(r.pending))
 	}
 }
 

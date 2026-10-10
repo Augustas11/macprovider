@@ -209,3 +209,22 @@ func TestSlotQueueGrantCountTracksProgress(t *testing.T) {
 		t.Fatalf("grant count=%d after the queue emptied, want reset", queue.grantCount("p"))
 	}
 }
+
+// A queue draining only pinned waiters still lets plaintext join it, as it
+// did when those waiters were standard.
+func TestSlotQueuePinnedWaitersCountAsDraining(t *testing.T) {
+	queue := newSlotQueue(4)
+	if _, ok := queue.enterPinned("p", 2); !ok {
+		t.Fatal("pinned waiter rejected")
+	}
+	if !queue.hasStandardWaiters("p") {
+		t.Fatal("pinned-only queue not treated as draining")
+	}
+	other := newSlotQueue(4)
+	if _, ok := other.enterWithKind("p", slotWaiterReservationOverflow); !ok {
+		t.Fatal("overflow waiter rejected")
+	}
+	if other.hasStandardWaiters("p") {
+		t.Fatal("reservation-overflow waiters treated as draining")
+	}
+}
