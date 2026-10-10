@@ -80,13 +80,17 @@ type swiftRelayFixture struct {
 	settlementProviderID string
 	// onDispatch, when set, runs on every inference_request before the
 	// fixture serves it.
-	onDispatch   func(raw []byte)
-	holdPosture  atomic.Bool
-	dispatches   atomic.Int32
-	postureReady chan struct{}
-	postureOnce  sync.Once
-	stdoutLog    *logBuffer
-	stderrLog    *logBuffer
+	onDispatch func(raw []byte)
+	// wsProviderID and wsProviderToken, when set, connect this fixture as
+	// a second provider instead of the scenario's own provider identity.
+	wsProviderID    string
+	wsProviderToken string
+	holdPosture     atomic.Bool
+	dispatches      atomic.Int32
+	postureReady    chan struct{}
+	postureOnce     sync.Once
+	stdoutLog       *logBuffer
+	stderrLog       *logBuffer
 }
 
 func buildSwiftRelayBinary(t *testing.T) string {
@@ -668,8 +672,12 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 	if err != nil {
 		t.Fatal(err)
 	}
+	providerID, providerToken := s.providerID, s.providerToken
+	if fixture.wsProviderID != "" {
+		providerID, providerToken = fixture.wsProviderID, fixture.wsProviderToken
+	}
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+s.providerToken)
+	header.Set("Authorization", "Bearer "+providerToken)
 	dialer := gobwas.Dialer{Timeout: 5 * time.Second, Header: gobwas.HandshakeHeaderHTTP(header)}
 	var conn net.Conn
 	deadline := time.Now().Add(10 * time.Second)
@@ -694,7 +702,7 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		"type":                    "hello",
 		"version":                 1,
 		"tier":                    1,
-		"provider_id":             s.providerID,
+		"provider_id":             providerID,
 		"hostname":                "swift-relay-fixture",
 		"model_id":                defaultFakeModelID,
 		"model_params_b":          3.0,
