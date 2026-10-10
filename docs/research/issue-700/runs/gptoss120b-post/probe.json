@@ -1,0 +1,178 @@
+{
+ "model": "<studio-home>/Library/Application Support/macprovider/models/mlx-community--gpt-oss-120b-4bit/08e7899579b5dd5e0364e4bcd32578134072e22d/c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
+ "family": "gpt_oss",
+ "pass": false,
+ "checks": [
+  {
+   "check": "load_and_generate",
+   "pass": true,
+   "content": "Paris is the capital of France.",
+   "usage": {
+    "macprovider_generation_ms": null,
+    "completion_tokens": 7,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 87,
+    "macprovider_generated_completion_tokens": 65,
+    "prompt_tokens": 80,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "greedy_deterministic",
+   "pass": true,
+   "second": "Paris is the capital of France."
+  },
+  {
+   "check": "eos_stop",
+   "pass": true,
+   "finish_reason": "stop",
+   "completion_tokens": 7
+  },
+  {
+   "check": "no_control_token_leak",
+   "pass": true,
+   "leaked": []
+  },
+  {
+   "check": "usage_consistent",
+   "pass": true,
+   "usage": {
+    "macprovider_generation_ms": null,
+    "completion_tokens": 7,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 87,
+    "macprovider_generated_completion_tokens": 65,
+    "prompt_tokens": 80,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "stream_matches_nonstream",
+   "pass": true,
+   "stream_content": "Paris is the capital of France.",
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generation_ms": 3547,
+    "completion_tokens": 7,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 87,
+    "macprovider_generated_completion_tokens": 65,
+    "prompt_tokens": 80,
+    "cached_prompt_tokens": 0
+   },
+   "content_deltas": 1
+  },
+  {
+   "check": "max_tokens_length",
+   "pass": true,
+   "finish_reason": "length",
+   "usage": {
+    "macprovider_generation_ms": null,
+    "completion_tokens": 309,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 388,
+    "macprovider_generated_completion_tokens": 400,
+    "prompt_tokens": 79,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "max_tokens_length_stream",
+   "pass": true,
+   "finish_reason": "length",
+   "usage": {
+    "macprovider_generation_ms": 30843,
+    "completion_tokens": 309,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 388,
+    "macprovider_generated_completion_tokens": 400,
+    "prompt_tokens": 79,
+    "cached_prompt_tokens": 0
+   },
+   "content_deltas": 1
+  },
+  {
+   "check": "analysis_exhausted_fail_closed",
+   "pass": true,
+   "status": 502,
+   "body": "{\"error\":{\"code\":\"malformed_tool_call_final_json\",\"retryable\":true,\"settlement_ran\":true,\"type\":\"upstream_provider_error\",\"param\":null,\"request_id\":null,\"message\":\"Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted before the model reache"
+  },
+  {
+   "check": "stop_string_exception",
+   "pass": false,
+   "error": "<HTTPError 502: 'Bad Gateway'>",
+   "body": "{\"error\":{\"code\":\"malformed_tool_call_final_json\",\"retryable\":true,\"settlement_ran\":true,\"type\":\"upstream_provider_error\",\"param\":null,\"request_id\":null,\"message\":\"Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted before the model reache"
+  },
+  {
+   "check": "reasoning_final_extracted",
+   "pass": true,
+   "content": "6:05\u202fPM",
+   "finish_reason": "stop"
+  },
+  {
+   "check": "reasoning_accounting",
+   "pass": true,
+   "usage": {
+    "macprovider_generation_ms": null,
+    "completion_tokens": 5,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 103,
+    "macprovider_generated_completion_tokens": 61,
+    "prompt_tokens": 98,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "reasoning_stream_parity",
+   "pass": true,
+   "stream_content": "6:05\u202fPM",
+   "usage": {
+    "macprovider_generation_ms": 3933,
+    "completion_tokens": 5,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 103,
+    "macprovider_generated_completion_tokens": 61,
+    "prompt_tokens": 98,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "tool_call",
+   "pass": true,
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\n  \"city\": \"Vilnius\",\n  \"unit\": \"c\"\n}"
+     },
+     "id": "call_<id>"
+    }
+   ],
+   "content": "",
+   "usage": {
+    "macprovider_generation_ms": null,
+    "completion_tokens": 0,
+    "macprovider_model_hash_observed": null,
+    "total_tokens": 145,
+    "macprovider_generated_completion_tokens": 200,
+    "prompt_tokens": 145,
+    "cached_prompt_tokens": 0
+   }
+  },
+  {
+   "check": "tool_call_stream_parity",
+   "pass": true,
+   "finish_reason": "tool_calls",
+   "tool_name": "get_weather",
+   "args": "{\n  \"city\": \"Vilnius\",\n  \"unit\": \"c\"\n}"
+  },
+  {
+   "check": "tool_history_turn_fail_closed",
+   "pass": true,
+   "status": 400,
+   "code": "unsupported_modelID_for_multi_turn"
+  }
+ ]
+}

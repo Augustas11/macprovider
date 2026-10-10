@@ -1,0 +1,5 @@
+auto_update_enabled: false
+enable_receipts: false
+idle_prewarm:
+  enabled: false
+continuous_batching: "off"

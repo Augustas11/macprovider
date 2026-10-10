@@ -1,0 +1,149 @@
+{
+ "model": "<studio-home>/Library/Application Support/macprovider/models/mlx-community--gpt-oss-20b-MXFP4-Q8/773a7da77e569019bb0fd17a554b263738d669a3/f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+ "family": "gpt_oss",
+ "pass": false,
+ "checks": [
+  {
+   "check": "load_and_generate",
+   "pass": true,
+   "content": "Paris is the capital of France.",
+   "usage": {
+    "prompt_tokens": 80,
+    "macprovider_generation_ms": null,
+    "total_tokens": 87,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "macprovider_generated_completion_tokens": 58,
+    "completion_tokens": 7
+   }
+  },
+  {
+   "check": "greedy_deterministic",
+   "pass": true,
+   "second": "Paris is the capital of France."
+  },
+  {
+   "check": "eos_stop",
+   "pass": true,
+   "finish_reason": "stop",
+   "completion_tokens": 7
+  },
+  {
+   "check": "no_control_token_leak",
+   "pass": true,
+   "leaked": []
+  },
+  {
+   "check": "usage_consistent",
+   "pass": true,
+   "usage": {
+    "prompt_tokens": 80,
+    "macprovider_generation_ms": null,
+    "total_tokens": 87,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "macprovider_generated_completion_tokens": 58,
+    "completion_tokens": 7
+   }
+  },
+  {
+   "check": "stream_matches_nonstream",
+   "pass": true,
+   "stream_content": "Paris is the capital of France.",
+   "finish_reason": "stop",
+   "usage": {
+    "prompt_tokens": 80,
+    "macprovider_generation_ms": 1354,
+    "total_tokens": 87,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "macprovider_generated_completion_tokens": 58,
+    "completion_tokens": 7
+   },
+   "content_deltas": 1
+  },
+  {
+   "check": "max_tokens_exception",
+   "pass": false,
+   "error": "<HTTPError 502: 'Bad Gateway'>",
+   "body": "{\"error\":{\"inference_ran\":true,\"retryable\":true,\"settlement_ran\":true,\"message\":\"Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted before the model reached its final answer; retry with a higher max_tokens or a lower reasoning effort. It "
+  },
+  {
+   "check": "stop_string_exception",
+   "pass": false,
+   "error": "<HTTPError 502: 'Bad Gateway'>",
+   "body": "{\"error\":{\"retryable\":true,\"type\":\"upstream_provider_error\",\"inference_ran\":true,\"request_id\":null,\"settlement_ran\":true,\"code\":\"malformed_tool_call_final_json\",\"param\":null,\"message\":\"Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted be"
+  },
+  {
+   "check": "reasoning_final_extracted",
+   "pass": true,
+   "content": "6:05 pm",
+   "finish_reason": "stop"
+  },
+  {
+   "check": "reasoning_accounting",
+   "pass": true,
+   "usage": {
+    "total_tokens": 102,
+    "completion_tokens": 4,
+    "macprovider_generation_ms": null,
+    "macprovider_generated_completion_tokens": 67,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "prompt_tokens": 98
+   }
+  },
+  {
+   "check": "reasoning_stream_parity",
+   "pass": true,
+   "stream_content": "6:05 pm",
+   "usage": {
+    "total_tokens": 102,
+    "completion_tokens": 4,
+    "macprovider_generation_ms": 2314,
+    "macprovider_generated_completion_tokens": 67,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "prompt_tokens": 98
+   }
+  },
+  {
+   "check": "tool_call",
+   "pass": true,
+   "finish_reason": "tool_calls",
+   "tool_calls": [
+    {
+     "id": "call_<id>",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Vilnius\",\"unit\":\"c\"}"
+     }
+    }
+   ],
+   "content": "",
+   "usage": {
+    "total_tokens": 144,
+    "completion_tokens": 0,
+    "macprovider_generation_ms": null,
+    "macprovider_generated_completion_tokens": 47,
+    "macprovider_model_hash_observed": null,
+    "cached_prompt_tokens": 0,
+    "prompt_tokens": 144
+   }
+  },
+  {
+   "check": "tool_call_stream_parity",
+   "pass": true,
+   "finish_reason": "tool_calls",
+   "tool_name": "get_weather",
+   "args": "{\"city\":\"Vilnius\",\"unit\":\"c\"}"
+  },
+  {
+   "check": "gpt_oss_tools_exception",
+   "pass": false,
+   "error": "<HTTPError 400: 'Bad Request'>",
+   "body": "{\"error\":{\"retryable\":false,\"type\":\"invalid_request_error\",\"inference_ran\":false,\"request_id\":null,\"settlement_ran\":false,\"code\":\"unsupported_modelID_for_multi_turn\",\"param\":null,\"message\":\"Model does not support multi-turn tool history rendering\"}}"
+  }
+ ]
+}

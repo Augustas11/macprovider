@@ -1,0 +1,17 @@
+1:event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+2:event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 emergency_off=false
+3:[paged-kv] measure nil: preconditions (family=gemma4 recognized=false modelID=true modelSHA=false)
+5:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+8:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+12:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+14:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+18:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+21:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+24:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+28:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+33:event=batching_unsupported action=serial_routed reason=kv_bits_unsupported
+52:  continuous_batching: canary
+53:  continuous_batch_queue_limit: 8
+54:  continuous_batch_queue_wait_timeout_ms: <unset, 30000>
+55:  continuous_batch_prefill_tokens_per_iteration: <unset, 2048>
+56:  continuous_batching_cached_turns: false

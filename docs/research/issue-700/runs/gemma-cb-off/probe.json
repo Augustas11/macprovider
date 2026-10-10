@@ -1,0 +1,146 @@
+{
+ "model": "<studio-home>/Library/Application Support/macprovider/models/mlx-community--gemma-4-26b-a4b-it-4bit/0d77464eeb233a2da68ebf9d7dc4edaac7db956d/b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
+ "family": "gemma4",
+ "pass": false,
+ "checks": [
+  {
+   "check": "load_and_generate",
+   "pass": true,
+   "content": "The capital of France is Paris.",
+   "usage": {
+    "macprovider_generated_completion_tokens": 7,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": null,
+    "completion_tokens": 7,
+    "total_tokens": 33,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 26
+   }
+  },
+  {
+   "check": "greedy_deterministic",
+   "pass": true,
+   "second": "The capital of France is Paris."
+  },
+  {
+   "check": "eos_stop",
+   "pass": true,
+   "finish_reason": "stop",
+   "completion_tokens": 7
+  },
+  {
+   "check": "no_control_token_leak",
+   "pass": true,
+   "leaked": []
+  },
+  {
+   "check": "usage_consistent",
+   "pass": true,
+   "usage": {
+    "macprovider_generated_completion_tokens": 7,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": null,
+    "completion_tokens": 7,
+    "total_tokens": 33,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 26
+   }
+  },
+  {
+   "check": "stream_matches_nonstream",
+   "pass": true,
+   "stream_content": "The capital of France is Paris.",
+   "finish_reason": "stop",
+   "usage": {
+    "prompt_tokens": 26,
+    "macprovider_generation_ms": 228,
+    "completion_tokens": 7,
+    "macprovider_model_hash_observed": null,
+    "macprovider_generated_completion_tokens": 7,
+    "cached_prompt_tokens": 0,
+    "total_tokens": 33
+   },
+   "content_deltas": 7
+  },
+  {
+   "check": "max_tokens_length",
+   "pass": true,
+   "finish_reason": "length",
+   "usage": {
+    "macprovider_generated_completion_tokens": 24,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": null,
+    "completion_tokens": 24,
+    "total_tokens": 49,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 25
+   }
+  },
+  {
+   "check": "max_tokens_length_stream",
+   "pass": true,
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 25,
+    "macprovider_generation_ms": 1262,
+    "completion_tokens": 24,
+    "macprovider_model_hash_observed": null,
+    "macprovider_generated_completion_tokens": 24,
+    "cached_prompt_tokens": 0,
+    "total_tokens": 49
+   },
+   "content_deltas": 24
+  },
+  {
+   "check": "stop_string",
+   "pass": true,
+   "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ",
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 109,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": null,
+    "completion_tokens": 109,
+    "total_tokens": 140,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 31
+   },
+   "unstopped_prefix": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 2"
+  },
+  {
+   "check": "stop_string_multitoken",
+   "pass": true,
+   "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, ",
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 109,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": null,
+    "completion_tokens": 109,
+    "total_tokens": 140,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 31
+   }
+  },
+  {
+   "check": "stop_string_stream",
+   "pass": true,
+   "stream_content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ",
+   "usage": {
+    "macprovider_generated_completion_tokens": 37,
+    "cached_prompt_tokens": 0,
+    "macprovider_generation_ms": 865,
+    "completion_tokens": 37,
+    "total_tokens": 68,
+    "macprovider_model_hash_observed": null,
+    "prompt_tokens": 31
+   }
+  },
+  {
+   "check": "stop_string_completion_tokens_parity",
+   "pass": false,
+   "nonstream_completion_tokens": 109,
+   "stream_completion_tokens": 37
+  }
+ ]
+}

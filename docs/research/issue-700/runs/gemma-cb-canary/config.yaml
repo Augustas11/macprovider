@@ -1,0 +1,19 @@
+auto_update_enabled: false
+enable_receipts: false
+idle_prewarm:
+  enabled: false
+continuous_batching: "canary"
+paged_kv:
+  enabled: true
+  max_physical_blocks: 102400
+max_concurrency_override: 4
+continuous_batch_queue_limit: 8
+continuous_batching_accepted_tuples:
+  - model_id: "<studio-home>/Library/Application Support/macprovider/models/mlx-community--gemma-4-26b-a4b-it-4bit/0d77464eeb233a2da68ebf9d7dc4edaac7db956d/b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01"
+    model_sha256: b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01
+    cache_class: mixed
+    kv_dtype: fp16
+    requires_moe: true
+    hardware_class: "apple-silicon:Apple M3 Ultra:ram-256gb"
+    metallib_sha256: f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756
+    kernel_identifier: macprovider_paged_kv_gather_v1

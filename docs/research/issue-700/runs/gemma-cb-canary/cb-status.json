@@ -1,0 +1,36 @@
+{
+ "binary_version": "1.8.232",
+ "continuous_batching": {
+  "active": false,
+  "cache_class": "mixed",
+  "mode": "canary",
+  "paged_kv_decision": "fallback_paged_fallback_quantized",
+  "policy": {
+   "authorization_source": "baked_empty_off",
+   "authorized": false,
+   "cached_turns_authorized": false,
+   "decision_reason": "absent_empty_off_fallback",
+   "emergency_off_override": false,
+   "expires_at": null,
+   "load_status": "absent_empty_off_fallback",
+   "local_proof_result": "failed",
+   "policy_sha256": null,
+   "policy_version": null,
+   "release_id": null,
+   "rollout_mode": "off",
+   "signer_key_id": null,
+   "tuple_sha256": null
+  },
+  "scheduler": {
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 0,
+   "shared_forward_calls": 0,
+   "slots_free": 0,
+   "slots_total": 0,
+   "waiting_count": 0
+  },
+  "unsupported_reason": "kv_bits_unsupported"
+ },
+ "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+ "weights_manifest_sha256": "1d450496c61d4a04993c4d186528c4798a1a992257fd5c69dcdf63d09fa49f0a"
+}
