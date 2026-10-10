@@ -199,6 +199,42 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(stored.state, .refused(reason: "row_divergence_at_2"))
     }
 
+    /// An owner-pinned provider with a signed positive entry keeps its pin
+    /// while its self-check runs (never off from noise).
+    func testOwnerPinnedProviderKeepsItsProvisionalGrant() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-owner-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o")
+        let resolution = try XCTUnwrap(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store,
+            target: .init(key: key, maxRows: 16),
+            ownerPinned: 6,
+            provisional: .init(modelSHA256: "m", slots: 6)
+        ))
+        XCTAssertEqual(resolution.servedSlots, 6)
+        XCTAssertEqual(resolution.state, .granted(slots: 6))
+    }
+
+    /// Records from the earlier v5 candidate still load, crash marker included.
+    func testV5StoreRecordsStillLoad() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-v5-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName)
+        let v5 = """
+        {"records":[{"alone_outputs":[[1]],"decided_at":null,"decision":{"reason":"granted","slots":4,"verified_slots":4},"in_progress_slots":5,"key":{"hardware_class":"h","kernel_identifier":"k","metallib_sha256":"x","model_sha256":"m","os_build":"o","runtime_build":"r"},"measurements":[],"no_gain_streak":0,"remeasure_after":null,"serial_tps":1}],"schema_version":"macprovider.cb-self-check.v5"}
+        """
+        FileManager.default.createFile(atPath: url.path, contents: Data(v5.utf8), attributes: [.posixPermissions: 0o600])
+        let store = ContinuousBatchingSelfCheckStore(url: url)
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", runtimeBuild: "r")
+        let record = try XCTUnwrap(store.record(for: key))
+        XCTAssertEqual(record.inProgressSlots, 5)
+        XCTAssertEqual(record.decision?.slots, 4)
+    }
+
     func testDeferralsBackOffToAtMostFifteenMinutes() {
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 0, base: 5), 0)
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 1, base: 5), 10)

@@ -2928,10 +2928,14 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
                     continuousBatchPrefillTokensPerIteration: resolved.continuousBatchPrefillTokensPerIteration,
                     continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
-                    continuousBatchingAcceptanceCoverage: .defaultOn(
-                        revocations: continuousBatchingPolicy.selection.revocations,
-                        acceptedTuples: effectiveAcceptedTuples
-                    ),
+                    // Autotune children keep explicit accepted-tuple admission
+                    // (they run no self-check); every other serve is default-on.
+                    continuousBatchingAcceptanceCoverage: autotuneCandidate
+                        ? ContinuousBatchingAcceptanceCoverage(acceptedTuples: effectiveAcceptedTuples)
+                        : .defaultOn(
+                            revocations: continuousBatchingPolicy.selection.revocations,
+                            acceptedTuples: effectiveAcceptedTuples
+                        ),
                     continuousBatchingPolicyLoadResult: continuousBatchingPolicy,
                     continuousBatchingEmergencyOffOverride: emergencyOffOverride,
                     continuousBatchingModeExplicitlyConfigured: resolved.continuousBatchingExplicitlyConfigured,
@@ -2988,7 +2992,7 @@ struct ServeCommand: AsyncParsableCommand {
             let provisionalModels = Set(
                 continuousBatchingPolicy.selection.entries.filter { $0.rollout != .off }.map(\.tuple.modelSHA256)
             )
-            let provisional: ContinuousBatchingSelfCheckDriver.Provisional? = plan.ownerPinned == nil && !provisionalModels.isEmpty
+            let provisional: ContinuousBatchingSelfCheckDriver.Provisional? = !provisionalModels.isEmpty
                 ? .init(
                     modelSHA256s: provisionalModels,
                     slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlotsForProvisional)

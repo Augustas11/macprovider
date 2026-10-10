@@ -4501,18 +4501,29 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// Applies a decision only while `expected` is still the loaded subject,
     /// so a result measured on one model never lands on a swapped-in one.
+    /// With `expected`, the whole transaction (state, report, gates, buyer
+    /// limit, advertised capacity) is fenced on the swap generation: it is
+    /// dropped if a swap began before it or begins while it runs.
     @discardableResult
     func applyContinuousBatchingSelfCheck(
         _ state: ContinuousBatchingSelfCheckState,
         servedSlots: Int,
-        expected: ContinuousBatchingSelfCheckTarget? = nil
+        expected: ContinuousBatchingSelfCheckTarget? = nil,
+        report: ContinuousBatchingSelfCheckReport? = nil,
+        publishCapacity: Bool = false
     ) async -> Bool {
         if let expected, continuousBatchingSelfCheckTarget(includeDecided: true) != expected {
             return false
         }
+        let generation = selfCheckGeneration
         continuousBatchingSelfCheck = state
+        if let report { continuousBatchingSelfCheckReport = report }
         await applyServedSlots(servedSlots)
-        return true
+        guard selfCheckGeneration == generation else { return false }
+        if publishCapacity {
+            await providerStatus?.updateServedSlots(min(max(1, servedSlots), maxBatch))
+        }
+        return selfCheckGeneration == generation
     }
 
     func setContinuousBatchingSelfCheckReport(_ report: ContinuousBatchingSelfCheckReport?) {
@@ -7707,10 +7718,15 @@ actor ModelRuntime: ModelRuntimeServing {
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
+        let buyerBudgetScheduler = servedSlotsManaged ? continuousBatchScheduler : nil
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
+                // SPEC-038-R011: serial buyer work shares the served budget
+                // with batched rows (acquired outside the model container).
+                try await buyerBudgetScheduler?.acquireExternalBuyerRow()
+                defer { if let buyerBudgetScheduler { Task { await buyerBudgetScheduler.releaseExternalBuyerRow() } } }
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
@@ -8412,6 +8428,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
+        let buyerBudgetScheduler = servedSlotsManaged ? continuousBatchScheduler : nil
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
@@ -8430,6 +8447,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 try await inferenceGate.withPermit { () async throws -> CompletionResult in
                 try drainCancelled.check()
                 try Task.checkCancellation()
+                try await buyerBudgetScheduler?.acquireExternalBuyerRow()
+                defer { if let buyerBudgetScheduler { Task { await buyerBudgetScheduler.releaseExternalBuyerRow() } } }
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
