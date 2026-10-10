@@ -311,6 +311,7 @@ type memoryModelAdmissionStore struct {
 	providerGen   map[string]uint64
 	pending       map[string]PendingModelAdmissionDecision
 	pendingByReq  map[string]string
+	probeEvidence []memoryProbeEvidenceRow
 }
 
 func NewMemoryModelAdmissionStore() ModelAdmissionStore {
@@ -643,6 +644,9 @@ CREATE TABLE IF NOT EXISTS model_admission_events (
 		return nil, err
 	}
 	if err := ensureSQLitePendingModelAdmissionTable(db); err != nil {
+		return nil, err
+	}
+	if err := ensureSQLiteModelAdmissionProbeEvidenceTable(db); err != nil {
 		return nil, err
 	}
 	if _, err := db.ExecContext(context.Background(), `
@@ -2202,6 +2206,11 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	// SPEC-047-R011: an offer whose exact pair matches one current pool entry
 	// binds under the signed pool manifest actor before any generic probe.
 	if !replay {
+		// SPEC-047-R011: the known-answer probe runs before the bind so the
+		// bind event can link its evidence record.
+		knownAnswerCtx, knownAnswerCancel := context.WithTimeout(context.WithoutCancel(r.Context()), modelAdmissionKnownAnswerTimeout+modelAdmissionRuntimeRevocationTimeout)
+		s.maybeRunKnownAnswerProbeForOffer(knownAnswerCtx, stored)
+		knownAnswerCancel()
 		s.reevaluatePoolManifestBindings(r.Context(), providerID)
 		if head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, stored.CandidateID); err == nil && found && head.PoolScoped() {
 			writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(head, replay))

@@ -622,6 +622,9 @@ func (s *Server) evaluatePoolManifestBindingsLocked(ctx context.Context, provide
 		if !ok {
 			continue
 		}
+		if decision.PoolScoped() && decision.State == "catalog_priced" {
+			decision.PoolProbeEvidenceDigest = s.linkedProbeEvidenceDigest(ctx, decision)
+		}
 		stored, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
 		if err != nil {
 			s.log.Warn().Err(err).
@@ -667,6 +670,9 @@ func (s *Server) reevaluatePoolManifestBindings(ctx context.Context, providerID 
 // poolManifestBindingSweepFullEvery ticks. Route time re-checks every
 // predicate, so the sweep only records the durable transitions.
 func (s *Server) RunPoolManifestBindingSweep(ctx context.Context) {
+	// SPEC-047-R011: the known-answer evidence refresh shares this loop's
+	// lifetime.
+	go s.RunModelAdmissionProbeEvidenceRefresh(ctx)
 	ticker := time.NewTicker(poolManifestBindingSweepInterval)
 	defer ticker.Stop()
 	kick := s.poolManifestSweepKick()

@@ -213,6 +213,9 @@ type Server struct {
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
 	modelAdmissionRouteReads       ModelAdmissionStore
+	// probeEvidence is the SPEC-047-R011 known-answer evidence store, set
+	// when the model admission store implements it.
+	probeEvidence ModelAdmissionProbeEvidenceStore
 	modelAdmissionIntakeState
 	modelAdmissionSubmitDisabled bool
 	modelAdmissionAttemptMu      sync.Mutex
@@ -1057,6 +1060,9 @@ func WithModelAdmissionStore(store ModelAdmissionStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.modelAdmissions = store
+			if evidence, ok := store.(ModelAdmissionProbeEvidenceStore); ok {
+				s.probeEvidence = evidence
+			}
 		}
 	}
 }
