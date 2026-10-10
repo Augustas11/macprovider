@@ -813,7 +813,9 @@ mainland-provider installer handoff.
    on every status, also after publication, so it gates promotion, the
    recommendation bump and rollout verification. It passes only when the
    RUNNING coordinator holds every registration: the candidate
-   `compatibility_set_id` is in `accepted_ids` and the on-disk config's
+   `compatibility_set_id` is admitted (in `accepted_ids`, or under a
+   `version_floor` policy: target repository, at or above
+   `minimum_version`, not revoked) and the on-disk config's
    sha256 equals the running process's boot `coordinator_config_applied`
    digests (restart-only fields), `privacy_class.enabled` is true, and the
    candidate `code_cdhash` is approved either by a `v<ver>.json` that
@@ -881,10 +883,16 @@ mainland-provider installer handoff.
 - Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).
-- Live-coordinator candidate test: `scripts/ops/cli-release.sh next --run`
-  at step `pearl_accepted_ids` adds its `compatibility_set_id` to
-  `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
-  a value copy — SIGHUP does not reload compatibility_set). The list is
+- Live-coordinator candidate test under `version_floor` (SPEC-002-R004):
+  no Pearl edit; the floor admits the candidate. Migration from the
+  allowlist is step `compatibility_policy`
+  (`docs/runbooks/provider-cli-release-verification.md` "Version-floor
+  admission").
+- Live-coordinator candidate test under the legacy allowlist:
+  `scripts/ops/cli-release.sh next --run` at step `pearl_accepted_ids` adds its `compatibility_set_id` to
+  `accepted_ids` (keep `target_id`) and restarts the coordinator (runtimes
+  before SPEC-002-R004 do not reload compatibility_set on SIGHUP, and
+  `latest_binary_version` never reloads). The list is
   capped at 8 and must include `target_id`; the step also runs after
   publication, so a lost acceptance of a published release is re-added
   (target unchanged); at the cap the step evicts the oldest accepted version that is not the

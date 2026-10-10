@@ -5170,7 +5170,10 @@ exact signed-manifest recommendation identity, in `owner/repo:vMAJOR.MINOR.PATCH
 form. It is not an admission allowlist. Buyer-serving release admission MUST
 accept any valid identity from the target repository at or above the numeric
 three-component minimum, except an exact identity in `revoked_ids`. Numeric
-overflow, malformed versions, and noncanonical leading-zero components MUST fail closed. For buyer-serving admission, the reported binary version
+overflow, malformed versions, and noncanonical leading-zero components (for
+example `v1.8.0224`) MUST fail closed. Revocation matches the identity the
+provider reports; it fences a release from routing and is not a
+cryptographic ban, because a modified binary can report another identity. For buyer-serving admission, the reported binary version
 MUST agree numerically with the identity's version. These reported fields do
 not authenticate a binary or grant a trust tier; provider authentication,
 attestation, catalog admission, and signed update verification remain separate.
@@ -5190,11 +5193,17 @@ policy. During migration, a legacy allowlist MAY satisfy this gate only when
 the exact candidate identity is already admitted; missing policy metadata
 MUST NOT imply admission. Version-floor policies MUST enforce the floor,
 repository, and revocation checks. Version-floor tooling MUST NOT request a
-per-release allowlist edit; the legacy train MAY retain its existing verified
-admission step until migration. A locked, scripted migration MUST refuse a floor above any
-connected provider or an unknown connected release identity, preserve unrelated
-configuration, and verify the applied policy after reload. Signed candidate verification and canary proof
-remain required.
+per-release allowlist edit; the legacy train MUST keep its existing verified
+admission step, and a runtime that reports no policy mode is treated as the
+legacy allowlist. Release tooling MUST read the mode from the applied
+configuration and `/healthz`, and MUST fail closed when the two disagree. The
+migration from the legacy allowlist MUST be an opt-in, locked, scripted
+release-train step that edits only the compatibility policy in place,
+validates it with the running coordinator, and verifies the applied policy
+after the coordinator restarts. It MUST refuse a floor above the latest
+reported release of any provider seen within the release train's in-use
+window, refuse a floor above the target, and never move an existing floor.
+Signed candidate verification and canary proof remain required.
 
 A validated SIGHUP reload MUST publish one immutable compatibility policy
 snapshot after fallible reload preparation succeeds. A rejected reload MUST

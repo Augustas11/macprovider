@@ -25,7 +25,7 @@ prior target kept accepted). Each prints the expected downtime first, holds
 the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
 an anchored transform, backs it up under `/root/macprovider-backups`,
 validates the new file with the running coordinator's binary, user and exact
-environment, restarts the coordinator (SIGHUP does not reload this policy),
+environment, restarts the coordinator (older runtimes do not reload this policy on SIGHUP and `latest_binary_version` never reloads),
 waits for `/healthz`, checks that the restarted coordinator logged the on-disk
 config as its boot config, and records the step. `recommendation_bump` is
 complete only when `/healthz` recommends the release AND the applied
@@ -35,6 +35,33 @@ restart), the step validates and restarts instead of reporting success. Nobody
 pastes a restart. Publication or a healthy advertised version alone does not
 prove that the new provider compatibility set is accepted and targeted; the
 `registrations` gate reads the running coordinator's applied config.
+
+### Version-floor admission (SPEC-002-R004)
+
+A coordinator runtime that reports `compatibility_policy_mode` on `/healthz`
+also supports `compatibility_set.minimum_version` with exact `revoked_ids`
+instead of `accepted_ids`. Under that `version_floor` policy a release is
+admitted when its `compatibility_set_id` is from the target's repository, at
+or above the floor (canonical numeric components; `v1.8.0224` is rejected)
+and not exactly revoked. `pearl_accepted_ids` then edits nothing; it and the
+`registrations` gate check that the applied policy admits the candidate.
+`recommendation_bump` moves only `target_id` and `latest_binary_version`; the
+prior target stays admitted by the floor. Revocation matches the
+`compatibility_set_id` the provider reports: it fences a release the operator
+no longer wants routed, and it does not authenticate binaries (signed
+installer and update verification, attestation and catalog admission do).
+
+The migration is one step of the CLI train, opt-in and one way. After the
+floor-capable coordinator runtime is live (`scripts/ops/pearl-runtime.sh`),
+choose a floor at or below every provider's latest connection version and
+run `COMPATIBILITY_MINIMUM_VERSION=<x.y.z> scripts/ops/cli-release.sh next
+--run`. Step `compatibility_policy` replaces `accepted_ids` with
+`minimum_version` through the same locked, validated, in-place edit and
+restart. It refuses a floor above the latest connection version of any
+provider seen in the last 14 days and prints the per-version table, and it is
+done only when `/healthz` reports `version_floor` at that floor. SIGHUP
+reloads refuse a compatibility policy that would reject a connected provider,
+except an exact revocation.
 
 
 This runbook covers release/updater correctness only. Keep product-specific
