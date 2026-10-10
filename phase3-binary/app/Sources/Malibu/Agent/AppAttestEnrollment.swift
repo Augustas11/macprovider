@@ -180,9 +180,17 @@ struct AppAttestEnrollment: Sendable {
     /// Spawns the same provider CLI the payout flow uses. The provider bearer
     /// stays in CLI custody; only public enrollment values cross argv/stdin.
     static let runProviderCLI: AppAttestCLIRunner = { arguments, stdin in
-        let executable = try CLIUpdateRunner.resolveExecutableURL()
-        // stdin is written into the pipe buffer before launch so a child that
-        // exits early can never SIGPIPE Malibu. 32 KiB fits any pipe buffer.
+        try await runProcess(try CLIUpdateRunner.resolveExecutableURL(), arguments: arguments, stdin: stdin)
+    }
+
+    /// Runs `executable`, feeding `stdin` after launch and draining output,
+    /// and kills it after `timeout` seconds.
+    static func runProcess(
+        _ executable: URL,
+        arguments: [String],
+        stdin: Data?,
+        timeout: TimeInterval = 120
+    ) async throws -> AppAttestCLIResult {
         if let stdin, stdin.count > 32 * 1024 {
             throw EnrollmentError(reason: "stdin_too_large")
         }
@@ -194,10 +202,8 @@ struct AppAttestEnrollment: Sendable {
                 let input = Pipe()
                 let output = Pipe()
                 let errors = Pipe()
-                if let stdin {
-                    input.fileHandleForWriting.write(stdin)
-                }
-                try? input.fileHandleForWriting.close()
+                // An early child exit must surface as EPIPE, never SIGPIPE.
+                _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
                 process.standardInput = input
                 process.standardOutput = output
                 process.standardError = errors
@@ -207,7 +213,17 @@ struct AppAttestEnrollment: Sendable {
                     continuation.resume(throwing: error)
                     return
                 }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 120) {
+                // Launch first, then feed stdin concurrently with draining
+                // stdout/stderr, so a full pipe can never block before the
+                // child (and the timeout below) exist.
+                let writer = input.fileHandleForWriting
+                DispatchQueue.global(qos: .utility).async {
+                    if let stdin {
+                        try? writer.write(contentsOf: stdin)
+                    }
+                    try? writer.close()
+                }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
                     if process.isRunning { process.terminate() }
                 }
                 let stderr = StderrBox()

@@ -185,6 +185,19 @@ final class AppAttestEnrollmentTests: XCTestCase {
     private func ok(_ json: String) -> AppAttestCLIResult {
         AppAttestCLIResult(stdout: Data((json + "\n").utf8), stderr: Data(), status: 0)
     }
+
+    func testProcessRunnerFeedsLargeStdinAfterLaunch() async throws {
+        let payload = Data(String(repeating: "A", count: 30 * 1024).utf8)
+        let result = try await AppAttestEnrollment.runProcess(URL(fileURLWithPath: "/bin/cat"), arguments: [], stdin: payload, timeout: 30)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.stdout, payload)
+    }
+
+    func testProcessRunnerSurvivesChildThatIgnoresStdin() async throws {
+        let payload = Data(String(repeating: "B", count: 30 * 1024).utf8)
+        let result = try await AppAttestEnrollment.runProcess(URL(fileURLWithPath: "/usr/bin/true"), arguments: [], stdin: payload, timeout: 30)
+        XCTAssertEqual(result.status, 0)
+    }
 }
 
 private final class Clock: @unchecked Sendable {
@@ -240,4 +253,5 @@ private final class FakeCLI: @unchecked Sendable {
             return responses.removeFirst()
         }
     }
+
 }
