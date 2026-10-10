@@ -3562,6 +3562,9 @@ struct ServeCommand: AsyncParsableCommand {
             resumeProvider = {
                 await LocalOnlyOperatorPause.resume(
                     providerStatus: providerStatus,
+                    resumeLeaseStore: ProviderLifecycleLeaseStore(
+                        url: ProviderLifecycleLeaseStore.operatorResumeURL(lifecycleStateURL: lifecycleStateStore.url)
+                    ),
                     persist: {
                         _ = try lifecycleStateStore.transition(
                             to: .degradedServing,
@@ -4810,11 +4813,20 @@ enum LocalOnlyOperatorPause {
 
     static func resume(
         providerStatus: ProviderStatus,
+        resumeLeaseStore: ProviderLifecycleLeaseStore,
         persist: () throws -> Void
     ) async -> ProviderControlCommandResult {
+        guard await providerStatus.operatorPauseFence else { return .accepted }
+        let lease: ProviderLifecycleLeaseRecord
+        do {
+            lease = try resumeLeaseStore.acquireOperatorResumeGrace()
+        } catch {
+            return .rejected("operator_resume_grace_persistence_failed")
+        }
         do {
             try persist()
         } catch {
+            _ = try? resumeLeaseStore.clear(ifLeaseID: lease.leaseID)
             return .rejected("lifecycle_state_persistence_failed")
         }
         await providerStatus.setOperatorPauseFence(false)

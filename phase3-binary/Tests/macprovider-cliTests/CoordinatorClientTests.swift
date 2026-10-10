@@ -493,6 +493,75 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(states, ["draining", "unavailable", "ready"])
     }
 
+    func testOperatorResumePublishesGraceBeforeReadyAndDoesNotRenewOnReplay() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let resumeStore = ProviderLifecycleLeaseStore(
+            url: ProviderLifecycleLeaseStore.operatorResumeURL(lifecycleStateURL: fixture.store.url)
+        )
+        let maintenanceStore = ProviderLifecycleLeaseStore(url: fixture.root.appendingPathComponent("lease.json"))
+        let maintenance = try maintenanceStore.acquire(kind: .maintenance, operationID: "update", duration: 120)
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { frame in
+                if frame["reason"] as? String == "operator_resumed" {
+                    guard case .valid(let grace) = resumeStore.inspect() else {
+                        return XCTFail("resume must publish grace before sending ready")
+                    }
+                    XCTAssertEqual(grace.expiresWallMilliseconds - grace.issuedWallMilliseconds, 60_000)
+                    XCTAssertFalse(try fixture.record().operatorPauseRequested)
+                }
+            },
+            lifecycleStateStore: fixture.store,
+            operatorResumeLeaseStore: resumeStore,
+            lifecycleOperationID: fixture.operationID
+        )
+        let paused = await client.pauseByOperator()
+        XCTAssertEqual(paused, .accepted)
+        let resumed = await client.resumeByOperator()
+        XCTAssertEqual(resumed, .accepted)
+        guard case .valid(let firstGrace) = resumeStore.inspect() else { return XCTFail("missing grace") }
+        let replay = await client.resumeByOperator()
+        XCTAssertEqual(replay, .accepted)
+        XCTAssertEqual(resumeStore.inspect(), .valid(firstGrace), "unpaused replay must not extend grace")
+        XCTAssertEqual(maintenanceStore.inspect(), .valid(maintenance), "resume must not replace updater lease")
+        let pausedAgain = await client.pauseByOperator()
+        XCTAssertEqual(pausedAgain, .accepted)
+        let resumedAgain = await client.resumeByOperator()
+        XCTAssertEqual(resumedAgain, .accepted, "a second pause/resume within the window must work")
+    }
+
+    func testOperatorResumeGraceFailureLeavesProviderPaused() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let invalidURL = root.appendingPathComponent("operator-resume-lease.json")
+        try Data("invalid".utf8).write(to: invalidURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: invalidURL.path)
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            operatorResumeLeaseStore: ProviderLifecycleLeaseStore(url: invalidURL)
+        )
+        let paused = await client.pauseByOperator()
+        XCTAssertEqual(paused, .accepted)
+        let resumed = await client.resumeByOperator()
+        XCTAssertEqual(resumed, .rejected("operator_resume_grace_persistence_failed"))
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .unavailable)
+        let fence = await status.operatorPauseFence
+        XCTAssertTrue(fence)
+    }
+
     func testOperatorResumeClosesAcceptedSessionSoFreshRegistrationCanRestoreBuyerServing() async throws {
         let recorder = CoordinatorFrameRecorder()
         let socket = FakeProviderWebSocketTask(receiveResults: [])
@@ -2028,16 +2097,27 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(admitted)
 
         struct PersistFailed: Error {}
-        let failedResume = await LocalOnlyOperatorPause.resume(providerStatus: status, persist: { throw PersistFailed() })
+        let resumeRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: resumeRoot) }
+        let resumeLeaseStore = ProviderLifecycleLeaseStore(url: resumeRoot.appendingPathComponent("operator-resume-lease.json"))
+        let failedResume = await LocalOnlyOperatorPause.resume(providerStatus: status, resumeLeaseStore: resumeLeaseStore, persist: { throw PersistFailed() })
         XCTAssertEqual(failedResume, .rejected("lifecycle_state_persistence_failed"))
+        XCTAssertEqual(resumeLeaseStore.inspect(), .missing, "failed persistence must withdraw grace")
         await status.setState(.ready, reason: "stray_ready")
         let stillPaused = await status.snapshot()
         XCTAssertEqual(stillPaused.status, .unavailable, "a failed resume must keep the fence")
 
-        let resumed = await LocalOnlyOperatorPause.resume(providerStatus: status, persist: {})
+        let resumed = await LocalOnlyOperatorPause.resume(providerStatus: status, resumeLeaseStore: resumeLeaseStore, persist: {})
         XCTAssertEqual(resumed, .accepted)
         let ready = await status.snapshot()
         XCTAssertEqual(ready.status, .ready)
+        let firstGrace = resumeLeaseStore.inspect()
+        let replay = await LocalOnlyOperatorPause.resume(
+            providerStatus: status, resumeLeaseStore: resumeLeaseStore,
+            persist: { XCTFail("unpaused local resume must not persist or renew grace") }
+        )
+        XCTAssertEqual(replay, .accepted)
+        XCTAssertEqual(resumeLeaseStore.inspect(), firstGrace)
     }
 
     func testOperatorPausedProviderIgnoresWarmUpAndCapacityTransitions() async throws {
@@ -9402,6 +9482,7 @@ final class CoordinatorClientTests: XCTestCase {
         coordinatorReadinessAttempts: Int = 1,
         admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
         lifecycleStateStore: ProviderLifecycleStateStore? = nil,
+        operatorResumeLeaseStore: ProviderLifecycleLeaseStore? = nil,
         lifecycleOperationID: String? = nil,
         useDefaultSendOverride: Bool = true,
         autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
@@ -9419,6 +9500,12 @@ final class CoordinatorClientTests: XCTestCase {
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider"
     ) async throws -> CoordinatorClient {
+        let resumeRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coordinator-resume-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: resumeRoot) }
+        let isolatedResumeLeaseStore = operatorResumeLeaseStore ?? ProviderLifecycleLeaseStore(
+            url: resumeRoot.appendingPathComponent("operator-resume-lease.json")
+        )
         var config = AppConfig.defaults(configPath: configPath)
         config.credentialStore = credentialStore
         config.coordinatorURL = coordinatorURL
@@ -9491,6 +9578,7 @@ final class CoordinatorClientTests: XCTestCase {
             credentialStatusRuntime: credentialStatusRuntime,
             admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
             lifecycleStateStore: lifecycleStateStore ?? ProviderLifecycleStateStore(),
+            operatorResumeLeaseStore: isolatedResumeLeaseStore,
             lifecycleOperationID: lifecycleOperationID,
             watchdogExitPreparation: watchdogExitPreparation ?? {},
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook

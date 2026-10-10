@@ -404,6 +404,19 @@ struct ProviderLifecycleLeaseStore: @unchecked Sendable {
             .appendingPathComponent("lease.json")
     }
 
+    static func operatorResumeURL(lifecycleStateURL: URL) -> URL {
+        lifecycleStateURL.deletingLastPathComponent()
+            .appendingPathComponent("operator-resume-lease.json")
+    }
+
+    /// Use only with the dedicated operator-resume sidecar, never lease.json.
+    /// Acquire is idempotent for this process; renewal starts a fresh window
+    /// for a new pause/resume cycle without displacing another live owner.
+    func acquireOperatorResumeGrace() throws -> ProviderLifecycleLeaseRecord {
+        let lease = try acquire(kind: .startup, operationID: "operator-resume-grace", duration: 60)
+        return try renew(leaseID: lease.leaseID, duration: 60)
+    }
+
     /// A non-throwing observation surface for watchdog and status consumers.
     /// Unsafe or unreadable storage is never treated as a valid grace period.
     func inspect() -> ProviderLifecycleLeaseInspection {

@@ -59,6 +59,7 @@ run_watchdog() {
   MACPROVIDER_LOG_DIR="$TMP/logs" \
   MACPROVIDER_BINARY_PATH="${WATCHDOG_TEST_BINARY_PATH:-$TMP/home/macprovider/macprovider-cli}" \
   MACPROVIDER_LIFECYCLE_LEASE_PATH="$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json" \
+  MACPROVIDER_OPERATOR_RESUME_LEASE_PATH="$TMP/home/Library/Application Support/macprovider/lifecycle/operator-resume-lease.json" \
   MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID="$(id -u)" \
   MACPROVIDER_CURL="$TMP/bin/curl" \
   WATCHDOG_TEST_LAUNCHCTL_LOG="$TMP/launchctl.log" \
@@ -80,9 +81,11 @@ write_watchdog_lease() {
   owner_pid="$2"
   window="${3:-valid}"
   owner_start_override="${4:-}"
+  lease_path="${5:-$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json}"
+  lease_duration_ms="${6:-}"
   mkdir -p "$TMP/home/Library/Application Support/macprovider/lifecycle"
   chmod 700 "$TMP/home/Library/Application Support/macprovider/lifecycle"
-  /usr/bin/python3 - "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json" "$kind" "$owner_pid" "$window" "$owner_start_override" <<'PY'
+  /usr/bin/python3 - "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json" "$kind" "$owner_pid" "$window" "$owner_start_override" "$lease_path" "$lease_duration_ms" <<'PY'
 import ctypes
 import json
 import sys
@@ -140,15 +143,18 @@ def live_process_start_us(pid):
         raise SystemExit("invalid process start")
     return value
 
-path, kind, owner_pid_text, window, owner_start_override = sys.argv[1:]
+_, kind, owner_pid_text, window, owner_start_override, path, duration_override = sys.argv[1:]
 owner_pid = int(owner_pid_text)
 owner_start_us = int(owner_start_override) if owner_start_override else live_process_start_us(owner_pid)
-duration_ms = 30 * 60 * 1000 if kind == "startup" else 20 * 60 * 1000
+duration_ms = int(duration_override) if duration_override else (30 * 60 * 1000 if kind == "startup" else 20 * 60 * 1000)
 issued_wall_ms = int(time.time() * 1000)
 issued_monotonic_ns = current_monotonic_ns()
 if window == "expired":
     issued_wall_ms -= duration_ms * 2
     issued_monotonic_ns -= duration_ms * 2 * 1_000_000
+elif window == "few_seconds":
+    issued_wall_ms -= 3_000
+    issued_monotonic_ns -= 3_000_000_000
 record = {
     "version": 1,
     "lease_id": str(uuid.uuid4()),
@@ -168,7 +174,7 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(record, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
 PY
-  chmod 600 "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
+  chmod 600 "$lease_path"
 }
 
 # F1 (RFC-001 #1382, SPEC-020 R-4.14): with no validated launchd PID the
@@ -446,6 +452,38 @@ if [ "$(grep -c -F 'kickstart -k gui/' "$TMP/launchctl.log")" -ne 2 ]; then
   echo "watchdog must kick exactly the stale and forged unhealthy providers" >&2
   exit 1
 fi
+
+# Resume grace must protect an armed process even before its listener returns.
+# No startup/maintenance lease is present. The clock-shifted records avoid sleeps.
+rm -f "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
+resume_lease_path="$TMP/home/Library/Application Support/macprovider/lifecycle/operator-resume-lease.json"
+for resume_case in valid expired oversized wrong_pid wrong_kind; do
+  : > "$TMP/logs/watchdog.log"
+  : > "$TMP/launchctl.log"
+  rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+  case "$resume_case" in
+    valid) write_watchdog_lease startup "$provider_owner_pid" few_seconds "" "$resume_lease_path" 60000 ;;
+    expired) write_watchdog_lease startup "$provider_owner_pid" expired "" "$resume_lease_path" 60000 ;;
+    oversized) write_watchdog_lease startup "$provider_owner_pid" valid "" "$resume_lease_path" 60001 ;;
+    wrong_pid) write_watchdog_lease startup "$forged_owner_pid" valid "" "$resume_lease_path" 60000 ;;
+    wrong_kind) write_watchdog_lease maintenance "$provider_owner_pid" valid "" "$resume_lease_path" 60000 ;;
+  esac
+  run_watchdog
+  if [ "$resume_case" = valid ]; then
+    grep -F 'inside a validated operator-resume lease; watchdog grants bounded grace' "$TMP/logs/watchdog.log" >/dev/null
+    if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+      echo "resumed provider must not restart before its grace window expires" >&2
+      exit 1
+    fi
+  else
+    grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null || {
+      echo "invalid/expired resume lease ($resume_case) must not defer wedge recovery" >&2
+      exit 1
+    }
+  fi
+done
+rm -f "$resume_lease_path"
+echo "operator resume grace and expiry ok"
 
 kill "$provider_owner_pid"
 wait "$provider_owner_pid" >/dev/null 2>&1 || true

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.24
+Version: v0.1.25
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -1087,7 +1087,17 @@ current-boot-gated **wedge** restart (unchanged by this version): a
 `launchctl kickstart` only after current-boot local health has been observed, a
 later local `/v1/health` failure is paired with a restart-worthy `/v1/status`
 state, it is outside cooldown, the provider is not operator-paused, and no valid
-startup/maintenance lifecycle lease grants grace. Consuming the SPEC-025 §5.2
+startup/maintenance lifecycle lease grants grace. Before clearing an operator
+pause, the serve process MUST durably publish a 60-second startup-shaped lease
+in `operator-resume-lease.json` beside the lifecycle state. This separate slot
+MUST NOT replace an updater/startup/maintenance lease. The watchdog MUST validate
+its owner UID, exact supervised PID, process start, executable, boot session,
+wall and monotonic clocks, and a maximum duration of 60 seconds before granting
+grace, including while the listener is absent. After either clock expires,
+normal wedge-restart eligibility resumes. An already-unpaused resume command
+MUST NOT renew grace; a new pause/resume cycle may create a fresh window. A
+failure to publish grace MUST leave the provider paused and reject resume.
+Consuming the SPEC-025 §5.2
 `model_liveness_token_v1` to additionally catch the listener-alive/model-dead
 wedge — and a domain-aware wedge target for headless/system-domain (RFC-001 F3) —
 are deferred follow-ups that must first define the stall threshold and its owner,
@@ -1694,6 +1704,9 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.25 (2026-10-11): R-4.14 adds a process-bound, 60-second operator-resume
+  grace sidecar published before clearing pause. It uses the existing lease
+  format independently of updater leases; expiry restores wedge recovery.
 - v0.1.24 (2026-10-10): SPEC-020-R007 revoked-build downgrade (#1880;
   admission #1914). A bad release V could not be rolled back: R-2.1 refused
   every downgrade, the target could not be revoked, and a revoked V connected
