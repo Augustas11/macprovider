@@ -17,7 +17,8 @@ import Foundation
 ///   by `minimumAggregateGain`.
 ///
 /// It runs only while the provider is idle, yields to real requests, and its
-/// result is stored per (model, Metal library, kernel, hardware, macOS build) so a restart
+/// result is stored per (model, Metal library, kernel, hardware, macOS build,
+/// MLX pin, decode window) so a restart
 /// does not repeat it. Until it finishes the provider serves one slot serially
 /// (or a signed positive entry's provisional grant).
 enum ContinuousBatchingSelfCheckState: Sendable, Equatable {
@@ -38,6 +39,11 @@ struct ContinuousBatchingSelfCheckKey: Sendable, Equatable, Hashable, Codable {
     /// version+revision): a runtime pin change re-runs the check even when the
     /// packaged Metal library hash happens not to change.
     var runtimeBuild: String = ContinuousBatchingSelfCheckKey.currentRuntimeBuild
+    /// The scheduler's decode lockstep window the check ran at (SPEC-038
+    /// FR-CB2): a result measured at another window (hybrid models moved from
+    /// 1 to 16 in v0.3.16) does not qualify this one. Records written before
+    /// the field decode as 0, which matches no live window, so they re-run.
+    var decodeWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
 
     enum CodingKeys: String, CodingKey {
         case modelSHA256 = "model_sha256"
@@ -46,6 +52,7 @@ struct ContinuousBatchingSelfCheckKey: Sendable, Equatable, Hashable, Codable {
         case hardwareClass = "hardware_class"
         case osBuild = "os_build"
         case runtimeBuild = "runtime_build"
+        case decodeWindow = "decode_window"
     }
 
     static var currentRuntimeBuild: String {
@@ -53,6 +60,19 @@ struct ContinuousBatchingSelfCheckKey: Sendable, Equatable, Hashable, Codable {
     }
 
     static var currentOSBuild: String { ProcessInfo.processInfo.operatingSystemVersionString }
+}
+
+extension ContinuousBatchingSelfCheckKey {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelSHA256 = try container.decode(String.self, forKey: .modelSHA256)
+        metallibSHA256 = try container.decode(String.self, forKey: .metallibSHA256)
+        kernelIdentifier = try container.decode(String.self, forKey: .kernelIdentifier)
+        hardwareClass = try container.decode(String.self, forKey: .hardwareClass)
+        osBuild = try container.decode(String.self, forKey: .osBuild)
+        runtimeBuild = try container.decode(String.self, forKey: .runtimeBuild)
+        decodeWindow = try container.decodeIfPresent(Int.self, forKey: .decodeWindow) ?? 0
+    }
 }
 
 struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {

@@ -249,10 +249,52 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         """
         FileManager.default.createFile(atPath: url.path, contents: Data(v5.utf8), attributes: [.posixPermissions: 0o600])
         let store = ContinuousBatchingSelfCheckStore(url: url)
-        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", runtimeBuild: "r")
-        let record = try XCTUnwrap(store.record(for: key))
+        // A record from before the decode window was keyed reads as window 0.
+        let legacy = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", runtimeBuild: "r", decodeWindow: 0)
+        let record = try XCTUnwrap(store.record(for: legacy))
         XCTAssertEqual(record.inProgressSlots, 5)
         XCTAssertEqual(record.decision?.slots, 4)
+    }
+
+    /// SPEC-038 v0.3.16: a result measured at another decode window (or before
+    /// the window was keyed) never qualifies the live window. The check re-runs
+    /// for it, and the older grant only carries the Mac through the re-run.
+    func testResultFromAnotherDecodeWindowDoesNotQualifyThisOne() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-window-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName)
+        let v6 = """
+        {"records":[{"alone_outputs":[],"decided_at":"2026-10-10T00:00:00Z","decision":{"reason":"granted","slots":6,"verified_slots":6},"in_progress_slots":null,"key":{"hardware_class":"h","kernel_identifier":"k","metallib_sha256":"x","model_sha256":"m","os_build":"o","runtime_build":"r"},"measurements":[],"no_gain_streak":0,"remeasure_after":null,"serial_tps":1}],"schema_version":"macprovider.cb-self-check.v6"}
+        """
+        FileManager.default.createFile(atPath: url.path, contents: Data(v6.utf8), attributes: [.posixPermissions: 0o600])
+        let store = ContinuousBatchingSelfCheckStore(url: url)
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", runtimeBuild: "r", decodeWindow: 16)
+        XCTAssertNil(store.record(for: key))
+        XCTAssertNil(store.decision(for: key))
+        XCTAssertEqual(store.priorGrant(for: key), 6)
+
+        var windowOne = key
+        windowOne.decodeWindow = 1
+        try store.store(.init(
+            key: windowOne, decision: .init(slots: 8, reason: "granted", verifiedSlots: 8), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertNil(store.record(for: key))
+        XCTAssertEqual(store.record(for: windowOne)?.decision?.slots, 8)
+        let resolution = try XCTUnwrap(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: .init(key: key, maxRows: 16), ownerPinned: nil, provisional: nil
+        ))
+        XCTAssertEqual(resolution.servedSlots, 8)
+
+        // A stored record round-trips its window.
+        try store.store(.init(
+            key: key, decision: .init(slots: 4, reason: "granted", verifiedSlots: 4), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertEqual(store.record(for: key)?.key.decodeWindow, 16)
+        XCTAssertEqual(store.decision(for: key)?.slots, 4)
     }
 
     func testDeferralsBackOffToAtMostFifteenMinutes() {

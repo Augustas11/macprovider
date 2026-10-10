@@ -4486,7 +4486,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard includeDecided || continuousBatchingSelfCheck == .pending,
               !continuousBatchingEmergencyOffOverride,
               currentDraftModelID == nil,
-              continuousBatchScheduler != nil,
+              let scheduler = continuousBatchScheduler,
               let tuple = continuousBatchingRequestedTuple(),
               !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
         else { return nil }
@@ -4496,7 +4496,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 metallibSHA256: tuple.metallibSHA256,
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
-                osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild
+                osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
+                decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
             generation: selfCheckGeneration
