@@ -1,0 +1,42 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 emergency_off=false
+mlx_cache_limit_bytes=2147483648
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=false rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=false
+[paged-kv] measure nil: batched-isolation gate (proven=false sharedForwardParity=false parityTokens=48 challengeDistinguishing=false rowsDecoded=2 rowFailures=0 crossRowDivergences=0)
+event=paged_kv_attach status=fallback reason=paged_fallback_metallib
+malibu-cli config
+  port: 18193
+  model: qwen/qwen3.6-35b-a3b
+  draft_model: <unset>
+  num_draft_tokens: 3
+  publishes_spec_decode_telemetry: false
+  coordinator_url: <unset>
+  provider_id: <unset, will use per-instance UUID>
+  endpoint_url: <unset, WS-tunneled>
+  config: <studio-home>/lab-332/runs/step1-diag-alloff/cfg-18193.yaml
+  log_level: info
+  log_format: json
+  tier2_mda_artifact_path: <unset>
+  kv_bits: <unset, mlx default>
+  max_context: 200000
+  max_batch: 8
+  continuous_batching: canary
+  continuous_batch_queue_limit: 16
+  continuous_batch_queue_wait_timeout_ms: <unset, 30000>
+  continuous_batch_prefill_tokens_per_iteration: <unset, 2048>
+  continuous_batching_cached_turns: false
+  enable_receipts: false
+  relay_blind_enabled: false
+  privacy_class_beta: false
+  idle_prewarm.enabled: false
+  idle_prewarm.idle_threshold_seconds: 30.0
+  idle_prewarm.tick_seconds: 5.0
+  idle_prewarm.max_tokens: 1
+  idle_prewarm.prompt: warm
+  idle_prewarm.run_on_battery: false
+  stream_interval: 1
+  prefill_step_size: 512
+Listening on http://127.0.0.1:18193

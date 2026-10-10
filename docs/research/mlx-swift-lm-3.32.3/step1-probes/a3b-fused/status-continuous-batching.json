@@ -1,0 +1,50 @@
+{
+ "binary_version": "1.8.230",
+ "capacity": {
+  "max_concurrency": 8,
+  "max_context_source": "recommendation_apply",
+  "max_context_tokens": 200000,
+  "ram_gb": 256,
+  "ram_tier": "64GB+",
+  "throughput_probe_max_tokens": null,
+  "throughput_probe_model": null,
+  "throughput_source": "none",
+  "throughput_tps_estimate": 0
+ },
+ "continuous_batching": {
+  "active": true,
+  "cache_class": "mixed",
+  "mode": "canary",
+  "paged_kv_decision": "attached",
+  "policy": {
+   "authorization_source": "baked_empty_off",
+   "authorized": false,
+   "cached_turns_authorized": false,
+   "decision_reason": "absent_empty_off_fallback",
+   "emergency_off_override": false,
+   "expires_at": null,
+   "load_status": "absent_empty_off_fallback",
+   "local_proof_result": "passed",
+   "policy_sha256": null,
+   "policy_version": null,
+   "release_id": null,
+   "rollout_mode": "off",
+   "signer_key_id": null,
+   "tuple_sha256": null
+  },
+  "scheduler": {
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 0,
+   "shared_forward_calls": 0,
+   "slots_free": 8,
+   "slots_total": 8,
+   "waiting_count": 0
+  },
+  "unsupported_reason": null
+ },
+ "memory_rss_mb": 38189,
+ "model": "qwen/qwen3.6-35b-a3b",
+ "model_hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+ "status": "ready",
+ "thermal_state": "nominal"
+}

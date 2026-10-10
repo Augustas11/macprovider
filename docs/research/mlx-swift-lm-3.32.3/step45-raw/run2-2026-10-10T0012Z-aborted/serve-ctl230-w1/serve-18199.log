@@ -1,0 +1,651 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 emergency_off=false
+mlx_cache_limit_bytes=2147483648
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[paged-kv] moe-isolation rejoin decodeA=[4097] serialA=[4097] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478] serialA=[478] decodeB=[406] serialB=[406]
+[paged-kv] moe-isolation rejoin decodeA=[292] serialA=[292] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable
+{"cached_prompt_tokens":0,"completion_tokens":16,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":14,"provider_id":"","request_id":"59C16EA8-8FDB-4174-894E-4A2B35D174E0","stream":false}
+{"event":"receipt_omitted","provider_id":"","reason":"no_keypair","request_id":"59C16EA8-8FDB-4174-894E-4A2B35D174E0"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-17515f7df2d245ba"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1673,"provider_id":"","request_id":"sweep-17515f7df2d245ba","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ae10c6e2c1614068"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-ae10c6e2c1614068","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6db9a7bbd3704557"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-6db9a7bbd3704557","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ebecae9b5c3b4cb3"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-ebecae9b5c3b4cb3","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-cfb8f9c7d5f74b0b"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-cfb8f9c7d5f74b0b","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6789fcb923174d28"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-6789fcb923174d28","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4a279742e722474a"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-4a279742e722474a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c7bc722e96b54d65"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-c7bc722e96b54d65","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-89f4f5a54fe345fc"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-89f4f5a54fe345fc","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-23c634596dfb4aa1"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-23c634596dfb4aa1","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f85ece20062d4d67"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-f85ece20062d4d67","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ee8f26ad44614c23"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-ee8f26ad44614c23","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d817cff9c8d44440"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-d817cff9c8d44440","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ec4027ad91b342ff"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-ec4027ad91b342ff","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-46ea59f21e414967"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-46ea59f21e414967","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ab8d1f9f08e746c0"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-ab8d1f9f08e746c0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-883cbffcdecb4e9e"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-883cbffcdecb4e9e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6e1859515a364531"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-6e1859515a364531","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-b474f6da2f2049ed"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-b474f6da2f2049ed","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-3c75d5dc32494761"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-3c75d5dc32494761","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4a94ffee0aaa4292"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-4a94ffee0aaa4292","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-8f60ca94ca104d2c"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-8f60ca94ca104d2c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ee57296df90b4351"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-ee57296df90b4351","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-07a0d3784b674057"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-07a0d3784b674057","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-75cfb1c57c964423"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-75cfb1c57c964423","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-859fa05310f042c1"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-859fa05310f042c1","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-5196999c2ed24260"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-5196999c2ed24260","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-b056d952d4fd4fe3"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-b056d952d4fd4fe3","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f56736e069564bbe"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-f56736e069564bbe","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1b4371ced82c441e"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-1b4371ced82c441e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-3a40c886f8cb4e28"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-3a40c886f8cb4e28","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4a6443cf57244b8c"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-4a6443cf57244b8c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e7fae999198542d8"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-e7fae999198542d8","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ee4162f493c74af1"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-ee4162f493c74af1","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-da572432e6444242"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-da572432e6444242","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ef7eb1325ede4e42"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4beae81b83e044f0"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ae93a28b2df24dca"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6740b27fae27470e"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-0c9bf52575d34480"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-43535ea694c143d9"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-38e04a08bf12414d"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-faca3ece95c94ba8"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-ef7eb1325ede4e42","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-821e50af8a714b4c"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-4beae81b83e044f0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1b565c372dab42be"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1666,"provider_id":"","request_id":"sweep-6740b27fae27470e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-dd65fc0737b0456a"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1665,"provider_id":"","request_id":"sweep-ae93a28b2df24dca","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e3f8474ad5184d7c"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-0c9bf52575d34480","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2291158017324e2d"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-43535ea694c143d9","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-80baa98602714dcc"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-38e04a08bf12414d","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-faca3ece95c94ba8","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-cfb8b8bacab34395"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-75a45bdd0ad04941"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-821e50af8a714b4c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-bea352a966954672"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-1b565c372dab42be","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2022822610bb4770"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-dd65fc0737b0456a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-33849450ab25460a"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-e3f8474ad5184d7c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d0de92dc9c284457"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-2291158017324e2d","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-9c6f84425c8745b6"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-80baa98602714dcc","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-75a45bdd0ad04941","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-7aba252b8f664d3e"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-80735a728e7d47e7"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-cfb8b8bacab34395","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f34194925dce49c7"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-bea352a966954672","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ed50a8c39d184f9c"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-2022822610bb4770","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-71cb7824a42142b1"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-33849450ab25460a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-36015addd8704bff"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-d0de92dc9c284457","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-aeff27cd331b48ef"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-9c6f84425c8745b6","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d11dc460ccdb474d"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-80735a728e7d47e7","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e7119a5dd7b144ba"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-7aba252b8f664d3e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1f632124285f471b"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-f34194925dce49c7","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6c976d513f6d4384"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-ed50a8c39d184f9c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1f7821fa6e6845cd"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-71cb7824a42142b1","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-af8ae6df3ebb4d72"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-36015addd8704bff","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-421fca5a26704a23"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-aeff27cd331b48ef","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c33061babb524b83"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-d11dc460ccdb474d","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ed62ef012e914830"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-e7119a5dd7b144ba","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c3214f99933b4478"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-1f632124285f471b","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-805afe4b2c1f4119"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-6c976d513f6d4384","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-5de41d99f696462f"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-1f7821fa6e6845cd","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ee695982c7ad479f"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-af8ae6df3ebb4d72","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2c408462662846a0"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-421fca5a26704a23","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-224625f9354249b1"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-c33061babb524b83","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1f3ae45624544574"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-ed62ef012e914830","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-931197383c11492a"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-c3214f99933b4478","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-fea26e74ffba4996"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-805afe4b2c1f4119","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-bee86969e26447e5"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-5de41d99f696462f","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-a553f45569254c0e"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-ee695982c7ad479f","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-9578f486ce6646ff"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-2c408462662846a0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e815faf04ef9488d"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-224625f9354249b1","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6e64288b48b041e6"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1665,"provider_id":"","request_id":"sweep-1f3ae45624544574","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-edbea3be383946e3"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-931197383c11492a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-942761398c234aeb"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-fea26e74ffba4996","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ae7f025886244d50"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-bee86969e26447e5","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-266dce9c97504662"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-a553f45569254c0e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-26e51d88287c42f2"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-9578f486ce6646ff","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1b34335f0ddd48eb"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-e815faf04ef9488d","stream":true}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-6e64288b48b041e6","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-edbea3be383946e3","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-942761398c234aeb","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-ae7f025886244d50","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-266dce9c97504662","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-26e51d88287c42f2","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1673,"provider_id":"","request_id":"sweep-1b34335f0ddd48eb","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-49e049a4266f4b60"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-edbed74fb8534cc0"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-429ce160abd84254"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-76efa8db63c94ba0"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-04a2459a3d944ee0"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-66c8148f09c54e27"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-a19f959c5c384d0f"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f5400b50c07d4c8f"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-5e45907640aa4efd"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-947006de9e95437c"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-0d8798998c544ba0"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4c78615c0a874b1a"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-3cdce5ae57d34075"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f3cec29eda9e4f50"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-dc8cf532c4e54fee"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-a6ccbf01dee34fe0"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-49e049a4266f4b60","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-455095d5a592402f"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1666,"provider_id":"","request_id":"sweep-429ce160abd84254","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1666,"provider_id":"","request_id":"sweep-edbed74fb8534cc0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2b7dbab1f5f24bdb"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d5fef57745544a2a"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-76efa8db63c94ba0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-cfe6c71f6f9b45c9"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-04a2459a3d944ee0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-93b3078b070846e8"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-f5400b50c07d4c8f","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-66c8148f09c54e27","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e9f54b04323a4823"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c7e493c20f7e4489"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-a19f959c5c384d0f","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-0a7f587b20e74d52"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-5e45907640aa4efd","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1f753371b2204695"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-947006de9e95437c","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ed3d8ceef4e64255"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-0d8798998c544ba0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1161823e868e474d"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-4c78615c0a874b1a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-85a3f1c378dc4dd4"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-3cdce5ae57d34075","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d533dcccad924fec"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-f3cec29eda9e4f50","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4f23be4ef0f24130"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-dc8cf532c4e54fee","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4cdf3ec9689f4298"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1666,"provider_id":"","request_id":"sweep-a6ccbf01dee34fe0","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1ce6d60ea280407b"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-455095d5a592402f","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-fe5d02afd00243a2"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-2b7dbab1f5f24bdb","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-595f48e35f0e4bec"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1672,"provider_id":"","request_id":"sweep-d5fef57745544a2a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-7af2031c4a194bff"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-cfe6c71f6f9b45c9","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c7c9b8cbc8e64601"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-93b3078b070846e8","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-33af56b8e7424d05"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-e9f54b04323a4823","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-5197d0ae24ce43c9"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-c7e493c20f7e4489","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-cb7afcca1cce4991"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-0a7f587b20e74d52","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-b21efa2402f549ad"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1673,"provider_id":"","request_id":"sweep-1f753371b2204695","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ffb57a3cb9db4e41"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-ed3d8ceef4e64255","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-9b20e5e8c24b4dba"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-1161823e868e474d","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-f203be7ba0eb4c0a"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-85a3f1c378dc4dd4","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d48ccc62847541db"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-d533dcccad924fec","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c2cc24ad59e54de7"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-4f23be4ef0f24130","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-8a149581a61a4655"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-4cdf3ec9689f4298","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-570ac928ecff44c7"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-1ce6d60ea280407b","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-49306378956a4f67"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-fe5d02afd00243a2","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-0dc40c9353ad4974"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-595f48e35f0e4bec","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-962af986e2234140"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-7af2031c4a194bff","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ef82694e988b4fcd"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-c7c9b8cbc8e64601","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-72c6eedf031c4225"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-33af56b8e7424d05","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2bee4f7943544798"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-5197d0ae24ce43c9","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4b4c841181c04fad"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-cb7afcca1cce4991","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-43b053ed450e449a"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1666,"provider_id":"","request_id":"sweep-b21efa2402f549ad","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-87ab806b87534811"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-ffb57a3cb9db4e41","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-2c633d6858ec4dd7"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-9b20e5e8c24b4dba","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-108974ec64f041d5"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1673,"provider_id":"","request_id":"sweep-f203be7ba0eb4c0a","stream":true}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-d48ccc62847541db","stream":true}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-c2cc24ad59e54de7","stream":true}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-8a149581a61a4655","stream":true}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1673,"provider_id":"","request_id":"sweep-570ac928ecff44c7","stream":true}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-49306378956a4f67","stream":true}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1664,"provider_id":"","request_id":"sweep-0dc40c9353ad4974","stream":true}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-962af986e2234140","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1671,"provider_id":"","request_id":"sweep-ef82694e988b4fcd","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-72c6eedf031c4225","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1669,"provider_id":"","request_id":"sweep-2bee4f7943544798","stream":true}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-4b4c841181c04fad","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-43b053ed450e449a","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1667,"provider_id":"","request_id":"sweep-87ab806b87534811","stream":true}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1670,"provider_id":"","request_id":"sweep-2c633d6858ec4dd7","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":256,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1668,"provider_id":"","request_id":"sweep-108974ec64f041d5","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-6e68e832f54b4bd6"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1955,"provider_id":"","request_id":"sweep-6e68e832f54b4bd6","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d5ebee99b263496e"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1953,"provider_id":"","request_id":"sweep-d5ebee99b263496e","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-c3ef21bf6a0f4707"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1953,"provider_id":"","request_id":"sweep-c3ef21bf6a0f4707","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-0b158c8bb90544be"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1955,"provider_id":"","request_id":"sweep-0b158c8bb90544be","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-d330141b94b94758"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1957,"provider_id":"","request_id":"sweep-d330141b94b94758","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-e84fdf9388b84e7a"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1954,"provider_id":"","request_id":"sweep-e84fdf9388b84e7a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-fb7bcffb308f4553"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1959,"provider_id":"","request_id":"sweep-fb7bcffb308f4553","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-945572dfb2a548f6"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-17552fdb863c4fdb"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-66d25b9b898541f4"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4644f8d8ee904866"}
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-389a0bacd24b455a"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-5c57f871f0944531"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-24c7f0ed6c364034"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-ff0086d82afb421b"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1956,"provider_id":"","request_id":"sweep-945572dfb2a548f6","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-54d1d7daa82241d5"}
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1951,"provider_id":"","request_id":"sweep-17552fdb863c4fdb","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-53da89b0352741e9"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1956,"provider_id":"","request_id":"sweep-66d25b9b898541f4","stream":true}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1956,"provider_id":"","request_id":"sweep-4644f8d8ee904866","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-4ff91142bd0a4bba"}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-35cf617a7a674fdd"}
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1957,"provider_id":"","request_id":"sweep-389a0bacd24b455a","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-357775736ecd4a93"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1959,"provider_id":"","request_id":"sweep-24c7f0ed6c364034","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-29ef0676de5b46cd"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1954,"provider_id":"","request_id":"sweep-5c57f871f0944531","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-1e9b1aee401e4fa9"}
+event=batching_admitted action=scheduler_admitted
+{"cached_prompt_tokens":0,"completion_tokens":1024,"event":"kv_cache_request_completed","finish_reason":"length","kv_cache_bytes_reused":0,"kv_cache_reuse_ratio":0,"model_id":"qwen\/qwen3.6-35b-a3b","prompt_tokens":1956,"provider_id":"","request_id":"sweep-ff0086d82afb421b","stream":true}
+{"event":"receipt_omitted","provider_id":"","reason":"streaming_request","request_id":"sweep-a7cef870173c4866"}
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}
+{"event":"idle_prewarm_skipped","reason":"disabled"}

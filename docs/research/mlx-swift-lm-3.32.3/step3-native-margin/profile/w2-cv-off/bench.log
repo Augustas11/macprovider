@@ -1,0 +1,64 @@
+start 15:29:23 tag=w2-cv-off bin=8b5c8012e2bb3169 env=MLX_LM_QWEN35_COMPILED_VERIFY=0
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[paged-kv] moe-isolation rejoin decodeA=[4097] serialA=[4097] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478] serialA=[478] decodeB=[406] serialB=[406]
+[paged-kv] moe-isolation rejoin decodeA=[292] serialA=[292] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=9 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+[labprof] d0.performDecode.call=23.599ms/n323 f0.finalize.total=1.429ms/n276 f1.finalize.build=0.291ms/n276 f2.finalize.eval=1.081ms/n276 fc.finalize.call=1.435ms/n276 o1.ord.build=1.084ms/n849 o2.ord.eval=7.797ms/n849 p0.propose=0.002ms/n276 r0.round.interval=13.205ms/n275 s1.native.prefill.target=98.780ms/n3 s1.ord.prefill.target=41.498ms/n21 s2.native.prefill.drafter+eval=178.101ms/n3 s2.ord.prefill.eval=82.521ms/n21 s9.native.prefill.chunk.total=276.884ms/n3 s9.ord.prefill.chunk.total=124.027ms/n21 v0.verify.call=11.686ms/n276 v1.verify.build=1.524ms/n276 v2.verify.eval=10.061ms/n276
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+[labprof] d0.performDecode.call=132.366ms/n61 f0.finalize.total=1.410ms/n568 f1.finalize.build=0.293ms/n568 f2.finalize.eval=1.061ms/n568 fc.finalize.call=1.416ms/n568 o1.ord.build=1.071ms/n972 o2.ord.eval=7.194ms/n972 p0.propose=0.001ms/n569 r0.round.interval=13.202ms/n566 s1.native.prefill.target=98.591ms/n9 s1.ord.prefill.target=98.737ms/n3 s2.native.prefill.drafter+eval=178.129ms/n9 s2.ord.prefill.eval=166.127ms/n3 s9.native.prefill.chunk.total=276.722ms/n9 s9.ord.prefill.chunk.total=264.866ms/n3 v0.verify.call=11.680ms/n568 v1.verify.build=1.508ms/n569 v2.verify.eval=10.072ms/n569
+event=batching_admitted action=scheduler_admitted
+[labprof] d0.performDecode.call=131.652ms/n32 f0.finalize.total=1.472ms/n259 f1.finalize.build=0.313ms/n259 f2.finalize.eval=1.095ms/n259 fc.finalize.call=1.479ms/n259 o1.ord.build=1.081ms/n511 o2.ord.eval=7.137ms/n511 p0.propose=0.002ms/n258 r0.round.interval=13.620ms/n258 s1.ord.prefill.target=74.699ms/n4 s2.ord.prefill.eval=166.339ms/n3 s9.ord.prefill.chunk.total=265.218ms/n3 v0.verify.call=12.024ms/n259 v1.verify.build=1.581ms/n258 v2.verify.eval=10.339ms/n258
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[paged-kv] moe-isolation rejoin decodeA=[4097] serialA=[4097] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478] serialA=[478] decodeB=[406] serialB=[406]
+[paged-kv] moe-isolation rejoin decodeA=[292] serialA=[292] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=9 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+[labprof] c1.capture.build=1.467ms/n114 c2.capture.eval=9.732ms/n113 d0.performDecode.call=31.378ms/n332 o1.ord.build=1.363ms/n823 o2.ord.eval=9.747ms/n823 s1.native.prefill.target=98.909ms/n3 s1.ord.prefill.target=50.714ms/n23 s2.native.prefill.drafter+eval=178.107ms/n3 s2.ord.prefill.eval=93.095ms/n24 s9.native.prefill.chunk.total=277.018ms/n3 s9.ord.prefill.chunk.total=141.793ms/n24
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+[labprof] c1.capture.build=1.510ms/n908 c2.capture.eval=10.352ms/n909 d0.performDecode.call=177.259ms/n89 o1.ord.build=1.456ms/n425 o2.ord.eval=9.860ms/n425 s1.native.prefill.target=99.065ms/n3 s1.ord.prefill.target=98.860ms/n9 s2.native.prefill.drafter+eval=179.077ms/n3 s2.ord.prefill.eval=165.596ms/n9 s9.native.prefill.chunk.total=278.145ms/n3 s9.ord.prefill.chunk.total=264.458ms/n9
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+[labprof] c1.capture.build=1.506ms/n511 c2.capture.eval=10.243ms/n511 d0.performDecode.call=172.345ms/n83 o1.ord.build=1.486ms/n717 o2.ord.eval=9.971ms/n717 s1.native.prefill.target=99.230ms/n3 s1.ord.prefill.target=81.048ms/n11 s2.native.prefill.drafter+eval=180.725ms/n3 s2.ord.prefill.eval=181.797ms/n11 s9.native.prefill.chunk.total=279.958ms/n3 s9.ord.prefill.chunk.total=263.898ms/n10
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=native_mtp_load_gate action=depth_zero active_rows=2 bound=1
+event=native_mtp_load_gate action=restore active_rows=1 bound=9223372036854775807
+exit=0 tag=w2-cv-off end 15:32:28

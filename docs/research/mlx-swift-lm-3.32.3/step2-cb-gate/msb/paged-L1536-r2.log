@@ -1,0 +1,56 @@
+{
+  "aggregateCVPct" : 0.21890900877834116,
+  "aggregateTPSRuns" : [
+    158.18346165504252,
+    157.69450768795033
+  ],
+  "aggregateTPSp50" : 158.18346165504252,
+  "aggregateUpliftVsPagedSingleRow" : 1.3813667670774068,
+  "aggregateVsProductionSerial" : 0.9955548451466035,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 10,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.6-35B-A3B-4bit\/38740b847e4cb78f352aba30aa41c76e08e6eb46\/3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "modelTag" : "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "pagedSingleRowCVPct" : 0.04856336417777876,
+  "pagedSingleRowTPSRuns" : [
+    114.43366377870669,
+    114.51228263563583
+  ],
+  "pagedSingleRowTPSp50" : 114.51228263563583,
+  "peakPhysFootprintMB" : 46888,
+  "peakRSSMB" : 39261,
+  "perRowFractionOfPagedSingleRow" : 0.6906833835387034,
+  "perRowTPSp50" : 79.09173082752126,
+  "productionSerialCVPct" : 0.07176476891713728,
+  "productionSerialPromptTokens" : 1536,
+  "productionSerialTPSRuns" : [
+    158.88975120376088,
+    158.7285746575465
+  ],
+  "productionSerialTPSp50" : 158.88975120376088,
+  "productionSerialTTFTSecondsRuns" : [
+    0.8082790374755859,
+    0.8068149089813232
+  ],
+  "promptTokenLengths" : [
+    1536,
+    1536
+  ],
+  "promptTokenSHA256" : [
+    "b8be5b5eba3b724a09e2b36eb5af871c1c256c8cf4e108f942ef253a52be3528",
+    "9916ad47f9d3eac8a72c16addfa5dc242818c253a79de4ba23938ea32990fad8"
+  ],
+  "promptTokensPerRow" : 1536,
+  "rows" : 2,
+  "runs" : 2,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-09T13:59:46Z"
+}
+msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=2 block=16 serial_tps_p50=158.9 engine_1row_tps_p50=114.5 aggregate_tps_p50=158.2 uplift_vs_1row=1.38x aggregate_vs_serial=1.00x peak_rss_mb=39261
+msb-throughput: wrote <studio-home>/lab-332/runs2/step2-msb/paged-L1536-r2.json

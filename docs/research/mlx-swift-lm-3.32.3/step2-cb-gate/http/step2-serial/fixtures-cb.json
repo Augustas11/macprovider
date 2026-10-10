@@ -1,0 +1,512 @@
+{
+ "keyless": {
+  "http": 200,
+  "elapsed_s": 2.201,
+  "x_request_id": null,
+  "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns: river, copper, lantern, orchard, glacier, harbor, violet, and meadow. Each noun is paired with the identifier \"0\" and a sequential index number ranging from 0 to 159. This structure creates a continuous, periodic sequence where the same set of words recurs twenty times.\n\nThere are 0 distinct colours named in the list.",
+  "reasoning": null,
+  "finish_reason": "stop",
+  "usage": {
+   "completion_tokens": 94,
+   "total_tokens": 1185,
+   "macprovider_generation_ms": 2192,
+   "cached_prompt_tokens": 0,
+   "macprovider_generated_completion_tokens": 94,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "prompt_tokens": 1091
+  }
+ },
+ "keyed_first_turn": {
+  "http": 200,
+  "elapsed_s": 1.995,
+  "x_request_id": null,
+  "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns, each followed by a unique numerical identifier. These nouns are copper, lantern, orchard, glacier, harbor, violet, meadow, and river, which appear sequentially and repeatedly throughout the sequence. The pattern continues without variation until the final entry, maintaining a consistent structure of eight distinct terms per cycle.\n\nThere are 0 distinct colours named in the list.",
+  "reasoning": null,
+  "finish_reason": "stop",
+  "usage": {
+   "cached_prompt_tokens": 0,
+   "prompt_tokens": 1091,
+   "completion_tokens": 92,
+   "total_tokens": 1183,
+   "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+   "macprovider_generated_completion_tokens": 92,
+   "macprovider_generation_ms": 1994
+  }
+ },
+ "alone": {
+  "fx0": {
+   "http": 200,
+   "elapsed_s": 2.016,
+   "x_request_id": null,
+   "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns: river, copper, lantern, orchard, glacier, harbor, violet, and meadow. Each noun is paired with the identifier \"0\" and a sequential index number ranging from 0 to 159. This structure creates a continuous, periodic sequence where the same set of words recurs twenty times.\n\nThere are 0 distinct colours named in the list.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 94,
+    "total_tokens": 1185,
+    "completion_tokens": 94,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "macprovider_generation_ms": 2014,
+    "cached_prompt_tokens": 0,
+    "prompt_tokens": 1091
+   }
+  },
+  "fx1": {
+   "http": 200,
+   "elapsed_s": 1.995,
+   "x_request_id": null,
+   "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns, each followed by a unique numerical identifier. These nouns are copper, lantern, orchard, glacier, harbor, violet, meadow, and river, which appear sequentially and repeatedly throughout the sequence. The pattern continues without variation until the final entry, maintaining a consistent structure of eight distinct terms per cycle.\n\nThere are 0 distinct colours named in the list.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "completion_tokens": 92,
+    "macprovider_generated_completion_tokens": 92,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "total_tokens": 1183,
+    "macprovider_generation_ms": 1994
+   }
+  },
+  "fx2": {
+   "http": 200,
+   "elapsed_s": 2.115,
+   "x_request_id": null,
+   "content": "The provided list consists of a repetitive sequence of eight specific items, each appended with the identifier \"-2\" and a sequential number ranging from 0 to 159. These items cycle continuously through the same set of nouns, creating a structured pattern of 160 total entries. The distinct items named in the list are lantern, orchard, glacier, harbor, violet, meadow, river, and copper.\n\nThere are 2 distinct colours named in the list: violet and copper.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "completion_tokens": 101,
+    "macprovider_generated_completion_tokens": 101,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "total_tokens": 1192,
+    "macprovider_generation_ms": 2114
+   }
+  },
+  "fx3": {
+   "http": 200,
+   "elapsed_s": 1.988,
+   "x_request_id": null,
+   "content": "The provided list consists of 159 items, each formatted as a combination of a noun and a numerical identifier. The nouns cycle repeatedly through a fixed sequence of eight specific words: orchard, glacier, harbor, violet, meadow, river, copper, and lantern. This pattern continues uniformly from the first entry to the last without any deviation in the word choices.\n\nThere are 2 distinct colours named in the list: violet and copper.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 91,
+    "total_tokens": 1182,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 91,
+    "macprovider_generation_ms": 1986
+   }
+  }
+ },
+ "concurrent": {
+  "fx1": {
+   "http": 200,
+   "elapsed_s": 5.588,
+   "x_request_id": null,
+   "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns, each followed by a unique numerical identifier. These nouns are copper, lantern, orchard, glacier, harbor, violet, meadow, and river, which appear sequentially and repeatedly throughout the sequence. The pattern continues without variation until the final entry, maintaining a consistent structure of eight distinct terms per cycle.\n\nThere are 0 distinct colours named in the list.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 92,
+    "total_tokens": 1183,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 92,
+    "macprovider_generation_ms": 5562
+   },
+   "sent_request_id": "lab-conc-fx1-41d421b1-b498-445f-856f-7fc531a447ea"
+  },
+  "fx3": {
+   "http": 200,
+   "elapsed_s": 5.663,
+   "x_request_id": null,
+   "content": "The provided list consists of 159 items, each formatted as a combination of a noun and a numerical identifier. The nouns cycle repeatedly through a fixed sequence of eight specific words: orchard, glacier, harbor, violet, meadow, river, copper, and lantern. This pattern continues uniformly from the first entry to the last without any deviation in the word choices.\n\nThere are 2 distinct colours named in the list: violet and copper.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 91,
+    "total_tokens": 1182,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 91,
+    "macprovider_generation_ms": 5639
+   },
+   "sent_request_id": "lab-conc-fx3-2b74ed26-cc77-43ac-bc1f-0e55ab1d96bf"
+  },
+  "fx0": {
+   "http": 200,
+   "elapsed_s": 5.698,
+   "x_request_id": null,
+   "content": "The provided list consists of 160 items arranged in a repeating cycle of eight specific nouns: river, copper, lantern, orchard, glacier, harbor, violet, and meadow. Each noun is paired with the identifier \"0\" and a sequential index number ranging from 0 to 159. This structure creates a continuous, periodic sequence where the same set of words recurs twenty times.\n\nThere are 0 distinct colours named in the list.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 94,
+    "total_tokens": 1185,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 94,
+    "macprovider_generation_ms": 5684
+   },
+   "sent_request_id": "lab-conc-fx0-787abfce-6a4b-4ab6-9af2-7627bba17b5b"
+  },
+  "fx2": {
+   "http": 200,
+   "elapsed_s": 5.784,
+   "x_request_id": null,
+   "content": "The provided list consists of a repetitive sequence of eight specific items, each appended with the identifier \"-2\" and a sequential number ranging from 0 to 159. These items cycle continuously through the same set of nouns, creating a structured pattern of 160 total entries. The distinct items named in the list are lantern, orchard, glacier, harbor, violet, meadow, river, and copper.\n\nThere are 2 distinct colours named in the list: violet and copper.",
+   "reasoning": null,
+   "finish_reason": "stop",
+   "usage": {
+    "macprovider_generated_completion_tokens": 101,
+    "total_tokens": 1192,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 101,
+    "macprovider_generation_ms": 5783
+   },
+   "sent_request_id": "lab-conc-fx2-5330f1f6-5449-4cfd-96ea-ec4434ac7df4"
+  }
+ },
+ "status_samples": [
+  {
+   "max_observed_batch_depth": 1,
+   "slots_total": 8,
+   "slots_free": 8,
+   "shared_forward_calls": 564,
+   "active_decode_rows": 0,
+   "waiting_count": 0,
+   "t": 1791554081.13
+  },
+  {
+   "shared_forward_calls": 564,
+   "active_decode_rows": 0,
+   "slots_total": 8,
+   "waiting_count": 0,
+   "max_observed_batch_depth": 1,
+   "slots_free": 4,
+   "t": 1791554081.39
+  },
+  {
+   "slots_free": 4,
+   "waiting_count": 0,
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 1,
+   "shared_forward_calls": 564,
+   "slots_total": 8,
+   "t": 1791554081.66
+  },
+  {
+   "slots_free": 4,
+   "waiting_count": 0,
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 1,
+   "shared_forward_calls": 564,
+   "slots_total": 8,
+   "t": 1791554081.91
+  },
+  {
+   "slots_total": 8,
+   "waiting_count": 0,
+   "slots_free": 4,
+   "max_observed_batch_depth": 1,
+   "shared_forward_calls": 564,
+   "active_decode_rows": 0,
+   "t": 1791554082.18
+  },
+  {
+   "waiting_count": 0,
+   "slots_total": 8,
+   "shared_forward_calls": 564,
+   "slots_free": 4,
+   "max_observed_batch_depth": 1,
+   "active_decode_rows": 0,
+   "t": 1791554082.44
+  },
+  {
+   "shared_forward_calls": 565,
+   "active_decode_rows": 1,
+   "slots_free": 4,
+   "waiting_count": 0,
+   "max_observed_batch_depth": 1,
+   "slots_total": 8,
+   "t": 1791554082.7
+  },
+  {
+   "slots_free": 4,
+   "max_observed_batch_depth": 1,
+   "slots_total": 8,
+   "shared_forward_calls": 566,
+   "waiting_count": 0,
+   "active_decode_rows": 1,
+   "t": 1791554082.96
+  },
+  {
+   "shared_forward_calls": 567,
+   "max_observed_batch_depth": 1,
+   "active_decode_rows": 1,
+   "waiting_count": 0,
+   "slots_total": 8,
+   "slots_free": 4,
+   "t": 1791554083.23
+  },
+  {
+   "max_observed_batch_depth": 1,
+   "waiting_count": 0,
+   "active_decode_rows": 1,
+   "slots_total": 8,
+   "slots_free": 4,
+   "shared_forward_calls": 567,
+   "t": 1791554083.49
+  },
+  {
+   "shared_forward_calls": 568,
+   "max_observed_batch_depth": 3,
+   "waiting_count": 0,
+   "active_decode_rows": 3,
+   "slots_total": 8,
+   "slots_free": 4,
+   "t": 1791554083.75
+  },
+  {
+   "max_observed_batch_depth": 3,
+   "shared_forward_calls": 568,
+   "waiting_count": 0,
+   "slots_total": 8,
+   "active_decode_rows": 3,
+   "slots_free": 4,
+   "t": 1791554084.01
+  },
+  {
+   "slots_total": 8,
+   "active_decode_rows": 4,
+   "max_observed_batch_depth": 4,
+   "waiting_count": 0,
+   "slots_free": 4,
+   "shared_forward_calls": 572,
+   "t": 1791554084.27
+  },
+  {
+   "max_observed_batch_depth": 4,
+   "active_decode_rows": 4,
+   "waiting_count": 0,
+   "slots_free": 4,
+   "shared_forward_calls": 581,
+   "slots_total": 8,
+   "t": 1791554084.54
+  },
+  {
+   "active_decode_rows": 4,
+   "max_observed_batch_depth": 4,
+   "slots_total": 8,
+   "slots_free": 4,
+   "shared_forward_calls": 590,
+   "waiting_count": 0,
+   "t": 1791554084.8
+  },
+  {
+   "active_decode_rows": 4,
+   "max_observed_batch_depth": 4,
+   "waiting_count": 0,
+   "slots_total": 8,
+   "shared_forward_calls": 599,
+   "slots_free": 4,
+   "t": 1791554085.06
+  },
+  {
+   "active_decode_rows": 4,
+   "slots_total": 8,
+   "max_observed_batch_depth": 4,
+   "slots_free": 4,
+   "shared_forward_calls": 608,
+   "waiting_count": 0,
+   "t": 1791554085.32
+  },
+  {
+   "waiting_count": 0,
+   "active_decode_rows": 4,
+   "slots_total": 8,
+   "slots_free": 4,
+   "shared_forward_calls": 618,
+   "max_observed_batch_depth": 4,
+   "t": 1791554085.59
+  },
+  {
+   "shared_forward_calls": 627,
+   "waiting_count": 0,
+   "active_decode_rows": 4,
+   "slots_total": 8,
+   "max_observed_batch_depth": 4,
+   "slots_free": 4,
+   "t": 1791554085.85
+  },
+  {
+   "active_decode_rows": 4,
+   "slots_total": 8,
+   "waiting_count": 0,
+   "max_observed_batch_depth": 4,
+   "shared_forward_calls": 636,
+   "slots_free": 4,
+   "t": 1791554086.11
+  },
+  {
+   "slots_free": 4,
+   "shared_forward_calls": 645,
+   "waiting_count": 0,
+   "active_decode_rows": 4,
+   "max_observed_batch_depth": 4,
+   "slots_total": 8,
+   "t": 1791554086.37
+  },
+  {
+   "waiting_count": 0,
+   "active_decode_rows": 4,
+   "shared_forward_calls": 654,
+   "slots_free": 4,
+   "slots_total": 8,
+   "max_observed_batch_depth": 4,
+   "t": 1791554086.63
+  },
+  {
+   "shared_forward_calls": 667,
+   "slots_free": 7,
+   "max_observed_batch_depth": 4,
+   "active_decode_rows": 1,
+   "slots_total": 8,
+   "waiting_count": 0,
+   "t": 1791554086.9
+  }
+ ],
+ "parity_rows": [
+  {
+   "id": "fx0",
+   "serial_vs_alone": false,
+   "serial_vs_concurrent": false,
+   "usage_serial": {
+    "prompt_tokens": 1091,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "macprovider_generated_completion_tokens": 96,
+    "macprovider_generation_ms": null,
+    "total_tokens": 1187,
+    "completion_tokens": 96,
+    "cached_prompt_tokens": 0
+   },
+   "usage_concurrent": {
+    "macprovider_generated_completion_tokens": 94,
+    "total_tokens": 1185,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 94,
+    "macprovider_generation_ms": 5684
+   },
+   "usage_match": false,
+   "finish": [
+    "length",
+    "stop",
+    "stop"
+   ],
+   "request_id_echo": false
+  },
+  {
+   "id": "fx1",
+   "serial_vs_alone": false,
+   "serial_vs_concurrent": false,
+   "usage_serial": {
+    "prompt_tokens": 1091,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "macprovider_generated_completion_tokens": 104,
+    "macprovider_generation_ms": null,
+    "total_tokens": 1195,
+    "completion_tokens": 104,
+    "cached_prompt_tokens": 0
+   },
+   "usage_concurrent": {
+    "macprovider_generated_completion_tokens": 92,
+    "total_tokens": 1183,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 92,
+    "macprovider_generation_ms": 5562
+   },
+   "usage_match": false,
+   "finish": [
+    "stop",
+    "stop",
+    "stop"
+   ],
+   "request_id_echo": false
+  },
+  {
+   "id": "fx2",
+   "serial_vs_alone": false,
+   "serial_vs_concurrent": false,
+   "usage_serial": {
+    "macprovider_generated_completion_tokens": 160,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "total_tokens": 1251,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 160,
+    "prompt_tokens": 1091,
+    "macprovider_generation_ms": null
+   },
+   "usage_concurrent": {
+    "macprovider_generated_completion_tokens": 101,
+    "total_tokens": 1192,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 101,
+    "macprovider_generation_ms": 5783
+   },
+   "usage_match": false,
+   "finish": [
+    "length",
+    "stop",
+    "stop"
+   ],
+   "request_id_echo": false
+  },
+  {
+   "id": "fx3",
+   "serial_vs_alone": false,
+   "serial_vs_concurrent": false,
+   "usage_serial": {
+    "macprovider_generated_completion_tokens": 91,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "total_tokens": 1182,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 91,
+    "prompt_tokens": 1091,
+    "macprovider_generation_ms": null
+   },
+   "usage_concurrent": {
+    "macprovider_generated_completion_tokens": 91,
+    "total_tokens": 1182,
+    "prompt_tokens": 1091,
+    "cached_prompt_tokens": 0,
+    "macprovider_model_hash_observed": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+    "completion_tokens": 91,
+    "macprovider_generation_ms": 5639
+   },
+   "usage_match": false,
+   "finish": [
+    "stop",
+    "stop",
+    "stop"
+   ],
+   "request_id_echo": false
+  }
+ ],
+ "max_active_rows_sampled": 4
+}

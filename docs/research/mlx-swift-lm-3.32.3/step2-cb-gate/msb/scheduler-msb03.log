@@ -1,0 +1,192 @@
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=256 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+msb-throughput: scheduler window_calls=265 one_token_decode_calls=0
+{
+  "aggregateCVPct" : 0.1954074017658685,
+  "aggregateTPSRuns" : [
+    194.81424993402572,
+    195.26531853312486,
+    195.2575554736281,
+    195.12718930000665,
+    195.8651210974404
+  ],
+  "aggregateTPSp50" : 195.2575554736281,
+  "aggregateUpliftVsPagedSingleRow" : 1.6779083669545234,
+  "aggregateVsProductionSerial" : 1.2312460566027095,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 10,
+  "leftovers" : {
+    "msb03" : {
+      "aggregatePass" : true,
+      "aggregateVsSerial" : 1.2312460566027095,
+      "pass" : false,
+      "promptTokenLengths" : [
+        512,
+        1024,
+        1536,
+        2048
+      ],
+      "shortRequestBatchedTTFTp95" : 0.2966310977935791,
+      "shortRequestSerialTTFTp95" : 0.29997897148132324,
+      "shortRequestTTFTRatio" : 0.9888396387546365,
+      "ttftPass" : true
+    },
+    "usagePass" : false,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 512,
+        "requestID" : "msb-sched-0-9876F1AB-6500-49C3-92D1-7EC9A6BDB704",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-8D4DFB02-FBEB-46A9-8C04-C3A73BAB9095",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 1536,
+        "requestID" : "msb-sched-2-526A8699-7E5B-41B7-AB8E-108633261C5D",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 2048,
+        "requestID" : "msb-sched-3-E881F869-9780-4BF3-AACB-3787CDF0595E",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.6-35B-A3B-4bit\/38740b847e4cb78f352aba30aa41c76e08e6eb46\/3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "modelTag" : "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "pagedSingleRowCVPct" : 0.23090766112019018,
+  "pagedSingleRowTPSRuns" : [
+    116.36961786419185,
+    116.21046598073018,
+    116.40227914958855,
+    116.73556960705557,
+    116.00712524159782
+  ],
+  "pagedSingleRowTPSp50" : 116.36961786419185,
+  "peakRSSMB" : 39243,
+  "perRowFractionOfPagedSingleRow" : 0.41947709173863085,
+  "perRowTPSp50" : 48.81438886840702,
+  "productionSerialCVPct" : 0.4165819423861015,
+  "productionSerialPromptTokens" : 512,
+  "productionSerialTPSRuns" : [
+    158.615779136611,
+    158.7631335815454,
+    157.16880350778558,
+    158.00090276406934,
+    158.5853245389378
+  ],
+  "productionSerialTPSp50" : 158.5853245389378,
+  "promptTokenLengths" : [
+    512,
+    1024,
+    1536,
+    2048
+  ],
+  "promptTokenSHA256" : [
+    "256980386f0db6d5936ed843aeebe14770985d59ee2c47fc888d047d61812c30",
+    "778b0062dd4fc0c6f0a06fc481eafd7c3a8df431fd30bdd2c0fc0c5f72eaced0",
+    "b0055706973f1d54d3bf3bd57ba12c33e2a865122775374bf064b846ce070b98",
+    "915e40e496d57574333b0ae6ad94a089eff2672f99434ad82a057fdcbac77e8b"
+  ],
+  "promptTokensPerRow" : 2048,
+  "rows" : 4,
+  "runs" : 5,
+  "scenario" : "msb03",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-09T14:03:36Z"
+}
+msb-throughput: msb03 aggregate_vs_serial=1.23x short_ttft_ratio=0.99x pass=false peak_rss_mb=39243
+msb-throughput: wrote <studio-home>/lab-332/runs2/step2-msb/scheduler-msb03.json

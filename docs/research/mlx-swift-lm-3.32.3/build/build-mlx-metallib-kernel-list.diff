@@ -1,0 +1,19 @@
+--- phase3-binary/scripts/build-mlx-metallib.sh	2026-10-09 19:42:16
++++ <scratch>/build-mlx-metallib-0322.sh	2026-10-09 19:56:49
+@@ -38,6 +38,8 @@
+ 
+ kernels=(
+   arg_reduce
++  dot
++  searchsorted
+   conv
+   gemv
+   layer_norm
+@@ -80,6 +82,7 @@
+     steel/gemm/kernels/steel_gemm_fused_nax
+     steel/gemm/kernels/steel_gemm_gather_nax
+     steel/gemm/kernels/steel_gemm_splitk_nax
++    steel/gemm/kernels/steel_gemm_segmented_nax
+     quantized_nax
+     fp_quantized_nax
+     steel/attn/kernels/steel_attention_nax

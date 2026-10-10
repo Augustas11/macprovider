@@ -1,0 +1,54 @@
+{
+  "aggregateCVPct" : 0.0857631834204444,
+  "aggregateTPSRuns" : [
+    115.61915798462024,
+    115.759474614549
+  ],
+  "aggregateTPSp50" : 115.759474614549,
+  "aggregateUpliftVsPagedSingleRow" : 1.0004349031677424,
+  "aggregateVsProductionSerial" : 0.7254682917426183,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 10,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.6-35B-A3B-4bit\/38740b847e4cb78f352aba30aa41c76e08e6eb46\/3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "modelTag" : "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "pagedSingleRowCVPct" : 0.3115098113443191,
+  "pagedSingleRowTPSRuns" : [
+    115.70915233766057,
+    115.20052597286043
+  ],
+  "pagedSingleRowTPSp50" : 115.70915233766057,
+  "peakPhysFootprintMB" : 41672,
+  "peakRSSMB" : 39262,
+  "perRowFractionOfPagedSingleRow" : 1.0004349031677424,
+  "perRowTPSp50" : 115.759474614549,
+  "productionSerialCVPct" : 0.4797420416164606,
+  "productionSerialPromptTokens" : 1536,
+  "productionSerialTPSRuns" : [
+    159.56517456674476,
+    158.48625236605724
+  ],
+  "productionSerialTPSp50" : 159.56517456674476,
+  "productionSerialTTFTSecondsRuns" : [
+    0.8047419786453247,
+    0.8052259683609009
+  ],
+  "promptTokenLengths" : [
+    1536
+  ],
+  "promptTokenSHA256" : [
+    "b8be5b5eba3b724a09e2b36eb5af871c1c256c8cf4e108f942ef253a52be3528"
+  ],
+  "promptTokensPerRow" : 1536,
+  "rows" : 1,
+  "runs" : 2,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-09T13:59:17Z"
+}
+msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=1 block=16 serial_tps_p50=159.6 engine_1row_tps_p50=115.7 aggregate_tps_p50=115.8 uplift_vs_1row=1.00x aggregate_vs_serial=0.73x peak_rss_mb=39262
+msb-throughput: wrote <studio-home>/lab-332/runs2/step2-msb/paged-L1536-r1.json

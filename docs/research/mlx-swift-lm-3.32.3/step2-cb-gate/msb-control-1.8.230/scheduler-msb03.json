@@ -1,0 +1,118 @@
+{
+  "aggregateCVPct" : 0.13475693321852802,
+  "aggregateTPSRuns" : [
+    188.03385449461794,
+    187.6190285148148,
+    188.15139218743474,
+    188.2875689934526,
+    187.92975101787488
+  ],
+  "aggregateTPSp50" : 188.03385449461794,
+  "aggregateUpliftVsPagedSingleRow" : 1.7661592742056849,
+  "aggregateVsProductionSerial" : 1.318149684624985,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 10,
+  "leftovers" : {
+    "msb03" : {
+      "aggregatePass" : true,
+      "aggregateVsSerial" : 1.318149684624985,
+      "pass" : false,
+      "promptTokenLengths" : [
+        512,
+        1024,
+        1536,
+        2048
+      ],
+      "shortRequestBatchedTTFTp95" : 0.31389403343200684,
+      "shortRequestSerialTTFTp95" : 0.3132059574127197,
+      "shortRequestTTFTRatio" : 1.0021968803689785,
+      "ttftPass" : true
+    },
+    "usagePass" : false,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 512,
+        "requestID" : "msb-sched-0-239F07FA-A902-4D9E-A374-8329338B0A97",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-3CDA2D55-4A0A-49EF-9450-7844AF3B86D0",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 1536,
+        "requestID" : "msb-sched-2-A4707B57-1B07-4F99-8DCB-39A97E190826",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 257,
+        "emittedTokens" : 257,
+        "promptTokens" : 2048,
+        "requestID" : "msb-sched-3-D7DEDB81-6C1A-4D8A-B154-DB07EDDF7176",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.6-35B-A3B-4bit\/38740b847e4cb78f352aba30aa41c76e08e6eb46\/3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "modelTag" : "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "pagedSingleRowCVPct" : 0.3793446535336393,
+  "pagedSingleRowTPSRuns" : [
+    105.78122296339424,
+    106.464834310702,
+    106.416323749118,
+    106.82723762607824,
+    106.69887455306619
+  ],
+  "pagedSingleRowTPSp50" : 106.464834310702,
+  "peakRSSMB" : 38412,
+  "perRowFractionOfPagedSingleRow" : 0.4415398185514212,
+  "perRowTPSp50" : 47.008463623654485,
+  "productionSerialCVPct" : 0.09611376619407552,
+  "productionSerialPromptTokens" : 512,
+  "productionSerialTPSRuns" : [
+    142.79937230304125,
+    142.82916623712282,
+    142.64984977644158,
+    142.56668241384924,
+    142.52127585088505
+  ],
+  "productionSerialTPSp50" : 142.64984977644158,
+  "promptTokenLengths" : [
+    512,
+    1024,
+    1536,
+    2048
+  ],
+  "promptTokenSHA256" : [
+    "256980386f0db6d5936ed843aeebe14770985d59ee2c47fc888d047d61812c30",
+    "778b0062dd4fc0c6f0a06fc481eafd7c3a8df431fd30bdd2c0fc0c5f72eaced0",
+    "b0055706973f1d54d3bf3bd57ba12c33e2a865122775374bf064b846ce070b98",
+    "915e40e496d57574333b0ae6ad94a089eff2672f99434ad82a057fdcbac77e8b"
+  ],
+  "promptTokensPerRow" : 2048,
+  "rows" : 4,
+  "runs" : 5,
+  "scenario" : "msb03",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-09T14:08:42Z"
+}

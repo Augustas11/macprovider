@@ -1,0 +1,66 @@
+{
+  "aggregateCVPct" : 0.17750649881300515,
+  "aggregateTPSRuns" : [
+    118.51242774377468,
+    118.85753806887878,
+    118.78245305139649,
+    118.82052279270248,
+    119.10392061201523
+  ],
+  "aggregateTPSp50" : 118.82052279270248,
+  "aggregateUpliftVsPagedSingleRow" : 0.7449977354766119,
+  "aggregateVsProductionSerial" : 0.7449977354766119,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 256,
+  "engine" : "serial-parallel",
+  "layerCount" : 10,
+  "leftovers" : {
+    "msb05" : {
+      "nativeParallelRows" : 2,
+      "nativeParallelVsSerial" : 0.7449977354766119,
+      "omlxSidecarAvailable" : false,
+      "omlxSidecarUnavailableReason" : "no pinned oMLX v0.4.4 BatchGenerator sidecar on this host; MSB-05 Q2 is not measured"
+    }
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/Library\/Application Support\/macprovider\/models\/mlx-community--Qwen3.6-35B-A3B-4bit\/38740b847e4cb78f352aba30aa41c76e08e6eb46\/3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "modelTag" : "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+  "pagedSingleRowCVPct" : 0.15408595779957485,
+  "pagedSingleRowTPSRuns" : [
+    159.8246899954192,
+    159.42387876833408,
+    159.32971411617112,
+    159.49111941486254,
+    159.87579458316583
+  ],
+  "pagedSingleRowTPSp50" : 159.49111941486254,
+  "peakRSSMB" : 39265,
+  "perRowFractionOfPagedSingleRow" : 0.3724988677383059,
+  "perRowTPSp50" : 59.41026139635124,
+  "productionSerialCVPct" : 0.15408595779957485,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    159.8246899954192,
+    159.42387876833408,
+    159.32971411617112,
+    159.49111941486254,
+    159.87579458316583
+  ],
+  "productionSerialTPSp50" : 159.49111941486254,
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "94e5485180408ca87b57844c5fce957c529a0bcb0e9dbe6ddf2de5dcb7ce8941",
+    "778b0062dd4fc0c6f0a06fc481eafd7c3a8df431fd30bdd2c0fc0c5f72eaced0"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 5,
+  "scenario" : "msb05",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-09T14:04:24Z"
+}

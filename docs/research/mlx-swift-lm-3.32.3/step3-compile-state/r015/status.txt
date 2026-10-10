@@ -1,0 +1,5 @@
+started_at=2026-10-09T21:29:09Z policy_sha256=002929b3bfc36a78533bba3b41c1e9a8795b6e6c22e193be35fe6f19ae862ceb binary_sha256=05d685425b63afe6d922646fac953d53b7f6dee23b3c2633f1ec650edca21047 metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 provider_commit=8875789e7f6d378e5f1c9bf075a850ea07d9d50a env=MLX_LM_QWEN35_COMPILED_VERIFY=unset(on)
+phase=hardware_e2e exit_code=0 at=2026-10-09T21:30:12Z
+phase=matrix exit_code=0 lines=     133 at=2026-10-09T21:52:32Z
+phase=sustained exit_code=0 lines=     213 jsonl_sha256=75e29942ccfbec0d7feb07adaa7d6175988c0a8ee1365535915747dadfa2dab7 at=2026-10-09T22:23:35Z
+R015_DONE

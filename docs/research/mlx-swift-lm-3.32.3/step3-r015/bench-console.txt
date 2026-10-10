@@ -1,0 +1,6 @@
+{"accepted": true, "type": "pause_ack"}
+LIVE_PAUSED 14:32:33
+LIVE_DRAINED 14:32:34
+<studio-home>/lab-332/r015-332.sh: line 17: 65935 Terminated: 15          MACPROVIDER_NATIVE_MTP_E2E=1 $B native-mtp-bench --root $FIX --model-id qwen/qwen3.6-35b-a3b --policy $P --out $OUT --phase sustained --provider-commit $PC > $R/bench-sustained.log 2>&1
+{"accepted": true, "type": "resume_ack"}
+LIVE_RESUMED 14:57:40
