@@ -4498,6 +4498,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
+                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild,
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
@@ -5115,6 +5116,17 @@ actor ModelRuntime: ModelRuntimeServing {
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// The runtime identity the FR-CB10 self-check result is stored under:
+    /// the MLX pin plus this build's row-isolation policy (SPEC-038 FR-CB2
+    /// v0.3.17: per-row attention routes and the decode and verify forward
+    /// bounds of this device). A result measured before the policy, or at
+    /// other bounds, matches no live key, so the check re-runs; an earlier
+    /// grant carries the Mac through the re-run as for an MLX pin change.
+    static var continuousBatchingSelfCheckRuntimeBuild: String {
+        let bound = PagedKVSharedForwardBackend.deviceVerifyTokenBound
+        return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

@@ -2976,6 +2976,44 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
+    /// The FR-CB10 self-check result is keyed by the row-isolation policy: a
+    /// decision stored before it (same model, Metal library, kernel,
+    /// hardware, OS, MLX pin and window) does not apply. A stored refusal is
+    /// re-measured; a stored grant only carries the Mac through the re-run.
+    func testSelfCheckKeyCarriesTheRowIsolationPolicy() throws {
+        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild
+        XCTAssertTrue(live.hasPrefix(ContinuousBatchingSelfCheckKey.currentRuntimeBuild + "+cb-isolation-v1/"), live)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-isolation-key-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let before = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
+        )
+        var after = before
+        after.runtimeBuild = live
+        let target = ContinuousBatchingSelfCheckTarget(key: after, maxRows: 16)
+        try store.store(.init(
+            key: before, decision: .init(slots: 1, reason: "row_divergence_at_12", verifiedSlots: 11), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertNil(store.decision(for: after))
+        XCTAssertNil(
+            ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil),
+            "a refusal from before the policy is re-measured, not served"
+        )
+        try store.store(.init(
+            key: before, decision: .init(slots: 8, reason: "granted", verifiedSlots: 8), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertNil(store.decision(for: after))
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil)?.servedSlots,
+            8,
+            "a grant from before the policy carries the Mac through the re-run"
+        )
+    }
+
     /// More active rows than the decode row bound decode in consecutive
     /// forwards of at most that many rows, and every row still produces its
     /// own tokens.

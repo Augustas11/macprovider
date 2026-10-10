@@ -194,8 +194,14 @@ the call's shape:
   hashes the resolved core's `get_qmv_batch_limit`, the `sdpa_vector_2pass`
   partition choice, the one/two-pass choice and `kernels/sdpa_vector.h`;
   when it fails, re-derive the ports and both tables before updating the
-  digests. Split rows take their lone call's mask only under masks the batch
-  cache built; any other array mask keeps the single call with that mask. Before the fix (Studio, head dim 256, 16/2 heads)
+  digests. Split rows take their lone call's mask only under plain masks the
+  batch cache built (padding and causality, no window); under any other
+  array mask each split row attends with its own slice of that mask.
+  Sliding-window decode rows attend over their presented suffix. A padded
+  call the cache cannot isolate (stored keys not matching a row's extent,
+  an unmasked multi-token call) is treated like a model calling SDPA
+  itself. The FR-CB10 self-check result is keyed by this isolation policy
+  and the device's forward bounds (`ModelRuntime.continuousBatchingSelfCheckRuntimeBuild`). Before the fix (Studio, head dim 256, 16/2 heads)
   rows of 600-1023 keys padded past 1024 and a 4095-key row padded to 16400
   differed by up to 2e-3. A model that calls SDPA itself bypasses this;
   any padded update that reaches the batch cache outside `updateAndAttend`

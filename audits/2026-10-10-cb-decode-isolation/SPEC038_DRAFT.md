@@ -54,8 +54,13 @@ verification row has fewer real columns than the call:
   own call.
 
 Rows of one length, with full-width verification columns, keep the single
-call. Every other operator stays batched. Rows whose layers present a
-per-row trimmed sliding window keep the single call. These rules hold inside
+call. Every other operator stays batched. Sliding-window decode rows attend
+over their own presented suffix. A split row synthesizes its lone mask only
+under a mask the batch cache built that restricts nothing but padding and
+causality. Under any other array mask, each split row attends with its own
+slice of that mask, so a model's mask semantics (for example a window) are
+kept. A padded call the cache cannot isolate MUST be treated like a model
+that attends outside the cache path (below). These rules hold inside
 a multi-step lockstep window: every step attends over each row's keys as of
 that step.
 
@@ -86,6 +91,11 @@ and are released, not retried, because each row's paged cache may already
 hold the forward's tokens. From then on, for that model, the backend MUST
 form no ragged prefill groups and MUST decode and verify one row per
 forward.
+
+FR-CB10 (self-check): the stored self-check result MUST be keyed by the
+row-isolation policy and the device's decode and verify forward bounds, so
+a decision measured under other routing re-runs. A grant from before the
+change carries the Mac through the re-run.
 
 ## AC-16 addition (FR-CB2)
 
@@ -121,6 +131,9 @@ New tests to map:
 - `PagedKVRuntimeBridgeTests.testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy`
 - `PagedKVRuntimeBridgeTests.testCoreRoutingSourcesMatchThePortedDispatch`
 - `PagedKVRuntimeBridgeTests.testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory`
+- `PagedKVRuntimeBridgeTests.testRaggedPromptKeepsAWindowedMaskForSplitRows`
+- `PagedKVRuntimeBridgeTests.testSlidingWindowDecodeRowsMatchTheirLoneBits`
+- `ContinuousBatchSchedulerTests.testSelfCheckKeyCarriesTheRowIsolationPolicy`
 - `ContinuousBatchSchedulerTests.testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice`
 - `ContinuousBatchSchedulerTests.testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound`
 

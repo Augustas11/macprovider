@@ -52,8 +52,8 @@ What the change is:
    only in DEBUG or the lab harness) and env-gated served-model probes
    (`CBDecodeIsolationProbeTests`).
 
-Round 1 findings and their fixes: `ROUND1_FIXES.md` (check that each is
-closed).
+Round 1 and round 2 findings and their fixes: `ROUND1_FIXES.md`,
+`ROUND2_FIXES.md` (check that each is closed).
 
 Studio evidence: see `probes/` and the PR body (bitwise before/after on
 Qwen3.6-35B-A3B fused on/off and 27B, startup probes, throughput, R015).

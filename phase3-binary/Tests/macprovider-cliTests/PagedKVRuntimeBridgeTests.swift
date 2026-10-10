@@ -1870,10 +1870,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
-    /// Per-row attention replaces only the masks the batch cache builds. A
-    /// model-supplied array mask keeps the one padded call with that mask,
-    /// and a row whose stored keys do not match its logical offset (no
-    /// stored history) keeps the one padded call too.
+    /// Per-row attention synthesizes lone masks only under plain masks the
+    /// batch cache builds; a model-supplied array mask is sliced per row, so
+    /// its semantics are kept. A row whose stored keys do not match its
+    /// logical offset (no stored history) cannot be isolated: the padded
+    /// call is flagged as outside the cache path (the backend fails it).
     func testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory() throws {
         try requireMetal()
         MLXRandom.seed(1958)
@@ -1908,7 +1909,27 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             queries: queries, keys: padded(historyKeys, keys), values: padded(historyValues, values),
             scale: scale, mask: .array(foreign)
         )
-        XCTAssertTrue(arrayEqual(withForeignMask, single).item(Bool.self), "a foreign mask must reach the single call unchanged")
+        // The 601-key row splits (one pass alone) and keeps its own slice of
+        // the foreign mask; the 1501-key row shares the padded call.
+        let splitRow = MLXFast.scaledDotProductAttention(
+            queries: queries[0 ..< 1],
+            keys: concatenated([historyKeys[0], keys[0 ..< 1]], axis: 2),
+            values: concatenated([historyValues[0], values[0 ..< 1]], axis: 2),
+            scale: scale,
+            mask: .array(foreign[0 ..< 1, 0..., 0..., ..<601])
+        )
+        XCTAssertTrue(arrayEqual(withForeignMask[0 ..< 1], splitRow).item(Bool.self), "a foreign mask's semantics are kept for a split row")
+        XCTAssertTrue(arrayEqual(withForeignMask[1 ..< 2], single[1 ..< 2]).item(Bool.self))
+        XCTAssertFalse(
+            arrayEqual(withForeignMask[0 ..< 1], MLXFast.scaledDotProductAttention(
+                queries: queries[0 ..< 1],
+                keys: concatenated([historyKeys[0], keys[0 ..< 1]], axis: 2),
+                values: concatenated([historyValues[0], values[0 ..< 1]], axis: 2),
+                scale: scale,
+                mask: .none
+            )).item(Bool.self),
+            "the excluded first key stays excluded"
+        )
 
         // A row at logical offset 600 with no stored keys beside a full row.
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "offset-only", poolEpoch: 1)
@@ -1939,6 +1960,72 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(mixed.shape, queries.shape)
         XCTAssertEqual(offsetOnly.storedTokens, 1)
         XCTAssertEqual(offsetOnly.offset, 601)
+        XCTAssertTrue(PagedKVSharedForwardBackend.lastBatchAttentionLeftCachePathForTest)
+    }
+
+    /// Sliding-window decode rows of different lengths attend over their own
+    /// presented suffix, bit-identical to the row decoded alone.
+    func testSlidingWindowDecodeRowsMatchTheirLoneBits() throws {
+        try requireMetal()
+        MLXRandom.seed(1960)
+        let (queryHeads, kvHeads, headDim, window) = (16, 2, 128, 1100)
+        let scale = 1 / Float(headDim).squareRoot()
+        let histories = [300, 900, 5000]
+        let historyKeys = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let historyValues = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let queries = MLXRandom.normal([3, queryHeads, 1, headDim]).asType(.bfloat16)
+        let keys = MLXRandom.normal([3, kvHeads, 1, headDim]).asType(.bfloat16)
+        let values = MLXRandom.normal([3, kvHeads, 1, headDim]).asType(.bfloat16)
+        eval(historyKeys + historyValues + [queries, keys, values])
+        let rows = histories.indices.map { Self.attentionRowCache(history: historyKeys[$0], historyValues[$0], window: window) }
+        let batched = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: rows, queries: queries, keys: keys, values: values, scale: scale
+        )
+        XCTAssertFalse(PagedKVSharedForwardBackend.lastBatchAttentionLeftCachePathForTest)
+        for row in histories.indices {
+            let serial = Self.attentionRowCache(history: historyKeys[row], historyValues[row], window: window)
+            let slice = { (array: MLXArray) in array[row ..< row + 1, 0..., 0..., 0...] }
+            let lone = attentionWithCacheUpdate(
+                queries: slice(queries), keys: slice(keys), values: slice(values),
+                cache: serial, scale: scale,
+                mask: serial.makeMask(n: 1, windowSize: nil, returnArray: false)
+            )
+            XCTAssertTrue(arrayEqual(batched[row ..< row + 1], lone).item(Bool.self), "row \(row) (\(histories[row]) keys)")
+        }
+    }
+
+    /// A ragged prompt whose mask carries a sliding window (full-history row
+    /// caches, `makeMask(windowSize:)`) keeps that window for split rows.
+    func testRaggedPromptKeepsAWindowedMaskForSplitRows() throws {
+        try requireMetal()
+        MLXRandom.seed(1959)
+        let (queryHeads, kvHeads, headDim, chunk, window) = (16, 2, 256, 9, 4)
+        let scale = 1 / Float(headDim).squareRoot()
+        let histories = [3, 11]
+        let historyKeys = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let historyValues = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let queries = MLXRandom.normal([2, queryHeads, chunk, headDim]).asType(.bfloat16)
+        let keys = MLXRandom.normal([2, kvHeads, chunk, headDim]).asType(.bfloat16)
+        let values = MLXRandom.normal([2, kvHeads, chunk, headDim]).asType(.bfloat16)
+        eval(historyKeys + historyValues + [queries, keys, values])
+        let rows = histories.indices.map { Self.attentionRowCache(history: historyKeys[$0], historyValues[$0]) }
+        let attended = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: rows, queries: queries, keys: keys, values: values, scale: scale,
+            raggedPrefill: true, maskWindowSize: window
+        )
+        let windowed = PagedKVRaggedPrefillMask.make(queryTokens: chunk, rowOffsets: histories, windowSize: window)
+        for row in histories.indices {
+            let own = histories[row] + chunk
+            let expected = MLXFast.scaledDotProductAttention(
+                queries: queries[row ..< row + 1],
+                keys: concatenated([historyKeys[row], keys[row ..< row + 1]], axis: 2),
+                values: concatenated([historyValues[row], values[row ..< row + 1]], axis: 2),
+                scale: scale,
+                mask: .array(windowed[row ..< row + 1, 0..., 0..., ..<own])
+            )
+            XCTAssertTrue(arrayEqual(attended[row ..< row + 1], expected).item(Bool.self), "row \(row) keeps its window")
+        }
+        XCTAssertFalse(PagedKVSharedForwardBackend.lastBatchAttentionLeftCachePathForTest)
     }
 
     /// The Swift ports of core routing (`PagedKVVectorAttentionRoute`,
@@ -2056,7 +2143,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ), "an input wider than the call is malformed: one call")
     }
 
-    private static func attentionRowCache(history keys: MLXArray, _ values: MLXArray) -> PagedKVCache {
+    private static func attentionRowCache(history keys: MLXArray, _ values: MLXArray, window: Int? = nil) -> PagedKVCache {
         let blockSize = 256
         let blocks = 128
         let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "attention-row", poolEpoch: 1)
@@ -2079,7 +2166,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 poolEpoch: 1
             ),
             initialOffset: 0,
-            reconstructViaGather: false
+            reconstructViaGather: false,
+            attentionWindowTokens: window
         )
         if keys.dim(2) > 0 {
             let stored = cache.update(keys: keys, values: values)
