@@ -1870,6 +1870,128 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    /// Per-row attention replaces only the masks the batch cache builds. A
+    /// model-supplied array mask keeps the one padded call with that mask,
+    /// and a row whose stored keys do not match its logical offset (no
+    /// stored history) keeps the one padded call too.
+    func testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory() throws {
+        try requireMetal()
+        MLXRandom.seed(1958)
+        let (queryHeads, kvHeads, headDim) = (16, 2, 256)
+        let scale = 1 / Float(headDim).squareRoot()
+        let histories = [600, 1500]
+        let historyKeys = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let historyValues = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let queries = MLXRandom.normal([2, queryHeads, 1, headDim]).asType(.bfloat16)
+        let keys = MLXRandom.normal([2, kvHeads, 1, headDim]).asType(.bfloat16)
+        let values = MLXRandom.normal([2, kvHeads, 1, headDim]).asType(.bfloat16)
+        eval(historyKeys + historyValues + [queries, keys, values])
+        func caches() -> [PagedKVCache] {
+            histories.indices.map { Self.attentionRowCache(history: historyKeys[$0], historyValues[$0]) }
+        }
+        func padded(_ history: [MLXArray], _ incoming: MLXArray) -> MLXArray {
+            concatenated(histories.indices.map { row in
+                let own = concatenated([history[row], incoming[row ..< row + 1, 0..., 0..., 0...]], axis: 2)
+                let pad = 1501 - own.dim(2)
+                return pad == 0 ? own : concatenated([own, MLXArray.zeros([1, kvHeads, pad, headDim], dtype: own.dtype)], axis: 2)
+            }, axis: 0)
+        }
+        // Row 0 may not attend its first key; its padding stays masked.
+        let positions = MLXArray(Int32(0) ..< Int32(1501)).reshaped([1, 1, 1, 1501])
+        let lengths = MLXArray([Int32(601), Int32(1501)]).reshaped([2, 1, 1, 1])
+        let foreign = (positions .< lengths) .&& (positions .> MLXArray(Int32(0)))
+        let withForeignMask = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: caches(), queries: queries, keys: keys, values: values, scale: scale,
+            maskOverride: .array(foreign)
+        )
+        let single = MLXFast.scaledDotProductAttention(
+            queries: queries, keys: padded(historyKeys, keys), values: padded(historyValues, values),
+            scale: scale, mask: .array(foreign)
+        )
+        XCTAssertTrue(arrayEqual(withForeignMask, single).item(Bool.self), "a foreign mask must reach the single call unchanged")
+
+        // A row at logical offset 600 with no stored keys beside a full row.
+        let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "offset-only", poolEpoch: 1)
+        let offsetOnly = PagedKVCache(
+            blockSizeTokens: 256,
+            maxPhysicalBlocks: 128,
+            poolEpoch: 1,
+            binding: PagedKVStorageBinding(
+                handle: handle,
+                blockSizeTokens: 256,
+                maxLogicalTokens: 256 * 128,
+                currentTable: PagedKVBlockTable(
+                    handleID: handle.handleID, blockSizeTokens: 256, logicalTokenCount: 0,
+                    physicalBlocks: [], tailValidTokenCount: 0, poolEpoch: 1
+                ),
+                poolEpoch: 1
+            ),
+            initialOffset: 600,
+            reconstructViaGather: false
+        )
+        let full = Self.attentionRowCache(history: historyKeys[1], historyValues[1])
+        let rows = [offsetOnly, full]
+        let mask = PagedKVSharedForwardBackend.batchLayerMaskForTest(rowCaches: rows, n: 1, windowSize: nil)
+        let mixed = try PagedKVSharedForwardBackend.batchAttentionForTest(
+            rowCaches: [offsetOnly, full], queries: queries, keys: keys, values: values, scale: scale,
+            maskOverride: mask
+        )
+        XCTAssertEqual(mixed.shape, queries.shape)
+        XCTAssertEqual(offsetOnly.storedTokens, 1)
+        XCTAssertEqual(offsetOnly.offset, 601)
+    }
+
+    /// The Swift ports of core routing (`PagedKVVectorAttentionRoute`,
+    /// `ContinuousBatchDecodeRouteBound`) and the padding invariance they rely
+    /// on are pinned to the resolved core sources. A core rebase that changes
+    /// any of these regions fails here until the ports and their tables are
+    /// re-derived and these digests updated (runbook per-rebase gate).
+    func testCoreRoutingSourcesMatchThePortedDispatch() throws {
+        let core = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal")
+        func read(_ path: String) throws -> [String] {
+            let url = core.appendingPathComponent(path)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+                XCTFail("resolved MLX core source missing: \(url.path)")
+                throw XCTSkip("no core checkout")
+            }
+            return text.components(separatedBy: "\n")
+        }
+        func region(_ lines: [String], from start: (String) -> Bool, through end: (String) -> Bool) -> String {
+            guard let first = lines.firstIndex(where: start),
+                  let last = lines[first...].firstIndex(where: end)
+            else { return "" }
+            return lines[first ... last].joined(separator: "\n") + "\n"
+        }
+        func digest(_ text: String) -> String {
+            SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+        let quantized = try read("quantized.cpp")
+        XCTAssertEqual(
+            digest(region(quantized, from: { $0.hasPrefix("inline int get_qmv_batch_limit") }, through: { $0 == "}" })),
+            "53bef60bc4110c007e25e7824ddab81aaff934921c06faca58c8961c798510e8",
+            "get_qmv_batch_limit changed: re-derive ContinuousBatchDecodeRouteBound and ContinuousBatchPrefillGroupingRule"
+        )
+        let sdpa = try read("scaled_dot_product_attention.cpp")
+        XCTAssertEqual(
+            digest(region(sdpa, from: { $0.hasPrefix("void sdpa_vector_2pass(") }, through: { $0.contains("size_t k_head_stride") })),
+            "db7dbdee9644cb9902f620f34e9ecce2c108f6559190633f3ebe468e4ec7fe79",
+            "sdpa_vector_2pass partition/variant choice changed: re-derive PagedKVVectorAttentionRoute"
+        )
+        XCTAssertEqual(
+            digest(region(sdpa, from: { $0.contains("// We route to the 2 pass fused attention if") }, through: { $0 == "    }" })),
+            "6b79dadefe71a2f86ac2df014f4d0ddc198826caa0d303c301e540c187da148b",
+            "one-pass/two-pass choice changed: re-derive PagedKVVectorAttentionRoute"
+        )
+        XCTAssertTrue(sdpa.contains("  if (q_pre.shape(2) <= 8) {"), "vector-mode query bound changed")
+        XCTAssertEqual(
+            digest(try read("kernels/sdpa_vector.h").joined(separator: "\n")),
+            "de098d50a67a865e2e64fb1700fc4819307861f009a65642679777a9a9cec7cd",
+            "vector attention kernels changed: re-check that masked keys are skipped and keys are dealt to partitions by index"
+        )
+    }
+
     /// Rows that share the padded call: exactly those whose lone route equals
     /// it; an unknown route shares nothing.
     func testOnlyRowsInThePaddedCallsRouteShareIt() {
@@ -2043,6 +2165,19 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// row that joins mid-flight, and a row cancelled mid-flight must each
     /// emit exactly the serial ordinary greedy tokens for their own prompt.
     func testRealQwen35PackedNativeMTPRowsMatchSerialOrdinaryGreedy() async throws {
+        try await runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(maxVerifyTokensPerForward: nil)
+    }
+
+    /// The same scenario with packed verification bounded to 2 target tokens
+    /// per forward, so every round of several native rows verifies in
+    /// consecutive groups (SPEC-038 FR-CB2 verify token bound). Row identity,
+    /// acceptance, the cancelled row's abort inside a committing round and
+    /// the serial greedy tokens must be unchanged.
+    func testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy() async throws {
+        try await runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(maxVerifyTokensPerForward: 2)
+    }
+
+    private func runPackedNativeMTPRowsMatchSerialOrdinaryGreedy(maxVerifyTokensPerForward: Int?) async throws {
         try requireMetal()
 
         let configuration = try JSONDecoder().decode(
@@ -2080,7 +2215,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             drafterContainer: MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "mtp"),
                 model: drafter
-            ))
+            )),
+            maxVerifyTokensPerForward: maxVerifyTokensPerForward
         ))
         let scheduler = try Self.makeScheduler(maxActiveRows: 6, backend: backend, maxPhysicalBlocks: 64)
         let fence = Self.nativeMTPFence()
@@ -4807,8 +4943,16 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
             for layer in cache {
-                let updated = layer.update(keys: keys, values: values)
-                eval(updated.0, updated.1)
+                // Attend through the cache like the served models.
+                let attended = attentionWithCacheUpdate(
+                    queries: keys,
+                    keys: keys,
+                    values: values,
+                    cache: layer,
+                    scale: 1,
+                    mask: sequenceLength > 1 ? .causal : .none
+                )
+                eval(attended)
             }
         }
 
@@ -5223,8 +5367,16 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
             for layer in cache {
-                let updated = layer.update(keys: keys, values: values)
-                eval(updated.0, updated.1)
+                // Attend through the cache like the served models.
+                let attended = attentionWithCacheUpdate(
+                    queries: keys,
+                    keys: keys,
+                    values: values,
+                    cache: layer,
+                    scale: 1,
+                    mask: sequenceLength > 1 ? .causal : .none
+                )
+                eval(attended)
             }
         }
         var logits = Array(repeating: Float(-1_000), count: batch * sequenceLength * 32)

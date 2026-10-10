@@ -21,8 +21,11 @@ Rows on the padded call's route keep sharing it, because within one route
 padding does not change a row's bits. A decode forward also carries fewer
 rows than the device's smallest quantized-matmul vector limit, so every
 projection stays on `qmv`; at 16 rows in one forward on the Studio, rows
-differed from their lone runs in 255 of 256 steps. A ragged prefill forward
-that attended outside the per-row path fails its rows before sampling.
+differed from their lone runs in 255 of 256 steps and 30-38 greedy tokens
+flipped. Packed native-MTP verification is bounded the same way, counting
+rows x width target tokens. A padded forward whose model attended outside
+the per-row path fails its rows before sampling, and the model then decodes
+and verifies one row per forward.
 
 ## FR-CB2 body (insert after the v0.3.14 paragraph that ends "...once it observes it.")
 
@@ -65,18 +68,24 @@ devices, 5 on M1/M2 non-Ultra and 12 on M3-or-later non-Ultra. When more
 rows are active, the scheduler MUST decode them in consecutive forwards of
 at most that many. This is a per-forward bound, not the slot count.
 
-A ragged prefill forward in which the model attended outside the per-row
-path (it called SDPA itself) MUST be rejected before any token is sampled
-or any row state is committed. Its rows fail with
-`continuous_batching_prefill_failed` and are released, not retried, because
-each row's paged cache already holds the chunk. Later ragged groups for that
-model MUST prefill serially.
+Packed native-MTP verification multiplies each quantized projection by
+`rows x width` target tokens, so the same bound applies to verification: a
+packed verify forward MUST carry at most that many target tokens (rows times
+the widest row of the forward). A larger round MUST verify in consecutive
+packed forwards in packed-row order. A single row wider than the bound
+verifies alone, because its lone verification has the same shape. Split
+rounds MUST keep each row's packed row index, acceptance, finalize and abort
+semantics.
 
-Packed verification also multiplies each quantized projection by
-`rows x width` tokens. Whether a shared verify forward keeps every row on
-its lone kernel route is measured separately (see the PR evidence). If it
-does not, the rule above applies to verification with `rows x width` in
-place of `rows`.
+The isolation rules hold only when the model attends through the batch
+cache (`KVCacheAttentionProtocol.updateAndAttend`). A padded forward (rows
+of different key extents, prefill, decode or verification) in which the
+model attended outside that path (it called SDPA itself) MUST be failed
+before any token is sampled or any row state is committed. Its rows fail
+and are released, not retried, because each row's paged cache may already
+hold the forward's tokens. From then on, for that model, the backend MUST
+form no ragged prefill groups and MUST decode and verify one row per
+forward.
 
 ## AC-16 addition (FR-CB2)
 
@@ -89,7 +98,13 @@ Append to AC-16:
   history plus its new tokens.
 - A table test pins the vector-attention route port at every boundary.
 - A scheduler test requires every decode forward to carry at most the
-  decode row bound.
+  decode row bound; a grouping test and a tiny real-model packed-MTP
+  scheduler run with a 2-token verify bound require grouped verification to
+  keep every row's tokens, acceptance and abort semantics.
+- A source-digest test fails when the resolved core's routing regions
+  change, so the ports are re-derived at each core rebase.
+- A padded forward that bypasses the cache's attention path fails its rows
+  (ragged prefill test).
 - On the Studio, the served-model probe (16 unequal rows at the serve
   window) must be bit-identical to each row's lone run with the cap.
 
@@ -102,6 +117,10 @@ New tests to map:
 - `PagedKVRuntimeBridgeTests.testOnlyRowsInThePaddedCallsRouteShareIt`
 - `PagedKVRuntimeBridgeTests.testRowAttentionExtentsSplitOnlyPaddedRows`
 - `PagedKVRuntimeMixedCacheTests.testRaggedPrefillThatBypassesPerRowAttentionFailsItsRowsAndLaterGroupsRunSerially`
+- `PagedKVRuntimeBridgeTests.testPackedVerifyGroupsStayWithinTheTokenBound`
+- `PagedKVRuntimeBridgeTests.testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy`
+- `PagedKVRuntimeBridgeTests.testCoreRoutingSourcesMatchThePortedDispatch`
+- `PagedKVRuntimeBridgeTests.testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory`
 - `ContinuousBatchSchedulerTests.testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice`
 - `ContinuousBatchSchedulerTests.testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound`
 

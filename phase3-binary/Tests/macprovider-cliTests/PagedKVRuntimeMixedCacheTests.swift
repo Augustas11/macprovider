@@ -463,7 +463,12 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         let recorder = MixedCacheRecorder()
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
-            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            model: MixedCacheFakeModel(
+                recorder: recorder,
+                nextTokenByInput: [:],
+                attentionDType: .float16,
+                attendsThroughCache: false
+            ),
             processor: MixedCacheUserInputProcessor(),
             tokenizer: MixedCacheTokenizer()
         ))
@@ -924,8 +929,9 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     /// follows the forward's length and tests can read a prefill's full
     /// input back from it. On: one value per row, as real recurrent state.
     private let fixedShapeRecurrentState: Bool
-    /// Attend through `attentionWithCacheUpdate` like the served models,
-    /// instead of calling `update` and attending itself.
+    /// Attend through `attentionWithCacheUpdate` like the served models.
+    /// Off: call `update` and attend itself (a model that bypasses the
+    /// batch cache's per-row attention).
     private let attendsThroughCache: Bool
 
     init(
@@ -934,7 +940,7 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
         attentionDType: DType = .float32,
         returnsBackendStateForBatches: Bool = false,
         fixedShapeRecurrentState: Bool = false,
-        attendsThroughCache: Bool = false
+        attendsThroughCache: Bool = true
     ) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput

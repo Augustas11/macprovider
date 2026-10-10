@@ -4382,10 +4382,13 @@ actor ContinuousBatchScheduler {
 
     private func runOrdinaryDecodeStep(rows: [Row]) async {
         guard !rows.isEmpty else { return }
-        let rowBound = configuration.maxDecodeRowsPerForward
+        // Each forward stays below the device's quantized-matmul vector limit
+        // (`ContinuousBatchDecodeRouteBound`); a backend whose model attended
+        // outside its per-row attention path decodes one row per forward.
+        let rowBound = (backend as? PagedKVSharedForwardBackend)?.serializesPaddedRows == true
+            ? 1
+            : configuration.maxDecodeRowsPerForward
         if rows.count > rowBound {
-            // Each forward stays below the device's quantized-matmul vector
-            // limit (`ContinuousBatchDecodeRouteBound`).
             for start in stride(from: 0, to: rows.count, by: rowBound) {
                 let part = rows[start ..< min(start + rowBound, rows.count)]
                     .compactMap { activeDecode[$0.request.id] }

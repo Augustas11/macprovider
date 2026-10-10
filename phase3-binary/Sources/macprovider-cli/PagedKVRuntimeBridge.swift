@@ -769,7 +769,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        maxVerifyTokensPerForward: Int? = nil
     ) {
         self.init(
             container: container,
@@ -781,7 +782,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode,
             drafterContainer: drafterContainer,
-            nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap
+            nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap,
+            maxVerifyTokensPerForward: maxVerifyTokensPerForward
         )
     }
 
@@ -1064,20 +1066,40 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// `PagedKVBatchLayerCache.updateAndAttend`; later ragged groups then
     /// take the serial path.
     private func noteRaggedPrefillAttentionBypass(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
-        let bypassed = batches.contains {
-            ($0.cache as? PagedKVRaggedPrefillBatchLayerCache)?.attendedOutsidePerRowPath == true
-        }
-        guard bypassed else { return false }
+        notePaddedAttentionBypass(batches, phase: "prefill")
+    }
+
+    /// SPEC-038 FR-CB2: a padded forward (rows of different key extents)
+    /// whose model called SDPA itself attended over the padded batch, so its
+    /// rows' attention followed the padded route. The caller fails that
+    /// forward's rows before sampling. From then on the backend forms no
+    /// ragged prefill groups and decodes and verifies rows one per forward
+    /// (`serializesPaddedRows`).
+    private func notePaddedAttentionBypass(_ batches: [PagedKVSharedLayerBatch], phase: String) -> Bool {
+        guard Self.attendedOutsideCachePath(batches) else { return false }
         lock.lock()
         let first = !raggedPrefillAttentionBypassed
         raggedPrefillAttentionBypassed = true
         lock.unlock()
         if first {
             try? FileHandle.standardError.write(contentsOf: Data(
-                "event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache\n".utf8
+                "event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache phase=\(phase)\n".utf8
             ))
         }
         return true
+    }
+
+    private static func attendedOutsideCachePath(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
+        batches.contains { ($0.cache as? PagedKVBatchLayerCache)?.attendedOutsideCachePath == true }
+    }
+
+    /// True once a padded forward bypassed per-row attention: the scheduler
+    /// then decodes one row per forward and verification runs one row per
+    /// packed forward, so no row attends over another row's padding.
+    var serializesPaddedRows: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raggedPrefillAttentionBypassed
     }
 
     private static func hasValidBatchState(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
@@ -1290,7 +1312,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
         let groups = Self.verifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
-            maxTokens: maxVerifyTokensPerForward
+            maxTokens: serializesPaddedRows ? 1 : maxVerifyTokensPerForward
         )
         guard groups.count > 1 else {
             return try await verifyNativeMTPPackedGroup(rows: inputs)
@@ -1368,6 +1390,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cache: batchedCaches.map(\.cache),
                 requireContinuationState: true
             )
+            if self.notePaddedAttentionBypass(batchedCaches, phase: "verify") {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_padded_attention_bypassed")
+            }
             let pendingByRequestID = try Dictionary(
                 uniqueKeysWithValues: self.pendingNativeMTPTransactions(
                     from: batchedCaches,
@@ -2004,6 +2029,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
+                }
+                if notePaddedAttentionBypass(batchedCaches, phase: "decode") {
+                    // Fail closed before sampling; the rows' caches already
+                    // took this step, so they are released, not retried.
+                    storeDecodeSession(nil)
+                    for input in supportedInputs {
+                        removeRowState(for: input.requestID)
+                    }
+                    return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
                 let stepSampled = ContinuousBatchRowSampler.sample(
@@ -3322,6 +3356,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
     /// One uncompiled shared decode window over retained rows, as
     /// `performDecode` runs it: the batch caches are built once, `steps`
     /// forwards run on them with each row's greedy token fed back, and rows
@@ -3414,7 +3449,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         values: MLXArray,
         scale: Float,
         raggedPrefill: Bool = false,
-        mtpPackedRowMaps: [MTPPackedVerificationRowMap]? = nil
+        mtpPackedRowMaps: [MTPPackedVerificationRowMap]? = nil,
+        maskOverride: MLXFast.ScaledDotProductAttentionMaskMode? = nil
     ) throws -> MLXArray {
         let cache = raggedPrefill
             ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rowCaches)
@@ -3422,7 +3458,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if let mtpPackedRowMaps {
             try cache.prepareMTPPackedVerification(rowMaps: mtpPackedRowMaps)
         }
-        let mask = cache.makeMask(n: queries.dim(2), windowSize: nil, returnArray: false)
+        let mask = maskOverride ?? cache.makeMask(n: queries.dim(2), windowSize: nil, returnArray: false)
         let attended = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
@@ -3463,6 +3499,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         cache.syncRowsFromBatch()
         return outputs
     }
+    #endif
 
     static func exerciseMTPPackedCacheForTest(
         rowCaches: [PagedKVCache],
@@ -3836,44 +3873,10 @@ enum PagedKVRaggedPrefillMask {
 
 /// The batch cache of a ragged shared prefill (SPEC-038 FR-CB2). Its rows
 /// attend over their own keys like every batch cache
-/// (`PagedKVBatchLayerCache.updateAndAttend`); this subclass only notices a
-/// model that calls SDPA itself, which would attend over the padded batch.
-private final class PagedKVRaggedPrefillBatchLayerCache: PagedKVBatchLayerCache {
-    private var insideUpdateAndAttend = false
-    /// True when a ragged update reached this cache without
-    /// `updateAndAttend` (a model that calls SDPA itself).
-    private(set) var attendedOutsidePerRowPath = false
-
-    override func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
-        if !insideUpdateAndAttend,
-           incomingKeys.dim(2) > 1,
-           rowCaches.count > 1,
-           preparedMTPPackedRowMaps == nil,
-           Set(preUpdateOffsets).count > 1
-        {
-            attendedOutsidePerRowPath = true
-        }
-        return super.update(keys: incomingKeys, values: incomingValues)
-    }
-
-    override func updateAndAttend(
-        queries: MLXArray,
-        keys incomingKeys: MLXArray,
-        values incomingValues: MLXArray,
-        scale: Float,
-        mask: MLXFast.ScaledDotProductAttentionMaskMode
-    ) -> MLXArray {
-        insideUpdateAndAttend = true
-        defer { insideUpdateAndAttend = false }
-        return super.updateAndAttend(
-            queries: queries,
-            keys: incomingKeys,
-            values: incomingValues,
-            scale: scale,
-            mask: mask
-        )
-    }
-}
+/// (`PagedKVBatchLayerCache.updateAndAttend`); the type marks a ragged
+/// forward so the backend can reject it when the model attended outside
+/// that path.
+private final class PagedKVRaggedPrefillBatchLayerCache: PagedKVBatchLayerCache {}
 
 /// One row's share of a batched attention call: its query columns, its own
 /// keys (left-aligned in the batch buffer) and the mask its lone call takes.
@@ -4197,7 +4200,25 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         packFromRows()
     }
 
+    /// Set while `updateAndAttend` runs this layer's update.
+    private var insideUpdateAndAttend = false
+    /// True once a padded update (rows of different key extents) reached
+    /// this cache without `updateAndAttend`: the model called SDPA itself
+    /// over the padded batch, so its rows' attention followed the padded
+    /// route (SPEC-038 FR-CB2). The backend fails that forward.
+    private(set) var attendedOutsideCachePath = false
+
     func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
+        if !insideUpdateAndAttend,
+           incomingKeys.ndim == 4,
+           PagedKVRowAttention.extents(
+               queryTokens: incomingKeys.dim(2),
+               offsetsBefore: preUpdateOffsets,
+               packedRows: preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
+           ) != nil
+        {
+            attendedOutsideCachePath = true
+        }
         guard incomingKeys.ndim == 4,
               incomingValues.ndim == 4,
               incomingKeys.dim(0) == rowCaches.count,
@@ -4304,7 +4325,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         let queryTokens = queries.dim(2)
         let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
         let offsetsBefore = preUpdateOffsets
+        insideUpdateAndAttend = true
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
+        insideUpdateAndAttend = false
         func batched() -> MLXArray {
             MLXFast.scaledDotProductAttention(queries: queries, keys: keys, values: values, scale: scale, mask: mask)
         }
@@ -4319,8 +4342,21 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
               queries.dim(0) == rowCaches.count,
               keys.dim(0) == rowCaches.count,
               keys.dim(2) == extents.map(\.keyTokens).max(),
-              packedRows == nil ? rowCaches.enumerated().allSatisfy({ $0.element.offset == extents[$0.offset].keyTokens })
-                  : mtpPackedForwardDidUpdate
+              // Every row's buffer holds exactly its own keys: the stored
+              // history is the row's whole history, plus this call's tokens
+              // unless verification only staged them.
+              packedRows == nil
+                  ? rowCaches.enumerated().allSatisfy({
+                      $0.element.offset == extents[$0.offset].keyTokens
+                          && $0.element.storedTokens == extents[$0.offset].keyTokens
+                  })
+                  : mtpPackedForwardDidUpdate && rowCaches.enumerated().allSatisfy({
+                      $0.element.storedTokens == offsetsBefore[$0.offset]
+                  }),
+              // Split rows take their lone call's mask, which is equivalent
+              // only to the masks this cache builds. Any other array mask
+              // keeps the single call with the mask as given.
+              PagedKVBatchLayerCache.maskIsCacheBuilt(mask)
         else {
             return batched()
         }
@@ -4568,6 +4604,27 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        let mask = buildMask(n: n, windowSize: windowSize)
+        if case .array(let array) = mask {
+            Self.cacheBuiltMasks.lock.lock()
+            Self.cacheBuiltMasks.table.add(array)
+            Self.cacheBuiltMasks.lock.unlock()
+        }
+        return mask
+    }
+
+    /// Array masks this cache type built, held weakly: the model passes the
+    /// full-attention cache's mask to every attention layer of the forward.
+    private static let cacheBuiltMasks = (lock: NSLock(), table: NSHashTable<MLXArray>.weakObjects())
+
+    fileprivate static func maskIsCacheBuilt(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+        guard case .array(let array) = mask else { return true }
+        cacheBuiltMasks.lock.lock()
+        defer { cacheBuiltMasks.lock.unlock() }
+        return cacheBuiltMasks.table.contains(array)
+    }
+
+    private func buildMask(n: Int, windowSize: Int?) -> MLXFast.ScaledDotProductAttentionMaskMode {
         if let rowMaps = preparedMTPPackedRowMaps {
             return .array(Self.makePackedMTPMask(n: n, rowMaps: rowMaps, windowSize: windowSize))
         }

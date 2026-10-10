@@ -36,8 +36,24 @@ What the change is:
    vector limit minus one rows (Ultra 11, M1/M2 non-Ultra 5, M3+ 12) and
    decodes more active rows in consecutive forwards. A lab-harness-only env
    override exists for measurement.
-4. Test-only hooks on `PagedKVSharedForwardBackend` (`*ForTest`) and
-   env-gated served-model probes (`CBDecodeIsolationProbeTests`).
+4. Packed native-MTP verification multiplies each quantized projection by
+   rows x width tokens; `verifyNativeMTPPackedRound` now splits a round into
+   consecutive packed forwards of at most the same device bound in target
+   tokens, re-indexing each group and restoring packed row indices.
+5. Within one vector-attention route (pass count, partition count, `_gqa`
+   first pass) padding does not change a row's bits, so the padded call is
+   kept for rows whose lone route equals it (`PagedKVVectorAttentionRoute`,
+   a port of core's dispatch pinned by a source-digest test); only the
+   others split. Split rows use lone masks only under masks the cache built.
+6. Any padded update that reaches the batch cache outside `updateAndAttend`
+   (prefill, decode, verify) fails that forward before sampling; the backend
+   then serializes rows (decode bound 1, one verify row per forward).
+7. Test-only hooks on `PagedKVSharedForwardBackend` (`*ForTest`, compiled
+   only in DEBUG or the lab harness) and env-gated served-model probes
+   (`CBDecodeIsolationProbeTests`).
+
+Round 1 findings and their fixes: `ROUND1_FIXES.md` (check that each is
+closed).
 
 Studio evidence: see `probes/` and the PR body (bitwise before/after on
 Qwen3.6-35B-A3B fused on/off and 27B, startup probes, throughput, R015).

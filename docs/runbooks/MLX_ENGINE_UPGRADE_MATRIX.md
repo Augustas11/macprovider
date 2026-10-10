@@ -108,8 +108,15 @@ the call's shape:
   served output head reaches), and more active rows decode in consecutive
   forwards. The serve log prints
   `event=continuous_batch_decode_row_bound max_decode_rows_per_forward=N`.
-  Packed MTP verification still multiplies `M` by the verify width and is
-  not covered by this bound.
+  Packed native-MTP verification multiplies `M` by the verify width:
+  `PagedKVSharedForwardBackend.verifyNativeMTPPackedRound` verifies a round
+  in consecutive packed forwards of at most the same bound in target tokens
+  (rows x the group's widest row; one row wider than the bound verifies
+  alone). Studio, A3B, width 2: 8 rows in one forward (16 tokens) were not
+  bit-identical to their lone verification, 5 and 2 rows were. Without the
+  decode bound, 16 rows of unequal length in one forward flipped 30-38
+  greedy tokens out of 256 against their lone runs (A3B fused on/off, 27B);
+  with it, 0.
 - `GatherQMM` (`mlx/backend/metal/quantized.cpp` ~1901) takes
   `gather_qmm_rhs` for sorted gathers when `M == 1`, `B >= 16` and
   `B / E >= 4`, otherwise `gather_qmv`. MoE expert projections sort once a
@@ -182,12 +189,28 @@ the call's shape:
   `testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep` and
   `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check every
   row bit for bit through the batch caches (Metal hosts only; run them on the
-  Studio at each rebase). Before the fix (Studio, head dim 256, 16/2 heads)
+  Studio at each rebase). The table tests pin the ports, not core: a core
+  change is caught by `testCoreRoutingSourcesMatchThePortedDispatch`, which
+  hashes the resolved core's `get_qmv_batch_limit`, the `sdpa_vector_2pass`
+  partition choice, the one/two-pass choice and `kernels/sdpa_vector.h`;
+  when it fails, re-derive the ports and both tables before updating the
+  digests. Split rows take their lone call's mask only under masks the batch
+  cache built; any other array mask keeps the single call with that mask. Before the fix (Studio, head dim 256, 16/2 heads)
   rows of 600-1023 keys padded past 1024 and a 4095-key row padded to 16400
-  differed by up to 2e-3. A model that calls SDPA itself bypasses this: a
-  ragged prefill forward that does is failed before sampling and the backend
-  stops forming ragged groups (`event=continuous_batch_ragged_prefill_disabled`);
-  its decode rows keep the single padded call.
+  differed by up to 2e-3. A model that calls SDPA itself bypasses this;
+  any padded update that reaches the batch cache outside `updateAndAttend`
+  (prefill, decode or verification) fails that forward's rows before
+  sampling, and from then on the backend forms no ragged groups and decodes
+  and verifies one row per forward
+  (`event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache phase=...`).
+
+  Why provider-side and not a core-fork change: the batch cache owns each
+  row's real key extent, so it can make exactly the lone row's call. A core
+  change (fixed key partitioning in the vector kernels) would still leave the
+  pass-count, GQA-variant and unfused prompt-path differences, change every
+  serial request's numerics, and need three new fork tags and a SPEC-048 R003
+  tuple revision. The cost is the dispatch port above, re-derived at each
+  core rebase.
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it
