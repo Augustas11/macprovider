@@ -64,14 +64,21 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.240
 
-**No CLI cut is scheduled** (operator decision 2026-10-10). The rows below are
-recorded for the next release; they ship together whenever the next cut is
-authorized.
+**Authorized (operator, 2026-10-11), with a start condition:** cut the next
+CLI release once (1) the CB-throughput session's current work (decode
+isolation and its R015/probes) is merged, and (2) every other CLI-touching PR
+in flight below is merged. Until both hold, no cut.
 
 | PR | Change | Status |
 |---|---|---|
 | #1953 | Hybrid 16-step decode window; stop-boundary rule; self-check keyed by decode window (SPEC-038 v0.3.16). Expected +17% hybrid CB throughput at 8 concurrent output-heavy | merged (`2bddd66d0`) |
 | #1960 (issue #1958) | CB self-check ladder bounded by the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | merged (`072f86a99`) |
+| decode isolation (CB session) | Per-row attention for unequal-length decode and verify rows (SPEC-038 FR-CB2) | in progress (CB session) |
+| #1962 | Native-MTP tuple offer / canary visibility; provider logs the offer always | in progress (audit) |
+| #1948 | Non-streamed stop-string requests stop counting tokens generated past the stop | in progress (Codex) |
+| #1949 | gpt-oss stop strings no longer match hidden reasoning text | in progress (Codex) |
+| #1961 | Watchdog grace window after an operator-pause resume | in progress (Codex) |
+| App Attest auto-trust (#1911) | Malibu.app App Attest signing + CLI challenge/submit subcommands; coordinator verifier fix | in progress (campaign PR) |
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
