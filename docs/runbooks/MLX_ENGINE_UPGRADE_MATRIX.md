@@ -4,7 +4,7 @@ This is the mandatory correctness-first matrix for any change to `mlx-swift-lm`,
 
 ## Hard rules
 
-1. Use a tagged, remotely consumable `mlx-swift-lm` release. Never resolve production from `main`.
+1. Resolve production only from the immutable fork tags in [Fork model](#fork-model), each pinned by full revision. Never resolve production from a branch, a version range, or a moved tag.
 2. Record exact before/after versions and revisions for `mlx-swift-lm`, `mlx-swift`, `swift-transformers`, and `swift-jinja`.
 3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966.
 4. Build, test, resolve, candidate, and release jobs that compile `phase3-binary` or Malibu.app run only on the protected build toolchain: Xcode 26.6 (17F113) at `/Applications/Xcode_26.6.app`, Swift 6.3.3, macOS SDK 26.5, on the `macos-26` / `macos-26-intel` images. It replaced Xcode 16.4 / Swift 6.1 in the reviewed release-toolchain migration that landed with the mlx-swift-lm 3.32.3 dependency upgrade (`mlx-swift 0.32.3` declares `swift-tools-version: 6.3`; Related: #1906, #700). The protected `macos-15-intel` signers stay on the pinned signer toolchain (Xcode 16.4) for the sealed OpenSSL bottle and never compile the package. Any further toolchain move needs its own reviewed migration and release-runner proof.
@@ -22,11 +22,126 @@ Every run must attach:
 - generation parameters, random seed, prompt fixture revision, and cache/prefill/speculative settings;
 - baseline and candidate JSON outputs containing prompt token IDs, generated token IDs, decoded bytes, stop reason, prompt/completion accounting, and tool/reasoning parse result.
 
+## Fork model
+
+The production MLX runtime is three operator-owned forks under `Augustas11`.
+They are the permanent production runtime: MacProvider makes no upstream
+contributions and does not wait for upstream to carry its patches. Each
+upstream release MacProvider adopts is a rebase of all three patch stacks onto
+the new upstream tags, new fork tags, and a pass of the per-rebase acceptance
+gate below. SPEC-048 MTP-3 (R003) names the exact authorized tuple; a new tuple
+needs a SPEC revision.
+
+| Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
+| --- | --- | --- | --- | --- | --- |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.6` | `72c4ab082a08f291ba270a7303880e90036742e3` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.2` | `ca2f61d22c5e8afe87170525ebc1769f72da5b41` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.2-macprovider.2` | `c9196eb7161358f1e4a7f0605182186f8686e5f8` | `v0.32.2` (`1f8e74e3…`) |
+
+Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
+the next by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm,
+mlx-swift-lm's manifest pins mlx-swift, and mlx-swift's `Source/Cmlx/mlx`
+submodule commit pins core (`Source/Cmlx/mlx-c` stays upstream). Swift 6.3 is
+the effective minimum for the graph (mlx-swift declares tools version 6.3);
+the mlx-swift-lm fork keeps upstream's tools version.
+
+### Patch inventory
+
+Every rebase replays these stacks and drops any patch upstream now carries
+(record which, and why it is equivalent).
+
+mlx-swift-lm (`3.32.3..3.32.3-macprovider.6`):
+
+| Patch | Commits | What it carries |
+| --- | --- | --- |
+| MTP cache transactions | `87cefcd` | Public row-mapped `MTPKVCacheTransaction` stage/commit/discard/rewind. |
+| Packed MTP verification | `d7404cf`, `5c8811c`, `2c36a18`, `5402834`, `47835cf`, `038edb7`, `53e32e9`, `edeee8a` | `verifyMTPPackedTargets`, exact state across rounds, row state outside drafters, serialized drafter access, standalone Qwen MTP for packed hybrid schedulers, padded zero-proposal Mamba fix, host offset mirrors, deferred Mamba commit evaluation. |
+| Packed drafter | `49aa6af` | `advanceAndProposePacked`: every native row's drafter advances and proposes in one forward. |
+| GDN verify checkpoint | `9500c78` | `gatedDeltaUpdateCheckpointed`, one recurrent pass, bit-identical to the split recurrence. |
+| SSM mask skip | `d9897e6` | No all-true SSM mask when no packed verify row is padded. |
+| Fused A3B MoE | `e787537`, `965f78e` | `MLX_LM_QWEN35_FUSED_MOE` decode/verify-width kernels; eligible only for the exact stock module types and exact quantized layout, stock path otherwise. |
+| Compiled MTP verify | `1007bc6` | Qwen 3.5 verify step compiled like single-token decode (`MLX_LM_QWEN35_COMPILED_VERIFY`). |
+| Compile-state ownership | `7be182c` (upstream #631, `-x`), `905170f` | The fused GDN projection and every array a verify trace reads are declared compile state. |
+| Core pin | `37f0d7c`, `5203b73` | Resolves the mlx-swift fork. |
+| Tests | `8941054`, `72c4ab0` | Prepared fused-GDN compiled-verify fixture and in-place reload regression. |
+
+`784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
+next rebase.
+
+mlx-swift (`0.32.3..0.32.3-macprovider.2`): `d073a644`, `ca2f61d2` move the
+`Source/Cmlx/mlx` submodule to the core fork and update the compiled-function
+erase documentation. No API change.
+
+MLX core (`v0.32.2..v0.32.2-macprovider.2`):
+
+| Patch | Commit | What it carries |
+| --- | --- | --- |
+| Batch-invariant small-M quantized matmul | `ff1b94832` | No `qmv_wide` (every small-M product stays on `qmv`) and no `qmm_splitk` (`qmm` reduces K in one order for every M), so a continuously batched row matches its serial result. |
+| Every-thread compiled-function erase | `c9196eb71` | Freeing a compiled function erases it from every thread's compile cache, so a later function at the same address never replays a dead trace. |
+
+### Bounded routing exceptions
+
+The batch-invariant routing covers `QuantizedMatmul`. These routes still
+depend on the call's shape. None is a demonstrated token divergence:
+
+- `GatherQMM` (`mlx/backend/metal/quantized.cpp` ~1901) takes
+  `gather_qmm_rhs` for sorted gathers when `M == 1`, `B >= 16` and
+  `B / E >= 4`, otherwise `gather_qmv`. MoE expert projections sort once a
+  call carries 64 or more expert selections, with `B` = tokens x top-k.
+  Decode stays below the switch: A3B (256 experts, top-8) at 8 rows is
+  `B / E = 0.25`, and decode/verify widths of at most seven tokens per row
+  take the fused path anyway. Prefill does not always stay below it: a single
+  A3B chunk crosses at 128 tokens, and continuous batching groups up to four
+  prefill rows with the same cursor and chunk length into one forward. Rows
+  of 32-127 tokens can therefore take `gather_qmv` alone and
+  `gather_qmm_rhs` when grouped (for example two 64-token chunks). The
+  startup batched-isolation probe uses 513-token prompts and does not cover
+  this case. The CB-vs-serial deterministic parity row was already an open
+  gate row on 1.8.230 (see
+  `docs/research/mlx-swift-lm-3.32.3/README.md`).
+- Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
+  quantized linears are transposed, so serve shapes do not use them.
+- `QQMatmul` always takes the vector route. It is independent of `M`, so it
+  cannot split a row's result by batch size.
+
+A new model, expert count, top-k, or batch/prefill shape re-runs the startup
+isolation probe and re-derives these bounds before it serves.
+
+### Pin sites
+
+Moving a tag changes these together; CI fails if they disagree:
+`phase3-binary/Package.swift`, `phase3-binary/Package.resolved`,
+`KVBuildIdentity.mlxSwiftLMRevision`
+(`KVConversationColdTierAdapter.swift`, checked by
+`KVBuildIdentityDriftTests`), `scripts/read_swiftpm_pins.py` (fails closed on
+an unreviewed fork revision), `scripts/check-upstream-throughput-blockers.sh`,
+`scripts/tests/test_upstream_watch.py`, and SPEC-048 MTP-3. The native-MTP
+bench (`NativeMTPHardwareE2ERunner.upstreamRevision`) reads
+`KVBuildIdentity`, and `scripts/native_mtp_rehearsal_release.py` reads
+`Package.resolved` through `read_swiftpm_pins.py`.
+
+### Per-rebase acceptance gate
+
+Mandatory for every new fork tuple, in addition to the matrices below. Record
+results in the evidence header.
+
+| Row | Required proof |
+| --- | --- |
+| Patch replay | Each inventory patch applies or is dropped with a recorded upstream equivalent; the fork tests for every touched surface pass. |
+| Startup batched-isolation (fused MoE on) | On the Studio A3B tuple: `established=true`, `proven=true`, `crossRowDivergences=0`, `paged_kv_decision=attached`, with the fused path active. |
+| Startup batched-isolation (fused MoE off) | The same with `MLX_LM_QWEN35_FUSED_MOE=0`. |
+| CB enable gate | The rows of `docs/runbooks/continuous-batching-enable-gate.md` that run on the Studio pass on the new build; an open row that also fails on the previous build is recorded, not hidden. |
+| Native-MTP R015 | Required when a decode-path line changed since the last R015 evidence (AGENTS rule 2): name the line, or record that none changed. |
+| Cross-thread model reload | A reload loop that frees and rebuilds models across threads shows zero stale trace replays (every replay bit-exact to a fresh trace). |
+| Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
+| Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
+| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream. |
+
 ## Package and toolchain preflight
 
 | Gate | Required result |
 | --- | --- |
-| Tagged release | Candidate functionality is in a published `mlx-swift-lm` tag; upstream #518 or equivalent remote-package consumption failure is closed. |
+| Fork tags | Every fork in the tuple has a new immutable tag on the rebased stack, pushed before the pin moves; each link pins the next by full revision (see [Fork model](#fork-model)). |
 | Deterministic resolution | A clean `Package.resolved` regeneration resolves the reviewed exact graph; no branch dependencies or unexplained transitive drift. |
 | Protected toolchain | Debug and release manifests/builds pass on the protected Xcode/Swift pair. A newer pair requires its own migration and release-runner proof. |
 | API inventory | Compile errors and deprecations from `GenerateParameters`, cache creation/configuration, model factories, loading and generation are explicitly adapted and reviewed. |
@@ -59,9 +174,10 @@ Run temperature 0 with identical fixtures and parameters. Unless a row explicitl
 | Quantized reusable KV | #965 real-model ownership/aliasing/mutation tests pass before `kvBits` is re-enabled for any `conversation_key`. Until then Macprovider must fail closed to fp16 reuse. |
 | Cold-tier ABI | Persist/promote/reuse passes with exact identity; old dependency-version cache state is invalidated or explicitly migrated, never silently read. |
 | Paged KV | Default-off behavior, descriptor admission, bridge capability and metallib/kernel parity remain intact; no unsupported tuple becomes routable. |
-| `.remainder` prefill | Legacy/current prefill boundary produces exact tokens and accounting across below/equal/above-step prompts. |
-| Balanced/adaptive prefill | Evaluate only after `.remainder` parity is green; preserve exact output, memory bounds and cancellation behavior. |
-| Compiled decode | Generic compile remains off until #964/upstream #406 is released and stateful KV offsets, retrace and failure recovery pass. |
+| `.remainder` prefill | Legacy/current prefill boundary produces exact tokens and accounting across below/equal/above-step prompts. MacProvider keeps legacy `.remainder` chunking on every generation path until a reviewed balanced-prefill migration passes the next row. |
+| Balanced/adaptive prefill | Evaluate only after `.remainder` parity is green, as its own reviewed migration: exact output and accounting against `.remainder`, memory bounds, and cancellation behavior must all pass before any path leaves `.remainder`. |
+| Compiled decode (generic) | The generic `GenerateParameters` compile path stays off until #964/upstream #406 is released and stateful KV offsets, retrace and failure recovery pass. This row does not cover the model-specific compiled traces below. |
+| Compiled decode/verify (Qwen 3.5, fork) | The fork's model-specific compiled single-token decode segments and compiled MTP verify step (`MLX_LM_QWEN35_COMPILED_VERIFY`) stay on only while the per-rebase compile-state rows pass: bit-identical to the general path, every array a trace reads declared as compile state, zero stale trace replays across model reload. They are not the generic compile path and do not satisfy or reopen #964. |
 | Speculative pre-wrap | Exact target-only output parity with accepted/rejected draft paths in streaming and non-streaming modes. |
 | Speculative cache wrap | #377 crosses the rotating-window boundary and proves exact rollback. While upstream #424 is unresolved, classic production speculation remains disabled by default; the global-context boundary check is defense in depth, not enable authority. |
 | Speculative failure | Draft load/generation/cancellation failure falls back before mixed output and leaves no conversation lease or stale cache state. |
@@ -94,7 +210,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-10-09): `mlx-swift-lm 3.32.3` and `mlx-swift 0.32.3` (the mlx-swift-lm 3.32.3 dependency upgrade), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current protected baseline (2026-10-10): fork `mlx-swift-lm 3.32.3-macprovider.6` (`72c4ab08…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.2` (`ca2f61d2…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.2` (`c9196eb7…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is
