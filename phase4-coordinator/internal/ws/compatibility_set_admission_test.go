@@ -330,9 +330,11 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 	if err := json.Unmarshal(payload, &ack); err != nil {
 		t.Fatalf("decode hello_ack: %v", err)
 	}
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || !provider.RoutingEligible() {
-		t.Fatalf("provider should start routable: ok=%v provider=%+v", ok, provider)
-	}
+	// The routing hold is released just after the hello_ack write.
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+		return ok && provider.RoutingEligible()
+	})
 	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
 		TargetID:       compatibilityTargetSet,
 		MinimumVersion: "1.8.4",
@@ -439,9 +441,11 @@ func TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift(t *tes
 			if err := json.Unmarshal(payload, &ack); err != nil {
 				t.Fatalf("decode hello_ack: %v", err)
 			}
-			if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || !provider.RoutingEligible() {
-				t.Fatalf("provider should start routable: ok=%v provider=%+v", ok, provider)
-			}
+			// The routing hold is released just after the hello_ack write.
+			eventually(t, func() bool {
+				provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+				return ok && provider.RoutingEligible()
+			})
 			closed, err := h.Provider.SetCompatibilitySetPolicy(test.reload)
 			if err == nil || !strings.Contains(err.Error(), test.wantReason) {
 				t.Fatalf("SetCompatibilitySetPolicy error = %v, want %q", err, test.wantReason)
@@ -518,9 +522,11 @@ func TestCompatibilityPolicyReloadRefusesBuyerServingSessionDemotedToBridgeOnly(
 	if err := json.Unmarshal(payload, &ack); err != nil {
 		t.Fatalf("decode hello_ack: %v", err)
 	}
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.CatalogAdmissionMode == "update_bridge" || !provider.RoutingEligible() {
-		t.Fatalf("provider should start as buyer-serving, not bridge-only: ok=%v provider=%+v", ok, provider)
-	}
+	// The routing hold is released just after the hello_ack write.
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+		return ok && provider.CatalogAdmissionMode != "update_bridge" && provider.RoutingEligible()
+	})
 	closed, err := h.Provider.SetCompatibilitySetPolicy(config.CompatibilitySetConfig{
 		TargetID:          compatibilityFutureSet,
 		MinimumVersion:    "1.8.12",
