@@ -49,18 +49,47 @@ selection.
 
 ## Current published release and fleet target
 
-Verified 2026-10-08 against public release metadata and live health:
+Verified 2026-10-10 against public release metadata, the release train
+(`scripts/ops/cli-release.sh status`) and live health:
 
 | Field | Value |
 |---|---|
-| GitHub provider release | [v1.8.223](https://github.com/Augustas11/macprovider/releases/tag/v1.8.223) |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.223@9c8c87dbff8ee00ba2c72f7923e1dce268c42e78` |
-| Pearl runtime / recommended provider | `v1.8.223` / `1.8.223` |
-| Compatibility target | `1.8.223`; applied target recorded in the coordinator release train on 2026-10-08 |
-| Mirror discovery caveat | `download.malibu.tech/releases/latest.json` still reports `v1.8.207`; do not claim all installer/mirror channels are synchronized |
+| GitHub provider release | [v1.8.232](https://github.com/Augustas11/macprovider/releases/tag/v1.8.232) (published 2026-10-09 23:22Z) |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.232@36758c05c18dcedea1a321aa6b3120c6678640c0` |
+| Pearl runtime / recommended provider | `v1.8.236` / `1.8.232` |
+| Admission | Repository policy (#1919): every well-formed release from this repository connects and gets the recommendation; 42 exact revocations (the v1.8.34–v1.8.123 seed) make those builds update-only. No accepted-id list. |
+| Canary | Studio canary on 1.8.232 passed with CB live-verified; e2e gate recorded as CF-232-E2E (below). |
+| Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
+| Mirror discovery caveat | `download.malibu.tech/releases/latest.json` still reports `v1.8.224` (checked 2026-10-10); do not claim the mirror channel is synchronized. |
 
-CLI223 predates #1871 and #1892. Neither this version alignment nor its public
-signature proves automatic privacy enrollment or network activation.
+## Next CLI release — net changes vs 1.8.232
+
+One candidate, one Studio canary, one promotion. Nothing is recommended to the
+fleet before the canary passes.
+
+| PR / branch | Change | Status |
+|---|---|---|
+| #1910 | Capacity shedding and prefill fairness; measured concurrency calibration | merged |
+| #1937 | Attested-hardware auto-trust, pending hardware checks non-fatal, engine-run CLI fixes, operator pause survives coordinator drains | merged |
+| #1919 | Provider side of repository admission (`binary_version` must equal the compatibility-id version) | merged |
+| #1927 | MLX runtime to mlx-swift-lm 3.32.3 / MLX 0.32 through the forks; Swift 6.3 / Xcode 26.6 toolchain; kernel-route-invariant CB prefill grouping | in progress (draft, other session) |
+| `cli/auto-cb-slots` | CB/MTP simplification: CB on by default, per-Mac self-check (batched-vs-alone exactness at every granted slot count, net-gain check) picks the served slots; signed CB/MTP policy becomes revocation-only; native MTP model-keyed | in progress (no PR yet; opens after #1927 merges) |
+| #1944 | Calendar-expiry removal (catalog, native-MTP sidecar, discovery head, autotune feed age) | in progress (audit fixes) |
+| `cli/revoked-build-downgrade` | Rollback lever: a Mac on an exactly revoked build may update down to the coordinator-recommended, validly signed release (coordinator path only, never the discovery rail) | in progress (must ship in this same release) |
+
+Release plan:
+1. Cut the candidate from `main` after every row above is merged.
+2. Studio canary through `cli-release.sh` (`canary_smoke`), with the self-check
+   decision read from `/v1/status`. One-off, outside the train: the same
+   candidate on one house M1 8GB for about 30 minutes of serving, through the
+   proven private-candidate install recipe.
+3. Promotion and recommendation bump.
+4. The Pearl runtime train for the coordinator side follows (#1944, CB/MTP
+   coordinator canary, #1942); see the coordinator release train.
+
+Rollback after promotion (once the downgrade lever ships): set the
+recommendation back to the previous good version and revoke the bad build
+exactly. Macs on the revoked build update down and serve again.
 
 ## Historical fully documented 207 promotion
 
