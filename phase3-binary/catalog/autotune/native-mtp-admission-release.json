@@ -2,14 +2,14 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "2d06c6978f745b31cdfd88576d2bca4992e988ecef891961ed6933bf2e0e85e7",
-    "challenge_bank_sha256": "7d6247666d1b57a5c4d36216d777ba0268f451e49f36e41bae83da012c0299b1",
+    "challenge_bank_sha256": "74ddf59539316d4e12610c58f16da695a0bde223fbcfb437e253078878021838",
     "live_executable_cdhash": "8a65d6f517130b9612f49a09b7964f8d0b562b76",
     "provider_revision": "6f7290f45b3e976b275a97a5fa6ac248ef648811",
     "reproducible_build_sha256": "cb09dcd13f320e18a1a765b9ee8fa0b8da4ca1abbee88d4b95da185aa347ae28",
     "source_commit": "6f7290f45b3e976b275a97a5fa6ac248ef648811"
   },
-  "expires_at": "2027-01-07T12:00:00Z",
-  "issued_at": "2026-10-10T12:00:00Z",
+  "expires_at": "2027-01-07T12:50:49Z",
+  "issued_at": "2026-10-10T12:50:49Z",
   "release_id": "published-2026-10-10-native-mtp-v238",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
