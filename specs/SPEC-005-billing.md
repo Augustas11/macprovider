@@ -1,7 +1,12 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.18 (2026-10-09, non-streaming completion ceiling basis and one-time ceiling restatement)
+**Version:** 0.6.19 (2026-10-10, chat-template headroom for prompt billing cap)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.19 (2026-10-10):** §5.3.2 adds 64 tokens of chat-template
+headroom to the ordinary chat prompt cap, matching the gateway allowance.
+The bare estimate substituted for missing provider usage stays unchanged.
+Relay-blind input caps remain the buyer-authorized reservation limits.
 
 **Change log v0.6.18 (2026-10-09):** Money-path decision recorded in
 `beta/DECISION_CRITERIA.md` Entry 250. (1) §5.3/§6.8: a successful
@@ -1469,10 +1474,16 @@ The prompt count the formula prices is bounded above by a coordinator-side estim
 applies, in order:
 
 1. **Independent estimate.** The coordinator estimates the request's prompt tokens from the buyer
-   request at routing time — `PromptTokenUpperBound = estimateTokens(req.raw)`
+   request at routing time — `PromptTokenUpperBound = estimateTokens(req.raw) + 64`
    (`internal/buyer/server.go`), where `estimateTokens ≈ len(req.raw)/4`. This is a **loose heuristic
    upper bound**, not a tokenizer-exact count: `req.raw` is the whole request JSON (whitespace,
-   non-model fields, formatting), so `len/4` typically **over**-estimates the true prompt tokens.
+   non-model fields, formatting). The byte heuristic can overestimate or underestimate the true
+   prompt count; role markers and default system prompts added by the model's chat template can
+   put short prompts above the bare estimate. The fixed 64-token allowance matches the gateway's
+   template headroom and applies only to the cap, never to the substituted billable estimate.
+   Token-dense prompts or larger templates can still exceed this heuristic cap. Relay-blind
+   requests instead retain the buyer-authorized `InputTokenUpperBound` from their reservation;
+   the coordinator cannot inspect their encrypted prompt or enlarge the signed reservation cap.
 2. **Provider-attributed prompt (`provider_reported_prompt_tokens`).** This column holds the prompt
    count **attributed to the provider**, which is the provider's own reported value **when present**.
    When the provider omits the prompt count on a path that still bills prompt — an estimated-completion
@@ -1489,8 +1500,8 @@ applies, in order:
    attributed prompt, the value passes through **unbounded**.
 
 This is a **money-affecting** normalization that caps *gross* prompt over-reporting: a provider claiming
-far more prompt tokens than `len(req.raw)/4` is billed only for that heuristic bound. It is **not** a
-tight anti-inflation guarantee — because the bound is `len/4` rather than a tokenizer count, a dishonest
+far more prompt tokens than `estimateTokens(req.raw) + 64` is billed only for that heuristic bound. It is **not** a
+tight anti-inflation guarantee — because the ordinary chat bound is `estimateTokens(req.raw) + 64` rather than a tokenizer count, a dishonest
 provider retains **slack** to inflate the prompt report up to the heuristic, and NULL-bound
 (legacy/recovery) rows are not capped at all. A conforming implementation MUST price the bounded
 `prompt_tokens`, MUST NOT price a value above `PromptTokenUpperBound` when a bound exists, and MUST
@@ -3087,9 +3098,9 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
-### AC-PROMPT-BOUND: Charged prompt bounded to coordinator estimate (§5.3.2)
+### AC-PROMPT-BOUND: Charged prompt bounded to coordinator estimate plus template headroom (§5.3.2)
 
-**Verification:** Price a row whose attributed prompt (`provider_reported_prompt_tokens`) **exceeds** the coordinator `PromptTokenUpperBound`, and a second row whose attributed prompt is at or below the bound. Cover both a provider-reported prompt and a coordinator-substituted prompt (prompt absent on a `byte_estimated`/502/504 path).
+**Verification:** Price a row whose attributed prompt (`provider_reported_prompt_tokens`) **exceeds** the coordinator `PromptTokenUpperBound`, and a second row whose attributed prompt is at or below the bound. Cover both a provider-reported prompt and a coordinator-substituted prompt (prompt absent on a `byte_estimated`/502/504 path). Include a short chat whose provider-reported prompt exceeds the bare estimate but fits within the 64-token headroom, a report exactly at the cap, and gross over-reporting above it; the substituted estimate MUST NOT include headroom.
 **Expected:** For the over-bound row, `prompt_tokens = charged_prompt_tokens = PromptTokenUpperBound` (the raw/attributed value preserved separately in `provider_reported_prompt_tokens`) and §5.3 prices the bounded value; for the at/below-bound row the value passes through unchanged; a NULL bound (legacy/recovery) passes through unbounded. Store order is `prompt_tokens = charged_prompt_tokens = min(attributed, bound)` with `provider_reported_prompt_tokens` = the raw/substituted attribution. The **`ledger_provider_identity_snapshots.provider_reported_prompt_tokens`** mirror MUST carry the same reported-or-substituted attribution as the credit-row column (§4.8), including for the substituted-prompt case.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.

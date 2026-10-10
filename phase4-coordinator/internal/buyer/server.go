@@ -2760,7 +2760,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
 	state.estimatedTokens = estimateTokens(req.raw)
-	rec.setPromptTokenUpperBound(int64(state.estimatedTokens))
+	rec.setPromptTokenUpperBound(promptTokenUpperBound(req.raw))
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
@@ -10950,6 +10950,15 @@ func (s *Server) startRecoveryProbe(provider pool.Provider) {
 			s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider marked unavailable after recovery preflight failures")
 		}
 	}()
+}
+
+// Match the gateway's chat-template allowance without changing the bare
+// estimate used when provider usage is absent. This is a heuristic cap, not
+// a tokenizer count or a quantity to bill automatically.
+const promptHeadroomTokens = 64
+
+func promptTokenUpperBound(raw json.RawMessage) int64 {
+	return int64(estimateTokens(raw)) + promptHeadroomTokens
 }
 
 func estimateTokens(raw json.RawMessage) int {
