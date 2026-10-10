@@ -462,9 +462,9 @@ jobs:
         run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
 
   swift-journeys:
-    # Hermetic BYOM journeys, Sparkle key checks, and installer recovery
-    # checks, split out of the old single Swift job (#1920).
-    name: phase3-binary (BYOM journeys, Sparkle, recovery)
+    # Hermetic BYOM journeys and Sparkle key checks, split out of the old
+    # single Swift job (#1920).
+    name: phase3-binary (BYOM journeys, Sparkle)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-15
     timeout-minutes: 35
@@ -526,14 +526,10 @@ jobs:
         # during an operator signing session.
         run: make test-byom-discovery-journey
 
-      - name: Verify macOS upgrade rollback and manual process recovery
-        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
-
-      - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
-        run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
-
   malibu-app-tests:
-    name: phase3-binary (Malibu app tests)
+    # Malibu app tests plus the installer recovery checks; neither needs the
+    # SwiftPM build, and pairing them balances this job with swift-journeys.
+    name: phase3-binary (Malibu app tests, recovery)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-15
     timeout-minutes: 30
@@ -568,6 +564,12 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS'
 
+      - name: Verify macOS upgrade rollback and manual process recovery
+        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
+
+      - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
+        run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
+
   swift-tests:
     # Aggregator that keeps the historical `phase3-binary (swift test)` result
     # ci-required checks. It runs whenever the Swift gate is true (even if a
@@ -594,8 +596,8 @@ jobs:
           set -euo pipefail
           failed=0
           for pair in "swift test shards=$SHARD_RESULT" \
-                      "BYOM journeys, Sparkle, recovery=$JOURNEYS_RESULT" \
-                      "Malibu app tests=$APP_RESULT"; do
+                      "BYOM journeys, Sparkle=$JOURNEYS_RESULT" \
+                      "Malibu app tests, recovery=$APP_RESULT"; do
             echo "$pair"
             if [ "${pair##*=}" != "success" ]; then
               echo "${pair%=*} result=${pair##*=} (expected success)" >&2
