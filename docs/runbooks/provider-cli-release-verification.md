@@ -313,9 +313,13 @@ holds only GitHub assets, including one named `release.json`), and re-downloads 
        <(curl -fsSL "https://download.malibu.tech/releases/$tag/$a")
    ```
 3. When the coordinator's `latest_binary_version` advances to the tag, move the
-   advisory pointer: `bash scripts/publish-release-mirror.sh --tag vX.Y.Z
-   --promote-latest`. It refuses unless `coordinator.malibu.tech/healthz`
-   already advertises the tag, and never moves `latest.json` backwards.
+   advisory pointer. The CLI release train does it: `scripts/ops/cli-release.sh`
+   step `mirror_latest` is pending while the served `releases/latest.json` names
+   another tag, and `next --run` executes `bash scripts/publish-release-mirror.sh
+   --tag vX.Y.Z --promote-latest` under the live-ops lock (it needs
+   `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The script
+   refuses unless `coordinator.malibu.tech/healthz` already advertises the tag,
+   and never moves `latest.json` backwards.
 
 A published `/releases/<tag>/` is immutable: a rerun is a no-op when the bytes
 match and an error otherwise. Do not edit it in place; cut a new release.

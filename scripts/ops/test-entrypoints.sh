@@ -71,7 +71,18 @@ cp "$tmp/keys/release.pem" "$W/ops/pearl-updater/release-signing-public.pem"
 SEED1="test/repo:v1.0.1@$(printf '1%.0s' $(seq 40))"
 SEED2="test/repo:v1.0.2@$(printf '2%.0s' $(seq 40))"
 printf '# test seed\n# below: 1.0.3\n%s\n%s\n' "$SEED1" "$SEED2" > "$W/phase4-coordinator/dist/compatibility-revoked-ids.txt"
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops docs/releases/cli-release-train.md \
+# Stand-in for the mirror publisher: records its argv and whether the token and
+# key reached it, then moves the fake mirror's latest.json like --promote-latest.
+cat > "$W/scripts/publish-release-mirror.sh" <<'FAKEMIRROR'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$FAKE_PEARL/svc/mirror-args"
+printf 'token=%s key=%s\n' "${GH_TOKEN:-}" "${MALIBU_DOWNLOAD_SSH_KEY:-}" > "$FAKE_PEARL/svc/mirror-env"
+[ -z "${FAKE_MIRROR_FAIL:-}" ] || exit 1
+printf '{"tag_name": "%s"}\n' "$2" > "$FAKE_PEARL/svc/mirror-latest.json"
+FAKEMIRROR
+chmod +x "$W/scripts/publish-release-mirror.sh"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh docs/releases/cli-release-train.md \
   ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
@@ -117,12 +128,13 @@ export FAKE_PEARL="$tmp" PEARL_PROC_ROOT="$tmp/proc" PEARL_INSTALL_ROOT="$tmp/pe
 export PEARL_CONFIG_GUARD="$SRC_REPO/scripts/lib/coordinator_config_guard.py" PEARL_UPDATER_LOCK="$tmp/pearl/updater.lock"
 export PEARL_BACKUP_ROOT="$tmp/pearl/backups"
 export PEARL_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PORT/healthz"
+export MIRROR_LATEST_URL="http://127.0.0.1:$PORT/releases/latest.json"
 export PEARL_PRIVACY_METADATA_DIR="$tmp/pearl/privacy-release-identities" PEARL_RELEASE_PUBLIC_KEY_PATH="$tmp/keys/release.pem"
 mkdir -p "$tmp/pearl/root" "$tmp/proc"
 systemctl _init
 PEARL_RELEASE_IDENTITY_OWNER="$(id -un)" PEARL_RELEASE_IDENTITY_GROUP="$(id -gn)"
 export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINATOR_METRICS_URL="http://127.0.0.1:$PORT/metrics"
-unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT
+unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
 # health: a repository-admission runtime (its /healthz reports the running
@@ -675,6 +687,39 @@ PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "journal fallback refuses rejections
 run_rc 0 "cli status reports the journal source without the metric" scripts/ops/cli-release.sh status
 if [ "$(fact_of privacy_unapproved_rejections_source)" = "journal" ]; then ok; else bad "fallback source: $(fact_of privacy_unapproved_rejections_source)"; fi
 rm -f "$tmp/svc/journal.txt"
+
+# ==== mirror_latest ===========================================================
+# After the rollout verification the release mirror's advisory latest.json must
+# name the recommended tag; next --run promotes it through the mirror script.
+fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
+  "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}],
+    "verify-live-coordinator-release-rollout.yml": [{"databaseId": 888, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T01:00:00Z"}]},
+  "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]}}'
+printf '{"tag_name": "v%s"}\n' "$LIVE" > "$tmp/svc/mirror-latest.json"
+run_rc 0 "mirror latest.json lags the recommended tag" scripts/ops/cli-release.sh status
+if [ "$(state_of mirror_latest)" = "pending" ] && [ "$(fact_of mirror_latest_tag)" = "v$LIVE" ]; then ok; else bad "mirror_latest not pending while latest.json lags: $(state_of mirror_latest)"; fi
+expect_next mirror_latest:blocked
+expect_err_or_reason() { case "$(next_field reason)" in *"$1"*) ok ;; *) bad "reason lacks '$1': $(next_field reason)" ;; esac; }
+expect_err_or_reason "MALIBU_DOWNLOAD_SSH_KEY is unset"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "mirror_latest refuses without the mirror key" scripts/ops/cli-release.sh next --run
+expect_lock_free
+export MALIBU_DOWNLOAD_SSH_KEY="$tmp/mirror-key"
+run_rc 0 "mirror latest.json lags, key set" scripts/ops/cli-release.sh status
+expect_next mirror_latest:mutate
+case "$(next_field command)" in
+  *"scripts/publish-release-mirror.sh --tag v$CAND --promote-latest"*) ok ;; *) bad "mirror command: $(next_field command)" ;;
+esac
+case "$(next_field command)" in *stub-gh-token*) bad "the token leaked into the printed command" ;; *) ok ;; esac
+FAKE_MIRROR_FAIL=1 MACPROVIDER_OPS_OWNER=t run_rc 1 "a failing mirror publish is not recorded" scripts/ops/cli-release.sh next --run
+expect_lock_free
+MACPROVIDER_OPS_OWNER=t run_rc 0 "mirror_latest promotes through next --run" scripts/ops/cli-release.sh next --run
+expect_lock_free
+if [ "$(cat "$tmp/svc/mirror-args")" = "--tag v$CAND --promote-latest" ]; then ok; else bad "mirror script args: $(cat "$tmp/svc/mirror-args")"; fi
+if [ "$(cat "$tmp/svc/mirror-env")" = "token=stub-gh-token key=$tmp/mirror-key" ]; then ok; else bad "mirror script env lacks the token or key"; fi
+run_rc 0 "mirror latest.json matches" scripts/ops/cli-release.sh status
+if [ "$(state_of mirror_latest)" = "done" ]; then ok; else bad "mirror_latest not done once latest.json matches"; fi
+if [ "$(next_field id)" != "mirror_latest" ]; then ok; else bad "mirror_latest still next after it matches"; fi
+unset MALIBU_DOWNLOAD_SSH_KEY
 
 # ==== discovery-renew =========================================================
 fixture '{"runs": {"renew-release-discovery-head.yml": []}}'

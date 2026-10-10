@@ -15,6 +15,7 @@ Files in STATE_DIR steer it:
   mode                    gateway behaviour: move | stuck | serial-request |
                           no-request-id | no-provider-id | other-provider
   provider_id             X-Provider-Id the gateway reports (unless the mode drops it)
+  mirror-latest.json      /releases/latest.json body of the release mirror (404 when absent)
   served                  number of completions served (written here)
 """
 import json
@@ -61,6 +62,8 @@ class Handler(BaseHTTPRequestHandler):
                 d["compatibility_policy_target_id"] = str(cs.get("target_id") or "")
                 d["compatibility_policy_revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []]
             return self.send(200, json.dumps(d))
+        if self.path == "/releases/latest.json" and read("mirror-latest.json"):
+            return self.send(200, read("mirror-latest.json"))
         if self.path == "/v1/autotune-release" and read("autotune-release.json"):
             return self.send(200, read("autotune-release.json"))
         if self.path == "/metrics":

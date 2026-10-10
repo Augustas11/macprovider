@@ -102,6 +102,14 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `v<ver>` is annotated, peels to the candidate SHA and its exact remote tag
   object passes `git verify-tag`; it refuses an unsigned, untrusted,
   lightweight or other-commit `v<ver>`.
+- `cli-release.sh` step `mirror_latest`, after `verify_live_rollout`, keeps the
+  release mirror's advisory `releases/latest.json` on the recommended tag. It is
+  done when the served `tag_name` equals `v<ver>`; `next --run` runs
+  `scripts/publish-release-mirror.sh --tag v<ver> --promote-latest`, which itself
+  refuses a tag the coordinator does not advertise and never moves the pointer
+  backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
+  defaults to the repo's `gh` login. Runbook:
+  `docs/runbooks/provider-cli-release-verification.md#release-mirror-byte-identity-downloadmalibutech-1737`.
 - Steps the operator owns are `manual`: an environment approval click or a
   provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
@@ -130,6 +138,7 @@ COORDINATOR_URL=https://<coordinator-host>
 GATEWAY_URL=https://<gateway-host>
 INSTALL_SH_URL=https://<installer-host>/install.sh
 INSTALL_SH_REMOTE_PATH=<webroot path of the served install.sh>
+MALIBU_DOWNLOAD_SSH_KEY=<key file for the release mirror host>  # mirror_latest only
 PEARL_SSH=<ssh alias for the coordinator host>   # configure identity/known_hosts in ~/.ssh/config
 PEARL_SSH_IDENTITY=<optional key file>           # used by the repo scripts that the steps call
 PEARL_SSH_KNOWN_HOSTS=<optional pinned known_hosts>

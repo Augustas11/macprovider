@@ -75,10 +75,16 @@
 #                           posture_unapproved_code_identity counter over
 #                           PRIVACY_REJECTION_WINDOW_SECONDS, default 180; journal fallback),
 #                           then verify-live-coordinator-release-rollout.yml
+#  9a mirror_latest        the China release mirror's advisory releases/latest.json names the
+#                           recommended tag; next --run: scripts/publish-release-mirror.sh
+#                           --tag v<ver> --promote-latest (it requires the coordinator to
+#                           advertise the tag and never moves backwards). Needs
+#                           MALIBU_DOWNLOAD_SSH_KEY; GH_TOKEN defaults to the gh login
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
 #  11 install_sh_consumer_health
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, INSTALL_SH_URL,
+# MALIBU_DOWNLOAD_SSH_KEY (mirror_latest; MIRROR_LATEST_URL overrides the served pointer),
 # PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
 # Pearl paths default to the production layout: PEARL_COORDINATOR_CONFIG,
 # PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_COORDINATOR_METRICS_URL,
@@ -354,14 +360,23 @@ EOF
   fi
   fact install_sh_vs_release "$install_state"
 
+  # The mirror pointer is read through the mirror's public URL, like install.sh.
+  local mirror_tag="" mirror_state="unknown"
+  if [ "$published" = true ] &&
+    [ "$(http_get "${MIRROR_LATEST_URL:-https://download.malibu.tech/releases/latest.json}" "$OPS_TMP_DIR/mirror-latest.json")" = "200" ]; then
+    mirror_tag="$(json_field "$OPS_TMP_DIR/mirror-latest.json" 'd["tag_name"]')"
+    if [ "$mirror_tag" = "v$V" ]; then mirror_state=done; else mirror_state=pending; fi
+  fi
+  fact mirror_latest_tag "$mirror_tag"
+
   decide "$main_sha" "$head_sha" "$V" "$A" "$L" "$published" "$active_id" "$active_status" \
-    "$ok_id" "$ok_sha" "$artifact_state" "$promote_active" "$verify_ok" "$verify_active" "$prod_active" "$install_state"
+    "$ok_id" "$ok_sha" "$artifact_state" "$promote_active" "$verify_ok" "$verify_active" "$prod_active" "$install_state" "$mirror_state" "$mirror_tag"
 }
 
 decide() {
   local main_sha="$1" head_sha="$2" V="$3" A="$4" L="$5" published="$6" active_id="$7" active_status="$8"
   local ok_id="$9" ok_sha="${10}" artifact_state="${11}" promote_active="${12}" verify_ok="${13}"
-  local verify_active="${14}" prod_active="${15}" install_state="${16}"
+  local verify_active="${14}" prod_active="${15}" install_state="${16}" mirror_state="${17}" mirror_tag="${18}"
   NEXT_RUNBOOK="$TRAIN_DOC#promotion-gate-checklist"
 
   if [ -z "$L" ]; then
@@ -691,6 +706,29 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
 gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref main -f tag=v$V"
     fi
   fi
+
+  # 9a. China release mirror advisory pointer (releases/latest.json).
+  case "$mirror_state" in
+    done) step mirror_latest "done" "mirror latest.json -> v$V" ;;
+    pending)
+      step mirror_latest pending "mirror latest.json -> ${mirror_tag:-unreadable}, not v$V"
+      if [ "$L" != "$V" ]; then
+        set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
+          "the coordinator recommends $L, not v$V; the mirror script refuses a tag the coordinator does not advertise"
+      elif [ -z "${MALIBU_DOWNLOAD_SSH_KEY:-}" ]; then
+        set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
+          "MALIBU_DOWNLOAD_SSH_KEY is unset; set it in the ops env (see scripts/ops/README.md)"
+      else
+        set_next mirror_latest mutate "Point the release mirror latest.json at v$V" \
+"GH_TOKEN=\"\${GH_TOKEN:-\$(gh auth token -u Augustas11)}\" \\
+  bash scripts/publish-release-mirror.sh --tag v$V --promote-latest"
+        next_meta mirror_latest "$VERIFY_DOC#release-mirror-byte-identity-downloadmalibutech-1737" "none expected: static file replace on the mirror host"
+      fi ;;
+    *)
+      step mirror_latest unknown "needs a published v$V and a readable mirror latest.json"
+      [ "$published" != true ] || set_next mirror_latest blocked "Check the release mirror pointer" "" \
+        "the mirror latest.json is unreadable (MIRROR_LATEST_URL)" ;;
+  esac
 
   # 10. get-channel install.sh.
   case "$install_state" in
