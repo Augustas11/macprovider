@@ -100,6 +100,10 @@ func TestModelAdmissionProbeEvidenceStoresAreAppendOnly(t *testing.T) {
 				}
 				digests = append(digests, digest)
 			}
+			// An earlier evaluation appended last never shadows the newest.
+			if _, err := store.AppendModelAdmissionProbeEvidence(ctx, testProbeEvidence(ModelAdmissionProbeResultError, base.Add(-3*time.Hour))); err != nil {
+				t.Fatal(err)
+			}
 			if again, err := store.AppendModelAdmissionProbeEvidence(ctx, passed); err != nil || again != digests[2] {
 				t.Fatalf("idempotent append = %s, %v", again, err)
 			}
@@ -310,8 +314,12 @@ func TestPoolManifestBindWaitsForInFlightOfferProbe(t *testing.T) {
 	source := wirePoolSource(f)
 	source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
 	f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
-	key := knownAnswerInFlightKey(poolProvider, "byom_"+strings.Repeat("p", 52))
-	f.server.knownAnswerInFlight.Store(key, struct{}{})
+	candidate := "byom_" + strings.Repeat("p", 52)
+	release := f.server.holdKnownAnswerProbe(poolProvider, candidate)
+	// An overlapping submission's release never clears this handler's hold.
+	other := f.server.holdKnownAnswerProbe(poolProvider, candidate)
+	other()
+	other()
 	offer := f.offer(t, poolProvider, "p", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
 	f.reevaluate(poolProvider)
 	if head := f.latest(t, poolProvider, offer.CandidateID); head.PoolScoped() {
@@ -322,7 +330,7 @@ func TestPoolManifestBindWaitsForInFlightOfferProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.server.knownAnswerInFlight.Delete(key)
+	release()
 	f.reevaluate(poolProvider)
 	if head := f.latest(t, poolProvider, offer.CandidateID); !head.PoolScoped() || head.PoolProbeEvidenceDigest != digest {
 		t.Fatalf("bind after the probe = %+v", head)

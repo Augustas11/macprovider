@@ -2176,9 +2176,8 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 	// SPEC-047-R011 probe before bind: from the append until the offer-time
 	// known-answer probe has recorded, the binding sweep leaves this
 	// candidate unbound; this handler re-evaluates it afterwards.
-	inFlightKey := knownAnswerInFlightKey(providerID, event.CandidateID)
-	s.knownAnswerInFlight.Store(inFlightKey, struct{}{})
-	defer s.knownAnswerInFlight.Delete(inFlightKey)
+	releaseKnownAnswer := s.holdKnownAnswerProbe(providerID, event.CandidateID)
+	defer releaseKnownAnswer()
 	stored, replay, err := s.appendModelAdmissionEventInSection(r.Context(), providerID, func(ctx context.Context) (ModelAdmissionEvent, bool, error) {
 		return s.modelAdmissions.AppendModelAdmissionOffer(ctx, event)
 	})
@@ -2187,7 +2186,7 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		// (runbook "submits (or keeps) its offer") answers its current
 		// status, after the pool-manifest binding re-evaluates it.
 		if head, found, headErr := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); headErr == nil && found && modelAdmissionOfferRepeatsHead(head, event) {
-			s.knownAnswerInFlight.Delete(inFlightKey)
+			releaseKnownAnswer()
 			s.reevaluatePoolManifestBindings(r.Context(), providerID)
 			if current, ok, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, event.CandidateID); err == nil && ok {
 				head = current
@@ -2218,7 +2217,7 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		knownAnswerCtx, knownAnswerCancel := context.WithTimeout(context.WithoutCancel(r.Context()), modelAdmissionKnownAnswerTimeout+modelAdmissionRuntimeRevocationTimeout)
 		s.maybeRunKnownAnswerProbeForOffer(knownAnswerCtx, stored)
 		knownAnswerCancel()
-		s.knownAnswerInFlight.Delete(inFlightKey)
+		releaseKnownAnswer()
 		s.reevaluatePoolManifestBindings(r.Context(), providerID)
 		if head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(r.Context(), providerID, stored.CandidateID); err == nil && found && head.PoolScoped() {
 			writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(head, replay))

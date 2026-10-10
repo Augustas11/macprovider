@@ -216,9 +216,11 @@ type Server struct {
 	// probeEvidence is the SPEC-047-R011 known-answer evidence store, set
 	// when the model admission store implements it.
 	probeEvidence ModelAdmissionProbeEvidenceStore
-	// knownAnswerInFlight holds provider\x00candidate keys of offer-time
-	// known-answer probes still running (SPEC-047-R011 probe before bind).
-	knownAnswerInFlight sync.Map
+	// knownAnswerInFlight counts, per provider\x00candidate key, the offer
+	// handlers whose known-answer probe has not yet recorded (SPEC-047-R011
+	// probe before bind).
+	knownAnswerInFlightMu sync.Mutex
+	knownAnswerInFlight   map[string]int
 	modelAdmissionIntakeState
 	modelAdmissionPoolProvenState
 	modelAdmissionSubmitDisabled bool

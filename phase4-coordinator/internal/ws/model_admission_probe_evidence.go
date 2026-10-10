@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
@@ -249,15 +250,19 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionProbeEvidence(_ context.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hash = strings.ToLower(hash)
-	for i := len(s.probeEvidence) - 1; i >= 0; i-- {
-		r := s.probeEvidence[i].stored
+	// Newest by evaluated_at, the later append breaking ties (as SQLite).
+	var best StoredModelAdmissionProbeEvidence
+	found := false
+	for _, row := range s.probeEvidence {
+		r := row.stored
 		if r.Record.ProbePolicyID == ModelAdmissionKnownAnswerProbePolicyID && r.Record.ProviderID == providerID && r.Record.CandidateID == candidateID &&
 			r.Record.ArtifactHashAlgorithm == algorithm && r.Record.ArtifactHash == hash &&
-			!r.Record.EvaluatedTime().Before(since.UTC().Truncate(time.Second)) {
-			return r, true, nil
+			!r.Record.EvaluatedTime().Before(since.UTC().Truncate(time.Second)) &&
+			(!found || r.Record.EvaluatedAt >= best.Record.EvaluatedAt) {
+			best, found = r, true
 		}
 	}
-	return StoredModelAdmissionProbeEvidence{}, false, nil
+	return best, found, nil
 }
 
 func (s *memoryModelAdmissionStore) PassingModelAdmissionProbeEvidenceSince(_ context.Context, policyID string, since time.Time, limit int) ([]StoredModelAdmissionProbeEvidence, error) {
@@ -580,11 +585,35 @@ func knownAnswerInFlightKey(providerID, candidateID string) string {
 	return providerID + "\x00" + candidateID
 }
 
-// knownAnswerProbeInFlight reports whether an offer-time probe for this
-// candidate is still running.
+// holdKnownAnswerProbe registers one offer handler for the candidate and
+// returns its release, which is idempotent and releases only this handler's
+// hold: overlapping submissions never clear each other's guard.
+func (s *Server) holdKnownAnswerProbe(providerID, candidateID string) func() {
+	key := knownAnswerInFlightKey(providerID, candidateID)
+	s.knownAnswerInFlightMu.Lock()
+	if s.knownAnswerInFlight == nil {
+		s.knownAnswerInFlight = map[string]int{}
+	}
+	s.knownAnswerInFlight[key]++
+	s.knownAnswerInFlightMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.knownAnswerInFlightMu.Lock()
+			if s.knownAnswerInFlight[key]--; s.knownAnswerInFlight[key] <= 0 {
+				delete(s.knownAnswerInFlight, key)
+			}
+			s.knownAnswerInFlightMu.Unlock()
+		})
+	}
+}
+
+// knownAnswerProbeInFlight reports whether any offer handler for this
+// candidate has not yet recorded its probe.
 func (s *Server) knownAnswerProbeInFlight(providerID, candidateID string) bool {
-	_, ok := s.knownAnswerInFlight.Load(knownAnswerInFlightKey(providerID, candidateID))
-	return ok
+	s.knownAnswerInFlightMu.Lock()
+	defer s.knownAnswerInFlightMu.Unlock()
+	return s.knownAnswerInFlight[knownAnswerInFlightKey(providerID, candidateID)] > 0
 }
 
 // linkedProbeEvidenceDigest is the digest an R011 bind or rebind event links:
