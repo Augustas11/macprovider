@@ -2970,6 +2970,7 @@ struct ServeCommand: AsyncParsableCommand {
         // decision for this tuple, else the plan's initial count, else one
         // slot when this tuple cannot batch at all.
         let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
+        var cbProvisional: ContinuousBatchingSelfCheckDriver.Provisional?
         if let plan = autoServedSlots, let mlxRuntime = modelRuntime as? ModelRuntime {
             // The startup bound may have lowered the rows below the plan.
             let rows = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
@@ -2979,30 +2980,33 @@ struct ServeCommand: AsyncParsableCommand {
                 served = 1
                 source = "cb_unavailable_for_loaded_tuple"
             }
-            await mlxRuntime.configureServedSlots(managed: plan.selfChecked, ownerPinned: plan.ownerPinned)
-            if plan.selfChecked, let target = await mlxRuntime.continuousBatchingSelfCheckTarget() {
-                let record = cbSelfCheckStore.record(for: target.key)
-                if let decision = record?.decision, record?.inProgressSlots == nil {
-                    served = ContinuousBatchingSelfCheck.servedSlots(
-                        decision: decision, ownerPinned: plan.ownerPinned, maxRows: target.maxRows
-                    )
-                    source = "stored_self_check_\(decision.reason)"
-                    await mlxRuntime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: served)
-                    await mlxRuntime.setContinuousBatchingSelfCheckReport(.init(
-                        decision: decision.reason,
-                        servedSlots: served,
-                        verifiedSlots: decision.verifiedSlots,
-                        key: target.key
-                    ))
-                } else if plan.ownerPinned == nil, let prior = cbSelfCheckStore.priorGrant(for: target.key), prior > served {
-                    // This Mac batched the model under an older runtime
-                    // identity: keep batching while the new one is checked.
-                    served = min(prior, target.maxRows)
-                    source = "prior_grant_pending_recheck"
-                    await mlxRuntime.applyContinuousBatchingSelfCheck(.granted(slots: served), servedSlots: served)
-                } else {
-                    await mlxRuntime.applyServedSlots(served)
+            let provisional = plan.reason == "provisional_policy_entry"
+                ? resolved.modelArtifactSHA256.map {
+                    ContinuousBatchingSelfCheckDriver.Provisional(modelSHA256: $0, slots: plan.initialServed)
                 }
+                : nil
+            cbProvisional = provisional
+            let ownerPinned = plan.ownerPinned
+            let store = cbSelfCheckStore
+            let resolver: @Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution? = { target in
+                ContinuousBatchingSelfCheckResolution.resolve(
+                    store: store, target: target, ownerPinned: ownerPinned, provisional: provisional
+                )
+            }
+            await mlxRuntime.configureServedSlots(
+                managed: plan.selfChecked,
+                ownerPinned: ownerPinned,
+                resolver: plan.selfChecked ? resolver : nil
+            )
+            if plan.selfChecked,
+               let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),
+               let resolution = ContinuousBatchingSelfCheckResolution.resolve(
+                   store: cbSelfCheckStore, target: target, ownerPinned: plan.ownerPinned, provisional: provisional
+               ) {
+                served = resolution.servedSlots
+                source = "self_check_\(resolution.report.decision)"
+                await mlxRuntime.applyContinuousBatchingSelfCheck(resolution.state, servedSlots: served)
+                await mlxRuntime.setContinuousBatchingSelfCheckReport(resolution.report)
             } else {
                 await mlxRuntime.applyServedSlots(served)
             }
@@ -3144,11 +3148,7 @@ struct ServeCommand: AsyncParsableCommand {
                 providerStatus: providerStatus,
                 store: cbSelfCheckStore,
                 ownerPinnedSlots: plan.ownerPinned,
-                provisional: plan.reason == "provisional_policy_entry"
-                    ? resolved.modelArtifactSHA256.map {
-                        ContinuousBatchingSelfCheckDriver.Provisional(modelSHA256: $0, slots: plan.initialServed)
-                    }
-                    : nil,
+                provisional: cbProvisional,
                 log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
             )
             return Task { await driver.run() }

@@ -219,8 +219,9 @@ enum ContinuousBatchingSelfCheck {
         return value.isFinite ? value : 0
     }
 
-    /// Consecutive clear losses (best exact batch slower than serial) a Mac
-    /// that already batches needs before throughput alone may take its grant.
+    /// Consecutive clear losses (best exact batch slower than serial) are
+    /// counted and logged and stretch the re-measure interval; throughput
+    /// alone never lowers or removes a prior grant.
     static let confirmedNoGainStreak = 3
     static let remeasureBaseSeconds = 3_600.0
 
@@ -246,18 +247,6 @@ enum ContinuousBatchingSelfCheck {
             let best = exact.map { gain(of: $0, serialTPS: serialTPS) }.max() ?? 0
             let clearLoss = fresh.reason == "no_net_gain" && best > 0 && best < 1.0
             let streak = clearLoss ? previousStreak + 1 : 0
-            if streak >= confirmedNoGainStreak {
-                // Repeated clear losses lower the count but never switch
-                // batching off: throughput alone may not revoke a grant.
-                let lowered = min(prior, fresh.verifiedSlots, 2)
-                if lowered > 1 {
-                    return (
-                        .init(slots: lowered, reason: "kept_prior_grant_lowered_no_gain", verifiedSlots: fresh.verifiedSlots),
-                        streak,
-                        remeasureBaseSeconds * pow(2, Double(min(streak, 6)))
-                    )
-                }
-            }
             let keep = min(prior, max(fresh.verifiedSlots, 1))
             return (
                 .init(slots: keep, reason: "kept_prior_grant_\(fresh.reason)", verifiedSlots: fresh.verifiedSlots),
@@ -349,13 +338,53 @@ enum ContinuousBatchingSelfCheck {
     }
 }
 
+/// What a freshly loaded model serves before its own self-check runs: its
+/// stored decision, else an older-runtime or signed provisional grant for the
+/// same model, else nil (one slot, or the owner pin). Used at startup and on
+/// every warm swap or adoption, before readiness is published.
+struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
+    let state: ContinuousBatchingSelfCheckState
+    let servedSlots: Int
+    let report: ContinuousBatchingSelfCheckReport
+
+    static func resolve(
+        store: ContinuousBatchingSelfCheckStore,
+        target: ContinuousBatchingSelfCheckTarget,
+        ownerPinned: Int?,
+        provisional: ContinuousBatchingSelfCheckDriver.Provisional?
+    ) -> ContinuousBatchingSelfCheckResolution? {
+        let record = store.record(for: target.key)
+        if let decision = record?.decision, record?.inProgressSlots == nil {
+            let slots = ContinuousBatchingSelfCheck.servedSlots(
+                decision: decision, ownerPinned: ownerPinned, maxRows: target.maxRows
+            )
+            return .init(
+                state: decision.state,
+                servedSlots: slots,
+                report: .init(decision: decision.reason, servedSlots: slots, verifiedSlots: decision.verifiedSlots, key: target.key)
+            )
+        }
+        guard ownerPinned == nil else { return nil }
+        let provisionalSlots = provisional.flatMap { $0.modelSHA256 == target.key.modelSHA256 ? $0.slots : nil }
+        guard let prior = [provisionalSlots, store.priorGrant(for: target.key)].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
+            return nil
+        }
+        let slots = min(prior, target.maxRows)
+        return .init(
+            state: .granted(slots: slots),
+            servedSlots: slots,
+            report: .init(decision: "prior_grant_pending_recheck", servedSlots: slots, verifiedSlots: 1, key: target.key)
+        )
+    }
+}
+
 /// Stored self-check state, keyed by `ContinuousBatchingSelfCheckKey`. A
 /// private (0600, owner-only, no symlinks) JSON file next to the provider
 /// config. Progress is written before each step, so a step that kills the
 /// process (e.g. a Metal OOM at a high slot count) is found on restart and
 /// never retried on the same key.
 struct ContinuousBatchingSelfCheckStore: Sendable {
-    static let schemaVersion = "macprovider.cb-self-check.v5"
+    static let schemaVersion = "macprovider.cb-self-check.v6"
     static let fileName = "cb-self-check.json"
     static let maxEntries = 64
     static let maxFileBytes: off_t = 8 << 20
@@ -377,6 +406,9 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         var noGainStreak: Int = 0
         /// Kept prior grant: re-measure after this time (RFC 3339).
         var remeasureAfter: String?
+        /// Lowest width that crashed the process on this key; it and every
+        /// wider count are never measured again on this key.
+        var crashedSlots: Int?
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -388,6 +420,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case decidedAt = "decided_at"
             case noGainStreak = "no_gain_streak"
             case remeasureAfter = "remeasure_after"
+            case crashedSlots = "crashed_slots"
         }
     }
 
@@ -625,7 +658,8 @@ actor ContinuousBatchingSelfCheckDriver {
         remeasureOf previous: ContinuousBatchingSelfCheckStore.Record?
     ) async {
         let runtime = runtime
-        let maxSlots = ownerPinnedSlots.map { min($0, target.maxRows) } ?? target.maxRows
+        let crashBound = (previous ?? store.record(for: target.key))?.crashedSlots.map { $0 - 1 } ?? Int.max
+        let maxSlots = min(ownerPinnedSlots.map { min($0, target.maxRows) } ?? target.maxRows, crashBound)
         let rungs = Set(ContinuousBatchingSelfCheck.ladder(maxRows: maxSlots))
         var record: ContinuousBatchingSelfCheckStore.Record
         if let previous {
@@ -805,6 +839,9 @@ actor ContinuousBatchingSelfCheckDriver {
         final.noGainStreak = reconciled.streak
         final.remeasureAfter = reconciled.remeasureAfterSeconds.map {
             ISO8601DateFormatter().string(from: Date().addingTimeInterval($0))
+        }
+        if let crashedAt {
+            final.crashedSlots = min(record.crashedSlots ?? crashedAt, crashedAt)
         }
         final.inProgressSlots = nil
         final.decidedAt = ISO8601DateFormatter().string(from: Date())

@@ -5282,15 +5282,19 @@
       "requirement_id": "SPEC-039-R013",
       "spec_id": "SPEC-039",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testNoClearGainServesSerially"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-PKV13 (servability / sizing obligation against the 32 GB live-30B envelope + paged-attention overhead ceiling IMPL gate): normative define-and-record obligation in SPEC-039 v0.1; values and tests land in the follow-up IMPL PR."
+        "rationale": "SPEC-039 v0.1.15 enforces the FR-PKV13 overhead ceiling per Mac through the SPEC-038 FR-CB10 on-device self-check (median serial/batch gain >= 1.2x on the same prompts, implemented and unit-tested); live fleet evidence of the self-check on shipped builds is still pending."
       }
     },
     {

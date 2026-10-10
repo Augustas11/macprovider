@@ -1620,14 +1620,17 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private var inferenceGate: AsyncSemaphore
-    /// SPEC-038-R011: bounds buyer rows submitted to the CB scheduler at the
-    /// served slot count (the self-check's grant), on every surface (relay and
-    /// direct HTTP). Scheduler rows (`maxBatch`) may be larger.
-    private let buyerBatchGate: AsyncSemaphore
+    /// SPEC-038-R011: the served slot count. `inferenceGate` is sized to it
+    /// and every buyer request takes one of its permits, batched rows
+    /// included (relay and direct HTTP), so all buyer work together never
+    /// exceeds it. Scheduler rows (`maxBatch`) may be larger.
+    private var servedSlotLimit: Int
     /// Set by `serve` when the self-check owns the served count; a swap then
     /// serves the owner pin or one slot until the new model's check decides.
     private var servedSlotsManaged = false
     private var ownerPinnedServedSlots: Int?
+    /// Resolves a swapped-in model's stored or prior grant before readiness.
+    private var servedSlotsResolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)?
     private let blockingInferenceExecutor: BlockingInferenceExecutor
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
@@ -2692,7 +2695,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
-        self.buyerBatchGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.servedSlotLimit = boundedMaxBatch
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
@@ -3269,7 +3272,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.conversationCache = ConversationCache()
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
-        self.buyerBatchGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.servedSlotLimit = boundedMaxBatch
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
@@ -4438,17 +4441,46 @@ actor ModelRuntime: ModelRuntimeServing {
     /// request already holding a permit of the replaced gate releases it there.
     func applyServedSlots(_ slots: Int) async {
         let served = min(max(1, slots), maxBatch)
+        servedSlotLimit = served
         await inferenceGate.resize(to: served)
-        await buyerBatchGate.resize(to: served)
     }
 
-    func configureServedSlots(managed: Bool, ownerPinned: Int?) {
+    private static func servedSlotPassthrough<T>(_ operation: () async throws -> T) async rethrows -> T {
+        try await operation()
+    }
+
+    /// Buyer CB rows wait for a served slot in a bounded, timed queue (the
+    /// scheduler's own queue limit and wait timeout for that slot count), so
+    /// excess requests are refused as queue pressure instead of piling up.
+    private func withBuyerBatchAdmission<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
+        let gate = inferenceGate
+        let maxWaiters = ContinuousBatchingPolicy.queueLimit(
+            configured: continuousBatchQueueLimit,
+            maxActiveRows: servedSlotLimit
+        )
+        do {
+            return try await gate.withBoundedPermit(
+                maxWaiters: maxWaiters,
+                timeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(continuousBatchQueueWaitTimeoutMS),
+                operation
+            )
+        } catch is AsyncSemaphore.AdmissionError {
+            throw ContinuousBatchSchedulerError.backpressure
+        }
+    }
+
+    func configureServedSlots(
+        managed: Bool,
+        ownerPinned: Int?,
+        resolver: (@Sendable (ContinuousBatchingSelfCheckTarget) -> ContinuousBatchingSelfCheckResolution?)? = nil
+    ) {
         servedSlotsManaged = managed
         ownerPinnedServedSlots = ownerPinned
+        servedSlotsResolver = resolver
     }
 
     func servedSlotLimitForTest() async -> Int {
-        await buyerBatchGate.currentLimit()
+        await inferenceGate.currentLimit()
     }
 
     /// The self-check subject for the loaded model, or nil when there is
@@ -5377,8 +5409,8 @@ actor ModelRuntime: ModelRuntimeServing {
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
             : adoptionKnobs?.maxBatch
         if let swapServedSlots {
+            servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots)
-            await buyerBatchGate.resize(to: swapServedSlots)
         }
         currentContainer = container
         currentModelID = modelID
@@ -5490,6 +5522,18 @@ actor ModelRuntime: ModelRuntimeServing {
                 reason: draftFailureReason
             )
         }
+        // The swapped-in model's stored or prior grant applies before the
+        // swap is published, so a qualified model keeps batching.
+        var swapAdvertisedSlots = swapServedSlots
+        if servedSlotsManaged, let resolver = servedSlotsResolver,
+           let target = continuousBatchingSelfCheckTarget(includeDecided: true),
+           let resolution = resolver(target) {
+            continuousBatchingSelfCheck = resolution.state
+            continuousBatchingSelfCheckReport = resolution.report
+            servedSlotLimit = resolution.servedSlots
+            await inferenceGate.resize(to: resolution.servedSlots)
+            swapAdvertisedSlots = resolution.servedSlots
+        }
         await providerStatus?.completeTargetSwap(
             modelID: modelID,
             modelHash: modelHash,
@@ -5497,7 +5541,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: weightsManifestSHA256,
             maxContextTokens: adoptionKnobs?.maxContext,
             maxContextSource: adoptionKnobs?.contextSource,
-            maxConcurrency: swapServedSlots,
+            maxConcurrency: swapAdvertisedSlots,
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
             specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
         )
@@ -6753,9 +6797,8 @@ actor ModelRuntime: ModelRuntimeServing {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
-            let buyerBatchGate = buyerBatchGate
-            result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await buyerBatchGate.withPermit {
+            result = try await withBuyerBatchAdmission {
+                try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                     try await scheduler.submit(submission.schedulerRequest)
                 }
             }
@@ -7209,12 +7252,11 @@ actor ModelRuntime: ModelRuntimeServing {
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
             // serial generate loop.
-            let buyerBatchGate = buyerBatchGate
-            result = try await Self.withDrainAndClientCancellation(
+            result = try await withBuyerBatchAdmission { try await Self.withDrainAndClientCancellation(
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await buyerBatchGate.withPermit {
+                try await Self.servedSlotPassthrough {
                     try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
                         guard !drainCancelled.isFired,
                               !shouldCancel(),
@@ -7238,6 +7280,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         }
                     })
                 }
+            }
             }
         } catch {
             if let lease {

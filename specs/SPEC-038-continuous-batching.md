@@ -1026,9 +1026,9 @@ above are superseded where they conflict:
    beyond the probe rule, or a crashed step) may revoke or lower the grant,
    and never below `verified_k`. A throughput result may raise it but not
    lower it. A no-gain result keeps the grant (`kept_prior_grant_*`, logged)
-   and schedules a re-measurement (1 h, doubling); three consecutive clear
-   losses (best exact gain below 1.0x) lower it to 2 slots
-   (`kept_prior_grant_lowered_no_gain`) and never to serial. While a new
+   and schedules a re-measurement (1 h, doubling with each consecutive clear
+   loss, i.e. best exact gain below 1.0x); throughput alone never lowers or
+   removes the grant. While a new
    runtime identity is checked, a Mac with an older grant for the same model
    and hardware keeps serving it (`prior_grant_pending_recheck`).
 3. The check MUST NOT block serving. It runs only while no request is in
@@ -1040,8 +1040,9 @@ above are superseded where they conflict:
    on restart (the process died, e.g. a Metal OOM at a high k), including
    during a re-measurement of a kept grant, is never retried on that key, and
    the decision uses the widths that passed below it (`crashed_at_<k>` when
-   none). Self-check serial runs stop generating as soon as a request
-   arrives.
+   none); the lowest crashed width is stored with the key and neither it nor
+   any wider count is measured again on that key. Self-check serial runs stop
+   generating as soon as a request arrives.
    Until it decides, the provider serves one slot serially, except that a
    signed positive entry for the served model artifact is a provisional grant
    that keeps its configured count and batching (so an already-enabled model
@@ -1107,10 +1108,13 @@ NOT change `slots_total`.
    provisional grant's configured count) and becomes the FR-CB10 self-check's
    k, applied live: the serial-path gate and the advertised capacity change;
    the scheduler is not rebuilt, and the relay admits at most `slots_total`
-   requests and every buyer row (relay or direct HTTP) takes a permit of a
-   buyer-batch gate sized to `slots_total`, so active rows never exceed it.
-   Both gates resize in place: holders keep their permits and nobody new is
-   admitted above a lowered limit. A capacity change is published at once. A
+   requests and every buyer request (relay or direct HTTP, batched or
+   serial) takes a permit of one served-slot gate sized to `slots_total`, so
+   buyer work together never exceeds it. Batched rows wait for a permit in a
+   bounded queue (the scheduler queue limit for `slots_total`, and its wait
+   timeout) and are refused as queue pressure beyond it. The gate resizes in
+   place: holders keep their permits and nobody new is admitted above a
+   lowered limit. A capacity change is published at once. A
    stored self-check result for the loaded tuple applies at startup before
    the first advertisement, clamped to the rows after the startup memory
    bound; a provisional grant never exceeds a computable memory fit. A warm

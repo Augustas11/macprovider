@@ -82,23 +82,22 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(ContinuousBatchingSelfCheck.servedSlots(decision: kept.decision, ownerPinned: nil, maxRows: 16), 8)
     }
 
-    func testRepeatedClearLossesLowerButNeverSwitchBatchingOff() {
+    func testRepeatedClearLossesNeverLowerOrRemoveAPriorGrant() {
         let losing = [m(2, tps: 30), m(4, tps: 35)]
         let fresh = ContinuousBatchingSelfCheck.decide(serialTPS: 50, measurements: losing)
         var streak = 0
+        var intervals: [Double] = []
         for round in 1...(ContinuousBatchingSelfCheck.confirmedNoGainStreak + 2) {
             let result = ContinuousBatchingSelfCheck.reconcile(
-                fresh: fresh, priorGrant: 8, serialTPS: 50, measurements: losing, previousStreak: streak
+                fresh: fresh, priorGrant: 4, serialTPS: 50, measurements: losing, previousStreak: streak
             )
             streak = result.streak
-            XCTAssertGreaterThan(result.decision.slots, 1, "round \(round): throughput alone never revokes")
-            XCTAssertEqual(result.decision.state, .granted(slots: result.decision.slots))
-            if round >= ContinuousBatchingSelfCheck.confirmedNoGainStreak {
-                XCTAssertEqual(result.decision.slots, 2)
-                XCTAssertEqual(result.decision.reason, "kept_prior_grant_lowered_no_gain")
-            }
-            XCTAssertNotNil(result.remeasureAfterSeconds)
+            XCTAssertEqual(result.decision.slots, 4, "round \(round): throughput alone never lowers a grant")
+            XCTAssertEqual(result.decision.state, .granted(slots: 4))
+            intervals.append(try! XCTUnwrap(result.remeasureAfterSeconds))
         }
+        XCTAssertEqual(streak, ContinuousBatchingSelfCheck.confirmedNoGainStreak + 2)
+        XCTAssertEqual(intervals, intervals.sorted(), "re-measure interval stretches with the streak")
     }
 
     /// Isolation-only widths between rungs verify rows but are not picked.
@@ -157,6 +156,47 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(store.priorGrant(for: new), 8)
         XCTAssertNil(store.priorGrant(for: otherMac))
         XCTAssertNil(store.priorGrant(for: old))
+    }
+
+    /// Startup and every swap: a stored decision, else an older-runtime or
+    /// signed provisional grant for the same model, else nothing.
+    func testResolutionPrefersStoredThenPriorAndBindsProvisionalToItsModel() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-resolve-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "new", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o")
+        let target = ContinuousBatchingSelfCheckTarget(key: key, maxRows: 16)
+        XCTAssertNil(ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil))
+        // Provisional grant for another model does not apply.
+        XCTAssertNil(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: .init(modelSHA256: "other", slots: 8)
+        ))
+        let provisional = try XCTUnwrap(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: .init(modelSHA256: "m", slots: 8)
+        ))
+        XCTAssertEqual(provisional.servedSlots, 8)
+        XCTAssertEqual(provisional.state, .granted(slots: 8))
+        // An older-runtime grant for the same model keeps batching.
+        var older = key
+        older.runtimeBuild = "old-pin"
+        try store.store(.init(
+            key: older, decision: .init(slots: 6, reason: "granted", verifiedSlots: 6), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        XCTAssertEqual(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: nil
+        )?.servedSlots, 6)
+        // This key's own decision wins, clamped to verified and rows.
+        try store.store(.init(
+            key: key, decision: .init(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-10T00:00:00Z"
+        ))
+        let stored = try XCTUnwrap(ContinuousBatchingSelfCheckResolution.resolve(
+            store: store, target: target, ownerPinned: nil, provisional: .init(modelSHA256: "m", slots: 8)
+        ))
+        XCTAssertEqual(stored.servedSlots, 1)
+        XCTAssertEqual(stored.state, .refused(reason: "row_divergence_at_2"))
     }
 
     func testDeferralsBackOffToAtMostFifteenMinutes() {
