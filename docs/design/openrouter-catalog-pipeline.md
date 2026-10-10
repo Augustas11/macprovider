@@ -35,10 +35,10 @@ catalog cut**, not a rewrite of billing or a new SPEC.
 - **Sign + deploy tail**: `scripts/resign-autotune-static.sh` (Ed25519,
   `streamvc-autotune-static-v4`, key file `~/.config/macprovider/keys/autotune-static-v4.private.base64`)
   and `scripts/renew-autotune-static-feed.sh --deploy` (rsync → Pearl
-  `/opt/macprovider/autotune/current`, SIGHUP, rollback). Driven by
-  `.github/workflows/renew-autotune-static-feed-signed.yml` (Wed 16:00 UTC).
-- **Staleness alarms**: `autotune-feed-freshness-alarm.yml` (6h, 20d),
-  `renew-autotune-static-feed.yml` (Tue, 7d). **No 401 / fetch-side alarm.**
+  `/opt/macprovider/autotune/current`, SIGHUP, rollback), run on demand by an
+  operator; the scheduled restamp was retired in #1938.
+- **Staleness alarms**: retired in #1938 (feed age is advisory on providers).
+  **No 401 / fetch-side alarm.**
 
 ## Normative surface (SPEC-first)
 

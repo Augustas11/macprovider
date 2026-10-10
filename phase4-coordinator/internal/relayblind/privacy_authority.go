@@ -728,7 +728,7 @@ func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest stri
 		return time.Time{}, "posture_expired"
 	}
 	if !a.identityMatches(teamID, signingID, cdhash, binary, now) {
-		return time.Time{}, "code_identity_unapproved_or_expired"
+		return time.Time{}, "code_identity_unapproved"
 	}
 	ctx := context.Background()
 	disabled, err := a.store.PrivacyDisabled(ctx)
@@ -768,7 +768,8 @@ const (
 )
 
 // approve is SPEC-049-R006: the deny list wins; configuration entries for
-// the same identity govern (an expired entry withdraws approval); otherwise
+// the same identity govern (an entry naming another binary version withdraws
+// approval; entries have no calendar expiry, #1938); otherwise
 // a release-derived identity with the same binary version approves. A key
 // attestation carries no team, so it is matched with requireTeam false.
 func (a *PrivacyAuthority) approve(teamID, signingID, cdhash, binary string, requireTeam bool, now time.Time) codeApproval {

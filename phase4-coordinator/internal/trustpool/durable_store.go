@@ -1059,10 +1059,12 @@ func validateCreatorReactivation(ctx context.Context, conn *sql.Conn, currentApp
 		if p.CreatorAccountID != next.CreatorAccountID || p.Lifecycle != LifecycleActive || p.RootIssuer == nil {
 			continue
 		}
-		if current.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+		// Routing validity (#1938): an elapsed Agreement grace leaves the pool
+		// routing, so renewing it is not a reactivation.
+		if current.RoutingInvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) == "" {
 			continue
 		}
-		if next.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+		if next.RoutingInvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) == "" {
 			return ErrCreatorApprovalGate
 		}
 	}
@@ -3938,10 +3940,10 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		}
 		pool := s.Pools[id]
 		p, policyUntil, policyActive := pool.activePolicyView(at)
-		routeable, routeabilityReason := poolRouteability(p)
+		routeable, _ := poolRouteability(p)
 		prior := pool.priorPolicyWindow(p.ManifestVersion)
 		if routeable && !policyActive {
-			routeable, routeabilityReason = false, "pool_policy_stale"
+			routeable = false
 		}
 		generation := pool.EffectiveGeneration()
 		if pool.Lifecycle == LifecycleActive && !routeable {
@@ -4006,7 +4008,6 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			Routeable:                 routeable,
 			Generation:                generation,
 			RouteableUntilUTC:         routeableUntil,
-			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,
 			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),

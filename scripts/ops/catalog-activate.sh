@@ -14,8 +14,8 @@
 # docs/runbooks/catalog-release-decision-tree.md "Content lane"):
 #   1 catalog_verify          committed release passes catalog-release.py verify;
 #                             a native-bound release's self-test bank names its release_id
-#   2 revocation_slots        native-bound: publish revocations when the live batch
-#                             covers < 7 days (publish-native-mtp-revocations.sh --deploy)
+#   2 revocation_slots        native-bound: publish revocations when no signed slot
+#                             is served (publish-native-mtp-revocations.sh --deploy)
 #   3 nginx_routes            every feed the release binds is routed to the coordinator
 #   4 coordinator_native_keys coordinator.yaml autotune native_mtp_* keys + pool canary
 #   5 catalog_preflight       catalog-content-release.sh --preflight (read-only)
@@ -50,7 +50,6 @@ AUTOTUNE="phase3-binary/catalog/autotune"
 MTP_DOC="docs/runbooks/native-mtp-enablement.md"
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 TREE_DOC="docs/runbooks/catalog-release-decision-tree.md"
-REVOCATION_MIN_DAYS="${REVOCATION_MIN_DAYS:-7}"
 REVOCATION_BATCH_DAYS="${NATIVE_MTP_REVOCATION_DAYS:-14}"
 
 # Feeds the release binds -> public route. Revocations are keyed by signer.
@@ -188,16 +187,16 @@ PY
     set_next live_state blocked "Read live coordinator state" "" "COORDINATOR_URL is unset"
   fi
 
+  # #1938 (SPEC-023 v0.22.22): providers keep the newest verified revocation
+  # body in force after it ages, and the coordinator keeps serving the newest
+  # issued slot, so any served slot is enough. A batch is published only when
+  # none is served; batch age is reported, never a reason to republish.
   if [ "$native_bound" != true ]; then
     step revocation_slots "done" "release is not native-bound"
-  elif [ -n "$coverage_days" ] && python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= float(sys.argv[2]) else 1)' "$coverage_days" "$REVOCATION_MIN_DAYS"; then
-    step revocation_slots "done" "live batch covers $coverage_days days"
-  elif [ -z "$coverage_days" ]; then
-    step revocation_slots unknown "live slot current=$slot_current; batch coverage unreadable"
-    set_next revocation_slots blocked "Read revocation batch coverage" "" \
-      "PEARL_SSH and REMOTE_REVOCATION_DIR must be set to read the live revocation batch (read-only readlink)"
+  elif [ -n "$slot_exp" ]; then
+    step revocation_slots "done" "a signed slot is served (expires_at $slot_exp; batch coverage ${coverage_days:-unknown} days)"
   else
-    step revocation_slots pending "live batch covers $coverage_days days (< $REVOCATION_MIN_DAYS)"
+    step revocation_slots pending "no revocation slot is served"
     set_next revocation_slots mutate "Publish 14 days of native-MTP revocation slots" \
       "scripts/publish-native-mtp-revocations.sh --deploy"
     next_meta revocation_slots "$MTP_DOC" "none expected: atomic batch symlink swap; the coordinator rescans within 10 s"

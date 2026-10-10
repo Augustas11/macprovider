@@ -32,7 +32,10 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 		// laterEvidence, when set, is a newer submission (any status) whose
 		// evidence is mutated by laterEvidence (#1938 re-benchmark trigger).
 		laterEvidence func(map[string]any)
-		wantOK        bool
+		// laterGeneratedAt offsets the later submission's generated_at from
+		// the verified job's (default +1 minute).
+		laterGeneratedAt time.Duration
+		wantOK           bool
 	}{
 		{
 			name:            "current verified exact tuple admits",
@@ -120,6 +123,20 @@ func TestLatestVerifiedRequiresCurrentVerifiedHardwareTuple(t *testing.T) {
 			},
 		},
 		{
+			// A later submission whose provider-supplied generated_at is not
+			// newer still supersedes: order is the coordinator job id.
+			name:             "later-ingested evidence with an older generated_at from a different OS build supersedes",
+			profileChip:      "apple m4 max",
+			profileMemory:    64,
+			profileVerified:  true,
+			trustPresent:     true,
+			nowOffset:        time.Hour,
+			laterGeneratedAt: -time.Hour,
+			laterEvidence: func(payload map[string]any) {
+				payload["hardware"].(map[string]any)["os_version"] = "macOS 26.1 (25B78)"
+			},
+		},
+		{
 			name:            "later evidence from a new CLI on the same hardware and OS does not supersede",
 			profileChip:     "apple m4 max",
 			profileMemory:   64,
@@ -152,8 +169,12 @@ INSERT INTO hardware_verification_jobs (
 				t.Fatalf("insert verified job: %v", err)
 			}
 			if tc.laterEvidence != nil {
+				laterAt := generatedAt.Add(time.Minute)
+				if tc.laterGeneratedAt != 0 {
+					laterAt = generatedAt.Add(tc.laterGeneratedAt)
+				}
 				var payload map[string]any
-				if err := json.Unmarshal(mustVerifiedEvidenceJSON(t, generatedAt.Add(time.Minute)), &payload); err != nil {
+				if err := json.Unmarshal(mustVerifiedEvidenceJSON(t, laterAt), &payload); err != nil {
 					t.Fatal(err)
 				}
 				tc.laterEvidence(payload)
@@ -166,7 +187,7 @@ INSERT INTO hardware_verification_jobs (
     provider_id, status, chip_normalized, unified_memory_gb,
     generated_at, decision_reason, evidence
 ) VALUES (?, 'pending', ?, ?, ?, '', ?)`,
-					"mp-provider", "apple m4 max", 64, generatedAt.Add(time.Minute), raw); err != nil {
+					"mp-provider", "apple m4 max", 64, laterAt, raw); err != nil {
 					t.Fatalf("insert later job: %v", err)
 				}
 			}

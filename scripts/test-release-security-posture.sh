@@ -1625,11 +1625,20 @@ for requirement in (
         raise SystemExit(f"post-publication rollout omits: {requirement}")
 if "${OPENSSL_BIN:-openssl}" in rollout:
     raise SystemExit("post-publication rollout falls back to PATH-selected OpenSSL")
+renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
+    encoding="utf-8"
+)
 promotion = (workflow_dir / "promote-acceptance-candidate.yml").read_text(
     encoding="utf-8"
 )
 sealed_output = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
 for label, auxiliary, sealed_root, consumer_count in (
+    (
+        "protected discovery renewal",
+        renewal,
+        "/private/var/macprovider-openssl-discovery-renewal",
+        2,
+    ),
     (
         "acceptance promotion",
         promotion,
@@ -1684,6 +1693,21 @@ for step_name in (
         raise SystemExit(
             f"{step_name} omits sealed OpenSSL checksum verification"
         )
+for requirement in (
+    "environment: production-release",
+    "scripts/build-release-discovery-head.py",
+    "--minimum-sequence",
+    "--require-immutable",
+    "scripts/verify-anonymous-release-discovery.sh",
+    "validity_hours must be 168",
+    '--issued-at "$issued_at"',
+    '--expires-at "$expires_at"',
+    "timedelta(hours=hours)",
+):
+    if requirement not in renewal:
+        raise SystemExit(f"protected discovery renewal omits: {requirement}")
+if "--clobber" in renewal or 'gh release create "release-discovery"' in renewal:
+    raise SystemExit("protected discovery renewal must stay append-only")
 if "--draft" not in create or create.find("scripts/verify-release-checksums.sh") > create.find("gh release create"):
     raise SystemExit("GitHub publication must verify canonical checksums before creating a draft")
 if (

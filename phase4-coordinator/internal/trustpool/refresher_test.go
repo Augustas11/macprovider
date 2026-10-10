@@ -70,6 +70,13 @@ func TestRefreshRegistryKeepsRoutingAfterCreatorAgreementGrace(t *testing.T) {
 	if !snap.Exists || !snap.Routeable || snap.RouteableExpired || !snap.Members["provider-a"] {
 		t.Fatalf("post-grace snapshot = %+v, want still routeable provider-a", snap)
 	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	if p := state.Pools[root.poolID]; p.CreatorGateReason != "" || strings.Join(p.StatusWarnings, ",") != trustpool.StatusWarningCreatorAgreementExpired {
+		t.Fatalf("post-grace gate=%q warnings=%v, want no gate and the %s warning", p.CreatorGateReason, p.StatusWarnings, trustpool.StatusWarningCreatorAgreementExpired)
+	}
 }
 
 func TestRefreshRegistryClearsRouteableSnapshotsOnMalformedDurableState(t *testing.T) {

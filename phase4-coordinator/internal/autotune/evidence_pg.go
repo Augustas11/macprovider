@@ -65,7 +65,9 @@ func (s *PGEvidenceStore) LatestVerified(ctx context.Context, providerID string)
 	// test harness.
 	//
 	// #1938: evidence age is not a cutoff. Evidence stops counting when the
-	// provider later submits evidence (any status) from different hardware
+	// provider later submits evidence (any status; "later" is the
+	// coordinator-assigned job id, never the provider-supplied generated_at)
+	// from different hardware
 	// (hardware_identity_hash) or a different OS build (os_version): that is
 	// the re-benchmark trigger. A chip/memory change is already caught by the
 	// profile join above.
@@ -93,11 +95,11 @@ SELECT j.generated_at, j.evidence, j.chip_normalized, j.unified_memory_gb
        SELECT 1
          FROM hardware_verification_jobs n
         WHERE n.provider_id = j.provider_id
-          AND n.generated_at > j.generated_at
+          AND n.id > j.id
           AND (n.evidence -> 'hardware' ->> 'hardware_identity_hash' <> j.evidence -> 'hardware' ->> 'hardware_identity_hash'
                OR n.evidence -> 'hardware' ->> 'os_version' <> j.evidence -> 'hardware' ->> 'os_version')
    )
- ORDER BY j.generated_at DESC, j.id DESC
+ ORDER BY j.id DESC
  LIMIT 1`, providerID, hardwareverify.VerifiedDecisionReason, now).Scan(&generatedAt, &rawEvidence, &chipNormalized, &unifiedMemoryGB)
 	if errors.Is(err, sql.ErrNoRows) {
 		return VerifiedEvidence{}, false, nil

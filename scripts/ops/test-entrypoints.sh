@@ -688,6 +688,7 @@ run_rc 0 "cli status reports the journal source without the metric" scripts/ops/
 if [ "$(fact_of privacy_unapproved_rejections_source)" = "journal" ]; then ok; else bad "fallback source: $(fact_of privacy_unapproved_rejections_source)"; fi
 rm -f "$tmp/svc/journal.txt"
 
+# ==== mirror_latest ===========================================================
 # After the rollout verification the release mirror's advisory latest.json must
 # name the recommended tag; next --run promotes it through the mirror script.
 fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-09T00:00:00Z"}},
@@ -738,7 +739,6 @@ fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "sta
 run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
 expect_next env_approval:manual
 
-=======
 # ==== catalog-activate gateway proof ==========================================
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.22
+Version: v0.1.23
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -369,7 +369,10 @@ A head renewal, when an operator publishes one, MUST use a newly signed,
 strictly greater sequence and append a new immutable transport even when the
 numeric target is unchanged. No existing transport may be refreshed in place.
 No recurring renewal is required: a head stays valid until superseded, so the
-release promotion above is the only routine signer (v0.1.22). The client MUST
+release promotion above is the only routine signer (v0.1.22). The protected
+`renew-release-discovery-head.yml` remains as an on-demand, operator-dispatched
+renewal (`scripts/ops/discovery-renew.sh`) for CLIs that predate v0.1.22 and
+must rediscover a target whose newest head is older than seven days. The client MUST
 fail closed when the greatest located transport is mutable, malformed,
 incorrectly signed, or inconsistent with its sequence-bound tag; it MUST NOT
 silently fall back to an older located transport.
@@ -1572,15 +1575,20 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.23 (2026-10-10): `renew-release-discovery-head.yml` and
+  `scripts/ops/discovery-renew.sh` are kept as an unscheduled, on-demand
+  renewal for CLIs that predate v0.1.22 (#1938 audit round 1); the schedule
+  and the freshness alarm stay removed.
 - v0.1.22 (2026-10-10): No calendar expiry on the signed discovery head
   (#1938, AGENTS.md rule 10). R001: `expires_at` is structural only; the
   provider no longer rejects a head past `expires_at` or a window over seven
   days, so a missed renewal can no longer strand coordinator-independent
   self-heal. Replay, equivocation, future-issued, signature, transport-binding,
-  signed minimum and revocation checks are unchanged. The recurring
-  `renew-release-discovery-head.yml` signer and its freshness alarm are no
-  longer part of the contract; release promotion still publishes each new head
-  with a window of at most seven days for CLIs that predate this version.
+  signed minimum and revocation checks are unchanged. The twice-weekly
+  schedule of `renew-release-discovery-head.yml` and its freshness alarm are
+  removed; the workflow stays as an on-demand renewal for CLIs that predate
+  this version, and release promotion still publishes each new head with a
+  window of at most seven days.
 - v0.1.20 (2026-09-25): SPEC-020-R006 release mirror for tag resolution
   (#1737). Providers in mainland China cannot reach api.github.com or
   github.com release assets, so coordinator-triggered autoupdate falls back to

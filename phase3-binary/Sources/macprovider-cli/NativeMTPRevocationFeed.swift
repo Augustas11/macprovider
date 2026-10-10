@@ -107,6 +107,8 @@ enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
     case signatureInvalid(String)
     case signerMismatch
     case futureIssued
+    /// Reserved: no longer raised since #1938 (an aged body stays in force);
+    /// kept so recorded diagnostics still decode.
     case expired
     case rollback
     case revokedSetRegression

@@ -5,7 +5,6 @@ package rewards_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 )

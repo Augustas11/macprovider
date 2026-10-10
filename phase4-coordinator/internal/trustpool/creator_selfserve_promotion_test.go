@@ -177,7 +177,9 @@ func TestSelfServeAgreementRecordsCredentialProvenance(t *testing.T) {
 // An Agreement past its grace end with an active pool renews through
 // self-service: the renewal pauses the pool in the same transaction, and the
 // creator promotes it again through the gate.
-func TestSelfServeRenewalAfterGracePausesActivePools(t *testing.T) {
+// #1938: a pool keeps routing through an elapsed Agreement grace period, so a
+// renewal then neither pauses nor interrupts it.
+func TestSelfServeRenewalAfterGraceKeepsActivePoolsRouting(t *testing.T) {
 	t.Parallel()
 	f := newSelfServeFixture(t)
 	_, root := selfServeBuildPool(t, f)
@@ -193,8 +195,9 @@ func TestSelfServeRenewalAfterGracePausesActivePools(t *testing.T) {
 	if _, err := f.store.UpsertCreatorApproval(context.Background(), lapsed); err != nil {
 		t.Fatalf("lapse agreement: %v", err)
 	}
-	// The lapsed creator cannot pause by itself.
-	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/lifecycle", map[string]string{"lifecycle": "paused"}, "op-ss-pause-lapsed"), http.StatusConflict, "pause under lapsed agreement")
+	if !f.registry.Snapshot(root.poolID).Routeable {
+		t.Fatal("pool stopped routing after the Agreement grace ended")
+	}
 
 	renewal := selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "agreement", selfServeAgreementBody(), "")
 	selfServeExpect(t, renewal, http.StatusAccepted, "renewal after grace")
@@ -205,25 +208,18 @@ func TestSelfServeRenewalAfterGracePausesActivePools(t *testing.T) {
 	if err := json.Unmarshal(renewal.Body.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode renewal: %v", err)
 	}
-	if len(decoded.Acceptance.PausedPoolIDs) != 1 || decoded.Acceptance.PausedPoolIDs[0] != root.poolID {
-		t.Fatalf("renewal paused = %v, want [%s]", decoded.Acceptance.PausedPoolIDs, root.poolID)
-	}
-	if !decoded.Creator.ValidFor(decoded.Creator.ApprovalRecordID, decoded.Creator.CurrentApprovalVersion, trustpool.LaunchEnvironmentSelfServePrivate, time.Now()) {
-		t.Fatalf("renewed approval invalid: %+v", decoded.Creator)
+	if len(decoded.Acceptance.PausedPoolIDs) != 0 {
+		t.Fatalf("renewal paused = %v, want none", decoded.Acceptance.PausedPoolIDs)
 	}
 	state, err := f.store.Reconstruct(context.Background())
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
-	if p := state.Pools[root.poolID]; p.Lifecycle != trustpool.LifecyclePaused || p.LifecycleReason != trustpool.SelfServeRenewalPauseReason {
+	if p := state.Pools[root.poolID]; p.Lifecycle != trustpool.LifecycleActive {
 		t.Fatalf("pool after renewal lifecycle=%s reason=%s", p.Lifecycle, p.LifecycleReason)
 	}
-	if f.registry.Snapshot(root.poolID).Routeable {
-		t.Fatal("renewal reactivated the pool")
-	}
-	selfServeExpect(t, selfServeDo(t, f.handler, defaultSelfServePrincipal, http.MethodPost, "pools/"+root.poolID+"/promote", nil, "op-ss-repromote"), http.StatusAccepted, "promotion after renewal")
 	if !f.registry.Snapshot(root.poolID).Routeable {
-		t.Fatal("re-promoted pool not routeable")
+		t.Fatal("renewal interrupted routing")
 	}
 }
 

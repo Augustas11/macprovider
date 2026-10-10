@@ -200,13 +200,13 @@ class ServingEvidenceTest(unittest.TestCase):
         with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "does not match"):
             contract.validate_evidence(self.repo.root, "serving", source, evidence, now=NOW)
 
-    def test_expired_evidence_fails(self):
+    def test_evidence_past_expires_at_stays_valid(self):
+        # #1938: expires_at is structural only.
         evidence = self.compose(self.files())
-        with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "expired"):
-            contract.validate_evidence(
-                self.repo.root, "serving", f"{self.dir}.redacted.json", evidence,
-                now=datetime(2027, 2, 1, tzinfo=timezone.utc),
-            )
+        contract.validate_evidence(
+            self.repo.root, "serving", f"{self.dir}.redacted.json", evidence,
+            now=datetime(2027, 2, 1, tzinfo=timezone.utc),
+        )
 
 
 class ReleaseEvidenceTest(unittest.TestCase):

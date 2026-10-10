@@ -6,7 +6,8 @@
 # on stderr) when the COMMAND WORD of any simple command in the line is:
 #   - gh workflow run (or gh api .../workflows/<wf>/dispatches) of
 #     acceptance-candidate.yml, promote-acceptance-candidate.yml, release.yml,
-#     pearl-runtime-release.yml, or verify-live-coordinator-release-rollout.yml, by file name, display name,
+#     pearl-runtime-release.yml, renew-release-discovery-head.yml, or
+#     verify-live-coordinator-release-rollout.yml, by file name, display name,
 #     or any numeric workflow id; or gh run rerun
 #   - deploy-pearl-vps.sh; catalog-content-release.sh --deploy;
 #     publish-native-mtp-revocations.sh --deploy; macprovider-pearl-update --apply;

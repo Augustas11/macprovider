@@ -331,7 +331,7 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 	if registry != nil {
 		return registry.Snapshot(p.PoolID)
 	}
-	routeable, routeabilityReason := poolRouteability(p)
+	routeable, _ := poolRouteability(p)
 	members := map[string]bool{}
 	if routeable {
 		for id := range p.Members {
@@ -345,13 +345,12 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 		revision = state.Revision
 	}
 	return Snapshot{
-		PoolID:           p.PoolID,
-		Exists:           true,
-		Members:          members,
-		Routeable:        routeable,
-		Generation:       p.RouteableSnapshotGeneration(),
-		Revision:         revision,
-		RouteableExpired: routeabilityReason == StatusWarningCreatorAgreementExpired,
+		PoolID:     p.PoolID,
+		Exists:     true,
+		Members:    members,
+		Routeable:  routeable,
+		Generation: p.RouteableSnapshotGeneration(),
+		Revision:   revision,
 	}
 }
 

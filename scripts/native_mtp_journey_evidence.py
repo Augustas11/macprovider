@@ -484,8 +484,9 @@ def validate_evidence(root: Path, kind: str, source: str, evidence: object, *, n
     expires = parse_timestamp(evidence["expires_at"], "expires_at")
     if not captured < expires <= captured + timedelta(days=EXPIRY_DAYS[kind]):
         fail(f"expires_at must be after captured_at and at most {EXPIRY_DAYS[kind]} days later")
-    if (now or datetime.now(timezone.utc)) >= expires:
-        fail("evidence has expired")
+    # expires_at is structural only (#1938, SPEC-048 0.1.28): unchanged
+    # evidence stays usable after it; a decode-path change requires a new run.
+    del now
     compact = bundle.relative_dir.rsplit("-", 1)[-1]
     if compact != captured.strftime("%Y%m%dT%H%M%SZ"):
         fail("bundle name must be its captured_at")

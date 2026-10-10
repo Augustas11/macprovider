@@ -135,7 +135,8 @@ fetch_coordinator_health() {
 production_release_active_runs() {
   local wf
   for wf in acceptance-candidate.yml promote-acceptance-candidate.yml release.yml \
-    pearl-runtime-release.yml verify-live-coordinator-release-rollout.yml; do
+    pearl-runtime-release.yml verify-live-coordinator-release-rollout.yml \
+    renew-release-discovery-head.yml; do
     gh run list -R "$(gh_repo)" -w "$wf" -L 10 \
       --json databaseId,status \
       --jq ".[] | select(.status != \"completed\") | \"\(.databaseId)\t$wf\t\(.status)\"" 2>/dev/null || true

@@ -213,7 +213,9 @@ func (s *Server) admissionEvidenceStaleVerdict(ctx context.Context, provider poo
 		return true, "autotune_evidence_lookup_failed"
 	}
 	if !ok {
-		return true, "autotune_evidence_expired"
+		// No current evidence: none verified, or superseded by a newer
+		// submission from other hardware or OS (#1938; age never expires it).
+		return true, "autotune_evidence_not_current"
 	}
 	if !providerHasAdmittedTuple(provider) {
 		return true, "autotune_admitted_tuple_missing"

@@ -203,7 +203,9 @@ unchanged, so they recover without a restart.
 ## Schedule
 
 None. There is no scheduled feed restamp, revocation publish, or discovery-head
-renewal (SPEC-020 v0.1.22, SPEC-023 v0.22.22). Do **not** install a laptop
+renewal (SPEC-020 v0.1.22, SPEC-023 v0.22.22). The discovery head can still be
+renewed on demand through `scripts/ops/discovery-renew.sh` for CLIs older than
+SPEC-020 v0.1.22. Do **not** install a laptop
 LaunchAgent or a Pearl signer.
 
 ## Running a restamp

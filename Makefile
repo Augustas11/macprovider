@@ -148,7 +148,9 @@ test-dist-release:
 	bash scripts/test-release-discovery-head.sh
 	bash scripts/test-release-discovery-transport.sh
 	bash scripts/test-select-public-discovery-transport.sh
-	bash scripts/test-anonymous-release-discovery-download.sh
+	bash scripts/test-resolve-discovery-renewal-target.sh
+	bash scripts/test-select-discovery-renewal-base.sh
+	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-ops-alarm.sh
 	bash -n scripts/renew-autotune-static-feed.sh
 	bash scripts/test-renew-autotune-static-feed.sh
