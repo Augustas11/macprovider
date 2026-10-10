@@ -1925,6 +1925,101 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .ready)
     }
 
+    func testOperatorPauseSurvivesCoordinatorDrainAndReconnect() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let pauseResult = await client.pauseByOperator()
+        XCTAssertEqual(pauseResult, .accepted)
+
+        try await client.drainFromCoordinator(reason: "coordinator restart")
+        let drainedSnapshot = await status.snapshot()
+        XCTAssertEqual(drainedSnapshot.status, .unavailable, "a coordinator drain must not lift an operator pause")
+        let drainedRequest = await status.beginRequestIfAccepting(requestID: "after-drain")
+        XCTAssertNil(drainedRequest)
+
+        let preReconnectCount = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+        let reconnectStates = await recorder.frames.dropFirst(preReconnectCount)
+            .filter { $0["type"] as? String == "state_update" }
+        let firstState = try XCTUnwrap(reconnectStates.first, "missing post-admission state_update")
+        XCTAssertEqual(firstState["state"] as? String, "unavailable")
+        XCTAssertEqual(firstState["reason"] as? String, "operator_paused")
+        XCTAssertFalse(reconnectStates.contains { ["ready", "busy"].contains($0["state"] as? String) })
+        let reconnectedSnapshot = await status.snapshot()
+        XCTAssertEqual(reconnectedSnapshot.status, .unavailable)
+    }
+
+    func testOperatorPausedProviderIgnoresWarmUpAndCapacityTransitions() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+        let pauseResult = await client.pauseByOperator()
+        XCTAssertEqual(pauseResult, .accepted)
+        let pausedFrameCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(["type": "warm_up"])
+        // A capacity transition fired while paused (e.g. a direct local request
+        // admitted before the fence) must not publish ready/busy either.
+        let started = await status.beginRequest(requestID: "local-direct")
+        await status.finishRequest(startedAt: started, completion: nil, failed: false, requestID: "local-direct")
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let newStates = await recorder.frames.dropFirst(pausedFrameCount)
+            .filter { $0["type"] as? String == "state_update" }
+        XCTAssertFalse(newStates.isEmpty, "warm_up while paused should restate the pause")
+        XCTAssertTrue(newStates.allSatisfy { $0["state"] as? String == "unavailable" }, "\(newStates)")
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .unavailable)
+    }
+
+    func testOperatorResumeAfterCoordinatorDrainPublishesReady() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        _ = await client.pauseByOperator()
+        try await client.drainFromCoordinator(reason: "coordinator restart")
+
+        let resumeResult = await client.resumeByOperator()
+        XCTAssertEqual(resumeResult, .accepted)
+        let resumedSnapshot = await status.snapshot()
+        XCTAssertEqual(resumedSnapshot.status, .ready)
+        let lastState = await recorder.frames.last { $0["type"] as? String == "state_update" }
+        XCTAssertEqual(lastState?["state"] as? String, "ready")
+        XCTAssertEqual(lastState?["reason"] as? String, "operator_resumed")
+
+        let preReconnectCount = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+        let firstState = await recorder.frames.dropFirst(preReconnectCount)
+            .first { $0["type"] as? String == "state_update" }
+        XCTAssertEqual(firstState?["state"] as? String, "ready")
+    }
+
     func testDrainWaitsForInflightRequestBeforeResettingReady() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
