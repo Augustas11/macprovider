@@ -1743,18 +1743,20 @@ type BillingConfig struct {
 	// SIGHUP-reloadable.
 	CeilingRestatementEnabled bool `yaml:"ceiling_restatement_enabled"`
 	// Retention is the SPEC-022 R-15 settled-evidence retention job
-	// (#1793). Default off.
+	// (#1793). On by default; `enabled: false` is the kill switch.
 	Retention BillingRetentionConfig `yaml:"retention"`
 }
 
 // BillingRetentionConfig moves settled SPEC-022 evidence rows out of the hot
-// SQLite database into verified, off-host-confirmed archives (SPEC-022 R-15).
+// SQLite database into verified local archives (SPEC-022 R-15).
 type BillingRetentionConfig struct {
-	// Enabled arms the nightly job and the admin run route. Dry runs are
-	// always available to the operator.
+	// Enabled arms the nightly job and the admin run route. Default true;
+	// setting it false stops every run (the emergency kill switch). Dry
+	// runs are always available to the operator.
 	Enabled bool `yaml:"enabled"`
-	// ArchiveDir receives the gzip JSONL archives and their manifests. It
-	// must be an absolute path when Enabled.
+	// ArchiveDir receives the gzip JSONL archives and their manifests. Empty
+	// means "retention-archive" in the directory of the coordinator database
+	// file (storage.db_path); an explicit value must be absolute.
 	ArchiveDir string `yaml:"archive_dir"`
 	// MinSettlementCycles is how many completed settlement windows must
 	// follow the window a credit settled in. Floor 2.
@@ -1772,9 +1774,15 @@ type BillingRetentionConfig struct {
 	// IncrementalVacuumMaxSteps bounds the steps per run.
 	IncrementalVacuumPages    int `yaml:"incremental_vacuum_pages"`
 	IncrementalVacuumMaxSteps int `yaml:"incremental_vacuum_max_steps"`
-	// OffhostVerifyCommand is run as argv + [archive_path, sha256_hex] and
-	// must exit 0 only when that checksum is confirmed present at the
-	// off-host destination. Empty means deletion always refuses.
+	// ArchiveMinFreeBytes and ArchiveMinFreePercent are the free-space floor
+	// of the archive filesystem: a run that would write a new archive is
+	// refused while free space is below either one.
+	ArchiveMinFreeBytes   int64 `yaml:"archive_min_free_bytes"`
+	ArchiveMinFreePercent int   `yaml:"archive_min_free_percent"`
+	// OffhostVerifyCommand is optional. When set, it is run as argv +
+	// [archive_path, sha256_hex] after the local verification and must exit
+	// 0 before anything is deleted (an extra check that the archive's
+	// checksum is present at an off-host copy).
 	OffhostVerifyCommand []string `yaml:"offhost_verify_command"`
 	// OffhostVerifyTimeoutSeconds bounds one verification command.
 	OffhostVerifyTimeoutSeconds int `yaml:"offhost_verify_timeout_seconds"`
@@ -2020,7 +2028,7 @@ func Default() Config {
 		},
 		Billing: BillingConfig{
 			Retention: BillingRetentionConfig{
-				Enabled:                     false,
+				Enabled:                     true,
 				MinSettlementCycles:         2,
 				BatchSize:                   50,
 				BatchPauseMS:                200,
@@ -2028,6 +2036,8 @@ func Default() Config {
 				MaxScanRowsPerRun:           500000,
 				IncrementalVacuumPages:      2048,
 				IncrementalVacuumMaxSteps:   256,
+				ArchiveMinFreeBytes:         20 << 30,
+				ArchiveMinFreePercent:       10,
 				OffhostVerifyTimeoutSeconds: 300,
 			},
 		},
@@ -4682,8 +4692,14 @@ func (c Config) validateBillingRetention() error {
 	if len(r.OffhostVerifyCommand) > 0 && !filepath.IsAbs(r.OffhostVerifyCommand[0]) {
 		return fmt.Errorf("billing.retention.offhost_verify_command[0] must be an absolute path")
 	}
-	if r.Enabled && (r.ArchiveDir == "" || !filepath.IsAbs(r.ArchiveDir)) {
-		return fmt.Errorf("billing.retention.archive_dir must be an absolute path when billing.retention.enabled is true")
+	if r.ArchiveMinFreeBytes < 0 {
+		return fmt.Errorf("billing.retention.archive_min_free_bytes must be >= 0")
+	}
+	if r.ArchiveMinFreePercent < 0 || r.ArchiveMinFreePercent > 90 {
+		return fmt.Errorf("billing.retention.archive_min_free_percent must be in [0, 90]")
+	}
+	if strings.TrimSpace(r.ArchiveDir) != "" && !filepath.IsAbs(r.ArchiveDir) {
+		return fmt.Errorf("billing.retention.archive_dir must be an absolute path")
 	}
 	return nil
 }

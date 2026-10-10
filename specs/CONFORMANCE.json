@@ -7242,6 +7242,9 @@
         "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) RunEvidenceRetention",
         "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) deleteArchivedBatch",
         "phase4-coordinator/internal/billing/evidence_retention.go:func incrementalVacuum",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func poolProvenRollupPending",
+        "phase4-coordinator/internal/billing/evidence_archive_disk.go:func archiveDiskBelowFloor",
+        "phase4-coordinator/internal/billing/earnings_rollup.go:func providerEarningsRollupTriggers",
         "phase4-coordinator/internal/billing/evidence_archive.go:func verifyEvidenceArchive",
         "phase4-coordinator/internal/billing/evidence_archive.go:func RederiveArchivedCredit",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
@@ -7256,7 +7259,12 @@
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence",
-        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDeletesWithoutOffhostCommand",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhileOffhostCommandFails",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFirstRunIsChunked",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesBelowArchiveDiskFloor",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal",
+        "phase4-coordinator/internal/billing/evidence_retention_earnings_test.go:TestEvidenceRetentionKeepsProviderEarningsAndVerifiedReceiptCountExact",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionDeletesOnlyArchivedRowsInBoundedBatches",
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionRederivesSettledCreditFromArchive",
@@ -7276,7 +7284,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1793",
-        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification, the operator-configured off-host confirmation that refuses deletion by default, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified, and bounded incremental vacuum. It is off by default. Pending: the first dry run and live run on the production database, the off-host destination, and a bounded hot database across two weekly settlements."
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements."
       }
     },
     {

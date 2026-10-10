@@ -4,9 +4,15 @@ Related: #1793. This runbook covers the retention job that moves settled
 SPEC-022 evidence out of the hot coordinator SQLite database. The rows it moves
 are route snapshots, receipt verdicts, attempt outputs, compute-integrity
 captures, delivered audit-outbox rows, and the matching mirrored rows in the
-`coordinator.db.route-snapshots` journal. The job writes them to verified,
-off-host-confirmed archives. It never deletes ledger credits, operator credits,
-payouts, settlement windows, or quarantine resolutions.
+`coordinator.db.route-snapshots` journal. The job writes them to a compressed,
+checksummed archive on the coordinator host, verifies the archive by reading it
+back, and deletes only rows that match it column for column. It never deletes
+ledger credits, operator credits, payouts, settlement windows, or quarantine
+resolutions.
+
+Retention is **on by default**. Once the release is deployed, it runs nightly
+at 03:00 UTC with the bounds below and needs no operator step. The kill switch
+is `billing.retention.enabled: false` plus SIGHUP.
 
 Before any Pearl step, read `docs/runbooks/pearl-coordinator-rollout.md` and
 tell the operator the expected downtime. Live changes go through
@@ -38,6 +44,10 @@ one of these is true:
   snapshot, and at deletion every scope's settlement finality is closed. The
   job stores that finality with the deletion, so a buyer reservation still
   held at the gateway settles from it later.
+- Every pool-scoped route snapshot is held, with its finality, in the
+  SPEC-047-R012 pool-proven rollup (`pool_proven_rollup_attempts`). Without
+  that table, pool-scoped requests stay hot
+  (`skipped_requests.pool_proven_rollup_pending`).
 
 ## Configuration
 
@@ -45,8 +55,10 @@ one of these is true:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `false` | Arms the nightly 03:00 UTC run and `POST .../run`. Dry runs work while disabled. |
-| `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Required when enabled. |
+| `enabled` | `true` | Arms the nightly 03:00 UTC run and `POST .../run`. `false` is the kill switch. Dry runs work either way. |
+| `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Empty means `retention-archive/` next to `storage.db_path` (for a database at `/var/lib/macprovider/coordinator.db`: `/var/lib/macprovider/retention-archive/`). Created with mode `0700` on first use. |
+| `archive_min_free_bytes` | `21474836480` (20 GiB) | A run that would write a new archive is refused (`refused_archive_disk_low`) while the archive filesystem has less free space. `0` disables this bound. |
+| `archive_min_free_percent` | `10` | Same, as a percentage of the archive filesystem. `0` disables this bound. |
 | `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
@@ -54,12 +66,15 @@ one of these is true:
 | `max_scan_rows_per_run` | `500000` | Ledger credits scanned per run. The scan resumes from a persisted cursor and wraps. |
 | `incremental_vacuum_pages` | `2048` | Pages released per `PRAGMA incremental_vacuum` step. |
 | `incremental_vacuum_max_steps` | `256` | Steps per run, per database file. |
-| `offhost_verify_command` | empty | Absolute argv. The job appends `<archive_path> <sha256_hex>`. Exit 0 means that checksum is confirmed at the off-host destination. When empty, the job never deletes. |
+| `offhost_verify_command` | empty | Optional. Absolute argv. The job appends `<archive_path> <sha256_hex>`. Exit 0 means that checksum is confirmed at an off-host destination. When set, it is an extra check before deletion; when empty, nothing is skipped. |
 | `offhost_verify_timeout_seconds` | `300` | Limit for one verify command. |
 
-### Off-host verify command contract
+### Optional off-host verify command contract
 
-The command runs without a shell and with a minimal `PATH`. It may copy the
+Retention does not need an off-host copy to delete: the local archive is
+re-read and checked before anything leaves. An operator who also wants an
+off-host copy confirmed before deletion configures this command. It runs
+without a shell and with a minimal `PATH`. It may copy the
 archive and its manifest to the off-host destination itself. It must exit 0
 only after it has read back the remote file's SHA-256 and compared it with the
 second argument. Any other exit refuses deletion and leaves the archive in the
@@ -76,7 +91,7 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
 [ "$got" = "$want" ]
 ```
 
-## 1. Deploy the code (retention still off)
+## 1. Deploy the code (retention on)
 
 1. `scripts/ops/pearl-runtime.sh status`, then `next`, then
    `MACPROVIDER_OPS_OWNER=<label> scripts/ops/pearl-runtime.sh next --run`
@@ -87,8 +102,13 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
    `settlement_evidence_archived_verdict_counts`, and
    `settlement_evidence_retention_state`. It also rebuilds the payable view
    with the archived-credit branch and records billing compatibility floor 4
-   (section 6: from here on, roll forward only). Nothing is deleted while
-   `enabled: false`.
+   (section 6: from here on, roll forward only).
+3. The first nightly run after the deploy archives and deletes at most
+   `max_requests_per_run` requests, `batch_size` requests per short
+   transaction with `batch_pause_ms` between batches. A large backlog drains
+   over several nights; it never holds the writer for long. To hold
+   retention off for this deploy, set `billing.retention.enabled: false`
+   in `coordinator.yaml` before the runtime train step.
 
 ## 2. Dry run
 
@@ -107,19 +127,20 @@ The report has:
 - `skipped_requests` counts by reason.
 
 `cutoff_window_end_utc` is empty until three or more weekly settlements have
-completed. Repeat the dry run until the numbers are stable before the first
-live run. A dry run scans at most `max_scan_rows_per_run` credits from the
+completed. Use the dry run to preview what the next nightly run moves. A dry
+run scans at most `max_scan_rows_per_run` credits from the
 persisted cursor and writes nothing.
 
-## 3. First live run
+## 3. Watching the first live run
 
-1. Create `archive_dir` with mode `0700`, owned by the coordinator user, on
-   a filesystem with room for the dry-run payload. Gzip usually makes the
-   archive several times smaller than the payload estimate.
-2. Install the off-host verify command and test it by hand on a scratch file.
-3. Edit `coordinator.yaml` (manual step): set `billing.retention.enabled:
-   true`, `archive_dir`, and `offhost_verify_command`. Reload with SIGHUP.
-4. Start one run instead of waiting for 03:00 UTC:
+1. Check that the archive filesystem (default: the database's filesystem,
+   `retention-archive/` next to the database) has room above the free-space
+   floor for the dry-run payload. Gzip usually makes the archive several
+   times smaller than the payload estimate. To put archives elsewhere, set
+   an absolute `archive_dir` and reload with SIGHUP.
+2. Optional: install an off-host verify command, test it by hand on a scratch
+   file, set `offhost_verify_command`, and reload with SIGHUP.
+3. Wait for the nightly run, or start one now:
 
    ```bash
    curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_KEY" \
@@ -128,11 +149,19 @@ persisted cursor and writes nothing.
      "https://<coordinator-host>/admin/ledger/settlement-evidence-retention?report=last"
    ```
 
-5. The run is done when it reports `status: deleted`, with
-   `deleted_requests`, `tables.<table>.deleted_rows`, `archive_file`, and
-   `archive_sha256` set. Other statuses:
-   - `refused_offhost_unverified`: the archive is kept and nothing is
-     deleted. Fix the command; the next run resumes this archive.
+4. The run is done when it reports `status: deleted`, with
+   `deleted_requests`, `delete_batches`, `tables.<table>.deleted_rows`,
+   `archive_file`, `archive_sha256`, and `archive_bytes` set;
+   `archive_free_bytes` and `archive_disk_bytes` show the archive
+   filesystem at the start of the run. The coordinator logs the same fields
+   in its `settlement_evidence_retention` event. Other statuses:
+   - `refused_archive_disk_low` (logged as a warning): the archive
+     filesystem is below `archive_min_free_bytes` or
+     `archive_min_free_percent`. Nothing is exported or deleted. Free space
+     or move `archive_dir`.
+   - `refused_offhost_unverified`: only with an off-host command configured.
+     The archive is kept and nothing is deleted. Fix the command; the next
+     run resumes this archive.
    - `refused_archive_invalid`: the archive failed its checksum, size, parse,
      or count check. It is marked `failed` and nothing is deleted. The next
      run writes a fresh archive.
@@ -142,10 +171,11 @@ persisted cursor and writes nothing.
    because a row changed after export; the next archive picks them up.
    `route_snapshot_journal_kept_rows` counts archived journal rows left hot
    for the same reason. If a run stops after the main delete commits but
-   before the journal step, the archive stays `offhost_verified` and the next
-   run finishes the journal step before marking it `deleted`.
-6. Copy every finished archive and its manifest into long-term off-host
-   storage. Retention never deletes archive files.
+   before the journal step, the archive stays `exported` (or
+   `offhost_verified`) and the next run finishes the journal step before
+   marking it `deleted`.
+5. Retention never deletes archive files. Archives are the only copy of the
+   deleted evidence; include `archive_dir` in the host's backups.
 
 Weekly settlement, nightly reconcile, payout claims, earnings, and the billing
 mirror keep working on archived requests:
@@ -190,7 +220,7 @@ report shows `auto_vacuum_mode: incremental`.
 Each archive is self-contained. It holds every column of every archived
 evidence row. It also holds reference copies of the request's ledger credits,
 operator credits, payout rows, provider identity snapshots, and config
-snapshots. Run these against a copy fetched back from off-host storage:
+snapshots. Run these against the archive in `archive_dir` or a copy of it:
 
 ```bash
 coordinator-cli settlement-evidence-archive verify   --archive <file>.jsonl.gz
@@ -225,8 +255,8 @@ restore into a scratch copy of the database, never into the live one.
 
 - To stop retention: set `billing.retention.enabled: false` and reload with
   SIGHUP. A run in progress stops deleting at the next batch boundary. Each
-  batch either commits whole or not at all. The archive stays
-  `offhost_verified` and is resumed after re-enabling.
+  batch either commits whole or not at all. The archive stays `exported`
+  (or `offhost_verified`) and is resumed after re-enabling.
 - Roll the coordinator forward only, once this release has started. On
   open it records billing compatibility contract 4 in `billing_compat_floor`
   (SPEC-022 R-15.9), and every deletion records it again. Older releases

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -142,6 +143,12 @@ func (r *recordingVerifier) verify(_ context.Context, path, sha string) error {
 		r.hook()
 	}
 	return r.err
+}
+
+// holdVerifier is a configured off-host check that never confirms: the run
+// exports and verifies its archive locally and deletes nothing.
+func holdVerifier() EvidenceArchiveOffhostVerifier {
+	return (&recordingVerifier{err: errors.New("off-host copy not present yet")}).verify
 }
 
 func retentionTestOptions(dir string, verifier EvidenceArchiveOffhostVerifier) EvidenceRetentionOptions {
@@ -293,7 +300,32 @@ func TestEvidenceRetentionArchivesVerifiesAndDeletesSettledEvidence(t *testing.T
 	}
 }
 
-func TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation(t *testing.T) {
+// With no off-host command the locally re-read, row-for-row verified archive
+// is the whole precondition: the run deletes.
+func TestEvidenceRetentionDeletesWithoutOffhostCommand(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 1 || f.hotRows(t, "b") != 0 {
+		t.Fatalf("no-command run=%+v", report)
+	}
+	if report.ArchiveBytes <= 0 || report.ArchiveFreeBytes <= 0 || report.ArchiveDiskBytes < report.ArchiveFreeBytes {
+		t.Fatalf("archive disk accounting missing: %+v", report)
+	}
+	if f.hotRows(t, "first") != 3 {
+		t.Fatal("run touched the first verified request")
+	}
+}
+
+// A configured off-host command is an extra check: while it fails nothing is
+// deleted and the archive is resumed, never duplicated.
+func TestEvidenceRetentionRefusesDeletionWhileOffhostCommandFails(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
 	f.seed(t, "first")
@@ -301,12 +333,12 @@ func TestEvidenceRetentionRefusesDeletionWithoutOffhostConfirmation(t *testing.T
 	f.settle(t)
 	dir := t.TempDir()
 
-	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, holdVerifier()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Status != EvidenceRetentionStatusOffhostUnverified || report.DeletedRequests != 0 {
-		t.Fatalf("no-verifier run=%+v", report)
+		t.Fatalf("first failing-verifier run=%+v", report)
 	}
 	failing := &recordingVerifier{err: errors.New("checksum not found off host")}
 	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, failing.verify))
@@ -374,7 +406,7 @@ func TestEvidenceRetentionRefusesDeletionWhenArchiveChecksumFails(t *testing.T) 
 	f.seed(t, "b")
 	f.settle(t)
 	dir := t.TempDir()
-	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, holdVerifier()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +450,7 @@ func TestEvidenceArchiveVerificationRejectsTampering(t *testing.T) {
 	f.seed(t, "b")
 	f.settle(t)
 	dir := t.TempDir()
-	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, holdVerifier()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +500,7 @@ func TestEvidenceRetentionRefusesArchiveChangedAfterVerification(t *testing.T) {
 	b := f.seed(t, "b")
 	f.settle(t)
 	dir := t.TempDir()
-	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, holdVerifier()))
 	if err != nil || report.Status != EvidenceRetentionStatusOffhostUnverified {
 		t.Fatalf("export run=%+v err=%v", report, err)
 	}
@@ -1080,5 +1112,155 @@ func TestEvidenceRetentionStopsDeletingWhenDisabledMidRun(t *testing.T) {
 	report, err = f.store.RunEvidenceRetention(ctx, opts)
 	if err != nil || !report.ResumedArchive || report.DeletedRequests != 1 {
 		t.Fatalf("re-enabled run err=%v report=%+v", err, report)
+	}
+}
+
+// The first run on a large backlog is chunked: it archives at most
+// max_requests_per_run requests and deletes them batch_size requests per short
+// transaction; the rest waits for later runs. The shipped defaults keep that
+// bound.
+func TestEvidenceRetentionFirstRunIsChunked(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	backlog := []string{"b", "c", "d", "e", "g"}
+	for _, id := range backlog {
+		f.seed(t, id)
+	}
+	f.settle(t)
+	opts := retentionTestOptions(t.TempDir(), nil)
+	opts.MaxRequestsPerRun = 3
+	opts.BatchSize = 2
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.EligibleRequests != 3 || report.DeletedRequests != 3 || report.DeleteBatches != 2 {
+		t.Fatalf("first run=%+v want 3 requests in 2 delete batches", report)
+	}
+	hot := 0
+	for _, id := range backlog {
+		if f.hotRows(t, id) != 0 {
+			hot++
+		}
+	}
+	if hot != 2 {
+		t.Fatalf("hot backlog after first run=%d want 2", hot)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 2 || report.DeleteBatches != 1 {
+		t.Fatalf("second run=%+v err=%v", report, err)
+	}
+
+	def := config.Default()
+	d := EvidenceRetentionOptionsFromConfig(def.Billing.Retention, def.Settlement)
+	if !d.Enabled || d.BatchSize != 50 || d.BatchPause != 200*time.Millisecond || d.MaxRequestsPerRun != 20000 || d.MaxScanRowsPerRun != 500000 {
+		t.Fatalf("default bounds=%+v", d)
+	}
+	if d.ArchiveDir != "" || d.OffhostVerifier != nil {
+		t.Fatalf("default archive dir=%q offhost=%v", d.ArchiveDir, d.OffhostVerifier != nil)
+	}
+	var dbFile string
+	if err := f.store.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&dbFile); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := f.store.defaultEvidenceArchiveDir(ctx)
+	if err != nil || dir != filepath.Join(filepath.Dir(dbFile), "retention-archive") {
+		t.Fatalf("default archive dir=%q err=%v db=%q", dir, err, dbFile)
+	}
+	if d.ArchiveMinFreeBytes != 20<<30 || d.ArchiveMinFreePercent != 10 {
+		t.Fatalf("default disk floor=%+v", d)
+	}
+}
+
+// A run that would write a new archive refuses while the archive filesystem
+// is below its free-space floor, and touches nothing.
+func TestEvidenceRetentionRefusesBelowArchiveDiskFloor(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	dir := filepath.Join(t.TempDir(), "archive")
+	opts := retentionTestOptions(dir, nil)
+	opts.ArchiveMinFreeBytes = 1 << 62
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != EvidenceRetentionStatusArchiveDiskLow || report.ArchiveFreeBytes <= 0 || report.EligibleRequests != 0 {
+		t.Fatalf("disk-low run=%+v", report)
+	}
+	if f.hotRows(t, "b") != 3 || scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`) != 0 {
+		t.Fatal("disk-low run exported or deleted")
+	}
+	opts.ArchiveMinFreeBytes = 0
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.Status != EvidenceRetentionStatusDeleted {
+		t.Fatalf("run above floor=%+v err=%v", report, err)
+	}
+
+	for _, tc := range []struct {
+		free, total, bytes int64
+		pct                int
+		low                bool
+	}{
+		{free: 25 << 30, total: 100 << 30, bytes: 20 << 30, pct: 10},
+		{free: 19 << 30, total: 100 << 30, bytes: 20 << 30, pct: 10, low: true},
+		{free: 30 << 30, total: 400 << 30, bytes: 20 << 30, pct: 10, low: true},
+		{free: 1, total: 100, bytes: 0, pct: 0},
+	} {
+		got := archiveDiskBelowFloor(tc.free, tc.total, EvidenceRetentionOptions{ArchiveMinFreeBytes: tc.bytes, ArchiveMinFreePercent: tc.pct})
+		if (got != "") != tc.low {
+			t.Errorf("free=%d total=%d floor=%d/%d%% got %q", tc.free, tc.total, tc.bytes, tc.pct, got)
+		}
+	}
+}
+
+// SPEC-047-R012 compatibility: a pool-scoped attempt stays hot until the
+// pool-proven rollup holds its final state, so archiving never shrinks the
+// pool-proven aggregate. Without the rollup table (an aggregate that recounts
+// hot evidence) pool-scoped requests are never archived.
+func TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	pool := f.seed(t, "pool")
+	f.seed(t, "plain")
+	f.settle(t)
+	if _, err := f.store.db.Exec(`DROP TRIGGER trg_srs_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`UPDATE settlement_route_snapshots SET pool_id = 'pool-a' WHERE request_id = ?`, pool.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DeletedRequests != 1 || f.hotRows(t, "plain") != 0 || f.hotRows(t, "pool") != 3 ||
+		report.SkippedRequests[retentionSkipPoolProvenUnrolled] != 1 {
+		t.Fatalf("no rollup table: report=%+v hot(pool)=%d", report, f.hotRows(t, "pool"))
+	}
+	snapshotID := scalar(t, f.store.db, `SELECT id FROM settlement_route_snapshots WHERE request_id = ?`, pool.RequestID)
+	if _, err := f.store.db.Exec(`
+CREATE TABLE pool_proven_rollup_attempts (route_snapshot_id INTEGER PRIMARY KEY, counted INTEGER NOT NULL DEFAULT 0, finality_at_utc TEXT NULL);
+INSERT INTO pool_proven_rollup_attempts (route_snapshot_id, counted, finality_at_utc) VALUES (?, 1, NULL);
+UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0;`, snapshotID); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil || report.DeletedRequests != 0 || f.hotRows(t, "pool") != 3 || report.SkippedRequests[retentionSkipPoolProvenUnrolled] != 1 {
+		t.Fatalf("rollup row without finality: report=%+v err=%v", report, err)
+	}
+	if _, err := f.store.db.Exec(`
+UPDATE pool_proven_rollup_attempts SET finality_at_utc = '2026-07-01T00:00:00.000000000Z';
+UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0;`); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "pool") != 0 {
+		t.Fatalf("final rollup row: report=%+v err=%v", report, err)
 	}
 }

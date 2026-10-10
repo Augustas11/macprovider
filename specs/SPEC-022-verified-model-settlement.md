@@ -21,11 +21,15 @@ defines:
   verdict, undrained or poisoned outbox row, or unmaterialized journal row);
 - what the archive must preserve to rederive a settled credit.
 
-Deletion refuses unless the archive has been re-verified locally and its
-checksum has been confirmed at an off-host destination. Archived credits stay
-payable, and they stay verified for the billing mirror and reward counts,
-through hot tombstones. Ledger, operator-credit, payout, and settlement-window
-rows are never deleted. Retention is off by default. A retention-capable
+Deletion refuses unless the local archive has been re-read and verified
+(checksum, size, row counts, and row-for-row equality with the hot rows it
+replaces). An off-host verification command is an optional extra check.
+Archived credits stay payable, and they stay verified for the billing mirror
+and reward counts, through hot tombstones; the provider earnings rollup and
+the pool-proven aggregate stay exact. Ledger, operator-credit, payout, and
+settlement-window rows are never deleted. Retention is on by default, bounded
+per run and per batch, and refuses to write an archive below a free-space
+floor; `enabled: false` stops it. A retention-capable
 coordinator records billing compatibility floor 4 at open and with every
 deletion (R-15.9), so a pre-retention coordinator refuses the database at
 startup. The conformance
@@ -1982,7 +1986,12 @@ eligible only when every one of the following holds:
   one of its route snapshots' account scopes, so its finality can be frozen
   (R-15.6);
 - at deletion, the settlement finality of every account scope of the request
-  is closed and complete (no pending attempt, scope complete).
+  is closed and complete (no pending attempt, scope complete);
+- every pool-scoped route snapshot of the request (non-empty `pool_id`) is
+  held with a recorded finality in the SPEC-047-R012 pool-proven rollup
+  (`pool_proven_rollup_attempts`), so the aggregate keeps counting it after
+  its evidence leaves. Without that rollup table, pool-scoped requests stay
+  hot.
 
 A request that fails any condition stays hot in full. When a run deletes a
 request's rows, it re-checks these conditions inside the delete transaction.
@@ -2007,16 +2016,19 @@ manifest that records:
 
 The hot database records each archive in `settlement_evidence_archives`.
 
-R-15.4. Deletion refuses without a verified archive. Deletion MUST NOT start
-unless all of the following hold:
+R-15.4. Deletion refuses without a verified archive. The archive is written
+to `archive_dir` on the coordinator host, a directory separate from the
+database files (default: `retention-archive` next to `storage.db_path`).
+Deletion MUST NOT start unless all of the following hold:
 
 1. The local archive has been re-read and passes these checks: its SHA-256
    and byte size match the manifest, every line parses, and every per-table
    row count matches.
-2. The archive's SHA-256 has been confirmed at the configured off-host
-   destination by the operator-configured verification command. With no
-   command configured, retention exports and verifies the archive but
-   deletes nothing.
+2. When an off-host verification command is configured, it has confirmed
+   the archive's SHA-256 at the off-host destination. The command is
+   optional: with none configured, the verified local archive is the whole
+   precondition and nothing is skipped. A configured command that fails
+   refuses deletion and the next run resumes the same archive.
 
 Deletion takes its row identities from the verified archive file, not from
 process memory. It deletes only rows present in that file, and refuses a
@@ -2030,7 +2042,12 @@ two steps resumes the same archive: it retries the journal step for every
 request that archive already tombstoned, and marks the archive deleted only
 after that step completes.
 
-R-15.5. Bounded work. Retention uses one short `BEGIN IMMEDIATE` transaction
+R-15.5. Bounded work. Before writing a new archive, retention reads the free
+space of the archive filesystem and refuses the run
+(`refused_archive_disk_low`) while it is below `archive_min_free_bytes`
+(default 20 GiB) or `archive_min_free_percent` (default 10) of the
+filesystem. Each run reports the archive's byte size and the filesystem's
+free and total bytes. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is
 never starved. The number of requests per run and the ledger rows scanned
 per run are bounded by configuration. Memory is bounded independently of the
@@ -2055,7 +2072,11 @@ records:
 Readers MUST degrade gracefully on archived requests:
 
 - A tombstoned credit stays in `spec022_payable_request_credits`, so earnings
-  totals, payout revalidation, and admin totals do not change.
+  totals, payout revalidation, and admin totals do not change. Its archived
+  evidence is immutable, so, as before archival, its payability does not
+  depend on the `settled` stamp. The tombstone table is an input of the
+  provider earnings rollup: its inserts, like the evidence deletions, mark
+  the affected rollup hours for recompute.
 - The billing mirror keeps `spec022_verified` from the tombstone.
 - Reward unlock verified-receipt counts and unranged provider receipt
   summaries add the archived verdict counts.
@@ -2078,8 +2099,11 @@ payable, recomputes the credit from the archived attempt output's usage under
 the archived credit's rate contract, and checks that the result equals the
 hot ledger credit.
 
-R-15.8. Default off. Retention is disabled by default
-(`billing.retention.enabled: false`). A dry run reports the eligible request
+R-15.8. Default on. Retention is enabled by default
+(`billing.retention.enabled: true`) and runs nightly within the R-15.5
+bounds. Setting `enabled: false` (SIGHUP-reloadable) is the kill switch: no
+run starts and a running deletion stops at its next batch. Retention has no
+expiry or automatic withdrawal. A dry run reports the eligible request
 count and the row and payload-byte counts per table, without writing.
 
 R-15.9. Rollback floor. Archived credits stay payable only through the
@@ -2374,16 +2398,21 @@ the release that wrote the snapshot, stays valid. No path may lower the floor.
   - an undrained or poisoned outbox row;
   - an unmaterialized output journal row;
   - an unmirrored route-snapshot journal row;
-  - its provider's earliest verified verdict.
+  - its provider's earliest verified verdict;
+  - a pool-scoped route snapshot not yet final in the pool-proven rollup.
 - **AC-022-72 (v0.4.0):** Retention deletes nothing when any of these fail:
   - the archive checksum, size, parse, or row-count check;
-  - the off-host confirmation.
+  - the off-host confirmation, when an off-host command is configured.
+
+  With no off-host command configured, it deletes against the verified
+  local archive.
 
   It deletes only rows present in the verified archive, in bounded
   transactions.
 - **AC-022-73 (v0.4.0):** After retention, these do not change for archived
   requests:
-  - payable totals;
+  - payable totals, and provider earnings served from the earnings rollup
+    once the refresher recomputes the hours retention marked;
   - payout revalidation;
   - billing-mirror `spec022_verified`;
   - reward verified-receipt counts;
@@ -2395,6 +2424,11 @@ the release that wrote the snapshot, stays valid. No path may lower the floor.
 - **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
   compatibility floor 4 at open and in every delete transaction, so a
   coordinator below contract 4 refuses to open the database.
+- **AC-022-75 (v0.4.0):** Retention is enabled by default with the default
+  archive directory next to the database. A run archives at most
+  `max_requests_per_run` requests and deletes them `batch_size` requests per
+  transaction. A run that would write a new archive below the archive
+  filesystem's free-space floor exports and deletes nothing.
 
 ## Implementation sequencing
 

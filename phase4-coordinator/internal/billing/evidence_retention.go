@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,8 +19,9 @@ import (
 // SPEC-022 R-15 (#1793): settled-evidence retention. Per-attempt settlement
 // evidence of requests whose credits all settled at least
 // min_settlement_cycles completed settlement windows ago is exported to a
-// verified, off-host-confirmed archive and then deleted from the hot tables
-// in short batches. The money record (ledger credits, operator credits,
+// local archive, verified by re-reading it (checksum, size, row counts, and
+// row-for-row equality with the hot rows), optionally confirmed off host,
+// and then deleted from the hot tables in short batches. The money record (ledger credits, operator credits,
 // payouts, settlement windows, quarantine resolutions) is never deleted.
 
 // evidenceRetentionTables are deleted in this order: the outbox references
@@ -58,6 +60,7 @@ const (
 	EvidenceRetentionStatusNothingEligible   = "nothing_eligible"
 	EvidenceRetentionStatusOffhostUnverified = "refused_offhost_unverified"
 	EvidenceRetentionStatusArchiveInvalid    = "refused_archive_invalid"
+	EvidenceRetentionStatusArchiveDiskLow    = "refused_archive_disk_low"
 	EvidenceRetentionStatusDeleted           = "deleted"
 
 	evidenceRetentionScanChunk = 2000
@@ -93,6 +96,7 @@ const (
 	retentionSkipRelayBlind         = "relay_blind_attempt"
 	retentionSkipScopeUnresolved    = "settlement_scope_unresolved"
 	retentionSkipFinalityOpen       = "settlement_finality_open"
+	retentionSkipPoolProvenUnrolled = "pool_proven_rollup_pending"
 )
 
 var (
@@ -101,7 +105,8 @@ var (
 )
 
 // EvidenceArchiveOffhostVerifier confirms that an archive with this SHA-256
-// is present at the off-host destination. A nil verifier refuses deletion.
+// is present at an off-host destination. It is optional: a nil verifier
+// skips this extra check; a configured one that fails refuses deletion.
 type EvidenceArchiveOffhostVerifier func(ctx context.Context, archivePath, sha256Hex string) error
 
 // CommandOffhostVerifier runs argv + [archivePath, sha256Hex] without a
@@ -141,7 +146,11 @@ type EvidenceRetentionOptions struct {
 	MaxScanRowsPerRun         int
 	IncrementalVacuumPages    int
 	IncrementalVacuumMaxSteps int
-	OffhostVerifier           EvidenceArchiveOffhostVerifier
+	// ArchiveMinFreeBytes and ArchiveMinFreePercent are the archive
+	// filesystem's free-space floor; zero disables that bound.
+	ArchiveMinFreeBytes   int64
+	ArchiveMinFreePercent int
+	OffhostVerifier       EvidenceArchiveOffhostVerifier
 }
 
 // EvidenceRetentionOptionsFromConfig derives options from coordinator
@@ -165,6 +174,8 @@ func EvidenceRetentionOptionsFromConfig(rc config.BillingRetentionConfig, sc con
 		MaxScanRowsPerRun:         rc.MaxScanRowsPerRun,
 		IncrementalVacuumPages:    rc.IncrementalVacuumPages,
 		IncrementalVacuumMaxSteps: rc.IncrementalVacuumMaxSteps,
+		ArchiveMinFreeBytes:       rc.ArchiveMinFreeBytes,
+		ArchiveMinFreePercent:     rc.ArchiveMinFreePercent,
 		OffhostVerifier:           CommandOffhostVerifier(rc.OffhostVerifyCommand, time.Duration(rc.OffhostVerifyTimeoutSeconds)*time.Second),
 	}
 }
@@ -201,26 +212,32 @@ type EvidenceRetentionTableStats struct {
 
 // EvidenceRetentionReport is what a dry run or run reports.
 type EvidenceRetentionReport struct {
-	Status                  string                                 `json:"status"`
-	DryRun                  bool                                   `json:"dry_run"`
-	StartedAtUTC            string                                 `json:"started_at_utc"`
-	FinishedAtUTC           string                                 `json:"finished_at_utc,omitempty"`
-	CutoffWindowEndUTC      string                                 `json:"cutoff_window_end_utc,omitempty"`
-	CreditAgeCutoffUTC      string                                 `json:"credit_age_cutoff_utc,omitempty"`
-	ScanFromCreditID        int64                                  `json:"scan_from_credit_id"`
-	ScanToCreditID          int64                                  `json:"scan_to_credit_id"`
-	ScannedCredits          int64                                  `json:"scanned_credits"`
-	ScanWrapped             bool                                   `json:"scan_wrapped"`
-	EligibleRequests        int                                    `json:"eligible_requests"`
-	SkippedRequests         map[string]int                         `json:"skipped_requests"`
-	Tables                  map[string]EvidenceRetentionTableStats `json:"tables"`
-	ArchiveID               int64                                  `json:"archive_id,omitempty"`
-	ArchiveFile             string                                 `json:"archive_file,omitempty"`
-	ArchiveSHA256           string                                 `json:"archive_sha256,omitempty"`
-	ArchiveBytes            int64                                  `json:"archive_bytes,omitempty"`
-	ResumedArchive          bool                                   `json:"resumed_archive,omitempty"`
-	DeletedRequests         int                                    `json:"deleted_requests"`
-	RouteJournalDeletedRows int64                                  `json:"route_snapshot_journal_deleted_rows"`
+	Status             string                                 `json:"status"`
+	DryRun             bool                                   `json:"dry_run"`
+	StartedAtUTC       string                                 `json:"started_at_utc"`
+	FinishedAtUTC      string                                 `json:"finished_at_utc,omitempty"`
+	CutoffWindowEndUTC string                                 `json:"cutoff_window_end_utc,omitempty"`
+	CreditAgeCutoffUTC string                                 `json:"credit_age_cutoff_utc,omitempty"`
+	ScanFromCreditID   int64                                  `json:"scan_from_credit_id"`
+	ScanToCreditID     int64                                  `json:"scan_to_credit_id"`
+	ScannedCredits     int64                                  `json:"scanned_credits"`
+	ScanWrapped        bool                                   `json:"scan_wrapped"`
+	EligibleRequests   int                                    `json:"eligible_requests"`
+	SkippedRequests    map[string]int                         `json:"skipped_requests"`
+	Tables             map[string]EvidenceRetentionTableStats `json:"tables"`
+	ArchiveID          int64                                  `json:"archive_id,omitempty"`
+	ArchiveFile        string                                 `json:"archive_file,omitempty"`
+	ArchiveSHA256      string                                 `json:"archive_sha256,omitempty"`
+	ArchiveBytes       int64                                  `json:"archive_bytes,omitempty"`
+	// ArchiveFreeBytes is the free space of the archive filesystem when the
+	// run started; ArchiveDiskBytes is that filesystem's size.
+	ArchiveFreeBytes int64 `json:"archive_free_bytes,omitempty"`
+	ArchiveDiskBytes int64 `json:"archive_disk_bytes,omitempty"`
+	ResumedArchive   bool  `json:"resumed_archive,omitempty"`
+	DeletedRequests  int   `json:"deleted_requests"`
+	// DeleteBatches counts the short delete transactions of the run.
+	DeleteBatches           int   `json:"delete_batches"`
+	RouteJournalDeletedRows int64 `json:"route_snapshot_journal_deleted_rows"`
 	// RouteJournalKeptRows are archived journal rows left hot because the
 	// live row no longer equals its archived copy.
 	RouteJournalKeptRows int64                           `json:"route_snapshot_journal_kept_rows,omitempty"`
@@ -353,6 +370,7 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
 
 type evidenceQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 func queryArchiveRows(ctx context.Context, q evidenceQueryer, query string, args ...any) ([]archiveRow, error) {
@@ -419,6 +437,10 @@ type requestEvidenceBundle struct {
 	outputJournal []archiveRow
 	// routeJournal holds the journal rows from the route-snapshot journal DB.
 	routeJournal []archiveRow
+	// poolProvenUnrolled is true when a pool-manifest route snapshot of the
+	// request is not yet captured with a final state in the SPEC-047-R012
+	// pool-proven rollup, which must keep counting it after archival.
+	poolProvenUnrolled bool
 }
 
 // collectRequestEvidence reads one request through q (the reader for export,
@@ -536,6 +558,9 @@ func collectRequestEvidence(ctx context.Context, q evidenceQueryer, requestID st
 		return b, err
 	}
 	b.evidence["settlement_route_snapshots"] = snapshots
+	if b.poolProvenUnrolled, err = poolProvenRollupPending(ctx, q, snapshots); err != nil {
+		return b, err
+	}
 	seenScope := map[string]bool{}
 	for _, row := range snapshots {
 		if scope, ok := row.str("account_scope"); ok && !seenScope[scope] {
@@ -580,6 +605,37 @@ func collectRequestEvidence(ctx context.Context, q evidenceQueryer, requestID st
 		b.outputJournal = append(b.outputJournal, journal...)
 	}
 	return b, nil
+}
+
+// poolProvenRollupPending reports whether any pool-scoped route snapshot is
+// still needed raw by the SPEC-047-R012 pool-proven aggregate: the rollup
+// table is absent (an aggregate that recounts hot evidence), or the snapshot
+// has no rollup row with a recorded finality. Retention keeps such a request
+// hot until the rollup holds the attempt's final state.
+func poolProvenRollupPending(ctx context.Context, q evidenceQueryer, snapshots []archiveRow) (bool, error) {
+	var poolIDs []int64
+	for _, row := range snapshots {
+		if pool, ok := row.str("pool_id"); ok && strings.TrimSpace(pool) != "" {
+			id, _ := row.int64("id")
+			poolIDs = append(poolIDs, id)
+		}
+	}
+	if len(poolIDs) == 0 {
+		return false, nil
+	}
+	var tables int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pool_proven_rollup_attempts'`).Scan(&tables); err != nil {
+		return false, err
+	}
+	if tables == 0 {
+		return true, nil
+	}
+	ph, args := int64Placeholders(poolIDs)
+	var final int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id IN (`+ph+`) AND finality_at_utc IS NOT NULL`, args...).Scan(&final); err != nil {
+		return false, err
+	}
+	return final != len(poolIDs), nil
 }
 
 // collectRouteJournal reads the request's rows from the separate
@@ -651,6 +707,9 @@ func evaluateRetentionEligibility(b requestEvidenceBundle, cut evidenceRetention
 	// snapshot itself, so a relay-blind request stays hot. Every other
 	// request's finality is frozen at deletion under its snapshot scope
 	// (R-15.6), which needs every scope the request settles under.
+	if b.poolProvenUnrolled {
+		return false, retentionSkipPoolProvenUnrolled
+	}
 	snapshotScopes := map[string]bool{}
 	for _, srs := range b.evidence["settlement_route_snapshots"] {
 		entrypoint, _ := srs.str("paid_entrypoint")
@@ -1031,6 +1090,11 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	if err != nil {
 		return EvidenceRetentionReport{}, err
 	}
+	if opts.ArchiveDir == "" {
+		if opts.ArchiveDir, err = s.defaultEvidenceArchiveDir(ctx); err != nil {
+			return EvidenceRetentionReport{}, err
+		}
+	}
 	now := s.nowUTC()
 	report = newEvidenceRetentionReport(false, now)
 	defer func() {
@@ -1045,6 +1109,18 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		return report, err
 	}
 	if archive == nil {
+		// A new archive needs room: refuse below the free-space floor rather
+		// than fill the filesystem the coordinator may share.
+		free, total, err := archiveFilesystemSpace(opts.ArchiveDir)
+		if err != nil {
+			return report, err
+		}
+		report.ArchiveFreeBytes, report.ArchiveDiskBytes = free, total
+		if reason := archiveDiskBelowFloor(free, total, opts); reason != "" {
+			report.Status = EvidenceRetentionStatusArchiveDiskLow
+			report.Error = reason
+			return report, nil
+		}
 		cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, now)
 		if err != nil {
 			return report, err
@@ -1096,12 +1172,10 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	if resumed {
 		report.EligibleRequests = verified.Manifest.RequestCount
 	}
-	if archive.status != evidenceArchiveStatusOffhostVerified {
-		if opts.OffhostVerifier == nil {
-			report.Status = EvidenceRetentionStatusOffhostUnverified
-			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusExported, "offhost_verify_command not configured", 0)
-			return report, nil
-		}
+	// The local re-read above is the verification deletion requires. An
+	// off-host verification command, when configured, is one more check
+	// that must pass first.
+	if archive.status != evidenceArchiveStatusOffhostVerified && opts.OffhostVerifier != nil {
 		if verr := opts.OffhostVerifier(ctx, verified.Path, verified.Manifest.SHA256); verr != nil {
 			report.Status = EvidenceRetentionStatusOffhostUnverified
 			report.Error = verr.Error()
@@ -1127,6 +1201,34 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	report.Status = EvidenceRetentionStatusDeleted
 	report.Vacuum = s.incrementalVacuumAll(ctx, opts)
 	return report, nil
+}
+
+// evidenceArchiveDirName is the default archive directory, created next to
+// the coordinator database file when billing.retention.archive_dir is unset.
+const evidenceArchiveDirName = "retention-archive"
+
+// defaultEvidenceArchiveDir is evidenceArchiveDirName in the directory of the
+// main database file.
+func (s *Store) defaultEvidenceArchiveDir(ctx context.Context) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA database_list`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return "", err
+		}
+		if name == "main" && filepath.IsAbs(file) {
+			return filepath.Join(filepath.Dir(file), evidenceArchiveDirName), nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", errors.New("settlement evidence archive_dir is unset and the database has no file path; set billing.retention.archive_dir")
 }
 
 type evidenceArchiveRecord struct {
@@ -1281,6 +1383,7 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 		if err != nil {
 			return err
 		}
+		report.DeleteBatches++
 		deleted += len(done)
 		processed += len(batch)
 		batch, batchBytes = nil, 0
@@ -1777,6 +1880,12 @@ func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRe
 				continue
 			}
 			report, err := s.RunEvidenceRetention(ctx, opts)
+			level := "info"
+			if report.Status == EvidenceRetentionStatusArchiveDiskLow {
+				level = "warn"
+			}
+			log.Printf("settlement evidence retention: level=%s status=%s archive_bytes=%d archive_free_bytes=%d archive_disk_bytes=%d delete_batches=%d deleted_requests=%d reason=%q",
+				level, report.Status, report.ArchiveBytes, report.ArchiveFreeBytes, report.ArchiveDiskBytes, report.DeleteBatches, report.DeletedRequests, report.Error)
 			if logf != nil {
 				logf(report, err)
 			}
