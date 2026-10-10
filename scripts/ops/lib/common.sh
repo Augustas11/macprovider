@@ -28,7 +28,23 @@ OPS_CURL_TIMEOUT="${OPS_CURL_TIMEOUT:-15}"
 OPS_FACTS="$(mktemp -t macprovider-ops-facts.XXXXXX)"
 OPS_STEPS="$(mktemp -t macprovider-ops-steps.XXXXXX)"
 OPS_TMP_DIR="$(mktemp -d -t macprovider-ops.XXXXXX)"
-trap 'rm -rf "$OPS_FACTS" "$OPS_STEPS" "$OPS_TMP_DIR"' EXIT
+# Live-ops lock taken by run_next. Held only while the step runs: released on
+# every exit (success, failure, refusal, signal).
+OPS_LOCK_OWNER=""
+release_live_lock() {
+  [ -n "$OPS_LOCK_OWNER" ] || return 0
+  local owner="$OPS_LOCK_OWNER"
+  OPS_LOCK_OWNER=""
+  "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+}
+cleanup_ops() {
+  release_live_lock
+  rm -rf "$OPS_FACTS" "$OPS_STEPS" "$OPS_TMP_DIR"
+}
+trap cleanup_ops EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # The single next step. Kinds:
 #   done      nothing left in this train
@@ -320,8 +336,10 @@ run_next() {
   if [ "$NEXT_KIND" = "mutate" ]; then
     [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
       refuse "MACPROVIDER_OPS_OWNER is unset; name the session that will hold the live-ops lock"
-    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" >&2 ||
+    # --bind-pid: this process owns the lock, so a dead pid frees it.
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:$NEXT_ID" --bind-pid >&2 ||
       refuse "live-ops lock not acquired; see '$OPS_DIR/live-lock.sh status'"
+    OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"
     # State may have moved while we waited for the lock: decide again and run
     # only if the same step with the same command is still next.
     local want_id="$NEXT_ID" want_cmd="$NEXT_CMD"

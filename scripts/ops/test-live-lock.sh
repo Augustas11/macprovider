@@ -64,5 +64,33 @@ expect 3 "lock without timestamps refused" -- bash "$LOCK_SH" acquire erin --ste
 expect 0 "force release removes an unreadable lock" -- bash "$LOCK_SH" release erin --force
 expect 0 "free again" -- bash "$LOCK_SH" acquire erin
 
+# --bind-pid: a lock whose holder pid is gone is taken over at once.
+rm -f "$MACPROVIDER_LIVE_LOCK"
+bash "$LOCK_SH" acquire ghost --purpose t --bind-pid 2>/dev/null
+python3 - "$MACPROVIDER_LIVE_LOCK" <<'PY'
+import json, subprocess, sys
+p = sys.argv[1]
+d = json.load(open(p))
+sub = subprocess.Popen(["true"]); sub.wait()   # a pid that is certainly gone
+d["pid"] = sub.pid
+json.dump(d, open(p, "w"))
+PY
+expect 0 "dead pid-bound lock taken over by another owner without --steal" -- bash "$LOCK_SH" acquire frank
+if grep -q "TAKING OVER" "$tmp/err" && grep -q "owner=ghost" "$tmp/err"; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL takeover not logged with the holder"; fi
+bash "$LOCK_SH" release frank 2>/dev/null
+bash "$LOCK_SH" acquire ghost --bind-pid 2>/dev/null
+expect 3 "live pid-bound lock (holder pid alive) still refused" -- bash "$LOCK_SH" acquire frank
+python3 - "$MACPROVIDER_LIVE_LOCK" <<'PY'
+import json, subprocess, sys
+p = sys.argv[1]
+d = json.load(open(p))
+sub = subprocess.Popen(["true"]); sub.wait()
+d["pid"] = sub.pid
+d["pid_bound"] = False
+json.dump(d, open(p, "w"))
+PY
+expect 3 "dead pid on a hand-taken lock is not a takeover" -- bash "$LOCK_SH" acquire frank
+bash "$LOCK_SH" release ghost 2>/dev/null
+
 printf 'live lock: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

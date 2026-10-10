@@ -145,6 +145,8 @@ expect_next() {
 }
 fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
 state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
+# next --run must hand the live-ops lock back on every exit path.
+expect_lock_free() { if [ ! -e "$MACPROVIDER_LIVE_LOCK" ]; then ok; else bad "live-ops lock still held after next --run: $(tr -d '\n ' < "$MACPROVIDER_LIVE_LOCK")"; fi; }
 expect_err() { if grep -q -- "$1" "$tmp/err"; then ok; else bad "stderr lacks '$1'"; sed 's/^/    /' "$tmp/err" | tail -n 3; fi; }
 
 # ==== pearl-runtime ===========================================================
@@ -187,7 +189,7 @@ fixture '{"runs": {"pearl-runtime-release.yml": []}, "later_from": 2,
   "runs_later": {"pearl-runtime-release.yml": [{"databaseId": 900, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 3 "state change after the lock is refused" scripts/ops/pearl-runtime.sh next --run
 expect_err "live state changed after taking the lock"
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE
@@ -268,17 +270,17 @@ run_rc 3 "_pearl-config refuses outside next --run" scripts/ops/cli-release.sh _
 expect_err "runs only from"
 touch "$tmp/pearl/root/.pricing-txn"
 MACPROVIDER_OPS_OWNER=t run_rc 1 "a pricing transaction journal refuses the edit" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 rm -f "$tmp/pearl/root/.pricing-txn"
 printf '# INVALID marker\n' >> "$tmp/pearl/coordinator.yaml"; pearl_boot
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
 MACPROVIDER_OPS_OWNER=t run_rc 3 "a config the running binary rejects is never installed" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 expect_err "rejects the edited config"
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml" && [ "$(restarts)" = 0 ]; then ok; else bad "a rejected edit changed the config or restarted"; fi
 pearl_config "$OLD" ""; pearl_boot; cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "setup and staging in one run" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 grep -q "EXPECTED DOWNTIME" "$tmp/out" && ok || bad "no downtime banner printed"
 if [ "$(restarts)" = 1 ]; then ok; else bad "want one shared restart, got $(restarts)"; fi
 if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; r=d["privacy_class"]["release_code_identities"]; sys.exit(0 if sys.argv[2] not in c["accepted_ids"] and sys.argv[3] in c["accepted_ids"] and r["metadata_dir"] == sys.argv[4] else 1)' \
@@ -390,7 +392,7 @@ expect_err "refusing to create or move it"
 git -C "$W" push -q origin ":refs/tags/v$CAND"
 git -C "$W" tag -d "v$CAND" >/dev/null
 MACPROVIDER_OPS_OWNER=t run_rc 0 "release_tag creates the signed annotated tag" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if [ "$(git -C "$W" ls-remote origin "refs/tags/v$CAND^{}" | awk '{print $1}')" = "$B" ] && git -C "$W" verify-tag "v$CAND" 2>/dev/null; then ok; else bad "v$CAND not a verified tag on $B at origin"; fi
 run_rc 0 "cli status with the tag present" scripts/ops/cli-release.sh status
 if [ "$(state_of release_tag)" = "done" ]; then ok; else bad "present tag not done"; fi
@@ -416,7 +418,7 @@ case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli
 run_rc 3 "_revoke-seed refuses outside next --run" scripts/ops/cli-release.sh _revoke-seed
 before="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "revocation seed applied" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == sys.argv[2:] else 1)' \
   "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "seed not written as revoked_ids in one restart"; fi
 run_rc 0 "status after the seed" scripts/ops/cli-release.sh status
@@ -427,7 +429,7 @@ TARGET_ID="$SEED1" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
 run_rc 0 "seed with the incumbent target in it" scripts/ops/cli-release.sh status
 expect_next revocation_seed:mutate
 MACPROVIDER_OPS_OWNER=t run_rc 0 "seed applied except the deferred target" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == [sys.argv[2]] and c["target_id"] == sys.argv[3] else 1)' \
   "$tmp/pearl/coordinator.yaml" "$SEED2" "$SEED1"; then ok; else bad "deferred target was revoked or the rest was not"; fi
 run_rc 0 "status with the deferred target" scripts/ops/cli-release.sh status
@@ -436,7 +438,7 @@ REVOKED="$SEED2" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot   # recommend
 run_rc 0 "deferred seed id after the target moved" scripts/ops/cli-release.sh status
 expect_next revocation_seed:mutate
 MACPROVIDER_OPS_OWNER=t run_rc 0 "deferred seed id revoked" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if sorted(c["revoked_ids"]) == sorted(sys.argv[2:]) else 1)' \
   "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2"; then ok; else bad "deferred seed id not revoked after the target moved"; fi
 # An old runtime never gets the seed step as next.
@@ -557,11 +559,11 @@ case "$(next_field command)" in *"_pearl-config --recommend $CAND $COMPAT"*) ok 
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
 touch "$tmp/svc/restart_fail"
 MACPROVIDER_OPS_OWNER=t run_rc 1 "a failed restart puts the read bytes back" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 rm -f "$tmp/svc/restart_fail"
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "config not restored after a failed restart"; fi
 MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; sys.exit(0 if c["target_id"] == sys.argv[2] and sys.argv[3] in c["accepted_ids"] and d["coordinator_advertised_version"]["latest_binary_version"] == sys.argv[4] else 1)' \
   "$tmp/pearl/coordinator.yaml" "$COMPAT" "$OLD" "$CAND"; then ok; else bad "bump did not set target/latest or dropped the prior target"; fi
 run_rc 0 "cli status after the bump" scripts/ops/cli-release.sh status
@@ -580,7 +582,7 @@ health v9.0.0 "$CAND"
 run_rc 0 "cli status with the release advertised but the old target applied" scripts/ops/cli-release.sh status
 expect_next recommendation_bump:mutate
 MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump repairs the target" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if grep -q "target_id: $COMPAT" "$tmp/pearl/coordinator.yaml"; then ok; else bad "target_id not repaired"; fi
 run_rc 0 "cli status after the target repair" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "bump not complete after the target repair"; fi
@@ -602,7 +604,7 @@ PYCFG
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
 before="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk bump is recovered with a restart" scripts/ops/cli-release.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied bump not recovered by one restart"; fi
 run_rc 0 "cli status after the recovered bump" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "recovered bump not live"; fi
@@ -676,7 +678,7 @@ esac
 MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 run_rc 3 "discovery renewal dispatch needs owner" scripts/ops/discovery-renew.sh next --run
 expect_err "MACPROVIDER_OPS_OWNER is unset"
 MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=168 MACPROVIDER_OPS_OWNER=t run_rc 0 "discovery renewal dispatch through entrypoint" scripts/ops/discovery-renew.sh next --run
-bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+expect_lock_free
 fixture '{"runs": {"renew-release-discovery-head.yml": [{"databaseId": 777, "status": "waiting", "conclusion": "", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]}}'
 run_rc 0 "discovery renewal waiting status" scripts/ops/discovery-renew.sh status
 expect_next env_approval:manual

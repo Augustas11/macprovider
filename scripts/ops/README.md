@@ -37,8 +37,14 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   before it does anything else. A mutating step (and every runnable
   `pearl-runtime.sh` step) needs a clean checkout whose HEAD is `origin/main`.
   It then takes the live-ops lock and decides the next step again; if the
-  step changed while it waited, it refuses. The lock stays held until you
-  release it, because a train spans several steps.
+  step changed while it waited, it refuses. The lock is held only while the
+  step runs: `next --run` releases it on every exit (success, failure,
+  refusal, SIGINT/SIGTERM/SIGHUP), so the next step, run by any owner, is not
+  blocked. A step that runs asynchronously (the Pearl `apply` updater unit)
+  is covered by the read-only `wait_updater` step, not by the lock. The lock
+  is pid-bound (`--bind-pid`): if the process that took it dies without
+  releasing (SIGKILL, crash), the next `acquire` on the same host takes it
+  over and logs the holder. Locks taken by hand keep TTL and `--steal` only.
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.

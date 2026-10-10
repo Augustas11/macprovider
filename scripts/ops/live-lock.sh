@@ -3,7 +3,7 @@
 # (pearl-coordinator-rollout.md rule 3, AGENTS.md hard rule 7).
 #
 # Usage:
-#   scripts/ops/live-lock.sh acquire <owner-label> [--purpose TEXT] [--ttl-hours N] [--steal]
+#   scripts/ops/live-lock.sh acquire <owner-label> [--purpose TEXT] [--ttl-hours N] [--steal] [--bind-pid]
 #   scripts/ops/live-lock.sh release <owner-label> [--force]
 #   scripts/ops/live-lock.sh status
 #
@@ -17,7 +17,14 @@
 # printed. It may be taken over only with --steal, and only once the holder's
 # own TTL has passed since its last refresh (the TTL stored in the record;
 # default 6h, MACPROVIDER_LIVE_LOCK_TTL_HOURS, minimum 1). An unreadable or
-# unparsable lock file is refused. release removes the lock only for its
+# unparsable lock file is refused.
+#
+# --bind-pid (used by the ops entrypoints' next --run) records that the lock
+# belongs to the calling process. Such a lock whose pid no longer exists on
+# this host is stale at once: acquire by any owner takes it over, logging the
+# takeover, without --steal and without waiting for the TTL. Locks taken by
+# hand (no --bind-pid) keep TTL/--steal semantics only, because their pid is
+# a short-lived shell. release removes the lock only for its
 # owner unless --force (which prints the holder it removed).
 #
 # The session id comes from MACPROVIDER_OPS_SESSION, CLAUDE_SESSION_ID or
@@ -39,6 +46,7 @@ owner=""
 purpose=""
 force=0
 steal=0
+bindpid=0
 case "$cmd" in
   acquire|release)
     owner="${1:-}"
@@ -54,6 +62,7 @@ while [ $# -gt 0 ]; do
     --purpose) purpose="${2:-}"; shift ;;
     --ttl-hours) TTL_HOURS="${2:-}"; shift ;;
     --force) force=1 ;;
+    --bind-pid) bindpid=1 ;;
     --steal) steal=1 ;;
     *) echo "live-lock: unknown option $1" >&2; exit 2 ;;
   esac
@@ -67,10 +76,10 @@ chmod 700 "$(dirname "$LOCK_PATH")" 2>/dev/null || true
 
 session="${MACPROVIDER_OPS_SESSION:-${CLAUDE_SESSION_ID:-${CODEX_SESSION_ID:-unknown}}}"
 
-exec python3 - "$cmd" "$LOCK_PATH" "$TTL_HOURS" "$owner" "$purpose" "$force" "$session" "$PPID" "$steal" <<'PY'
+exec python3 - "$cmd" "$LOCK_PATH" "$TTL_HOURS" "$owner" "$purpose" "$force" "$session" "$PPID" "$steal" "$bindpid" <<'PY'
 import datetime, fcntl, json, os, socket, sys
 
-cmd, path, ttl_hours, owner, purpose, force, session, pid, steal = sys.argv[1:10]
+cmd, path, ttl_hours, owner, purpose, force, session, pid, steal, bindpid = sys.argv[1:11]
 now = datetime.datetime.now(datetime.timezone.utc)
 fmt = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -102,6 +111,18 @@ def stale(r):
     """True once the holder's own TTL has passed since its last refresh."""
     holder_ttl = datetime.timedelta(hours=int(r.get("ttl_hours", ttl_hours)))
     return now - parse(r.get("refreshed_at") or r["acquired_at"]) > holder_ttl
+
+def pid_dead(r):
+    """True when a pid-bound lock's holder process is gone from this host."""
+    if not r.get("pid_bound") or r.get("host") != socket.gethostname().split(".")[0]:
+        return False
+    try:
+        os.kill(int(r["pid"]), 0)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        return False
+    return False
 
 def write(r):
     tmp = path + ".tmp"
@@ -136,21 +157,26 @@ if cmd == "status":
 if cmd == "acquire":
     stamp = now.strftime(fmt)
     if rec is not None and rec.get("owner") != owner:
-        if not stale(rec):
+        if pid_dead(rec):
+            sys.stderr.write("live-lock: TAKING OVER lock whose holder pid is gone: %s\n" % holder_line(rec))
+            rec = None
+        elif not stale(rec):
             sys.stderr.write("live-lock: REFUSED: %s\n" % holder_line(rec))
             sys.exit(3)
-        if steal != "1":
+        elif steal != "1":
             sys.stderr.write("live-lock: REFUSED: stale (past the holder's %sh TTL) but still %s; "
                              "take it over only with --steal after confirming the holder is gone\n"
                              % (rec.get("ttl_hours", ttl_hours), holder_line(rec)))
             sys.exit(3)
-        sys.stderr.write("live-lock: STEALING stale lock %s\n" % holder_line(rec))
-        rec = None
+        else:
+            sys.stderr.write("live-lock: STEALING stale lock %s\n" % holder_line(rec))
+            rec = None
     if rec is None:
         rec = {"owner": owner, "acquired_at": stamp}
     rec.update({
         "session": session,
         "pid": int(pid),
+        "pid_bound": bindpid == "1",
         "host": socket.gethostname().split(".")[0],
         "refreshed_at": stamp,
         "purpose": purpose or rec.get("purpose", ""),
