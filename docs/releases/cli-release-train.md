@@ -64,13 +64,14 @@ Verified 2026-10-10 against public release metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.240
 
-One release, cut when #1958 merges, so the window-16 gain and the >16-slot
-grant ship together.
+**No CLI cut is scheduled** (operator decision 2026-10-10). The rows below are
+recorded for the next release; they ship together whenever the next cut is
+authorized.
 
 | PR | Change | Status |
 |---|---|---|
 | #1953 | Hybrid 16-step decode window; stop-boundary rule; self-check keyed by decode window (SPEC-038 v0.3.16). Expected +17% hybrid CB throughput at 8 concurrent output-heavy | merged (`2bddd66d0`) |
-| #1958 | CB self-check ladder sized to the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | in progress |
+| #1960 (issue #1958) | CB self-check ladder bounded by the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | in progress (draft PR) |
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
