@@ -388,7 +388,19 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: pendingCode, retryAfterHeader: nil),
             "hardware evidence already submitted; verification pending"
         )
-        XCTAssertNotNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: legacyQueue, retryAfterHeader: "600"))
+        // An older coordinator's queue message cannot tell queued from
+        // finished, and the finished-job cooldown is not pending: both fail.
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: legacyQueue, retryAfterHeader: "600"))
+        let cooldown = Data(#"{"error":{"code":"hardware_evidence_rate_limited","message":"hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later"}}"#.utf8)
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600"))
+        XCTAssertEqual(
+            AutotuneHardwareEvidenceSubmitter.failureReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600"),
+            "rate_limited: retry in 600 seconds (hardware_evidence_rate_limited: hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later)"
+        )
+        XCTAssertNotNil(AutotuneCommand.requiredHardwareEvidenceBlockReason(
+            submission: .failed(AutotuneHardwareEvidenceSubmitter.failureReason(statusCode: 429, responseData: cooldown, retryAfterHeader: "600")),
+            required: true
+        ))
         XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: providerFlood, retryAfterHeader: "600"))
         XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 429, responseData: ipFlood, retryAfterHeader: "60"))
         XCTAssertNil(AutotuneHardwareEvidenceSubmitter.pendingReason(statusCode: 409, responseData: pendingCode, retryAfterHeader: nil))

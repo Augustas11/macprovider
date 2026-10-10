@@ -586,8 +586,13 @@ func TestHandleHardwareEvidenceMapsDBAdmissionCap(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), `"code":"rate_limited"`) {
-		t.Fatalf("body=%s, want rate_limited when no job is pending", rr.Body.String())
+	// A recent job that already finished is a cooldown, not a queued job: a
+	// distinct code the CLI keeps as a failure (code/arch R1 MEDIUM).
+	if !strings.Contains(rr.Body.String(), `"code":"hardware_evidence_rate_limited"`) || strings.Contains(rr.Body.String(), "hardware_evidence_pending") {
+		t.Fatalf("body=%s, want hardware_evidence_rate_limited when no job is pending", rr.Body.String())
+	}
+	if got := rr.Header().Get("Retry-After"); got != "600" {
+		t.Fatalf("Retry-After=%q, want 600", got)
 	}
 }
 

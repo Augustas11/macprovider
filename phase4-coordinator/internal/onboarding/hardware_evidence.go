@@ -41,6 +41,10 @@ var ErrHardwareEvidenceRateLimited = errors.New("hardware evidence rate limited"
 // on file and awaiting the verifier (SPEC-033-R003); it is not a flood refusal.
 const hardwareEvidencePendingCode = "hardware_evidence_pending"
 
+// hardwareEvidenceRateLimitedCode is the 10-minute cooldown after a job that
+// has already finished. Nothing is queued, so it stays a failure for the CLI.
+const hardwareEvidenceRateLimitedCode = "hardware_evidence_rate_limited"
+
 // HardwareEvidenceRequest is provider-authenticated autotune evidence. The
 // coordinator queues it for the verifier sidecar; public stats only consume it
 // after the sidecar promotes a conservative trusted profile.
@@ -408,7 +412,7 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			w.Header().Set("Retry-After", "600")
-			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence queue already has a recent job")
+			writeJSONError(w, http.StatusTooManyRequests, hardwareEvidenceRateLimitedCode, "hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later")
 			return
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")

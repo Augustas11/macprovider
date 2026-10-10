@@ -3,7 +3,8 @@
 -- *.up.sql; run this manually, and before the 019 rollback artifact, which
 -- cannot drop hardware_trust_definer while 031's function and grants exist.
 --
--- It removes the automatic path and every app_attest trust root. Profiles whose
+-- It removes the automatic path, every app_attest trust root, the recorded
+-- App Attest verifications and the app_attest_recorder role. Profiles whose
 -- only active trust backing was an app_attest root are demoted first, so
 -- admission never keeps trusting a root this script deletes. The
 -- hardware_trust_grants audit rows, their four audit columns, the widened
@@ -52,10 +53,18 @@ DROP FUNCTION IF EXISTS auto_trust_attested_hardware(BIGINT);
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hardware_trust_definer') THEN
-        REVOKE SELECT (provider_id, attested, app_attest_key_id) ON provider_identities FROM hardware_trust_definer;
         REVOKE SELECT (evidence_sha256) ON hardware_verification_jobs FROM hardware_trust_definer;
     END IF;
 END $$;
+
+DROP TABLE IF EXISTS provider_app_attest_verifications;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_attest_recorder') THEN
+        REVOKE USAGE ON SCHEMA public FROM app_attest_recorder;
+    END IF;
+END $$;
+DROP ROLE IF EXISTS app_attest_recorder;
 
 DELETE FROM schema_migrations_spec017 WHERE version = 31;
 

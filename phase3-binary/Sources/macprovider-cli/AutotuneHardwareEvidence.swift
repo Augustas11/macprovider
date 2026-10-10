@@ -145,10 +145,12 @@ struct AutotuneHardwareEvidenceSubmitter {
         return "transport error (URLError code \(urlError.errorCode))"
     }
 
-    /// SPEC-033-R003: a 429 that only says "a job is already queued for you" is
-    /// pending, not a failure. Current coordinators send the
-    /// `hardware_evidence_pending` code; older ones send `rate_limited` with the
-    /// queue message. IP and per-provider flood refusals stay failures.
+    /// SPEC-033-R003: a 429 carrying `hardware_evidence_pending` means a job is
+    /// queued for this provider, so it is pending, not a failure. Every other
+    /// 429 stays a failure: the IP and per-provider flood limits, the
+    /// `hardware_evidence_rate_limited` cooldown after a finished job, and an
+    /// older coordinator's `rate_limited` queue message, which cannot tell a
+    /// queued job from a finished one.
     static func pendingReason(statusCode: Int, responseData: Data, retryAfterHeader: String?) -> String? {
         guard statusCode == 429,
               !responseData.isEmpty,
@@ -158,11 +160,7 @@ struct AutotuneHardwareEvidenceSubmitter {
         else {
             return nil
         }
-        let code = safeCoordinatorErrorCode(error["code"])
-        let isPending = code == "hardware_evidence_pending"
-            || (code == "rate_limited"
-                && (error["message"] as? String) == "hardware evidence queue already has a recent job")
-        guard isPending else { return nil }
+        guard safeCoordinatorErrorCode(error["code"]) == "hardware_evidence_pending" else { return nil }
         var reason = "hardware evidence already submitted; verification pending"
         if let retry = retryAfterSeconds(retryAfterHeader) {
             reason += " (retry in \(retry) seconds)"
@@ -209,8 +207,12 @@ struct AutotuneHardwareEvidenceSubmitter {
         else {
             return nil
         }
-        guard safeCoordinatorErrorCode(error["code"]) == "rate_limited" else { return nil }
-        let code = "rate_limited"
+        let code: String
+        switch safeCoordinatorErrorCode(error["code"]) {
+        case "rate_limited": code = "rate_limited"
+        case "hardware_evidence_rate_limited": code = "hardware_evidence_rate_limited"
+        default: return nil
+        }
         guard let message = safeKnownRateLimitMessage(error["message"]) else { return code }
         return "\(code): \(message)"
     }
@@ -229,7 +231,8 @@ struct AutotuneHardwareEvidenceSubmitter {
         switch raw {
         case "hardware evidence ip rate limit exceeded",
              "hardware evidence provider rate limit exceeded",
-             "hardware evidence queue already has a recent job":
+             "hardware evidence queue already has a recent job",
+             "hardware evidence was submitted less than 10 minutes ago and is no longer queued; retry later":
             return raw
         default:
             return nil

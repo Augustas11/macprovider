@@ -5,10 +5,14 @@
 -- already verified is trusted without operator approval; the migration-019
 -- dual-control path stays for hardware without a verified attestation.
 --
--- "Verified attestation" is exactly provider_identities.attested = TRUE with a
--- non-null app_attest_key_id: the onboarding app-track register handler sets it
--- only after AppleAppAttestVerifier.Verify succeeds (SPEC-026 §5.3), and the
--- flag is latched (attested OR EXCLUDED.attested).
+-- "Verified attestation" is a row in provider_app_attest_verifications. The
+-- onboarding app-track register handler writes it only after
+-- AppleAppAttestVerifier.Verify succeeds (SPEC-026 §5.3), and only through the
+-- separate app_attest_recorder role. provider_onboarding cannot write it, so a
+-- compromise of the network-facing onboarding role cannot fabricate an
+-- attestation (provider_identities.attested, which onboarding can write, is
+-- not read). Rows are insert-only: first verification per provider and per
+-- key wins.
 --
 -- The only writer of source='app_attest' trust roots is
 -- auto_trust_attested_hardware(job_id), a SECURITY DEFINER function owned by
@@ -21,11 +25,33 @@
 -- hardware_trust_grants (grant_source='app_attest') with the bound job, the
 -- job's evidence digest, and a digest of the App Attest key id. An existing
 -- app_attest row is never updated, so an operator revoke (which expires it)
--- sticks, and a recorded action='revoke' grant for the hardware blocks any
--- automatic re-grant.
+-- sticks. Any recorded action='revoke' grant for the provider, whatever
+-- hardware hash it named, blocks automatic trust for that attested device
+-- permanently: the hash is self-reported, the provider identity is the one
+-- bound to the App Attest key. Only dual-control approval can trust it again.
 --
 -- No primary-key change: unlike 019, this migration carries no
 -- stats-inventory-sync deploy sequencing constraint.
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_attest_recorder') THEN
+        CREATE ROLE app_attest_recorder NOLOGIN;
+    END IF;
+    ALTER ROLE app_attest_recorder NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS provider_app_attest_verifications (
+    provider_id       TEXT PRIMARY KEY,
+    app_attest_key_id BYTEA NOT NULL UNIQUE CHECK (octet_length(app_attest_key_id) = 32),
+    verified_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+REVOKE ALL ON provider_app_attest_verifications FROM PUBLIC;
+REVOKE ALL ON provider_app_attest_verifications FROM provider_onboarding;
+GRANT USAGE ON SCHEMA public TO app_attest_recorder;
+GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;
 
 ALTER TABLE hardware_verification_trust
     DROP CONSTRAINT IF EXISTS hardware_verification_trust_source_check;
@@ -108,21 +134,19 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    SELECT pi.app_attest_key_id INTO v_key_id
-      FROM provider_identities pi
-     WHERE pi.provider_id = job.provider_id
-       AND pi.attested = TRUE
-       AND pi.app_attest_key_id IS NOT NULL;
+    SELECT v.app_attest_key_id INTO v_key_id
+      FROM provider_app_attest_verifications v
+     WHERE v.provider_id = job.provider_id;
     IF NOT FOUND THEN
         RETURN FALSE;
     END IF;
 
-    -- An operator revoke of this hardware is final for the automatic path.
+    -- An operator revoke is final for the automatic path for this attested
+    -- device, under any hardware hash it reports later.
     IF EXISTS (
         SELECT 1
           FROM hardware_trust_grants g
          WHERE g.provider_id = job.provider_id
-           AND g.hardware_identity_hash = job.hardware_identity_hash
            AND g.action = 'revoke'
     ) THEN
         RETURN FALSE;
@@ -318,7 +342,7 @@ END;
 $$;
 
 -- The definer reads the attestation flag and the job's evidence digest.
-GRANT SELECT (provider_id, attested, app_attest_key_id) ON provider_identities TO hardware_trust_definer;
+GRANT SELECT ON provider_app_attest_verifications TO hardware_trust_definer;
 GRANT SELECT (evidence_sha256) ON hardware_verification_jobs TO hardware_trust_definer;
 
 -- ALTER ... OWNER requires CREATE on the schema for the new owner; grant it only

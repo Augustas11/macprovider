@@ -998,9 +998,10 @@ func TestHardwareTrustAppAttestAutoMigrationShape(t *testing.T) {
 		"CREATE OR REPLACE FUNCTION auto_trust_attested_hardware(p_job_id BIGINT)",
 		"SECURITY DEFINER",
 		"pg_try_advisory_xact_lock(582026, hashtext(v_provider))",
-		"AND pi.attested = TRUE",
-		"AND pi.app_attest_key_id IS NOT NULL",
-		"AND g.action = 'revoke'",
+		"FROM provider_app_attest_verifications v",
+		"REVOKE ALL ON provider_app_attest_verifications FROM provider_onboarding;",
+		"GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;",
+		"WHERE g.provider_id = job.provider_id\n           AND g.action = 'revoke'",
 		"'system:app_attest',\n        v_now,\n        NULL,",
 		"ON CONFLICT DO NOTHING;\n    GET DIAGNOSTICS v_inserted = ROW_COUNT;",
 		"encode(sha256(v_key_id), 'hex')",
@@ -1020,6 +1021,12 @@ func TestHardwareTrustAppAttestAutoMigrationShape(t *testing.T) {
 	}
 	if strings.Contains(body, "DO UPDATE") {
 		t.Error("migration 031 must never update an existing trust root or grant")
+	}
+	if strings.Contains(body, "provider_identities") {
+		t.Error("migration 031 must not read provider_identities: provider_onboarding can write its attested flag")
+	}
+	if strings.Contains(body, "ON provider_app_attest_verifications TO provider_onboarding") {
+		t.Error("provider_onboarding must not be granted access to recorded App Attest verifications")
 	}
 	if strings.Contains(body, "GRANT EXECUTE ON FUNCTION auto_trust_attested_hardware(BIGINT) TO provider_onboarding") {
 		t.Error("provider_onboarding must not execute the automatic trust function")
