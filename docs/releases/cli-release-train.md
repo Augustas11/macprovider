@@ -75,7 +75,7 @@ fleet before the canary passes.
 | #1927 | MLX runtime to mlx-swift-lm 3.32.3 / MLX 0.32 through the forks; Swift 6.3 / Xcode 26.6 toolchain; kernel-route-invariant CB prefill grouping | in progress (draft, other session) |
 | `cli/auto-cb-slots` | CB/MTP simplification: CB on by default, per-Mac self-check (batched-vs-alone exactness at every granted slot count, net-gain check) picks the served slots; signed CB/MTP policy becomes revocation-only; native MTP model-keyed | in progress (no PR yet; opens after #1927 merges) |
 | #1944 | Calendar-expiry removal (catalog, native-MTP sidecar, discovery head, autotune feed age) | in progress (audit fixes) |
-| `cli/revoked-build-downgrade` | Rollback lever: a Mac on an exactly revoked build may update down to the coordinator-recommended, validly signed release (coordinator path only, never the discovery rail) | in progress (must ship in this same release) |
+| #1946 | Rollback lever: a Mac on an exactly revoked build may update down to the coordinator-recommended, validly signed release (coordinator path only, never the discovery rail) | **not in this release**: R4 verification left one MEDIUM in each of the code and architecture lanes; draft for the release after |
 
 Before the cut: run the CLI train's pending one-time `privacy_release_setup` step
 (`privacy_class.release_code_identities` on Pearl, #1934), so the new build's
@@ -98,9 +98,9 @@ Release plan:
 4. The Pearl runtime train for the coordinator side follows (#1944, CB/MTP
    coordinator canary, #1942); see the coordinator release train.
 
-Rollback after promotion (once the downgrade lever ships): set the
-recommendation back to the previous good version and revoke the bad build
-exactly. Macs on the revoked build update down and serve again.
+Rollback for this release is forward-only (the updater refuses downgrades
+until #1946 ships): keep a revert PR of #1927 and the CB/MTP bundle ready
+before the recommendation bump; a V+1 forward fix takes about 2-4 hours.
 
 ## Historical fully documented 207 promotion
 
