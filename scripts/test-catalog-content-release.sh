@@ -113,6 +113,11 @@ export MACPROVIDER_ROOT="$CCR_FAKE/opt/macprovider" MACPROVIDER_ETC_ROOT="$CCR_F
   MACPROVIDER_BOOT_ID_FILE="$CCR_FAKE/boot_id"
 case "$cmd" in
   "bash -s"*) pearl-rw | bash -c "$cmd" ;;
+  # Pearl runs GNU tar: AppleDouble ._<name> members land as regular files
+  # (a macOS bsdtar extract would fold them back into xattrs and hide them).
+  "tar -xf - -C "*)
+    dest="$(printf '%s' "${cmd#tar -xf - -C }" | tr -d "'")"
+    exec python3 -c 'import sys, tarfile; tarfile.open(fileobj=sys.stdin.buffer, mode="r|").extractall(sys.argv[1], filter="tar")' "$dest" ;;
   # The lock validator's Pearl paths live in its body (not sha-pinned).
   "cat >"*pearl_autotune_deploy_lock.py*) pearl-rw | bash -c "$cmd" ;;
   *) exec bash -c "$cmd" ;;
@@ -543,6 +548,12 @@ cp "$root/scripts/catalog-content-release.sh" "$root/scripts/pearl_autotune_depl
    "$root/scripts/openrouter_pricing_engine.py" "$root/scripts/cb_release_baselines.py" \
    "$root/scripts/native_mtp_admission_sidecar.py" "$root/scripts/native_mtp_revocation_slots.py" \
    "$root/scripts/sign-catalog.go" "$R/scripts/"
+# A macOS checkout tags files with extended attributes (com.apple.provenance);
+# bsdtar would ship them as AppleDouble ._<name> members, which Pearl's GNU tar
+# (emulated by the fake ssh) extracts as extra files beside the reviewed tools.
+if command -v xattr >/dev/null 2>&1; then
+  xattr -w com.example.ccr-test 1 "$R/scripts/autotune_window.py" "$R/scripts/sign-catalog.go"
+fi
 cp "$root/scripts/lib/autotune-activate.sh" "$root/scripts/lib/catalog-canary-token.sh" \
    "$root/scripts/lib/catalog-window-override.sh" "$root/scripts/lib/coordinator-config-guard.sh" "$R/scripts/lib/"
 cp "$root/ops/pearl-updater/catalog-canary-proof.py" "$R/ops/pearl-updater/"

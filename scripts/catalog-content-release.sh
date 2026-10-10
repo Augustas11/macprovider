@@ -1045,8 +1045,11 @@ pf_dry_load() {
     if [ -f "$PRICING_DIR/pinned-names.json" ]; then cp "$PRICING_DIR/pinned-names.json" "$WORK/upload/pricing/"; fi
     upload_dirs="$upload_dirs pricing"
   fi
+  # macOS bsdtar ships extended attributes (com.apple.provenance) as AppleDouble
+  # ._<name> members, which Pearl's GNU tar extracts as extra files beside the
+  # reviewed tools and release bytes. Ship file contents only.
   # shellcheck disable=SC2086
-  if ! tar -C "$WORK/upload" -cf - $upload_dirs | SSH "tar -xf - -C '$REMOTE_SCRATCH'"; then
+  if ! COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK/upload" -cf - $upload_dirs | SSH "tar -xf - -C '$REMOTE_SCRATCH'"; then
     record coordinator_dry_load 0 "cannot upload the candidate to the Pearl scratch dir"; return 1
   fi
   [ -z "$ORIG_PREVIOUS_TARGET" ] || prev_arg="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
