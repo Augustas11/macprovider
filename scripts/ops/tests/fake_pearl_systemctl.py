@@ -3,7 +3,7 @@
 
 Env FAKE_PEARL=<dir> holds: svc/ (fake_services state), proc/ (a fake /proc),
 pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
-  show -p InvocationID --value U   fixed invocation id
+  show -p InvocationID --value U   fixed invocation id (svc/invocation_seq: one per call)
   show -p MainPID --value U        current fake main pid
   restart U                        new pid and /proc entry, boot.txt digests of
                                    the files now on disk, /healthz recommending
@@ -46,7 +46,13 @@ args = sys.argv[1:]
 if args == ["_init"]:
     mkproc(4242)
 elif args[:1] == ["show"] and "InvocationID" in args:
-    print("0123456789abcdef0123456789abcdef")
+    seq = os.path.join(svc, "invocation_seq")
+    if os.path.exists(seq):
+        values = open(seq).read().split()
+        open(seq, "w").write("\n".join(values[1:] or values))
+        print(values[0])
+    else:
+        print("0123456789abcdef0123456789abcdef")
 elif args[:1] == ["show"] and "MainPID" in args:
     print(pid())
 elif args[:1] == ["restart"]:

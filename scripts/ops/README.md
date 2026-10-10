@@ -76,7 +76,11 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `canary_smoke --probe` also fails on a privacy rejection of the canary in
   Pearl's journal. `verify_live_rollout` runs `_check-privacy-rejections`
   first: two samples of the unapproved-rejection counter over a window
-  (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180).
+  (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180) bound to one coordinator
+  invocation; after a restart in the window it counts the unit journal
+  instead. `pearl_accepted_ids` also repairs a published release whose
+  acceptance was lost. Pearl-side helper errors print only the file name and
+  error class, never config bytes.
 - `cli-release.sh` step `release_tag`, just before `promotion`, creates the
   signed annotated `v<ver>` tag on the verified candidate SHA with the
   operator's git signing key, checks it with `git verify-tag`, and pushes it;

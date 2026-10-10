@@ -408,7 +408,7 @@ bash scripts/release-staged-version-policy.sh v$V" \
       local key_sha setup_cmd setup_also=""
       key_sha="$(shasum -a 256 "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" | awk '{print $1}')"
       setup_cmd="scripts/ops/cli-release.sh _pearl-config --privacy-setup $PRIVACY_METADATA_DIR $PRIVACY_PUBLIC_KEY_PATH $key_sha"
-      if [ "$published" != true ] && [ -n "$compat_id" ] && [ "$REG_COMPAT_ACCEPTED" != true ]; then
+      if [ -n "$compat_id" ] && [ "$REG_COMPAT_ACCEPTED" != true ]; then
         setup_cmd="$setup_cmd --accepted-id $compat_id"; setup_also=" and add $compat_id to accepted_ids"
       fi
       [ -z "$(candidate_release_bytes "$V")" ] || setup_cmd="$setup_cmd
@@ -443,10 +443,9 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
     esac
   fi
 
-  # 5. Pearl accepted_ids (keep target): read live from the applied config.
-  if [ "$published" = true ]; then
-    step pearl_accepted_ids "done" "v$V published"
-  elif [ "$REG_COMPAT_ACCEPTED" = true ]; then
+  # 5. Pearl accepted_ids (keep target): read live from the applied config,
+  # also after publication, so a lost acceptance is repaired by the train.
+  if [ "$REG_COMPAT_ACCEPTED" = true ]; then
     step pearl_accepted_ids "done" "$compat_id accepted by the running coordinator"
   else
     step pearl_accepted_ids pending ""
@@ -982,7 +981,7 @@ release_tag() {
 # of the counter PRIVACY_REJECTION_WINDOW_SECONDS apart (default 180 s, three
 # posture challenge intervals); without the metric, journal lines in the window.
 check_privacy_rejections() {
-  local window="${PRIVACY_REJECTION_WINDOW_SECONDS:-180}" a b src delta
+  local window="${PRIVACY_REJECTION_WINDOW_SECONDS:-180}" a b src delta=""
   [[ "$window" =~ ^[0-9]+$ ]] || die "PRIVACY_REJECTION_WINDOW_SECONDS must be a whole number"
   require_pearl_ssh
   a="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL")" ||
@@ -993,14 +992,22 @@ check_privacy_rejections() {
   if [ "$src" = metric ]; then
     b="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL")" ||
       refuse "rejection counter unreadable over PEARL_SSH"
-    delta="$(python3 -c 'import json,sys; a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2]); print(b["count"] - a["count"] if b["source"] == "metric" else "-reset")' "$a" "$b")"
-  else
+    delta="$(python3 -c '
+import json, sys
+a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+same = b["source"] == "metric" and a.get("invocation") and a.get("invocation") == b.get("invocation")
+print(b["count"] - a["count"] if same and b["count"] >= a["count"] else "reset")' "$a" "$b")"
+  fi
+  if [ "$src" != metric ] || [ "$delta" = reset ]; then
+    # A restart reset the per-process counter (or there is no metric): count
+    # the unit journal across every invocation in the window instead.
+    [ "$delta" != reset ] || log "the coordinator restarted during the window; counting its journal instead"
     delta="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" - - "-${window}s" |
       python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])')" || refuse "coordinator journal unreadable over PEARL_SSH"
   fi
   case "$delta" in
     0) ;;
-    -*) refuse "the rejection counter went backwards during the window (coordinator restarted?); re-run" ;;
+    *[!0-9]*) refuse "rejection count unreadable: $delta" ;;
     *) refuse "the coordinator rejected $delta privacy advertisement(s) as posture_unapproved_code_identity in the last ${window}s; register (privacy_release_identity) or deny that code identity, then re-run" ;;
   esac
   log "no posture_unapproved_code_identity rejections in ${window}s"

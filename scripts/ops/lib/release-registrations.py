@@ -46,6 +46,7 @@ import time
 import urllib.request
 
 UNAPPROVED = "posture_unapproved_code_identity"
+CONTEXT = {"file": ""}
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 MAX_FILE = 1 << 20
 
@@ -74,11 +75,16 @@ def read_bounded(path):
         return f.read(MAX_FILE + 1)
 
 
-def invocation_journal(unit):
-    """Journal lines of the coordinator's current systemd invocation."""
+def invocation_id(unit):
     inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
                          capture_output=True, text=True, timeout=15).stdout.strip()
-    if not re.match(r"^[0-9a-f]{32}$", inv):
+    return inv if re.match(r"^[0-9a-f]{32}$", inv) else None
+
+
+def invocation_journal(unit):
+    """Journal lines of the coordinator's current systemd invocation."""
+    inv = invocation_id(unit)
+    if inv is None:
         return None
     proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
                           capture_output=True, text=True, timeout=60)
@@ -129,6 +135,7 @@ def facts(cfg_path, overlay_path, unit, version, metrics_url):
     for key, path in (("config_sha256", cfg_path), ("overlay_sha256", overlay_path)):
         if not path or path == "-":
             continue
+        CONTEXT["file"] = os.path.basename(path)
         with open(path, "rb") as f:
             raw = f.read()
         disk[key] = hashlib.sha256(raw).hexdigest()
@@ -272,7 +279,9 @@ def unapproved(unit, url, provider_id="", since=""):
         return
     count = metric_count(url) if url and url != "-" else None
     if count is not None:
-        print(json.dumps({"source": "metric", "count": count}))
+        # The counter is per process: the invocation id lets a caller tell a
+        # restart (reset) between two samples.
+        print(json.dumps({"source": "metric", "count": count, "invocation": invocation_id(unit)}))
         return
     lines = invocation_journal(unit)
     if lines is None:
@@ -429,4 +438,14 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        # Parse and I/O errors can quote config bytes, secrets included: emit
+        # a fixed message with the file name and error class only.
+        sys.stderr.write("release-registrations: %s failed%s (%s)\n" % (
+            (sys.argv[1:2] or ["?"])[0], " reading " + CONTEXT["file"] if CONTEXT["file"] else "",
+            type(exc).__name__))
+        sys.exit(2)

@@ -848,9 +848,10 @@ mainland-provider installer handoff.
 9. `verify-live-coordinator-release-rollout` before publishing discovery.
    `cli-release.sh` runs `_check-privacy-rejections` before the dispatch: it
    samples `relayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"}`
-   twice, `PRIVACY_REJECTION_WINDOW_SECONDS` (default 180) apart, and refuses
-   on any new rejection (journal lines in the window when the metric is not
-   served). The lifetime count is only reported, so historical rejections
+   twice, `PRIVACY_REJECTION_WINDOW_SECONDS` (default 180) apart, within one
+   coordinator invocation, and refuses on any new rejection. When the
+   coordinator restarted in between (the counter resets) or the metric is not
+   served, it counts the unit journal's rejection lines across the window. The lifetime count is only reported, so historical rejections
    never block; a provider that keeps being rejected does, until its identity
    is registered or denied.
 10. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
@@ -884,7 +885,9 @@ mainland-provider installer handoff.
   at step `pearl_accepted_ids` adds its `compatibility_set_id` to
   `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
   a value copy — SIGHUP does not reload compatibility_set). The list is
-  capped at 8 and must include `target_id`; at the cap the step evicts the oldest accepted version that is not the
+  capped at 8 and must include `target_id`; the step also runs after
+  publication, so a lost acceptance of a published release is re-added
+  (target unchanged); at the cap the step evicts the oldest accepted version that is not the
   target, not the previous target/stable and not in use, where a version is
   in use when it is the latest connection version of some provider seen in
   the last 14 days (`_anonymous` excluded). It prints the per-version table

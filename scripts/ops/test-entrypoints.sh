@@ -135,6 +135,7 @@ expect_next() {
   got="$(next_field id):$(next_field kind)"
   if [ "$got" = "$want" ]; then ok; else bad "next: want $want got $got ($(next_field reason))"; fi
 }
+fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
 state_of() { python3 -c 'import json,sys; print(next(s["state"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == sys.argv[2]))' "$tmp/out" "$1"; }
 expect_err() { if grep -q -- "$1" "$tmp/err"; then ok; else bad "stderr lacks '$1'"; sed 's/^/    /' "$tmp/err" | tail -n 3; fi; }
 
@@ -238,13 +239,19 @@ PYDB
 event p0 0.0.0 2000-01-01T00:00:00Z
 COMPAT="test/repo:v$CAND@$B"
 META="$tmp/pearl/privacy-release-identities"
-fact_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["facts"].get(sys.argv[2]))' "$tmp/out" "$1"; }
 restarts() { cat "$tmp/svc/restarts" 2>/dev/null || echo 0; }
 
 # One run: the one-time setup, the accepted_ids edit (one shared restart) and the
 # identity staging, under the live lock with the downtime banner.
 pearl_config "$OLD" ""
 pearl_boot
+# A config Pearl cannot parse never echoes its bytes (secrets included).
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/good.yaml"
+printf 'auth:\n  operator_key: "FAKE-SECRET-4242\n  other: [\n' >> "$tmp/pearl/coordinator.yaml"
+run_rc 0 "cli status with an unparseable Pearl config" scripts/ops/cli-release.sh status
+if grep -q "FAKE-SECRET-4242" "$tmp/out" "$tmp/err"; then bad "config secret echoed in status output"; else ok; fi
+case "$(fact_of privacy_release_metadata_dir)" in *"failed reading coordinator.yaml ("*")"*) ok ;; *) bad "no redacted parse error: $(fact_of privacy_release_metadata_dir)" ;; esac
+cp "$tmp/pearl/good.yaml" "$tmp/pearl/coordinator.yaml"
 run_rc 0 "cli status without a Pearl metadata_dir" scripts/ops/cli-release.sh status
 expect_next privacy_release_setup:mutate
 case "$(next_field command)" in
@@ -526,6 +533,19 @@ bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 if grep -q "target_id: $COMPAT" "$tmp/pearl/coordinator.yaml"; then ok; else bad "target_id not repaired"; fi
 run_rc 0 "cli status after the target repair" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "bump not complete after the target repair"; fi
+# After publication a lost acceptance is repaired through the train, keeping
+# the target; the stale target is then repaired by recommendation_bump.
+pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "published release whose acceptance was lost" scripts/ops/cli-release.sh status
+expect_next pearl_accepted_ids:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "accepted_ids repaired after publication" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if grep -q -- "- $COMPAT" "$tmp/pearl/coordinator.yaml" && grep -q "target_id: $OLD" "$tmp/pearl/coordinator.yaml"; then ok; else bad "acceptance not repaired or target moved"; fi
+run_rc 0 "cli status after the published repair" scripts/ops/cli-release.sh status
+if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "published repair not live"; fi
+expect_next recommendation_bump:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump after the published repair" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
 # Fresh ops state (no verification record): the compatibility id comes from
 # the verified v<ver> tag, or the gate fails closed.
 mkdir -p "$tmp/state-fresh"
@@ -551,6 +571,22 @@ printf '1' > "$tmp/svc/rejections_bump"
 PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "new rejections in the window refuse rollout verification" scripts/ops/cli-release.sh _check-privacy-rejections
 expect_err "rejected 1 privacy advertisement"
 rm -f "$tmp/svc/rejections" "$tmp/svc/rejections_bump" "$tmp/svc/metrics_reads"
+# A restart inside the window resets the per-process counter: the samples are
+# bound to one invocation, and a reset falls back to the unit journal.
+REJ='{"error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"p1"}'
+printf '%s\n%s\n' "$REJ" "$REJ" > "$tmp/svc/journal.txt"
+printf '5\n5\n' > "$tmp/svc/rejections_seq"
+printf '%s\n%s\n' "$(printf 'a%.0s' $(seq 32))" "$(printf 'b%.0s' $(seq 32))" > "$tmp/svc/invocation_seq"
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "a restart back to the same count does not hide rejections" scripts/ops/cli-release.sh _check-privacy-rejections
+expect_err "rejected 2 privacy advertisement"
+rm -f "$tmp/svc/invocation_seq"
+printf '5\n2\n' > "$tmp/svc/rejections_seq"
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "a counter that goes down is treated as a reset" scripts/ops/cli-release.sh _check-privacy-rejections
+expect_err "restarted during the window"
+rm -f "$tmp/svc/journal.txt"
+printf '5\n5\n' > "$tmp/svc/rejections_seq"
+PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 0 "a steady counter in one invocation passes" scripts/ops/cli-release.sh _check-privacy-rejections
+rm -f "$tmp/svc/rejections_seq"
 printf '{"error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"p1"}\n' > "$tmp/svc/journal.txt"
 PRIVACY_REJECTION_WINDOW_SECONDS=0 run_rc 3 "journal fallback refuses rejections in the window" scripts/ops/cli-release.sh _check-privacy-rejections
 run_rc 0 "cli status reports the journal source without the metric" scripts/ops/cli-release.sh status

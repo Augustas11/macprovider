@@ -7,6 +7,7 @@ Files in STATE_DIR steer it:
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
   metrics.txt, loaded.txt coordinator /metrics body parts (404 when all absent)
+  rejections_seq          counter values served one per /metrics read (last repeats)
   rejections              unapproved rejection counter base; with rejections_bump it
                           grows by that much on every /metrics read
   mode                    gateway behaviour: move | stuck | serial-request |
@@ -50,7 +51,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, read("autotune-release.json"))
         if self.path == "/metrics":
             parts = [v for v in (read("metrics.txt"), read("loaded.txt")) if v is not None]
-            if read("rejections") is not None:
+            seq = read("rejections_seq")
+            if seq is not None:
+                values = seq.split()
+                open(os.path.join(state, "rejections_seq"), "w").write("\n".join(values[1:] or values))
+                parts.append("# TYPE relayblind_privacy_posture_rejections_total counter\n"
+                             'relayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"} %s' % values[0])
+            elif read("rejections") is not None:
                 reads = int(read("metrics_reads", "0"))
                 open(os.path.join(state, "metrics_reads"), "w").write(str(reads + 1))
                 value = int(read("rejections")) + int(read("rejections_bump", "0")) * reads
