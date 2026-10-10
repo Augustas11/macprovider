@@ -67,7 +67,12 @@ Verified 2026-10-10 against public release metadata, the release train
 **Authorized (operator, 2026-10-11), with a start condition:** cut the next
 CLI release once (1) the CB-throughput session's current work (decode
 isolation and its R015/probes) is merged, and (2) every other CLI-touching PR
-in flight below is merged. Until both hold, no cut.
+in flight below is merged. Until both hold, no cut. Then freeze main and run
+one isolated end-to-end check of exactly that main SHA on the Studio (own
+loopback coordinator, gateway and CLI; 1.8.240 vs final main; output-heavy at
+8 and 16 concurrent through the gateway; self-check grant recorded; two
+announced pause windows of at most 25 minutes). Cut only after it passes; any
+merge in between changes the SHA and re-runs it.
 
 | PR | Change | Status |
 |---|---|---|
