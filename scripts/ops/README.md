@@ -7,7 +7,6 @@ not add steps of its own:
 | Script | Train | Runbooks |
 |---|---|---|
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
-| `compatibility-policy-migrate.sh` | one-time locked legacy allowlist to version-floor migration | `docs/runbooks/pearl-coordinator-rollout.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release | `docs/runbooks/pearl-coordinator-rollout.md` |
@@ -26,8 +25,7 @@ MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
 scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
 scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
-scripts/ops/compatibility-policy-migrate.sh status --floor <x.y.z>
-scripts/ops/compatibility-policy-migrate.sh next --floor <x.y.z> --run
+COMPATIBILITY_MINIMUM_VERSION=<x.y.z> scripts/ops/cli-release.sh next --run   # one-way version_floor migration
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
 scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```
@@ -58,6 +56,22 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   any provider seen in 14 days, printing the per-version table. An edit
   already on disk but not applied by the running coordinator is recovered
   with a validated restart.
+- `cli-release.sh` supports both SPEC-002-R004 compatibility modes, read
+  from `/healthz` `compatibility_policy_mode` and the applied config:
+  `legacy_allowlist` (exact `accepted_ids`, as above; also a runtime that
+  reports no mode) and `version_floor` (`minimum_version` plus exact
+  `revoked_ids`). Under `version_floor`, `pearl_accepted_ids` and the
+  `registrations` gate check that the candidate is from the target's
+  repository, at or above the floor and not revoked; nothing is edited and
+  nothing is evicted. A `/healthz` mode that disagrees with the applied
+  config fails closed. Step `compatibility_policy` is the one-way migration,
+  opt-in with `COMPATIBILITY_MINIMUM_VERSION=<x.y.z>` on a runtime that
+  reports `legacy_allowlist`: `next --run` runs `_pearl-config
+  --migrate-floor`, which replaces `accepted_ids` with `minimum_version`
+  through the same locked edit and restart, refuses a floor above the latest
+  connection version of any provider seen in 14 days (printing the
+  per-version table), and requires `/healthz` to report `version_floor` at
+  that floor. The train never moves a live floor.
 - Release tags count only with an approved signer: list SSH signers in
   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
   `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints

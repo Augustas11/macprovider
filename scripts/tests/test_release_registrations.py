@@ -109,5 +109,29 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn("privacy_class.enabled", " ".join(self.verdict(privacy_class_enabled=False)["missing"]))
 
 
+class CompatibilityModeTest(unittest.TestCase):
+    TARGET = "test/repo:v1.8.230@%s" % ("ab" * 20)
+
+    def verdict(self, compat, **facts):
+        base = {"target_id": self.TARGET, "accepted_ids": [], "minimum_version": "1.8.230", "revoked_ids": []}
+        base.update(facts)
+        return rr.compat_verdict(base, compat)
+
+    def test_floor_admits_same_repo_at_or_above_the_floor(self):
+        self.assertEqual(self.verdict(COMPAT), ("version_floor", ""))
+        self.assertEqual(self.verdict(self.TARGET), ("version_floor", ""))
+
+    def test_floor_rejections(self):
+        self.assertEqual(self.verdict(COMPAT, revoked_ids=[COMPAT])[1], "provider_release_revoked")
+        self.assertEqual(self.verdict(COMPAT, minimum_version="1.9.0")[1], "provider_version_below_minimum")
+        self.assertEqual(self.verdict(COMPAT.replace("test/repo", "other/repo"))[1], "compatibility_set_repository_mismatch")
+        # Leading-zero components are not canonical release identities.
+        self.assertEqual(self.verdict("test/repo:v1.8.0240@%s" % ("ab" * 20))[1], "compatibility_set_invalid")
+
+    def test_legacy_allowlist_is_exact(self):
+        self.assertEqual(self.verdict(COMPAT, minimum_version="", accepted_ids=[COMPAT]), ("legacy_allowlist", ""))
+        self.assertEqual(self.verdict(COMPAT, minimum_version="")[1], "compatibility_set_unaccepted")
+
+
 if __name__ == "__main__":
     unittest.main()

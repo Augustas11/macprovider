@@ -7,7 +7,9 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   show -p MainPID --value U        current fake main pid
   restart U                        new pid and /proc entry, boot.txt digests of
                                    the files now on disk, /healthz recommending
-                                   the config's latest_binary_version
+                                   the config's latest_binary_version (and, when
+                                   /healthz already reports a compatibility mode,
+                                   the config's compatibility policy)
   _init                            create the first /proc entry
 Anything else exits 1. A file svc/restart_fail makes restart fail.
 """
@@ -70,6 +72,15 @@ elif args[:1] == ["restart"]:
     health = json.load(open(h)) if os.path.exists(h) else {"status": "ok"}
     if m:
         health["recommended_binary_version"] = m.group(1)
+    if "compatibility_policy_mode" in health:
+        # A floor-capable runtime reports the applied compatibility policy.
+        import yaml
+        cs = ((yaml.safe_load(open(cfg)) or {}).get("coordinator") or {}).get("compatibility_set") or {}
+        floor = str(cs.get("minimum_version") or "")
+        health["compatibility_policy_mode"] = "version_floor" if floor else "legacy_allowlist"
+        health["compatibility_policy_target_id"] = str(cs.get("target_id") or "")
+        health["compatibility_policy_minimum_version"] = floor
+        health["compatibility_policy_revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []]
     json.dump(health, open(h, "w"))
 else:
     sys.exit(1)

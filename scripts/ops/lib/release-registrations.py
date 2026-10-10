@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Coordinator-side registrations of a provider CLI release (cli-release.sh).
 
-A new CLI binary is served only when Pearl knows it in two places:
-compatibility_set.accepted_ids (restart-only config) and a privacy-class code
+A new CLI binary is served only when Pearl knows it in two places: its
+compatibility_set admits it (restart-only config; SPEC-002-R004: in
+legacy_allowlist mode the exact id is in accepted_ids, in version_floor mode it
+is from the target's repository, >= minimum_version and not in revoked_ids)
+and a privacy-class code
 identity approval, either a signed `v<ver>.json` in
 privacy_class.release_code_identities.metadata_dir (hot, re-read every
 challenge interval) or a privacy_class.approved_code_identities entry
@@ -29,9 +32,11 @@ file`) and print JSON; they never print credentials or the full config.
       invocation; "source" says which. Four arguments: journal lines since
       SINCE (journalctl syntax), naming PROVIDER_ID unless it is "-".
 
-  evaluate FACTS_JSON VERSION COMPAT_ID PEARL_RELEASE_JSON PEARL_RELEASE_SIG
+  evaluate FACTS_JSON VERSION COMPAT_ID PEARL_RELEASE_JSON PEARL_RELEASE_SIG [HEALTH_MODE]
       local: decide the metadata state and whether the candidate is fully
-      registered; prints a JSON verdict.
+      registered; prints a JSON verdict. HEALTH_MODE is the live /healthz
+      compatibility_policy_mode ("" when the runtime does not report one); a
+      reported mode that disagrees with the applied config fails closed.
 """
 import base64
 import datetime
@@ -48,6 +53,7 @@ import urllib.request
 UNAPPROVED = "posture_unapproved_code_identity"
 CONTEXT = {"file": ""}
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+COMPAT_ID = re.compile(r"^([A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}):v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))@[0-9a-f]{40}$")
 MAX_FILE = 1 << 20
 
 
@@ -153,6 +159,8 @@ def facts(cfg_path, overlay_path, unit, version, metrics_url):
     doc = {
         "target_id": str(compat.get("target_id") or ""),
         "accepted_ids": [str(x) for x in compat.get("accepted_ids") or []],
+        "minimum_version": str(compat.get("minimum_version") or ""),
+        "revoked_ids": [str(x) for x in compat.get("revoked_ids") or []],
         "privacy_class_enabled": bool(pc.get("enabled")),
         "approved_code_identities": approved,
         "denied_code_cdhashes": [str(x) for x in pc.get("denied_code_cdhashes") or []],
@@ -324,7 +332,30 @@ def expired(value, now):
     return parsed.timestamp() <= now
 
 
-def evaluate(facts_path, version, compat_id, prj, prjsig):
+def version_key(value):
+    return tuple(int(x) for x in value.split("."))
+
+
+def compat_verdict(f, compat_id):
+    """(mode, rejection) of compat_id under the applied compatibility_set,
+    mirroring config.CompatibilitySetConfig.RejectionCode."""
+    floor = f.get("minimum_version") or ""
+    if not floor:
+        listed = compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", [])
+        return "legacy_allowlist", "" if listed else "compatibility_set_unaccepted"
+    m, t = COMPAT_ID.match(compat_id), COMPAT_ID.match(f.get("target_id") or "")
+    if not m:
+        return "version_floor", "compatibility_set_invalid"
+    if compat_id in f.get("revoked_ids", []):
+        return "version_floor", "provider_release_revoked"
+    if not t or m.group(1) != t.group(1):
+        return "version_floor", "compatibility_set_repository_mismatch"
+    if not VERSION.match(floor) or version_key(m.group(2)) < version_key(floor):
+        return "version_floor", "provider_version_below_minimum"
+    return "version_floor", ""
+
+
+def evaluate(facts_path, version, compat_id, prj, prjsig, health_mode=""):
     f = json.load(open(facts_path))
     local = local_sig = None
     if prj and prjsig and os.path.isfile(prj) and os.path.isfile(prjsig):
@@ -354,15 +385,23 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
                     "with (or its boot digest is unreadable): restart-only registrations are not proven live")
     if not f.get("privacy_class_enabled"):
         miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
-    listed = bool(compat_id) and (compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", []))
+    mode, rejection = compat_verdict(f, compat_id or "")
+    out["compat_mode"] = mode
+    out["compat_rejection"] = rejection if compat_id else ""
+    if health_mode and health_mode != mode:
+        miss.append("live /healthz reports compatibility_policy_mode %s but the applied config is %s" % (health_mode, mode))
+    listed = bool(compat_id) and not rejection and (not health_mode or health_mode == mode)
     out["compat_accepted"] = listed and out["config_applied"]
     out["target_applied"] = bool(compat_id) and compat_id == f.get("target_id") and out["config_applied"]
     if not compat_id:
         # Without the candidate's own id, acceptance cannot be proven: fail closed.
         miss.append("the candidate compatibility_set_id is unknown (no signed_byte_verification record and no "
                     "verified v%s tag to derive it from), so its compatibility acceptance cannot be proven" % version)
-    elif not listed:
+    elif rejection and mode == "legacy_allowlist":
         miss.append("compatibility_set.accepted_ids lacks %s (pearl_accepted_ids step)" % compat_id)
+    elif rejection:
+        miss.append("the version_floor compatibility_set (minimum_version %s) does not admit %s: %s"
+                    % (f.get("minimum_version"), compat_id, rejection))
     if local is None and remote is not None and f.get("public_key_pem") and verify_sig(f["public_key_pem"], remote, remote_sig):
         # A published release with no local bytes: the signed file names the identity.
         local, local_sig = remote, remote_sig
@@ -431,7 +470,7 @@ def main(argv):
         stage(*args)
     elif cmd == "unapproved" and len(args) in (2, 4):
         unapproved(*args)
-    elif cmd == "evaluate" and len(args) == 5:
+    elif cmd == "evaluate" and len(args) in (5, 6):
         evaluate(*args)
     else:
         fail("bad arguments for %s" % cmd)

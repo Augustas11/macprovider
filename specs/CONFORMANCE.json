@@ -11775,10 +11775,13 @@
       "implementation": [
         "phase4-coordinator/internal/config/config.go:CompatibilitySetConfig",
         "phase4-coordinator/internal/ws/server.go:requireCompatibleSet",
+        "phase4-coordinator/internal/ws/server.go:compatibilitySetPolicyReloadErrorLocked",
         "phase4-coordinator/cmd/coordinator/main.go:reloadCoordinatorConfig",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
-        "scripts/ops/cli-release.sh:provider_version_policy_status",
-        "scripts/ops/compatibility-policy-migrate.sh:apply"
+        "scripts/ops/cli-release.sh:load_registrations",
+        "scripts/ops/lib/release-registrations.py:compat_verdict",
+        "scripts/ops/lib/pearl-cli-config.py:check_floor",
+        "scripts/ops/lib/pearl-cli-config.py:set_floor"
       ],
       "tests": [
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetMinimumVersionAcceptsFutureSameRepoWithoutAllowlist",
@@ -11788,8 +11791,9 @@
         "phase4-coordinator/internal/ws/autotune_catalog_reload_test.go:TestCompatibilityReloadCatalogPublishDoesNotDeadlockParallelRegistration",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testTier2PreChallengeRejectedAuthResponseKeepsCoordinatorError",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState",
-        "scripts/ops/tests/test-compatibility-policy.py:CompatibilityPolicyTest",
-        "scripts/ops/tests/test-compatibility-policy-migration.py:MigrationTest"
+        "scripts/tests/test_pearl_cli_config.py:FloorTest",
+        "scripts/tests/test_release_registrations.py:CompatibilityModeTest",
+        "scripts/ops/test-entrypoints.sh:floor_config"
       ],
       "journeys": [],
       "evidence": [],
@@ -11797,7 +11801,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1914",
-        "rationale": "Version-floor admission and reload regression coverage are added by this campaign; deployment migration and live release preflight remain pending."
+        "rationale": "Version-floor admission, reload refusal, and the dual-mode release train with its locked migration step are implemented and tested; the floor-capable coordinator runtime and the live migration are pending deployment."
       }
     }
   ]

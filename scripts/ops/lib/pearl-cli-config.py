@@ -3,7 +3,7 @@
 Pearl coordinator.yaml edits, with one coordinator restart.
 
   python3 - apply [layout flags] [--accepted-id ID] [--privacy-setup DIR KEY KEY_SHA256]
-                  [--recommend VERSION TARGET_ID]
+                  [--recommend VERSION TARGET_ID] [--migrate-floor VERSION]
 
 Under both Pearl locks (the installed, sha256-pinned coordinator_config_guard
 LockSet: updater flock, coordinator deploy flock, refuse on a pricing
@@ -27,6 +27,20 @@ event of some provider seen in the last 14 days (`_anonymous` excluded;
 provider_connection_events.db, read-only). It prints the per-version table
 (latest-version provider counts, last seen) and refuses with it when nothing
 is evictable. Nothing secret is printed.
+
+Two compatibility modes (SPEC-002-R004), read from the config itself:
+legacy_allowlist (accepted_ids, no minimum_version) and version_floor
+(minimum_version, optional revoked_ids, no accepted_ids). In version_floor
+mode accepted_ids is never edited: a release is admitted when it is from the
+target's repository, >= minimum_version and not exactly revoked, so
+--accepted-id is refused and --recommend moves only target_id and
+latest_binary_version.
+
+--migrate-floor VERSION is the one-way legacy_allowlist -> version_floor
+switch: it replaces the accepted_ids block with minimum_version, after
+refusing a floor above the latest connection version of any provider seen in
+the last 14 days (the eviction rule's provider_connection_events read), and
+then requires /healthz to report the version_floor policy at that floor.
 """
 import argparse
 import copy
@@ -47,6 +61,9 @@ import urllib.request
 ACCEPTED_CAP = 8
 IN_USE_WINDOW = datetime.timedelta(days=14)
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# Canonical numeric version: no leading-zero components (SPEC-002-R004).
+CANONICAL_VERSION = re.compile(r"^(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})\.(?:0|[1-9][0-9]{0,8})$")
+COMPAT_ID = re.compile(r"^([A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}):v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))@[0-9a-f]{40}$")
 COMPAT_VERSION = re.compile(r":v([0-9]+\.[0-9]+\.[0-9]+)@[0-9a-f]{40}$")
 
 
@@ -95,6 +112,65 @@ def set_accepted(text, add, remove):
         prefix = lines[0].split("- ", 1)[0]
         kept.append("%s- %s\n" % (prefix, add))
     return text[:a] + "".join(kept) + text[b:]
+
+
+def set_floor(text, floor):
+    """Replace the one block-style accepted_ids list with minimum_version."""
+    start, end = block(text, r"^ *compatibility_set:[ \t]*$")
+    body = text[start:end]
+    if re.search(r"^ +(minimum_version|revoked_ids):", body, re.M):
+        raise Refused("compatibility_set already has minimum_version or revoked_ids; refusing to migrate it")
+    found = list(re.finditer(r"^( *)accepted_ids:[ \t]*\n((?:\1 *- .*\n)+)", body, re.M))
+    if len(found) != 1:
+        raise Refused("compatibility_set.accepted_ids must be one block-style list")
+    m = found[0]
+    new = '%sminimum_version: "%s"\n' % (m.group(1), floor)
+    return text[:start] + body[:m.start()] + new + body[m.end():] + text[end:]
+
+
+def compat_admits(compat, item):
+    """SPEC-002-R004 version_floor admission of a compatibility_set_id
+    (config.CompatibilitySetConfig.RejectionCode): '' or the rejection."""
+    m, t = COMPAT_ID.match(item or ""), COMPAT_ID.match(str(compat.get("target_id") or ""))
+    if not m:
+        return "compatibility_set_invalid"
+    if item in [str(x) for x in compat.get("revoked_ids") or []]:
+        return "provider_release_revoked"
+    if not t or m.group(1) != t.group(1):
+        return "compatibility_set_repository_mismatch"
+    if version_key(m.group(2)) < version_key(str(compat.get("minimum_version"))):
+        return "provider_version_below_minimum"
+    return ""
+
+
+def floor_table(usage, floor):
+    lines = ["%-12s %9s  %s" % ("version", "providers", "last seen (latest-version providers, 14 days)")]
+    for version in sorted(usage, key=lambda v: version_key(v) if VERSION.match(v) else (-1,)):
+        count, seen = usage[version]
+        below = not VERSION.match(version) or version_key(version) < version_key(floor)
+        lines.append("%-12s %9d  %s%s" % (version, count, seen.isoformat(), "  BELOW FLOOR" if below else ""))
+    return "\n".join(lines)
+
+
+def check_floor(floor, target, db_path, now):
+    """Refuse a floor above the latest connection version of any provider seen
+    in the last 14 days, or above the target."""
+    if not CANONICAL_VERSION.match(floor or ""):
+        raise Refused("--migrate-floor must be canonical MAJOR.MINOR.PATCH (no leading zeros)")
+    t = COMPAT_ID.match(target)
+    if not t:
+        raise Refused("compatibility_set.target_id is missing or malformed")
+    if version_key(t.group(2)) < version_key(floor):
+        raise Refused("floor %s is above the target %s" % (floor, t.group(2)))
+    usage = latest_versions(db_path, now)
+    table = floor_table(usage, floor)
+    sys.stderr.write("providers by latest connection version (last 14 days):\n%s\n" % table)
+    below = [v for v in usage if not VERSION.match(v) or version_key(v) < version_key(floor)]
+    if below:
+        raise Refused("floor %s is above the latest connection version of %d provider(s) seen in the last 14 days "
+                      "(%s; table above); choose a floor at or below the lowest" % (
+                          floor, sum(usage[v][0] for v in below), ", ".join(sorted(below))))
+    return table
 
 
 def set_scalar(text, header, key, value):
@@ -203,7 +279,8 @@ def plan(text, args, now):
     compat = ((doc.get("coordinator") or {}).get("compatibility_set") or {})
     accepted = [str(x) for x in compat.get("accepted_ids") or []]
     target = str(compat.get("target_id") or "")
-    mutations, summary, new = [], {}, text
+    floor_mode = bool(compat.get("minimum_version"))
+    summary, new = {"compatibility_mode": "version_floor" if floor_mode else "legacy_allowlist"}, text
 
     def add_accepted(item, keep):
         nonlocal new, accepted
@@ -219,15 +296,34 @@ def plan(text, args, now):
         if evict:
             summary.setdefault("accepted_evicted", []).append(evict)
 
+    if args.migrate_floor:
+        if floor_mode:
+            if str(compat.get("minimum_version")) != args.migrate_floor:
+                raise Refused("compatibility_set is already version_floor at %s; this step does not move a live floor"
+                              % compat.get("minimum_version"))
+        else:
+            summary["floor_table"] = check_floor(args.migrate_floor, target, args.events_db, now).splitlines()
+            new = set_floor(new, args.migrate_floor)
+            summary["minimum_version"] = args.migrate_floor
+            summary["accepted_ids_removed"] = accepted
     if args.accepted_id:
+        if floor_mode:
+            raise Refused("compatibility_set is version_floor (minimum_version %s): accepted_ids is not edited; "
+                          "%s is %s" % (compat.get("minimum_version"), args.accepted_id,
+                                        compat_admits(compat, args.accepted_id) or "already admitted"))
         add_accepted(args.accepted_id, [args.accepted_id])
     if args.recommend:
         version, new_target = args.recommend
         if not VERSION.match(version):
             raise Refused("bad version")
-        if target and target != new_target:
-            add_accepted(target, [new_target])  # the prior target stays accepted
-        add_accepted(new_target, [target])
+        if floor_mode:
+            why = compat_admits(compat, new_target)
+            if why:
+                raise Refused("the version_floor policy does not admit the new target %s (%s)" % (new_target, why))
+        else:
+            if target and target != new_target:
+                add_accepted(target, [new_target])  # the prior target stays accepted
+            add_accepted(new_target, [target])
         if target != new_target:
             new = set_scalar(new, r"^ *compatibility_set:[ \t]*$", "target_id", new_target)
             summary["target_id"] = new_target
@@ -242,8 +338,12 @@ def plan(text, args, now):
             summary["release_code_identities"] = args.privacy_setup[0]
 
     def expected(d):
-        if args.accepted_id or args.recommend:
+        if args.accepted_id or args.recommend or args.migrate_floor:
             cs = d.setdefault("coordinator", {}).setdefault("compatibility_set", {})
+        if "minimum_version" in summary:
+            cs.pop("accepted_ids", None)
+            cs["minimum_version"] = args.migrate_floor
+        elif (args.accepted_id or args.recommend) and not floor_mode:
             cs["accepted_ids"] = accepted
         if args.recommend:
             cs["target_id"] = args.recommend[1]
@@ -269,7 +369,7 @@ def overlay_conflicts(overlay_path, args):
         return
     with open(overlay_path) as f:
         ov = yaml.safe_load(f) or {}
-    if (args.accepted_id or args.recommend) and "compatibility_set" in (ov.get("coordinator") or {}):
+    if (args.accepted_id or args.recommend or args.migrate_floor) and "compatibility_set" in (ov.get("coordinator") or {}):
         raise Refused("the overlay sets coordinator.compatibility_set; reconcile it first")
     if args.recommend and "latest_binary_version" in (ov.get("coordinator_advertised_version") or {}):
         raise Refused("the overlay sets coordinator_advertised_version.latest_binary_version; reconcile it first")
@@ -394,6 +494,11 @@ def restart(args, old_pid):
 def check_live(args, health):
     if args.recommend and health.get("recommended_binary_version") != args.recommend[0]:
         raise Refused("/healthz recommends %r, not %s" % (health.get("recommended_binary_version"), args.recommend[0]))
+    if args.migrate_floor and (health.get("compatibility_policy_mode") != "version_floor" or
+                               health.get("compatibility_policy_minimum_version") != args.migrate_floor):
+        raise Refused("/healthz reports compatibility policy %r at %r, not version_floor at %s" % (
+            health.get("compatibility_policy_mode"), health.get("compatibility_policy_minimum_version"),
+            args.migrate_floor))
 
 
 def privacy_preflight(args, env, uid, gid):
@@ -506,6 +611,7 @@ def main(argv):
     p.add_argument("--accepted-id")
     p.add_argument("--privacy-setup", nargs=3, metavar=("DIR", "KEY", "KEY_SHA256"))
     p.add_argument("--recommend", nargs=2, metavar=("VERSION", "TARGET_ID"))
+    p.add_argument("--migrate-floor", metavar="VERSION")
     args = p.parse_args(argv)
     try:
         apply(args)
