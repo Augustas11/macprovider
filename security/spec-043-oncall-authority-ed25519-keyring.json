@@ -4,6 +4,19 @@
   "allowed_environment_classes": [
     "production"
   ],
-  "keys": [],
+  "keys": [
+    {
+      "key_id": "macprovider-spec043-oncall-authority-ed25519-v1",
+      "purpose": "oncall-readiness-operations-authority",
+      "issuer": "macprovider-ops",
+      "valid_from": "2026-10-10T00:00:00Z",
+      "valid_until": "2036-10-10T00:00:00Z",
+      "allowed_environment_classes": [
+        "production"
+      ],
+      "public_key_sha256": "cb28e0ffec44fab27a6aef8d46c5898d97abf82f414c3ed03b2fef24b5d45b9b",
+      "public_key_path": "security/spec-043-oncall-authority-ed25519-v1.pem"
+    }
+  ],
   "note": "SPEC-043-R008/R011 on-call readiness operations-authority Ed25519 keys are registered here. An empty keys array is fail-closed: no on-call readiness record can be signed or accepted until an operator registers a public key with scripts/register-spec043-oncall-authority-key.py. Only the public half is committed; the private half lives solely in the GitHub production-release environment secret MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM (provision it the same way scripts/provision-spec043-production-release-key.sh handles the production-release key). The coordinator allowlists the key by SHA-256 of the raw 32-byte public key via MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256; register-spec043-oncall-authority-key.py prints that digest for the deploy environment."
 }
