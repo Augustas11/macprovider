@@ -2638,13 +2638,12 @@ struct ServeCommand: AsyncParsableCommand {
         )
         let policyEntries = continuousBatchingPolicy.selection.entries
         let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
-        let currentPolicyEntries = policyEntries.filter {
-            currentPolicyKeys.contains($0.modelKey)
-        }
         let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
             && resolved.continuousBatching == .off
+        // SPEC-038 v0.3.12 / SPEC-039 FR-PKV14: the paged engine attaches by
+        // default so every catalog model the engine can batch is self-checked;
+        // an explicit paged_kv setting or the CB emergency off still rules.
         if !emergencyOffOverride,
-           !currentPolicyEntries.isEmpty,
            !resolved.pagedKVEnabledExplicitlyConfigured,
            resolved.pagedKV.errors.isEmpty {
             resolved.pagedKV.enabled = true
@@ -2658,7 +2657,7 @@ struct ServeCommand: AsyncParsableCommand {
         let effectiveAcceptedTuples = policyAcceptedTuples
             + (noJoin ? resolved.continuousBatchingAcceptedTuples : [])
         FileHandle.standardError.write(Data(
-            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) emergency_off=\(emergencyOffOverride)\n".utf8
+            "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) revocations=\(continuousBatchingPolicy.selection.revocations.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
         // Facts shared by the automatic slot count and the R018 item 9 bound.
         let servedConfigJSONData = resolved.modelArtifactPath.flatMap {
@@ -2676,18 +2675,20 @@ struct ServeCommand: AsyncParsableCommand {
         let servedWeightsBytes = ProviderContextWorkflow.liveModelFacts(
             artifactPath: resolved.modelArtifactPath
         ).weightsBytes
-        // SPEC-023-R009 / SPEC-038-R011: unless the owner pinned it, the slot
-        // count follows the signed policy loaded above, recomputed at every
-        // serve start. Loopback runtimes and autotune children keep theirs.
-        var autoServedSlots: AutoServedSlots.Decision?
+        // SPEC-023-R009 / SPEC-038-R011 (v0.3.12): scheduler rows are the
+        // memory-fit recommendation for this Mac; the served count starts at
+        // one (or a provisional grant) and the on-device self-check sets it.
+        // Loopback runtimes and autotune children keep their configured count.
+        var autoServedSlots: AutoServedSlots.Plan?
         if !autotuneCandidate, resolved.model.flatMap({ LoopbackServeSelection.select($0) }) == nil {
             let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
             let configuredSlots = resolved.maxConcurrencyOverride
-            let decision = AutoServedSlots.resolve(
+            let plan = AutoServedSlots.plan(
                 configuredSlots: configuredSlots,
                 source: resolved.maxConcurrencySource,
                 draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
-                continuousBatchingAuthorized: AutoServedSlots.policyAuthorizesServedModel(
+                emergencyOff: emergencyOffOverride,
+                provisionalPolicyEntry: AutoServedSlots.policyAuthorizesServedModel(
                     continuousBatchingPolicy,
                     modelKeys: currentPolicyKeys,
                     emergencyOff: emergencyOffOverride
@@ -2709,12 +2710,10 @@ struct ServeCommand: AsyncParsableCommand {
                     )
                 }
             )
-            if decision.reason != "owner_pinned" {
-                resolved.maxConcurrencyOverride = decision.slots
-            }
-            autoServedSlots = decision
+            resolved.maxConcurrencyOverride = plan.rows
+            autoServedSlots = plan
             FileHandle.standardError.write(Data(
-                "event=served_slots action=resolved slots=\(decision.slots) reason=\(decision.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune")\n".utf8
+                "event=served_slots action=planned rows=\(plan.rows) served=\(plan.initialServed) reason=\(plan.reason) configured=\(configuredSlots.map(String.init) ?? "unset") source=\(resolved.maxConcurrencySource?.rawValue ?? "autotune")\n".utf8
             ))
         }
 
@@ -2924,7 +2923,8 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
                     continuousBatchPrefillTokensPerIteration: resolved.continuousBatchPrefillTokensPerIteration,
                     continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
-                    continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
+                    continuousBatchingAcceptanceCoverage: .defaultOn(
+                        revocations: continuousBatchingPolicy.selection.revocations,
                         acceptedTuples: effectiveAcceptedTuples
                     ),
                     continuousBatchingPolicyLoadResult: continuousBatchingPolicy,
@@ -2962,18 +2962,38 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data(("provider model load failed: \(error)\n").utf8))
             throw error
         }
-        // SPEC-038-R011: the pre-load gate saw a policy entry for the model
-        // key; the exact tuple is known only now. Batching inactive for the
-        // loaded tuple serves one slot, set before the startup probe and the
-        // first capacity advertisement.
-        if autoServedSlots?.reason == "cb_authorized",
-           ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride) > 1,
-           let mlxRuntime = modelRuntime as? ModelRuntime,
-           !AutoServedSlots.continuousBatchingServing(await mlxRuntime.currentSnapshot().continuousBatching) {
-            await mlxRuntime.lowerServedSlotsBeforeServing(to: 1)
-            resolved.maxConcurrencyOverride = 1
+        // SPEC-038-R011 (v0.3.12): set the served count before the startup
+        // probe and the first capacity advertisement: a stored self-check
+        // decision for this tuple, else the plan's initial count, else one
+        // slot when this tuple cannot batch at all.
+        let cbSelfCheckStore = ContinuousBatchingSelfCheckStore(configPath: resolved.configPath)
+        if let plan = autoServedSlots, let mlxRuntime = modelRuntime as? ModelRuntime {
+            var served = plan.initialServed
+            var source = plan.reason
+            if plan.ownerPinned == nil, !(await mlxRuntime.continuousBatchingCapableForServedSlots()) {
+                served = 1
+                source = "cb_unavailable_for_loaded_tuple"
+            }
+            if plan.selfChecked,
+               let target = await mlxRuntime.continuousBatchingSelfCheckTarget(),
+               let decision = cbSelfCheckStore.decision(for: target.key) {
+                served = ContinuousBatchingSelfCheck.servedSlots(
+                    decision: decision, ownerPinned: plan.ownerPinned, maxRows: target.maxRows
+                )
+                source = "stored_self_check_\(decision.reason)"
+                await mlxRuntime.applyContinuousBatchingSelfCheck(decision.state, servedSlots: served)
+                await mlxRuntime.setContinuousBatchingSelfCheckReport(.init(
+                    decision: decision.reason,
+                    servedSlots: served,
+                    verifiedSlots: decision.verifiedSlots,
+                    key: target.key
+                ))
+            } else {
+                await mlxRuntime.applyServedSlots(served)
+            }
+            resolved.maxConcurrencyOverride = served
             FileHandle.standardError.write(Data(
-                "event=served_slots action=lowered slots=1 reason=cb_inactive_for_loaded_tuple\n".utf8
+                "event=served_slots action=applied slots=\(served) rows=\(plan.rows) reason=\(source)\n".utf8
             ))
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
@@ -3099,6 +3119,21 @@ struct ServeCommand: AsyncParsableCommand {
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
+        // SPEC-038 v0.3.12: qualify continuous batching on this Mac in the
+        // background, only while idle; it never blocks serving.
+        let cbSelfCheckTask: Task<Void, Never>? = {
+            guard let plan = autoServedSlots, plan.selfChecked,
+                  let mlxRuntime = modelRuntime as? ModelRuntime else { return nil }
+            let driver = ContinuousBatchingSelfCheckDriver(
+                runtime: mlxRuntime,
+                providerStatus: providerStatus,
+                store: cbSelfCheckStore,
+                ownerPinnedSlots: plan.ownerPinned,
+                log: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) }
+            )
+            return Task { await driver.run() }
+        }()
+        defer { cbSelfCheckTask?.cancel() }
         let receiptKeyStore = ProviderCredentialStoreFactory.receiptKeyStore(for: resolved)
         let admissionIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey]
         let persistAdmissionIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?

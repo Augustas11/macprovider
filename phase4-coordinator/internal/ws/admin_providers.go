@@ -48,6 +48,7 @@ type adminProviderView struct {
 	AdmissionSandboxed       bool                          `json:"admission_sandboxed,omitempty"`
 	LastAutoupdateEvent      json.RawMessage               `json:"last_autoupdate_event,omitempty"`
 	SafetyTelemetry          *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
+	CBSelfCheck              *pool.ProviderCBSelfCheck     `json:"cb_self_check,omitempty"`
 }
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +288,7 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 		AdmissionSandboxed:       p.AdmissionSandboxed,
 		LastAutoupdateEvent:      p.LastAutoupdateEvent,
 		SafetyTelemetry:          p.SafetyTelemetry,
+		CBSelfCheck:              p.CBSelfCheck,
 	}
 	if !p.ConnectedAt.IsZero() {
 		t := p.ConnectedAt.UTC()

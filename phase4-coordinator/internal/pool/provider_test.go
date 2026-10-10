@@ -3533,3 +3533,23 @@ func TestRegisterDoesNotMigrateMDAProofOnSEKeyChange(t *testing.T) {
 		t.Fatal("MDA proof must not migrate when SE key changes")
 	}
 }
+
+func TestSetCBSelfCheckStoresACopyAndClears(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 5, SlotsFree: 5, MaxConcurrency: 5}, nil)
+	metallib := "metallib-a"
+	in := &ProviderCBSelfCheck{Decision: "granted", ServedSlots: 5, VerifiedK: 6, MetallibSHA256: &metallib}
+	registry.SetCBSelfCheck("p1", in)
+	metallib = "mutated"
+	in.Decision = "mutated"
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok || got.CBSelfCheck == nil || got.CBSelfCheck.Decision != "granted" || got.CBSelfCheck.VerifiedK != 6 ||
+		got.CBSelfCheck.MetallibSHA256 == nil || *got.CBSelfCheck.MetallibSHA256 != "metallib-a" {
+		t.Fatalf("cb_self_check = %+v", got.CBSelfCheck)
+	}
+	registry.SetCBSelfCheck("p1", nil)
+	if got, _ := registry.Resolve("p1", "s1"); got.CBSelfCheck != nil {
+		t.Fatalf("cb_self_check not cleared: %+v", got.CBSelfCheck)
+	}
+	registry.SetCBSelfCheck("unknown", in)
+}

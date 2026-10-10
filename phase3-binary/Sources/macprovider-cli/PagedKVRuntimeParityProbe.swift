@@ -900,7 +900,7 @@ enum PagedKVRuntimeParityProbe {
         }
     }
 
-    private static func serialReference(
+    static func serialReference(
         model: any LanguageModel,
         prompt: [Int]
     ) throws -> SerialReference {

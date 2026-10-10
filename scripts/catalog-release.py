@@ -1465,6 +1465,9 @@ def cb_policy_source_entries() -> list[dict]:
     return result
 
 
+CB_POLICY_STRUCTURAL_EXPIRES_AT = "9999-12-31T23:59:59Z"
+
+
 def default_cb_policy(candidate: bytes, candidate_obj: dict, signer_key_id: str | None = None) -> bytes:
     signer = signer_key_id
     if signer is None:
@@ -1476,7 +1479,9 @@ def default_cb_policy(candidate: bytes, candidate_obj: dict, signer_key_id: str 
     value: dict = {
         "candidate_catalog_sha256": sha256(candidate),
         "entries": cb_policy_source_entries(),
-        "expires_at": "2026-12-25T00:00:00Z",
+        # SPEC-038 v0.3.13: the CB policy only revokes and never expires;
+        # expires_at stays a structural field older CLIs still parse.
+        "expires_at": CB_POLICY_STRUCTURAL_EXPIRES_AT,
         "generated_at": candidate_obj["generated_at"],
         "policy_version": candidate_obj["policy_version"],
         "release_id": candidate_obj["version"],

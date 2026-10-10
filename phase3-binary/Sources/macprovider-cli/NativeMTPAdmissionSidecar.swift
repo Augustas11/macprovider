@@ -701,6 +701,13 @@ enum NativeMTPAdmissionSidecar {
 
         var sourceLayout: String { "separate_artifact" }
 
+        /// SPEC-048-R013 (v0.1.28): admission is model-keyed. Hardware, RAM,
+        /// slot count and runtime revision only prefer the entry measured
+        /// closest to this Mac; the on-device self-check qualifies it here.
+        func matchesModel(context: RuntimeContext) -> Bool {
+            modelKey == context.modelID && artifactHash == context.modelRevision
+        }
+
         func matches(context: RuntimeContext) -> Bool {
             modelKey == context.modelID
                 && artifactHash == context.modelRevision
@@ -1234,6 +1241,7 @@ enum NativeMTPAdmissionSidecar {
 
         var lastSortKey: [String]?
         var selected: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
+        var modelKeyed: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
         for (index, rawEntry) in rawEntries.enumerated() {
             guard case .object(let entryObject) = rawEntry else {
                 throw NativeMTPAdmissionSidecarError.wrongType("$.entries[\(index)]")
@@ -1249,9 +1257,11 @@ enum NativeMTPAdmissionSidecar {
                     throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
                 }
                 selected = (entry, rawEntry)
+            } else if entry.matchesModel(context: context), modelKeyed == nil {
+                modelKeyed = (entry, rawEntry)
             }
         }
-        guard let selected else {
+        guard let selected = selected ?? modelKeyed else {
             throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.entries")
         }
         guard let resolvedArtifactAuthority else {
@@ -1832,15 +1842,9 @@ enum NativeMTPAdmissionSidecar {
     private static func validateLiveTuple(_ parsed: Parsed, context: RuntimeContext) throws {
         guard parsed.modelID == context.modelID else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.id") }
         guard parsed.modelRevision == context.modelRevision else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.revision") }
-        guard parsed.upstreamMLXSwiftLMRevision == context.upstreamMLXSwiftLMRevision else {
-            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.revisions.upstream_mlx_swift_lm")
-        }
-        guard parsed.hardwareChip == canonicalHardwareClass(context.hardwareChip) else {
-            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.hardware.chip")
-        }
-        guard parsed.ramGB == context.ramGB else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.hardware.ram_gb") }
-        guard parsed.osVersion == context.osVersion else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.hardware.os_version") }
-        guard parsed.qualifiedSlots == context.slotCount else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.hardware.qualified_slots") }
+        // SPEC-048-R013 (v0.1.28): runtime revision, hardware, RAM, OS and
+        // slots are the evidence's provenance, not a gate; the on-device
+        // self-check qualifies this Mac.
     }
 
     static func canonicalHardwareClass(_ chip: String) -> String {
@@ -1862,10 +1866,8 @@ enum NativeMTPAdmissionSidecar {
     }
 
     private static func validateRevocation(_ parsed: Parsed, context: RuntimeContext) throws {
-        guard let revoked = context.revokedTupleSHA256 else {
-            throw NativeMTPAdmissionSidecarError.revocationUnavailable
-        }
-        guard !revoked.contains(parsed.tupleSHA256) else {
+        // SPEC-048-R014 (v0.1.28): unknown revocation state revokes nothing.
+        guard !(context.revokedTupleSHA256 ?? []).contains(parsed.tupleSHA256) else {
             throw NativeMTPAdmissionSidecarError.tupleRevoked(parsed.tupleSHA256)
         }
     }

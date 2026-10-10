@@ -21,6 +21,25 @@ struct ContinuousBatchingPolicyEntry: Sendable, Equatable {
     let provenance: ContinuousBatchingPolicyProvenance
 }
 
+/// SPEC-038 FR-CB10 (v0.3.12): the signed policy only revokes. A
+/// `rollout: off` entry forces serial for its model artifact on its runtime
+/// revision (Metal library + paged-KV kernel) on every Mac; hardware class and
+/// the other recorded tuple fields do not narrow it. Positive entries no longer
+/// authorize anything beyond the provisional pre-self-check grant and the
+/// AC-26 cached-turn grant.
+struct ContinuousBatchingRevocation: Sendable, Equatable {
+    let modelKey: String
+    let modelSHA256: String
+    let metallibSHA256: String
+    let kernelIdentifier: String
+
+    func revokes(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
+        tuple.modelSHA256 == modelSHA256
+            && tuple.metallibSHA256 == metallibSHA256
+            && tuple.kernelIdentifier == kernelIdentifier
+    }
+}
+
 struct ContinuousBatchingPolicySelection: Sendable, Equatable {
     let releaseID: String
     let policyVersion: String
@@ -30,6 +49,7 @@ struct ContinuousBatchingPolicySelection: Sendable, Equatable {
     let signerKeyID: String
     let source: String
     let entries: [ContinuousBatchingPolicyEntry]
+    var revocations: [ContinuousBatchingRevocation] = []
 
     static let emptyOff = ContinuousBatchingPolicySelection(
         releaseID: "baked-empty-off",
@@ -166,7 +186,15 @@ enum ContinuousBatchingSignedPolicy {
             candidateCatalogSHA256: parsed.candidateCatalogSHA256,
             signerKeyID: parsed.signerKeyID,
             source: source,
-            entries: parsed.entries.filter { $0.rollout != .off }
+            entries: parsed.entries.filter { $0.rollout != .off },
+            revocations: parsed.entries.filter { $0.rollout == .off }.map {
+                ContinuousBatchingRevocation(
+                    modelKey: $0.modelKey,
+                    modelSHA256: $0.tuple.modelSHA256,
+                    metallibSHA256: $0.tuple.metallibSHA256,
+                    kernelIdentifier: $0.tuple.kernelIdentifier
+                )
+            }
         )
     }
 

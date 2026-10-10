@@ -2400,6 +2400,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "local_proof_result": policy?.localProofResult ?? "not_run",
                 "decision_reason": policy?.decisionReason ?? "policy_absent",
             ],
+            "self_check": snapshot?.selfCheck.map { $0.jsonObject as Any } ?? NSNull(),
             "scheduler": [
                 "active_decode_rows": scheduler?.activeDecodeRows ?? 0,
                 "waiting_count": scheduler?.waitingCount ?? 0,

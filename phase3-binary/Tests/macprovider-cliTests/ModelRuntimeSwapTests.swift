@@ -5,7 +5,7 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeSwapTests: XCTestCase {
-    func testNativeMTPAdmissionIgnoresRecordedCLIIdentityButPinsDecodePath() {
+    func testNativeMTPAdmissionIgnoresRecordedBuildIdentityButPinsTargetArtifact() {
         let source = String(repeating: "a", count: 40)
         let build = String(repeating: "b", count: 64)
         let cdHash = String(repeating: "1", count: 40)
@@ -39,9 +39,11 @@ final class ModelRuntimeSwapTests: XCTestCase {
             targetModelRevision: target,
             runningBuildIdentity: laterRelease
         ))
-        // Decode-path identity stays pinned: upstream MLX revision of the
-        // running build, of the admission, and the target artifact.
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+        // SPEC-048-R013 (v0.1.28): the upstream MLX revision of the running
+        // build or of the admission is provenance (a fork bump keeps native
+        // MTP; the on-device self-check qualifies it). The target artifact
+        // stays pinned.
+        XCTAssertTrue(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             capability,
             targetModelRevision: target,
             runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
@@ -51,7 +53,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
                 upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40)
             )
         ))
-        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+        XCTAssertTrue(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
             makeNativeMTPAdmissionCapability(
                 providerRevision: source,
                 upstreamRevision: String(repeating: "f", count: 40),

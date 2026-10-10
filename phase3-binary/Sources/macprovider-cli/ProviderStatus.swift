@@ -703,6 +703,18 @@ actor ProviderStatus {
         resetSpecDecodeWindow()
     }
 
+    /// SPEC-038-R011: the continuous-batching self-check changed the served
+    /// slot count; heartbeats and relay admission read it from here.
+    func updateServedSlots(_ slots: Int) {
+        capacity = ProviderCapacity(
+            maxContextOverride: capacity.maxContextTokens,
+            maxConcurrencyOverride: max(1, slots),
+            throughputTPSEstimate: capacity.throughputTPSEstimate,
+            maxContextSource: capacity.maxContextSource,
+            throughputProbe: capacity.throughputProbe
+        )
+    }
+
     func completeTargetSwap(
         modelID: String,
         modelHash: String?,

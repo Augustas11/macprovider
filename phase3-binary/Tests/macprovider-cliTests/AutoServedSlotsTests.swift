@@ -30,46 +30,51 @@ final class AutoServedSlotsTests: XCTestCase {
         XCTAssertThrowsError(try load(file: "max_concurrency_source: me\n"))
     }
 
-    // MARK: - Resolution precedence
+    // MARK: - Plan precedence
 
-    func testOwnerPinnedIsKeptEvenWhenBatchingIsAuthorized() {
-        let decision = AutoServedSlots.resolve(
-            configuredSlots: 2, source: .owner, draftConfigured: false,
-            continuousBatchingAuthorized: true, recommendedSlots: { 8 }
+    private func plan(
+        configured: Int? = nil,
+        source: MaxConcurrencySource? = nil,
+        draft: Bool = false,
+        emergencyOff: Bool = false,
+        provisional: Bool = false,
+        recommended: Int = 4
+    ) -> AutoServedSlots.Plan {
+        AutoServedSlots.plan(
+            configuredSlots: configured, source: source, draftConfigured: draft,
+            emergencyOff: emergencyOff, provisionalPolicyEntry: provisional,
+            recommendedSlots: { recommended }
         )
-        XCTAssertEqual(decision, .init(slots: 2, reason: "owner_pinned"))
     }
 
-    func testAutotuneDerivedIsRaisedWhenBatchingIsAuthorized() {
-        let decision = AutoServedSlots.resolve(
-            configuredSlots: 1, source: nil, draftConfigured: false,
-            continuousBatchingAuthorized: true, recommendedSlots: { 4 }
-        )
-        XCTAssertEqual(decision, .init(slots: 4, reason: "cb_authorized"))
+    func testOwnerPinnedIsKept() {
+        let pinned = plan(configured: 2, source: .owner, recommended: 8)
+        XCTAssertEqual(pinned, .init(rows: 2, initialServed: 2, ownerPinned: 2, reason: "owner_pinned"))
+        XCTAssertTrue(pinned.selfChecked)
     }
 
-    func testNotAuthorizedServesOneSlot() {
-        let decision = AutoServedSlots.resolve(
-            configuredSlots: 8, source: .autotune, draftConfigured: false,
-            continuousBatchingAuthorized: false, recommendedSlots: { 8 }
-        )
-        XCTAssertEqual(decision, .init(slots: 1, reason: "cb_not_authorized"))
+    func testAutotuneDerivedStartsAtOneWithRecommendedRows() {
+        let pending = plan(configured: 8, source: .autotune, recommended: 4)
+        XCTAssertEqual(pending, .init(rows: 4, initialServed: 1, ownerPinned: nil, reason: "self_check_pending"))
     }
 
-    func testDraftModelForcesOneSlot() {
-        let decision = AutoServedSlots.resolve(
-            configuredSlots: nil, source: nil, draftConfigured: true,
-            continuousBatchingAuthorized: true, recommendedSlots: { 8 }
-        )
-        XCTAssertEqual(decision, .init(slots: 1, reason: "draft_model"))
+    func testProvisionalPolicyEntryKeepsTheConfiguredCount() {
+        let provisional = plan(configured: 8, provisional: true, recommended: 4)
+        XCTAssertEqual(provisional, .init(rows: 8, initialServed: 8, ownerPinned: nil, reason: "provisional_policy_entry"))
     }
 
-    func testRecommendationNeverExceedsTheServedHardCap() {
-        let decision = AutoServedSlots.resolve(
-            configuredSlots: nil, source: nil, draftConfigured: false,
-            continuousBatchingAuthorized: true, recommendedSlots: { 500 }
-        )
-        XCTAssertEqual(decision.slots, ProviderCapacity.maxConcurrencyOverrideLimit)
+    func testDraftModelAndEmergencyOffForceOneSlotWithoutSelfCheck() {
+        let draft = plan(configured: 4, draft: true, provisional: true, recommended: 8)
+        XCTAssertEqual(draft.rows, 1)
+        XCTAssertEqual(draft.initialServed, 1)
+        XCTAssertFalse(draft.selfChecked)
+        let off = plan(configured: 4, emergencyOff: true, recommended: 8)
+        XCTAssertEqual(off.initialServed, 1)
+        XCTAssertFalse(off.selfChecked)
+    }
+
+    func testRowsNeverExceedTheServedHardCap() {
+        XCTAssertEqual(plan(recommended: 500).rows, ProviderCapacity.maxConcurrencyOverrideLimit)
     }
 
     // MARK: - Recommendation for this Mac
@@ -88,9 +93,9 @@ final class AutoServedSlotsTests: XCTestCase {
         XCTAssertEqual(AutoServedSlots.recommendedSlots(chip: "Apple M4", memoryGB: 16, memoryFitCap: nil), 1)
     }
 
-    // MARK: - Policy load changes the advertised capacity
+    // MARK: - Provisional grant from the signed policy
 
-    func testPolicyChangeBetweenStartsChangesAdvertisedCapacity() {
+    func testPositiveEntryForTheServedModelIsAProvisionalGrant() {
         let keys: Set<String> = ["qwen3.6-35b-a3b"]
         let empty = ContinuousBatchingPolicyLoadResult(
             selection: .emptyOff, status: .absentFallback, policySHA256: nil, signerKeyID: nil
@@ -99,23 +104,14 @@ final class AutoServedSlotsTests: XCTestCase {
             selection: ContinuousBatchingPolicySelection(
                 releaseID: "r", policyVersion: "v", generatedAt: .distantPast, expiresAt: .distantFuture,
                 candidateCatalogSHA256: "", signerKeyID: "k", source: "coordinator",
-                entries: [Self.entry(modelKey: "qwen3.6-35b-a3b", rollout: .on)]
+                entries: [Self.entry(modelKey: "qwen3.6-35b-a3b", rollout: .canary)]
             ),
             status: .liveVerified, policySHA256: "p", signerKeyID: "k"
         )
-        func advertised(_ policy: ContinuousBatchingPolicyLoadResult) -> Int {
-            let decision = AutoServedSlots.resolve(
-                configuredSlots: 1, source: nil, draftConfigured: false,
-                continuousBatchingAuthorized: AutoServedSlots.policyAuthorizesServedModel(
-                    policy, modelKeys: keys, emergencyOff: false
-                ),
-                recommendedSlots: { 4 }
-            )
-            return ProviderCapacity(maxContextOverride: 4_000, maxConcurrencyOverride: decision.slots).maxConcurrency
-        }
-        XCTAssertEqual(advertised(empty), 1)
-        XCTAssertEqual(advertised(live), 4)
+        XCTAssertFalse(AutoServedSlots.policyAuthorizesServedModel(empty, modelKeys: keys, emergencyOff: false))
+        XCTAssertTrue(AutoServedSlots.policyAuthorizesServedModel(live, modelKeys: keys, emergencyOff: false))
         XCTAssertFalse(AutoServedSlots.policyAuthorizesServedModel(live, modelKeys: keys, emergencyOff: true))
+        XCTAssertFalse(AutoServedSlots.policyAuthorizesServedModel(live, modelKeys: ["llama"], emergencyOff: false))
     }
 
     // MARK: - Helpers
@@ -124,7 +120,7 @@ final class AutoServedSlotsTests: XCTestCase {
         try ConfigLoader.load(cli: cli, environment: environment, fileExists: { _ in true }, readFile: { _ in file })
     }
 
-    private static func entry(modelKey: String, rollout: ContinuousBatchingMode) -> ContinuousBatchingPolicyEntry {
+    static func entry(modelKey: String, rollout: ContinuousBatchingMode) -> ContinuousBatchingPolicyEntry {
         ContinuousBatchingPolicyEntry(
             tupleSHA256: String(repeating: "a", count: 64),
             modelKey: modelKey,

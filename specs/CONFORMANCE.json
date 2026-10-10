@@ -888,7 +888,7 @@
     {
       "spec_id": "SPEC-031",
       "title": "Canary Probe, Degrade & Sanction Lifecycle",
-      "version": "v0.3.6",
+      "version": "v0.3.7",
       "path": "specs/SPEC-031-canary-degrade-sanctions.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1135,7 +1135,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.14",
+      "version": "v0.1.15",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4911,8 +4911,16 @@
       "requirement_id": "SPEC-038-R010",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:actor ContinuousBatchingSelfCheckDriver {",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testShippedPolicyKeepsTheStudioQwenTupleBatching",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testRolloutOffRevokesTheModelOnItsRuntimeRevisionOnly"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -4925,8 +4933,13 @@
       "requirement_id": "SPEC-038-R011",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutoServedSlots.swift:static func plan"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testOwnerPinnedIsKept",
+        "phase3-binary/Tests/macprovider-cliTests/AutoServedSlotsTests.swift:testM1AndM2NonUltraCapAtFive"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -10844,11 +10857,13 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestChallenge",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestRuntimeTuple"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPSelfTest.swift:NativeMTPSelfTestRuntimeTuple",
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:enum NativeMTPOnDeviceSelfCheck"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testChallengeBankParsesExactRecordAndPassingExecutionEvaluatesTupleOnlyPass",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testEvaluatorRejectsEachRuntimeMismatch"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelfTestTests.swift:testEvaluatorRejectsEachRuntimeMismatch",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testTokenMismatchKeepsNativeMTPOff"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"

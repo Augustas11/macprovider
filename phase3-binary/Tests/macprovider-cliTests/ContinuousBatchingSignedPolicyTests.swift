@@ -57,6 +57,77 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         XCTAssertFalse(selection.acceptanceCoverage.covers(fixture.requestedTuple))
     }
 
+    /// SPEC-038 v0.3.12: the policy is revocation-only. A `rollout: off`
+    /// entry forces serial for its model artifact on its runtime revision on
+    /// every Mac; anything else the engine admits stays covered.
+    func testRolloutOffRevokesTheModelOnItsRuntimeRevisionOnly() throws {
+        let fixture = try makeFixture(mutate: { entry in
+            entry["rollout"] = "off"
+        })
+        let selection = try ContinuousBatchingSignedPolicy.verify(
+            policyData: fixture.policyData,
+            signatureData: fixture.signatureData,
+            catalog: fixture.catalog,
+            trustedKeyring: fixture.trustedKeyring,
+            now: fixture.now
+        )
+        XCTAssertEqual(selection.revocations.count, 1)
+        let coverage = ContinuousBatchingAcceptanceCoverage.defaultOn(revocations: selection.revocations)
+        let tuple = fixture.requestedTuple
+        XCTAssertFalse(coverage.covers(tuple))
+        XCTAssertTrue(coverage.isRevoked(Self.tuple(tuple, hardwareClass: "apple-silicon:Apple M1:ram-16gb")))
+        XCTAssertTrue(coverage.covers(Self.tuple(tuple, metallibSHA256: String(repeating: "9", count: 64))))
+        XCTAssertTrue(coverage.covers(Self.tuple(tuple, kernelIdentifier: "macprovider_paged_kv_gather_v2")))
+    }
+
+    func testPositiveEntriesDoNotNarrowDefaultOnCoverage() throws {
+        let fixture = try makeFixture()
+        let selection = try ContinuousBatchingSignedPolicy.verify(
+            policyData: fixture.policyData,
+            signatureData: fixture.signatureData,
+            catalog: fixture.catalog,
+            trustedKeyring: fixture.trustedKeyring,
+            now: fixture.now
+        )
+        XCTAssertTrue(selection.revocations.isEmpty)
+        let coverage = ContinuousBatchingAcceptanceCoverage.defaultOn(
+            revocations: selection.revocations,
+            acceptedTuples: selection.entries.map(\.tuple)
+        )
+        let otherRuntime = Self.tuple(fixture.requestedTuple, metallibSHA256: String(repeating: "9", count: 64))
+        XCTAssertTrue(coverage.covers(otherRuntime))
+        XCTAssertTrue(coverage.covers(Self.tuple(fixture.requestedTuple, hardwareClass: "apple-silicon:Apple M2:ram-24gb")))
+        // The AC-26 cached-turn grant stays exact-tuple.
+        XCTAssertTrue(coverage.coversCachedTurns(fixture.requestedTuple))
+        XCTAssertFalse(coverage.coversCachedTurns(otherRuntime))
+        // An absent or invalid policy revokes nothing.
+        XCTAssertTrue(ContinuousBatchingAcceptanceCoverage.defaultOn(
+            revocations: ContinuousBatchingPolicySelection.emptyOff.revocations
+        ).covers(fixture.requestedTuple))
+    }
+
+    private static func tuple(
+        _ base: ContinuousBatchingRequestedTuple,
+        hardwareClass: String? = nil,
+        metallibSHA256: String? = nil,
+        kernelIdentifier: String? = nil
+    ) -> ContinuousBatchingRequestedTuple {
+        ContinuousBatchingRequestedTuple(
+            modelID: base.modelID,
+            modelSHA256: base.modelSHA256,
+            tokenizerSHA256: base.tokenizerSHA256,
+            chatTemplateSHA256: base.chatTemplateSHA256,
+            cacheClass: base.cacheClass,
+            kvDType: base.kvDType,
+            requiresMoE: base.requiresMoE,
+            hardwareClass: hardwareClass ?? base.hardwareClass,
+            metallibSHA256: metallibSHA256 ?? base.metallibSHA256,
+            kernelIdentifier: kernelIdentifier ?? base.kernelIdentifier,
+            parityLabel: base.parityLabel,
+            poolEpoch: base.poolEpoch
+        )
+    }
+
     func testProviderCLIIdentityIsRecordedProvenanceNotAGate() throws {
         let fixture = try makeFixture()
         let selection = try ContinuousBatchingSignedPolicy.verify(

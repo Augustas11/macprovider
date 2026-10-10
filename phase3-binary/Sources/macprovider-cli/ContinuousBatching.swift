@@ -126,9 +126,33 @@ struct ContinuousBatchingRequestedTuple: Sendable, Equatable {
 /// inheriting an entry recorded on a different kernel. `parityLabel` is derived
 /// from these fields plus the pool shape, and `poolEpoch` is per-boot; both stay
 /// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first.
+///
+/// SPEC-038 v0.3.12: production serve uses `defaultOn(revocations:)`. Every
+/// tuple the local engine admits is covered unless a signed revocation names
+/// its model artifact and runtime revision; whether batching then runs is the
+/// on-device self-check's decision (`ContinuousBatchingSelfCheck`). Accepted
+/// tuples remain only for the AC-26 cached-turn grant and `--no-join` lab use.
 struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
     let acceptedTuples: [ContinuousBatchingAcceptedTuple]
     private let unrestricted: Bool
+    private var defaultOn = false
+    private(set) var revocations: [ContinuousBatchingRevocation] = []
+
+    static func defaultOn(
+        revocations: [ContinuousBatchingRevocation],
+        acceptedTuples: [ContinuousBatchingAcceptedTuple] = []
+    ) -> ContinuousBatchingAcceptanceCoverage {
+        var coverage = ContinuousBatchingAcceptanceCoverage(acceptedTuples: acceptedTuples)
+        coverage.defaultOn = true
+        coverage.revocations = revocations
+        return coverage
+    }
+
+    var isDefaultOn: Bool { defaultOn }
+
+    func isRevoked(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
+        revocations.contains { $0.revokes(tuple) }
+    }
 
     static let empty = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [])
 
@@ -151,6 +175,8 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
 
     func covers(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
         if unrestricted { return true }
+        if isRevoked(tuple) { return false }
+        if defaultOn { return true }
         return acceptedTuples.contains { Self.matches($0, tuple) }
     }
 
@@ -159,6 +185,7 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
     /// positive-cached batched turns).
     func coversCachedTurns(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
         if unrestricted { return true }
+        if isRevoked(tuple) { return false }
         return acceptedTuples.contains { $0.cachedTurnsAccepted && Self.matches($0, tuple) }
     }
 

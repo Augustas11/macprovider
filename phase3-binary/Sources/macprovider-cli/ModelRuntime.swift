@@ -314,6 +314,8 @@ public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public let cacheClass: String
     public let policy: RuntimeContinuousBatchingPolicySnapshot
     public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
+    /// SPEC-038 v0.3.12 on-device self-check state; nil when none ran.
+    public var selfCheck: ContinuousBatchingSelfCheckReport? = nil
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -1638,6 +1640,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private let continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult
     private let continuousBatchingModeExplicitlyConfigured: Bool
     private let continuousBatchingEmergencyOffOverride: Bool
+    /// SPEC-038 v0.3.12: the on-device self-check's decision for the loaded
+    /// tuple. Reset to pending on every swap.
+    private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
+    private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -2919,16 +2925,40 @@ actor ModelRuntime: ModelRuntimeServing {
             let selfTestReceipt: NativeMTPSelfTestReceipt?
             if let scheduler = self.continuousBatchScheduler {
                 do {
-                    let receipt = try await self.executeNativeMTPSelfTest(
+                    // SPEC-048-R016 (v0.1.28): qualify native MTP on this Mac.
+                    // MTP-on greedy output must equal ordinary decode on the same
+                    // paged engine, and MTP must beat it by the R015 decode bar.
+                    // A pre-signed token digest from another runtime revision is
+                    // not the reference.
+                    var receipt: NativeMTPSelfTestReceipt?
+                    var mtpSeconds = Double.infinity
+                    for _ in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+                        let start = Date()
+                        receipt = try await self.executeNativeMTPSelfTest(
+                            nativeMTPLoad.selfTestInput,
+                            scheduler: scheduler,
+                            capability: nativeMTPLoad.capability,
+                            servedSnapshotID: nativeMTPLoad.servedSnapshotID
+                        )
+                        mtpSeconds = min(mtpSeconds, Date().timeIntervalSince(start))
+                    }
+                    let ordinary = try await self.executeNativeMTPOrdinaryReference(
                         nativeMTPLoad.selfTestInput,
-                        scheduler: scheduler,
-                        capability: nativeMTPLoad.capability,
-                        servedSnapshotID: nativeMTPLoad.servedSnapshotID
+                        scheduler: scheduler
                     )
-                    if (try? await NativeMTPSelfTestRunner { _ in receipt }.validate(nativeMTPLoad.selfTestInput)) != nil {
+                    let verdict = NativeMTPOnDeviceSelfCheck.decide(
+                        mtpTokens: receipt?.generatedTokenIDs ?? [],
+                        mtpSeconds: mtpSeconds,
+                        ordinaryTokens: ordinary.tokens,
+                        ordinarySeconds: ordinary.seconds
+                    )
+                    FileHandle.standardError.write(Data(
+                        "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
+                    ))
+                    if let receipt, verdict.passed, receipt.actualDecodePath == .nativeMTP, !receipt.fallbackUsed {
                         selfTestReceipt = receipt
                     } else {
-                        selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_receipt_invalid")
+                        selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
                     }
                 } catch {
                     selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
@@ -3328,7 +3358,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         slotsFree: $0.slotsFree,
                         sharedForwardCalls: $0.sharedForwardCalls
                     )
-                }
+                },
+                selfCheck: continuousBatchingSelfCheckReport
             ),
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPCapability: currentNativeMTPCapability,
@@ -3381,6 +3412,12 @@ actor ModelRuntime: ModelRuntimeServing {
         let decisionReason: String
         if continuousBatchingEmergencyOffOverride {
             decisionReason = "emergency_off"
+        } else if let requestedTuple, continuousBatchingAcceptanceCoverage.isRevoked(requestedTuple) {
+            decisionReason = "revoked"
+        } else if case .granted(let slots) = continuousBatchingSelfCheck {
+            decisionReason = "self_check_granted_\(slots)"
+        } else if case .refused(let reason) = continuousBatchingSelfCheck {
+            decisionReason = "self_check_refused_\(reason)"
         } else if loadResult.status != .liveVerified {
             decisionReason = loadResult.status.rawValue
         } else if requestedTuple == nil {
@@ -3516,28 +3553,39 @@ actor ModelRuntime: ModelRuntimeServing {
         let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
         let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
         let store = KeychainNativeMTPRevocationStore.live()
+        // SPEC-048-R014 (v0.1.28): only a feed naming the tuple disables it.
+        // A stale or unreachable feed revokes nothing; polling resumes.
         nativeMTPRevocationRefreshTask = Task { [weak self] in
-            await NativeMTPRevocationFeedManager.pollWhileActive(
-                pinnedSignerKeyID: signerKeyID,
-                tupleSHA256: tupleSHA256,
-                verifier: verifier,
-                store: store,
-                initialExpiresAt: load.revocationExpiresAt
-            ) { _ in
-                await self?.disableNativeMTPTuple(
-                    admissionTupleSHA256: tupleSHA256,
-                    servedSnapshotID: servedSnapshotID,
-                    targetGeneration: targetGeneration
-                )
-            } onUnavailable: {
-                await self?.disableNativeMTPTuple(
-                    admissionTupleSHA256: tupleSHA256,
-                    servedSnapshotID: servedSnapshotID,
-                    targetGeneration: targetGeneration,
-                    reason: .revocationStateUnavailable
-                )
+            while !Task.isCancelled {
+                let revoked = RevokedFlag()
+                await NativeMTPRevocationFeedManager.pollWhileActive(
+                    pinnedSignerKeyID: signerKeyID,
+                    tupleSHA256: tupleSHA256,
+                    verifier: verifier,
+                    store: store
+                ) { _ in
+                    revoked.set()
+                    await self?.disableNativeMTPTuple(
+                        admissionTupleSHA256: tupleSHA256,
+                        servedSnapshotID: servedSnapshotID,
+                        targetGeneration: targetGeneration
+                    )
+                } onUnavailable: {
+                    FileHandle.standardError.write(Data(
+                        "event=native_mtp_revocation_feed action=unavailable effect=none\n".utf8
+                    ))
+                }
+                if revoked.isSet || Task.isCancelled { return }
+                try? await Task.sleep(nanoseconds: UInt64(NativeMTPRevocationFeedManager.refreshIntervalSeconds * 1_000_000_000))
             }
         }
+    }
+
+    private final class RevokedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     private func stopNativeMTPRevocationRefresh() {
@@ -3615,6 +3663,36 @@ actor ModelRuntime: ModelRuntimeServing {
             actualDecodePath: .nativeMTP,
             fallbackUsed: false
         )
+    }
+
+    /// The same challenge prompt on the ordinary decode path of the same
+    /// scheduler: the reference the MTP self-check output must equal. Best of
+    /// `NativeMTPOnDeviceSelfCheck.repetitions` timed runs.
+    private func executeNativeMTPOrdinaryReference(
+        _ input: NativeMTPSelfTestInput,
+        scheduler: ContinuousBatchScheduler
+    ) async throws -> (tokens: [Int], seconds: Double) {
+        guard let challenge = input.selectedChallenge else {
+            throw NativeMTPSelfTestError.failed("missing_challenge_record")
+        }
+        var tokens: [Int] = []
+        var seconds = Double.infinity
+        for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+            let id = "native-mtp-selfcheck-ordinary-\(challenge.challengeID)-\(attempt)"
+            let start = Date()
+            let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                id: id,
+                conversationKey: "",
+                promptTokens: challenge.promptTokenIDs,
+                maxOutputTokens: challenge.maxCompletionTokens,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                temperature: 0,
+                topP: 1
+            ))
+            seconds = min(seconds, Date().timeIntervalSince(start))
+            tokens = result.generatedTokens
+        }
+        return (tokens, seconds)
     }
 
     func runNativeMTPCanary(_ request: CoordinatorClient.NativeMTPCanaryRequestPayload) async -> CoordinatorClient.NativeMTPCanaryResultPayload {
@@ -4339,16 +4417,154 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch
     }
 
-    /// SPEC-038-R011: lowers the served slot count when continuous batching
-    /// turned out inactive for the loaded tuple. Only `serve` calls it, right
-    /// after load and before the startup probe or any request, so no permit of
-    /// the replaced gate is held. Never raises: the memory envelope, scheduler
-    /// rows, and native-MTP slot sizing were set for the larger count.
-    func lowerServedSlotsBeforeServing(to slots: Int) {
-        let lowered = max(1, slots)
-        guard lowered < maxBatch else { return }
-        maxBatch = lowered
-        inferenceGate = AsyncSemaphore(value: lowered)
+    /// SPEC-038-R011 (v0.3.12): the served slot count is the serial-path
+    /// gate; scheduler rows stay at `maxBatch`, the most any self-check may
+    /// grant, and the relay admits at most the advertised slots. Never above
+    /// `maxBatch`: the memory envelope and scheduler were sized for it. A
+    /// request already holding a permit of the replaced gate releases it there.
+    func applyServedSlots(_ slots: Int) {
+        inferenceGate = AsyncSemaphore(value: min(max(1, slots), maxBatch))
+    }
+
+    /// The self-check subject for the loaded model, or nil when there is
+    /// nothing to check: a decision already exists, batching cannot run here
+    /// (emergency off, draft model, no attached scheduler), or a signed
+    /// revocation names this model on this runtime revision.
+    func continuousBatchingSelfCheckTarget() -> ContinuousBatchingSelfCheckTarget? {
+        guard continuousBatchingSelfCheck == .pending,
+              !continuousBatchingEmergencyOffOverride,
+              currentDraftModelID == nil,
+              continuousBatchScheduler != nil,
+              let tuple = continuousBatchingRequestedTuple(),
+              !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
+        else { return nil }
+        return ContinuousBatchingSelfCheckTarget(
+            key: ContinuousBatchingSelfCheckKey(
+                modelSHA256: tuple.modelSHA256,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier,
+                hardwareClass: tuple.hardwareClass,
+                osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild
+            ),
+            maxRows: maxBatch
+        )
+    }
+
+    /// True when the loaded tuple can batch at all; false sends `serve` to one
+    /// slot unless the owner pinned the count.
+    func continuousBatchingCapableForServedSlots() -> Bool {
+        guard !continuousBatchingEmergencyOffOverride,
+              currentDraftModelID == nil,
+              continuousBatchScheduler != nil,
+              let tuple = continuousBatchingRequestedTuple()
+        else { return false }
+        return !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
+    }
+
+    func applyContinuousBatchingSelfCheck(_ state: ContinuousBatchingSelfCheckState, servedSlots: Int) {
+        continuousBatchingSelfCheck = state
+        applyServedSlots(servedSlots)
+    }
+
+    func setContinuousBatchingSelfCheckReport(_ report: ContinuousBatchingSelfCheckReport?) {
+        continuousBatchingSelfCheckReport = report
+    }
+
+    func continuousBatchingSelfCheckState() -> ContinuousBatchingSelfCheckState {
+        continuousBatchingSelfCheck
+    }
+
+    /// Greedy prompts for the self-check, tokenized with the loaded chat
+    /// template so rows look like buyer turns.
+    func continuousBatchingSelfCheckPrompts(_ texts: [String]) async throws -> [[Int]] {
+        guard let container = currentContainer else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
+        }
+        return try await container.perform { context in
+            var prompts: [[Int]] = []
+            for text in texts {
+                let lmInput = try await context.processor.prepare(input: UserInput(chat: [.user(text)]))
+                prompts.append(lmInput.text.tokens.asArray(Int32.self).map(Int.init))
+            }
+            return prompts
+        }
+    }
+
+    /// SPEC-038 FR-CB10: whether a batched row's first divergence from the
+    /// same prompt run alone is a numerical near-tie, judged with the load-time
+    /// isolation probe's own rule (`PagedKVRuntimeParityProbe
+    /// .batchedTokenIsConformant`, 1.0-logit runner-up bound, other-row leak
+    /// guard) against the stock serial logits of the shared prefix, and with
+    /// the alone token also in that top two. Returns the logit margin between
+    /// the two tokens for the evidence log.
+    func continuousBatchingSelfCheckDivergence(
+        prompt: [Int],
+        sharedPrefix: [Int],
+        aloneToken: Int,
+        batchedToken: Int,
+        otherRowsAloneTokens: [Int]
+    ) async throws -> (nearTie: Bool, margin: Float?, reason: String) {
+        guard let container = currentContainer else { return (false, nil, "model_unavailable") }
+        let reference = try await container.perform { context in
+            try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+        }
+        let logits = reference.logits
+        let margin: Float? = logits.indices.contains(aloneToken) && logits.indices.contains(batchedToken)
+            ? abs(logits[aloneToken] - logits[batchedToken])
+            : nil
+        let tolerance = PagedKVRuntimeParityProbe.batchedArgmaxLogitTolerance
+        let leaked = batchedToken != reference.top1 && otherRowsAloneTokens.contains(batchedToken)
+        let batchedConformant = !leaked && PagedKVRuntimeParityProbe.batchedTokenIsConformant(
+            decoded: batchedToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
+        )
+        let aloneConformant = PagedKVRuntimeParityProbe.batchedTokenIsConformant(
+            decoded: aloneToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
+        )
+        if leaked { return (false, margin, "other_row_token") }
+        if !batchedConformant { return (false, margin, "batched_outside_serial_top2") }
+        if !aloneConformant { return (false, margin, "alone_outside_serial_top2") }
+        guard let margin, margin <= tolerance else { return (false, margin, "margin_above_tolerance") }
+        return (true, margin, "near_tie")
+    }
+
+    /// Runs `prompts` together on the attached scheduler at temperature 0 and
+    /// returns each row's tokens and the wall time. Cancelling the calling
+    /// task cancels every row.
+    func runContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]],
+        maxOutputTokens: Int,
+        idPrefix: String
+    ) async throws -> (outputs: [[Int]], seconds: Double) {
+        guard let scheduler = continuousBatchScheduler else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
+        }
+        let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
+        let start = Date()
+        let outputs = try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: (Int, [Int]).self) { group in
+                for (index, prompt) in prompts.enumerated() {
+                    let id = ids[index]
+                    group.addTask {
+                        let result = try await scheduler.submit(ContinuousBatchSchedulerRequest(
+                            id: id,
+                            conversationKey: "",
+                            promptTokens: prompt,
+                            maxOutputTokens: maxOutputTokens,
+                            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+                            temperature: 0,
+                            topP: 1
+                        ))
+                        return (index, result.generatedTokens)
+                    }
+                }
+                var rows = Array(repeating: [Int](), count: prompts.count)
+                for try await (index, tokens) in group { rows[index] = tokens }
+                return rows
+            }
+        } onCancel: {
+            Task { for id in ids { await scheduler.cancel(requestID: id) } }
+        }
+        return (outputs, Date().timeIntervalSince(start))
     }
 
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
@@ -4402,10 +4618,28 @@ actor ModelRuntime: ModelRuntimeServing {
     ) -> ContinuousBatchingMode {
         if continuousBatchingEmergencyOffOverride { return .off }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
-        let policyMode = tuple.flatMap { requested in
+        if let tuple, continuousBatchingAcceptanceCoverage.isRevoked(tuple) { return .off }
+        // SPEC-038 v0.3.12: a signed positive entry for this model artifact is
+        // a provisional grant that keeps an already-enabled model batching
+        // until this Mac's self-check decides; the self-check result rules.
+        let provisionalMode = tuple.flatMap { requested in
             continuousBatchingPolicyLoadResult.selection.entries.first { entry in
-                ContinuousBatchingAcceptanceCoverage(acceptedTuples: [entry.tuple]).covers(requested)
+                entry.tuple.modelID == requested.modelID && entry.tuple.modelSHA256 == requested.modelSHA256
             }?.rollout
+        }
+        let policyMode: ContinuousBatchingMode?
+        switch continuousBatchingSelfCheck {
+        case .granted:
+            policyMode = provisionalMode ?? .canary
+        case .refused:
+            // This Mac measured the tuple and it did not qualify; an explicit
+            // expert mode does not override that.
+            return .off
+        case .pending:
+            // Production (default-on coverage) serves serially until the
+            // self-check decides, unless a provisional grant applies.
+            if continuousBatchingAcceptanceCoverage.isDefaultOn && provisionalMode == nil { return .off }
+            policyMode = provisionalMode
         }
         guard let policyMode else {
             // An explicit expert/test mode retains the existing strict/canary
@@ -5093,6 +5327,9 @@ actor ModelRuntime: ModelRuntimeServing {
         adoptionKnobs: ModelRuntimeAdoptionServeKnobs?
     ) async {
         let target = targetModelID ?? modelID
+        // SPEC-038 v0.3.12: a new model or runtime is re-checked.
+        continuousBatchingSelfCheck = .pending
+        continuousBatchingSelfCheckReport = nil
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
@@ -8789,6 +9026,47 @@ actor ModelRuntime: ModelRuntimeServing {
         Double(completionTokens) / max(elapsedSeconds, 0.001)
     }
 
+    /// SPEC-038 FR-CB10 serial baseline: the self-check prompts run one at a
+    /// time through stock serial decode (the path a one-slot provider
+    /// serves), as total generated tokens over total wall time, so the
+    /// batched aggregate is compared on the same work.
+    func continuousBatchingSelfCheckSerialTPS(prompts: [[Int]], maxTokens: Int) async throws -> Double {
+        guard let container = currentContainer else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
+        }
+        let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
+        let blockingInferenceExecutor = blockingInferenceExecutor
+        var tokens = 0
+        var seconds = 0.0
+        for prompt in prompts {
+            try Task.checkCancellation()
+            let start = Date()
+            let result: BlockingGenerateResult = try await inferenceGate.withPermit {
+                try await container.perform { context in
+                    let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
+                    let parameters = Self.makeServeGenerateParameters(
+                        maxTokens: maxTokens,
+                        maxContextTokens: maxContextTokens,
+                        kvBitsOverride: kvBitsOverride,
+                        prefillStepSize: prefillStepSize,
+                        temperature: 0.0,
+                        topP: 1.0
+                    )
+                    return try await blockingInferenceExecutor.run { _ in
+                        BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                            GenerateDisposition.more
+                        })
+                    }
+                }
+            }
+            seconds += Date().timeIntervalSince(start)
+            tokens += result.generationTokenCount
+        }
+        return seconds > 0 ? Double(tokens) / seconds : 0
+    }
+
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
         guard let container = currentContainer else {
             return 0.0
@@ -9406,9 +9684,6 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return reject(reasonCode: "build_binding_mismatch", artifactRole: "sidecar")
             }
-            guard admissionCapability.qualifiedSlots <= slotCount else {
-                return reject(reasonCode: "qualified_slots_exceed_runtime", artifactRole: "runtime")
-            }
             guard let capturedArtifacts = admissionCapability.capturedArtifacts else {
                 return reject(reasonCode: "captured_artifacts_unavailable", artifactRole: "pair")
             }
@@ -9724,16 +9999,26 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             let store = KeychainNativeMTPRevocationStore.live()
             let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-            let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            // SPEC-048-R014 (v0.1.28): the revocation feed only revokes. When
+            // no fresh signed feed can be had, nothing is revoked; the refresh
+            // keeps polling and disables the tuple once a feed names it.
+            guard let state = try? await NativeMTPRevocationFeedManager.loadNetworkFirst(
                 pinnedSignerKeyID: revocationSignerKeyID,
                 verifier: verifier,
                 store: store
-            )
+            ) else {
+                return NativeMTPRevocationAdmissionState(
+                    revokedTupleSHA256: [],
+                    signerKeyID: revocationSignerKeyID,
+                    trustedKeyring: trustedKeyring,
+                    expiresAt: nil
+                )
+            }
             return NativeMTPRevocationAdmissionState(
                 revokedTupleSHA256: state.feed.revokedSet,
                 signerKeyID: revocationSignerKeyID,
                 trustedKeyring: trustedKeyring,
-                expiresAt: state.feed.expiresAt
+                expiresAt: nil
             )
         } catch {
             return nil
@@ -9745,12 +10030,11 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelRevision: String,
         runningBuildIdentity: NativeMTPRunningBuildIdentity
     ) -> Bool {
-        // The admission's provider revision and SPEC-023 build identity are
-        // recorded provenance; any signed CLI release may serve the admitted
-        // decode path. The upstream MLX revision and target artifact stay pinned.
-        admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
-            && runningBuildIdentity.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
-            && admissionCapability.targetArtifactSHA256 == targetModelRevision
+        // SPEC-048-R013 (v0.1.28): admission is model-keyed. The upstream MLX
+        // revision, provider revision and build identity are recorded
+        // provenance; the on-device MTP-on vs MTP-off self-check qualifies the
+        // running runtime. Only the loaded target artifact must match.
+        admissionCapability.targetArtifactSHA256 == targetModelRevision
     }
 
     static func nativeMTPAdmissionMatchesRunningBuildForTest(

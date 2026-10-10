@@ -1728,3 +1728,27 @@ func TestParseAuthRequestRejectsOversizedHandshakeFields(t *testing.T) {
 		t.Fatalf("oversized attestation_token field=%q err=%v, want attestation_token error", field, err)
 	}
 }
+
+func TestParseHeartbeatAcceptsBoundedCBSelfCheck(t *testing.T) {
+	base := `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":5,"slots_free":5,"slots_total":5,"throughput_tps_estimate":10.0,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0`
+	hb, _, _, err := ParseHeartbeat([]byte(base + `,"cb_self_check":{"decision":"granted","served_slots":5,"verified_k":6,"deferrals":0,"model_sha256":"abc","metallib_sha256":"def","kernel_identifier":"k","hardware_class":"apple-silicon:Apple M2:ram-24gb","os_build":"Version 26.5 (Build 25F71)"}}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if hb.CBSelfCheck == nil || hb.CBSelfCheck.Decision != "granted" || hb.CBSelfCheck.VerifiedK != 6 || hb.CBSelfCheck.ServedSlots != 5 {
+		t.Fatalf("cb_self_check = %+v", hb.CBSelfCheck)
+	}
+	if hb, _, _, err := ParseHeartbeat([]byte(base + `}`)); err != nil || hb.CBSelfCheck != nil {
+		t.Fatalf("absent cb_self_check: hb=%+v err=%v", hb.CBSelfCheck, err)
+	}
+	for _, bad := range []string{
+		`{"decision":"","served_slots":1,"verified_k":1,"deferrals":0}`,
+		`{"decision":"granted","served_slots":-1,"verified_k":1,"deferrals":0}`,
+		`{"decision":"gr\u0001","served_slots":1,"verified_k":1,"deferrals":0}`,
+		`{"decision":"granted","served_slots":1,"verified_k":1,"deferrals":0,"os_build":"` + strings.Repeat("x", 300) + `"}`,
+	} {
+		if _, _, field, err := ParseHeartbeat([]byte(base + `,"cb_self_check":` + bad + `}`)); err == nil || field != "cb_self_check" {
+			t.Fatalf("accepted invalid cb_self_check %s (field=%q err=%v)", bad, field, err)
+		}
+	}
+}

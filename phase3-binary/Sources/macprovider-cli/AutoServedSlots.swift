@@ -2,15 +2,14 @@ import CryptoKit
 import Foundation
 import MacProviderCore
 
-/// SPEC-023-R009 / SPEC-038-R011: the slot count `serve` runs, recomputed at
-/// every serve start from the signed continuous-batching policy loaded there,
-/// so a new policy entry raises existing providers without another
-/// `autotune --recommend --apply`.
+/// SPEC-023-R009 / SPEC-038-R011 (v0.3.12): the slot count `serve` runs.
 ///
 /// Precedence: an owner-pinned `max_concurrency_override` is served as written;
-/// a draft model forces 1 (SPEC-028 FR-4); continuous batching authorized and
-/// active for the served tuple runs the memory-fit recommendation; anything
-/// else runs 1.
+/// a draft model or the emergency off forces 1 (SPEC-028 FR-4); otherwise the
+/// on-device continuous-batching self-check (`ContinuousBatchingSelfCheck`)
+/// picks the count, at most the memory-fit recommendation for this Mac. Until
+/// it decides, serve runs one slot, or the configured count when a signed
+/// positive policy entry names the served model (provisional grant).
 enum AutoServedSlots {
     /// MLX's quantized matmul switches from the vector kernel (qmv) to the
     /// matrix kernel (qmm) above 5 rows. On M1/M2 GPUs (Ultra excepted) rows
@@ -18,36 +17,51 @@ enum AutoServedSlots {
     /// there. An owner pin may still go higher.
     static let appleM1M2NonUltraRowCap = 5
 
-    struct Decision: Equatable {
-        let slots: Int
-        /// Log reason: `owner_pinned`, `draft_model`, `cb_authorized`,
-        /// `cb_not_authorized`.
+    struct Plan: Equatable {
+        /// Scheduler rows built at load: the most the self-check may grant.
+        let rows: Int
+        /// Slots advertised from the first heartbeat until the self-check (or
+        /// a stored decision) changes them.
+        let initialServed: Int
+        /// Non-nil when the owner pinned the count; the self-check then only
+        /// turns batching on or off.
+        let ownerPinned: Int?
+        /// Log reason: `owner_pinned`, `draft_model`, `emergency_off`,
+        /// `provisional_policy_entry`, `self_check_pending`.
         let reason: String
+
+        /// False when no self-check may raise the count from `initialServed`.
+        var selfChecked: Bool { reason != "draft_model" && reason != "emergency_off" }
     }
 
-    static func resolve(
+    static func plan(
         configuredSlots: Int?,
         source: MaxConcurrencySource?,
         draftConfigured: Bool,
-        continuousBatchingAuthorized: Bool,
+        emergencyOff: Bool,
+        provisionalPolicyEntry: Bool,
         recommendedSlots: () -> Int
-    ) -> Decision {
+    ) -> Plan {
+        let configured = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlots)
         if source == .owner {
-            return Decision(
-                slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlots),
-                reason: "owner_pinned"
-            )
+            return Plan(rows: configured, initialServed: configured, ownerPinned: configured, reason: "owner_pinned")
         }
         if draftConfigured {
-            return Decision(slots: 1, reason: "draft_model")
+            return Plan(rows: 1, initialServed: 1, ownerPinned: nil, reason: "draft_model")
         }
-        guard continuousBatchingAuthorized else {
-            return Decision(slots: 1, reason: "cb_not_authorized")
+        if emergencyOff {
+            return Plan(rows: 1, initialServed: 1, ownerPinned: nil, reason: "emergency_off")
         }
-        return Decision(
-            slots: min(max(1, recommendedSlots()), ProviderCapacity.maxConcurrencyOverrideLimit),
-            reason: "cb_authorized"
-        )
+        let recommended = min(max(1, recommendedSlots()), ProviderCapacity.maxConcurrencyOverrideLimit)
+        if provisionalPolicyEntry {
+            return Plan(
+                rows: max(recommended, configured),
+                initialServed: configured,
+                ownerPinned: nil,
+                reason: "provisional_policy_entry"
+            )
+        }
+        return Plan(rows: recommended, initialServed: 1, ownerPinned: nil, reason: "self_check_pending")
     }
 
     /// The autotune recommendation for this Mac and model: the memory-fit
@@ -78,10 +92,9 @@ enum AutoServedSlots {
         return normalized.range(of: #"\bm[12]\b"#, options: .regularExpression) != nil
     }
 
-    /// Pre-load gate: the verified signed policy carries an enabled entry for
-    /// the served model key and no emergency off is configured. The exact
-    /// tuple match is known only after the model loads; `serve` checks it then
-    /// and lowers the slots to 1 when batching is not active.
+    /// Provisional grant: the verified signed policy carries an enabled entry
+    /// for the served model key (SPEC-038 v0.3.12; the self-check result then
+    /// replaces it).
     static func policyAuthorizesServedModel(
         _ policy: ContinuousBatchingPolicyLoadResult,
         modelKeys: Set<String>,
@@ -95,13 +108,6 @@ enum AutoServedSlots {
 }
 
 extension AutoServedSlots {
-    /// Post-load gate: batching runs for the loaded tuple under the signed
-    /// policy (not only an expert/test mode).
-    static func continuousBatchingServing(_ snapshot: RuntimeContinuousBatchingSnapshot?) -> Bool {
-        guard let snapshot else { return false }
-        return snapshot.active && snapshot.policy.authorized
-    }
-
     /// `AutotuneModelContextCap.memoryFitBatchDepth` at the served context for
     /// the configured artifact; nil when its geometry or catalog row is unknown.
     static func memoryFitSlots(

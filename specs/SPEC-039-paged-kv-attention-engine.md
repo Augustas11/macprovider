@@ -1,7 +1,12 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.14
-Status: draft (normative design). v0.1.14 admits the measured
+Version: v0.1.15
+Status: draft (normative design). v0.1.15 (follows SPEC-038 v0.3.12) turns
+paged KV on by default for a coordinator-joined provider unless
+`paged_kv.enabled` is set explicitly or the CB emergency off is set, and
+moves the FR-PKV13 overhead ceiling from per-tuple signed acceptance to each
+Mac's SPEC-038 FR-CB10 on-device self-check (aggregate gain over stock serial
+on that Mac); the signed policy only revokes. v0.1.14 admits the measured
 `openai/gpt-oss-120b` sliding-window/full-attention identity to FR-PKV12 after
 Studio packaged-runtime 1024-token prefill / 48-token parity plus isolation,
 replay, and drain evidence. v0.1.13 clarifies that keep=0
@@ -768,6 +773,16 @@ on that revision has no acceptance, so it serial-routes in canary and fails
 closed in strict `on`. A new runtime revision
 must re-measure before it can serve batched traffic.
 
+**(v0.1.15)** The paragraph above is superseded for activation. The ceiling
+is enforced on each Mac by the SPEC-038 FR-CB10 self-check: batched traffic is
+served only at a slot count whose measured aggregate tokens/s, on that Mac and
+runtime revision, is at least 1.2x stock serial decode in the same idle
+window, with every row token-identical to the same prompt alone on the paged
+engine. A longer idle-time measurement over every granted slot count replaces
+the startup micro-benchmark this paragraph rejected. The signed policy may
+only revoke a model artifact on a runtime revision (Metal library SHA-256 and
+kernel identifier); it no longer grants acceptance.
+
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)
 
 Paged KV MUST expose an operator configuration surface mirroring the SPEC-037
@@ -781,6 +796,13 @@ least:
 | `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
 | `max_physical_blocks` | `MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS` | `--paged-kv-max-physical-blocks` | unset ⇒ covers advertised `max_context_tokens` (min 1024) | pool capacity bound (FR-PKV2), or an equivalent `max_pool_bytes`; > 0; invalid ⇒ disabled |
 | `fallback_policy` | `MACPROVIDER_PAGED_KV_FALLBACK_POLICY` | `--paged-kv-fallback-policy` | `permissive` | `permissive` (stock-route) or `strict` (fail preflight) (FR-PKV7); invalid ⇒ disabled |
+
+**(v0.1.15)** With `enabled` unset, `serve` enables paged KV unless the
+SPEC-038 `continuous_batching: off` emergency override is set; an explicit
+`enabled` value (YAML, env or CLI) always wins. The FR-PKV7 permissive
+fallback keeps any model or configuration the engine cannot attach on the
+stock contiguous path, and the FR-PKV6 byte-identical guarantee still holds
+for `enabled: false`.
 
 Default-off invariants are FR-PKV6; the fallback-policy values select the
 FR-PKV7 branch. Invalid configuration MUST disable paged mode with a logged
