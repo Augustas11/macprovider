@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.12",
+      "version": "1.6.13",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -564,7 +564,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.23",
+      "version": "v0.1.24",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2658,6 +2658,53 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
         "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Signed discovery (R001) stays GitHub-only; a manual update or the Malibu Update button whose discovery is unreachable installs the coordinator-advertised release through the mirror, and the R005 recovery rail remains GitHub-only. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R007",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:static func revokedBuildDowngradeDecision(",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:static func signedDiscoveryAllowsTarget(",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:static let revokedBuildDowngradeFloor",
+        "phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift:static func compatibilitySetIDParts(",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func validateCompatibilitySetAcceptance(",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func restoredPreviousAdmissionProven(",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func scheduleRevokedSessionRetryIfNeeded(",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateEvent.swift:static func isRevokedBuildDowngradeTransaction(",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:private func downgradeCriticalSection(",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:func withSignedPolicyLock<"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeDecisionMatrix",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testSignedDiscoveryRailNeverDowngrades",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testOlderRecommendationWithoutRevocationIsNotAttempted",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeEntersTheUpgradeReleasePath",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeRefusesASignedRevokedTarget",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeRefusesABadSignature",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testCompatibilitySetRevokedBindsARevocationNoticeToTheAcceptedSession",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeStopsWhenTheLiveSessionNoLongerRevokes",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testRevokedUpdateOnlySessionIsHeldInsteadOfDropped",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeStopsOnGenerationVersionOrPolicyChange",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testDowngradeTransactionEventsCarryTheDirection",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testDowngradeActivationRunsOnlyInsideTheLiveAuthorizationSection",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testSelfUpdateRefusesAReleaseObjectNamingAnotherTag",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testSignedPolicyPersistWaitsForTheSignedPolicyLock",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testStaleRestoreCleanupDoesNotClearANewerConnection",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnDuringDrain",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnAfterEviction",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift:testRevokedBuildDowngradeHarnessCompletesWhileAuthorized"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "SPEC-020 v0.1.24 (SPEC-020-R007): a provider whose accepted session carries compatibility_set_revoked for its own set installs the older recommended release under every upgrade check, bound to the recommended set and a compiled-in floor; discovery and manual update never downgrade. Implemented and unit-tested; no physical rollback of a revoked release has been captured."
       }
     },
     {
@@ -11830,7 +11877,12 @@
         "scripts/ops/lib/release-registrations.py:compat_verdict",
         "scripts/ops/lib/release-registrations.py:live_policy",
         "scripts/legacy-compatibility-revocations.py:generate",
-        "scripts/ops/cli-release.sh:revoke_seed"
+        "scripts/ops/cli-release.sh:revoke_seed",
+        "phase4-coordinator/internal/ws/server.go:populateCompatibilityHelloAck",
+        "phase4-coordinator/internal/ws/server.go:populateCompatibilityAuthResponse",
+        "scripts/ops/cli-release.sh:decide_rollback",
+        "scripts/ops/lib/pearl-cli-config.py:plan",
+        "scripts/ops/cli-release.sh:signed_release_compat_id"
       ],
       "tests": [
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetAdmitsEveryWellFormedTargetRepositoryRelease",
@@ -11848,7 +11900,10 @@
         "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetCheckedInRevocationSeedValidates",
         "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRepositoryCompatibilitySetRejectsForeignAndMalformedHello",
         "scripts/tests/test_pearl_cli_config.py:RevokeTest",
-        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestBelowRequiredReleaseConnectsUpdateOnlyWithRecommendation"
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestBelowRequiredReleaseConnectsUpdateOnlyWithRecommendation",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRollbackRecommendationMarksOnlyTheExactlyRevokedRelease",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRevokedReleaseAuthResponseCarriesCompatibilitySetRevoked",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetAllowsRecommendingOlderThanARevokedRelease"
       ],
       "journeys": [],
       "evidence": [],

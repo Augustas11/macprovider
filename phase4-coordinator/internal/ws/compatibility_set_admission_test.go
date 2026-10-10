@@ -179,14 +179,15 @@ func TestRepositoryCompatibilityHealthzPublishesPolicy(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var body struct {
-		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
-		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
-		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+		CompatibilityPolicyMode          string   `json:"compatibility_policy_mode"`
+		CompatibilityPolicyTargetID      string   `json:"compatibility_policy_target_id"`
+		CompatibilityPolicyRevokedIDs    []string `json:"compatibility_policy_revoked_ids"`
+		CompatibilityPolicyRevokedSignal bool     `json:"compatibility_policy_revoked_signal"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode healthz: %v", err)
 	}
-	if body.CompatibilityPolicyMode != "repository" ||
+	if body.CompatibilityPolicyMode != "repository" || !body.CompatibilityPolicyRevokedSignal ||
 		body.CompatibilityPolicyTargetID != compatibilityFutureSet ||
 		len(body.CompatibilityPolicyRevokedIDs) != 1 ||
 		body.CompatibilityPolicyRevokedIDs[0] != compatibilityRevokedSet {
@@ -500,7 +501,8 @@ func TestConfiguredCompatibilitySetEchoesAcceptedAuthSetAndTarget(t *testing.T) 
 	if response.Status != "accepted" ||
 		response.CompatibilityPolicy != "configured" ||
 		response.AcceptedCompatibilitySetID != compatibilityRollbackSet ||
-		response.RecommendedCompatibilitySetID != compatibilityTargetSet {
+		response.RecommendedCompatibilitySetID != compatibilityTargetSet ||
+		response.CompatibilitySetRevoked {
 		t.Fatalf("auth_response compatibility contract = %+v", response)
 	}
 }
@@ -598,6 +600,105 @@ func TestRevokedReleaseGetsUpdateOnlySessionWithRecommendation(t *testing.T) {
 	provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
 	if !ok || provider.CatalogAdmissionMode != "update_bridge" || provider.RoutingEligible() || provider.ServingCapable() {
 		t.Fatalf("revoked release must be update-only and non-routable: ok=%v provider=%+v", ok, provider)
+	}
+	if !ack.CompatibilitySetRevoked {
+		t.Fatalf("an exactly revoked release must be told compatibility_set_revoked: %+v", ack)
+	}
+}
+
+// rawHelloAckFor is helloAckFor returning the decoded JSON object, so a test
+// can prove a field is absent from the wire.
+func rawHelloAckFor(t *testing.T, url string, setID, version string) (map[string]any, func()) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(url))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	hello := validHello("m4-anon")
+	hello["compatibility_set_id"] = setID
+	hello["binary_version"] = version
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil || op != gobwas.OpText {
+		t.Fatalf("read hello_ack: op=%v err=%v", op, err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("decode hello_ack: %v", err)
+	}
+	return ack, func() { conn.Close() }
+}
+
+// SPEC-020-R007 rollback lever: the recommendation moved back to an older
+// release and the newer one is exactly revoked. The revoked newer release is
+// told compatibility_set_revoked with the older recommendation; the older
+// target and an update-only session below required_binary_version are not,
+// and the field stays off the wire for them (older providers see no change).
+func TestRollbackRecommendationMarksOnlyTheExactlyRevokedRelease(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+			TargetID:   compatibilityFutureSet,
+			RevokedIDs: []string{compatibilityLaterSet},
+		}
+		cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
+		cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.8.11"
+	})
+	defer h.HTTP.Close()
+
+	revoked, doneRevoked := rawHelloAckFor(t, h.HTTP.URL, compatibilityLaterSet, "1.8.13")
+	if revoked["compatibility_set_revoked"] != true ||
+		revoked["accepted_compatibility_set_id"] != compatibilityLaterSet ||
+		revoked["recommended_compatibility_set_id"] != compatibilityFutureSet ||
+		revoked["recommended_binary_version"] != "1.8.12" {
+		t.Fatalf("revoked newer release hello_ack = %v", revoked)
+	}
+	doneRevoked()
+
+	for _, c := range []struct{ set, version string }{
+		{compatibilityFutureSet, "1.8.12"},  // the recommended target
+		{compatibilityRevokedSet, "1.8.10"}, // update-only only because it is below required
+	} {
+		ack, done := rawHelloAckFor(t, h.HTTP.URL, c.set, c.version)
+		if _, present := ack["compatibility_set_revoked"]; present || ack["type"] != "hello_ack" {
+			t.Fatalf("%s hello_ack must not carry compatibility_set_revoked: %v", c.set, ack)
+		}
+		done()
+	}
+}
+
+// The v2 auth_response carries the same signal for an exactly revoked set.
+func TestRevokedReleaseAuthResponseCarriesCompatibilitySetRevoked(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
+			TargetID:   compatibilityTargetSet,
+			RevokedIDs: []string{compatibilityRollbackSet},
+		}
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["compatibility_set_id"] = compatibilityRollbackSet
+	initial["binary_version"] = "1.8.3"
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || !response.CompatibilitySetRevoked ||
+		response.AcceptedCompatibilitySetID != compatibilityRollbackSet ||
+		response.RecommendedCompatibilitySetID != compatibilityTargetSet {
+		t.Fatalf("revoked auth_response = %+v", response)
 	}
 }
 

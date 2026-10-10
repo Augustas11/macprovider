@@ -422,11 +422,18 @@ struct SelfUpdate {
     }
 
     func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {
+        let release: GitHubRelease
         do {
-            return try await releaseByTag("v\(normalizedTarget)")
+            release = try await releaseByTag("v\(normalizedTarget)")
         } catch UpdateError.releaseNotFound {
-            return try await releaseByTag(normalizedTarget)
+            release = try await releaseByTag(normalizedTarget)
         }
+        // The release object must name the requested tag: a replayed object
+        // for another (older) signed release must never stand in for it.
+        guard (try? Self.validateReleaseTag(release.tagName)) == normalizedTarget else {
+            throw UpdateError.invalidReleaseVersion(release.tagName)
+        }
+        return release
     }
 
     func prepareValidatedUpdate(

@@ -83,6 +83,13 @@
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
 #  11 install_sh_consumer_health
 #
+# Revoked-build rollback (SPEC-020-R007; runbook VERIFY_DOC "Revoked-build rollback"):
+#   CLI_ROLLBACK_TO_ID=<previous good compatibility_set_id> \
+#   CLI_ROLLBACK_REVOKE_ID=<bad release compatibility_set_id> scripts/ops/cli-release.sh status|next [--run]
+#                           replaces the train with one step, rollback: next --run runs
+#                           _pearl-config --recommend <prev> <prev id> --revoke <bad id> (one restart).
+#                           Done when /healthz recommends <prev>, targets <prev id> and revokes <bad id>.
+#
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, INSTALL_SH_URL,
 # MALIBU_DOWNLOAD_SSH_KEY (mirror_latest; MIRROR_LATEST_URL overrides the served pointer),
 # PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
@@ -191,7 +198,7 @@ load_registrations() {
     if [ -n "$bytes" ]; then prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"; fi
     if python3 "$OPS_LIB_DIR/release-registrations.py" evaluate "$OPS_TMP_DIR/reg-facts.json" "$V" \
       "${compat:-}" "${prj:-}" "${sig:-}" "$OPS_TMP_DIR/healthz.json" \
-      "$REPO_ROOT/phase4-coordinator/dist/compatibility-revoked-ids.txt" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
+      "${REG_SEED_FILE:-$REPO_ROOT/phase4-coordinator/dist/compatibility-revoked-ids.txt}" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
       REG_DIR="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
       REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
       REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
@@ -292,6 +299,11 @@ gather() {
     policy_target="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_target_id") or ""')"
   fact live_compatibility_target "${policy_target:-not reported by this runtime}"
 
+  if [ -n "${CLI_ROLLBACK_TO_ID:-}${CLI_ROLLBACK_REVOKE_ID:-}" ]; then
+    decide_rollback "$L"
+    return
+  fi
+
   local latest_stable published=false pub_at=""
   latest_stable="$(gh release list -R "$(gh_repo)" --exclude-pre-releases --exclude-drafts -L 1 \
     --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
@@ -371,6 +383,138 @@ EOF
 
   decide "$main_sha" "$head_sha" "$V" "$A" "$L" "$published" "$active_id" "$active_status" \
     "$ok_id" "$ok_sha" "$artifact_state" "$promote_active" "$verify_ok" "$verify_active" "$prod_active" "$install_state" "$mirror_state" "$mirror_tag"
+}
+
+# rollback_ids_check TO REVOKE -> "TO_VERSION REVOKE_VERSION" when both are
+# canonical ids from one repository and TO is strictly older; else a reason on
+# stderr and exit 1.
+rollback_ids_check() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+pat = re.compile(r"^([A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}):v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))@[0-9a-f]{40}$")
+to, revoke = (pat.fullmatch(x) if len(x) <= 256 else None for x in sys.argv[1:3])
+if not to or not revoke:
+    sys.exit("CLI_ROLLBACK_TO_ID and CLI_ROLLBACK_REVOKE_ID must both be canonical compatibility_set_ids")
+if to.group(1) != revoke.group(1):
+    sys.exit("the rollback target and the revoked release must be from one repository")
+key = lambda m: tuple(int(x) for x in m.group(2).split("."))
+if not key(to) < key(revoke):
+    sys.exit("the rollback target must be strictly older than the revoked release")
+print(to.group(2), revoke.group(2))
+PY
+}
+
+# signed_release_compat_id VER: the compatibility_set_id
+# (repository:tag@commit) that release v<VER>'s signed pearl-release.json
+# binds, after verifying its signature with the release signing key the train
+# uses for candidates; exit 1 when the metadata is missing, unsigned, tampered
+# or does not describe v<VER>.
+signed_release_compat_id() {
+  local ver="$1" dir
+  is_semver "$ver" || return 1
+  dir="$(mktemp -d "$OPS_TMP_DIR/signed-release.XXXXXX")"
+  gh release download "v$ver" -R "$(gh_repo)" -p pearl-release.json -p pearl-release.json.sig -D "$dir" \
+    >/dev/null 2>&1 || return 1
+  openssl dgst -sha256 -verify "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
+    -signature "$dir/pearl-release.json.sig" "$dir/pearl-release.json" >/dev/null 2>&1 || return 1
+  python3 - "$dir/pearl-release.json" "$ver" <<'PY'
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+ver = sys.argv[2]
+repo, tag, commit = d.get("repository"), d.get("tag"), d.get("commit")
+if not (isinstance(repo, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}", repo)
+        and tag == "v" + ver and d.get("release_version") == ver
+        and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)):
+    sys.exit(1)
+print("%s:%s@%s" % (repo, tag, commit))
+PY
+}
+
+# decide_rollback L: the revoked-build rollback (SPEC-020-R007, runbook
+# "Revoked-build rollback"). One mutate step: recommend the previous good
+# release and exactly revoke the bad one in one Pearl edit and restart.
+# Macs on the revoked build then auto-update down to the recommendation.
+decide_rollback() {
+  local L="$1" ids to_ver revoke_ver live_target live_revoked pub signal tag_commit signed_id
+  NEXT_RUNBOOK="$VERIFY_DOC#revoked-build-rollback"
+  if ! ids="$(rollback_ids_check "${CLI_ROLLBACK_TO_ID:-}" "${CLI_ROLLBACK_REVOKE_ID:-}" 2>&1)"; then
+    step rollback blocked "$ids"
+    set_next rollback blocked "Roll back the fleet" "" "$ids"
+    return
+  fi
+  to_ver="${ids%% *}"; revoke_ver="${ids##* }"
+  fact rollback_to "$CLI_ROLLBACK_TO_ID"
+  fact rollback_revoke "$CLI_ROLLBACK_REVOKE_ID"
+  if [ -z "$L" ]; then
+    step rollback unknown "live recommendation unreadable"
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" "COORDINATOR_URL is unset or /healthz is unreadable"
+    return
+  fi
+  live_target="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_target_id") or ""')"
+  live_revoked="$(json_field "$OPS_TMP_DIR/healthz.json" '" ".join(d.get("compatibility_policy_revoked_ids") or [])')"
+  # Both before mutating and before reporting done: the runtime must send
+  # compatibility_set_revoked (or the revoked build is fenced but never told
+  # to move down), and its live policy must equal the applied config.
+  signal="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_revoked_signal") is True')"
+  # The rollback's own unapplied edit (target -> P, V revoked) is a pending
+  # edit, not a mismatch, so an interrupted run resumes through next --run.
+  { revocation_seed_ids; printf '%s\n' "$CLI_ROLLBACK_REVOKE_ID"; } > "$OPS_TMP_DIR/rollback-seed.txt"
+  REG_SEED_FILE="$OPS_TMP_DIR/rollback-seed.txt" load_registrations "$to_ver" "$CLI_ROLLBACK_TO_ID"
+  # P's id must be its signed release identity: the commit of tag v<P>.
+  tag_commit="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$to_ver" "refs/tags/v$to_ver^{}" 2>/dev/null |
+    awk '$2 ~ /\^\{\}$/ {peeled=$1} {any=$1} END {print (peeled != "" ? peeled : any)}')"
+  if [ "$tag_commit" != "${CLI_ROLLBACK_TO_ID##*@}" ]; then
+    step rollback blocked "tag v$to_ver is at ${tag_commit:-nothing}, not ${CLI_ROLLBACK_TO_ID##*@}"
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" \
+      "CLI_ROLLBACK_TO_ID does not name release v$to_ver: origin tag v$to_ver is at ${tag_commit:-nothing}, the id names ${CLI_ROLLBACK_TO_ID##*@}"
+    return
+  fi
+  # ...and exactly the full compatibility_set_id its signed release metadata
+  # binds (signature verified with the train's release signing key).
+  signed_id="$(signed_release_compat_id "$to_ver" || true)"
+  fact rollback_to_signed_id "${signed_id:-unverified}"
+  if [ "$signed_id" != "$CLI_ROLLBACK_TO_ID" ]; then
+    step rollback blocked "signed release metadata of v$to_ver names ${signed_id:-nothing verifiable}"
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" \
+      "CLI_ROLLBACK_TO_ID is not the signed identity of v$to_ver: its verified pearl-release.json names ${signed_id:-nothing (missing, unsigned or tampered)}"
+    return
+  fi
+  if [ "$signal" != true ]; then
+    step rollback blocked "the running coordinator does not report compatibility_policy_revoked_signal"
+    set_next rollback blocked "Ship the coordinator runtime that signals revocations before rolling back" \
+      "scripts/ops/pearl-runtime.sh status" \
+      "the running coordinator does not report compatibility_policy_revoked_signal; revoked builds would not roll back"
+    next_meta rollback "$ROLLOUT_DOC"
+    return
+  fi
+  if [ "$REG_MODE" != repository ] || [ -n "$REG_MISMATCH" ]; then
+    step rollback blocked "live policy ${REG_MODE:-unknown}${REG_MISMATCH:+ (mismatch: $REG_MISMATCH)}"
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" \
+      "the live compatibility policy is ${REG_MODE:-unknown}${REG_MISMATCH:+ with mismatch: $REG_MISMATCH}${REG_ERR:+ ($REG_ERR)}; it must be repository mode and equal the applied config"
+    return
+  fi
+  if [ "$L" = "$to_ver" ] && [ "$live_target" = "$CLI_ROLLBACK_TO_ID" ] &&
+    [[ " $live_revoked " == *" $CLI_ROLLBACK_REVOKE_ID "* ]]; then
+    step rollback "done" "live recommends $to_ver ($CLI_ROLLBACK_TO_ID); $CLI_ROLLBACK_REVOKE_ID revoked"
+    set_next "done" "done" "rollback to v$to_ver live; revoked v$revoke_ver builds auto-update down to it" ""
+    return
+  fi
+  step rollback pending "live recommends $L (target ${live_target:-unknown})"
+  pub="$(gh release view "v$to_ver" -R "$(gh_repo)" --json isPrerelease,isDraft \
+    --jq 'select(.isPrerelease == false and .isDraft == false) | "published"' 2>/dev/null || true)"
+  if [ "$pub" != published ]; then
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" "v$to_ver is not a published stable release"
+  elif [ "$live_target" != "$CLI_ROLLBACK_REVOKE_ID" ] && [ "$live_target" != "$CLI_ROLLBACK_TO_ID" ]; then
+    set_next rollback blocked "Roll back the fleet to v$to_ver" "" \
+      "the live target is ${live_target:-not reported}, neither the release to revoke nor the rollback target"
+  else
+    set_next rollback mutate "Recommend v$to_ver and revoke $CLI_ROLLBACK_REVOKE_ID, then restart" \
+      "scripts/ops/cli-release.sh _pearl-config --recommend $to_ver $CLI_ROLLBACK_TO_ID --revoke $CLI_ROLLBACK_REVOKE_ID"
+    next_meta rollback "$VERIFY_DOC#revoked-build-rollback" "coordinator restart: a few seconds of buyer outage"
+  fi
 }
 
 decide() {

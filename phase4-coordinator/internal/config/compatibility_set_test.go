@@ -163,3 +163,26 @@ func TestCompatibilitySetCheckedInRevocationSeedValidates(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-020-R007 rollback lever: the operator recommends an older release and
+// exactly revokes the newer one. Nothing enforces a monotonic recommendation,
+// and the target itself still may not be revoked.
+func TestCompatibilitySetAllowsRecommendingOlderThanARevokedRelease(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
+		TargetID:   compatibilitySetTarget,
+		RevokedIDs: []string{compatibilitySetFuture},
+	}
+	cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.4"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	policy := cfg.Coordinator.CompatibilitySet
+	if !policy.IsUpdateOnly(compatibilitySetFuture) || policy.IsUpdateOnly(compatibilitySetTarget) || !policy.Accepts(compatibilitySetTarget) {
+		t.Fatalf("rollback policy: revoked newer release must be update-only and the older target must serve")
+	}
+	cfg.Coordinator.CompatibilitySet.RevokedIDs = append(cfg.Coordinator.CompatibilitySet.RevokedIDs, compatibilitySetTarget)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not contain target_id") {
+		t.Fatalf("Validate() error = %v, want the target to stay unrevocable", err)
+	}
+}

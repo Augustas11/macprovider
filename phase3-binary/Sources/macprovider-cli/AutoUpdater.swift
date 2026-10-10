@@ -45,6 +45,33 @@ struct AutoUpdateSwapPrecedenceAborted: Error {
     let reason: String
 }
 
+/// SPEC-020-R007: what the coordinator told this session about the running
+/// build. Present only when the accepted session's ack carried
+/// `compatibility_set_revoked: true` for the compatibility set this provider
+/// reported (the ack's `accepted_compatibility_set_id`), i.e. the session is
+/// update-only because of an exact revocation. It authorizes nothing by itself:
+/// `AutoUpdater.revokedBuildDowngradeDecision` binds it to the running version,
+/// the recommended set and the recommended version before a downgrade may run.
+struct CoordinatorRevocationNotice: Sendable, Equatable {
+    let revokedCompatibilitySetID: String
+    let recommendedCompatibilitySetID: String
+}
+
+/// One actor-isolated snapshot of the live coordinator session, read in a single
+/// await so trust and the revocation can never come from different sessions.
+struct LiveDowngradeAuthorization: Sendable {
+    let trust: AutoUpdateTrustState
+    let notice: CoordinatorRevocationNotice?
+    let recommendedCompatibilitySetID: String?
+    let recommendedBinaryVersion: String?
+    let sessionGeneration: Int
+}
+
+enum RevokedBuildDowngradeDecision: Sendable, Equatable {
+    case allow
+    case deny(reason: String)
+}
+
 struct AutoUpdater: Sendable {
     typealias TrustProvider = @Sendable () async -> AutoUpdateTrustState
     typealias Drain = @Sendable (_ target: String) async throws -> Bool
@@ -54,11 +81,28 @@ struct AutoUpdater: Sendable {
     typealias Availability = @Sendable () -> Bool
     typealias EvictStaleLocalStatusOwner = @Sendable (_ targetVersion: String, _ expectedExecutablePath: String) async -> Void
     typealias LocalStatusProbe = @Sendable (_ port: Int) async throws -> [String: Any]
+    /// Runs `body` on the coordinator session's actor with its live snapshot,
+    /// so nothing about the session can change while `body` runs.
+    typealias LiveRevocation = @Sendable (_ body: @Sendable (LiveDowngradeAuthorization) throws -> Void) async throws -> Void
+    typealias CriticalSection = @Sendable (_ body: @Sendable () throws -> Void) async throws -> Void
 
     let config: AppConfig
     let currentVersion: String
     let providerStatus: ProviderStatus
     let expectedCompatibilitySetID: String?
+    let coordinatorRevocation: CoordinatorRevocationNotice?
+    /// The live session's revocation notice and recommended set, read again at
+    /// every downgrade phase (SPEC-020-R007). Without it no downgrade proceeds.
+    let liveRevocation: LiveRevocation?
+    #if DEBUG
+    /// Test-only stand-in for release resolution and verified preparation, so
+    /// tests can drive a full swap without a signed release. Compiled out of
+    /// release builds; production always resolves and verifies the release.
+    var preparedReleaseForTest: (@Sendable (_ target: String) async throws -> PreparedSelfUpdate)?
+    #endif
+    /// The coordinator session generation this updater was built for. A
+    /// downgrade proceeds only while the live session is still that one.
+    let downgradeSessionGeneration: Int?
     let releasesAPIURL: String?
     let markerStore: AutoUpdateMarkerStore
     let session: URLSession
@@ -85,6 +129,9 @@ struct AutoUpdater: Sendable {
         currentVersion: String,
         providerStatus: ProviderStatus,
         expectedCompatibilitySetID: String? = nil,
+        coordinatorRevocation: CoordinatorRevocationNotice? = nil,
+        liveRevocation: LiveRevocation? = nil,
+        downgradeSessionGeneration: Int? = nil,
         releasesAPIURL: String? = nil,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         session: URLSession = .shared,
@@ -116,6 +163,9 @@ struct AutoUpdater: Sendable {
         self.currentVersion = currentVersion
         self.providerStatus = providerStatus
         self.expectedCompatibilitySetID = expectedCompatibilitySetID
+        self.coordinatorRevocation = coordinatorRevocation
+        self.liveRevocation = liveRevocation
+        self.downgradeSessionGeneration = downgradeSessionGeneration
         self.releasesAPIURL = releasesAPIURL
         self.markerStore = markerStore
         self.session = session
@@ -161,6 +211,58 @@ struct AutoUpdater: Sendable {
         case forwardProgress
     }
 
+    static let downgradeFromRevokedReason = "downgrade_from_revoked"
+
+    /// Oldest release a SPEC-020-R007 downgrade may install. It bounds how far a
+    /// compromised coordinator could walk a provider back through signed history
+    /// (threat model T-4): nothing older than v1.8.232, a release the fleet ran,
+    /// is reachable. A later release MAY raise it; it MUST NOT be lowered.
+    static let revokedBuildDowngradeFloor = "1.8.232"
+
+    /// SPEC-020-R007 gate for a coordinator recommendation that is not newer than
+    /// the running build. Fails closed: only a session the coordinator marked as an
+    /// exact revocation of this exact build may move strictly down to exactly the
+    /// recommended set's version, from the same repository, at or above the floor.
+    /// The signed policy (R-2.2) and every release verification still run after it.
+    static func revokedBuildDowngradeDecision(
+        currentVersion: String,
+        target: String,
+        notice: CoordinatorRevocationNotice?,
+        expectedCompatibilitySetID: String?
+    ) -> RevokedBuildDowngradeDecision {
+        guard let notice else {
+            return .deny(reason: "target_not_newer")
+        }
+        guard SelfUpdate.compareSemver(currentVersion, target) == .orderedDescending else {
+            return .deny(reason: "target_not_newer")
+        }
+        guard let revoked = CompatibilitySetManifest.compatibilitySetIDParts(notice.revokedCompatibilitySetID),
+              let recommended = CompatibilitySetManifest.compatibilitySetIDParts(notice.recommendedCompatibilitySetID),
+              notice.revokedCompatibilitySetID != notice.recommendedCompatibilitySetID,
+              revoked.repository == recommended.repository
+        else {
+            return .deny(reason: "downgrade_revocation_notice_invalid")
+        }
+        guard revoked.version == currentVersion else {
+            return .deny(reason: "downgrade_revoked_set_not_running_build")
+        }
+        guard expectedCompatibilitySetID == notice.recommendedCompatibilitySetID,
+              recommended.version == target
+        else {
+            return .deny(reason: "downgrade_target_not_recommended_set")
+        }
+        guard SelfUpdate.compareSemver(target, revokedBuildDowngradeFloor) != .orderedAscending else {
+            return .deny(reason: "downgrade_target_below_floor")
+        }
+        return .allow
+    }
+
+    /// The signed discovery rail (SPEC-020-R001/R005) only ever moves forward; it
+    /// never consults a coordinator revocation (SPEC-020-R007).
+    static func signedDiscoveryAllowsTarget(installedReleaseVersion: String, target: String) -> Bool {
+        SelfUpdate.compareSemver(installedReleaseVersion, target) == .orderedAscending
+    }
+
     @discardableResult
     func handleCoordinatorRecommendation(_ rawRecommended: String) async -> RecommendationOutcome {
         let updateID = UUID().uuidString.lowercased()
@@ -188,7 +290,24 @@ struct AutoUpdater: Sendable {
         }
 
         let target = validated.normalized
-        await record(updateID: updateID, target: target, phase: .detection, outcome: .inProgress, reason: "recommended_binary_version_detected", attempt: 1)
+        // SPEC-020-R-2.1 refuses every downgrade except SPEC-020-R007: a build the
+        // coordinator exactly revoked moves to the exact recommended release.
+        // Decided before the detection event so every event of a downgrade
+        // attempt carries its direction.
+        var downgradeDecision: RevokedBuildDowngradeDecision?
+        if SelfUpdate.compareSemver(currentVersion, target) != .orderedAscending {
+            downgradeDecision = Self.revokedBuildDowngradeDecision(
+                currentVersion: currentVersion,
+                target: target,
+                notice: coordinatorRevocation,
+                expectedCompatibilitySetID: expectedCompatibilitySetID
+            )
+        }
+        let downgradeAuthorization = downgradeDecision == .allow ? coordinatorRevocation : nil
+        let downgradeMetadata: [String: String] = downgradeAuthorization == nil
+            ? [:]
+            : ["update_direction": Self.downgradeFromRevokedReason]
+        await record(updateID: updateID, target: target, phase: .detection, outcome: .inProgress, reason: "recommended_binary_version_detected", attempt: 1, extraMetadata: downgradeMetadata)
         let commitTracker = AutoUpdateCommitTracker()
         // Set once execution clears the compatibility-target gate; from that point
         // any later failure is still forward progress for R005 accounting because
@@ -205,13 +324,19 @@ struct AutoUpdater: Sendable {
             }
         }
 
-        guard SelfUpdate.compareSemver(currentVersion, target) == .orderedAscending else {
-            await record(updateID: updateID, target: target, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
+        switch downgradeDecision {
+        case nil:
+            break
+        case .deny(let reason)?:
+            await record(updateID: updateID, target: target, phase: .eligibility, outcome: .noop, reason: reason, attempt: 1)
             return .notAttempted
+        case .allow?:
+            print("The coordinator revoked this build (v\(currentVersion)); rolling back to the recommended release v\(target).")
+            await record(updateID: updateID, target: target, phase: .eligibility, outcome: .inProgress, reason: Self.downgradeFromRevokedReason, attempt: 1, extraMetadata: downgradeMetadata)
         }
         guard AutoUpdateConfig.enabled(config) else {
             print("A newer version is available (v\(target)), but autoupdate is disabled.")
-            await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled", attempt: 1)
+            await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled", attempt: 1, extraMetadata: downgradeMetadata)
             return .notAttempted
         }
         do {
@@ -222,7 +347,7 @@ struct AutoUpdater: Sendable {
                 // and MUST increment the counter (not .notAttempted). A revoked or
                 // below-minimum target is refused for every profile, so it wins
                 // ahead of the headless handoff.
-                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
+                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum", extraMetadata: downgradeMetadata)
                 return .forwardProgressFailure
             }
             // A headless_fleet / system-domain provider is operator-managed: SPEC-020
@@ -236,34 +361,43 @@ struct AutoUpdater: Sendable {
             // check, which is non-mutating and still wins.
             guard !headlessOperatorManagedTopology() else {
                 print("A newer version is available (v\(target)), but headless_fleet providers update through the signed operator installer acceptance bundle, not consumer autoupdate.")
-                await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "headless_operator_update_required", attempt: 1)
+                await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "headless_operator_update_required", attempt: 1, extraMetadata: downgradeMetadata)
                 return .notAttempted
             }
             guard launchdProviderAvailable() else {
-                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
+                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: "unsupported_install_topology", extraMetadata: downgradeMetadata)
                 return .forwardProgressFailure
             }
             guard rollbackObserverAvailable() else {
-                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable")
+                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable", extraMetadata: downgradeMetadata)
                 return .forwardProgressFailure
             }
             try markerStore.ensureTrustedRoot()
             if let activeCooldown = markerStore.activeCooldown(target: target) {
-                await record(updateID: updateID, target: target, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
+                await record(updateID: updateID, target: target, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt, extraMetadata: downgradeMetadata)
                 return .cooldownActive
             }
-            try await ensureEligible(phase: .eligibility)
+            try await ensureEligible(phase: .eligibility, downgrade: downgradeAuthorization, target: target)
             let heldMutationLock = try acquireUpdateLockAndFenceReloadJobs()
             mutationLock = heldMutationLock
             let previousContinuousBatching = try await currentContinuousBatchingPreservationSnapshot()
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
-            let release: GitHubRelease
-            do {
-                try await ensureEligible(phase: .download)
-                release = try await update.resolveReleaseByTags(normalizedTarget: target)
-            } catch UpdateError.releaseNotFound {
-                await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found")
-                return .forwardProgressFailure
+            var preparedForTest: PreparedSelfUpdate?
+            #if DEBUG
+            if let preparedReleaseForTest {
+                try await ensureEligible(phase: .download, downgrade: downgradeAuthorization, target: target)
+                preparedForTest = try await preparedReleaseForTest(target)
+            }
+            #endif
+            var release: GitHubRelease?
+            if preparedForTest == nil {
+                do {
+                    try await ensureEligible(phase: .download, downgrade: downgradeAuthorization, target: target)
+                    release = try await update.resolveReleaseByTags(normalizedTarget: target)
+                } catch UpdateError.releaseNotFound {
+                    await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found", extraMetadata: downgradeMetadata)
+                    return .forwardProgressFailure
+                }
             }
             // The coordinator's recommended compatibility-set target is a precondition
             // known without downloading the release payload. Check it here — after the
@@ -279,16 +413,23 @@ struct AutoUpdater: Sendable {
                     target: target,
                     phase: .eligibility,
                     failure: .other,
-                    reason: "coordinator_compatibility_target_missing"
+                    reason: "coordinator_compatibility_target_missing",
+                    extraMetadata: downgradeMetadata
                 )
                 return .missingTarget
             }
             let prepared: PreparedSelfUpdate
             do {
-                prepared = try await update.prepareValidatedUpdate(from: release)
+                if let preparedForTest {
+                    prepared = preparedForTest
+                } else if let release {
+                    prepared = try await update.prepareValidatedUpdate(from: release)
+                } else {
+                    throw UpdateError.releaseNotFound
+                }
             } catch {
                 let failure = Self.failureClass(for: error)
-                await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
+                await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error), extraMetadata: downgradeMetadata)
                 return .forwardProgressFailure
             }
             defer { prepared.cleanup() }
@@ -298,7 +439,8 @@ struct AutoUpdater: Sendable {
                     target: target,
                     phase: .eligibility,
                     failure: .other,
-                    reason: "coordinator_compatibility_target_mismatch"
+                    reason: "coordinator_compatibility_target_mismatch",
+                    extraMetadata: downgradeMetadata
                 )
                 return .forwardProgressFailure
             }
@@ -313,7 +455,8 @@ struct AutoUpdater: Sendable {
                     target: target,
                     phase: .eligibility,
                     failure: .other,
-                    reason: "signed_malibu_bundle_missing"
+                    reason: "signed_malibu_bundle_missing",
+                    extraMetadata: downgradeMetadata
                 )
                 return .forwardProgress
             }
@@ -322,14 +465,14 @@ struct AutoUpdater: Sendable {
                 operationID: "autoupdate:\(updateID)",
                 duration: TimeInterval(prepared.compatibilityManifest.maintenanceLeaseSeconds)
             )
-            try await ensureEligible(phase: .drain)
+            try await ensureEligible(phase: .drain, downgrade: downgradeAuthorization, target: target)
             let drained = try await drain(target)
             guard drained else {
-                await fail(updateID: updateID, target: target, phase: .drain, failure: .drainTimeout, reason: "drain_timeout")
+                await fail(updateID: updateID, target: target, phase: .drain, failure: .drainTimeout, reason: "drain_timeout", extraMetadata: downgradeMetadata)
                 try? await sendReady()
                 return .forwardProgress
             }
-            try await ensureEligible(phase: .backup)
+            try await ensureEligible(phase: .backup, downgrade: downgradeAuthorization, target: target)
             try await preserveMarkerAndSwap(
                 updateID: updateID,
                 target: target,
@@ -338,20 +481,37 @@ struct AutoUpdater: Sendable {
                 authorityMode: "coordinator_recommendation",
                 discoveryHead: nil,
                 previousContinuousBatching: previousContinuousBatching,
-                swapBoundaryGate: { .ensureTrust },
+                // SPEC-020-R007: a downgrade activates inside the session
+                // actor's critical section, after proving trust, the same live
+                // revocation and the signed policy there; nothing can change
+                // in between. A refusal aborts before activation. An upgrade
+                // keeps its trust check at the boundary.
+                swapBoundaryGate: { downgradeAuthorization == nil ? .ensureTrust : .proceed },
+                activationCriticalSection: downgradeCriticalSection(
+                    downgradeAuthorization,
+                    target: target,
+                    refusal: AutoUpdateSwapPrecedenceAborted(reason: "downgrade_authorization_changed")
+                ),
                 whileHolding: heldMutationLock
             )
             if let signedPolicy = prepared.signedPolicy {
                 try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
             }
-            await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
-            try await ensureEligible(phase: .restart)
+            await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1, extraMetadata: downgradeMetadata)
+            try await ensureEligible(phase: .restart, downgrade: downgradeAuthorization, target: target)
             do {
                 try await prepareStartupHandoffEvictAndRestart(
                     maintenanceLease: maintenanceLease,
                     operationID: "autoupdate:\(updateID)",
                     targetVersion: target,
-                    readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
+                    readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds,
+                    // The restart into the older release runs inside the same
+                    // critical section; a refusal rolls the swap back.
+                    restartCriticalSection: downgradeCriticalSection(
+                        downgradeAuthorization,
+                        target: target,
+                        refusal: AutoUpdateError.trustStateLost("downgrade_authorization_changed")
+                    )
                 )
                 startupHandoffPrepared = true
             } catch {
@@ -363,14 +523,14 @@ struct AutoUpdater: Sendable {
                     _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
                 }
                 startupHandoffPrepared = false
-                await fail(updateID: updateID, target: target, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
+                await fail(updateID: updateID, target: target, phase: .restart, failure: .other, reason: Self.redactedReason(for: error), extraMetadata: downgradeMetadata)
                 return .forwardProgress
             }
-            await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
+            await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1, extraMetadata: downgradeMetadata)
         } catch AutoUpdateMarkerError.lockContended {
-            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
+            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress", extraMetadata: downgradeMetadata)
         } catch AutoUpdateMarkerError.transactionPending {
-            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
+            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending", extraMetadata: downgradeMetadata)
         } catch AutoUpdateError.trustStateLost(let reason) {
             if let mutationLock {
                 rollbackCommittedMutationAfterGuardFailure(
@@ -378,7 +538,7 @@ struct AutoUpdater: Sendable {
                     whileHolding: mutationLock
                 )
             }
-            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason)
+            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason, extraMetadata: downgradeMetadata)
         } catch is AutoUpdateSignedPolicyPersistError {
             if let mutationLock {
                 rollbackCommittedMutationAfterGuardFailure(
@@ -387,8 +547,12 @@ struct AutoUpdater: Sendable {
                 )
             }
             markerStore.recordCooldown(target: target, failureClass: .other)
+        } catch let abort as AutoUpdateSwapPrecedenceAborted {
+            // Only the SPEC-020-R007 swap gate aborts on this rail; the pending
+            // transaction was already unwound before activation.
+            await fail(updateID: updateID, target: target, phase: .swap, failure: .trustStateLost, reason: abort.reason, extraMetadata: downgradeMetadata)
         } catch {
-            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error))
+            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error), extraMetadata: downgradeMetadata)
         }
         // Success path falls through here (forwardProgressReached == true). Every
         // caught failure also reaches here: forward progress if it happened past
@@ -488,7 +652,7 @@ struct AutoUpdater: Sendable {
                 expectedVersion: currentVersion,
                 allowProviderVersionMismatch: true
             )?.version ?? currentVersion
-            guard SelfUpdate.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+            guard Self.signedDiscoveryAllowsTarget(installedReleaseVersion: installedReleaseVersion, target: target) else {
                 // Keep PATH converged even on noop polls so mixed regular-file
                 // PATH installs heal without waiting for the next activation.
                 _ = try? markerStore.ensurePathEntrypointMatchesInstallAuthority(
@@ -612,6 +776,7 @@ struct AutoUpdater: Sendable {
         discoveryHead: SignedReleaseDiscoveryHead?,
         previousContinuousBatching: AutoUpdateContinuousBatchingPreservationSnapshot? = nil,
         swapBoundaryGate: @Sendable () async -> AutoUpdateSwapBoundaryDecision,
+        activationCriticalSection: CriticalSection? = nil,
         whileHolding lock: AutoUpdateLock
     ) async throws {
         defer { withExtendedLifetime(lock) {} }
@@ -649,13 +814,21 @@ struct AutoUpdater: Sendable {
             case let .abort(reason):
                 throw AutoUpdateSwapPrecedenceAborted(reason: reason)
             }
-            try markerStore.activateReleasePayload(
-                from: prepared.newBinary.deletingLastPathComponent(),
-                newBinary: prepared.newBinary,
-                to: current,
-                stagedMalibuApp: prepared.stagedMalibuApp,
-                rollbackMarker: marker
-            )
+            let store = markerStore
+            let activate: @Sendable () throws -> Void = {
+                try store.activateReleasePayload(
+                    from: prepared.newBinary.deletingLastPathComponent(),
+                    newBinary: prepared.newBinary,
+                    to: current,
+                    stagedMalibuApp: prepared.stagedMalibuApp,
+                    rollbackMarker: marker
+                )
+            }
+            if let activationCriticalSection {
+                try await activationCriticalSection(activate)
+            } else {
+                try activate()
+            }
             tracker.committedSwap = true
         } catch let abort as AutoUpdateSwapPrecedenceAborted where !tracker.committedSwap {
             // round-7 HIGH: a swap-boundary precedence/trust abort is a PRE-activation
@@ -696,7 +869,8 @@ struct AutoUpdater: Sendable {
         maintenanceLease: ProviderLifecycleLeaseRecord?,
         operationID: String,
         targetVersion: String,
-        readinessTimeoutSeconds: Int
+        readinessTimeoutSeconds: Int,
+        restartCriticalSection: CriticalSection? = nil
     ) async throws {
         guard let lease = maintenanceLease,
               let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -716,7 +890,12 @@ struct AutoUpdater: Sendable {
             startupLeaseDuration: TimeInterval(readinessTimeoutSeconds)
         )
         await evictStaleLocalStatusOwner(targetVersion, current.path)
-        try restartLaunchd()
+        if let restartCriticalSection {
+            let restart = restartLaunchd
+            try await restartCriticalSection { try restart() }
+        } else {
+            try restartLaunchd()
+        }
     }
 
     func preserveMarkerAndSwapForTest(
@@ -739,6 +918,32 @@ struct AutoUpdater: Sendable {
             discoveryHead: discoveryHead,
             previousContinuousBatching: nil,
             swapBoundaryGate: { decision },
+            whileHolding: lock
+        )
+    }
+
+    func preserveMarkerAndSwapForTest(
+        updateID: String,
+        target: String,
+        prepared: PreparedSelfUpdate,
+        downgrade: CoordinatorRevocationNotice
+    ) async throws {
+        let lock = try acquireUpdateLockAndFenceReloadJobs()
+        defer { withExtendedLifetime(lock) {} }
+        try await preserveMarkerAndSwap(
+            updateID: updateID,
+            target: target,
+            prepared: prepared,
+            tracker: AutoUpdateCommitTracker(),
+            authorityMode: "coordinator_recommendation",
+            discoveryHead: nil,
+            previousContinuousBatching: nil,
+            swapBoundaryGate: { .proceed },
+            activationCriticalSection: downgradeCriticalSection(
+                downgrade,
+                target: target,
+                refusal: AutoUpdateSwapPrecedenceAborted(reason: "downgrade_authorization_changed")
+            ),
             whileHolding: lock
         )
     }
@@ -930,6 +1135,82 @@ struct AutoUpdater: Sendable {
             throw AutoUpdateError.trustStateLost(trust.lossReason)
         }
         _ = phase
+    }
+
+    /// `ensureEligible`, plus SPEC-020-R007: a downgrade re-proves at every
+    /// phase that the live session still revokes this build with the same
+    /// recommendation, so a reconnect to a session that no longer does stops it.
+    private func ensureEligible(phase: AutoUpdatePhase, downgrade: CoordinatorRevocationNotice?, target: String) async throws {
+        try await ensureEligible(phase: phase)
+        guard await downgradeAuthorizationIsLive(downgrade, target: target) else {
+            throw AutoUpdateError.trustStateLost("downgrade_authorization_changed")
+        }
+    }
+
+    /// SPEC-020-R007 critical section: on the session actor, prove the live
+    /// authorization (and that this task is not cancelled), then run `body`
+    /// before anything else can touch the session. `nil` for an upgrade.
+    private func downgradeCriticalSection(
+        _ downgrade: CoordinatorRevocationNotice?,
+        target: String,
+        refusal: any Error & Sendable
+    ) -> CriticalSection? {
+        guard let downgrade else { return nil }
+        let updater = self
+        return { body in
+            guard let liveRevocation = updater.liveRevocation,
+                  let generation = updater.downgradeSessionGeneration
+            else { throw refusal }
+            let store = updater.markerStore
+            let expected = updater.expectedCompatibilitySetID
+            try await liveRevocation { live in
+                // The signed-policy lock spans the final policy read and the
+                // mutation, so no concurrent policy persist can slip between.
+                try store.withSignedPolicyLock {
+                    guard !Task.isCancelled,
+                          Self.downgradeAuthorized(
+                              live: live,
+                              downgrade: downgrade,
+                              sessionGeneration: generation,
+                              expectedCompatibilitySetID: expected,
+                              target: target,
+                              policy: store.effectivePolicy()
+                          )
+                    else { throw refusal }
+                    try body()
+                }
+            }
+        }
+    }
+
+    static func downgradeAuthorized(
+        live: LiveDowngradeAuthorization,
+        downgrade: CoordinatorRevocationNotice,
+        sessionGeneration: Int,
+        expectedCompatibilitySetID: String?,
+        target: String,
+        policy: (minimum: String?, revoked: Set<String>)
+    ) -> Bool {
+        live.trust.isEligible
+            && live.sessionGeneration == sessionGeneration
+            && live.notice == downgrade
+            && live.recommendedCompatibilitySetID == downgrade.recommendedCompatibilitySetID
+            && expectedCompatibilitySetID == downgrade.recommendedCompatibilitySetID
+            && live.recommendedBinaryVersion == target
+            && !SelfUpdate.targetRejectedBySignedPolicy(target, policy: policy)
+    }
+
+    /// One snapshot of the live session must show: eligible trust, the same
+    /// session generation, the same revocation notice, the same recommended set
+    /// and exactly this recommended version; and the signed policy, which a
+    /// concurrent manual check may have advanced, must still allow the target.
+    private func downgradeAuthorizationIsLive(_ downgrade: CoordinatorRevocationNotice?, target: String) async -> Bool {
+        guard let section = downgradeCriticalSection(
+            downgrade,
+            target: target,
+            refusal: AutoUpdateError.trustStateLost("downgrade_authorization_changed")
+        ) else { return true }
+        return (try? await section {}) != nil
     }
 
     private func fail(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String, extraMetadata: [String: String] = [:]) async {

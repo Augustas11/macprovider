@@ -71,6 +71,12 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `revoked_ids` with one restart, on a repository-mode runtime only; a seed
   id that is the current target is deferred until `recommendation_bump`
   moves the target, then revoked by the same step.
+- Revoked-build rollback (SPEC-020-R007): with `CLI_ROLLBACK_TO_ID` (the
+  previous good release's compatibility id) and `CLI_ROLLBACK_REVOKE_ID` (the
+  bad release's) set, `cli-release.sh` replaces the train with one `rollback`
+  step whose `next --run` recommends the previous release and revokes the bad
+  one in one Pearl edit and restart. Procedure and timing:
+  `docs/runbooks/provider-cli-release-verification.md` "Revoked-build rollback".
 - Release tags count only with an approved signer: list SSH signers in
   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
   `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints
