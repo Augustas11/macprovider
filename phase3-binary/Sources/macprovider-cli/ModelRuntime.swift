@@ -5220,14 +5220,17 @@ actor ModelRuntime: ModelRuntimeServing {
     /// structured output. Their serial stream parses Harmony channels as
     /// tokens arrive and sends only the final channel; the batched stream
     /// sink streams decoded text and has no Harmony channel parser, and the
-    /// gate cannot tell a streaming request from a non-streaming one.
+    /// gate cannot tell a streaming request from a non-streaming one. Buyer
+    /// stops on Harmony also require that parser: raw scheduler token stops
+    /// would terminate on hidden analysis or headers.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
         if HarmonyResponseParser.isHarmonyModelID(request.model),
            requiresStructuredValidation(request.responseFormat)
-            || hasEnabledTools(request.promptSource.tools) {
+            || hasEnabledTools(request.promptSource.tools)
+            || request.stop.contains(where: { !$0.isEmpty }) {
             return false
         }
         // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
@@ -6433,7 +6436,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let filtered = applyOutputFilters(
             decoded,
             stopTokenFilter: stopTokenFilter,
-            requestStops: request.stop
+            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
         )
         // `length` when the row ended on an output budget: an explicit
         // max_tokens reached by the post-model-stop, pre-truncation
@@ -7952,7 +7955,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         let filtered = Self.applyOutputFilters(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
-                            requestStops: request.stop
+                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
                         )
 
                         let rawLengthFinish = Self.labSerialLengthFinish(
@@ -8678,7 +8681,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             return harmonyFinalDetokenizer.next()
                         },
                         allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
-                        stopCandidates: stopTokenFilter.tokens + request.stop
+                        stopCandidates: stopTokenFilter.tokens
                     )
                     let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     Self.clearMLXBufferCacheAfterPrefill()
@@ -8808,7 +8811,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         let final = Self.applyOutputFilters(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
-                            requestStops: request.stop
+                            requestStops: HarmonyResponseParser.isHarmonyModelID(request.model) ? [] : request.stop
                         )
                         let rawLengthFinish = Self.labSerialLengthFinish(
                             generatedCompletionTokens: result.generationTokenCount,
@@ -11230,7 +11233,8 @@ actor ModelRuntime: ModelRuntimeServing {
             decode: decode,
             allowedFunctionNames: toolFunctionNames(from: request.promptSource.tools),
             mode: mode,
-            stopCandidates: stopTokenFilter.tokens + requestStops
+            stopCandidates: stopTokenFilter.tokens,
+            requestStops: requestStops
         )
         return try harmonyParsedOutput(
             from: parsed,
