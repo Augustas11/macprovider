@@ -1,9 +1,8 @@
 # SPEC-038 FR-CB2 draft: decode and verification row isolation
 
-Draft text for `specs/SPEC-038-continuous-batching.md`. It is held here
-because the release session is also editing SPEC-038; the operator decides
-when it lands. The numbers assume v0.3.16 (#1953) is current. If another
-SPEC-038 change lands first, renumber.
+**Applied** in `specs/SPEC-038-continuous-batching.md` v0.3.18 (with the
+CONFORMANCE mappings below) after #1960 took v0.3.17; this file keeps the
+reviewed draft as written (numbered v0.3.17 here).
 
 ## Change log entry (insert above v0.3.16)
 
