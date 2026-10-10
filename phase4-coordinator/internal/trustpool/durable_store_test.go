@@ -1801,8 +1801,14 @@ func TestDurableStore_CreatorApprovalControlsRouteability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconstruct expired: %v", err)
 	}
-	if got := reconstructed.Pools[root.poolID].CreatorGateReason; got != "creator_agreement_expired" {
-		t.Fatalf("expired gate reason = %q, want creator_agreement_expired", got)
+	// #1938: an elapsed Creator Agreement grace is a status warning, not a
+	// routing gate.
+	expiredPool := reconstructed.Pools[root.poolID]
+	if got := expiredPool.CreatorGateReason; got != "" {
+		t.Fatalf("expired agreement gate reason = %q, want none (status warning only)", got)
+	}
+	if strings.Join(expiredPool.StatusWarnings, ",") != trustpool.StatusWarningCreatorAgreementExpired {
+		t.Fatalf("status warnings = %v, want %s", expiredPool.StatusWarnings, trustpool.StatusWarningCreatorAgreementExpired)
 	}
 }
 

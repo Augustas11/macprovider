@@ -38,7 +38,9 @@ func routeableFor(t *testing.T, state *trustpool.ReconstructedState, poolID stri
 	return trustpool.RouteableSnapshot{}
 }
 
-func TestProductionPoolStopsRoutingWhenOnCallReadinessLapses(t *testing.T) {
+// #1938 (AGENTS.md rule 10): a lapsed on-call confirmation is a status
+// warning, never a routing deadline. A missing record still unroutes.
+func TestProductionPoolKeepsRoutingWhenOnCallReadinessLapses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, root, promoted, db := promotedProductionPool(t)
@@ -50,8 +52,11 @@ func TestProductionPoolStopsRoutingWhenOnCallReadinessLapses(t *testing.T) {
 	if !snap.Routeable || len(snap.Members) == 0 {
 		t.Fatalf("promoted production pool with current on-call must route: %+v", snap)
 	}
-	if snap.RouteableUntilUTC.IsZero() || snap.RouteableUntilUTC.After(time.Now().Add(91*24*time.Hour)) {
-		t.Fatalf("routeable_until must carry the on-call expiry deadline, got %v", snap.RouteableUntilUTC)
+	if !snap.RouteableUntilUTC.IsZero() && snap.RouteableUntilUTC.Before(time.Now().Add(91*24*time.Hour)) {
+		t.Fatalf("routeable_until must not carry the on-call confirmation deadline, got %v", snap.RouteableUntilUTC)
+	}
+	if state.Pools[root.poolID].OnCallReadinessExpiresAtUTC.IsZero() {
+		t.Fatal("on-call confirmation deadline must still be recorded for status")
 	}
 	expireStoredOnCall(t, db, "production")
 	state, err = store.Reconstruct(ctx)
@@ -59,8 +64,12 @@ func TestProductionPoolStopsRoutingWhenOnCallReadinessLapses(t *testing.T) {
 		t.Fatalf("Reconstruct after expiry: %v", err)
 	}
 	snap = routeableFor(t, state, root.poolID)
-	if snap.Routeable || len(snap.Members) != 0 || state.Pools[root.poolID].ProductionGateReason != "oncall_readiness_expired" {
-		t.Fatalf("expired on-call must stop routing: snap=%+v reason=%q", snap, state.Pools[root.poolID].ProductionGateReason)
+	pool := state.Pools[root.poolID]
+	if !snap.Routeable || len(snap.Members) == 0 || pool.ProductionGateReason != "" {
+		t.Fatalf("lapsed on-call must keep routing: snap=%+v reason=%q", snap, pool.ProductionGateReason)
+	}
+	if strings.Join(pool.StatusWarnings, ",") != trustpool.StatusWarningOnCallReadinessExpired {
+		t.Fatalf("status warnings = %v, want %s", pool.StatusWarnings, trustpool.StatusWarningOnCallReadinessExpired)
 	}
 	// The refresher publishes the same verdict to the live registry.
 	registry, err := promoted.BuildRegistry()
@@ -70,15 +79,21 @@ func TestProductionPoolStopsRoutingWhenOnCallReadinessLapses(t *testing.T) {
 	if _, err := trustpool.RefreshRegistry(ctx, store, registry); err != nil {
 		t.Fatalf("RefreshRegistry: %v", err)
 	}
-	if registry.Snapshot(root.poolID).Routeable {
-		t.Fatal("registry kept routing a pool whose on-call readiness lapsed")
+	if !registry.Snapshot(root.poolID).Routeable {
+		t.Fatal("registry stopped routing a pool whose on-call confirmation lapsed")
 	}
-	// Admin publication of a state produced before the lapse re-checks too.
+	doc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", time.Now().UTC())
+	if err != nil || !found {
+		t.Fatalf("BuildStatusDocument found=%v err=%v", found, err)
+	}
+	if !doc.Routeability.Routeable || strings.Join(doc.Routeability.Warnings, ",") != trustpool.StatusWarningOnCallReadinessExpired {
+		t.Fatalf("status routeability = %+v, want routeable with the on-call warning", doc.Routeability)
+	}
 	if err := store.ApplyRouteGates(ctx, promoted); err != nil {
 		t.Fatalf("ApplyRouteGates: %v", err)
 	}
-	if routeableFor(t, promoted, root.poolID).Routeable {
-		t.Fatal("ApplyRouteGates left a lapsed pool routeable")
+	if !routeableFor(t, promoted, root.poolID).Routeable {
+		t.Fatal("ApplyRouteGates unrouted a pool whose on-call confirmation lapsed")
 	}
 }
 

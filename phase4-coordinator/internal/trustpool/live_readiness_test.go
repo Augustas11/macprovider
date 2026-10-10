@@ -830,8 +830,8 @@ func assertAdminErrorCode(t *testing.T, rec *httptest.ResponseRecorder, want str
 	}
 }
 
-// A replaced on-call record that shortens the gate must republish the routing
-// registry immediately, not wait for the next refresh tick.
+// A replaced on-call record republishes the routing registry immediately; its
+// confirmation deadline never becomes a routing deadline (#1938).
 func TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -856,7 +856,7 @@ func TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate(t *testing.T) {
 	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-republish")
 	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-republish", http.StatusAccepted)
 	before := registry.Snapshot(root.poolID)
-	if !before.Routeable || !before.RouteableUntilUTC.After(time.Now().UTC().Add(2*time.Hour)) {
+	if !before.Routeable || (!before.RouteableUntilUTC.IsZero() && !before.RouteableUntilUTC.After(time.Now().UTC().Add(2*time.Hour))) {
 		t.Fatalf("before shortening: routeable=%v until=%s, want routeable beyond 2h", before.Routeable, before.RouteableUntilUTC)
 	}
 
@@ -868,8 +868,8 @@ func TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate(t *testing.T) {
 	}
 	postAdminOnCall(t, handler, "operator-secret", short, http.StatusOK)
 	after := registry.Snapshot(root.poolID)
-	if after.RouteableUntilUTC.IsZero() || after.RouteableUntilUTC.After(time.Now().UTC().Add(time.Hour)) {
-		t.Fatalf("after shortening: until=%s, want the shortened on-call gate (<= 1h)", after.RouteableUntilUTC)
+	if !after.Routeable || !after.RouteableUntilUTC.Equal(before.RouteableUntilUTC) {
+		t.Fatalf("after shortening: routeable=%v until=%s, want routing unchanged (until=%s)", after.Routeable, after.RouteableUntilUTC, before.RouteableUntilUTC)
 	}
 	if after.Revision != before.Revision {
 		t.Fatalf("revision changed %d -> %d; on-call is a same-revision route-gate input", before.Revision, after.Revision)
