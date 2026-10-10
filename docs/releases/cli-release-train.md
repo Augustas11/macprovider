@@ -262,9 +262,10 @@ are consumed and must not be reused.
 
 Candidate **207** was promoted from exact accepted commit `d98b74a6` on
 2026-09-29. The Studio serving canary now runs the signed public 207 payload
-with `qwen/qwen3.6-35b-a3b`, and Pearl recommends compatibility set 207 while
-retaining promoted 117 and 123 in `accepted_ids` for the older fleet. Private
-candidate 202 was removed from the accepted set after the 207 cut.
+with `qwen/qwen3.6-35b-a3b`, and Pearl recommends compatibility set 207.
+Private candidate 202 was removed from the accepted set after the 207 cut.
+(Since SPEC-002-R004, 117 and 123 are not in the live allowlist and are in
+the one-time revocation seed: they connect update-only and auto-update.)
 
 
 | Net change in CLI / Malibu / installer | Status | PR |

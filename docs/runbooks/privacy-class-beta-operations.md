@@ -100,7 +100,7 @@ privacy_class:
 install -d -o root -g macprovider -m 0750 /opt/macprovider/privacy-release-identities
 ```
 
-Before the edit it checks that `/usr/local/share/macprovider/release-signing-public.pem` has the sha256 of `ops/pearl-updater/release-signing-public.pem` and that the coordinator user can read it (a configured key that cannot be read stops startup), and creates the directory (`root:macprovider`, 0750, as the Pearl updater requires). It backs the file up under `/root/macprovider-backups`, validates the edited file with the running coordinator's binary, user and exact environment, replaces it atomically, restarts the coordinator and waits for `/healthz`; on a failed restart it puts back the bytes it read under the same locks. When `accepted_ids` still lacks the candidate it adds it in the same edit, so one restart covers both, and it then stages the candidate's `v<ver>.json`.
+Before the edit it checks that `/usr/local/share/macprovider/release-signing-public.pem` has the sha256 of `ops/pearl-updater/release-signing-public.pem` and that the coordinator user can read it (a configured key that cannot be read stops startup), and creates the directory (`root:macprovider`, 0750, as the Pearl updater requires). It backs the file up under `/root/macprovider-backups`, validates the edited file with the running coordinator's binary, user and exact environment, replaces it atomically, restarts the coordinator and waits for `/healthz`; on a failed restart it puts back the bytes it read under the same locks. It then stages the candidate's `v<ver>.json`. Compatibility admission needs no edit since SPEC-002-R004: the coordinator admits every well-formed release from the `target_id` repository that is not in `revoked_ids`.
 
 Overrides, in this order:
 
