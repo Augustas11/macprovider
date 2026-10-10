@@ -221,7 +221,6 @@ func TestPoolProvenRollupQueryPlansAvoidFullScans(t *testing.T) {
 			plan = append(plan, detail)
 		}
 		rows.Close()
-		t.Logf("%s plan:\n%s", name, strings.Join(plan, "\n"))
 		for _, line := range plan {
 			for _, table := range []string{"settlement_route_snapshots", "settlement_receipt_verdicts", "ledger_request_credits", "lrc", "srs", "srv", "settlement_attempt_outputs", "sao"} {
 				if strings.HasPrefix(line, "SCAN "+table) {
