@@ -395,15 +395,80 @@ jobs:
       - name: make test-dist-${{ matrix.shard }}
         run: make test-dist-${{ matrix.shard }}
 
-  swift-tests:
-    name: phase3-binary (swift test)
+  swift-test-shard:
+    # The XCTest suite split into four parallel shards (#1920). Each shard
+    # builds the tests, lists them, and runs a deterministic quarter of the
+    # test classes; scripts/ci-swift-test-shard.py fails if the partition
+    # leaves any listed test unassigned or if a shard's run does not contain
+    # exactly its assigned tests. Aggregated into `phase3-binary (swift test)`.
+    name: phase3-binary (swift test shard ${{ matrix.shard }}/4)
+    # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-15
-    # Cold Swift/app builds plus journey and recovery checks exceed 25 minutes.
-    timeout-minutes: 45
+    timeout-minutes: 35
     needs: changes
-    # Swift/xcodebuild only runs when Swift sources, build scripts, the
-    # Makefile, or this workflow change. ci-required treats a skip here as a
-    # pass; the `changes` detector fails open so an undetected diff still runs.
+    if: ${{ needs.changes.outputs.swift == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore SwiftPM cache
+        id: spm-cache
+        # Pinned to actions/cache v4.2.2 (restore half; shard 1 saves below).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: phase3-binary/.build
+          key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
+          # A pin or toolchain change restores the nearest prior cache so only
+          # changed packages rebuild instead of a cold build.
+          restore-keys: |
+            spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
+            spm-${{ runner.os }}-
+
+      - name: Build Swift tests
+        id: build
+        working-directory: phase3-binary
+        timeout-minutes: 25
+        run: swift build --build-tests
+
+      - name: Save SwiftPM cache
+        # One writer per key: only shard 1 saves, and only after a successful
+        # build, so the four shards never race on the same cache entry.
+        if: ${{ always() && matrix.shard == 1 && steps.build.outcome == 'success' && steps.spm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: phase3-binary/.build
+          key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
+
+      - name: Run Swift test shard ${{ matrix.shard }}/4
+        working-directory: phase3-binary
+        timeout-minutes: 20
+        run: python3 ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
+
+  swift-journeys:
+    # Hermetic BYOM journeys, Sparkle key checks, and installer recovery
+    # checks, split out of the old single Swift job (#1920).
+    name: phase3-binary (BYOM journeys, Sparkle, recovery)
+    # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
+    runs-on: macos-15
+    timeout-minutes: 35
+    needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
       - name: Checkout
@@ -421,7 +486,12 @@ jobs:
           fetch-depth: 0
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Verify one-time Malibu Sparkle generator integration
         run: bash scripts/test-malibu-sparkle-generator-integration.sh
@@ -429,28 +499,23 @@ jobs:
       - name: Verify Sparkle 2.6.4 target key continuity
         run: bash scripts/test-malibu-sparkle-validator-integration.sh
 
-      - name: Cache SwiftPM
-        # Pinned to actions/cache v4.2.2.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: Restore SwiftPM cache
+        # Pinned to actions/cache v4.2.2 (restore only; swift-test-shard 1
+        # is the single writer for this key).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: phase3-binary/.build
-          key: spm-${{ runner.os }}-${{ hashFiles('phase3-binary/Package.resolved') }}
-          # A pin change must restore the nearest prior cache (only changed
-          # packages rebuild) instead of a ~15 min cold build in the 25 min step.
+          key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
           restore-keys: |
+            spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
             spm-${{ runner.os }}-
-
-      - name: Run Swift tests
-        working-directory: phase3-binary
-        timeout-minutes: 25
-        run: swift test --parallel
 
       - name: Run BYOM CLI onboarding E2E (hermetic)
         # #1381 F8: this hermetic harness (fake Ollama loopback + in-process
         # coordinator) is the only automated cover for the CLI-owned BYOM
         # admission surface end to end. It was manual-only and silently
         # regressed; gate it here so canSubmit/dry-run drift fails a required
-        # check. Reuses the SwiftPM build warmed by the swift test step above.
+        # check. Builds macprovider-cli on top of the restored SwiftPM cache.
         run: make test-byom-e2e
 
       - name: Run BYOM discovery-journey driver and evidence pipeline (hermetic)
@@ -458,8 +523,32 @@ jobs:
         # capture -> build -> preflight. Gated here so a drift between the driver's
         # manifest and the governance step/requirement/observation tables (or the
         # fail-closed redaction scan) fails a required check instead of surfacing
-        # during an operator signing session. Reuses the SwiftPM build above.
+        # during an operator signing session.
         run: make test-byom-discovery-journey
+
+      - name: Verify macOS upgrade rollback and manual process recovery
+        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
+
+      - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
+        run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
+
+  malibu-app-tests:
+    name: phase3-binary (Malibu app tests)
+    # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
+    runs-on: macos-15
+    timeout-minutes: 30
+    needs: changes
+    if: ${{ needs.changes.outputs.swift == 'true' }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
       - name: Install reviewed XcodeGen artifact
         shell: bash
@@ -479,11 +568,41 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS'
 
-      - name: Verify macOS upgrade rollback and manual process recovery
-        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
-
-      - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
-        run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
+  swift-tests:
+    # Aggregator that keeps the historical `phase3-binary (swift test)` result
+    # ci-required checks. It runs whenever the Swift gate is true (even if a
+    # dependency failed) and passes only if every split Swift job succeeded;
+    # it skips only when the detector says no Swift changed, which ci-required
+    # already ties to SWIFT_GATE=false.
+    name: phase3-binary (swift test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - changes
+      - swift-test-shard
+      - swift-journeys
+      - malibu-app-tests
+    if: ${{ always() && needs.changes.outputs.swift == 'true' }}
+    steps:
+      - name: Require every split Swift job
+        shell: bash
+        env:
+          SHARD_RESULT: ${{ needs.swift-test-shard.result }}
+          JOURNEYS_RESULT: ${{ needs.swift-journeys.result }}
+          APP_RESULT: ${{ needs.malibu-app-tests.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for pair in "swift test shards=$SHARD_RESULT" \
+                      "BYOM journeys, Sparkle, recovery=$JOURNEYS_RESULT" \
+                      "Malibu app tests=$APP_RESULT"; do
+            echo "$pair"
+            if [ "${pair##*=}" != "success" ]; then
+              echo "${pair%=*} result=${pair##*=} (expected success)" >&2
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   swift-package-lock:
     name: phase3-binary (locked SwiftPM resolve)
