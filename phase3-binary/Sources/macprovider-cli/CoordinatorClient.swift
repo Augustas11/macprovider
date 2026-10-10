@@ -7453,7 +7453,10 @@ actor CoordinatorClient {
             do {
                 try await sendNativeMTPTupleOfferIfAvailable()
             } catch {
-                Self.keepaliveDebug("native_mtp_tuple_offer_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+                Self.logNativeMTPTupleOffer(
+                    action: "send_failed",
+                    detail: "error=\(Self.sanitizedDiagnosticText(String(describing: error)))"
+                )
             }
         }
     }
@@ -7467,7 +7470,7 @@ actor CoordinatorClient {
         let snapshot = await modelRuntime.currentSnapshot()
         guard let offer = snapshot.nativeMTPTupleOffer else { return }
         guard let identity = nativeMTPTupleOfferWireIdentity(for: offer) else {
-            Self.keepaliveDebug("native_mtp_tuple_offer_skipped_missing_wire_identity")
+            Self.logNativeMTPTupleOffer(action: "skipped", detail: "reason=missing_wire_identity")
             return
         }
         let offerDigestInput = [
@@ -7505,6 +7508,21 @@ actor CoordinatorClient {
         )
         try await send(payload.wireObject)
         lastNativeMTPTupleOfferDigest = offerDigest
+        Self.logNativeMTPTupleOffer(
+            action: "sent",
+            detail: "target_generation=\(offer.targetGeneration) runtime_tuple_sha256=\(identity.nativeMTPRuntimeTupleSHA256)"
+        )
+    }
+
+    /// The tuple offer gates the coordinator's native-MTP canary (SPEC-031-R033),
+    /// so its outcome is logged unconditionally rather than behind
+    /// MACPROVIDER_KEEPALIVE_DEBUG. It is sent at most once per session and tuple.
+    private static func logNativeMTPTupleOffer(action: String, detail: String) {
+        FileHandle.standardError.write(Data(nativeMTPTupleOfferLogLine(action: action, detail: detail).utf8))
+    }
+
+    static func nativeMTPTupleOfferLogLine(action: String, detail: String) -> String {
+        "event=native_mtp_tuple_offer action=\(action) \(detail)\n"
     }
 
     private struct NativeMTPTupleOfferWireIdentity {

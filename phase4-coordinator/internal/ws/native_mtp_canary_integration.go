@@ -123,7 +123,7 @@ func (s *Server) handleNativeMTPTupleOffer(providerID, assignedID string, payloa
 		return
 	}
 	if s.nativeMTPCanaryBank == nil || !s.cfg.Pool.NativeMTPCanary.Enabled {
-		s.log.Debug().Str("provider_id", providerID).Msg("native MTP tuple offer ignored: canary disabled")
+		s.log.Info().Str("provider_id", providerID).Msg("native MTP tuple offer ignored: canary disabled")
 		return
 	}
 	if offer.ChallengeBankSHA256 != s.nativeMTPCanaryBank.RawSHA256 || offer.ChallengeBankReleaseID != s.nativeMTPCanaryBank.ReleaseID {
@@ -173,7 +173,15 @@ func (s *Server) handleNativeMTPTupleOffer(providerID, assignedID string, payloa
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("native MTP tuple offer rejected: provider session not active")
+		return
 	}
+	s.log.Info().
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Uint64("target_generation", offer.TargetGeneration).
+		Str("native_mtp_runtime_tuple_sha256", offer.NativeMTPRuntimeTupleSHA256).
+		Str("challenge_bank_release_id", offer.ChallengeBankReleaseID).
+		Msg("native MTP tuple offer accepted")
 }
 
 func (s *Server) runNativeMTPCanaryLoop() {
@@ -295,6 +303,12 @@ func (s *Server) handleNativeMTPCanaryResult(providerID, assignedID string, payl
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("native MTP canary result rejected")
 		return
 	}
+	s.log.Info().
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Str("outcome", string(eval.Outcome)).
+		Str("reason", eval.Reason).
+		Msg("native MTP canary result recorded")
 	if state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, s.now()); ok {
 		if updated, ok := s.recordNativeMTPCanaryState(providerID, assignedID, key.RuntimeTupleSHA256, state); ok {
 			if state.Status == NativeMTPCanaryTupleDisabled {
