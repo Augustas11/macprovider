@@ -40,11 +40,13 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
+from scripts import read_swiftpm_pins
 from scripts.tests import test_catalog_artifact_feed as artifact_feed
 
 catalog_release = artifact_feed.catalog_release
 ROOT = artifact_feed.ROOT
 CATALOG = ROOT / "phase3-binary/catalog/autotune"
+PACKAGE_RESOLVED = ROOT / "phase3-binary/Package.resolved"
 FORMAL_TUPLE = ROOT / "docs/research/spec048-r015/evidence-2026-10-02-a3b-formal/admission-tuple-input.json"
 R015_EVIDENCE = ROOT / "docs/research/spec048-r015/evidence-2026-10-06-a3b-amended-gates-quiet-26a434"
 G1_JOURNEY = ROOT / "docs/research/spec048-r014/evidence-2026-10-06-g1-mixed-row-26a434/journey-result.json"
@@ -106,6 +108,22 @@ class RehearsalRelease(artifact_feed.HermeticRelease):
         os.chmod(self.seed_file, 0o600)
 
 
+def runtime_revision() -> str:
+    """The mlx-swift-lm revision the provider resolves.
+
+    Read through the reviewed-pin reader, which fails closed unless
+    Package.resolved names the SPEC-048 fork at its reviewed revision, so the
+    rehearsal can never stamp an identity the build does not resolve.
+    """
+    try:
+        revision = read_swiftpm_pins.read_pins(PACKAGE_RESOLVED).get("mlx_swift_lm_revision")
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise SystemExit(f"cannot read the mlx-swift-lm pin from {PACKAGE_RESOLVED}: {error}")
+    if not isinstance(revision, str) or len(revision) != 40:
+        raise SystemExit(f"{PACKAGE_RESOLVED} has no mlx-swift-lm revision")
+    return revision
+
+
 def tuple_input() -> dict:
     value = json.loads(FORMAL_TUPLE.read_text())
     entry = value["entry"]
@@ -113,7 +131,7 @@ def tuple_input() -> dict:
     for key, item in list(entry.items()):
         if item == "0" * 64:
             entry[key] = marker
-    entry["runtime_revision"] = "5203b732c451344aef936958ef3f765480cf6a9a"
+    entry["runtime_revision"] = runtime_revision()
     entry["ordinary_baseline"]["runtime_revision"] = entry["runtime_revision"]
     entry["benchmark_policy_sha256"] = sha256((R015_EVIDENCE / "policy.json").read_bytes())
     analysis = sha256((R015_EVIDENCE / "analysis.json").read_bytes())
