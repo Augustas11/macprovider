@@ -105,7 +105,8 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil),
+            configuredLoopback: BYOMDiscoveryEnvironment.configuredLoopback(configPath: nil)
         ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
         let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
@@ -179,8 +180,9 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes()
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: nil),
+            configuredLoopback: BYOMDiscoveryEnvironment.configuredLoopback(configPath: nil)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try BYOMLiveCatalogMatcher.configuredCoordinatorURL()).withLoopbackRuntimeProbes(target: candidate)
         let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
@@ -278,8 +280,9 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
-        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes()
+            servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config),
+            configuredLoopback: BYOMDiscoveryEnvironment.configuredLoopback(configPath: config)
+        ).withCatalogMatcher(offline: offlineArtifactFeed, coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)).withLoopbackRuntimeProbes(target: candidate)
         if dryRun {
             let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
             for warning in document.warnings.sorted() {
@@ -481,11 +484,12 @@ struct ModelsProposeCommand: AsyncParsableCommand {
                 lmstudioOrigin: skipLmstudio ? nil : lmstudioOrigin,
                 llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
                 llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath),
-                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config)
+                servePort: BYOMDiscoveryEnvironment.configuredServePort(configPath: config),
+                configuredLoopback: BYOMDiscoveryEnvironment.configuredLoopback(configPath: config)
             ).withCatalogMatcher(
                 offline: offlineArtifactFeed,
                 coordinatorURL: try coordinatorURL ?? BYOMLiveCatalogMatcher.configuredCoordinatorURL(configPath: config)
-            ).withLoopbackRuntimeProbes()
+            ).withLoopbackRuntimeProbes(target: candidate)
             let bundle = yes
                 ? try await submitAndPropose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)
                 : try await propose(environment: environment, pricing: pricing, evaluationDigest: evaluationDigest)

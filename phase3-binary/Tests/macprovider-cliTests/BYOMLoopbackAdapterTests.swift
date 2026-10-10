@@ -466,6 +466,44 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertNoThrow(try env.artifactDigests.computeEvidence(runtimeSource: "llamacpp_loopback", servedModelRef: "llamacpp:tiny-q4", runtimeArtifactPath: approvedFile.resolvingSymlinksInPath().path))
     }
 
+    // MARK: - Config loopback_origin replaces the engine default (#1880)
+
+    func testConfiguredLoopbackOriginReplacesOnlyTheServedEnginesDefault() {
+        func env(_ configured: BYOMDiscoveryEnvironment.ConfiguredLoopback?, ollama: String? = OllamaLoopbackServeModel.defaultOrigin) -> BYOMDiscoveryEnvironment {
+            BYOMDiscoveryEnvironment.production(
+                namespacePath: "/nonexistent/ns",
+                mlxCacheDir: "/nonexistent/hf",
+                ollamaOrigin: ollama,
+                lmstudioOrigin: BYOMLMStudioDiscovery.defaultOrigin,
+                llamacppOrigin: BYOMLlamaCppDiscovery.defaultOrigin,
+                configuredLoopback: configured,
+                environment: [:],
+                homeDirectory: URL(fileURLWithPath: "/nonexistent/home")
+            )
+        }
+        let ollama = env(.init(modelRef: "ollama:llama3.2", origin: "http://127.0.0.1:11500"))
+        XCTAssertEqual(ollama.ollamaOrigin, "http://127.0.0.1:11500")
+        XCTAssertEqual(ollama.lmstudioOrigin, BYOMLMStudioDiscovery.defaultOrigin)
+
+        let lmstudio = env(.init(modelRef: "lmstudio:qwen/qwen3-8b", origin: "http://127.0.0.1:1235"))
+        XCTAssertEqual(lmstudio.lmstudioOrigin, "http://127.0.0.1:1235")
+        XCTAssertEqual(lmstudio.ollamaOrigin, OllamaLoopbackServeModel.defaultOrigin)
+
+        let llamacpp = env(.init(modelRef: "llamacpp:tiny-q4", origin: "http://127.0.0.1:8090"))
+        XCTAssertEqual(llamacpp.llamacppOrigin, "http://127.0.0.1:8090")
+
+        let mlxlm = env(.init(modelRef: "mlxlm:Qwen3-8B-4bit", origin: "http://127.0.0.1:8085"))
+        XCTAssertEqual(mlxlm.mlxlmOrigin, "http://127.0.0.1:8085")
+
+        // An explicit flag origin and a skipped adapter stay as the operator set them.
+        XCTAssertEqual(env(.init(modelRef: "ollama:llama3.2", origin: "http://127.0.0.1:11500"), ollama: "http://127.0.0.1:12000").ollamaOrigin, "http://127.0.0.1:12000")
+        XCTAssertNil(env(.init(modelRef: "ollama:llama3.2", origin: "http://127.0.0.1:11500"), ollama: nil).ollamaOrigin)
+        // A native model, no origin, or no config: defaults unchanged.
+        XCTAssertEqual(env(.init(modelRef: "mlx-community/Qwen3-8B-4bit", origin: "http://127.0.0.1:11500")).ollamaOrigin, OllamaLoopbackServeModel.defaultOrigin)
+        XCTAssertEqual(env(.init(modelRef: "ollama:llama3.2", origin: nil)).ollamaOrigin, OllamaLoopbackServeModel.defaultOrigin)
+        XCTAssertEqual(env(nil).ollamaOrigin, OllamaLoopbackServeModel.defaultOrigin)
+    }
+
     // MARK: - Digest cache never persists a model path (audit LOW)
 
     func testDigestCachePersistsAPathTokenNotThePathAndDiscardsV1Files() throws {
