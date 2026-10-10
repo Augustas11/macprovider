@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.7.2-draft
-**Date:** 2026-10-10
+**Status:** v0.8.0-draft
+**Date:** 2026-10-11
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -19,7 +19,9 @@ deployment/role SQL (`phase4-coordinator/dist/stats-inventory-writer.sql`,
 `dist/stats-hardware-verifier-bootstrap.sql`), the HTTP enqueue path
 (`internal/onboarding/hardware_evidence.go`) and its producer
 (`phase3-binary/.../AutotuneHardwareEvidence.swift`), the app-registration profile writer
-(`internal/onboarding/apptrack.go`, `store_pg.go`), the operator inventory writer/demotion
+(`internal/onboarding/apptrack.go`, `store_pg.go`), the App Attest challenge/submit path and
+its verifier (`internal/onboarding/appattest_submit.go`, `internal/onboarding/appattest.go`,
+`internal/appattest/`), the operator inventory writer/demotion
 (`cmd/stats-inventory-sync/main.go`), the runner (`cmd/stats-hardware-verifier/main.go`), and the
 downstream consumers — SPEC-032 admission (`internal/autotune/evidence_pg.go`), the SPEC-017
 hardware cache (`internal/stats/hardware/cache.go`), and the config-gated telemetry-drift evaluator
@@ -205,7 +207,14 @@ DB-level counterpart of the application's terminal-safe `WHERE` (§6).
   has no write path to any trust root and no EXECUTE on this function (§5.7, §10.1).
 - **`app_attest_recorder`** (migration 031, `NOLOGIN` until provisioned): `SELECT, INSERT` on
   `provider_app_attest_verifications`, nothing else. It is the only writer of recorded App Attest
-  verifications, the sole attestation input to the function above.
+  verifications, the sole attestation input to the function above. It is provisioned once with
+  `phase4-coordinator/dist/app-attest-recorder-bootstrap.sql` (`LOGIN` with a password read through
+  psql `\getenv`, never on argv or in output), the coordinator reads its DSN from
+  `onboarding.app_attest_record_dsn`, or from the root-owned env var
+  `ONBOARDING_APP_ATTEST_RECORD_DSN` when that field is unset (Pearl's live config is edited in
+  place, so provisioning the env var and restarting is enough), and the deploy preflight refuses a recorder DSN that cannot
+  log in, authenticates as another role, holds any role membership, or holds any privilege on that
+  table other than `SELECT, INSERT`.
 
 ### 2.8 Migration 019 operator approval coupling
 
@@ -442,20 +451,20 @@ attestation iff it has a row in `provider_app_attest_verifications` (migration 0
 `provider_id` primary key, `app_attest_key_id` 32 bytes and unique, `verified_at`). Only the
 `app_attest_recorder` role may write that table (`SELECT, INSERT`; no `UPDATE`/`DELETE`), and
 `provider_onboarding` has no privilege on it. The coordinator connects as `app_attest_recorder`
-through the separate `onboarding.app_attest_record_dsn` and writes the row only after a successful
-app-track registration (`internal/onboarding/apptrack.go`) in which
-`AppleAppAttestVerifier.Verify` (`internal/onboarding/appattest.go`) returned success: the
-attestation object chains to the pinned Apple App Attestation Root CA, the credential certificate
-carries the Apple nonce extension equal to `SHA-256(authData ‖ clientDataHash)`, `clientDataHash`
-binds the provider id, identity public key, register nonce, coordinator domain, bundle id and team id
-(SPEC-026 §5.3), the RP-ID hash equals `SHA-256(team_id.bundle_id)`, the authenticator-data
-credential id equals `app_attest_key_id`, the attested public key equals the leaf certificate's
-P-256 key, and the sign count is zero. The verifier does not yet enforce the production AAGUID
-(SPEC-026 §5.3 carried gap), so an attestation from a development build signed by the Malibu team
-also verifies; an outside party cannot produce one without the team's signing identity.
-Rows are insert-only and first-wins per provider and per key, so one App Attest key can vouch for
-one provider identity only. Without `app_attest_record_dsn` nothing is recorded and no hardware is
-trusted automatically. Nothing else counts:
+through the separate `onboarding.app_attest_record_dsn` and writes the row **only** from the
+provider App Attest submit endpoint (§5.7.1), after `appattest.VerifyAttestation` accepted the
+attestation under the production policy (§5.7.2), and **only** under the provider id bound to the
+bearer credential that fetched the challenge and submitted the attestation. That is the same
+token-bound id the hardware-evidence path stores in `hardware_verification_jobs.provider_id`
+(§3.1), which is the id `auto_trust_attested_hardware` looks up, so a recorded Mac's next job (or a
+job already parked in `waiting_trust`) matches without any id translation. No other path records:
+the SPEC-026 app-track register handler still verifies an optional attestation for its own
+`attested` response flag, but it never writes `provider_app_attest_verifications` (its `p_*` ids
+are never the id a serving Mac's evidence job carries). Rows are insert-only and first-wins per
+provider and per key, so one App Attest key can vouch for one provider identity only, and a
+provider keeps the first key recorded for it. Without a recorder DSN (`app_attest_record_dsn` or its env var) nothing is recorded,
+the endpoints answer `503 app_attest_unavailable`, and no hardware is trusted automatically.
+Nothing else counts:
 
 - `provider_identities.attested` (migration 006) is **not** read: `provider_onboarding` can write
   it, so it is not a trust input;
@@ -465,6 +474,87 @@ trusted automatically. Nothing else counts:
 - live MDM Managed Device Attestation (`AttestationTierHardware`, SPEC-008) is held in the
   coordinator's SQLite MDA store, which the stats-database verifier cannot read; it does not
   qualify until a later amendment records it in the stats database.
+
+#### 5.7.1 Proving App Attest: challenge, submit, record (SPEC-033-R004)
+
+App Attest is available only to a Developer ID signed Malibu.app whose embedded provisioning
+profile grants `com.apple.developer.devicecheck.app-attest-opt-in`, on macOS 27 or later, with
+`DCAppAttestService.isSupported`. The bare `macprovider-cli` cannot hold that entitlement, so
+Malibu.app performs the attestation and uses its embedded CLI only as the authenticated transport
+(`macprovider-cli app-attest challenge` / `app-attest submit`). Macs without Malibu.app, macOS < 27,
+virtual machines, and Macs whose attestation fails keep the dual-control path (§2.8) unchanged.
+
+1. **Challenge.** `POST /v1/providers/app-attest/challenge` with `Authorization: Bearer <provider
+   token>`. The coordinator validates the token and takes `provider_id` **from the token**
+   (`ValidateToken`); any body is ignored. If the provider already has a verification row it
+   answers `200 {"status":"already_recorded","provider_id":…}` and issues nothing. Otherwise it
+   issues 32 random bytes `challenge`, held in coordinator memory for **5 minutes**, bound to that
+   `provider_id`, at most one outstanding per provider (a new challenge replaces the old one) and a
+   bounded total; and answers `200 {"status":"challenge","provider_id","challenge","client_data",
+   "expires_at"}`. Issuance is rate limited per provider and per source IP (`429 rate_limited`).
+2. **Client data.** `client_data` is the RFC 8785 (JCS) canonical JSON of exactly
+   `{bundle_id, challenge, coordinator_domain, provider_id, purpose, team_id}` with
+   `purpose = "malibu.app_attest.hardware_trust.v1"`, `challenge` in standard base64, the
+   coordinator's configured `onboarding.bundle_id`, `onboarding.apple_team_id` and lowercase bare
+   `onboarding.coordinator_domain`. Malibu.app generates a fresh App Attest key and calls
+   `attestKey(keyId, clientDataHash: SHA-256(client_data bytes))` without re-serializing it.
+3. **Submit.** `POST /v1/providers/app-attest` with the same bearer and the closed body
+   `{"challenge","key_id","attestation"}` (standard base64; `key_id` 32 bytes; `attestation` at most
+   16 KiB; unknown members rejected). The coordinator again takes `provider_id` from the token, then
+   **consumes** the challenge: it is removed whether or not the rest succeeds, and it is accepted
+   only if it exists, has not expired, and was issued to the same `provider_id`
+   (`409 challenge_invalid` otherwise). It **recomputes** `client_data` from that `provider_id`, the
+   stored challenge and its own configuration — never from anything the client sends — and verifies
+   the attestation (§5.7.2) with `clientDataHash = SHA-256(client_data)`, so the Apple nonce binds
+   the attestation to this provider id and this one-time challenge.
+4. **Record.** On success it inserts `(provider_id, app_attest_key_id)` through
+   `app_attest_recorder` (`ON CONFLICT DO NOTHING`) and answers `200 {"status":"recorded"}`; if the
+   provider already has a row it answers `200 {"status":"already_recorded"}` (first key wins, the
+   new key is not recorded); if the key id is already recorded for another provider it answers
+   `409 app_attest_key_reused` and records nothing. A verification failure answers
+   `422 app_attest_rejected` and records nothing. A recorder failure answers `503` and records
+   nothing; the Mac stays on dual control and may retry with a fresh challenge.
+
+#### 5.7.2 Attestation verification (`internal/appattest`, production policy)
+
+`appattest.VerifyAttestation` follows Apple's server-side validation steps and rejects on the first
+failure: closed CBOR shape (`fmt = "apple-appattest"`, `attStmt = {x5c, receipt}`); the `x5c`
+chain verifies to the **pinned Apple App Attestation Root CA** at the current time (the root is
+compiled in from `internal/appattest/Apple_App_Attestation_Root_CA.crt`, published by Apple at
+`https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem`, and refused unless
+its DER SHA-256 equals `1cb9823ba28ba6ad2d33a006941de2ae4f513ef1d4e831b9f7e0fa7b6242c932`, it is a CA
+and it is self-signed; no runtime fetch); `keyId = SHA-256(leaf public point)`; exactly one Apple
+nonce extension (`1.2.840.113635.100.8.2`, `SEQUENCE { [1] EXPLICIT OCTET STRING }`) equal to
+`SHA-256(authData ‖ clientDataHash)`; `rpIdHash = SHA-256(team_id "." bundle_id)`; the AT flag; sign
+counter 0; the **production** AAGUID (`"appattest"` followed by seven zero bytes — development
+attestations are refused); `credentialId = keyId`; the COSE key equals the leaf key; a validation
+category, when present, of Developer ID; and the Apple ACL extension
+(`1.2.840.113635.100.8.6`) equal to the macOS value for SIP and Full Security. A key whose ACL does
+not match is a valid Apple key on a Mac that does not meet policy: it is answered
+`422 app_attest_rejected` like any other failure and never recorded. The leaf certificate's
+validity is checked only at submission; a recorded verification never expires (no calendar
+re-check after enrollment).
+
+**What App Attest proves, and what it does not.** A recorded verification proves that a genuine
+Apple device with SIP and Full Security, running Malibu.app signed by the configured team, generated
+the key and held the provider's bearer credential at submission. It does **not** prove the
+self-reported chip, memory or hardware hash: those remain bound only by the §5.1–§5.4 gates, which
+still run on every job. Its Sybil cost is one real macOS 27 Mac per provider id (keys are unique and
+first-wins), and an operator revoke ends automatic trust for that provider permanently (step 5 below).
+
+**SPEC-033-R004 — App Attest is recorded only for the token-bound provider after production
+verification.** The coordinator MUST record a `provider_app_attest_verifications` row only from the
+§5.7.1 submit endpoint, only through `app_attest_recorder`, and only after
+`appattest.VerifyAttestation` accepted an attestation whose `clientDataHash` it recomputed from the
+provider id bound to the request's bearer credential and an unexpired, single-use challenge issued
+to that same provider id. It MUST NOT take the provider id, team id, bundle id, coordinator domain
+or client data from the request body. It MUST refuse an attestation that does not chain to the
+pinned Apple App Attestation Root CA (fingerprint above), whose nonce extension does not match, whose
+AAGUID is not production, or whose ACL is not SIP and Full Security. A challenge MUST be usable at
+most once and MUST expire after 5 minutes. A key id already recorded for another provider MUST NOT be
+recorded again, and a provider's first recorded key MUST NOT be replaced. Any failure MUST leave the
+provider on the dual-control path and MUST NOT reject or block registration, hardware evidence or
+serving.
 
 **Decision.** For a job whose `Evaluate` result is `missing_trusted_hardware_identity` (every §5.1–
 §5.4 reject gate passed), the verifier calls `auto_trust_attested_hardware(job_id)` inside its batch
@@ -650,9 +740,9 @@ can write; `provider_onboarding` holds no privilege on it and no EXECUTE on the 
 function never reads `provider_identities.attested` (which onboarding can write). So a
 **compromised** onboarding SQL role still cannot obtain trust: it cannot fabricate an attestation
 record, cannot create a trust root, and cannot set the profile `verified` bit. Automatic trust for a
-provider requires the `app_attest_recorder` credential (held only by the coordinator's
-registration path, used after a successful Apple App Attest verification) or the verifier or
-operator roles. Every automatic grant is ledgered with its job and attestation digest, and an
+provider requires the `app_attest_recorder` credential (held only by the coordinator's App Attest
+submit path, used after a successful production Apple App Attest verification for the token-bound
+provider id, §5.7.1) or the verifier or operator roles. Every automatic grant is ledgered with its job and attestation digest, and an
 operator revoke ends automatic trust for that provider under every hardware hash.
 
 ### 10.2 What `verified` does NOT prove (non-guarantees — do not overstate)
@@ -808,6 +898,15 @@ issues; closing them is code follow-up, not a spec change:
   inserting a job, and the provider binary MUST report it as pending and continue an install,
   update or freshness check that requires evidence. A refusal caused only by a recently finished job
   MUST return `hardware_evidence_rate_limited` and MUST stay a failure in the provider binary.
+- **AC-HV-15 (App Attest recording, SPEC-033-R004).** The real macOS 27 Developer ID attestation
+  fixture MUST verify through the onboarding verifier and MUST fail when the compiled root is
+  replaced by any certificate whose fingerprint differs (including the pre-v0.8.0 corrupt copy). A
+  submit with a valid attestation MUST record a row keyed by the bearer's provider id; a body that
+  names another provider id MUST be rejected as malformed; a reused, expired, or other-provider
+  challenge MUST answer `409 challenge_invalid` without recording; a key recorded for another
+  provider MUST answer `409 app_attest_key_reused`; a development-AAGUID or non-SIP attestation MUST
+  answer `422` without recording; and a recorded provider's evidence job MUST promote through
+  AC-HV-13.
 - **AC-HV-12 (revocation calibration documented).** The spec MUST disclose the R1 `app_register`
   source-flip escape (a genuine revocation gap) and the R2 empty-trust *ergonomics* limitation
   (zero *active* trust is reachable via an expired placeholder and does demote — §10.4) as known
@@ -817,6 +916,18 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.8.0-draft (2026-10-11) — providers prove App Attest; the recorder is provisioned (#1911).**
+- **§5.7.1 / §5.7.2 added (SPEC-033-R004)**: a provider-token-authenticated, single-use, 5-minute
+  challenge and a submit endpoint record App Attest for the provider id bound to the bearer, the id
+  the hardware-evidence job carries, so auto-trust (R002) matches the serving `mp-*` provider. The
+  app-track register handler no longer records (its `p_*` ids never matched a job).
+- **§5.7.2**: the verifier moves to `internal/appattest`: the genuine Apple App Attestation Root CA
+  pinned by fingerprint (the earlier embedded copy was corrupt and could not verify any real
+  attestation), Apple's `[1] EXPLICIT` nonce encoding, production AAGUID enforced (closes the
+  SPEC-026 §5.3 carried gap), `keyId = SHA-256(leaf key)`, and SIP + Full Security ACL. App Attest
+  does not prove the self-reported chip or memory; §5.1–§5.4 still gate those.
+- **§2.7 / §10.1 / §12**: recorder provisioning, preflight, credential holder, AC-HV-15.
 
 **v0.7.2-draft (2026-10-10) — audit round 2 (#1880).**
 - **§5.7 / R002**: an operator revoke also expires every other `app_attest` root of the provider,

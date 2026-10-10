@@ -34,14 +34,14 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.24 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.10 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
-| SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.29 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
+| SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.30 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | draft | pending | pending corpus migration | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | Classic External-Draft MLX Speculative Decoding for Provider Serve | 0.3-draft | draft | pending | pending corpus migration | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | draft | pending | pending corpus migration | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 | SPEC-030 | Losslessness Probe | v0.1.1 | draft | pending | pending: 1 | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.3.7 | draft | pending | pending: 1 | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
 | SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.3.7 | draft | complete | conformant: 1, pending: 3 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
-| SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.7.2 | draft | pending | conformant: 1, pending: 2 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
+| SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.8.0 | draft | pending | conformant: 1, pending: 3 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1.2 | draft | complete | pending: 18 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |

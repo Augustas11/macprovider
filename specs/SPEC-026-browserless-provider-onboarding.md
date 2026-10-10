@@ -1,6 +1,19 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.30 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.30 (2026-10-11, App Attest for hardware trust — #1911).**
+§5.3 now points at the shipped App Attest path: Malibu.app (macOS 27+,
+Developer ID, DeviceCheck App Attest entitlement) attests through the
+provider-token-authenticated challenge/submit endpoints owned by SPEC-033
+§5.7.1 (SPEC-033-R004), which record the verification for the token-bound
+`mp-*` provider and make its hardware trusted automatically. The register
+path's optional attestation now uses the same production verifier
+(`internal/appattest`): the pinned genuine Apple root, Apple's nonce
+encoding and the production AAGUID are enforced, closing the carried gap;
+a key that fails only the SIP/Full Security policy degrades to
+`attested = false`; the register path never records a hardware-trust
+verification. Macs without App Attest keep the two-operator approval path.
 
 **Change log v0.29 (2026-09-05, watchdog rollback/exit-restart wording reconciled
 — RFC-001 F1, #1203).** Removes the stale §2.1.1 grounding claim that the
@@ -2178,23 +2191,34 @@ provided qualification lapses.
 
 ### 5.3 App Attest — opportunistic, replay-hardened
 
-> **NOT implemented client-side (reconciled v0.14).** The shipped Malibu app does
-> **not** call `DCAppAttestService` — there is no App Attest implementation in the app
-> tree, and current main deletes the former `RegisterClient` passthrough. The
-> register path remains dormant (§4.1). So "valid App Attest evidence unlocks trust
-> benefits" is a **coordinator-verifier contract + future client**, not shipped
-> behavior. **Hash-contract note (reconciled v0.16):** the coordinator hashes the JCS
+> **Hardware trust uses SPEC-033 §5.7.1, not `/register` (v0.30).** The shipped
+> App Attest client is Malibu.app on macOS 27 or later: it fetches a single-use
+> challenge with the provider bearer (`POST /v1/providers/app-attest/challenge`),
+> attests a fresh key over the coordinator-issued `client_data`, and submits it
+> (`POST /v1/providers/app-attest`) through its embedded CLI. The coordinator
+> takes the provider id from the bearer, verifies under the production policy
+> (SPEC-033 §5.7.2) and records the verification for that `mp-*` id, which is what
+> automatic hardware trust (SPEC-033-R002) reads. Macs without Malibu.app,
+> macOS < 27, VMs and failed attestations stay on the two-operator approval path.
+> The remainder of this section is the optional attestation on the dormant
+> app-track `/register` path; it sets only the register response's `attested`
+> flag and is never a hardware-trust input.
+>
+> **Hash-contract note (reconciled v0.16):** the coordinator hashes the JCS
 > member **named `ts_utc`** with an **integer Unix-seconds value** (it parses the RFC3339
 > `ts_utc` and converts to Unix seconds before hashing — `apptrack.go:518,527`). A future
 > client implementing §5.3 MUST keep the member name `ts_utc` and hash the **Unix-seconds
 > integer** — NOT the RFC3339 string, and NOT a renamed `ts_utc_unix` member; either would
 > produce a different JCS hash and an unverifiable attestation.
-> **Carried coordinator gap (reconciled v0.16):** the shipped verifier does NOT enforce
-> the environment-specific AAGUID — `SkipAAGUIDEnforce` is declared but unused and the
-> parser skips all 16 AAGUID bytes (`appattest.go:44-50,195-214`), so a *development*
-> attestation could verify as `attested=true`. Exposure is low because no shipped client
-> mints App Attest evidence (client-dormant, above); production-AAGUID enforcement is a
-> tracked coordinator hardening item, not a SPEC-026 client contract.
+> **Verifier (v0.30):** `AppleAppAttestVerifier` delegates to
+> `internal/appattest.VerifyAttestation`: the pinned genuine Apple App Attestation
+> Root CA, Apple's `[1] EXPLICIT` nonce encoding, the production AAGUID (the v0.16
+> carried gap is closed) and `keyId = SHA-256(leaf key)` are enforced. An attestation
+> that is valid but fails only the SIP/Full Security ACL policy returns
+> `attested = false` instead of a rejection. The dormant register path keeps its
+> 4 KiB `app_attest_object` cap and 8 KiB body cap, below a real macOS 27
+> attestation (about 5.8 KiB); it is not a hardware-trust input, and the
+> SPEC-033 §5.7.1 submit endpoint accepts up to 16 KiB.
 
 App-track binary calls `DCAppAttestService.attestKey(_:clientDataHash:)`
 with:
@@ -2222,6 +2246,8 @@ also:
   `provider_identities` for a different `provider_id`
   (attestation-key reuse detection).
 - Persist `app_attest_key_id` on the `provider_identities` row.
+- Never write `provider_app_attest_verifications`; only the SPEC-033
+  §5.7.1 submit endpoint records a hardware-trust verification.
 
 Valid attestation:
 - counts as one §5.2 unlock criterion

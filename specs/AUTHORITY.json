@@ -563,6 +563,7 @@
       "owner_spec": "SPEC-033",
       "consumers": [
         "SPEC-023",
+        "SPEC-026",
         "SPEC-031",
         "SPEC-032",
         "SPEC-044",
