@@ -57,6 +57,11 @@ func TestModelAdmissionProbeEvidenceRecordDigest(t *testing.T) {
 		"hash":        func(r *ModelAdmissionProbeEvidence) { r.ArtifactHash = "XYZ" },
 		"schema":      func(r *ModelAdmissionProbeEvidence) { r.Schema = "v0" },
 		"time":        func(r *ModelAdmissionProbeEvidence) { r.EvaluatedAt = "2026-10-01T12:00:00.5Z" },
+		"policy":      func(r *ModelAdmissionProbeEvidence) { r.ProbePolicyID = "macprovider.known_answer_probe.v0" },
+		"prompt set":  func(r *ModelAdmissionProbeEvidence) { r.PromptSetSHA256 = strings.Repeat("a", 64) },
+		"expected":    func(r *ModelAdmissionProbeEvidence) { r.ExpectedAnswerSHA256 = strings.Repeat("a", 64) },
+		"seed":        func(r *ModelAdmissionProbeEvidence) { r.Decoding.Seed = 7 },
+		"max tokens":  func(r *ModelAdmissionProbeEvidence) { r.Decoding.MaxTokens = 4 },
 	} {
 		bad := record
 		mutate(&bad)
@@ -294,4 +299,32 @@ func must(raw []byte, err error) []byte {
 		panic(err)
 	}
 	return raw
+}
+
+// Probe before bind: while an offer-time probe is in flight the binding
+// evaluation leaves the candidate unbound; once it clears, the bind links the
+// record the probe wrote.
+func TestPoolManifestBindWaitsForInFlightOfferProbe(t *testing.T) {
+	f := newBindingFixture(t)
+	f.server.probeEvidence = f.server.modelAdmissions.(ModelAdmissionProbeEvidenceStore)
+	source := wirePoolSource(f)
+	source.set(poolSnapshot(testPoolA, 1, poolDigestV1, ggufPoolEntry()))
+	f.registerPoolSession(t, poolProvider, "llamacpp_loopback", modelidentity.GGUFFileV1, poolGGUFHash)
+	key := knownAnswerInFlightKey(poolProvider, "byom_"+strings.Repeat("p", 52))
+	f.server.knownAnswerInFlight.Store(key, struct{}{})
+	offer := f.offer(t, poolProvider, "p", "llamacpp_loopback", map[string]string{modelidentity.GGUFFileV1: poolGGUFHash})
+	f.reevaluate(poolProvider)
+	if head := f.latest(t, poolProvider, offer.CandidateID); head.PoolScoped() {
+		t.Fatalf("bound while the offer probe was in flight: %+v", head)
+	}
+	record := newModelAdmissionProbeEvidence(poolProvider, offer.CandidateID, modelidentity.GGUFFileV1, poolGGUFHash, "llamacpp_loopback", ModelAdmissionProbeResultPass, f.now)
+	digest, err := f.server.probeEvidence.AppendModelAdmissionProbeEvidence(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server.knownAnswerInFlight.Delete(key)
+	f.reevaluate(poolProvider)
+	if head := f.latest(t, poolProvider, offer.CandidateID); !head.PoolScoped() || head.PoolProbeEvidenceDigest != digest {
+		t.Fatalf("bind after the probe = %+v", head)
+	}
 }

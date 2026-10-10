@@ -92,8 +92,9 @@ func (r ModelAdmissionProbeEvidence) EvaluatedTime() time.Time {
 // pool binding links null.
 type ModelAdmissionProbeEvidenceStore interface {
 	AppendModelAdmissionProbeEvidence(context.Context, ModelAdmissionProbeEvidence) (string, error)
-	// LatestModelAdmissionProbeEvidence is the newest record for one
-	// provider, candidate, and exact pair evaluated at or after since.
+	// LatestModelAdmissionProbeEvidence is the newest record under the
+	// current policy for one provider, candidate, and exact pair evaluated at
+	// or after since.
 	LatestModelAdmissionProbeEvidence(ctx context.Context, providerID, candidateID, algorithm, hash string, since time.Time) (StoredModelAdmissionProbeEvidence, bool, error)
 	// PassingModelAdmissionProbeEvidenceSince lists passing records under
 	// policyID evaluated at or after since, newest first, at most limit.
@@ -156,6 +157,13 @@ func validateModelAdmissionProbeEvidence(r ModelAdmissionProbeEvidence) error {
 		return errors.New("probe evidence: digests")
 	case r.Decoding.Temperature != 0 || r.Decoding.MaxTokens < 1:
 		return errors.New("probe evidence: decoding")
+	}
+	// One policy exists: a record naming it carries exactly its constants.
+	if r.ProbePolicyID != ModelAdmissionKnownAnswerProbePolicyID ||
+		r.PromptSetSHA256 != modelAdmissionKnownAnswerPromptSetSHA256() ||
+		r.ExpectedAnswerSHA256 != sha256HexString(modelAdmissionKnownAnswerExpected) ||
+		r.Decoding.Seed != modelAdmissionKnownAnswerSeed || r.Decoding.MaxTokens != modelAdmissionKnownAnswerMaxTokens {
+		return errors.New("probe evidence: not the known-answer policy")
 	}
 	switch r.Result {
 	case ModelAdmissionProbeResultPass, ModelAdmissionProbeResultFail, ModelAdmissionProbeResultError:
@@ -243,7 +251,7 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionProbeEvidence(_ context.
 	hash = strings.ToLower(hash)
 	for i := len(s.probeEvidence) - 1; i >= 0; i-- {
 		r := s.probeEvidence[i].stored
-		if r.Record.ProviderID == providerID && r.Record.CandidateID == candidateID &&
+		if r.Record.ProbePolicyID == ModelAdmissionKnownAnswerProbePolicyID && r.Record.ProviderID == providerID && r.Record.CandidateID == candidateID &&
 			r.Record.ArtifactHashAlgorithm == algorithm && r.Record.ArtifactHash == hash &&
 			!r.Record.EvaluatedTime().Before(since.UTC().Truncate(time.Second)) {
 			return r, true, nil
@@ -324,11 +332,11 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionProbeEvidence(ctx contex
 	err := s.db.QueryRowContext(ctx, `
 SELECT record_jcs, probe_evidence_digest
   FROM model_admission_probe_evidence
- WHERE provider_id = ? AND candidate_id = ? AND artifact_hash_algorithm = ? AND artifact_hash = ?
+ WHERE probe_policy_id = ? AND provider_id = ? AND candidate_id = ? AND artifact_hash_algorithm = ? AND artifact_hash = ?
    AND evaluated_at_utc >= ?
  ORDER BY evaluated_at_utc DESC, id DESC
  LIMIT 1`,
-		providerID, candidateID, algorithm, strings.ToLower(hash), since.UTC().Truncate(time.Second).Format(time.RFC3339)).Scan(&canonical, &digest)
+		ModelAdmissionKnownAnswerProbePolicyID, providerID, candidateID, algorithm, strings.ToLower(hash), since.UTC().Truncate(time.Second).Format(time.RFC3339)).Scan(&canonical, &digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredModelAdmissionProbeEvidence{}, false, nil
 	}
@@ -500,6 +508,23 @@ func (s *Server) runModelAdmissionKnownAnswerProbe(ctx context.Context, provider
 					text.WriteString(knownAnswerChunkText(chunk.Data))
 				}
 			case end := <-relay.Done:
+				// The relay sends the terminal frame before closing the
+				// chunk channel: evaluate only the complete response.
+				drained := chunks == nil
+				for !drained {
+					select {
+					case chunk, ok := <-chunks:
+						if !ok {
+							drained = true
+							continue
+						}
+						if text.Len() < 64*1024 {
+							text.WriteString(knownAnswerChunkText(chunk.Data))
+						}
+					case <-probeCtx.Done():
+						break wait
+					}
+				}
 				if end.Status == "complete" {
 					result = ModelAdmissionProbeResultFail
 					if normalizeKnownAnswer(text.String()) == modelAdmissionKnownAnswerExpected {
@@ -549,6 +574,17 @@ func (s *Server) maybeRunKnownAnswerProbeForOffer(ctx context.Context, head Mode
 	if _, err := s.runModelAdmissionKnownAnswerProbe(ctx, provider, head, algorithm, hash); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", head.ProviderID).Str("candidate_id", head.CandidateID).Msg("model admission known-answer probe not recorded")
 	}
+}
+
+func knownAnswerInFlightKey(providerID, candidateID string) string {
+	return providerID + "\x00" + candidateID
+}
+
+// knownAnswerProbeInFlight reports whether an offer-time probe for this
+// candidate is still running.
+func (s *Server) knownAnswerProbeInFlight(providerID, candidateID string) bool {
+	_, ok := s.knownAnswerInFlight.Load(knownAnswerInFlightKey(providerID, candidateID))
+	return ok
 }
 
 // linkedProbeEvidenceDigest is the digest an R011 bind or rebind event links:

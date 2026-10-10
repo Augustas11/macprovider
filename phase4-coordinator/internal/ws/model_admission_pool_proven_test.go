@@ -106,6 +106,7 @@ func TestPoolProvenOwnerAccountResolution(t *testing.T) {
 	snap.MemberOwnerAccounts = map[string]string{"native-member": "acct-member"}
 	source.set(snap)
 	wiring := f.server.poolModels.Load()
+	view := func(poolID string) (trustpool.Snapshot, bool) { return wiring.source.Snapshot(poolID), true }
 	native := func(provider string) billing.PoolProvenAttempt {
 		a := poolProvenAttempt(provider, "")
 		a.RuntimeSource, a.PoolOperatorAccountID = "", ""
@@ -122,7 +123,7 @@ func TestPoolProvenOwnerAccountResolution(t *testing.T) {
 		"native recorded owner":   {native("native-member"), "acct-member", true},
 		"native without an owner": {native("native-unknown"), "", false},
 	} {
-		got, ok := poolProvenOwnerAccount(tc.attempt, wiring)
+		got, ok := poolProvenOwnerAccount(tc.attempt, view)
 		if got != tc.want || ok != tc.ok {
 			t.Fatalf("%s: owner = %q ok=%v", name, got, ok)
 		}
@@ -210,6 +211,17 @@ func TestModelAdmissionPoolProvenEndpoint(t *testing.T) {
 	}
 	if _, again := c.do(http.MethodGet, path, "alice-secret", nil); again["nonce"] != first["nonce"] {
 		t.Fatal("a failed build replaced the snapshot")
+	}
+	// A build whose deadline has passed never replaces the snapshot.
+	src.err = nil
+	src.attempts = []billing.PoolProvenAttempt{poolProvenAttempt("p1", "acct-1")}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.buildModelAdmissionPoolProvenSnapshot(expired); err == nil {
+		t.Fatal("an expired build published a snapshot")
+	}
+	if _, again := c.do(http.MethodGet, path, "alice-secret", nil); again["nonce"] != first["nonce"] {
+		t.Fatal("an expired build replaced the snapshot")
 	}
 	// A snapshot older than two cadences is unavailable.
 	later := f.now.Add(modelAdmissionIntakeStaleAfter + time.Second)

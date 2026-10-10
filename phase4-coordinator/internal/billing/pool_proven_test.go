@@ -10,7 +10,7 @@ import (
 )
 
 // SPEC-047-R012 counting predicate: only an enforce-mode pool_manifest
-// attempt with a closed payable verdict, an undisputed pool label, and a
+// attempt with a closed payable verdict, a verified pool label, and a
 // payable credit with positive buyer debit and provider credit counts, by
 // verdict finality time, and the ceiling is applied at the query.
 func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
@@ -35,6 +35,11 @@ func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
 		insertSPEC022LedgerCredit(t, store.db, in, providerCredits)
 		if verified {
 			markSPEC022ReceiptVerified(t, store.db, in)
+			if pool {
+				if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'verified' WHERE request_id = ?`, requestID); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 		return in
 	}
@@ -45,6 +50,14 @@ func TestQueryPoolProvenAttemptsCountingPredicate(t *testing.T) {
 	seed("pp-zero-credit", true, true, 0)
 	disputed := seed("pp-disputed", true, true, 600)
 	if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'label_disputed' WHERE request_id = ?`, disputed.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	unverifiedLabel := seed("pp-unverified-label", true, true, 600)
+	if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'unverified' WHERE request_id = ?`, unverifiedLabel.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	noLabel := seed("pp-no-label", true, true, 600)
+	if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = NULL WHERE request_id = ?`, noLabel.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	quarantined := seed("pp-quarantined", true, true, 600)

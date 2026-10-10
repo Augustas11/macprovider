@@ -4764,6 +4764,8 @@ def validate_pool_proven_evidence(value: object, *, key: str, thresholds: dict, 
     if source_digest != digest:
         fail(f"{label}.pool_proven_evidence.source_sha256 names no retained {MODEL_ADMISSION_POOL_PROVEN_FILE}")
     frame_generated = _intake_rfc3339(frame["generated_at"], f"{MODEL_ADMISSION_POOL_PROVEN_FILE}.generated_at")
+    if frame_generated > release_generated:
+        fail(f"{label}: {MODEL_ADMISSION_POOL_PROVEN_FILE} was generated after the intake decision; it cannot be evidence for it")
     if release_generated - frame_generated > INTAKE_POOL_PROVEN_MAX_AGE:
         fail(f"{label}: {MODEL_ADMISSION_POOL_PROVEN_FILE} was generated more than 24 hours before the release (SPEC-023 §16.9)")
     pair = (v["artifact_hash_algorithm"], v["artifact_hash"])
@@ -4772,8 +4774,9 @@ def validate_pool_proven_evidence(value: object, *, key: str, thresholds: dict, 
     expected = pool_proven_value_from_source(frame, digest, *pair)
     if expected is None:
         fail(f"{label}: the retained {MODEL_ADMISSION_POOL_PROVEN_FILE} has no row for the pool-proven pair")
-    if v != expected:
-        differing = sorted(k for k in POOL_PROVEN_VALUE_KEYS if v.get(k) != expected.get(k))
+    # Type-exact comparison: JSON true never equals 1, nor 120 equal 120.0.
+    differing = sorted(k for k in POOL_PROVEN_VALUE_KEYS if type(v[k]) is not type(expected[k]) or v[k] != expected[k])
+    if differing:
         fail(f"{label}.pool_proven_evidence disagrees with the retained source on {differing}")
     if v["suppressed"]:
         fail(f"{label}: a suppressed pool-proven value satisfies no floor")

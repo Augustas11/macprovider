@@ -623,6 +623,10 @@ func (s *Server) evaluatePoolManifestBindingsLocked(ctx context.Context, provide
 	}
 	appended := false
 	for _, head := range events {
+		if !head.PoolScoped() && s.knownAnswerProbeInFlight(providerID, head.CandidateID) {
+			// The offer handler re-evaluates once its probe has recorded.
+			continue
+		}
 		decision, ok := poolBindingDecisionForHead(wiring, providerID, head, s.classifyCatalogPair, s.now())
 		if !ok {
 			continue

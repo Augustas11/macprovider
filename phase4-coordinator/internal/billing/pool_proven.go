@@ -29,7 +29,8 @@ type PoolProvenAttempt struct {
 // coordinator-assigned finality time (the closing time of the settlement
 // receipt verdict) lies in [since, until]: an enforce-mode route snapshot with
 // expected_model_hash_source pool_manifest, a closed payable verdict whose
-// pool label is not label_disputed, and a payable request credit (the SPEC-022
+// SPEC-042-R006 pool label is verified (only a verified label counts toward
+// pool-scoped accounting), and a payable request credit (the SPEC-022
 // payable view, so quarantined or reversed credits are excluded) with a
 // positive buyer debit and a positive provider credit. It returns at most
 // limit rows; the caller treats limit rows as the ceiling being reached.
@@ -73,12 +74,12 @@ SELECT srs.provider_id,
    AND COALESCE(srs.pool_id, '') <> ''
    AND srv.closed = 1
    AND ` + payableSettlementOutcomeSQL("srv", "srs") + `
-   AND COALESCE(srv.pool_label_status, '') <> ?
+   AND srv.pool_label_status = ?
    AND julianday(COALESCE(srv.updated_at_utc, srv.created_at_utc)) BETWEEN julianday(?) AND julianday(?)
  ORDER BY srs.id
  LIMIT ?`
 	rows, err := q.QueryContext(ctx, query,
-		ExpectedModelHashSourcePoolManifest, PoolLabelStatusDisputed,
+		ExpectedModelHashSourcePoolManifest, PoolLabelStatusVerified,
 		since.UTC().Format(time.RFC3339Nano), until.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err

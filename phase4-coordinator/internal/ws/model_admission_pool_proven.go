@@ -142,21 +142,28 @@ func BuildModelAdmissionPoolProvenRows(attempts []PoolProvenCountedAttempt, prob
 // creator account the snapshot recorded, else (native) the pool creator when
 // the provider is creator-owned or its recorded owner account in the current
 // registry view. An unresolved attempt is not counted.
-func poolProvenOwnerAccount(a billing.PoolProvenAttempt, wiring *poolModelWiring) (string, bool) {
+func poolProvenOwnerAccount(a billing.PoolProvenAttempt, view func(poolID string) (trustpool.Snapshot, bool)) (string, bool) {
 	if a.PoolMemberAccountID != "" {
 		return a.PoolMemberAccountID, true
 	}
 	if a.RuntimeSource != "" {
 		return a.PoolOperatorAccountID, a.PoolOperatorAccountID != ""
 	}
-	if wiring == nil || wiring.source == nil {
+	if view == nil {
 		return "", false
 	}
-	view := wiring.source.Snapshot(a.PoolID)
-	if view.CreatorAccountID != "" && view.CreatorOwnedMembers[a.ProviderID] {
+	snapshot, ok := view(a.PoolID)
+	if !ok {
+		return "", false
+	}
+	return poolProvenNativeOwner(snapshot, a.ProviderID)
+}
+
+func poolProvenNativeOwner(view trustpool.Snapshot, providerID string) (string, bool) {
+	if view.CreatorAccountID != "" && view.CreatorOwnedMembers[providerID] {
 		return view.CreatorAccountID, true
 	}
-	owner := view.MemberOwnerAccounts[a.ProviderID]
+	owner := view.MemberOwnerAccounts[providerID]
 	return owner, owner != ""
 }
 
@@ -196,28 +203,52 @@ func (s *Server) buildModelAdmissionPoolProvenSnapshot(ctx context.Context) erro
 	if len(attempts) > modelAdmissionPoolProvenAttemptCeiling {
 		return errModelAdmissionPoolProvenCeiling
 	}
+	// One registry snapshot and one accepted-entry index per pool per build:
+	// the per-attempt work is map lookups only.
 	wiring := s.poolModels.Load()
-	entriesByPool := map[string]map[trustpool.AcceptedCoreKey][]poolmanifest.PoolModelEntry{}
+	views := map[string]trustpool.Snapshot{}
+	view := func(poolID string) (trustpool.Snapshot, bool) {
+		if wiring == nil || wiring.source == nil {
+			return trustpool.Snapshot{}, false
+		}
+		snapshot, seen := views[poolID]
+		if !seen {
+			snapshot = wiring.source.Snapshot(poolID)
+			views[poolID] = snapshot
+		}
+		return snapshot, true
+	}
+	type entryKey struct {
+		core                         trustpool.AcceptedCoreKey
+		poolModelID, algorithm, hash string
+	}
+	entriesByPool := map[string]map[entryKey]poolmanifest.PoolModelEntry{}
 	counted := make([]PoolProvenCountedAttempt, 0, len(attempts))
-	for _, a := range attempts {
-		owner, ok := poolProvenOwnerAccount(a, wiring)
+	for i, a := range attempts {
+		if i%1024 == 0 && ctx.Err() != nil {
+			return fmt.Errorf("build: %w", ctx.Err())
+		}
+		owner, ok := poolProvenOwnerAccount(a, view)
 		if !ok || !validModelAdmissionSHA256Hex(a.ArtifactHash) || a.ArtifactHashAlgorithm == "" {
 			continue
 		}
-		cores, seen := entriesByPool[a.PoolID]
+		index, seen := entriesByPool[a.PoolID]
 		if !seen {
-			cores, err = s.poolProven.AcceptedPoolModelEntries(ctx, a.PoolID)
+			cores, err := s.poolProven.AcceptedPoolModelEntries(ctx, a.PoolID)
 			if err != nil {
 				return fmt.Errorf("accepted entries: %w", err)
 			}
-			entriesByPool[a.PoolID] = cores
+			index = map[entryKey]poolmanifest.PoolModelEntry{}
+			for core, entries := range cores {
+				for _, entry := range entries {
+					index[entryKey{core, entry.PoolModelID, entry.ArtifactHashAlgorithm, entry.ArtifactHash}] = entry
+				}
+			}
+			entriesByPool[a.PoolID] = index
 		}
 		c := PoolProvenCountedAttempt{ArtifactHashAlgorithm: a.ArtifactHashAlgorithm, ArtifactHash: a.ArtifactHash, OwnerAccountID: owner}
-		for _, entry := range cores[trustpool.AcceptedCoreKey{ManifestVersion: a.ManifestVersion, ManifestCoreDigest: a.ManifestCoreDigest}] {
-			if entry.PoolModelID == a.PoolModelID && entry.ArtifactHashAlgorithm == a.ArtifactHashAlgorithm && entry.ArtifactHash == a.ArtifactHash {
-				c.LicenseID, c.PaidServingAttested = entry.License, entry.PaidServingAttested
-				break
-			}
+		if entry, ok := index[entryKey{trustpool.AcceptedCoreKey{ManifestVersion: a.ManifestVersion, ManifestCoreDigest: a.ManifestCoreDigest}, a.PoolModelID, a.ArtifactHashAlgorithm, a.ArtifactHash}]; ok {
+			c.LicenseID, c.PaidServingAttested = entry.License, entry.PaidServingAttested
 		}
 		counted = append(counted, c)
 	}
@@ -254,6 +285,10 @@ func (s *Server) buildModelAdmissionPoolProvenSnapshot(ctx context.Context) erro
 	})
 	if err != nil {
 		return fmt.Errorf("encode: %w", err)
+	}
+	// A build that crossed its deadline never replaces the snapshot.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("build: %w", err)
 	}
 	s.modelAdmissionPPMu.Lock()
 	s.modelAdmissionPPSnap = &modelAdmissionPoolProvenSnapshot{generatedAt: generatedAt, body: body}

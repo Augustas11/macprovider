@@ -11768,7 +11768,8 @@
         "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestModelAdmissionProbeEvidenceStoresAreAppendOnly",
         "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestPoolManifestBindLinksProbeEvidence",
         "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestKnownAnswerProbeDueAndNormalization",
-        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestRunModelAdmissionKnownAnswerProbeRecordsResult"
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestRunModelAdmissionKnownAnswerProbeRecordsResult",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestPoolManifestBindWaitsForInFlightOfferProbe"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -11806,7 +11807,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "#1880 step 5 implements GET /admin/model-admission/pool-proven: the closed model_admission_pool_proven.v1 frame materialized every 15 minutes and at startup from settled enforce-mode pool_manifest attempts (closed payable verdict, undisputed label, payable credit with positive debit and credit) by verdict finality time, distinct owner accounts with k=3 suppression, licence agreement from the accepted core each snapshot names, the newest current passing known-answer record, the 100 000 counted-attempt ceiling and 10-second timeout leaving the previous snapshot, and pool_proven_unavailable when missing or stale. Pending until production evidence from a deployed build exists."
+        "rationale": "#1880 step 5 implements GET /admin/model-admission/pool-proven: the closed model_admission_pool_proven.v1 frame materialized every 15 minutes and at startup from settled enforce-mode pool_manifest attempts (closed payable verdict, verified pool label, payable credit with positive debit and credit) by verdict finality time, distinct owner accounts with k=3 suppression, licence agreement from the accepted core each snapshot names, the newest current passing known-answer record, the 100 000 counted-attempt ceiling and 10-second timeout leaving the previous snapshot, and pool_proven_unavailable when missing or stale. Pending until production evidence from a deployed build exists."
       }
     },
     {

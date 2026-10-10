@@ -3872,6 +3872,8 @@ class IntakeDecisionManifestTest(unittest.TestCase):
             ("source_sha256", "d" * 64, "names no retained model-admission-pool-proven.json"),
             ("window_start", "2026-08-31T00:00:00Z", "disagrees with the retained source on ['window_start']"),
             ("artifact_hash", "f" * 64, "is not a verified artifact"),
+            ("suppressed", 0, "disagrees with the retained source on ['suppressed']"),
+            ("paid_request_count", 120.0, "disagrees with the retained source on ['paid_request_count']"),
         ):
             with self.subTest(field=field):
                 entry = self.pool_entry(data)
@@ -3899,6 +3901,10 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         m["generated_at"] = "2026-10-01T12:00:01Z"
         m["decisions"][0]["as_of"] = "2026-10-01T12:00:01Z"
         self.rejects(m, "more than 24 hours before the release")
+        data = self.write_pool_proven()
+        m = self.manifest_v2([self.pool_entry(data)])
+        m["generated_at"] = "2026-09-30T11:59:59Z"
+        self.rejects(m, "was generated after the intake decision")
         source = self.pool_proven_source()
         source["rows"][0]["probe_evaluated_at"] = "2026-08-01T00:00:00Z"
         data = self.write("model-admission-pool-proven.json", source)
