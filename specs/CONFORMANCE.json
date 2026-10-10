@@ -11774,26 +11774,28 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/config/config.go:CompatibilitySetConfig",
+        "phase4-coordinator/internal/config/config.go:SessionRejectionCode",
         "phase4-coordinator/internal/ws/server.go:requireCompatibleSet",
         "phase4-coordinator/internal/ws/server.go:compatibilitySetPolicyReloadErrorLocked",
         "phase4-coordinator/cmd/coordinator/main.go:reloadCoordinatorConfig",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:receiveAuthChallenge",
         "scripts/ops/cli-release.sh:load_registrations",
         "scripts/ops/lib/release-registrations.py:compat_verdict",
-        "scripts/ops/lib/pearl-cli-config.py:check_floor",
-        "scripts/ops/lib/pearl-cli-config.py:set_floor"
+        "scripts/ops/lib/release-registrations.py:live_policy"
       ],
       "tests": [
-        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetMinimumVersionAcceptsFutureSameRepoWithoutAllowlist",
-        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestVersionFloorCompatibilitySetAcceptsFutureHelloWithoutEightIDCap",
-        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadRefusesFloorRepositoryAndAllowlistDrift",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetAdmitsEveryWellFormedTargetRepositoryRelease",
+        "phase4-coordinator/internal/config/compatibility_set_test.go:TestCompatibilitySetDeprecatedFieldsStillLoadAndAreIgnored",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestOldReleaseConnectsRoutableAndReceivesRecommendation",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestRevokedReleaseGetsUpdateOnlySessionWithRecommendation",
+        "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadRefusesRepositoryDrift",
         "phase4-coordinator/internal/ws/compatibility_set_admission_test.go:TestCompatibilityPolicyReloadFencesActiveRevokedSession",
         "phase4-coordinator/internal/ws/autotune_catalog_reload_test.go:TestCompatibilityReloadCatalogPublishDoesNotDeadlockParallelRegistration",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testTier2PreChallengeRejectedAuthResponseKeepsCoordinatorError",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState",
-        "scripts/tests/test_pearl_cli_config.py:FloorTest",
-        "scripts/tests/test_release_registrations.py:CompatibilityModeTest",
-        "scripts/ops/test-entrypoints.sh:floor_config"
+        "scripts/tests/test_release_registrations.py:CompatVerdictTest",
+        "scripts/tests/test_pearl_cli_config.py:RecommendTest",
+        "scripts/ops/test-entrypoints.sh:health_legacy"
       ],
       "journeys": [],
       "evidence": [],
@@ -11801,7 +11803,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1914",
-        "rationale": "Version-floor admission, reload refusal, and the dual-mode release train with its locked migration step are implemented and tested; the floor-capable coordinator runtime and the live migration are pending deployment."
+        "rationale": "Repository admission with exact revocations, update-only revoked sessions, deprecated allowlist parsing, reload refusal and the release-train policy check are implemented and tested; the coordinator runtime that carries them is pending deployment."
       }
     }
   ]

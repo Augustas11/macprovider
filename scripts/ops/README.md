@@ -25,7 +25,6 @@ MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
 scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
 scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
-COMPATIBILITY_MINIMUM_VERSION=<x.y.z> scripts/ops/cli-release.sh next --run   # one-way version_floor migration
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
 scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```
@@ -44,42 +43,30 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.
 - `cli-release.sh` edits Pearl's `coordinator.yaml` itself for
-  `privacy_release_setup`, `pearl_accepted_ids` and `recommendation_bump`:
+  `privacy_release_setup` and `recommendation_bump`:
   `next --run` prints the downtime, holds the live-ops lock, and runs
   `lib/pearl-cli-config.py` over `PEARL_SSH` under both Pearl locks (refusing
   on a pricing transaction journal): anchored in-place edit, backup under
   `/root/macprovider-backups`, validation with the running coordinator's
   binary, user and exact environment, atomic replace, one restart,
-  `/healthz` and the live postcondition, then the step is recorded. At the
-  `accepted_ids` cap of 8 it evicts the oldest version that is not the
-  target, not the previous stable, and not the latest connection version of
-  any provider seen in 14 days, printing the per-version table. An edit
+  `/healthz` and the live postcondition, then the step is recorded. An edit
   already on disk but not applied by the running coordinator is recovered
   with a validated restart.
-- `cli-release.sh` supports both SPEC-002-R004 compatibility modes, read
-  from `/healthz` `compatibility_policy_mode` and the applied config:
-  `legacy_allowlist` (exact `accepted_ids`, as above; also a runtime that
-  reports no mode) and `version_floor` (`minimum_version` plus exact
-  `revoked_ids`). Under `version_floor`, `pearl_accepted_ids` and the
-  `registrations` gate check that the candidate is from the target's
-  repository, at or above the floor and not revoked; nothing is edited and
-  nothing is evicted. A `/healthz` mode that disagrees with the applied
-  config fails closed. Step `compatibility_policy` is the one-way migration,
-  opt-in with `COMPATIBILITY_MINIMUM_VERSION=<x.y.z>` on a runtime that
-  reports `legacy_allowlist`: `next --run` runs `_pearl-config
-  --migrate-floor`, which replaces `accepted_ids` with `minimum_version`
-  through the same locked edit and restart, refuses a floor above the latest
-  connection version of any provider seen in 14 days (printing the
-  per-version table), and requires `/healthz` to report `version_floor` at
-  that floor. The train never moves a live floor.
+- Admission needs no Pearl edit (SPEC-002-R004): the coordinator admits every
+  well-formed release from the `target_id` repository; only exact
+  `revoked_ids` are kept off buyer traffic (update-only). `pearl_accepted_ids`
+  is a read-only check that the running policy admits the candidate. The
+  policy comes from `/healthz` and must equal the applied config; any
+  difference blocks every Pearl-mutating step. A runtime that reports no
+  policy mode is pointed at `pearl-runtime.sh`, never at an `accepted_ids`
+  edit (that field is deprecated and ignored).
 - Release tags count only with an approved signer: list SSH signers in
   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
   `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints
   in `MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS`. The checkout's git trust
   settings are not used. `promotion` re-checks Pearl registrations
   (`_check-registrations`) right before dispatching; the workflow itself
-  cannot reach Pearl. Steps that
-  can share a restart do (setup plus accepted_ids). No step asks anyone to
+  cannot reach Pearl. No step asks anyone to
   paste a restart; the ops guard still blocks a typed restart and a direct
   `_pearl-config`.
 - `cli-release.sh` registers each new CLI on Pearl before it can be
@@ -95,8 +82,7 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   first: two samples of the unapproved-rejection counter over a window
   (`PRIVACY_REJECTION_WINDOW_SECONDS`, default 180) bound to one coordinator
   invocation; after a restart in the window it counts the unit journal
-  instead. `pearl_accepted_ids` also repairs a published release whose
-  acceptance was lost. Pearl-side helper errors print only the file name and
+  instead. Pearl-side helper errors print only the file name and
   error class, never config bytes.
 - `cli-release.sh` step `release_tag`, just before `promotion`, creates the
   signed annotated `v<ver>` tag on the verified candidate SHA with the

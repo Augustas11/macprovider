@@ -3,7 +3,9 @@
 scripts/ops/test-entrypoints.sh. Usage: fake_services.py STATE_DIR (prints the port).
 
 Files in STATE_DIR steer it:
-  healthz.json            coordinator/gateway /healthz body
+  healthz.json            coordinator/gateway /healthz body; with "_policy": "running" the
+                          compatibility policy fields come from running.yaml
+  running.yaml            the coordinator config the fake coordinator is running
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
   metrics.txt, loaded.txt coordinator /metrics body parts (404 when all absent)
@@ -46,7 +48,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            return self.send(200, read("healthz.json", "{}"))
+            d = json.loads(read("healthz.json", "{}"))
+            if d.pop("_policy", None) == "running":
+                # A repository-admission runtime reports the compatibility
+                # policy of the config it is running (running.yaml).
+                import yaml
+                cs = ((yaml.safe_load(read("running.yaml", "") or "{}") or {}).get("coordinator") or {}).get("compatibility_set") or {}
+                d["compatibility_policy_mode"] = "repository" if cs else "unconfigured"
+                d["compatibility_policy_target_id"] = str(cs.get("target_id") or "")
+                d["compatibility_policy_revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []]
+            return self.send(200, json.dumps(d))
         if self.path == "/v1/autotune-release" and read("autotune-release.json"):
             return self.send(200, read("autotune-release.json"))
         if self.path == "/metrics":

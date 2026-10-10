@@ -11,16 +11,6 @@
 #
 # Order (docs/releases/cli-release-train.md "Promotion gate" and "Core rule",
 # docs/runbooks/provider-cli-release-verification.md):
-#   0 compatibility_policy  the live compatibility mode (SPEC-002-R004), from /healthz
-#                           compatibility_policy_mode and the applied Pearl config.
-#                           legacy_allowlist (exact accepted_ids; also a runtime that
-#                           reports no mode) and version_floor are both supported.
-#                           Opt-in, one-way migration: with COMPATIBILITY_MINIMUM_VERSION
-#                           set and the live runtime reporting legacy_allowlist,
-#                           next --run: _pearl-config --migrate-floor replaces accepted_ids
-#                           with minimum_version (refused above the latest connection
-#                           version of any provider seen in 14 days), restarts, and
-#                           checks /healthz reports version_floor at that floor
 #   1 version_alignment     checked-in latest_binary_version rows == live stable,
 #                           binaryVersion on main > live stable
 #   2 candidate_cut         acceptance-candidate.yml on the exact origin/main SHA,
@@ -30,19 +20,18 @@
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
 #                           verify-malibu-release-artifacts.sh
 #   4a privacy_release_setup  one-time Pearl setup of privacy_class.release_code_identities
-#                           (next --run: _pearl-config edit + restart, sharing the restart with
-#                           step 5 when due, then stages 4b); done while Pearl's config names it
+#                           (next --run: _pearl-config edit + restart, then stages 4b); done
+#                           while Pearl's config names it
 #   4b privacy_release_identity  copy the verified candidate pearl-release.json + .sig to
 #                           Pearl's privacy_class.release_code_identities.metadata_dir as
 #                           v<ver>.json/.sig (hot: re-read every ~60 s, no restart)
-#   5 pearl_accepted_ids    legacy_allowlist: next --run: _pearl-config adds the candidate
-#                           compatibility_set_id (keep target_id; at the cap of 8 evict the oldest
-#                           version that is not the target, not the previous stable, and not the
-#                           latest connection version of any provider seen in 14 days) and
-#                           restarts; done when the running coordinator's applied config lists it.
-#                           version_floor: no edit; done when the applied policy admits the
-#                           candidate (target repository, >= minimum_version, not revoked),
-#                           blocked otherwise
+#   5 pearl_accepted_ids    read-only, no Pearl edit (SPEC-002-R004): done when the running
+#                           coordinator admits the candidate by policy (well-formed, from the
+#                           target_id repository, not in revoked_ids). The policy is read from
+#                           /healthz and must equal the applied config; a mismatch blocks every
+#                           later Pearl-mutating step. A runtime that reports no
+#                           compatibility_policy_mode predates repository admission: blocked
+#                           until the coordinator runtime ships (pearl-runtime.sh)
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
@@ -58,10 +47,8 @@
 #                           candidate SHA or tag) or `--carry-forward ID` (a carry-forward record
 #                           in docs/releases/cli-release-train.md naming the candidate version)
 #   7a registrations        read-only gate over PEARL_SSH, on every status (it also gates 8 and
-#                           9): the running coordinator's compatibility policy admits the candidate
-#                           compatibility_set_id (accepted_ids, or version_floor as in step 5; a
-#                           /healthz mode that disagrees with the applied config fails closed;
-#                           on-disk config sha256 == its boot
+#                           9): the running coordinator admits the candidate compatibility_set_id
+#                           as in step 5 (on-disk config sha256 == its boot
 #                           coordinator_config_applied digests), privacy_class is enabled, and
 #                           the code_cdhash is approved by a verifying v<ver>.json it reports as
 #                           loaded (relayblind_privacy_release_identity_loaded) or by an
@@ -74,9 +61,8 @@
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
 #                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
 #   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
-#                           compatibility_set.target_id (legacy_allowlist: prior target stays
-#                           accepted; version_floor: the floor keeps admitting it), restarts,
-#                           and checks /healthz recommended_binary_version
+#                           compatibility_set.target_id, restarts, and checks /healthz
+#                           recommended_binary_version and compatibility_policy_target_id
 #   9 verify_live_rollout   _check-privacy-rejections (two samples of the
 #                           posture_unapproved_code_identity counter over
 #                           PRIVACY_REJECTION_WINDOW_SECONDS, default 180; journal fallback),
@@ -89,7 +75,6 @@
 # Pearl paths default to the production layout: PEARL_COORDINATOR_CONFIG,
 # PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_COORDINATOR_METRICS_URL,
 # PEARL_RELEASE_IDENTITY_OWNER, PEARL_RELEASE_IDENTITY_GROUP.
-# COMPATIBILITY_MINIMUM_VERSION=MAJOR.MINOR.PATCH opts in to the step 0 migration.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,7 +113,6 @@ registrations_remote() {
 PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
 PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
 PEARL_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
-PEARL_CONNECTION_EVENTS_DB="${PEARL_CONNECTION_EVENTS_DB:-/var/lib/macprovider/provider_connection_events.db}"
 PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
 PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8443/healthz}"
 PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
@@ -147,13 +131,13 @@ pearl_config() {
   local a guard_sha
   guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}')"
   for a in "$@" "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" \
-    "$PEARL_INSTALL_ROOT" "$PEARL_CONFIG_GUARD" "$PEARL_UPDATER_LOCK" "$PEARL_CONNECTION_EVENTS_DB" \
+    "$PEARL_INSTALL_ROOT" "$PEARL_CONFIG_GUARD" "$PEARL_UPDATER_LOCK" \
     "$PEARL_BACKUP_ROOT" "$PEARL_COORDINATOR_HEALTHZ_URL" "$PEARL_PROC_ROOT"; do
     [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl config helper: $a"
   done
   pearl_ssh "python3 - apply --config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY \
 --unit $PEARL_COORDINATOR_UNIT --install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD \
---guard-sha256 $guard_sha --updater-lock $PEARL_UPDATER_LOCK --events-db $PEARL_CONNECTION_EVENTS_DB \
+--guard-sha256 $guard_sha --updater-lock $PEARL_UPDATER_LOCK \
 --backup-root $PEARL_BACKUP_ROOT --healthz $PEARL_COORDINATOR_HEALTHZ_URL --proc $PEARL_PROC_ROOT $*" \
     < "$OPS_LIB_DIR/pearl-cli-config.py"
 }
@@ -178,11 +162,9 @@ registrations_live() {
 # into REG_STATE (unknown|unconfigured|missing|present|mismatch|staged),
 # REG_DIR, REG_BY, REG_MISSING and REG_ERR.
 load_registrations() {
-  local V="$1" compat="$2" bytes prj="" sig="" health_mode=""
+  local V="$1" compat="$2" bytes prj="" sig=""
   REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""; REG_COMPAT_ACCEPTED=false; REG_TARGET_APPLIED=false
-  REG_MODE=""; REG_REJECTION=""
-  [ ! -f "$OPS_TMP_DIR/healthz.json" ] ||
-    health_mode="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_mode") or ""')"
+  REG_MODE=""; REG_REJECTION=""; REG_MISMATCH=""; REG_CONFIG_APPLIED=false
   if [ -z "${PEARL_SSH:-}" ]; then
     REG_ERR="PEARL_SSH is unset"
   elif ! registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" \
@@ -192,7 +174,7 @@ load_registrations() {
     bytes="$(candidate_release_bytes "$V")"
     if [ -n "$bytes" ]; then prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"; fi
     if python3 "$OPS_LIB_DIR/release-registrations.py" evaluate "$OPS_TMP_DIR/reg-facts.json" "$V" \
-      "${compat:-}" "${prj:-}" "${sig:-}" "$health_mode" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
+      "${compat:-}" "${prj:-}" "${sig:-}" "$OPS_TMP_DIR/healthz.json" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
       REG_DIR="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
       REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
       REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
@@ -201,6 +183,8 @@ load_registrations() {
       REG_TARGET_APPLIED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("target_applied", False)')"
       REG_MODE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("compat_mode") or ""')"
       REG_REJECTION="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("compat_rejection") or ""')"
+      REG_MISMATCH="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("policy_mismatch") or ""')"
+      REG_CONFIG_APPLIED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("config_applied", False)')"
     else
       REG_ERR="registration evaluation failed: $(tail -n1 "$OPS_TMP_DIR/reg-verdict.err")"
     fi
@@ -211,7 +195,7 @@ load_registrations() {
     fact privacy_release_metadata_dir "${REG_DIR:-unset}"
   fi
   fact privacy_release_identity "$REG_STATE"
-  fact applied_compatibility_mode "${REG_MODE:-unknown}"
+  fact live_compatibility_policy "${REG_MODE:-unknown}${REG_MISMATCH:+ (mismatch: $REG_MISMATCH)}"
 }
 
 # checked_in_recommendation REV -> the one latest_binary_version shared by the
@@ -249,17 +233,11 @@ gather() {
   fi
   fact live_recommended_binary_version "$L"
   fact live_runtime_version "$runtime"
-  # Floor-capable runtimes report the applied compatibility policy on /healthz;
-  # older runtimes report none (legacy_allowlist, read from the applied config).
-  local policy_mode="" policy_target="" policy_floor=""
-  if [ -f "$OPS_TMP_DIR/healthz.json" ]; then
-    policy_mode="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_mode") or ""')"
+  # Repository-admission runtimes report the applied policy on /healthz.
+  local policy_target=""
+  [ ! -f "$OPS_TMP_DIR/healthz.json" ] ||
     policy_target="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_target_id") or ""')"
-    policy_floor="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_minimum_version") or ""')"
-  fi
-  fact live_compatibility_policy_mode "${policy_mode:-not reported (runtime predates version_floor)}"
-  fact live_compatibility_target "${policy_target:-not exposed by /healthz (read applied config on Pearl)}"
-  fact live_compatibility_minimum_version "$policy_floor"
+  fact live_compatibility_target "${policy_target:-not reported by this runtime}"
 
   local latest_stable published=false pub_at=""
   latest_stable="$(gh release list -R "$(gh_repo)" --exclude-pre-releases --exclude-drafts -L 1 \
@@ -346,31 +324,6 @@ decide() {
     return
   fi
 
-  # 0. compatibility policy mode; the opt-in legacy_allowlist -> version_floor
-  # migration comes first so it is next as soon as the operator asks for it.
-  local live_mode live_floor want_floor="${COMPATIBILITY_MINIMUM_VERSION:-}"
-  live_mode="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_mode") or ""')"
-  live_floor="$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("compatibility_policy_minimum_version") or ""')"
-  if [ "$live_mode" = version_floor ]; then
-    step compatibility_policy "done" "version_floor: minimum_version $live_floor${want_floor:+ (COMPATIBILITY_MINIMUM_VERSION=$want_floor ignored: the train does not move a live floor)}"
-  elif [ -z "$want_floor" ]; then
-    step compatibility_policy "done" "${live_mode:-legacy_allowlist (runtime reports no mode)}: exact accepted_ids; set COMPATIBILITY_MINIMUM_VERSION to migrate to version_floor"
-  elif ! [[ "$want_floor" =~ ^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]]; then
-    step compatibility_policy pending "COMPATIBILITY_MINIMUM_VERSION=$want_floor is not canonical MAJOR.MINOR.PATCH"
-    set_next compatibility_policy blocked "Migrate Pearl to version_floor" "" \
-      "COMPATIBILITY_MINIMUM_VERSION must be canonical MAJOR.MINOR.PATCH without leading zeros"
-  elif [ "$live_mode" != legacy_allowlist ]; then
-    step compatibility_policy pending "live runtime reports compatibility_policy_mode '${live_mode:-none}'"
-    set_next compatibility_policy blocked "Migrate Pearl to version_floor $want_floor" "" \
-      "the running coordinator does not report legacy_allowlist on /healthz; deploy the floor-capable runtime first (scripts/ops/pearl-runtime.sh), or unset COMPATIBILITY_MINIMUM_VERSION"
-  else
-    step compatibility_policy pending "legacy_allowlist; COMPATIBILITY_MINIMUM_VERSION=$want_floor requested"
-    set_next compatibility_policy mutate "Migrate Pearl compatibility_set from accepted_ids to minimum_version $want_floor and restart" \
-      "scripts/ops/cli-release.sh _pearl-config --migrate-floor $want_floor"
-    next_meta compatibility_policy "$ROLLOUT_DOC" \
-      "coordinator restart: a few seconds of buyer outage; providers reconnect under the floor"
-  fi
-
   # 1. version alignment (only meaningful before publication).
   if [ "$published" = true ]; then
     step version_alignment "done" "v$V published"
@@ -454,9 +407,15 @@ bash scripts/release-staged-version-policy.sh v$V" \
   # 4b. privacy release identity: the hot SPEC-049-R027 registration of the
   # candidate's code identity. Read live every time; never a local marker.
   load_registrations "$V" "$compat_id"
-  # 4a. one-time Pearl setup of the release metadata dir. It shares its one
-  # restart with the accepted_ids edit when that is still due, and stages the
-  # candidate identity right after (hot), so 4a, 4b and 5 take one run.
+  # A live policy that differs from the applied config (or an unreadable
+  # /healthz) makes every Pearl edit unsafe: block before any mutating step.
+  if [ -n "$REG_MISMATCH" ]; then
+    set_next compatibility_policy blocked "Reconcile Pearl's live compatibility policy with its applied config" "" \
+      "$REG_MISMATCH; no Pearl-mutating step runs until /healthz and the applied config agree"
+    next_meta compatibility_policy "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation"
+  fi
+  # 4a. one-time Pearl setup of the release metadata dir; it stages the
+  # candidate identity right after (hot), so 4a and 4b take one run.
   case "$REG_STATE" in
     unknown) step privacy_release_setup unknown "$REG_ERR" ;;
     unconfigured)
@@ -464,9 +423,6 @@ bash scripts/release-staged-version-policy.sh v$V" \
       local key_sha setup_cmd setup_also=""
       key_sha="$(shasum -a 256 "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" | awk '{print $1}')"
       setup_cmd="scripts/ops/cli-release.sh _pearl-config --privacy-setup $PRIVACY_METADATA_DIR $PRIVACY_PUBLIC_KEY_PATH $key_sha"
-      if [ -n "$compat_id" ] && [ "$REG_COMPAT_ACCEPTED" != true ] && [ "$REG_MODE" != version_floor ]; then
-        setup_cmd="$setup_cmd --accepted-id $compat_id"; setup_also=" and add $compat_id to accepted_ids"
-      fi
       [ -z "$(candidate_release_bytes "$V")" ] || setup_cmd="$setup_cmd
 scripts/ops/cli-release.sh _stage-privacy-identity $V"
       set_next privacy_release_setup mutate "One-time: configure privacy_class.release_code_identities on Pearl$setup_also" \
@@ -499,26 +455,31 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
     esac
   fi
 
-  # 5. Pearl accepted_ids (keep target): read live from the applied config,
-  # also after publication, so a lost acceptance is repaired by the train.
-  # Under version_floor the policy itself admits the candidate; nothing is edited.
+  # 5. admission by policy (SPEC-002-R004): a read-only check, no Pearl
+  # edit. Read live on every status, also after publication.
   if [ "$REG_COMPAT_ACCEPTED" = true ]; then
-    step pearl_accepted_ids "done" "$compat_id admitted by the running coordinator ($REG_MODE)"
+    step pearl_accepted_ids "done" "admitted by policy: same repo, well-formed, not revoked ($compat_id)"
   else
-    step pearl_accepted_ids pending "${REG_REJECTION:-}"
+    step pearl_accepted_ids pending "${REG_REJECTION:-$REG_ERR}"
     if [ "$REG_STATE" = unknown ]; then
       set_next pearl_accepted_ids blocked "Read Pearl's compatibility_set" "" "$REG_ERR"
-    elif [ "$REG_MODE" = version_floor ]; then
-      set_next pearl_accepted_ids blocked "Admit v$V on Pearl" "" \
-        "the applied version_floor policy does not admit ${compat_id:-the candidate}: ${REG_REJECTION:-$REG_MISSING}; accepted_ids is not used in version_floor mode"
-      next_meta pearl_accepted_ids "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation"
     elif [ -z "$compat_id" ]; then
-      set_next pearl_accepted_ids blocked "Accept v$V on Pearl" "" "no verified compatibility_set_id for v$V is recorded"
+      set_next pearl_accepted_ids blocked "Admit v$V on Pearl" "" "no verified compatibility_set_id for v$V is recorded"
+    elif [ -z "$REG_REJECTION" ] && [ "$REG_CONFIG_APPLIED" != true ]; then
+      # The policy admits the candidate, but Pearl's on-disk config is not
+      # the one running (an earlier edit stopped before its restart): apply
+      # it with a validated restart; nothing is edited.
+      set_next pearl_accepted_ids mutate "Apply Pearl's pending on-disk coordinator config (validated restart, no edit)" \
+        "scripts/ops/cli-release.sh _pearl-config"
+      next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage"
+    elif [ "$REG_MODE" = legacy_exact ]; then
+      set_next pearl_accepted_ids blocked "Ship the repository-admission coordinator runtime" "scripts/ops/pearl-runtime.sh status" \
+        "the running coordinator reports no compatibility_policy_mode (it predates SPEC-002-R004) and does not list $compat_id; ship the coordinator runtime through scripts/ops/pearl-runtime.sh instead of editing accepted_ids"
+      next_meta pearl_accepted_ids "$ROLLOUT_DOC"
     else
-      # Restart: runtimes before SPEC-002-R004 do not reload compatibility_set on SIGHUP.
-      set_next pearl_accepted_ids mutate "Add $compat_id to Pearl compatibility_set.accepted_ids (keep target_id) and restart" \
-        "scripts/ops/cli-release.sh _pearl-config --accepted-id $compat_id"
-      next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage" pearl_accepted_ids
+      set_next pearl_accepted_ids blocked "Admit v$V on Pearl" "" \
+        "the live compatibility policy does not admit $compat_id: ${REG_REJECTION:-$REG_MISSING}"
+      next_meta pearl_accepted_ids "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation"
     fi
   fi
 
@@ -553,7 +514,7 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
   # after publication, so it re-gates recommendation_bump and
   # verify_live_rollout (both come later in this order).
   if registrations_live; then
-    step registrations "done" "compatibility_set ($REG_MODE) admits $compat_id; code identity approved by $REG_BY"
+    step registrations "done" "policy admits $compat_id; code identity approved by $REG_BY"
   else
     step registrations pending "${REG_MISSING:-$REG_ERR}"
     set_next registrations blocked "Pearl registrations for v$V are not live" "" \
@@ -625,7 +586,7 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
     if [ -z "$compat_id" ]; then
       set_next recommendation_bump blocked "Recommend v$V" "" "no verified compatibility_set_id for v$V is recorded"
     else
-      set_next recommendation_bump mutate "Move Pearl latest_binary_version and compatibility_set.target_id to $V (the prior target stays admitted) and restart" \
+      set_next recommendation_bump mutate "Move Pearl latest_binary_version and compatibility_set.target_id to $V and restart" \
         "scripts/ops/cli-release.sh _pearl-config --recommend $V $compat_id"
       next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" \
         "coordinator restart: a few seconds of buyer outage" recommendation_bump
@@ -951,6 +912,7 @@ check_registrations() {
   is_semver "$V" || die "usage: _check-registrations VERSION"
   OPS_SCOPE="cli-release-$V"
   compat="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  fetch_coordinator_health || refuse "live coordinator /healthz unreadable; the compatibility policy cannot be proven"
   load_registrations "$V" "$compat"
   registrations_live || refuse "v$V is not registered in the running coordinator: ${REG_MISSING:-$REG_ERR}"
   log "v$V registrations are live in the running coordinator"

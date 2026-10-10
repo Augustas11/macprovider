@@ -121,7 +121,6 @@ expect allow 'MACPROVIDER_OPS_OWNER=me scripts/ops/cli-release.sh next --run'
 expect allow 'scripts/ops/cli-release.sh status'
 expect block 'scripts/ops/cli-release.sh _pearl-config --accepted-id x'
 expect block 'bash scripts/ops/cli-release.sh _pearl-config --recommend 1.2.3 x'
-expect block 'scripts/ops/cli-release.sh _pearl-config --migrate-floor 1.2.3'
 expect block "ssh pearl 'python3 - apply --accepted-id x' < scripts/ops/lib/pearl-cli-config.py"
 expect block 'python3 scripts/ops/lib/pearl-cli-config.py apply --accepted-id x'
 expect allow 'grep -n accepted scripts/ops/lib/pearl-cli-config.py'
