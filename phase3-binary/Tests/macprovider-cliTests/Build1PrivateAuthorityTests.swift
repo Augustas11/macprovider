@@ -9,7 +9,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         // This signed authority binds the historical catalog, not the current bake.
         let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
             .replacingOccurrences(of: "published-2026-10-10-native-mtp-v238", with: "published-2026-10-01-artifact-feed-activation-v1")
-            .replacingOccurrences(of: "2026-10-08T22:12:46Z", with: "2026-10-01T04:20:42Z").utf8)
+            .replacingOccurrences(of: "2026-10-10T12:50:49Z", with: "2026-10-01T04:20:42Z").utf8)
         XCTAssertEqual(Build1PrivateAuthorityLoader.sha256Hex(candidateBytes), "559a058f65093b70e1115a152eac4466a4c40eb5854055f61849aea395b0e666")
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
@@ -61,7 +61,7 @@ final class Build1PrivateAuthorityTests: XCTestCase {
         let fixture = Self.committedFixture()
         let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
             .replacingOccurrences(of: "published-2026-10-10-native-mtp-v238", with: "published-2026-10-01-artifact-feed-activation-v1")
-            .replacingOccurrences(of: "2026-10-08T22:12:46Z", with: "2026-10-01T04:20:42Z").utf8)
+            .replacingOccurrences(of: "2026-10-10T12:50:49Z", with: "2026-10-01T04:20:42Z").utf8)
         let authority = try Build1PrivateAuthorityLoader.load(
             authorityURL: fixture.authority,
             signatureURL: fixture.signature,
