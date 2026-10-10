@@ -62,7 +62,17 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
-## Next CLI release — net changes vs 1.8.232
+## Next CLI release — net changes vs 1.8.240
+
+One release, cut when #1958 merges, so the window-16 gain and the >16-slot
+grant ship together.
+
+| PR | Change | Status |
+|---|---|---|
+| #1953 | Hybrid 16-step decode window; stop-boundary rule; self-check keyed by decode window (SPEC-038 v0.3.16). Expected +17% hybrid CB throughput at 8 concurrent output-heavy | merged (`2bddd66d0`) |
+| #1958 | CB self-check ladder sized to the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | in progress |
+
+## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
 One candidate, one Studio canary, one promotion. Nothing is recommended to the
 fleet before the canary passes.
