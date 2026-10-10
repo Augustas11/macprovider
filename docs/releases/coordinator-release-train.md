@@ -313,12 +313,11 @@ renewal has since been retired (#1938); a restamp is on demand
 One runtime train, applied **after** the next CLI release (#1944's deploy order puts the CLI first). Expected downtime: one signed-updater apply (15–20 min worst case, about 3 min with the short-quiesce updater).
 
 Merged, waiting for this train:
-- [x] #1942 — coordinator honors `logging.level` (default `info`); stops debug lines flooding host logs. Related: #1940 (close after the live check shows no debug lines).
+- [x] Shipped in **v1.8.237** (live 2026-10-10 07:05Z): #1942 coordinator log level (#1940 closed after the live check), #1945 BYOM catalog graduation, the #1943 on-call key digest in the coordinator environment.
 
 To bundle when merged:
-- [ ] #1944 — calendar-expiry removal, coordinator side (Tier-2 catalog expiry shape-only, autotune evidence supersession, trusted-pool on-call / grace warnings instead of unrouting).
+- [x] #1944 — merged 2026-10-10 as `3833ae851`; calendar-expiry removal, coordinator side (Tier-2 catalog expiry shape-only, autotune evidence supersession, trusted-pool on-call / grace warnings instead of unrouting).
 - [ ] CB/MTP self-check bundle (branch `cli/auto-cb-slots`) — coordinator side of the native-MTP canary.
-- [x] #1945 — BYOM catalog graduation (#1880 step 5), merged 2026-10-10 as `d260134ee`.
 
 Configuration riding the same restart:
 - [ ] `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256` from #1943 in the coordinator launch environment, then sign and upsert the on-call readiness record (`build-signed-oncall-readiness.yml`, `coordinator-cli trust-pool-oncall upsert`).

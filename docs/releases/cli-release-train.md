@@ -72,9 +72,9 @@ fleet before the canary passes.
 | #1910 | Capacity shedding and prefill fairness; measured concurrency calibration | merged |
 | #1937 | Attested-hardware auto-trust, pending hardware checks non-fatal, engine-run CLI fixes, operator pause survives coordinator drains | merged |
 | #1919 | Provider side of repository admission (`binary_version` must equal the compatibility-id version) | merged |
-| #1927 | MLX runtime to mlx-swift-lm 3.32.3 / MLX 0.32 through the forks; Swift 6.3 / Xcode 26.6 toolchain; kernel-route-invariant CB prefill grouping | in progress (draft, other session) |
-| `cli/auto-cb-slots` | CB/MTP simplification: CB on by default, per-Mac self-check (batched-vs-alone exactness at every granted slot count, net-gain check) picks the served slots; signed CB/MTP policy becomes revocation-only; native MTP model-keyed | in progress (no PR yet; opens after #1927 merges) |
-| #1944 | Calendar-expiry removal (catalog, native-MTP sidecar, discovery head, autotune feed age) | in progress (audit fixes) |
+| #1927 | MLX runtime to mlx-swift-lm 3.32.3 / MLX 0.32 through the forks; Swift 6.3 / Xcode 26.6 toolchain; kernel-route-invariant CB prefill grouping | merged (`0117e6a72`) |
+| #1947 | CB/MTP simplification: CB on by default, per-Mac self-check (batched-vs-alone exactness at every granted slot count, net-gain check) picks the served slots; signed CB/MTP policy becomes revocation-only; native MTP model-keyed | in progress (draft PR, Studio re-run and audit) |
+| #1944 | Calendar-expiry removal (catalog, native-MTP sidecar, discovery head, autotune feed age); native MTP keeps the last verified revocation set when the feed ages out | merged (`3833ae851`) |
 | #1946 | Rollback lever: a Mac on an exactly revoked build may update down to the coordinator-recommended, validly signed release (coordinator path only, never the discovery rail) | in progress: fixing the two R4 MEDIUMs (test coverage; full signed compatibility-id check), then one verification round; rides this release |
 
 Before the cut: run the CLI train's pending one-time `privacy_release_setup` step
