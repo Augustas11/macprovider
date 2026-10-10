@@ -1462,6 +1462,12 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "model": harmony, "temperature": 0
         ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "model": harmony, "temperature": 0, "stop": ["STOP"]
+        ])))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "model": "catalog/plain-model", "temperature": 0, "stop": ["STOP"]
+        ])))
         // logit_bias / logprobs stay gated even alongside tools or structured output.
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "temperature": 0, "tools": tools, "logit_bias": ["123": -100]

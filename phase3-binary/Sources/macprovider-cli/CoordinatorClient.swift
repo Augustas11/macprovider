@@ -718,6 +718,7 @@ actor CoordinatorClient {
     private let autoupdateLocalHealthSleep: @Sendable () async -> Void
     private let autoupdateReloadHelperFence: ReloadHelperFence
     private let lifecycleStateStore: ProviderLifecycleStateStore
+    private let operatorResumeLeaseStore: ProviderLifecycleLeaseStore
     private let lifecycleOperationID: String?
     private var operatorPaused: Bool
     private var catalogWarmSwapInvalidated = false
@@ -801,6 +802,7 @@ actor CoordinatorClient {
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         privacyLabIdentityScope: PrivacyLabIdentityScope? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
+        operatorResumeLeaseStore: ProviderLifecycleLeaseStore? = nil,
         lifecycleOperationID: String? = nil,
         operatorPausedInitially: Bool = false,
         watchdogExitPreparation: @escaping @Sendable () -> Void = {},
@@ -1006,6 +1008,9 @@ actor CoordinatorClient {
         self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
         self.privacyLabIdentityScope = privacyLabIdentityScope
         self.lifecycleStateStore = lifecycleStateStore
+        self.operatorResumeLeaseStore = operatorResumeLeaseStore ?? ProviderLifecycleLeaseStore(
+            url: ProviderLifecycleLeaseStore.operatorResumeURL(lifecycleStateURL: lifecycleStateStore.url)
+        )
         self.lifecycleOperationID = lifecycleOperationID
         self.operatorPaused = operatorPausedInitially
         self.sleepAssertionFactory = sleepAssertionFactory
@@ -6118,6 +6123,16 @@ actor CoordinatorClient {
         }
 
         let operationID = "operator-resume:\(UUID().uuidString.lowercased())"
+        let resumeLease: ProviderLifecycleLeaseRecord
+        do {
+            // Publish grace before the durable pause fence is cleared. The
+            // watchdog must be able to read it while HTTP is still recovering.
+            // A separate slot cannot displace an update/maintenance lease.
+            // The unpaused replay guard above never renews an existing window.
+            resumeLease = try operatorResumeLeaseStore.acquireOperatorResumeGrace()
+        } catch {
+            return .rejected("operator_resume_grace_persistence_failed")
+        }
         do {
             _ = try recordLifecycleTransition(
                 to: .locallyReadyConnecting,
@@ -6128,6 +6143,7 @@ actor CoordinatorClient {
                 operatorPaused: false
             )
         } catch {
+            _ = try? operatorResumeLeaseStore.clear(ifLeaseID: resumeLease.leaseID)
             return .rejected("lifecycle_state_persistence_failed")
         }
 
@@ -7453,7 +7469,10 @@ actor CoordinatorClient {
             do {
                 try await sendNativeMTPTupleOfferIfAvailable()
             } catch {
-                Self.keepaliveDebug("native_mtp_tuple_offer_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+                Self.logNativeMTPTupleOffer(
+                    action: "send_failed",
+                    detail: "error=\(Self.sanitizedDiagnosticText(String(describing: error)))"
+                )
             }
         }
     }
@@ -7467,7 +7486,7 @@ actor CoordinatorClient {
         let snapshot = await modelRuntime.currentSnapshot()
         guard let offer = snapshot.nativeMTPTupleOffer else { return }
         guard let identity = nativeMTPTupleOfferWireIdentity(for: offer) else {
-            Self.keepaliveDebug("native_mtp_tuple_offer_skipped_missing_wire_identity")
+            Self.logNativeMTPTupleOffer(action: "skipped", detail: "reason=missing_wire_identity")
             return
         }
         let offerDigestInput = [
@@ -7505,6 +7524,21 @@ actor CoordinatorClient {
         )
         try await send(payload.wireObject)
         lastNativeMTPTupleOfferDigest = offerDigest
+        Self.logNativeMTPTupleOffer(
+            action: "sent",
+            detail: "target_generation=\(offer.targetGeneration) runtime_tuple_sha256=\(identity.nativeMTPRuntimeTupleSHA256)"
+        )
+    }
+
+    /// The tuple offer gates the coordinator's native-MTP canary (SPEC-031-R033),
+    /// so its outcome is logged unconditionally rather than behind
+    /// MACPROVIDER_KEEPALIVE_DEBUG. It is sent at most once per session and tuple.
+    private static func logNativeMTPTupleOffer(action: String, detail: String) {
+        FileHandle.standardError.write(Data(nativeMTPTupleOfferLogLine(action: action, detail: detail).utf8))
+    }
+
+    static func nativeMTPTupleOfferLogLine(action: String, detail: String) -> String {
+        "event=native_mtp_tuple_offer action=\(action) \(detail)\n"
     }
 
     private struct NativeMTPTupleOfferWireIdentity {

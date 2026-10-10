@@ -271,13 +271,18 @@ func privacyTestRecord(t *testing.T, identity ed25519.PrivateKey, key relayblind
 
 func privacyVerifyPosture(t *testing.T, authority *relayblind.PrivacyAuthority, identity ed25519.PrivateKey, se *ecdsa.PrivateKey, seRaw []byte, digest string, now time.Time) error {
 	t.Helper()
-	nonce, issued, err := authority.BeginChallenge("provider-a", "session-a", now)
+	return privacyVerifyPostureFor(t, authority, "provider-a", "session-a", identity, se, seRaw, digest, now)
+}
+
+func privacyVerifyPostureFor(t *testing.T, authority *relayblind.PrivacyAuthority, providerID, session string, identity ed25519.PrivateKey, se *ecdsa.PrivateKey, seRaw []byte, digest string, now time.Time) error {
+	t.Helper()
+	nonce, issued, err := authority.BeginChallenge(providerID, session, now)
 	if err != nil {
 		return err
 	}
 	statement := relayblind.PostureStatement{
-		Version: relayblind.PrivacyPostureVersion, PrivacyClass: relayblind.PrivacyClassV1, ProviderID: "provider-a",
-		AssignedSession: "session-a", Nonce: nonce, Sequence: 1, IssuedAtUnix: issued, BinaryVersion: privacyTestBinary,
+		Version: relayblind.PrivacyPostureVersion, PrivacyClass: relayblind.PrivacyClassV1, ProviderID: providerID,
+		AssignedSession: session, Nonce: nonce, Sequence: 1, IssuedAtUnix: issued, BinaryVersion: privacyTestBinary,
 		CodeCDHash: privacyTestCDHash, TeamID: privacyTestTeamID, SigningIdentifier: privacyTestSigning,
 		HardenedRuntime: true, LibraryValidation: true, GetTaskAllow: false, CSDebugged: false, PTraced: false,
 		PTDenyAttachApplied: true, CoreDumpsDisabled: true, SIPEnabled: true, RuntimeSource: relayblind.PrivacyRuntimeSource,
@@ -311,7 +316,7 @@ func privacyVerifyPosture(t *testing.T, authority *relayblind.PrivacyAuthority, 
 	if err != nil {
 		return err
 	}
-	return authority.VerifyPosture(context.Background(), "provider-a", "session-a", nonce, wire, seRaw, now)
+	return authority.VerifyPosture(context.Background(), providerID, session, nonce, wire, seRaw, now)
 }
 
 func (h *privacyHarness) privacyRequest(t *testing.T, method, path string, body []byte, authorization string, mutate func(*http.Request)) *httptest.ResponseRecorder {

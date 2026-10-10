@@ -49,6 +49,9 @@ type adminProviderView struct {
 	LastAutoupdateEvent      json.RawMessage               `json:"last_autoupdate_event,omitempty"`
 	SafetyTelemetry          *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 	CBSelfCheck              *pool.ProviderCBSelfCheck     `json:"cb_self_check,omitempty"`
+	// SPEC-031-R033: the live native-MTP tuple offer and canary state. Live
+	// view only; the canary store is in memory, so there is no last-known copy.
+	NativeMTPCanary *pool.NativeMTPCanaryDiagnostics `json:"native_mtp_canary,omitempty"`
 }
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
@@ -289,6 +292,7 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 		LastAutoupdateEvent:      p.LastAutoupdateEvent,
 		SafetyTelemetry:          p.SafetyTelemetry,
 		CBSelfCheck:              p.CBSelfCheck,
+		NativeMTPCanary:          p.NativeMTPCanary,
 	}
 	if !p.ConnectedAt.IsZero() {
 		t := p.ConnectedAt.UTC()

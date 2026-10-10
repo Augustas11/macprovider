@@ -44,12 +44,15 @@ enum HarmonyResponseParser {
         case complete(finishReason: String? = nil)
     }
 
+    // Model stop candidates retain fail-closed framing checks. Buyer request
+    // stops are considered only in visible final bodies, never hidden spans.
     static func parse(
         tokenIDs: [Int],
         decode: ([Int]) -> String,
         allowedFunctionNames: Set<String>? = nil,
         mode: Mode = .complete(),
-        stopCandidates: [String] = []
+        stopCandidates: [String] = [],
+        requestStops: [String] = []
     ) -> ParseResult {
         guard tokenIDs.contains(where: { isSpecialTokenID($0) }) else {
             return ParseResult(
@@ -68,7 +71,8 @@ enum HarmonyResponseParser {
                 decode: decode,
                 allowedFunctionNames: allowedFunctionNames,
                 mode: mode,
-                stopCandidates: stopCandidates
+                stopCandidates: stopCandidates,
+                requestStops: requestStops
             )
         } catch ParseError.incomplete {
             switch mode {
@@ -340,7 +344,8 @@ enum HarmonyResponseParser {
         decode: ([Int]) -> String,
         allowedFunctionNames: Set<String>?,
         mode: Mode,
-        stopCandidates: [String]
+        stopCandidates: [String],
+        requestStops: [String]
     ) throws -> ParseResult {
         var index = 0
         var finalContent = ""
@@ -432,7 +437,7 @@ enum HarmonyResponseParser {
                         content: finalContent,
                         tokenIDs: finalContentTokenIDs,
                         decode: decode,
-                        stopCandidates: stopCandidates
+                        stopCandidates: stopCandidates + requestStops
                     ) {
                         return stopped
                     }
@@ -465,7 +470,7 @@ enum HarmonyResponseParser {
                     content: finalContent,
                     tokenIDs: finalContentTokenIDs,
                     decode: decode,
-                    stopCandidates: stopCandidates
+                    stopCandidates: stopCandidates + requestStops
                 ) {
                     return stopped
                 }

@@ -795,6 +795,7 @@
       "id": "operator-constrained-privacy-class",
       "owner_spec": "SPEC-049",
       "consumers": [
+        "SPEC-002",
         "SPEC-006",
         "SPEC-041"
       ],
