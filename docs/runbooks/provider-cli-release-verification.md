@@ -14,13 +14,27 @@ keeping the existing target. Fleet recommendation additionally requires the
 matching target: a binary recommendation of 223 with compatibility target
 207 fails the consumer updater's exact manifest-target comparison.
 
-Apply under both Pearl locks after following
-[the rollout runbook](pearl-coordinator-rollout.md) and announcing expected
-downtime. Validate with the running coordinator's service environment, restart
-the coordinator (SIGHUP does not reload this policy), and verify its applied
-configuration hash and public health. Publication or a healthy advertised
-version alone does not prove that the new provider compatibility set is
-accepted and targeted.
+Both edits are `scripts/ops/cli-release.sh` steps that `next --run` executes:
+`pearl_accepted_ids` (add the candidate id; at the cap evict the oldest
+accepted version that is not the target, not the previous target/stable, and
+not the latest connection version of any provider seen in the last 14 days,
+`_anonymous` excluded; the step prints that per-version table and refuses with
+it when nothing is evictable) and
+`recommendation_bump` (`latest_binary_version` and `target_id` to the release,
+prior target kept accepted). Each prints the expected downtime first, holds
+the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
+an anchored transform, backs it up under `/root/macprovider-backups`,
+validates the new file with the running coordinator's binary, user and exact
+environment, restarts the coordinator (SIGHUP does not reload this policy),
+waits for `/healthz`, checks that the restarted coordinator logged the on-disk
+config as its boot config, and records the step. `recommendation_bump` is
+complete only when `/healthz` recommends the release AND the applied
+`compatibility_set.target_id` names it. When the requested edit is already on
+disk but the running coordinator never applied it (a run stopped before its
+restart), the step validates and restarts instead of reporting success. Nobody
+pastes a restart. Publication or a healthy advertised version alone does not
+prove that the new provider compatibility set is accepted and targeted; the
+`registrations` gate reads the running coordinator's applied config.
 
 
 This runbook covers release/updater correctness only. Keep product-specific
@@ -113,14 +127,17 @@ python3 -c 'import json; print(json.dumps(json.load(open("pearl-release.json"))[
    `binary_sha256` must equal the `shasum` output, `slices[0].code_cdhash`
    must equal `CDHash=`, `team_id` must equal `TeamIdentifier=`, and
    `signing_identifier` must equal `Identifier=` (`live.malibu.provider.cli`).
-   Any mismatch means the release is not verified. To fill SPEC-049
-   `privacy_class.approved_code_identities`, emit the entry from the verified
-   metadata instead of copying values by hand:
+   Any mismatch means the release is not verified. Pearl approves the
+   verified identity for the privacy class through
+   `scripts/ops/cli-release.sh` step `privacy_release_identity`, which stages
+   this `pearl-release.json` in `privacy_class.release_code_identities.metadata_dir`
+   (see `docs/runbooks/privacy-class-beta-operations.md` "Approved code
+   identities"). Only when a config entry is needed instead, emit it from the
+   verified metadata rather than copying values by hand:
 
 ```bash
 python3 scripts/provider-code-identity.py --emit-approved-identity \
-  --pearl-release-json pearl-release.json \
-  --expires-at 2027-01-31T00:00:00Z
+  --pearl-release-json pearl-release.json
 ```
 
    The command checks the signature against
@@ -131,9 +148,11 @@ python3 scripts/provider-code-identity.py --emit-approved-identity \
    - before publication, the signed feed bytes, keyring, and coordinator
      health version are checked while the recommendation may remain on the
      previous stable CLI;
-   - after publication and the immutable byte-identity check, have the Pearl
-     owner bump `recommended_binary_version` to the published CLI, then
-     dispatch `verify-live-coordinator-release-rollout.yml`. That workflow
+   - after publication and the immutable byte-identity check, run the
+     `recommendation_bump` step (`scripts/ops/cli-release.sh next --run`) to
+     move the recommendation to the published CLI, then its
+     `verify_live_rollout` step dispatches
+     `verify-live-coordinator-release-rollout.yml`. That workflow
      requires the exact post-publication gate before publishing the
      append-only discovery transport.
 7. Verify the Malibu artifact against the standalone provider tarball:

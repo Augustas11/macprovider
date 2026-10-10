@@ -1097,6 +1097,7 @@ func runCoordinator() (exitCode int) {
 			if err != nil {
 				logger.Fatal().Err(err).Msg("privacy class authority rejected")
 			}
+			privacyAuthority.UseMetrics(metricsHandle)
 			wsOpts = append(wsOpts, providerws.WithPrivacyAuthority(privacyAuthority))
 		}
 	}

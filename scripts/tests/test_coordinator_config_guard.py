@@ -81,6 +81,19 @@ SKIP_SUFFIXES = (".md", ".html", ".json", ".go", ".example", ".service", ".conf"
 ACTIVATE_MARKERS = ('. "$CCG_LIB"', 'ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}")',
                     'ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}" 120)')
 GUARDED = {
+    # CLI train Pearl config steps: cli-release.sh sends pearl-cli-config.py,
+    # which loads the installed guard (sha256-pinned to the repo copy) and
+    # does every read-modify-write + restart inside its LockSet.
+    "scripts/ops/cli-release.sh": (
+        'PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"',
+        'guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py"',
+        '< "$OPS_LIB_DIR/pearl-cli-config.py"',
+    ),
+    "scripts/ops/lib/pearl-cli-config.py": (
+        "the installed coordinator_config_guard.py differs from the reviewed source",
+        "return module.LockSet(args.install_root, updater_lock=args.updater_lock,",
+        "with guard(args):",
+    ),
     "scripts/ops/lib/privacy-activation.py": (
         "def config_guard():",
         "return module.LockSet('/opt/macprovider')",

@@ -447,3 +447,28 @@ func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
 	}
 	return true
 }
+
+func TestPrivacyPostureMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.IncPrivacyPostureRejection("posture_unapproved_code_identity")
+	m.IncPrivacyPostureRejection("posture_unapproved_code_identity")
+	m.IncPrivacyPostureRejection("attacker-chosen")
+	m.SetPrivacyReleaseIdentityVersions([]string{"1.8.230", "not-a-version"})
+	m.SetPrivacyReleaseIdentityVersions([]string{"1.8.232"})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMetricValue(t, families, "relayblind_privacy_posture_rejections_total", map[string]string{"reason": "posture_unapproved_code_identity"}, 2)
+	assertMetricValue(t, families, "relayblind_privacy_posture_rejections_total", map[string]string{"reason": "other"}, 1)
+	if metricExists(families, "relayblind_privacy_posture_rejections_total", map[string]string{"reason": "attacker-chosen"}) {
+		t.Fatal("unknown reason became a label value")
+	}
+	assertMetricValue(t, families, "relayblind_privacy_release_identity_loaded", map[string]string{"binary_version": "1.8.232"}, 1)
+	for _, stale := range []string{"1.8.230", "not-a-version"} {
+		if metricExists(families, "relayblind_privacy_release_identity_loaded", map[string]string{"binary_version": stale}) {
+			t.Fatalf("release identity %q survived a reload", stale)
+		}
+	}
+}

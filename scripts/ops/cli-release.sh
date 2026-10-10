@@ -19,27 +19,60 @@
 #   4 signed_byte_verification  checksums, pearl-release.json signature,
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
 #                           verify-malibu-release-artifacts.sh
-#   5 pearl_accepted_ids    add the candidate compatibility_set_id, keep target_id
+#   4a privacy_release_setup  one-time Pearl setup of privacy_class.release_code_identities
+#                           (next --run: _pearl-config edit + restart, sharing the restart with
+#                           step 5 when due, then stages 4b); done while Pearl's config names it
+#   4b privacy_release_identity  copy the verified candidate pearl-release.json + .sig to
+#                           Pearl's privacy_class.release_code_identities.metadata_dir as
+#                           v<ver>.json/.sig (hot: re-read every ~60 s, no restart)
+#   5 pearl_accepted_ids    next --run: _pearl-config adds the candidate compatibility_set_id
+#                           (keep target_id; at the cap of 8 evict the oldest version that is not
+#                           the target, not the previous stable, and not the latest connection
+#                           version of any provider seen in 14 days) and restarts; done when the
+#                           running coordinator's applied config lists it
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
 #                           candidate, coordinator.connected, candidate compatibility set,
 #                           CB active, live_verified, authorized, local proof passed, paged KV attached,
-#                           then sends one provider-attributed buyer request through the gateway)
+#                           then sends one provider-attributed buyer request through the gateway;
+#                           refused when Pearl's journal shows the canary's privacy advertisement
+#                           rejected as posture_unapproved_code_identity in the last 10 minutes,
+#                           or when the running coordinator does not hold the registrations of 7a)
 #   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
 #                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
 #                           promote-signed-*-journey run whose head SHA, title or log names the
 #                           candidate SHA or tag) or `--carry-forward ID` (a carry-forward record
 #                           in docs/releases/cli-release-train.md naming the candidate version)
+#   7a registrations        read-only gate over PEARL_SSH, on every status (it also gates 8 and
+#                           9): the running coordinator holds the candidate compatibility_set_id
+#                           in accepted_ids (on-disk config sha256 == its boot
+#                           coordinator_config_applied digests), privacy_class is enabled, and
+#                           the code_cdhash is approved by a verifying v<ver>.json it reports as
+#                           loaded (relayblind_privacy_release_identity_loaded) or by an
+#                           approved_code_identities entry in that applied config
+#   7a2 release_tag         signed annotated tag v<ver> on the candidate SHA, pushed to origin
+#                           (promote-acceptance-candidate.yml requires it); signed with the
+#                           operator's git signing key, checked with git verify-tag; an existing
+#                           tag counts only if its exact remote object verifies; refused when
+#                           v<ver> exists unsigned/untrusted, on another commit, or lightweight
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
-#                           sets physical_acceptance_confirmed=true, after 4, 6 and 7
-#   8 recommendation_bump   Pearl latest_binary_version + compatibility target
-#   9 verify_live_rollout   verify-live-coordinator-release-rollout.yml
+#                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
+#   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
+#                           compatibility_set.target_id (prior target stays accepted), restarts,
+#                           and checks /healthz recommended_binary_version
+#   9 verify_live_rollout   _check-privacy-rejections (two samples of the
+#                           posture_unapproved_code_identity counter over
+#                           PRIVACY_REJECTION_WINDOW_SECONDS, default 180; journal fallback),
+#                           then verify-live-coordinator-release-rollout.yml
 #  10 install_sh_republish  get-channel install.sh == released dist/install.sh
 #  11 install_sh_consumer_health
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, INSTALL_SH_URL,
 # PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
+# Pearl paths default to the production layout: PEARL_COORDINATOR_CONFIG,
+# PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_COORDINATOR_METRICS_URL,
+# PEARL_RELEASE_IDENTITY_OWNER, PEARL_RELEASE_IDENTITY_GROUP.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,6 +88,108 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 TRAIN_DOC="docs/releases/cli-release-train.md"
 VERIFY_DOC="docs/runbooks/provider-cli-release-verification.md"
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
+PRIVACY_DOC="docs/runbooks/privacy-class-beta-operations.md"
+
+PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
+PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
+PEARL_COORDINATOR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+PEARL_COORDINATOR_METRICS_URL="${PEARL_COORDINATOR_METRICS_URL:-http://127.0.0.1:8444/metrics}"
+PEARL_RELEASE_IDENTITY_OWNER="${PEARL_RELEASE_IDENTITY_OWNER:-root}"
+PEARL_RELEASE_IDENTITY_GROUP="${PEARL_RELEASE_IDENTITY_GROUP:-macprovider}"
+
+# registrations_remote ARGS...: run lib/release-registrations.py on Pearl
+# (the script travels on stdin). Every argument must be shell-safe.
+registrations_remote() {
+  local a
+  for a in "$@"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl registrations helper: $a"
+  done
+  pearl_ssh "python3 - $*" < "$OPS_LIB_DIR/release-registrations.py"
+}
+
+# Pearl layout for the coordinator.yaml edits (defaults: production).
+PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
+PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
+PEARL_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+PEARL_CONNECTION_EVENTS_DB="${PEARL_CONNECTION_EVENTS_DB:-/var/lib/macprovider/provider_connection_events.db}"
+PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
+PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8443/healthz}"
+PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
+PRIVACY_METADATA_DIR="${PEARL_PRIVACY_METADATA_DIR:-/opt/macprovider/privacy-release-identities}"
+PRIVACY_PUBLIC_KEY_PATH="${PEARL_RELEASE_PUBLIC_KEY_PATH:-/usr/local/share/macprovider/release-signing-public.pem}"
+
+# _pearl-config ARGS...: the train's coordinator.yaml edits plus one restart,
+# by lib/pearl-cli-config.py on Pearl (both Pearl locks, anchored edit,
+# backup, validation with the running coordinator's environment, restart,
+# /healthz, postconditions). Only `next --run` may call it: it holds the
+# live-ops lock and has printed the downtime banner.
+pearl_config() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_pearl-config runs only from '$0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  local a guard_sha
+  guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}')"
+  for a in "$@" "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" \
+    "$PEARL_INSTALL_ROOT" "$PEARL_CONFIG_GUARD" "$PEARL_UPDATER_LOCK" "$PEARL_CONNECTION_EVENTS_DB" \
+    "$PEARL_BACKUP_ROOT" "$PEARL_COORDINATOR_HEALTHZ_URL" "$PEARL_PROC_ROOT"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl config helper: $a"
+  done
+  pearl_ssh "python3 - apply --config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY \
+--unit $PEARL_COORDINATOR_UNIT --install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD \
+--guard-sha256 $guard_sha --updater-lock $PEARL_UPDATER_LOCK --events-db $PEARL_CONNECTION_EVENTS_DB \
+--backup-root $PEARL_BACKUP_ROOT --healthz $PEARL_COORDINATOR_HEALTHZ_URL --proc $PEARL_PROC_ROOT $*" \
+    < "$OPS_LIB_DIR/pearl-cli-config.py"
+}
+
+# candidate_release_bytes V -> 'PRJ<TAB>SIG' of the verified candidate, or nothing.
+candidate_release_bytes() {
+  local dir prj sig
+  dir="$(marker_field "cli-release-$1" signed_byte_verification 'd.get("bytes_dir")')"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  prj="$(find "$dir" -type f -name pearl-release.json | head -n1)"
+  sig="$(find "$dir" -type f -name pearl-release.json.sig | head -n1)"
+  [ -n "$prj" ] && [ -n "$sig" ] && printf '%s\t%s\n' "$prj" "$sig"
+}
+
+# registrations_live: the last load_registrations proved every registration
+# live, including the candidate's own compatibility id.
+registrations_live() {
+  [ "$REG_STATE" != unknown ] && [ -z "$REG_MISSING" ] && [ "$REG_COMPAT_ACCEPTED" = true ]
+}
+
+# load_registrations V COMPAT_ID: read Pearl's registration state (read-only)
+# into REG_STATE (unknown|unconfigured|missing|present|mismatch|staged),
+# REG_DIR, REG_BY, REG_MISSING and REG_ERR.
+load_registrations() {
+  local V="$1" compat="$2" bytes prj="" sig=""
+  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""; REG_COMPAT_ACCEPTED=false; REG_TARGET_APPLIED=false
+  if [ -z "${PEARL_SSH:-}" ]; then
+    REG_ERR="PEARL_SSH is unset"
+  elif ! registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" \
+    "$PEARL_COORDINATOR_UNIT" "$V" "$PEARL_COORDINATOR_METRICS_URL" > "$OPS_TMP_DIR/reg-facts.json" 2> "$OPS_TMP_DIR/reg-facts.err"; then
+    REG_ERR="Pearl coordinator config unreadable: $(tail -n1 "$OPS_TMP_DIR/reg-facts.err")"
+  else
+    bytes="$(candidate_release_bytes "$V")"
+    if [ -n "$bytes" ]; then prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"; fi
+    if python3 "$OPS_LIB_DIR/release-registrations.py" evaluate "$OPS_TMP_DIR/reg-facts.json" "$V" \
+      "${compat:-}" "${prj:-}" "${sig:-}" > "$OPS_TMP_DIR/reg-verdict.json" 2> "$OPS_TMP_DIR/reg-verdict.err"; then
+      REG_DIR="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
+      REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
+      REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
+      REG_MISSING="$(json_field "$OPS_TMP_DIR/reg-verdict.json" '"; ".join(d["missing"])')"
+      REG_COMPAT_ACCEPTED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("compat_accepted", False)')"
+      REG_TARGET_APPLIED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("target_applied", False)')"
+    else
+      REG_ERR="registration evaluation failed: $(tail -n1 "$OPS_TMP_DIR/reg-verdict.err")"
+    fi
+  fi
+  if [ "$REG_STATE" = unknown ]; then
+    fact privacy_release_metadata_dir "unknown: $REG_ERR"
+  else
+    fact privacy_release_metadata_dir "${REG_DIR:-unset}"
+  fi
+  fact privacy_release_identity "$REG_STATE"
+}
 
 # checked_in_recommendation REV -> the one latest_binary_version shared by the
 # three coordinator configs at REV, or "MISMATCH"/"" (release-staged-version-policy.sh rules).
@@ -249,20 +384,81 @@ bash scripts/release-staged-version-policy.sh v$V" \
 
   local compat_id
   compat_id="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  if [ -z "$compat_id" ]; then
+    # No local verification record (fresh ops state): derive the id from the
+    # verified, trusted-signer v<ver> tag, as verify_candidate binds it.
+    local tag_commit
+    tag_commit="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$V^{}" 2>/dev/null | awk '{print $1}')"
+    if is_sha40 "$tag_commit" && [ "$(release_tag_state "v$V" "$tag_commit")" = on_candidate ]; then
+      compat_id="$(gh_repo):v$V@$tag_commit"
+      fact compatibility_set_id_source "verified tag v$V"
+    fi
+  fi
 
-  # 5. Pearl accepted_ids (keep target).
-  if [ "$published" = true ] || marker_done "$OPS_SCOPE" pearl_accepted_ids; then
-    step pearl_accepted_ids "done" ""
+  # 4b. privacy release identity: the hot SPEC-049-R027 registration of the
+  # candidate's code identity. Read live every time; never a local marker.
+  load_registrations "$V" "$compat_id"
+  # 4a. one-time Pearl setup of the release metadata dir. It shares its one
+  # restart with the accepted_ids edit when that is still due, and stages the
+  # candidate identity right after (hot), so 4a, 4b and 5 take one run.
+  case "$REG_STATE" in
+    unknown) step privacy_release_setup unknown "$REG_ERR" ;;
+    unconfigured)
+      step privacy_release_setup pending "Pearl has no release_code_identities.metadata_dir"
+      local key_sha setup_cmd setup_also=""
+      key_sha="$(shasum -a 256 "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" | awk '{print $1}')"
+      setup_cmd="scripts/ops/cli-release.sh _pearl-config --privacy-setup $PRIVACY_METADATA_DIR $PRIVACY_PUBLIC_KEY_PATH $key_sha"
+      if [ -n "$compat_id" ] && [ "$REG_COMPAT_ACCEPTED" != true ]; then
+        setup_cmd="$setup_cmd --accepted-id $compat_id"; setup_also=" and add $compat_id to accepted_ids"
+      fi
+      [ -z "$(candidate_release_bytes "$V")" ] || setup_cmd="$setup_cmd
+scripts/ops/cli-release.sh _stage-privacy-identity $V"
+      set_next privacy_release_setup mutate "One-time: configure privacy_class.release_code_identities on Pearl$setup_also" \
+        "$setup_cmd"
+      next_meta privacy_release_setup "$PRIVACY_DOC#one-time-setup-pearl" \
+        "coordinator restart: a few seconds of buyer outage" privacy_release_setup ;;
+    *) step privacy_release_setup "done" "metadata_dir $REG_DIR" ;;
+  esac
+  if [ "$REG_STATE" = staged ] || { [ "$published" = true ] && [ "$REG_STATE" = present ]; }; then
+    step privacy_release_identity "done" "v$V.json in $REG_DIR"
+  else
+    step privacy_release_identity pending "$REG_STATE"
+    case "$REG_STATE" in
+      unknown)
+        set_next privacy_release_identity blocked "Read Pearl's privacy release identity registration" "" "$REG_ERR" ;;
+      unconfigured) ;;  # privacy_release_setup comes first
+      mismatch)
+        set_next privacy_release_identity blocked "Resolve the conflicting v$V.json in $REG_DIR" "" \
+          "$REG_DIR/v$V.json exists with bytes that differ from the verified candidate; refusing to replace a signed release identity" ;;
+      *)
+        if [ -z "$(candidate_release_bytes "$V")" ]; then
+          set_next privacy_release_identity blocked "Register v$V's privacy code identity on Pearl" "" \
+            "no verified candidate pearl-release.json for v$V is recorded; run the signed_byte_verification step"
+        else
+          set_next privacy_release_identity mutate "Stage v$V's signed pearl-release.json in Pearl's privacy release metadata dir" \
+            "scripts/ops/cli-release.sh _stage-privacy-identity $V"
+          next_meta privacy_release_identity "$PRIVACY_DOC#approved-code-identities" \
+            "none: two signed files added to $REG_DIR; the coordinator re-reads it within one challenge interval (~60 s), no restart"
+        fi ;;
+    esac
+  fi
+
+  # 5. Pearl accepted_ids (keep target): read live from the applied config,
+  # also after publication, so a lost acceptance is repaired by the train.
+  if [ "$REG_COMPAT_ACCEPTED" = true ]; then
+    step pearl_accepted_ids "done" "$compat_id accepted by the running coordinator"
   else
     step pearl_accepted_ids pending ""
-    set_next pearl_accepted_ids manual "Add $compat_id to Pearl compatibility_set.accepted_ids (keep target_id)" \
-"# docs/releases/cli-release-train.md Session protocol, docs/runbooks/provider-cli-release-verification.md
-# On Pearl, under both locks, edit coordinator.yaml IN PLACE (never restore a whole-file backup):
-#   compatibility_set.accepted_ids += \"$compat_id\"   (cap 8, keep target_id, drop oldest unused)
-# Validate with the running coordinator's service environment, then RESTART the coordinator
-# (s.cfg is a value copy; SIGHUP does not reload compatibility_set) and verify the applied
-# config hash and public /healthz."
-    next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage"
+    if [ "$REG_STATE" = unknown ]; then
+      set_next pearl_accepted_ids blocked "Read Pearl's compatibility_set" "" "$REG_ERR"
+    elif [ -z "$compat_id" ]; then
+      set_next pearl_accepted_ids blocked "Accept v$V on Pearl" "" "no verified compatibility_set_id for v$V is recorded"
+    else
+      # SIGHUP does not reload compatibility_set (s.cfg is a value copy): restart.
+      set_next pearl_accepted_ids mutate "Add $compat_id to Pearl compatibility_set.accepted_ids (keep target_id) and restart" \
+        "scripts/ops/cli-release.sh _pearl-config --accepted-id $compat_id"
+      next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage" pearl_accepted_ids
+    fi
   fi
 
   # 6. canary install/join smoke.
@@ -291,6 +487,43 @@ bash scripts/release-staged-version-policy.sh v$V" \
 #   $0 next --done e2e_gate --carry-forward <record id in docs/releases/cli-release-train.md>"
   fi
 
+  # 7a. registrations: every coordinator-side registration of the candidate
+  # binary is live in the running coordinator. Evaluated on every status, also
+  # after publication, so it re-gates recommendation_bump and
+  # verify_live_rollout (both come later in this order).
+  if registrations_live; then
+    step registrations "done" "accepted_ids has $compat_id; code identity approved by $REG_BY"
+  else
+    step registrations pending "${REG_MISSING:-$REG_ERR}"
+    set_next registrations blocked "Pearl registrations for v$V are not live" "" \
+      "promotion, recommendation bump and rollout verification refused: ${REG_MISSING:-$REG_ERR}"
+    next_meta registrations "$TRAIN_DOC#promotion-gate-checklist"
+  fi
+
+  # 7a2. signed release tag on the candidate SHA (the promotion workflow runs
+  # verify-release-tag-target.sh --require-existing).
+  local tag_state=""
+  if [ "$published" = true ]; then
+    step release_tag "done" "v$V published"
+  else
+    tag_state="$(release_tag_state "v$V" "$ok_sha")"
+    case "$tag_state" in
+      on_candidate) step release_tag "done" "signed annotated v$V -> $ok_sha (verify-tag ok)" ;;
+      absent)
+        step release_tag pending "v$V absent on origin"
+        if is_sha40 "$ok_sha" && marker_run_matches signed_byte_verification "$ok_id"; then
+          set_next release_tag mutate "Create and push the signed annotated tag v$V on $ok_sha" \
+            "scripts/ops/cli-release.sh _release-tag $V $ok_sha"
+        else
+          set_next release_tag blocked "Tag v$V" "" "no verified candidate SHA for v$V is recorded"
+        fi ;;
+      *)
+        step release_tag pending "$tag_state"
+        set_next release_tag blocked "Resolve the existing v$V tag" "" \
+          "v$V on origin is $tag_state, not a verified signed annotated tag on candidate $ok_sha; refusing to move or reuse it" ;;
+    esac
+  fi
+
   # 7. promotion.
   local cs
   cs="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')"
@@ -309,31 +542,45 @@ bash scripts/release-staged-version-policy.sh v$V" \
     if [ -n "$prod_active" ]; then
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
-      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha"; then
+      ! marker_canary_probe_matches "$ok_sha" || ! marker_candidate_matches e2e_gate "$ok_sha" ||
+      ! registrations_live || [ "$tag_state" != on_candidate ]; then
       set_next promotion blocked "Promote v$V" "" \
-        "physical_acceptance_confirmed=true needs verified bytes, canary smoke and e2e evidence recorded for $ok_sha"
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke, e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
-"gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
+"scripts/ops/cli-release.sh _check-registrations $V
+gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
   -f candidate_run_id=$ok_id -f candidate_sha=$ok_sha -f tag=v$V \\
   -f expected_checksums_sha256=$cs -f physical_acceptance_confirmed=true"
     fi
   fi
 
-  # 8. recommendation / compatibility target bump.
-  if [ "$L" = "$V" ]; then
-    step recommendation_bump "done" "live recommends $V"
+  # 8. recommendation / compatibility target bump: both the advertised version
+  # and the applied compatibility_set.target_id must name the release.
+  if [ "$L" = "$V" ] && [ "$REG_TARGET_APPLIED" = true ]; then
+    step recommendation_bump "done" "live recommends $V; applied target_id $compat_id"
   else
-    step recommendation_bump pending "live recommends $L"
-    set_next recommendation_bump manual "Move Pearl latest_binary_version and compatibility_set.target_id to $V" \
-"# docs/runbooks/provider-cli-release-verification.md 'Pearl compatibility gate before fleet recommendation'
-# On Pearl, under both locks, in place: latest_binary_version: \"$V\";
-#   compatibility_set.target_id = v$V's compatibility_set_id; keep the prior target in accepted_ids.
-# Restart the coordinator, then confirm /healthz recommended_binary_version == $V."
-    next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" "coordinator restart: a few seconds of buyer outage"
+    step recommendation_bump pending "live recommends $L; target_id $compat_id applied: $REG_TARGET_APPLIED"
+    if [ -z "$compat_id" ]; then
+      set_next recommendation_bump blocked "Recommend v$V" "" "no verified compatibility_set_id for v$V is recorded"
+    else
+      set_next recommendation_bump mutate "Move Pearl latest_binary_version and compatibility_set.target_id to $V (prior target stays accepted) and restart" \
+        "scripts/ops/cli-release.sh _pearl-config --recommend $V $compat_id"
+      next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" \
+        "coordinator restart: a few seconds of buyer outage" recommendation_bump
+    fi
   fi
 
-  # 9. verify-live-coordinator-release-rollout.
+  # 9. verify-live-coordinator-release-rollout. The process-lifetime
+  # rejection count is reported only; the dispatch is gated by
+  # _check-privacy-rejections, which samples the counter twice over a window
+  # so historical rejections never block it.
+  if [ "$L" = "$V" ] && [ -n "${PEARL_SSH:-}" ] &&
+    registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL" \
+      > "$OPS_TMP_DIR/unapproved.json" 2>/dev/null; then
+    fact privacy_unapproved_rejections_lifetime "$(json_field "$OPS_TMP_DIR/unapproved.json" 'd["count"]')"
+    fact privacy_unapproved_rejections_source "$(json_field "$OPS_TMP_DIR/unapproved.json" 'd["source"]')"
+  fi
   if [ -n "$verify_ok" ]; then
     step verify_live_rollout "done" "run $verify_ok"
   elif [ -n "$verify_active" ]; then
@@ -346,7 +593,8 @@ bash scripts/release-staged-version-policy.sh v$V" \
       set_next verify_live_rollout blocked "Verify the live rollout of v$V" "" "production-release group busy: $prod_active"
     else
       set_next verify_live_rollout mutate "Verify the live coordinator rollout and publish discovery for v$V" \
-        "gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref main -f tag=v$V"
+"scripts/ops/cli-release.sh _check-privacy-rejections
+gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref main -f tag=v$V"
     fi
   fi
 
@@ -487,6 +735,22 @@ if bad:
 print(json.dumps(got, sort_keys=True))
 PY
 )" || refuse "canary probe failed the candidate checks"
+        # The coordinator must accept the canary's privacy advertisement:
+        # a rejection is only a log line on Pearl, so read it there.
+        local canary_id rejected
+        canary_id="$(json_field "$OPS_TMP_DIR/canary.json" 'd["provider_id"]')"
+        [ -n "$canary_id" ] || refuse "canary /v1/status reports no provider_id"
+        require_pearl_ssh
+        rejected="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" - "$canary_id" -10min |
+          python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])')" ||
+          refuse "Pearl coordinator journal not readable over PEARL_SSH"
+        [ "$rejected" = 0 ] ||
+          refuse "Pearl rejected the canary's privacy advertisement $rejected time(s) in the last 10 minutes (posture_unapproved_code_identity): register v$V's code identity first"
+        # Absence of rejections is not approval: the running coordinator must
+        # positively hold every registration of this candidate.
+        load_registrations "$V" "$compat"
+        [ "$REG_STATE" != unknown ] && [ -z "$REG_MISSING" ] ||
+          refuse "v$V is not registered in the running coordinator: ${REG_MISSING:-$REG_ERR}"
         local gateway_proof
         gateway_proof="$({ "$OPS_DIR/catalog-activate.sh" _gateway-proof; } 2>&1)" ||
           refuse "canary gateway proof failed after status validation: $gateway_proof"
@@ -617,9 +881,179 @@ PY
   log "verified: checksums.txt sha256=$cs compatibility_set_id=$compat_id"
 }
 
+# _check-registrations VERSION: re-read Pearl right before a publication
+# dispatch and refuse unless every registration is live. The promotion
+# workflow cannot reach Pearl, so this is the last check before it publishes;
+# the environment approval is shown only while `status` still passes it.
+check_registrations() {
+  local V="$1" compat
+  is_semver "$V" || die "usage: _check-registrations VERSION"
+  OPS_SCOPE="cli-release-$V"
+  compat="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
+  load_registrations "$V" "$compat"
+  registrations_live || refuse "v$V is not registered in the running coordinator: ${REG_MISSING:-$REG_ERR}"
+  log "v$V registrations are live in the running coordinator"
+}
+
+# verify_tag_signer OBJECT: the tag object is signed by an explicitly approved
+# signer. SSH signatures verify only against MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS
+# (default ~/.config/macprovider/release-tag-allowed-signers), never the user's
+# git config; OpenPGP signatures need a VALIDSIG fingerprint listed in
+# MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS. Anything else is untrusted.
+verify_tag_signer() {
+  local obj="$1" body raw f
+  local allowed="${MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS:-$HOME/.config/macprovider/release-tag-allowed-signers}"
+  body="$(git -C "$REPO_ROOT" cat-file tag "$obj" 2>/dev/null)" || return 1
+  case "$body" in
+    *"-----BEGIN SSH SIGNATURE-----"*)
+      [ -s "$allowed" ] || return 1
+      git -C "$REPO_ROOT" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$allowed" \
+        verify-tag "$obj" >/dev/null 2>&1 ;;
+    *"-----BEGIN PGP SIGNATURE-----"*)
+      [ -n "${MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS:-}" ] || return 1
+      raw="$(git -C "$REPO_ROOT" verify-tag --raw "$obj" 2>&1)" || return 1
+      for f in $MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS; do
+        [[ "$f" =~ ^[0-9A-Fa-f]{40}$ ]] || continue
+        printf '%s\n' "$raw" | grep -E '^\[GNUPG:\] VALIDSIG ' | tr ' ' '\n' | grep -qix "$f" && return 0
+      done
+      return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# release_tag_state TAG SHA -> absent | on_candidate | on <commit> | lightweight on <commit>
+# | unverified on <commit> | ambiguous | unreadable, from origin's refs (the promotion
+# workflow reads the same). on_candidate also requires the exact remote tag object to
+# pass `git verify-tag` against the operator's signer trust (gpg keyring or
+# gpg.ssh.allowedSignersFile); an unsigned or untrusted tag is "unverified".
+release_tag_state() {
+  local rows obj peeled
+  rows="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" 2>/dev/null)" || { printf 'unreadable'; return; }
+  obj="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$1" '$2 == r {print $1}')"
+  peeled="$(printf '%s\n' "$rows" | awk -v r="refs/tags/$1^{}" '$2 == r {print $1}')"
+  if [ -z "$obj" ]; then printf 'absent'
+  elif [ "$(printf '%s\n' "$obj" | wc -l | tr -d ' ')" != 1 ]; then printf 'ambiguous'
+  elif [ -z "$peeled" ]; then printf 'lightweight on %s' "$obj"
+  elif [ -z "${2-}" ] || [ "$peeled" != "$2" ]; then printf 'on %s' "$peeled"
+  elif { git -C "$REPO_ROOT" cat-file -e "$obj" 2>/dev/null ||
+      git -C "$REPO_ROOT" fetch -q --no-tags origin "refs/tags/$1" 2>/dev/null; } &&
+    [ "$(git -C "$REPO_ROOT" cat-file -t "$obj" 2>/dev/null)" = tag ] &&
+    verify_tag_signer "$obj"; then
+    printf 'on_candidate'
+  else printf 'unverified on %s' "$peeled"
+  fi
+}
+
+# _release-tag VERSION CANDIDATE_SHA
+# Create v<ver> as a signed annotated tag on the verified candidate SHA with the
+# operator's git signing key, verify it, push it, and confirm origin's target.
+release_tag() {
+  local V="$1" sha="$2" tag state
+  is_semver "$V" && is_sha40 "$sha" || die "usage: _release-tag VERSION CANDIDATE_SHA"
+  tag="v$V"
+  [ "$(marker_field "cli-release-$V" signed_byte_verification 'd.get("candidate_sha")')" = "$sha" ] ||
+    refuse "$sha is not the verified candidate SHA for $V"
+  state="$(release_tag_state "$tag" "$sha")"
+  case "$state" in
+    on_candidate) log "$tag already targets $sha on origin and verifies"; return 0 ;;
+    absent) ;;
+    *) refuse "$tag on origin is $state; refusing to create or move it" ;;
+  esac
+  git -C "$REPO_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null || git -C "$REPO_ROOT" fetch -q origin "$sha" ||
+    refuse "candidate commit $sha is not available locally or on origin"
+  if git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    [ "$(git -C "$REPO_ROOT" rev-parse "$tag^{commit}")" = "$sha" ] &&
+      [ "$(git -C "$REPO_ROOT" cat-file -t "refs/tags/$tag")" = tag ] ||
+      refuse "local $tag exists and is not an annotated tag on $sha; delete the local tag and re-run"
+  else
+    git -C "$REPO_ROOT" tag -s -a "$tag" -m "macprovider-cli $V" "$sha" ||
+      refuse "git tag -s failed; configure the operator's git signing key (user.signingkey)"
+  fi
+  verify_tag_signer "$(git -C "$REPO_ROOT" rev-parse "refs/tags/$tag")" ||
+    refuse "$tag is not signed by an approved signer (MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS or MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS); not pushing"
+  git -C "$REPO_ROOT" push -q origin "refs/tags/$tag" || refuse "pushing $tag failed"
+  [ "$(release_tag_state "$tag" "$sha")" = on_candidate ] || refuse "origin $tag does not target $sha after the push"
+  log "pushed signed annotated $tag -> $sha"
+}
+
+# _check-privacy-rejections: refuse when the coordinator keeps rejecting
+# privacy advertisements as posture_unapproved_code_identity now. Two samples
+# of the counter PRIVACY_REJECTION_WINDOW_SECONDS apart (default 180 s, three
+# posture challenge intervals); without the metric, journal lines in the window.
+check_privacy_rejections() {
+  local window="${PRIVACY_REJECTION_WINDOW_SECONDS:-180}" a b src delta=""
+  [[ "$window" =~ ^[0-9]+$ ]] || die "PRIVACY_REJECTION_WINDOW_SECONDS must be a whole number"
+  require_pearl_ssh
+  a="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL")" ||
+    refuse "rejection counter unreadable over PEARL_SSH"
+  src="$(printf '%s' "$a" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source"])')"
+  log "sampling posture_unapproved_code_identity rejections over ${window}s ($src)"
+  sleep "$window"
+  if [ "$src" = metric ]; then
+    b="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" "$PEARL_COORDINATOR_METRICS_URL")" ||
+      refuse "rejection counter unreadable over PEARL_SSH"
+    delta="$(python3 -c '
+import json, sys
+a, b = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+same = b["source"] == "metric" and a.get("invocation") and a.get("invocation") == b.get("invocation")
+print(b["count"] - a["count"] if same and b["count"] >= a["count"] else "reset")' "$a" "$b")"
+  fi
+  if [ "$src" != metric ] || [ "$delta" = reset ]; then
+    # A restart reset the per-process counter (or there is no metric): count
+    # the unit journal across every invocation in the window instead.
+    [ "$delta" != reset ] || log "the coordinator restarted during the window; counting its journal instead"
+    delta="$(registrations_remote unapproved "$PEARL_COORDINATOR_UNIT" - - "-${window}s" |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])')" || refuse "coordinator journal unreadable over PEARL_SSH"
+  fi
+  case "$delta" in
+    0) ;;
+    *[!0-9]*) refuse "rejection count unreadable: $delta" ;;
+    *) refuse "the coordinator rejected $delta privacy advertisement(s) as posture_unapproved_code_identity in the last ${window}s; register (privacy_release_identity) or deny that code identity, then re-run" ;;
+  esac
+  log "no posture_unapproved_code_identity rejections in ${window}s"
+}
+
+# _stage-privacy-identity VERSION
+# Copy the verified candidate pearl-release.json and its signature, byte for
+# byte, into Pearl's privacy release metadata dir as v<ver>.json/.sig, then
+# read them back. The coordinator verifies the signature again before it
+# approves anything, so this adds no trust; it removes the config edit.
+stage_privacy_identity() {
+  local V="$1" bytes prj sig dir out
+  is_semver "$V" || die "usage: _stage-privacy-identity VERSION"
+  require_pearl_ssh
+  bytes="$(candidate_release_bytes "$V")"
+  [ -n "$bytes" ] || refuse "no verified candidate pearl-release.json for v$V; run the signed_byte_verification step"
+  prj="${bytes%%$'\t'*}"; sig="${bytes#*$'\t'}"
+  openssl dgst -sha256 -verify "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
+    -signature "$sig" "$prj" >/dev/null || refuse "candidate pearl-release.json signature does not verify"
+  [ "$(json_field "$prj" 'd["provider_code_identity"]["binary_version"]')" = "$V" ] ||
+    refuse "candidate pearl-release.json provider_code_identity does not name $V"
+  registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" "$V" - \
+    > "$OPS_TMP_DIR/reg-facts.json" || refuse "Pearl coordinator config unreadable"
+  dir="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
+  [ -n "$dir" ] || refuse "Pearl has no privacy_class.release_code_identities.metadata_dir; run the privacy_release_setup step with '$0 next --run' first"
+  [[ "$dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "unexpected metadata_dir path: $dir"
+  out="$(registrations_remote stage "$dir" "$V" "$PEARL_RELEASE_IDENTITY_OWNER" "$PEARL_RELEASE_IDENTITY_GROUP" \
+    "$(base64 < "$prj" | tr -d '\n')" "$(base64 < "$sig" | tr -d '\n')")" || refuse "staging v$V.json on Pearl failed"
+  python3 - "$out" "$prj" "$sig" "$V" <<'PY' || refuse "Pearl read-back does not match the candidate bytes"
+import hashlib, json, sys
+out, prj, sig, v = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+want = {"v%s.json" % v: hashlib.sha256(open(prj, "rb").read()).hexdigest(),
+        "v%s.json.sig" % v: hashlib.sha256(open(sig, "rb").read()).hexdigest()}
+sys.exit(0 if out == want else 1)
+PY
+  log "staged v$V.json and v$V.json.sig in $dir on Pearl; the coordinator approves them within one challenge interval"
+}
+
 internal() {
   case "$1" in
     _verify-candidate) shift; verify_candidate "$@" ;;
+    _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
+    _release-tag) shift; release_tag "$@" ;;
+    _pearl-config) shift; pearl_config "$@" ;;
+    _check-registrations) shift; check_registrations "$@" ;;
+    _check-privacy-rejections) shift; check_privacy_rejections "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

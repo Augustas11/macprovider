@@ -117,6 +117,13 @@ expect allow './scripts/ops/pearl-runtime.sh status'
 expect allow 'scripts/ops/catalog-activate.sh next --run'
 expect allow 'scripts/ops/discovery-renew.sh next --run'
 expect allow 'MACPROVIDER_OPS_OWNER=me scripts/ops/pearl-runtime.sh next --run'
+expect allow 'MACPROVIDER_OPS_OWNER=me scripts/ops/cli-release.sh next --run'
+expect allow 'scripts/ops/cli-release.sh status'
+expect block 'scripts/ops/cli-release.sh _pearl-config --accepted-id x'
+expect block 'bash scripts/ops/cli-release.sh _pearl-config --recommend 1.2.3 x'
+expect block "ssh pearl 'python3 - apply --accepted-id x' < scripts/ops/lib/pearl-cli-config.py"
+expect block 'python3 scripts/ops/lib/pearl-cli-config.py apply --accepted-id x'
+expect allow 'grep -n accepted scripts/ops/lib/pearl-cli-config.py'
 expect allow 'bash scripts/ops/cli-release.sh status'
 expect allow 'gh workflow run release.yml --ref main -f version=v1.8.230' Bash 1
 expect allow 'bash phase4-coordinator/dist/deploy-pearl-vps.sh' Bash 1

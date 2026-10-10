@@ -64,18 +64,43 @@ privacy_class:
   enabled: true
   release_code_identities:
     metadata_dir: /opt/macprovider/privacy-release-identities
-    public_key_path: /opt/macprovider/release-signing-public.pem
+    public_key_path: /usr/local/share/macprovider/release-signing-public.pem
   directory:
     signing_key_path: /etc/macprovider/privacy-directory.key
     ttl_seconds: 300
   allowed_se_key_backends: [file, keychain]
 ```
 
-`relay_blind.identity_public_keys` and `privacy_class.provider_se_public_keys` may stay empty. `public_key_path` is the PEM P-256 release signing key, the same bytes as `ops/pearl-updater/release-signing-public.pem`. Omitted timing keeps the defaults: challenge interval 60s, response timeout 10s, max age 150s, quarantine 86400s.
+`relay_blind.identity_public_keys` and `privacy_class.provider_se_public_keys` may stay empty. `public_key_path` is the PEM P-256 release signing key, the same bytes as `ops/pearl-updater/release-signing-public.pem` (on Pearl the updater's pinned copy at `/usr/local/share/macprovider/release-signing-public.pem`). Omitted timing keeps the defaults: challenge interval 60s, response timeout 10s, max age 150s, quarantine 86400s.
 
 ### Approved code identities
 
-Every signed CLI release is approved without a config edit. The Pearl updater, when it installs a verified release whose `pearl-release.json` carries `provider_code_identity`, writes that file and its signature to `metadata_dir` as `<tag>.json` and `<tag>.json.sig`. The coordinator re-verifies each pair against `public_key_path` at startup and on every challenge interval, and approves `(team_id, signing_identifier, code_cdhash, binary_version)` from each one. Files that fail are skipped and logged by name. An unreadable directory approves nothing until it reads again.
+A provider's privacy advertisement is refused as `posture_unapproved_code_identity` (no quarantine, only a coordinator log line and the `relayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"}` counter) until its code identity is approved from one of two sources:
+
+- **Release metadata (hot).** Each `<tag>.json` in `metadata_dir` with a sibling `<tag>.json.sig` is re-verified against `public_key_path` at startup and on every challenge interval (~60 s), and approves `(team_id, signing_identifier, code_cdhash, binary_version)`. Files that fail are skipped and logged by name. An unreadable directory approves nothing until it reads again. `relayblind_privacy_release_identity_loaded{binary_version}` on `/admin/metrics` lists the versions approved this way.
+- **`approved_code_identities` (restart-only).** Config entries, read only when the coordinator starts.
+
+Two writers fill `metadata_dir`, because CLI releases and Pearl runtime releases use separate tags:
+
+- **CLI releases:** `scripts/ops/cli-release.sh` step `privacy_release_identity`, right after the candidate's signed bytes are verified and before any canary or fleet provider runs it, copies the verified `pearl-release.json` and signature to `metadata_dir` as `v<ver>.json` and `v<ver>.json.sig` (`root:macprovider`, mode 0640, payload before signature). No restart. The `registrations` gate then refuses the canary, promotion, the recommendation bump and rollout verification until the running coordinator holds the registration: the file verifies and `relayblind_privacy_release_identity_loaded{binary_version="<ver>"}` is 1 on the coordinator, or an `approved_code_identities` entry is in a config whose sha256 equals the running process's boot `coordinator_config_applied` digests.
+- **Pearl runtime releases:** the Pearl updater writes the same pair for a runtime tag whose `pearl-release.json` carries `provider_code_identity`.
+
+#### One-time setup (Pearl)
+
+This is the `cli-release.sh` step `privacy_release_setup`; run it with `scripts/ops/cli-release.sh next --run` (it prints the expected downtime, holds the live-ops lock and both Pearl locks, and refuses on a pricing transaction journal). Status reads `privacy_release_metadata_dir` from Pearl itself. The step adds, in place in `/opt/macprovider/coordinator.yaml` (the `privacy_class` block; it refuses when the overlay sets it):
+
+```yaml
+privacy_class:
+  release_code_identities:
+    metadata_dir: /opt/macprovider/privacy-release-identities
+    public_key_path: /usr/local/share/macprovider/release-signing-public.pem
+```
+
+```bash
+install -d -o root -g macprovider -m 0750 /opt/macprovider/privacy-release-identities
+```
+
+Before the edit it checks that `/usr/local/share/macprovider/release-signing-public.pem` has the sha256 of `ops/pearl-updater/release-signing-public.pem` and that the coordinator user can read it (a configured key that cannot be read stops startup), and creates the directory (`root:macprovider`, 0750, as the Pearl updater requires). It backs the file up under `/root/macprovider-backups`, validates the edited file with the running coordinator's binary, user and exact environment, replaces it atomically, restarts the coordinator and waits for `/healthz`; on a failed restart it puts back the bytes it read under the same locks. When `accepted_ids` still lacks the candidate it adds it in the same edit, so one restart covers both, and it then stages the candidate's `v<ver>.json`.
 
 Overrides, in this order:
 
@@ -83,7 +108,7 @@ Overrides, in this order:
 2. An `approved_code_identities` entry for the same team, signing identifier, and cdhash takes over from the release. Set its `expires_at` in the past to withdraw a release.
 3. An `approved_code_identities` entry can also approve a build that has no release metadata, as in v0.1.
 
-An identity that is only unapproved (for example a release whose metadata has not reached `metadata_dir` yet) is refused by routing and not quarantined. To fill an entry by hand from a signed release:
+An identity that is only unapproved (for example a release whose metadata has not reached `metadata_dir` yet) is refused by routing and not quarantined. To fill an entry by hand from a signed release (it carries no `expires_at` unless you pass `--expires-at`):
 
 ```bash
 scripts/provider-code-identity.py --emit-approved-identity --pearl-release-json pearl-release.json --signature pearl-release.json.sig

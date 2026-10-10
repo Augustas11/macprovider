@@ -790,15 +790,72 @@ mainland-provider installer handoff.
    remains default-off and out of scope. Earlier signed
    candidate evidence may carry forward only where the table and track record
    explicitly permit it.
-4. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
+4. Privacy code identity registered on Pearl before any canary or fleet
+   provider runs the candidate: `scripts/ops/cli-release.sh` step
+   `privacy_release_identity` copies the verified candidate
+   `pearl-release.json` + `.sig` into Pearl's
+   `privacy_class.release_code_identities.metadata_dir` as `v<ver>.json`
+   (hot, no restart). While Pearl has no `metadata_dir`, step
+   `privacy_release_setup` comes first and `next --run` performs the one-time
+   setup (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup"),
+   sharing its single coordinator restart with the `pearl_accepted_ids` edit
+   and staging the identity right after. CLI 1.8.230 shipped without this and
+   every upgraded provider's privacy advertisement was refused for ~12 h.
+5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.
-5. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
+   The canary probe also fails when Pearl's coordinator journal shows its
+   privacy advertisement rejected as `posture_unapproved_code_identity` in
+   the last 10 minutes, or when the running coordinator does not positively
+   hold the candidate's registrations (item 6).
+6. Registrations gate (`registrations`, read-only over `PEARL_SSH`), checked
+   on every status, also after publication, so it gates promotion, the
+   recommendation bump and rollout verification. It passes only when the
+   RUNNING coordinator holds every registration: the candidate
+   `compatibility_set_id` is in `accepted_ids` and the on-disk config's
+   sha256 equals the running process's boot `coordinator_config_applied`
+   digests (restart-only fields), `privacy_class.enabled` is true, and the
+   candidate `code_cdhash` is approved either by a `v<ver>.json` that
+   verifies and that the coordinator reports as loaded
+   (`relayblind_privacy_release_identity_loaded`), or by an unexpired
+   `approved_code_identities` entry in that applied config. Unknown fails
+   closed, including an unknown candidate `compatibility_set_id` (from fresh
+   ops state it is derived only from the trusted-signer `v<ver>` tag); the
+   refusal names the missing item. The promotion dispatch runs
+   `_check-registrations` against Pearl immediately before
+   `gh workflow run`. `promote-acceptance-candidate.yml` cannot reach Pearl,
+   so it does not re-check registrations itself: approve its
+   production-release deployment only from `cli-release.sh` (the approval
+   step is shown only while `status` still passes this gate).
+7. Signed release tag (`release_tag`): `promote-acceptance-candidate.yml`
+   runs `scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin
+   --require-existing`, so `v<ver>` must already be an annotated tag on the
+   candidate SHA. `cli-release.sh next --run` creates it with the operator's
+   git signing key (`git tag -s -a v<ver> -m "macprovider-cli <ver>"
+   <candidate_sha>`), checks it with `git verify-tag`, pushes it and confirms
+   origin's target. An existing `v<ver>` counts only when it is annotated,
+   peels to the candidate, and its exact remote tag object is signed by an
+   explicitly approved signer: an SSH signature verified only against
+   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (default
+   `~/.config/macprovider/release-tag-allowed-signers`, never the checkout's
+   git config), or an OpenPGP signature whose `VALIDSIG` fingerprint is in
+   `MACPROVIDER_RELEASE_TAG_GPG_FINGERPRINTS`. An unsigned or unapproved tag,
+   a tag on another commit, or a lightweight tag is refused. Promotion of 1.8.224, 1.8.230 and 1.8.232 failed
+   until this tag was made by hand.
+8. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
    versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
-6. `verify-live-coordinator-release-rollout` before publishing discovery.
-7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
-8. Curl-channel `https://get.malibu.tech/install.sh`:
+9. `verify-live-coordinator-release-rollout` before publishing discovery.
+   `cli-release.sh` runs `_check-privacy-rejections` before the dispatch: it
+   samples `relayblind_privacy_posture_rejections_total{reason="posture_unapproved_code_identity"}`
+   twice, `PRIVACY_REJECTION_WINDOW_SECONDS` (default 180) apart, within one
+   coordinator invocation, and refuses on any new rejection. When the
+   coordinator restarted in between (the counter resets) or the metric is not
+   served, it counts the unit journal's rejection lines across the window. The lifetime count is only reported, so historical rejections
+   never block; a provider that keeps being rejected does, until its identity
+   is registered or denied.
+10. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
+11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
      against the tag is green. Confirm
@@ -824,14 +881,31 @@ mainland-provider installer handoff.
 - Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).
-- Live-coordinator candidate test: add its `compatibility_set_id` to
-  `accepted_ids` (keep `target_id`). The list is capped at 8 and must
-  include `target_id`; drop the oldest unused set if at cap. Restart the
-  coordinator (`s.cfg` is a value copy — SIGHUP does not reload
-  compatibility_set). Keep the id while it is the Studio serving canary;
+- Live-coordinator candidate test: `scripts/ops/cli-release.sh next --run`
+  at step `pearl_accepted_ids` adds its `compatibility_set_id` to
+  `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
+  a value copy — SIGHUP does not reload compatibility_set). The list is
+  capped at 8 and must include `target_id`; the step also runs after
+  publication, so a lost acceptance of a published release is re-added
+  (target unchanged); at the cap the step evicts the oldest accepted version that is not the
+  target, not the previous target/stable and not in use, where a version is
+  in use when it is the latest connection version of some provider seen in
+  the last 14 days (`_anonymous` excluded). It prints the per-version table
+  (latest-version provider counts, last seen) and refuses with it when
+  nothing is evictable. Keep the id while it is the Studio serving canary;
   revert after a throwaway test. An unaccepted set is closed 4001
   `compatibility_set_unaccepted`; the CLI reports that as
   `Expected auth_challenge v2`.
+- Every new CLI version needs two Pearl registrations, not one: the
+  compatibility set above and the privacy code identity. Stage the identity
+  with `scripts/ops/cli-release.sh next --run` at step
+  `privacy_release_identity`; never hand-edit `approved_code_identities` for a
+  signed release. `cli-release.sh status` reports the live state as facts
+  `privacy_release_metadata_dir` and `privacy_release_identity`.
+- Never hand-make the `v<ver>` release tag: `cli-release.sh` step
+  `release_tag` signs, verifies and pushes it on the verified candidate SHA.
+  It needs the operator's git signing key configured (`user.signingkey`, and
+  `gpg.format ssh` for an SSH key) in the checkout that runs the step.
 - Pearl coordinator/gateway runtime: **one cut of current `main`**. Do not
   dual-dispatch `pearl-runtime-release.yml` from two sessions. Record owner +
   payload + live tag in the Pearl paragraph above before/after apply.

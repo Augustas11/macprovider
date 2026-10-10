@@ -393,6 +393,10 @@ def classify(word, raw, args, names, ctx):
         if args[i:i + 1] == ["commit"]:
             ctx["message_files"].extend(flag_values(args[i + 1:], {"-F", "--file"}))
             ctx["message"] = True
+    elif word == "cli-release.sh" and args[:1] == ["_pearl-config"]:
+        raise Blocked("direct Pearl coordinator config edit and restart", route(CLI))
+    elif word in ("python3", "python", "ssh", "bash", "sh") and any("pearl-cli-config.py" in a for a in args):
+        raise Blocked("direct Pearl coordinator config edit and restart", route(CLI))
     elif word == "deploy-pearl-vps.sh":
         raise Blocked("direct deploy-pearl-vps.sh", route(CAT + " (catalog) or " + RT + " (runtime)"))
     elif word == "catalog-content-release.sh" and "--deploy" in args:

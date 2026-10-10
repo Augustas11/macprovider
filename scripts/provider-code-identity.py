@@ -265,8 +265,11 @@ def derive(args: argparse.Namespace) -> dict:
     return validate_identity(identity)
 
 
-def parse_expiry(value: str | None) -> str:
-    if value is None or not RFC3339.fullmatch(value):
+def parse_expiry(value: str | None) -> str | None:
+    # No expiry unless the operator asks for one (AGENTS.md rule 10).
+    if value is None:
+        return None
+    if not RFC3339.fullmatch(value):
         fail("--expires-at must be an RFC3339 timestamp")
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -323,8 +326,9 @@ def emit_approved_identity(args: argparse.Namespace) -> str:
             f"  signing_identifier: {identity['signing_identifier']}",
             f"  code_cdhash: {row['code_cdhash']}",
             f"  binary_version: \"{identity['binary_version']}\"",
-            f"  expires_at: \"{expires_at}\"",
         ]
+        if expires_at is not None:
+            lines.append(f"  expires_at: \"{expires_at}\"")
     return "\n".join(lines) + "\n"
 
 
@@ -341,7 +345,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--signature", type=pathlib.Path, help="default: <pearl-release.json>.sig")
     root.add_argument("--public-key", type=pathlib.Path, default=DEFAULT_PUBLIC_KEY)
     root.add_argument("--openssl", default="openssl")
-    root.add_argument("--expires-at")
+    root.add_argument("--expires-at", help="optional RFC3339 expiry; omitted, the entry has none")
     return root
 
 
