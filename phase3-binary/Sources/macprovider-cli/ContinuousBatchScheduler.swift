@@ -795,11 +795,9 @@ struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
     let requestID: String
     let promptOffset: Int
     /// The row's own next chunk: the balanced partition under the per-row
-    /// chunk limit and the group token budget.
+    /// chunk limit and the group token budget, the chunk the row prefills
+    /// when it runs alone.
     let naturalChunkTokens: Int
-    /// Tokens before the row's next hard boundary (prompt end or a recurrent
-    /// checkpoint). A shared chunk never crosses it.
-    let spanTokens: Int
     /// False for a row that may share a forward only with rows at its own
     /// offset (native-MTP prompt rows).
     let sharesRaggedOffsets: Bool
@@ -820,72 +818,54 @@ enum ContinuousBatchPrefillGrouping {
     static let maxRaggedKeySpreadFactor = 2
 
     /// Picks one group whose rows all prefill exactly `chunkTokens` tokens in
-    /// one shared forward. The FCFS head always leads. The chunk length is
-    /// the head's own chunk or a shorter peer chunk the head may shrink to,
-    /// whichever advances the most prompt tokens within `maxRows` and
-    /// `tokenBudget` (ties keep the longer chunk). A row joins when its span
-    /// fits the chunk and the chunk is at least half of the row's own next
-    /// chunk, so a short final chunk does not cut a long prompt into slivers.
-    /// A row at another offset joins only within the key-spread cap.
+    /// one shared forward. The FCFS head always leads and sets the length:
+    /// its own next chunk. A peer joins only when its own next chunk has that
+    /// length, so no row's chunk partition differs from the one it takes
+    /// alone (a shortened chunk would also move the row's later chunks, and
+    /// a short remainder can take another kernel route). A peer at another
+    /// offset joins only within the key-spread cap. A chunk shorter than
+    /// `minimumGroupedChunkTokens` (`ContinuousBatchPrefillGroupingRule`)
+    /// never shares a forward.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
-        tokenBudget: Int
+        tokenBudget: Int,
+        minimumGroupedChunkTokens: Int = 1
     ) -> ContinuousBatchPrefillGroup? {
         guard let head = candidates.first, head.naturalChunkTokens > 0 else { return nil }
-        var lengths = [head.naturalChunkTokens]
-        for candidate in candidates.dropFirst() {
-            let length = candidate.naturalChunkTokens
-            if length > 0,
-               length < head.naturalChunkTokens,
-               mayRun(length, naturalChunkTokens: head.naturalChunkTokens),
-               !lengths.contains(length) {
-                lengths.append(length)
+        let length = head.naturalChunkTokens
+        let rowCap = length >= minimumGroupedChunkTokens
+            ? max(1, min(maxRows, tokenBudget / length))
+            : 1
+        var ids = [head.requestID]
+        var sameOffset = true
+        var allRagged = head.sharesRaggedOffsets
+        var minOffset = head.promptOffset
+        var maxOffset = head.promptOffset
+        for candidate in candidates.dropFirst() where ids.count < rowCap {
+            guard candidate.naturalChunkTokens == length else { continue }
+            let atHeadOffset = candidate.promptOffset == head.promptOffset
+            guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
+                continue
             }
+            let groupMin = min(minOffset, candidate.promptOffset)
+            let groupMax = max(maxOffset, candidate.promptOffset)
+            guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
+                continue
+            }
+            ids.append(candidate.requestID)
+            sameOffset = sameOffset && atHeadOffset
+            allRagged = allRagged && candidate.sharesRaggedOffsets
+            minOffset = groupMin
+            maxOffset = groupMax
         }
-        lengths.sort(by: >)
-        var best: ContinuousBatchPrefillGroup?
-        for length in lengths {
-            let rowCap = max(1, min(maxRows, tokenBudget / length))
-            var ids = [head.requestID]
-            var sameOffset = true
-            var allRagged = head.sharesRaggedOffsets
-            var minOffset = head.promptOffset
-            var maxOffset = head.promptOffset
-            for candidate in candidates.dropFirst() where ids.count < rowCap {
-                guard candidate.naturalChunkTokens > 0,
-                      candidate.spanTokens >= length,
-                      mayRun(length, naturalChunkTokens: candidate.naturalChunkTokens)
-                else { continue }
-                let atHeadOffset = candidate.promptOffset == head.promptOffset
-                guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
-                    continue
-                }
-                let groupMin = min(minOffset, candidate.promptOffset)
-                let groupMax = max(maxOffset, candidate.promptOffset)
-                guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
-                    continue
-                }
-                ids.append(candidate.requestID)
-                sameOffset = sameOffset && atHeadOffset
-                allRagged = allRagged && candidate.sharesRaggedOffsets
-                minOffset = groupMin
-                maxOffset = groupMax
-            }
-            if best.map({ ids.count * length > $0.requestIDs.count * $0.chunkTokens }) ?? true {
-                best = ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
-            }
-        }
-        return best
-    }
-
-    private static func mayRun(_ length: Int, naturalChunkTokens: Int) -> Bool {
-        length * 2 >= naturalChunkTokens
+        return ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
     }
 
     static func withinKeySpread(minOffset: Int, maxOffset: Int, chunkTokens: Int) -> Bool {
         maxOffset + chunkTokens <= maxRaggedKeySpreadFactor * (minOffset + chunkTokens)
     }
+
 }
 
 struct ContinuousBatchPrefillInput: Sendable, Equatable {
@@ -5218,8 +5198,11 @@ actor ContinuousBatchScheduler {
         return released
     }
 
-    /// Rows at one prompt offset whose balanced chunks have the head's length.
+    /// Rows at one prompt offset whose own balanced chunks have the head's
+    /// length. Every row keeps the chunk it prefills alone, so grouping never
+    /// changes a row's chunk partition.
     private func selectEqualOffsetPrefillGroup() -> [(row: Row, end: Int)] {
+        let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []
         var selectedOffset: Int?
         var selectedChunkCount: Int?
@@ -5228,12 +5211,7 @@ actor ContinuousBatchScheduler {
             guard selected.count < configuration.maxPrefillRowsPerIteration,
                   let row = activePrompt[id]
             else { continue }
-            let remainingBudget = configuration.maxPrefillTokensPerIteration - selectedTokenCount
-            guard remainingBudget > 0 else { break }
-            let chunkLimit = min(
-                configuration.maxPromptChunkTokens,
-                selectedChunkCount ?? remainingBudget
-            )
+            guard configuration.maxPrefillTokensPerIteration - selectedTokenCount > 0 else { break }
             let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
             let chunkCount = end - row.prefillCursor
             guard chunkCount > 0 else { continue }
@@ -5269,7 +5247,6 @@ actor ContinuousBatchScheduler {
                 requestID: id,
                 promptOffset: row.prefillCursor,
                 naturalChunkTokens: naturalChunk,
-                spanTokens: prefillSpanEnd(for: row) - row.prefillCursor,
                 sharesRaggedOffsets: !row.usesNativeMTP
             ))
             rowsByID[id] = row
@@ -5277,7 +5254,8 @@ actor ContinuousBatchScheduler {
         guard let group = ContinuousBatchPrefillGrouping.select(
             candidates,
             maxRows: configuration.maxPrefillRowsPerIteration,
-            tokenBudget: configuration.maxPrefillTokensPerIteration
+            tokenBudget: configuration.maxPrefillTokensPerIteration,
+            minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens
         ) else {
             return []
         }

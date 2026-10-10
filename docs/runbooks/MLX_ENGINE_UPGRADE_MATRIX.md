@@ -118,14 +118,15 @@ the call's shape:
   (`audits/2026-10-10-mlx-swift-lm-332/ROUND1_FIXES.md`) found 14/14 rows
   token-identical to their lone runs at 8 rows.
   **Prefill is enforced by the CB grouping rule.** Continuous batching groups
-  up to four prefill rows with the same cursor and chunk length into one
-  forward, and a group carries every row's selections. Before the rule, a
+  up to four prefill rows with one chunk length into one forward (at one
+  cursor, or at different cursors under ragged shared prefill), and a group
+  carries every row's selections. Before the rule, a
   32-127-token A3B chunk took `gather_qmv` alone and `gather_qmm_rhs` when
   grouped, and greedy outputs depended on the neighbours (Studio, build
   `38aff2880`: 69 of 108 grouped rows differed from their lone runs, exactly
   in the groups whose combined selections reach 1024). Now
   `ContinuousBatchPrefillGroupingRule` (`ContinuousBatchScheduler.swift`,
-  SPEC-038 FR-CB2 v0.3.11/v0.3.12) co-batches a chunk only when it is at
+  SPEC-038 FR-CB2 v0.3.12-v0.3.14) co-batches a chunk only when it is at
   least 33 tokens (the `QuantizedMatmul` bound above) and, on MoE models,
   `chunk x top-k >= max(16, 64, 4 x experts)`, read from the loaded model's
   `config.json` (A3B: 128 tokens; Qwen3.6-27B: 33). Shorter chunks prefill
@@ -137,6 +138,8 @@ the call's shape:
   the chunks of an uncached prompt of 128 or more tokens to at least 128
   tokens each, so long prompts still group (R015: 1536/4096 tokens in
   512-token chunks).
+  Every grouped row prefills its own balanced chunk, so grouping never
+  changes a row's chunk partition.
   The rule's constants are the fork's routing bounds: a rebase that changes
   `get_qmv_batch_limit`, the `GatherQMM` condition or the `SwitchGLU` sort
   threshold updates them.
@@ -147,11 +150,21 @@ the call's shape:
   vision tower does not run for text). The grouping rule never groups a model
   whose configuration declares no quantization or excludes a layer.
 - Attention picks its kernel from the query length, key length, head
-  dimensions and mask, never from the batch. Grouped rows share chunk length
-  and offset, so they take the same attention route as each row alone. With
-  head dimension 256 and more than 8 query tokens the unfused path runs
-  batched GEMMs whose tile size follows `rows x heads x L x keys`; tiles
-  change the blocking, not each element's K accumulation order.
+  dimensions and mask, never from the batch. Equal-offset grouped rows share
+  chunk length and key length, so they take the same attention route as each
+  row alone. With head dimension 256 and more than 8 query tokens the unfused
+  path runs batched GEMMs whose tile size follows `rows x heads x L x keys`;
+  tiles change the blocking, not each element's K accumulation order.
+  Ragged grouped rows (SPEC-038 v0.3.14) do not share one attention call:
+  through it each row would attend over keys zero-padded to the group's
+  longest row, and the unfused path (head dims 192/256) does not give a
+  padded row its lone bits (Studio, bfloat16: up to 2.4e-4 apart; the fused
+  steel kernel at head dim 128 did). `PagedKVRaggedPrefillBatchLayerCache`
+  attends each row over exactly its own keys with the causal mask, which
+  `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` checks bit
+  for bit at head dims 128 and 256, on both sides of the 4096-key softmax
+  switch. A model that calls SDPA itself bypasses it; the backend then stops
+  forming ragged groups (`event=continuous_batch_ragged_prefill_disabled`).
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it

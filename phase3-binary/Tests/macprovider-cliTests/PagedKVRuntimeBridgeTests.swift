@@ -1487,6 +1487,177 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// The grouping bound also holds for ragged shared prefill (SPEC-038
+    /// FR-CB2): a row mid-prompt and a row at offset 0 whose chunks share one
+    /// length share a forward only at or above the bound. Below it (20-token
+    /// chunks, bound 33) every chunk prefills alone; at 40-token chunks the
+    /// second chunk of `row-a` and the first of `row-b` share one ragged
+    /// forward. Either way each row generates exactly what it generates when
+    /// it is the only row in the scheduler (same chunk partition).
+    func testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        let configData = Data(Self.tinyQwen35DenseConfiguration.utf8)
+        var served = try XCTUnwrap(JSONSerialization.jsonObject(with: configData) as? [String: Any])
+        served["quantization"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+            try JSONSerialization.data(withJSONObject: served),
+            modelID: nil
+        )
+        XCTAssertEqual(rule.minimumGroupedChunkTokens, 33)
+        let configuration = try JSONDecoder().decode(Qwen35TextConfiguration.self, from: configData)
+        MLXRandom.seed(1906)
+        let target = Qwen35TextModel(configuration)
+        quantize(model: target, groupSize: 64, bits: 4, mode: .affine)
+        eval(target)
+
+        let steps = 6
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 128)
+        for (chunk, expectedGroups) in [
+            (20, [["row-a"], ["row-a"], ["row-b"]]),
+            (40, [["row-a"], ["row-a", "row-b"]]),
+        ] {
+            let prompts = [
+                "row-a": Self.tinyPrompt(length: 2 * chunk, salt: 41, vocabulary: 64),
+                "row-b": Self.tinyPrompt(length: chunk, salt: 42, vocabulary: 64),
+            ]
+            /// Runs `ids` through one scheduler; `row-b` is submitted while
+            /// `row-a`'s first chunk is parked in the backend.
+            func run(_ ids: [String]) async throws -> (groups: [[String]], tokens: [String: [Int]]) {
+                let sharedBackend = PagedKVSharedForwardBackend(
+                    container: ModelContainer(context: ModelContext(
+                        configuration: ModelConfiguration(id: descriptor.modelID),
+                        model: target,
+                        processor: StandInUserInputProcessor(),
+                        tokenizer: RuntimeBridgeFakeTokenizer()
+                    )),
+                    descriptor: descriptor,
+                    layerCount: 2,
+                    cacheKinds: [.recurrentMamba, .pagedAttention]
+                )
+                XCTAssertTrue(sharedBackend.supportsRaggedPrefillOffsets)
+                let backend = RuntimeBridgeRecordingNativeMTPBackend(sharedBackend)
+                let firstChunkGate = RuntimeBridgeTestGate()
+                let parksFirstChunk = ids.count > 1
+                backend.onPrefill = { prefillIDs in
+                    if parksFirstChunk, prefillIDs == ["row-a"], backend.prefillRequestGroups().count == 1 {
+                        await firstChunkGate.wait()
+                    }
+                }
+                let scheduler = try Self.makeScheduler(
+                    maxActiveRows: 4,
+                    backend: backend,
+                    maxPhysicalBlocks: 128,
+                    maxPromptChunkTokens: chunk,
+                    maxPrefillRowsPerIteration: 4,
+                    maxPrefillTokensPerIteration: 4 * chunk,
+                    prefillGrouping: rule,
+                    allowsRaggedPrefillOffsets: true
+                )
+                var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+                for (index, id) in ids.enumerated() {
+                    tasks.append(Task {
+                        try await scheduler.submit(Self.schedulerRequest(
+                            id: id,
+                            promptTokens: prompts[id]!,
+                            maxOutputTokens: steps
+                        ))
+                    })
+                    if parksFirstChunk, index == 0 {
+                        try await Self.eventually { backend.prefillRequestGroups().count == 1 }
+                    }
+                }
+                if parksFirstChunk {
+                    try await Self.eventually { await scheduler.metrics().waitingCount == 1 }
+                    await firstChunkGate.open()
+                }
+                var tokens: [String: [Int]] = [:]
+                for (id, task) in zip(ids, tasks) {
+                    tokens[id] = try await task.value.outputTokens
+                }
+                return (backend.prefillRequestGroups(), tokens)
+            }
+
+            let grouped = try await run(["row-a", "row-b"])
+            XCTAssertEqual(grouped.groups, expectedGroups, "chunk \(chunk)")
+            for id in ["row-a", "row-b"] {
+                let alone = try await run([id])
+                XCTAssertEqual(grouped.tokens[id]?.count, steps, "\(id) chunk \(chunk)")
+                XCTAssertEqual(grouped.tokens[id], alone.tokens[id], "\(id) at chunk \(chunk) diverged from its lone run")
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB2 ragged shared prefill: a ragged batch cache attends
+    /// each row over its own left-aligned keys `[0, offset + L)` of the
+    /// zero-padded batch buffer with the causal mask
+    /// (`PagedKVRaggedPrefillBatchLayerCache.updateAndAttend`). That must be
+    /// bit-identical to the row's lone causal attention for the fused steel
+    /// kernel (head dim 128) and for the unfused SDPA (head dim 256, every
+    /// Qwen3.5/3.6 attention layer), including key lengths on both sides of
+    /// the 4096-key softmax switch. The padded batch call under the per-row
+    /// boolean mask is not used for head dim 256: there it is not
+    /// bit-identical to the lone call.
+    func testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise() throws {
+        try requireMetal()
+        MLXRandom.seed(1906)
+        let queryHeads = 16
+        let kvHeads = 2
+        for headDim in [128, 256] {
+            for (chunk, offsets) in [
+                (33, [0, 7, 30]),
+                (64, [500, 37, 900]),
+                (128, [3000, 3968, 2100]),
+                (128, [3900, 4100]),
+                (128, [7000, 8100]),
+            ] {
+                let keyCount = offsets.max()! + chunk
+                var queries: [MLXArray] = []
+                var keys: [MLXArray] = []
+                var values: [MLXArray] = []
+                for offset in offsets {
+                    queries.append(MLXRandom.normal([1, queryHeads, chunk, headDim]).asType(.bfloat16))
+                    keys.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
+                    values.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
+                }
+                func padded(_ rows: [MLXArray]) -> MLXArray {
+                    concatenated(rows.map { row in
+                        let pad = keyCount - row.dim(2)
+                        guard pad > 0 else { return row }
+                        return concatenated(
+                            [row, MLXArray.zeros([1, kvHeads, pad, headDim], dtype: row.dtype)],
+                            axis: 2
+                        )
+                    }, axis: 0)
+                }
+                let batchQueries = concatenated(queries, axis: 0)
+                let batchKeys = padded(keys)
+                let batchValues = padded(values)
+                let scale = 1 / Float(headDim).squareRoot()
+                for (row, offset) in offsets.enumerated() {
+                    let own = offset + chunk
+                    let perRow = MLXFast.scaledDotProductAttention(
+                        queries: batchQueries[row ..< row + 1, 0..., 0..., 0...],
+                        keys: batchKeys[row ..< row + 1, 0..., ..<own, 0...],
+                        values: batchValues[row ..< row + 1, 0..., ..<own, 0...],
+                        scale: scale,
+                        mask: .causal
+                    )
+                    let lone = MLXFast.scaledDotProductAttention(
+                        queries: queries[row],
+                        keys: keys[row],
+                        values: values[row],
+                        scale: scale,
+                        mask: .causal
+                    )
+                    XCTAssertTrue(
+                        arrayEqual(perRow, lone).item(Bool.self),
+                        "head dim \(headDim), chunk \(chunk), offset \(offset) of \(offsets)"
+                    )
+                }
+            }
+        }
+    }
+
     /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
     /// commits keyed rows in serial format hands back the same terminal
     /// conversation-cache entry as the ordinary row: same tokens, same token
@@ -3829,6 +4000,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
+        allowsRaggedPrefillOffsets: Bool = false,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
@@ -3869,6 +4041,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 prefillGrouping: prefillGrouping,
                 maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
                 maxPromptChunkTokens: maxPromptChunkTokens,
+                allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,

@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.13
+Version: v0.3.14
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.14 (2026-10-10, route-invariant ragged prefill groups):**
+FR-CB2: the kernel-route rule (v0.3.12/v0.3.13) applies to ragged groups as
+well as equal-offset groups. A grouped row now always prefills its own
+balanced chunk: the scheduler no longer shortens a chunk to meet a peer's
+length, because a shortened chunk moves the row's later chunks and a short
+remainder can take another kernel route than the row's lone partition. In a
+ragged forward each row attends separately over exactly its own keys with
+the causal mask, the attention call it makes alone: over keys padded to the
+longest row, MLX's unfused SDPA (head dims 192 and 256, every Qwen3.5/3.6
+attention layer) does not reproduce the lone row's bits.
+
 **Change log v0.3.13 (2026-10-10, dense prefill route bound):**
 FR-CB2: the kernel-route rule covers every quantized projection, not only
 sorted-gather MoE experts. A shared prefill flattens `rows x chunk` into one
@@ -567,16 +578,17 @@ one compatible prefill group when all of these hold:
 The scheduler MUST form a ragged group only when the backend declares that it
 runs this shape in one forward. A backend whose ragged shared forward cannot
 complete MUST fail that group's rows rather than retry them serially, because
-the forward has already appended each row's chunk to its own cache. To make
-chunk lengths meet, the scheduler MAY shorten a row's chunk below its own
-balanced chunk, but MUST NOT shorten it below half of that chunk and MUST NOT
-cross the row's prompt end or a recurrent checkpoint boundary. Keys of a
+the forward has already appended each row's chunk to its own cache. A chunk
+MUST NOT cross the row's prompt end or a recurrent checkpoint boundary.
+**(v0.3.14)** The scheduler MUST NOT shorten a row's chunk to make chunk
+lengths meet: every grouped row, at any offset, prefills exactly its own
+balanced chunk (the chunk it prefills when it runs alone), so grouping never
+changes a row's chunk partition. Keys of a
 ragged group are padded to its longest row, so the scheduler MUST admit a row
 at another offset only while `(max offset + L) <= 2 x (min offset + L)` over
 the group including that row (`maxRaggedKeySpreadFactor`); equal-offset groups
-are unaffected. The FCFS head always leads the group. The group length is either the head's chunk or a
-shorter peer chunk, whichever advances the most prompt tokens within the row
-cap and token budget. Fallback MUST
+are unaffected. The FCFS head always leads the group, and its own balanced
+chunk is the group length. Fallback MUST
 preserve FCFS accounting, cancellation boundaries, receipt boundaries,
 request-local block-table isolation, and every FR-CB6 per-request isolation
 rule.
@@ -606,6 +618,20 @@ MoE model (Qwen3.6-27B: 33 tokens; Qwen3.6-35B-A3B: 128). Unquantized matmuls
 choose split-K partitions from the row count, so a model whose configuration
 declares no `quantization` (or `quantization_config`) object, or excludes a
 layer from quantization, MUST prefill every chunk alone.
+
+**(v0.3.14)** The kernel-route rule applies to ragged groups as it applies to
+equal-offset groups: a chunk shorter than the bound MUST NOT share a ragged
+forward either. A ragged group adds one route input of its own, the key
+length: through a single batched attention call every row would attend over
+keys zero-padded to `max offset + L` under a per-row boolean mask, while the
+same row alone attends over its own `offset_b + L` keys under the causal
+mask. For prompt chunks of head dim 192 or 256 (every Qwen3.5/3.6 attention
+layer) the pinned MLX core runs the unfused SDPA, whose result depends on the
+padded key length (Studio, bfloat16: up to 2.4e-4 apart). A ragged shared
+forward MUST therefore compute each row's attention over exactly that row's
+own keys with the causal mask, the call the row makes alone; every other
+operator stays batched. A backend that cannot route a model's attention that
+way MUST stop forming ragged groups for that model once it observes it.
 
 For a fresh prompt, prefill MUST commit the complete prompt sequence; it MUST
 NOT hold back the final prompt token for a decode call. Every non-final chunk is
