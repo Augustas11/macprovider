@@ -8,6 +8,10 @@
 # Usage: bash scripts/ops/test-runbook-commands.sh
 set -euo pipefail
 
+# common.sh normally loads operator targets, which would overwrite the fixture
+# URLs below. This offline test must never source the caller's ops.env.
+export MACPROVIDER_OPS_ENV=/dev/null
+
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$OPS_DIR/../.." && pwd)"
 REF="${RUNBOOK_REF:-origin/main}"
@@ -81,9 +85,23 @@ case "$rendered" in
   *'ssh "$PEARL_SSH" '*'--apply --tag v1.8.999'*) pass=$((pass + 1)) ;;
   *) fail=$((fail + 1)); echo "FAIL unexpected rendered apply: $rendered" ;;
 esac
+# Check URL substitution separately: the apply block has no URL placeholder.
+rendered="$(OPS_NAME=test COORDINATOR_URL=https://example.test:8443 bash -c '. "$1/lib/common.sh"; render_runbook "$RB_PEARL_PREFLIGHT"' _ "$OPS_DIR")"
+want="${RB_PEARL_PREFLIGHT//<coordinator-url>/https://example.test:8443}"
+want="${want//<pearl-ssh>/\"\$PEARL_SSH\"}"
+if [ "$rendered" = "$want" ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); echo "FAIL unexpected rendered preflight"
+fi
+
 rc=0
-(OPS_NAME=test COORDINATOR_URL='https://x.test/;rm' bash -c '. "$1/lib/common.sh"; render_runbook "$RB_PEARL_PREFLIGHT"' _ "$OPS_DIR") >/dev/null 2>&1 || rc=$?
-if [ "$rc" -ne 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL unsafe COORDINATOR_URL rendered"; fi
+rejected="$(OPS_NAME=test COORDINATOR_URL='https://x.test/;rm' bash -c '. "$1/lib/common.sh"; render_runbook "$RB_PEARL_PREFLIGHT"' _ "$OPS_DIR" 2>&1)" || rc=$?
+if [ "$rc" -eq 1 ] && [ "$rejected" = '[test] ERROR: COORDINATOR_URL must be https://host[:port] to render this runbook command' ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1)); echo "FAIL unsafe COORDINATOR_URL was not rejected by URL validation"
+fi
 
 printf 'runbook commands: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
