@@ -24,7 +24,6 @@ type WalletHandlerDeps struct {
 	Connectivity          ProviderConnectivity
 	Limiter               *RewardAuditLimiter
 	HardwareEvidence      autotune.EvidenceStore
-	HardwareEvidenceTTL   time.Duration
 	Logger                zerolog.Logger
 }
 
@@ -142,12 +141,11 @@ func NewWalletStatusHandler(deps WalletHandlerDeps) http.Handler {
 			return
 		}
 		status, err := QueryProviderWalletStatusWithDeps(r.Context(), providerID, ProviderRewardProjectionDeps{
-			RewardsDB:           deps.RewardsDB,
-			PayoutDB:            deps.PayoutDB,
-			Config:              deps.Config,
-			Connectivity:        deps.Connectivity,
-			HardwareEvidence:    deps.HardwareEvidence,
-			HardwareEvidenceTTL: deps.HardwareEvidenceTTL,
+			RewardsDB:        deps.RewardsDB,
+			PayoutDB:         deps.PayoutDB,
+			Config:           deps.Config,
+			Connectivity:     deps.Connectivity,
+			HardwareEvidence: deps.HardwareEvidence,
 		})
 		if err != nil {
 			deps.Logger.Warn().Err(err).Str("provider_id", providerID).Msg("provider wallet projection failed")

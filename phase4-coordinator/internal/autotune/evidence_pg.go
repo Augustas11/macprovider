@@ -21,7 +21,7 @@ func NewPGEvidenceStore(db *sql.DB) *PGEvidenceStore {
 	return &PGEvidenceStore{db: db, now: time.Now}
 }
 
-func (s *PGEvidenceStore) LatestVerified(ctx context.Context, providerID string, ttl time.Duration) (VerifiedEvidence, bool, error) {
+func (s *PGEvidenceStore) LatestVerified(ctx context.Context, providerID string) (VerifiedEvidence, bool, error) {
 	if s == nil || s.db == nil {
 		return VerifiedEvidence{}, false, errors.New("autotune evidence store is nil")
 	}
@@ -29,14 +29,10 @@ func (s *PGEvidenceStore) LatestVerified(ctx context.Context, providerID string,
 	if providerID == "" {
 		return VerifiedEvidence{}, false, errors.New("provider_id is required")
 	}
-	if ttl <= 0 {
-		return VerifiedEvidence{}, false, errors.New("evidence ttl must be > 0")
-	}
 	now := time.Now().UTC()
 	if s.now != nil {
 		now = s.now().UTC()
 	}
-	cutoff := now.Add(-ttl)
 
 	var rawEvidence []byte
 	var generatedAt time.Time
@@ -63,10 +59,16 @@ func (s *PGEvidenceStore) LatestVerified(ctx context.Context, providerID string,
 	// `evidence #>> '{hardware,hardware_identity_hash}'` (identical semantics; the
 	// chained-arrow spelling is portable across Postgres and the SQLite unit-test
 	// harness). The unexpired-root predicate compares expires_at against the
-	// store's wall clock bound as $4 (same pattern as the cutoff bind above),
-	// rather than an in-SQL now()/clock_timestamp(); this single-statement read has
-	// no long-transaction clock-freeze concern and the bind keeps the query
-	// portable to the SQLite test harness.
+	// store's wall clock bound as $3, rather than an in-SQL
+	// now()/clock_timestamp(); this single-statement read has no long-transaction
+	// clock-freeze concern and the bind keeps the query portable to the SQLite
+	// test harness.
+	//
+	// #1938: evidence age is not a cutoff. Evidence stops counting when the
+	// provider later submits evidence (any status) from different hardware
+	// (hardware_identity_hash) or a different OS build (os_version): that is
+	// the re-benchmark trigger. A chip/memory change is already caught by the
+	// profile join above.
 	err := s.db.QueryRowContext(ctx, `
 SELECT j.generated_at, j.evidence, j.chip_normalized, j.unified_memory_gb
   FROM hardware_verification_jobs j
@@ -77,8 +79,7 @@ SELECT j.generated_at, j.evidence, j.chip_normalized, j.unified_memory_gb
    AND p.unified_memory_gb = j.unified_memory_gb
  WHERE j.provider_id = $1
    AND j.status = 'verified'
-   AND j.generated_at >= $2
-   AND j.decision_reason = $3
+   AND j.decision_reason = $2
    AND EXISTS (
        SELECT 1
          FROM hardware_verification_trust t
@@ -86,17 +87,25 @@ SELECT j.generated_at, j.evidence, j.chip_normalized, j.unified_memory_gb
           AND t.hardware_identity_hash = j.evidence -> 'hardware' ->> 'hardware_identity_hash'
           AND t.chip_normalized = j.chip_normalized
           AND t.unified_memory_gb = j.unified_memory_gb
-          AND (t.expires_at IS NULL OR t.expires_at > $4)
+          AND (t.expires_at IS NULL OR t.expires_at > $3)
+   )
+   AND NOT EXISTS (
+       SELECT 1
+         FROM hardware_verification_jobs n
+        WHERE n.provider_id = j.provider_id
+          AND n.generated_at > j.generated_at
+          AND (n.evidence -> 'hardware' ->> 'hardware_identity_hash' <> j.evidence -> 'hardware' ->> 'hardware_identity_hash'
+               OR n.evidence -> 'hardware' ->> 'os_version' <> j.evidence -> 'hardware' ->> 'os_version')
    )
  ORDER BY j.generated_at DESC, j.id DESC
- LIMIT 1`, providerID, cutoff, hardwareverify.VerifiedDecisionReason, now).Scan(&generatedAt, &rawEvidence, &chipNormalized, &unifiedMemoryGB)
+ LIMIT 1`, providerID, hardwareverify.VerifiedDecisionReason, now).Scan(&generatedAt, &rawEvidence, &chipNormalized, &unifiedMemoryGB)
 	if errors.Is(err, sql.ErrNoRows) {
 		return VerifiedEvidence{}, false, nil
 	}
 	if err != nil {
 		return VerifiedEvidence{}, false, fmt.Errorf("load verified autotune evidence: %w", err)
 	}
-	evidence, err := decodeVerifiedEvidence(rawEvidence, generatedAt, cutoff)
+	evidence, err := decodeVerifiedEvidence(rawEvidence, generatedAt)
 	if err != nil {
 		return VerifiedEvidence{}, false, err
 	}
@@ -108,7 +117,7 @@ SELECT j.generated_at, j.evidence, j.chip_normalized, j.unified_memory_gb
 	return evidence, true, nil
 }
 
-func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) (VerifiedEvidence, error) {
+func decodeVerifiedEvidence(raw []byte, generatedAt time.Time) (VerifiedEvidence, error) {
 	var payload struct {
 		GeneratedAt            string `json:"generated_at"`
 		CandidateCatalogSHA256 string `json:"candidate_catalog_sha256"`
@@ -162,9 +171,8 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 		HardwareIdentityHash: strings.TrimSpace(payload.Hardware.HardwareIdentityHash),
 	}
 	for _, b := range payload.Benchmarks {
-		benchmarkGeneratedAt, parseErr := time.Parse(time.RFC3339, b.GeneratedAt)
-		if parseErr != nil || benchmarkGeneratedAt.Before(benchmarkCutoff) {
-			return VerifiedEvidence{}, errors.New("verified autotune benchmark is stale")
+		if _, parseErr := time.Parse(time.RFC3339, b.GeneratedAt); parseErr != nil {
+			return VerifiedEvidence{}, errors.New("verified autotune benchmark generated_at is invalid")
 		}
 		if strings.TrimSpace(b.ModelKey) == "" || strings.TrimSpace(b.ModelID) == "" ||
 			!isLowerSHA256(strings.TrimSpace(b.ArtifactSHA256)) ||

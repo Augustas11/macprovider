@@ -40,13 +40,12 @@ type ProviderRewardProjection struct {
 // coordinator-owned MALIBU projection. Compute integrity deliberately has no
 // dependency here until a production, covered-key source exists.
 type ProviderRewardProjectionDeps struct {
-	RewardsDB           *sql.DB
-	PayoutDB            *sql.DB
-	Config              Config
-	Connectivity        ProviderConnectivity
-	HardwareEvidence    autotune.EvidenceStore
-	HardwareEvidenceTTL time.Duration
-	Now                 func() time.Time
+	RewardsDB        *sql.DB
+	PayoutDB         *sql.DB
+	Config           Config
+	Connectivity     ProviderConnectivity
+	HardwareEvidence autotune.EvidenceStore
+	Now              func() time.Time
 }
 
 // BuildProviderRewardProjection loads one complete MALIBU read bundle. A
@@ -89,7 +88,7 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 	walletBound := currentWalletAllowed && !walletMismatch
 	trust = trustCriteriaWithWalletBinding(trust, walletBound)
 
-	hardwareState, hardwareExpiresAt := hardwareEvidenceObservation(ctx, providerID, deps.HardwareEvidence, deps.HardwareEvidenceTTL)
+	hardwareState, hardwareExpiresAt := hardwareEvidenceObservation(ctx, providerID, deps.HardwareEvidence)
 	recentWorkAt, recentWorkErr := queryRecentVerifiedWork(ctx, deps.RewardsDB, providerID, now)
 	facts := MalibuRewardEligibilityFacts{
 		AccruedMALIBU:         bal.AccruedMALIBU,
@@ -142,16 +141,20 @@ func recentWorkEligibilityFacts(observedAt *time.Time, err error) ([]string, boo
 	return nil, true
 }
 
-func hardwareEvidenceState(ctx context.Context, providerID string, source autotune.EvidenceStore, ttl time.Duration) string {
-	state, _ := hardwareEvidenceObservation(ctx, providerID, source, ttl)
+func hardwareEvidenceState(ctx context.Context, providerID string, source autotune.EvidenceStore) string {
+	state, _ := hardwareEvidenceObservation(ctx, providerID, source)
 	return state
 }
 
-func hardwareEvidenceObservation(ctx context.Context, providerID string, source autotune.EvidenceStore, ttl time.Duration) (string, *time.Time) {
-	if source == nil || ttl <= 0 {
+// hardwareEvidenceObservation reports the provider's verified hardware
+// evidence. Evidence has no age-based expiry (#1938); it is replaced when the
+// provider re-benchmarks after a hardware or OS change, so the returned
+// expiry is always nil.
+func hardwareEvidenceObservation(ctx context.Context, providerID string, source autotune.EvidenceStore) (string, *time.Time) {
+	if source == nil {
 		return HardwareEvidenceStateUnavailable, nil
 	}
-	evidence, ok, err := source.LatestVerified(ctx, providerID, ttl)
+	evidence, ok, err := source.LatestVerified(ctx, providerID)
 	if err != nil {
 		return HardwareEvidenceStateUnavailable, nil
 	}
@@ -161,8 +164,7 @@ func hardwareEvidenceObservation(ctx context.Context, providerID string, source 
 	if evidence.GeneratedAt.IsZero() {
 		return HardwareEvidenceStateUnavailable, nil
 	}
-	expiresAt := evidence.GeneratedAt.UTC().Add(ttl)
-	return HardwareEvidenceStateVerified, &expiresAt
+	return HardwareEvidenceStateVerified, nil
 }
 
 func queryRecentVerifiedWork(ctx context.Context, db *sql.DB, providerID string, now time.Time) (*time.Time, error) {

@@ -40,7 +40,7 @@ type stubAutotuneEvidence struct {
 	err      error
 }
 
-func (s stubAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s stubAutotuneEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return s.evidence, s.ok, s.err
 }
 
@@ -50,7 +50,7 @@ type sequencedAutotuneEvidence struct {
 	calls     int
 }
 
-func (s *sequencedAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s *sequencedAutotuneEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.calls >= len(s.responses) {
@@ -177,11 +177,14 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	}
 }
 
-func TestAutotuneHelloGateRejectsEvidenceBinaryVersionMismatch(t *testing.T) {
+// #1938: the evidence's recorded binary_version is provenance. A provider that
+// updated its CLI keeps its hardware evidence; evidence without the v2
+// bindings is still refused.
+func TestAutotuneHelloGateAdmitsEvidenceFromAnotherCLIVersion(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
 		ProbeProtocol:          "spec-023-harmony-stream.v2",
-		BinaryVersion:          "0.1.1",
+		BinaryVersion:          "0.0.9",
 		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{{
@@ -194,21 +197,58 @@ func TestAutotuneHelloGateRejectsEvidenceBinaryVersionMismatch(t *testing.T) {
 			CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 		}},
 	}
-	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
-		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
-	}, func(cfg *config.Config) {
-		cfg.Providers = nil
-		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
-		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
-	})
-	defer h.HTTP.Close()
+	for _, tc := range []struct {
+		name       string
+		mutate     func(*autotune.VerifiedEvidence)
+		wantReason string
+	}{
+		{name: "older CLI evidence admits"},
+		{name: "missing binary binding refused", mutate: func(e *autotune.VerifiedEvidence) { e.BinaryVersion = "" }, wantReason: "autotune_evidence_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := evidence
+			if tc.mutate != nil {
+				tc.mutate(&ev)
+			}
+			h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+				providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: ev, ok: true}),
+			}, func(cfg *config.Config) {
+				cfg.Providers = nil
+				cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+			})
+			defer h.HTTP.Close()
 
-	hello := validHello("m4-anon")
-	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
-	addCatalogAdmissionMetadata(t, hello, catalog)
-	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
-	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_binary_version_mismatch" {
-		t.Fatalf("code=%d reason=%q", code, reason)
+			hello := validHello("m4-anon")
+			hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			if tc.wantReason != "" {
+				code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+				if code != providerws.CloseInvalidHello || reason != tc.wantReason {
+					t.Fatalf("code=%d reason=%q, want %q", code, reason, tc.wantReason)
+				}
+				return
+			}
+			conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+				t.Fatalf("write hello: %v", err)
+			}
+			payload, op, err := wsutil.ReadServerData(conn)
+			if err != nil || op != gobwas.OpText {
+				t.Fatalf("read ack: op=%v err=%v", op, err)
+			}
+			var ack map[string]any
+			if err := json.Unmarshal(payload, &ack); err != nil || ack["type"] != "hello_ack" {
+				t.Fatalf("ack = %s err=%v, want hello_ack", payload, err)
+			}
+			provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+			if !ok || provider.MaxAdmittedModelKey != "small" {
+				t.Fatalf("provider=%+v ok=%v, want admitted at small", provider, ok)
+			}
+		})
 	}
 }
 

@@ -1700,7 +1700,7 @@ func (s *Server) LastProofOfWeightsReloadResult() (config.ProofOfWeightsConfig, 
 }
 
 func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsConfig, result ProofOfWeightsReloadResult) ProofOfWeightsReloadResult {
-	if s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil || cfg.AutotuneEvidenceTTLDays <= 0 {
+	if s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil {
 		for _, provider := range s.pool.Snapshot() {
 			if s.pool.SetAdmissionEvidenceStale(provider.ProviderID, provider.AssignedID, true) {
 				result.StillEvidenceStale++
@@ -1708,7 +1708,6 @@ func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsCon
 		}
 		return result
 	}
-	ttl := time.Duration(cfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), trustRevalidationSweepDeadlineCap)
 	defer cancel()
 	for _, provider := range s.pool.Snapshot() {
@@ -1725,7 +1724,7 @@ func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsCon
 			}
 			continue
 		}
-		stale, _ := s.admissionEvidenceStaleVerdict(ctx, provider, ttl)
+		stale, _ := s.admissionEvidenceStaleVerdict(ctx, provider)
 		if stale {
 			prior, _, ok := s.pool.SetAdmissionGateFlags(provider.ProviderID, provider.AssignedID, pool.AdmissionGateFlags{
 				AdmissionEvidenceStale: true,
@@ -3779,10 +3778,9 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 			}
 		}
 	}
-	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
 	defer cancel()
-	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, hello.ProviderID, ttl)
+	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, hello.ProviderID)
 	if err != nil {
 		event := s.log.Warn().Err(err).Str("provider_id", hello.ProviderID)
 		if requireGate {
@@ -3817,7 +3815,7 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 		}
 		return autotuneAdmissionObservation{}, true
 	}
-	decision := autotune.EvaluateHelloGateForHello(catalog, evidence, hello.ModelID, hello.BinaryVersion)
+	decision := autotune.EvaluateHelloGateForHello(catalog, evidence, hello.ModelID)
 	if !decision.Allowed {
 		if !requireGate {
 			return autotuneAdmissionObservation{

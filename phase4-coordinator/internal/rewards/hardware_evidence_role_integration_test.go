@@ -38,7 +38,7 @@ func TestPGEvidenceStoreReadsAsProviderOnboardingRole(t *testing.T) {
 		t.Fatalf("current role = %q, want provider_onboarding", currentUser)
 	}
 
-	_, ok, err := autotune.NewPGEvidenceStore(db).LatestVerified(ctx, "provider-without-evidence", 24*time.Hour)
+	_, ok, err := autotune.NewPGEvidenceStore(db).LatestVerified(ctx, "provider-without-evidence")
 	if err != nil {
 		t.Fatalf("latest verified evidence as provider_onboarding: %v", err)
 	}

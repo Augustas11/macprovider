@@ -56,31 +56,19 @@ func setSignedAutotuneFeedPathsForProofTest(cfg *config.Config) {
 	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
 }
 
-func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.T) {
-	// FIX 2 (issue #582): with the hello gate enabled the admission TTL must be at
-	// least the verifier evidence-age limit (7). A TTL of 1 would leave evidence
-	// approvable+promotable within the 7-day window but excluded from the hello-gate
-	// admission window, so admission stays blocked despite every action succeeding.
+// #1938: autotune_evidence_ttl_days is accepted for overlay compatibility and
+// ignored; it never blocks enabling the hello gate.
+func TestValidateProofOfWeightsHelloGateIgnoresEvidenceTTL(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
 	cfg.Auth.GatewayServiceToken = "test-gateway-service-token"
 	cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 	proofOfWeightsOnboardingBaseline(&cfg)
-
-	cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 1
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "must be >= hardwareverify.MaxEvidenceAgeDays") {
-		t.Fatalf("Validate() = %v, want TTL-below-verifier-limit rejection", err)
-	}
-
-	// The boundary (== verifier limit, 7) and a wider window (30) must both pass.
-	cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 7
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() with TTL=7 = %v, want nil", err)
-	}
-	cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() with TTL=30 = %v, want nil", err)
+	for _, ttl := range []int{-1, 0, 1, 30} {
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = ttl
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() with autotune_evidence_ttl_days=%d = %v, want nil", ttl, err)
+		}
 	}
 }
 

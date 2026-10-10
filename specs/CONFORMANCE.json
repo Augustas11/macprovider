@@ -919,7 +919,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.3.6",
+      "version": "v0.3.7",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3511,7 +3511,7 @@
     {
       "requirement_id": "SPEC-032-R002",
       "spec_id": "SPEC-032",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionEvidenceStale",
         "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) runAdmissionEvidenceRevalidationSweep",
@@ -3543,7 +3543,12 @@
           "expires_at": "2026-12-02"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "SPEC_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1938",
+        "rationale": "SPEC-032 v0.3.7 (#1938) removed the evidence-age cutoff and the binary_version equality from the hello gate, so admissionEvidenceStaleVerdict and the LatestVerified lookup changed and the 2026-09-02 strict physical journey no longer attests the current contract. The recorded commit and signed journey evidence are kept unchanged (not rebound). Restore conformant from a fresh signed SPEC-032 strict admission journey captured against a build with this change."
+      }
     },
     {
       "requirement_id": "SPEC-032-R003",

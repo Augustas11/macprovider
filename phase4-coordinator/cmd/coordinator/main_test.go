@@ -42,7 +42,7 @@ const reloadOtherHash = "fffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 type reloadStubAutotuneEvidence struct{}
 
-func (reloadStubAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (reloadStubAutotuneEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return autotune.VerifiedEvidence{}, false, nil
 }
 

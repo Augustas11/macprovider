@@ -15,7 +15,7 @@ type stubEvidence struct {
 	ok       bool
 }
 
-func (s stubEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s stubEvidence) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return s.evidence, s.ok, nil
 }
 
@@ -48,7 +48,7 @@ func TestEvaluateHeartbeatTPSDrift(t *testing.T) {
 		TPSRatioThreshold: 0.70,
 		TPSMinAbsolute:    5,
 		AlertCooldown:     time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
@@ -99,7 +99,7 @@ func TestEvaluateHeartbeatTPSDriftIgnoresIdleCapacityEstimate(t *testing.T) {
 		TPSRatioThreshold: 0.70,
 		TPSMinAbsolute:    5,
 		AlertCooldown:     time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
@@ -133,7 +133,7 @@ func TestEvaluateHeartbeatTPSDriftIgnoresSingleRequestWindow(t *testing.T) {
 		TPSRatioThreshold: 0.70,
 		TPSMinAbsolute:    5,
 		AlertCooldown:     time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
@@ -167,7 +167,7 @@ func TestEvaluateHeartbeatHashArtifactDrift(t *testing.T) {
 		Enabled:                  true,
 		HashAlertOnArtifactDrift: true,
 		AlertCooldown:            time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
@@ -201,7 +201,7 @@ func TestEvaluateHeartbeatSuppressesArtifactDriftForVerifiedTier2Hash(t *testing
 		Enabled:                  true,
 		HashAlertOnArtifactDrift: true,
 		AlertCooldown:            time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
@@ -224,7 +224,7 @@ func TestRecordModelClassCanaryPassRateDrop(t *testing.T) {
 		OPoIPassRateWindow:    5,
 		OPoIPassRateThreshold: 0.80,
 		AlertCooldown:         time.Second,
-	}, nil, stubEvidence{}, time.Hour)
+	}, nil, stubEvidence{})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 	provider := pool.Provider{ProviderID: "mac", AssignedID: "sess-1", ModelID: "qwen3-coder-30b-a3b-instruct"}
 
@@ -258,7 +258,7 @@ func TestTelemetryDriftCooldownSuppressesRepeat(t *testing.T) {
 		TPSRatioThreshold: 0.70,
 		TPSMinAbsolute:    5,
 		AlertCooldown:     15 * time.Minute,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return now }
 
 	provider := pool.Provider{
@@ -298,7 +298,7 @@ func TestEvaluateHeartbeatChecksArtifactBoundSessionAgainstItsMember(t *testing.
 		Enabled:                  true,
 		HashAlertOnArtifactDrift: true,
 		AlertCooldown:            time.Second,
-	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	}, catalog, stubEvidence{evidence: evidence, ok: true})
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 	binding := &artifactidentity.Binding{Member: artifactidentity.Member{ModelKey: "qwen3-coder-30b-a3b-instruct", ModelID: "qwen3-coder-30b-a3b-instruct", ArtifactID: "gguf-q4", HashAlgorithm: "macprovider.gguf-file.v1", Hash: "member-gguf-hash"}}
 	live := func(hash string) pool.Provider {

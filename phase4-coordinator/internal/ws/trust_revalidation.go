@@ -168,10 +168,9 @@ func (s *Server) runAdmissionEvidenceRevalidationSweep() {
 	defer s.proofOfWeightsAdmissionMu.RUnlock()
 
 	powCfg := s.proofOfWeightsConfig()
-	if !powCfg.RequireAutotuneHelloGate || s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil || powCfg.AutotuneEvidenceTTLDays <= 0 {
+	if !powCfg.RequireAutotuneHelloGate || s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil {
 		return
 	}
-	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	deadline := trustRevalidationInterval
 	if deadline > trustRevalidationSweepDeadlineCap {
 		deadline = trustRevalidationSweepDeadlineCap
@@ -186,7 +185,7 @@ func (s *Server) runAdmissionEvidenceRevalidationSweep() {
 		if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
 			continue
 		}
-		stale, reason := s.admissionEvidenceStaleVerdict(ctx, provider, ttl)
+		stale, reason := s.admissionEvidenceStaleVerdict(ctx, provider)
 		if !s.pool.SetAdmissionEvidenceStale(provider.ProviderID, provider.AssignedID, stale) {
 			continue
 		}
@@ -208,8 +207,8 @@ func (s *Server) runAdmissionEvidenceRevalidationSweep() {
 	}
 }
 
-func (s *Server) admissionEvidenceStaleVerdict(ctx context.Context, provider pool.Provider, ttl time.Duration) (bool, string) {
-	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, provider.ProviderID, ttl)
+func (s *Server) admissionEvidenceStaleVerdict(ctx context.Context, provider pool.Provider) (bool, string) {
+	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, provider.ProviderID)
 	if err != nil {
 		return true, "autotune_evidence_lookup_failed"
 	}

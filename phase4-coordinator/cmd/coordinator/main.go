@@ -838,15 +838,10 @@ func runCoordinator() (exitCode int) {
 			wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
 		}
 	}
-	if autotuneEvidenceStore != nil && autotuneCatalog != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
+	if autotuneEvidenceStore != nil && autotuneCatalog != nil {
 		logger.Info().
-			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Msg("proof-of-weights admission cap observation enabled")
-	} else if autotuneEvidenceStore != nil && autotuneCatalog != nil {
-		logger.Info().
-			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
-			Msg("proof-of-weights admission cap observation disabled because evidence TTL is not positive")
 	}
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
 		if autotuneCatalog == nil {
@@ -865,7 +860,6 @@ func runCoordinator() (exitCode int) {
 		// trust join so it is active exactly when the hello gate is.
 		wsOpts = append(wsOpts, providerws.WithProviderTrustChecker(onboardingStore))
 		logger.Info().
-			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Msg("proof-of-weights autotune hello gate enabled")
 	}
@@ -894,8 +888,7 @@ func runCoordinator() (exitCode int) {
 		if autotuneEvidenceStore == nil {
 			autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
 		}
-		ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl)))
+		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore)))
 		logger.Info().
 			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
 			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
@@ -4088,7 +4081,6 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, 
 		Config:                coordinatorRewardsConfig(cfg),
 		Connectivity:          connectivity,
 		HardwareEvidence:      hardwareEvidence,
-		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
 		Logger:                logger,
 	})
 }
@@ -4125,7 +4117,6 @@ func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB,
 		Connectivity:          connectivity,
 		Limiter:               limiter,
 		HardwareEvidence:      hardwareEvidence,
-		HardwareEvidenceTTL:   time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour,
 		Logger:                logger,
 	})
 }
@@ -4640,8 +4631,7 @@ func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotu
 	if err != nil {
 		return nil, err
 	}
-	ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-	return pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl), nil
+	return pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore), nil
 }
 
 func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {

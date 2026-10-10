@@ -15,29 +15,28 @@ type projectionEvidenceStore struct {
 	generatedAt time.Time
 }
 
-func (s projectionEvidenceStore) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+func (s projectionEvidenceStore) LatestVerified(context.Context, string) (autotune.VerifiedEvidence, bool, error) {
 	return autotune.VerifiedEvidence{GeneratedAt: s.generatedAt}, s.ok, s.err
 }
 
 func TestHardwareEvidenceStateFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
-	ttl := 30 * 24 * time.Hour
 	for _, tc := range []struct {
 		name   string
 		source autotune.EvidenceStore
-		ttl    time.Duration
 		want   string
 	}{
 		{name: "missing source", want: HardwareEvidenceStateUnavailable},
-		{name: "nonpositive ttl", source: projectionEvidenceStore{ok: true, generatedAt: now}, want: HardwareEvidenceStateUnavailable},
-		{name: "owner error", source: projectionEvidenceStore{err: errors.New("unavailable")}, ttl: ttl, want: HardwareEvidenceStateUnavailable},
-		{name: "no current verified evidence", source: projectionEvidenceStore{}, ttl: ttl, want: HardwareEvidenceStateMissing},
-		{name: "malformed verified evidence", source: projectionEvidenceStore{ok: true}, ttl: ttl, want: HardwareEvidenceStateUnavailable},
-		{name: "current verified evidence", source: projectionEvidenceStore{ok: true, generatedAt: now}, ttl: ttl, want: HardwareEvidenceStateVerified},
+		{name: "owner error", source: projectionEvidenceStore{err: errors.New("unavailable")}, want: HardwareEvidenceStateUnavailable},
+		{name: "no current verified evidence", source: projectionEvidenceStore{}, want: HardwareEvidenceStateMissing},
+		{name: "malformed verified evidence", source: projectionEvidenceStore{ok: true}, want: HardwareEvidenceStateUnavailable},
+		{name: "current verified evidence", source: projectionEvidenceStore{ok: true, generatedAt: now}, want: HardwareEvidenceStateVerified},
+		// #1938: old evidence is still current; age is not an expiry.
+		{name: "year-old verified evidence", source: projectionEvidenceStore{ok: true, generatedAt: now.AddDate(-1, 0, 0)}, want: HardwareEvidenceStateVerified},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hardwareEvidenceState(ctx, "provider-a", tc.source, tc.ttl); got != tc.want {
+			if got := hardwareEvidenceState(ctx, "provider-a", tc.source); got != tc.want {
 				t.Fatalf("hardware evidence state = %q, want %q", got, tc.want)
 			}
 		})
