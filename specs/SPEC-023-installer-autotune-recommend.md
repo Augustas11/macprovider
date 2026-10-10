@@ -9,7 +9,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 ## Change log
 
 - **v0.22.19 (2026-10-10)** — The provider sets its own served slots and the
-  CB policy only revokes (with SPEC-038 v0.3.12). `max_concurrency_override`
+  CB policy only revokes (with SPEC-038 v0.3.15). `max_concurrency_override`
   was written once by `autotune --recommend --apply` at install and never
   recomputed, and CB needed a signed per-tuple entry, so providers stayed at
   their install-time slots and new models never batched. The config now
@@ -3782,7 +3782,7 @@ being implied by an unauthenticated notion of a "later" replacement.
 SPEC-038 local parity, row-isolation, and load-time attach probes remain
 mandatory and fail closed.
 
-**[v0.22.19] Revocation-only policy (SPEC-038 v0.3.12).** The schema is
+**[v0.22.19] Revocation-only policy (SPEC-038 v0.3.15).** The schema is
 unchanged and old policy files still parse, but the policy no longer grants
 CB. Every tuple the local SPEC-039 engine admits is covered unless an entry
 with `rollout: "off"` names its `model_sha256`, `metallib_sha256` and

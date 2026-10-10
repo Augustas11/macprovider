@@ -505,7 +505,7 @@ private extension ChatCompletionPromptSource {
     var repetitionPenaltyValue: JSONValue? { repetitionPenalty }
 }
 
-/// SPEC-048-R016 (v0.1.28) on-device native-MTP qualification: MTP-on greedy
+/// SPEC-048-R016 (v0.1.30) on-device native-MTP qualification: MTP-on greedy
 /// tokens must equal ordinary decode on the same paged engine (same kernels,
 /// so near-tied logits resolve the same way), and MTP must beat ordinary
 /// decode by the SPEC-048-R015 decode-throughput bar.

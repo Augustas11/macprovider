@@ -3,7 +3,7 @@ import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-038 v0.3.12 on-device continuous-batching self-check.
+/// SPEC-038 v0.3.15 on-device continuous-batching self-check.
 final class ContinuousBatchingSelfCheckTests: XCTestCase {
     private func m(_ slots: Int, exact: Bool = true, tps: Double) -> ContinuousBatchingSelfCheckMeasurement {
         .init(slots: slots, conformant: exact, aggregateTPS: tps)
@@ -198,6 +198,10 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(ContinuousBatchingSelfCheck.ladder(maxRows: 1), [])
         let prompts = ContinuousBatchingSelfCheck.promptTexts(count: 32)
         XCTAssertEqual(Set(prompts).count, 32)
+        // Unequal prompt lengths in every ladder step from k=4 up.
+        let lengths = Set(prompts.prefix(4).map(\.count))
+        XCTAssertEqual(lengths.count, 4)
+        XCTAssertGreaterThan(prompts[3].count, prompts[0].count * 20)
     }
 
     // MARK: - Revocation
@@ -249,6 +253,10 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
             modelSHA256: "a", metallibSHA256: "b", kernelIdentifier: "k", hardwareClass: "h", osBuild: "26.6 (25G5)"
         )
         XCTAssertNil(store.decision(for: newOS), "evidence from before an OS upgrade is not reused")
+        var newRuntime2 = key
+        newRuntime2.runtimeBuild = "other-fork-revision/0.32.3+other"
+        XCTAssertNil(store.decision(for: newRuntime2), "evidence from an older MLX fork pin is not reused")
+        XCTAssertEqual(key.runtimeBuild, ContinuousBatchingSelfCheckKey.currentRuntimeBuild)
         var st = stat()
         XCTAssertEqual(lstat(store.url.path, &st), 0)
         XCTAssertEqual(st.st_mode & 0o777, 0o600)
@@ -308,7 +316,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     }
 }
 
-/// SPEC-048-R016 (v0.1.28) on-device native-MTP qualification.
+/// SPEC-048-R016 (v0.1.30) on-device native-MTP qualification.
 final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
     func testIdenticalOutputWithAGainPasses() {
         let verdict = NativeMTPOnDeviceSelfCheck.decide(

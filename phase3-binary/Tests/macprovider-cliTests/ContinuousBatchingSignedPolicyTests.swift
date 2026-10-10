@@ -57,7 +57,7 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         XCTAssertFalse(selection.acceptanceCoverage.covers(fixture.requestedTuple))
     }
 
-    /// SPEC-038 v0.3.12: the policy is revocation-only. A `rollout: off`
+    /// SPEC-038 v0.3.15: the policy is revocation-only. A `rollout: off`
     /// entry forces serial for its model artifact on its runtime revision on
     /// every Mac; anything else the engine admits stays covered.
     func testRolloutOffRevokesTheModelOnItsRuntimeRevisionOnly() throws {

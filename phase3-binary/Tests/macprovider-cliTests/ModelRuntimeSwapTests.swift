@@ -39,7 +39,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             targetModelRevision: target,
             runningBuildIdentity: laterRelease
         ))
-        // SPEC-048-R013 (v0.1.28): the upstream MLX revision of the running
+        // SPEC-048-R013 (v0.1.30): the upstream MLX revision of the running
         // build or of the admission is provenance (a fork bump keeps native
         // MTP; the on-device self-check qualifies it). The target artifact
         // stays pinned.

@@ -1,13 +1,13 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
 Version: v0.3.15
-Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
+Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
-**Change log v0.3.12 (2026-10-10, default-on CB qualified per Mac):**
-Follows SPEC-023 v0.22.19, SPEC-039 v0.1.15 and SPEC-048 v0.1.28. Continuous
+**Change log v0.3.15 (2026-10-10, default-on CB qualified per Mac):**
+Follows SPEC-023 v0.22.19, SPEC-039 v0.1.15 and SPEC-048 v0.1.30. Continuous
 batching is on by default for every model the local SPEC-039 engine admits.
 Each Mac qualifies itself (FR-CB10): the load-time SPEC-039 parity and
 isolation probes stay the quality gate against stock serial decode, and a new
@@ -25,17 +25,6 @@ AC-26 cached-turn grant; an absent, stale or invalid policy revokes nothing;
 `expires_at` stays structural. The FR-CB15 per-tuple Studio campaign is no
 longer the activation gate. The emergency `continuous_batching: off` override
 is unchanged.
-**Change log v0.3.12 (2026-10-10, automatic CB slot count):** Follows
-SPEC-023 v0.22.19. FR-CB11's Entry 110 concurrency is now the slot count serve
-resolves at each start, not only the value an install-time apply persisted.
-Unless the owner pinned `max_concurrency_override` (`max_concurrency_source:
-owner`, environment, or `--max-batch`), serve runs the autotune recommendation
-for this Mac when the verified signed policy authorizes batching for the
-loaded tuple and batching is active, and one slot otherwise. A new policy
-entry therefore raises existing providers at their next serve start without
-another `autotune --recommend --apply`. The count is not changed while serving:
-scheduler rows, the inference gate, native-MTP slot sizing and the memory
-envelope are fixed at load, and the policy is loaded only at serve start.
 **Change log v0.3.14 (2026-10-10, route-invariant ragged prefill groups):**
 FR-CB2: the kernel-route rule (v0.3.12/v0.3.13) applies to ragged groups as
 well as equal-offset groups. A grouped row now always prefills its own
@@ -336,9 +325,9 @@ accounting is the load-bearing invariant of this SPEC (FR-CB6). A single
 mis-attributed token is a billing and provider-earnings defect, not merely a
 serving glitch.
 
-**(v0.3.12)** The feature is on by default for every model the local engine
+**(v0.3.15)** The feature is on by default for every model the local engine
 admits, gated per Mac by the FR-CB10 on-device self-check; the rest of this
-paragraph describes the pre-v0.3.12 posture. The feature was **disabled by
+paragraph describes the pre-v0.3.15 posture. The feature was **disabled by
 default** and enabled nothing on merge of either this SPEC or its IMPL. When the flag is off, the provider MUST behave
 byte-for-byte as it does today (FR-CB9). Turning it on for real traffic is
 gated on the acceptance criteria of §7 and, decisively, on the real-hardware
@@ -991,7 +980,7 @@ parity/isolation probes also pass. A missing,
 stale, malformed, unsigned, wrong-signer, revoked, catalog-mismatched, or
 identity-mismatched policy is equivalent to no acceptance coverage.
 
-**(v0.3.12) Default-on with on-device qualification.** The two paragraphs
+**(v0.3.15) Default-on with on-device qualification.** The two paragraphs
 above are superseded where they conflict:
 
 1. Acceptance coverage for a coordinator-joined provider is every tuple the
@@ -1004,8 +993,12 @@ above are superseded where they conflict:
 2. Batching runs for a non-revoked tuple only after this Mac's self-check
    grants it. The check runs automatically when a model loads or swaps and
    whenever the (model SHA-256, Metal library SHA-256, kernel identifier,
-   hardware class, macOS version and build) key has no stored result; an OS
-   upgrade therefore re-runs it. For each slot count k on the
+   hardware class, macOS version and build, pinned MLX fork identity) key has
+   no stored result; an OS upgrade or MLX pin change therefore re-runs it. It
+   runs through the production scheduler, so it probes at the serve path's
+   own decode lockstep window, and its prompts have unequal lengths (short to
+   about 1.5k tokens) because batched decode pads keys to the longest row,
+   which can change a neighbour's attention route. For each slot count k on the
    SPEC-023-R009 ladder from 2 to the scheduler rows, it submits k distinct
    fixed greedy prompts together, twice (the first pass also compiles kernels
    for that row count). Every row of both passes MUST equal that prompt run
@@ -1078,7 +1071,7 @@ capacity minus active accepted/runnable work. Internal prompt-batch,
 decode-batch, microbatch, paged-engine, and queue limits MAY differ but MUST
 NOT change `slots_total`.
 
-**(v0.3.12)** The Entry 110 concurrency is resolved by the provider itself
+**(v0.3.15)** The Entry 110 concurrency is resolved by the provider itself
 (SPEC-023-R009, automatic application):
 
 1. An owner-pinned `max_concurrency_override` (config with
@@ -1199,11 +1192,11 @@ complete a real-Mac exercise on that tuple demonstrating, at minimum:
   within the defined bound, warm-swap/receipt/model-hash parity (FR-CB13), and
   `SPEC-039` paged-engine support for the tuple.
 
-**(v0.3.12)** Activation is no longer gated on this per-tuple campaign: each
+**(v0.3.15)** Activation is no longer gated on this per-tuple campaign: each
 Mac's FR-CB10 on-device self-check (row isolation at every granted k, measured
 aggregate gain over serial) is the activation gate, and the signed policy only
 revokes. The campaign above remains the evidence standard for release review
-and for Gate A5 promotion below. Before v0.3.12: absent this evidence the flag
+and for Gate A5 promotion below. Before v0.3.15: absent this evidence the flag
 MUST remain off for real traffic. This mirrors
 the Entry-199 lesson: a dormant, default-off feature with green gates is not a
 production-enabled feature. The step-by-step enable-gate procedure for

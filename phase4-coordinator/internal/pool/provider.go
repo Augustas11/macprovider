@@ -298,7 +298,7 @@ type Provider struct {
 	// operators so remote canaries can enforce queue, memory, thermal, restart,
 	// and runtime invariants without a provider-local network route.
 	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
-	// CBSelfCheck is the provider's latest SPEC-038 v0.3.12 on-device
+	// CBSelfCheck is the provider's latest SPEC-038 v0.3.15 on-device
 	// continuous-batching self-check state, reported on heartbeats. It is
 	// observability for operators and release canaries; routing still uses
 	// the advertised slots and the pool concurrency ceiling.

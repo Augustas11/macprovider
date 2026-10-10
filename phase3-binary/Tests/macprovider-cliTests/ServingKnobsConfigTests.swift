@@ -1957,7 +1957,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
-    /// SPEC-038 v0.3.12: production coverage is default-on; only a signed
+    /// SPEC-038 v0.3.15: production coverage is default-on; only a signed
     /// revocation of the model on this runtime revision serial-routes.
     func testDefaultOnCoverageBatchesUnlessRevoked() {
         let tuple = Self.continuousBatchingTuple()

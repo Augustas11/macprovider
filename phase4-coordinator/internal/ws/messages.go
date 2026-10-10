@@ -1589,7 +1589,7 @@ func parseModelIdentityMetadata(
 	return "", nil
 }
 
-// parseCBSelfCheck validates the optional SPEC-038 v0.3.12 heartbeat object.
+// parseCBSelfCheck validates the optional SPEC-038 v0.3.15 heartbeat object.
 // It is bounded observability, never a routing input.
 func parseCBSelfCheck(v json.RawMessage) (*pool.ProviderCBSelfCheck, error) {
 	if len(v) > 2048 {

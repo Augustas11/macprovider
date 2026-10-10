@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// SPEC-038 FR-CB10 / FR-CB11 (v0.3.12): every Mac qualifies continuous
+/// SPEC-038 FR-CB10 / FR-CB11 (v0.3.15): every Mac qualifies continuous
 /// batching for its own loaded model. The load-time SPEC-039 probes already
 /// prove the paged engine against stock serial decode on fixed prompts (the
 /// quality gate); this check proves row isolation and measures the gain at
@@ -34,6 +34,10 @@ struct ContinuousBatchingSelfCheckKey: Sendable, Equatable, Hashable, Codable {
     /// macOS version and build: an OS upgrade changes Metal compilation and
     /// scheduling, so evidence from before it is not reused.
     let osBuild: String
+    /// The pinned MLX fork identity (mlx-swift-lm revision and mlx-swift
+    /// version+revision): a runtime pin change re-runs the check even when the
+    /// packaged Metal library hash happens not to change.
+    var runtimeBuild: String = ContinuousBatchingSelfCheckKey.currentRuntimeBuild
 
     enum CodingKeys: String, CodingKey {
         case modelSHA256 = "model_sha256"
@@ -41,6 +45,11 @@ struct ContinuousBatchingSelfCheckKey: Sendable, Equatable, Hashable, Codable {
         case kernelIdentifier = "kernel_identifier"
         case hardwareClass = "hardware_class"
         case osBuild = "os_build"
+        case runtimeBuild = "runtime_build"
+    }
+
+    static var currentRuntimeBuild: String {
+        "\(KVBuildIdentity.mlxSwiftLMRevision)/\(KVBuildIdentity.mlxVersion)"
     }
 
     static var currentOSBuild: String { ProcessInfo.processInfo.operatingSystemVersionString }
@@ -108,6 +117,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
     public let kernelIdentifier: String?
     public let hardwareClass: String?
     public let osBuild: String?
+    public let runtimeBuild: String?
 
     init(
         decision: String,
@@ -125,6 +135,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
         self.kernelIdentifier = key?.kernelIdentifier
         self.hardwareClass = key?.hardwareClass
         self.osBuild = key?.osBuild
+        self.runtimeBuild = key?.runtimeBuild
     }
 
     var jsonObject: [String: Any] {
@@ -139,6 +150,7 @@ public struct ContinuousBatchingSelfCheckReport: Sendable, Equatable {
             "kernel_identifier": nullable(kernelIdentifier),
             "hardware_class": nullable(hardwareClass),
             "os_build": nullable(osBuild),
+            "runtime_build": nullable(runtimeBuild),
         ]
     }
 }
@@ -206,7 +218,7 @@ enum ContinuousBatchingSelfCheck {
     static let confirmedNoGainStreak = 3
     static let remeasureBaseSeconds = 3_600.0
 
-    /// SPEC-038 FR-CB10 (v0.3.12): throughput noise never switches batching
+    /// SPEC-038 FR-CB10 (v0.3.15): throughput noise never switches batching
     /// off or lowers a Mac that already batches. Only a correctness result
     /// (row divergence or leak beyond the probe rule, or a crash) lowers or
     /// revokes `priorGrant`; a fresh Mac keeps the 1.2x rule. Returns the
@@ -299,9 +311,26 @@ enum ContinuousBatchingSelfCheck {
             "Describe a sunrise over the ocean in vivid detail.",
             "Explain the difference between TCP and UDP briefly.",
         ]
+        // Rows of unequal prompt length: batched decode pads keys to the
+        // longest row, which can change a neighbour's attention kernel route,
+        // so a ladder of equal-length rows would miss that case.
+        let contextParagraphs = [0, 2, 8, 14]
         return (0..<count).map { index in
-            index < starts.count ? starts[index] : "\(starts[index % starts.count]) (variant \(index / starts.count))"
+            let task = index < starts.count ? starts[index] : "\(starts[index % starts.count]) (variant \(index / starts.count))"
+            let paragraphs = contextParagraphs[index % contextParagraphs.count]
+            guard paragraphs > 0 else { return task }
+            let context = (0..<paragraphs).map { contextParagraph($0 + index) }.joined(separator: "\n\n")
+            return "Background notes:\n\(context)\n\nIgnoring the notes above, answer this: \(task)"
         }
+    }
+
+    private static func contextParagraph(_ seed: Int) -> String {
+        let subjects = ["the harbor", "the orchard", "the observatory", "the railway yard", "the mill", "the library", "the market", "the glacier"]
+        let subject = subjects[seed % subjects.count]
+        return "Paragraph \(seed): Visitors to \(subject) often arrive early, before the light settles, and spend a long hour "
+            + "walking its edges while noting small details: the sound of distant machinery, the color of the stone, the "
+            + "names painted on old signs, and the way the wind changes direction near noon. Records kept at \(subject) "
+            + "describe seasons of plenty and seasons of repair, careful inventories, and letters exchanged with neighbors."
     }
 }
 
@@ -311,7 +340,7 @@ enum ContinuousBatchingSelfCheck {
 /// process (e.g. a Metal OOM at a high slot count) is found on restart and
 /// never retried on the same key.
 struct ContinuousBatchingSelfCheckStore: Sendable {
-    static let schemaVersion = "macprovider.cb-self-check.v3"
+    static let schemaVersion = "macprovider.cb-self-check.v4"
     static let fileName = "cb-self-check.json"
     static let maxEntries = 64
 

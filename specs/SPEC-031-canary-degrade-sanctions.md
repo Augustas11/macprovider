@@ -852,7 +852,7 @@ interval.
 **[v0.3.7]** The canary stays the cross-runtime correctness signal: a result
 whose actual token IDs, terminal reason, counters or committed-state digest
 differ from the bank record still fails and disables only that tuple. SPEC-048
-v0.1.28 qualifies native MTP per Mac on device, but that does not relax this
+v0.1.30 qualifies native MTP per Mac on device, but that does not relax this
 check. When a provider release changes MLX numerics so that the expected
 values legitimately change, the challenge bank MUST be re-baselined on the new
 runtime and recorded and signed through the normal release path before that
@@ -1140,7 +1140,7 @@ before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
-- **v0.3.7 (2026-10-10):** FR-CAN33 notes SPEC-048 v0.1.28: the native-MTP
+- **v0.3.7 (2026-10-10):** FR-CAN33 notes SPEC-048 v0.1.30: the native-MTP
   canary's expected-value comparison stays a failure; a release that changes
   MLX numerics re-baselines the signed challenge bank on the new runtime.
 - **v0.3.6 (2026-10-09):** The native-MTP challenge bank's `issued_at` must

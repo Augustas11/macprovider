@@ -2640,7 +2640,7 @@ struct ServeCommand: AsyncParsableCommand {
         let currentPolicyKeys = Set([resolved.modelCatalogKey, resolved.model].compactMap { $0 })
         let emergencyOffOverride = resolved.continuousBatchingExplicitlyConfigured
             && resolved.continuousBatching == .off
-        // SPEC-038 v0.3.12 / SPEC-039 FR-PKV14: the paged engine attaches by
+        // SPEC-038 v0.3.15 / SPEC-039 FR-PKV14: the paged engine attaches by
         // default so every catalog model the engine can batch is self-checked;
         // an explicit paged_kv setting or the CB emergency off still rules.
         if !emergencyOffOverride,
@@ -2675,7 +2675,7 @@ struct ServeCommand: AsyncParsableCommand {
         let servedWeightsBytes = ProviderContextWorkflow.liveModelFacts(
             artifactPath: resolved.modelArtifactPath
         ).weightsBytes
-        // SPEC-023-R009 / SPEC-038-R011 (v0.3.12): scheduler rows are the
+        // SPEC-023-R009 / SPEC-038-R011 (v0.3.15): scheduler rows are the
         // memory-fit recommendation for this Mac; the served count starts at
         // one (or a provisional grant) and the on-device self-check sets it.
         // Loopback runtimes and autotune children keep their configured count.
@@ -2962,7 +2962,7 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data(("provider model load failed: \(error)\n").utf8))
             throw error
         }
-        // SPEC-038-R011 (v0.3.12): set the served count before the startup
+        // SPEC-038-R011 (v0.3.15): set the served count before the startup
         // probe and the first capacity advertisement: a stored self-check
         // decision for this tuple, else the plan's initial count, else one
         // slot when this tuple cannot batch at all.
@@ -3119,7 +3119,7 @@ struct ServeCommand: AsyncParsableCommand {
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
-        // SPEC-038 v0.3.12: qualify continuous batching on this Mac in the
+        // SPEC-038 v0.3.15: qualify continuous batching on this Mac in the
         // background, only while idle; it never blocks serving.
         let cbSelfCheckTask: Task<Void, Never>? = {
             guard let plan = autoServedSlots, plan.selfChecked,

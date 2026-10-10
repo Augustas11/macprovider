@@ -1,7 +1,7 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
 Version: v0.1.15
-Status: draft (normative design). v0.1.15 (follows SPEC-038 v0.3.12) turns
+Status: draft (normative design). v0.1.15 (follows SPEC-038 v0.3.15) turns
 paged KV on by default for a coordinator-joined provider unless
 `paged_kv.enabled` is set explicitly or the CB emergency off is set, and
 moves the FR-PKV13 overhead ceiling from per-tuple signed acceptance to each

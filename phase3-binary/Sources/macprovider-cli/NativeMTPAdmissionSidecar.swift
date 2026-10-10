@@ -701,7 +701,7 @@ enum NativeMTPAdmissionSidecar {
 
         var sourceLayout: String { "separate_artifact" }
 
-        /// SPEC-048-R013 (v0.1.28): admission is model-keyed. Hardware, RAM,
+        /// SPEC-048-R013 (v0.1.30): admission is model-keyed. Hardware, RAM,
         /// slot count and runtime revision only prefer the entry measured
         /// closest to this Mac; the on-device self-check qualifies it here.
         func matchesModel(context: RuntimeContext) -> Bool {
@@ -1842,7 +1842,7 @@ enum NativeMTPAdmissionSidecar {
     private static func validateLiveTuple(_ parsed: Parsed, context: RuntimeContext) throws {
         guard parsed.modelID == context.modelID else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.id") }
         guard parsed.modelRevision == context.modelRevision else { throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.model.revision") }
-        // SPEC-048-R013 (v0.1.28): runtime revision, hardware, RAM, OS and
+        // SPEC-048-R013 (v0.1.30): runtime revision, hardware, RAM, OS and
         // slots are the evidence's provenance, not a gate; the on-device
         // self-check qualifies this Mac.
     }
@@ -1866,7 +1866,7 @@ enum NativeMTPAdmissionSidecar {
     }
 
     private static func validateRevocation(_ parsed: Parsed, context: RuntimeContext) throws {
-        // SPEC-048-R014 (v0.1.28): unknown revocation state revokes nothing.
+        // SPEC-048-R014 (v0.1.30): unknown revocation state revokes nothing.
         guard !(context.revokedTupleSHA256 ?? []).contains(parsed.tupleSHA256) else {
             throw NativeMTPAdmissionSidecarError.tupleRevoked(parsed.tupleSHA256)
         }

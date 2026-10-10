@@ -7165,7 +7165,7 @@ actor CoordinatorClient {
         if let hardwareSummary {
             payload["hardware_summary"] = hardwareSummary
         }
-        // SPEC-038 v0.3.12: the on-device CB self-check state, for the release
+        // SPEC-038 v0.3.15: the on-device CB self-check state, for the release
         // canary and operators. Absent until a self-check exists.
         if let selfCheck = await modelRuntime.currentSnapshot().continuousBatching?.selfCheck {
             payload["cb_self_check"] = selfCheck.jsonObject

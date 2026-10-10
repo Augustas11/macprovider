@@ -21,7 +21,7 @@ struct ContinuousBatchingPolicyEntry: Sendable, Equatable {
     let provenance: ContinuousBatchingPolicyProvenance
 }
 
-/// SPEC-038 FR-CB10 (v0.3.12): the signed policy only revokes. A
+/// SPEC-038 FR-CB10 (v0.3.15): the signed policy only revokes. A
 /// `rollout: off` entry forces serial for its model artifact on its runtime
 /// revision (Metal library + paged-KV kernel) on every Mac; hardware class and
 /// the other recorded tuple fields do not narrow it. Positive entries no longer

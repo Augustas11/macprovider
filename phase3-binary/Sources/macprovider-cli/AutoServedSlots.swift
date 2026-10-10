@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import MacProviderCore
 
-/// SPEC-023-R009 / SPEC-038-R011 (v0.3.12): the slot count `serve` runs.
+/// SPEC-023-R009 / SPEC-038-R011 (v0.3.15): the slot count `serve` runs.
 ///
 /// Precedence: an owner-pinned `max_concurrency_override` is served as written;
 /// a draft model or the emergency off forces 1 (SPEC-028 FR-4); otherwise the
@@ -93,7 +93,7 @@ enum AutoServedSlots {
     }
 
     /// Provisional grant: the verified signed policy carries an enabled entry
-    /// for the served model key (SPEC-038 v0.3.12; the self-check result then
+    /// for the served model key (SPEC-038 v0.3.15; the self-check result then
     /// replaces it).
     static func policyAuthorizesServedModel(
         _ policy: ContinuousBatchingPolicyLoadResult,

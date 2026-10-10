@@ -127,7 +127,7 @@ struct ContinuousBatchingRequestedTuple: Sendable, Equatable {
 /// from these fields plus the pool shape, and `poolEpoch` is per-boot; both stay
 /// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first.
 ///
-/// SPEC-038 v0.3.12: production serve uses `defaultOn(revocations:)`. Every
+/// SPEC-038 v0.3.15: production serve uses `defaultOn(revocations:)`. Every
 /// tuple the local engine admits is covered unless a signed revocation names
 /// its model artifact and runtime revision; whether batching then runs is the
 /// on-device self-check's decision (`ContinuousBatchingSelfCheck`). Accepted

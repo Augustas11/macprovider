@@ -1,6 +1,6 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.31
+**Version:** 0.1.32
 
 ```json
 {
@@ -954,12 +954,12 @@ malformed. The provider revision, source commit, reproducible-build digest, and
 live executable CDHash are recorded provenance of the qualifying build
 (SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
 provider CLI, so a signed admission keeps serving across signed CLI releases.
-**(0.1.28)** Admission is model-keyed: only the model key and target
+**(0.1.30)** Admission is model-keyed: only the model key and target
 artifact bind. The upstream MLX runtime revision, hardware class, RAM and
 qualified slot count are recorded provenance of the qualifying run; a sidecar
 entry matching them exactly is preferred, otherwise the first entry for the
 model is used, and the MTP-16 on-device self-check qualifies the running
-runtime on this Mac. Before 0.1.28 the upstream MLX runtime revision stayed
+runtime on this Mac. Before 0.1.30 the upstream MLX runtime revision stayed
 bound to the running build. Loader
 The MLX runtime (fork) revision and target artifact remain bound to the
 running build. Regressions under a new CLI are caught by the SPEC-031-R033
@@ -1026,11 +1026,11 @@ Phase 0/1 implementation may claim issue completion or a production MTP
 multiplier.
 
 `activation` means the first production configuration load at which an exact
-tuple becomes selectable. **(0.1.28)** A sidecar's `expires_at` is structural
+tuple becomes selectable. **(0.1.30)** A sidecar's `expires_at` is structural
 only (it must follow `issued_at`); an admitted model keeps native MTP past the
 date, and revocation is the off switch. An absent, stale or unreachable
 revocation feed revokes nothing; the provider keeps polling and disables the
-tuple only when a verified feed names it. Before 0.1.28: sidecars and
+tuple only when a verified feed names it. Before 0.1.30: sidecars and
 serving-journey results expire after 90 days. Renewal creates a new immutable release/sidecar, reruns the local
 self-test and signed serving journey, the 30-minute sustained cell, ordinary
 and MTP parity sample, and post-gateway eligibility sample. The full matrix may
@@ -1275,11 +1275,14 @@ state digest with the signed synthetic challenge record. Failure disables only
 that tuple. This is provider-local health evidence, not coordinator-issued
 integrity evidence and not a SPEC-031 canary result.
 
-**(0.1.28)** The self-test reference is on-device: the provider runs the
+**(0.1.30)** The self-test reference is on-device: the provider runs the
 challenge prompt through native MTP and through ordinary decode on the same
 paged engine (same kernels, so near-tied logits resolve identically) at
 greedy, requires identical token IDs, and requires the native run to be at
-least 1.15x faster (best of two runs each). Failure disables only that tuple
+least 1.15x faster (best of two runs each). The 1.15x bar is the R015
+native-eligible decode-throughput bound; the R015 PASS on the final
+mlx-swift-lm 3.32.3 stack is recorded in `docs/research/mlx-swift-lm-3.32.3/`
+(`step3-native-margin.md`, `step3-parity-event.md`, `step45-throughput.md`). Failure disables only that tuple
 on that Mac. The signed challenge record's expected digest is no longer
 compared by the provider, because it may have been produced on another
 runtime revision. The SPEC-031-R033 coordinator canary is unchanged: it still
@@ -1420,8 +1423,8 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.28 (2026-10-10)** — Model-keyed admission, revocation-only policy,
-  on-device qualification (follows SPEC-038 v0.3.12). MTP-13: admission keys
+- **0.1.30 (2026-10-10)** — Model-keyed admission, revocation-only policy,
+  on-device qualification (follows SPEC-038 v0.3.15). MTP-13: admission keys
   on the model and its target artifact; the upstream MLX runtime revision,
   hardware class, RAM and qualified slots are recorded provenance that only
   prefer the closest entry, so a fork-revision bump keeps native MTP. MTP-14:

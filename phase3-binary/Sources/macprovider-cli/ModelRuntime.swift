@@ -314,7 +314,7 @@ public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
     public let cacheClass: String
     public let policy: RuntimeContinuousBatchingPolicySnapshot
     public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
-    /// SPEC-038 v0.3.12 on-device self-check state; nil when none ran.
+    /// SPEC-038 v0.3.15 on-device self-check state; nil when none ran.
     public var selfCheck: ContinuousBatchingSelfCheckReport? = nil
 }
 
@@ -1640,7 +1640,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let continuousBatchingPolicyLoadResult: ContinuousBatchingPolicyLoadResult
     private let continuousBatchingModeExplicitlyConfigured: Bool
     private let continuousBatchingEmergencyOffOverride: Bool
-    /// SPEC-038 v0.3.12: the on-device self-check's decision for the loaded
+    /// SPEC-038 v0.3.15: the on-device self-check's decision for the loaded
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
@@ -2925,7 +2925,7 @@ actor ModelRuntime: ModelRuntimeServing {
             let selfTestReceipt: NativeMTPSelfTestReceipt?
             if let scheduler = self.continuousBatchScheduler {
                 do {
-                    // SPEC-048-R016 (v0.1.28): qualify native MTP on this Mac.
+                    // SPEC-048-R016 (v0.1.30): qualify native MTP on this Mac.
                     // MTP-on greedy output must equal ordinary decode on the same
                     // paged engine, and MTP must beat it by the R015 decode bar.
                     // A pre-signed token digest from another runtime revision is
@@ -3553,7 +3553,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
         let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
         let store = KeychainNativeMTPRevocationStore.live()
-        // SPEC-048-R014 (v0.1.28): only a feed naming the tuple disables it.
+        // SPEC-048-R014 (v0.1.30): only a feed naming the tuple disables it.
         // A stale or unreachable feed revokes nothing; polling resumes.
         nativeMTPRevocationRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -4417,7 +4417,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch
     }
 
-    /// SPEC-038-R011 (v0.3.12): the served slot count is the serial-path
+    /// SPEC-038-R011 (v0.3.15): the served slot count is the serial-path
     /// gate; scheduler rows stay at `maxBatch`, the most any self-check may
     /// grant, and the relay admits at most the advertised slots. Never above
     /// `maxBatch`: the memory envelope and scheduler were sized for it. A
@@ -4619,7 +4619,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if continuousBatchingEmergencyOffOverride { return .off }
         let tuple = requestedTuple ?? continuousBatchingRequestedTuple()
         if let tuple, continuousBatchingAcceptanceCoverage.isRevoked(tuple) { return .off }
-        // SPEC-038 v0.3.12: a signed positive entry for this model artifact is
+        // SPEC-038 v0.3.15: a signed positive entry for this model artifact is
         // a provisional grant that keeps an already-enabled model batching
         // until this Mac's self-check decides; the self-check result rules.
         let provisionalMode = tuple.flatMap { requested in
@@ -5327,7 +5327,7 @@ actor ModelRuntime: ModelRuntimeServing {
         adoptionKnobs: ModelRuntimeAdoptionServeKnobs?
     ) async {
         let target = targetModelID ?? modelID
-        // SPEC-038 v0.3.12: a new model or runtime is re-checked.
+        // SPEC-038 v0.3.15: a new model or runtime is re-checked.
         continuousBatchingSelfCheck = .pending
         continuousBatchingSelfCheckReport = nil
         if let adoptionKnobs {
@@ -9999,7 +9999,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             let store = KeychainNativeMTPRevocationStore.live()
             let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-            // SPEC-048-R014 (v0.1.28): the revocation feed only revokes. When
+            // SPEC-048-R014 (v0.1.30): the revocation feed only revokes. When
             // no fresh signed feed can be had, nothing is revoked; the refresh
             // keeps polling and disables the tuple once a feed names it.
             guard let state = try? await NativeMTPRevocationFeedManager.loadNetworkFirst(
@@ -10030,7 +10030,7 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelRevision: String,
         runningBuildIdentity: NativeMTPRunningBuildIdentity
     ) -> Bool {
-        // SPEC-048-R013 (v0.1.28): admission is model-keyed. The upstream MLX
+        // SPEC-048-R013 (v0.1.30): admission is model-keyed. The upstream MLX
         // revision, provider revision and build identity are recorded
         // provenance; the on-device MTP-on vs MTP-off self-check qualifies the
         // running runtime. Only the loaded target artifact must match.
