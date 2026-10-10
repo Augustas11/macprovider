@@ -4450,7 +4450,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let served = min(max(1, slots), maxBatch)
         let scheduler = continuousBatchScheduler
         servedSlotLimit = served
-        await inferenceGate.resize(to: served)
+        await inferenceGate.resize(to: served, stamp: generation)
         guard selfCheckGeneration == generation else { return false }
         await scheduler?.setBuyerRowLimit(served)
         return selfCheckGeneration == generation
@@ -4527,7 +4527,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if let report { continuousBatchingSelfCheckReport = report }
         guard await applyServedSlots(servedSlots), selfCheckGeneration == generation else { return false }
         if publishCapacity {
-            await providerStatus?.updateServedSlots(min(max(1, servedSlots), maxBatch))
+            await providerStatus?.updateServedSlots(min(max(1, servedSlots), maxBatch), stamp: generation)
         }
         return selfCheckGeneration == generation
     }
@@ -5410,7 +5410,7 @@ actor ModelRuntime: ModelRuntimeServing {
             : adoptionKnobs?.maxBatch
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
-            await inferenceGate.resize(to: swapServedSlots)
+            await inferenceGate.resize(to: swapServedSlots, stamp: selfCheckGeneration)
         }
         currentContainer = container
         currentModelID = modelID
@@ -5531,7 +5531,7 @@ actor ModelRuntime: ModelRuntimeServing {
             continuousBatchingSelfCheck = resolution.state
             continuousBatchingSelfCheckReport = resolution.report
             servedSlotLimit = resolution.servedSlots
-            await inferenceGate.resize(to: resolution.servedSlots)
+            await inferenceGate.resize(to: resolution.servedSlots, stamp: selfCheckGeneration)
             swapAdvertisedSlots = resolution.servedSlots
         }
         // The rebuilt scheduler starts unlimited; cap buyer rows at once.
@@ -5549,6 +5549,11 @@ actor ModelRuntime: ModelRuntimeServing {
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
             specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
         )
+        // Stamp the swap's count so a pending older self-check publication
+        // cannot overwrite it.
+        if servedSlotsManaged, let swapAdvertisedSlots {
+            await providerStatus?.updateServedSlots(swapAdvertisedSlots, stamp: selfCheckGeneration)
+        }
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
     }
 

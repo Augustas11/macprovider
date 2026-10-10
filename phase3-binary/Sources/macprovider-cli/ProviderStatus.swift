@@ -705,7 +705,15 @@ actor ProviderStatus {
 
     /// SPEC-038-R011: the continuous-batching self-check changed the served
     /// slot count; heartbeats and relay admission read it from here.
-    func updateServedSlots(_ slots: Int) async {
+    /// `stamp` (the runtime's swap generation) orders concurrent updates: an
+    /// update stamped older than one already applied is ignored.
+    private var servedSlotsStamp: Int?
+
+    func updateServedSlots(_ slots: Int, stamp: Int? = nil) async {
+        if let stamp {
+            if let applied = servedSlotsStamp, stamp < applied { return }
+            servedSlotsStamp = stamp
+        }
         capacity = ProviderCapacity(
             maxContextOverride: capacity.maxContextTokens,
             maxConcurrencyOverride: max(1, slots),

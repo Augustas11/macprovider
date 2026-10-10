@@ -45,6 +45,18 @@ final class AsyncSemaphoreResizeTests: XCTestCase {
         try await second.value
     }
 
+    /// A resize stamped with an older swap generation never overrides a newer one.
+    func testStaleStampedResizeIsIgnored() async {
+        let gate = AsyncSemaphore(value: 8)
+        await gate.resize(to: 1, stamp: 2)
+        await gate.resize(to: 8, stamp: 1)
+        let afterStale = await gate.currentLimit()
+        XCTAssertEqual(afterStale, 1)
+        await gate.resize(to: 4, stamp: 2)
+        let sameStamp = await gate.currentLimit()
+        XCTAssertEqual(sameStamp, 4)
+    }
+
     private func waitUntil(_ condition: @escaping () async -> Bool) async throws {
         for _ in 0..<200 {
             if await condition() { return }
@@ -72,5 +84,21 @@ private actor Release {
         opened = true
         waiters.forEach { $0.resume() }
         waiters = []
+    }
+}
+
+/// SPEC-038-R011: the advertised served count ignores a publication stamped
+/// with an older swap generation.
+final class ProviderStatusServedSlotsStampTests: XCTestCase {
+    func testStaleStampedServedSlotsUpdateIsIgnored() async {
+        let capacity = ProviderCapacity(maxContextOverride: 4_000, maxConcurrencyOverride: 8)
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: capacity)
+        await status.updateServedSlots(1, stamp: 3)
+        await status.updateServedSlots(8, stamp: 2)
+        let afterStale = await status.snapshot().capacity.maxConcurrency
+        XCTAssertEqual(afterStale, 1)
+        await status.updateServedSlots(5, stamp: 3)
+        let current = await status.snapshot().capacity.maxConcurrency
+        XCTAssertEqual(current, 5)
     }
 }

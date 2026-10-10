@@ -19,7 +19,15 @@ actor AsyncSemaphore {
     /// Changes the limit in place. Holders keep their permits; after a
     /// decrease no new holder is admitted until the count falls under the new
     /// limit, and after an increase waiters are admitted at once.
-    func resize(to value: Int) {
+    /// `stamp` (the runtime's swap generation) orders concurrent resizes: a
+    /// resize stamped older than one already applied is ignored.
+    private var resizeStamp: Int?
+
+    func resize(to value: Int, stamp: Int? = nil) {
+        if let stamp {
+            if let applied = resizeStamp, stamp < applied { return }
+            resizeStamp = stamp
+        }
         let newLimit = max(0, value)
         permits += newLimit - limit
         limit = newLimit
