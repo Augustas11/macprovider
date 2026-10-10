@@ -318,7 +318,7 @@ Merged, waiting for this train:
 To bundle when merged:
 - [ ] #1944 — calendar-expiry removal, coordinator side (Tier-2 catalog expiry shape-only, autotune evidence supersession, trusted-pool on-call / grace warnings instead of unrouting).
 - [ ] CB/MTP self-check bundle (branch `cli/auto-cb-slots`) — coordinator side of the native-MTP canary.
-- [ ] #1945 — BYOM catalog graduation (#1880 step 5), only if audited and merged in time; otherwise the following train.
+- [x] #1945 — BYOM catalog graduation (#1880 step 5), merged 2026-10-10 as `d260134ee`.
 
 Configuration riding the same restart:
 - [ ] `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256` from #1943 in the coordinator launch environment, then sign and upsert the on-call readiness record (`build-signed-oncall-readiness.yml`, `coordinator-cli trust-pool-oncall upsert`).
