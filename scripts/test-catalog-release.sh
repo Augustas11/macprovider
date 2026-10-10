@@ -290,6 +290,8 @@ expected_history = {
     "published-2026-10-08-native-mtp-v223-v1",
     # Superseded: its self-test bank still named v223 (restamp gap).
     "published-2026-10-08-native-mtp-v224-v1",
+    # Superseded by the re-baselined self-test bank for signed CLI 1.8.238.
+    "published-2026-10-09-native-mtp-v224-v2",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
