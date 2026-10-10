@@ -243,3 +243,20 @@ proof=passed slots=8`, `min_grouped_chunk_tokens` 128 / 128 / 33.
 - R015's native rows keep the equal-offset rule; its 1536/4096-token prompts
   in 512-token chunks group as before. R015 is not rerun on this basis; the
   operator decides on the #1910 lines above.
+
+## Closure check (Codex code lane, after the rebase onto main)
+
+Verdict: 0 CRITICAL / 0 HIGH / 1 MEDIUM / 2 LOW. The round-3 MEDIUM (dense
+prefill kernel route) is closed: both selectors enforce the 33/128-token
+bounds and keep each row's natural chunk, and the ragged per-row prefill
+attention is consistent with lone causal attention (RoPE, KV layout, GDN/conv
+state, accounting, cancellation).
+
+The audit reached its three-round cap; the remaining findings are carried:
+
+| Finding | Severity | Introduced by #1927? | Carry reason and follow-up |
+| --- | --- | --- | --- |
+| Unequal-length decode rows pad keys to the longest row; core SDPA picks one-pass vs two-pass vector attention (and two-pass partition counts) from the padded length, so a row's decode reduction order can depend on its neighbours (`PagedKVRuntimeBridge.swift` decode batch cache; core `scaled_dot_product_attention.cpp` vector dispatch). | MEDIUM | No — CB decode has always padded this way, including on the 0.31 runtime. | Fixing it changes the decode path (per-row decode attention over each row's exact keys, a device-aware decode guard for the 6-8-row qmv/qmm switch on non-Ultra M1/M2), which requires a new R015 and a throughput re-measure. It ships as its own decode-isolation PR next, before the hybrid decode-window PR. |
+| The ragged-prefill bypass fail-safe disables later ragged groups but still samples and commits the first affected forward. | LOW | Yes (defensive path) | Served Qwen implementations attend through the cache protocol, so the path is not reachable for served models. Fixed in the decode-isolation PR: reject the affected group before sampling, release its rows. |
+| The bitwise ragged-attention test exercises the attention math, not the cache subclass. | LOW | Yes (test depth) | Fixed in the decode-isolation PR with a cache/backend-driven bitwise test at served head dimensions. |
+| Duplicated build/signer toolchain profiles. | LOW | Yes | Release-tooling refactor outside this upgrade; drift fails loudly. |
