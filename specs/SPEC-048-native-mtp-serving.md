@@ -1390,8 +1390,9 @@ requests.
 
 - **0.1.31 (2026-10-10)** — The emergency revocation feed fails to last-known
   (#1938, follows SPEC-023 v0.22.22). `revocation_state_unavailable` now means
-  no verified revocation body has ever been accepted; an aged or unreachable
-  feed keeps the newest verified revoked set in force and native MTP on.
+  no usable authenticated revocation state (none ever verified, or a local
+  store/cache/anchor integrity failure); an aged, unreachable or rejected feed
+  keeps the newest verified revoked set in force and native MTP on.
 - **0.1.30 (2026-10-10)** — No calendar expiry on native MTP (#1938, AGENTS.md
   rule 10). MTP-14: the admission sidecar's and the serving journey's
   `expires_at` are structural only; an activated tuple stays selectable until

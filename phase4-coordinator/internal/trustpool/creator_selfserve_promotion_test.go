@@ -174,9 +174,6 @@ func TestSelfServeAgreementRecordsCredentialProvenance(t *testing.T) {
 	}
 }
 
-// An Agreement past its grace end with an active pool renews through
-// self-service: the renewal pauses the pool in the same transaction, and the
-// creator promotes it again through the gate.
 // #1938: a pool keeps routing through an elapsed Agreement grace period, so a
 // renewal then neither pauses nor interrupts it.
 func TestSelfServeRenewalAfterGraceKeepsActivePoolsRouting(t *testing.T) {

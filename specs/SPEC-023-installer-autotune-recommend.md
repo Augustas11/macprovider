@@ -3659,10 +3659,12 @@ controls that origin can hand it an older signed revoked set; once a provider
 holds an anchor, no replayed body can remove a revocation it already enforces. Key rotation uses a separate account and cannot copy or lower the old
 account. Acceptance MUST cover crashes at every update boundary, restored
 filesystem snapshots, missing/corrupt Keychain or cache state, and old-key
-replay. The newest verified cached body stays usable after its `expires_at`;
-only when no verified body has ever been accepted (no anchor and no reachable
-origin) does native MTP stay off, while ordinary and classic decode remain
-available.
+replay. The newest verified cached body stays usable after its `expires_at`.
+Native MTP stays off only while no usable authenticated state exists: no body
+has ever been verified (no anchor and no reachable origin), or the local store,
+cache or anchor fails its integrity checks; ordinary and classic decode remain
+available. An unreachable origin or a rejected network body is never such a
+state once a verified body is held.
 Decode-path selection MUST check the current revocation set immediately before
 admitting a native row. A listed identity disables only that exact admission
 tuple and prevents new native rows immediately. Already-admitted rows stop at

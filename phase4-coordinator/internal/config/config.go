@@ -1141,8 +1141,9 @@ const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
 
 // ApprovedCodeIdentity is one operator-approved privacy-class code identity.
 // BinaryVersion is optional; when set, the posture binary_version must match.
-// An approval has no calendar expiry (#1938); it is withdrawn by removing it
-// or listing its cdhash in denied_code_cdhashes.
+// An approval has no calendar expiry (#1938). Removing an entry withdraws only
+// a configuration-only approval; a release-backed identity is withdrawn by an
+// entry naming another binary_version or by denied_code_cdhashes.
 type ApprovedCodeIdentity struct {
 	TeamID            string `yaml:"team_id"`
 	SigningIdentifier string `yaml:"signing_identifier"`

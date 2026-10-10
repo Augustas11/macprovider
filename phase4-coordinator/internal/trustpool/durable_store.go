@@ -2907,7 +2907,8 @@ func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 // state against this coordinator's CURRENT production activation gate and the
 // CURRENT on-call readiness of its launch environment, before the state is
 // published to the routing registry. Promotion checked both once; a gate that
-// tightens later, or an on-call record that lapses, must stop routing too.
+// tightens later, or a missing on-call record, must stop routing too. A lapsed
+// on-call confirmation is only a status warning (#1938).
 func (s *Store) ApplyRouteGates(ctx context.Context, state *ReconstructedState) error {
 	if s == nil || s.db == nil || state == nil {
 		return nil
@@ -4053,7 +4054,6 @@ func (s *ReconstructedState) routeableMembersSurviveTermsEquivalentRollover(p *R
 	return true
 }
 
-// earliestDeadline returns the earlier non-zero instant, or zero if both are.
 func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
 	if p == nil {
 		return 0
