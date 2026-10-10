@@ -5129,7 +5129,15 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The decode row bound for this device (`ContinuousBatchDecodeRouteBound`).
     private static func continuousBatchDecodeRowBound() -> Int {
         let architecture = metalArchitectureForQuantizedRoutes()
-        let bound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
+        let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only: capped vs uncapped decode forwards.
+        let bound = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_DECODE_ROW_BOUND"]
+            .flatMap { Int($0) }
+            .flatMap { $0 >= 1 ? $0 : nil } ?? deviceBound
+        #else
+        let bound = deviceBound
+        #endif
         FileHandle.standardError.write(Data(
             "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(bound)\n".utf8
         ))
