@@ -109,36 +109,62 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// Which prefill chunks may share one forward with other rows.
 ///
 /// A grouped prefill forward must give every row the kernels it would get
-/// alone; otherwise a row's numerics depend on its batch neighbours. Dense
-/// quantized matmuls are batch invariant (MLX core fork
-/// `v0.32.2-macprovider.2`, no `qmv_wide`/`qmm_splitk`). Sorted-gather MoE
-/// expert projections are not: `GatherQMM::eval_gpu`
-/// (`mlx/backend/metal/quantized.cpp`) takes `gather_qmm_rhs` when `M == 1`,
-/// `B >= 16`, the gather is right-sorted and `B / E >= 4` (B = expert
-/// selections in the call, E = experts), else `gather_qmv`. mlx-swift-lm's
-/// `SwitchGLU` (fork `3.32.3-macprovider.6`) sorts, and Qwen3.5 then takes
-/// the direct weighted reduction, once a call carries 64 selections. A
-/// grouped call carries the selections of every row, so a chunk below those
-/// bounds alone could cross them when grouped (A3B, 256 experts, top-8: a
-/// 32-127-token chunk takes `gather_qmv` alone, `gather_qmm_rhs` beside a
-/// second row). A chunk co-batches only when it already takes the grouped
-/// route by itself; any other chunk prefills alone. The fused Qwen3.5 MoE
-/// kernels select per row (at most 7 tokens per row) and are batch invariant,
-/// so they need no bound of their own.
+/// alone; otherwise a row's numerics depend on its batch neighbours. A shared
+/// prefill feeds `[rows, chunk]` tokens, and every quantized projection
+/// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.2`):
+/// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
+/// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
+/// weights and 4 otherwise. Within each route a row's result does not depend
+/// on M (the fork removed `qmv_wide` and `qmm_splitk`), but a chunk below
+/// `vector_limit` takes `qmv` alone and `qmm` beside a neighbour. So every
+/// chunk that co-batches must be at least the largest `vector_limit` of any
+/// projection: `get_qmv_batch_limit` returns at most 33 for any shape and
+/// device (`quantizedMatmulVectorLimitBound`), which also keeps grouped
+/// chunks off the M-dependent `gemv_wide` and `sdpa_vector` routes.
+///
+/// Sorted-gather MoE expert projections add a second bound:
+/// `GatherQMM::eval_gpu` takes `gather_qmm_rhs` when `M == 1`, `B >= 16`, the
+/// gather is right-sorted and `B / E >= 4` (B = expert selections in the
+/// call, E = experts), else `gather_qmv`. mlx-swift-lm's `SwitchGLU` (fork
+/// `3.32.3-macprovider.6`) sorts, and Qwen3.5 then takes the direct weighted
+/// reduction, once a call carries 64 selections. A grouped call carries the
+/// selections of every row (A3B, 256 experts, top-8: a 32-127-token chunk
+/// takes `gather_qmv` alone, `gather_qmm_rhs` beside a second row). The fused
+/// Qwen3.5 MoE kernels select per row (at most 7 tokens per row) and are
+/// batch invariant, so they need no bound of their own.
+///
+/// A chunk co-batches only when it already takes every grouped route by
+/// itself; any other chunk prefills alone. Unquantized matmuls are not
+/// covered: steel GEMM picks split-K partitions from M, so a model whose
+/// configuration does not declare quantization, or excludes a layer from it,
+/// never groups.
 struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
     /// Smallest chunk (tokens per row) that may share a prefill forward.
     let minimumGroupedChunkTokens: Int
 
-    /// No neighbour-dependent route: dense models and test backends.
+    /// No neighbour-dependent route: test backends that run no MLX kernels.
     static let unconstrained = ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: 1)
-    /// Fail safe: every chunk prefills alone (MoE with unreadable expert counts).
+    /// Fail safe: every chunk prefills alone (unreadable or unquantized
+    /// configuration, MoE with unreadable expert counts).
     static let ungrouped = ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: Int.max)
+
+    /// Maximum of `get_qmv_batch_limit` over every branch (architecture
+    /// generation, device class, K and N) in the core fork. A chunk this long
+    /// takes `qmm` alone for every quantized projection of any shape.
+    static let quantizedMatmulVectorLimitBound = 33
+    /// A dense quantized model: only the `qmv`/`qmm` bound applies.
+    static let denseQuantized = ContinuousBatchPrefillGroupingRule(
+        minimumGroupedChunkTokens: quantizedMatmulVectorLimitBound
+    )
 
     // `GatherQMM` `gather_qmm_rhs` bounds and the `SwitchGLU` sort bound.
     static let gatherQMMRHSMinimumSelections = 16
     static let gatherQMMRHSMinimumSelectionsPerExpert = 4
     static let switchGLUSortMinimumSelections = 64
 
+    /// An MoE model: the sorted-gather bound, and never below the bound its
+    /// dense projections (attention, shared expert, router) need.
     static func sortedGatherMoE(numExperts: Int, topK: Int) -> ContinuousBatchPrefillGroupingRule {
         guard numExperts > 0, topK > 0 else { return .ungrouped }
         let (perExpert, overflow) = numExperts.multipliedReportingOverflow(
@@ -147,18 +173,30 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
         guard !overflow else { return .ungrouped }
         let selections = max(gatherQMMRHSMinimumSelections, switchGLUSortMinimumSelections, perExpert)
         return ContinuousBatchPrefillGroupingRule(
-            minimumGroupedChunkTokens: (selections + topK - 1) / topK
+            minimumGroupedChunkTokens: max(
+                (selections + topK - 1) / topK,
+                quantizedMatmulVectorLimitBound
+            )
         )
     }
 
     /// Derives the rule from the loaded model's `config.json` (top level or
-    /// `text_config`). A model that reads as MoE without both an expert count
-    /// and a top-k, or a configuration that cannot be read, is `.ungrouped`.
+    /// `text_config`). A configuration that cannot be read, declares no
+    /// `quantization` (or `quantization_config`) object, or excludes a layer
+    /// from quantization is `.ungrouped`; so is a model that reads as MoE
+    /// without both an expert count and a top-k.
     static func fromModelConfiguration(_ data: Data?, modelID: String?) -> ContinuousBatchPrefillGroupingRule {
         guard let data,
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return .ungrouped }
         let scopes = [root] + ((root["text_config"] as? [String: Any]).map { [$0] } ?? [])
+        let quantization = scopes.flatMap { scope in
+            ["quantization", "quantization_config"].compactMap { scope[$0] as? [String: Any] }
+        }
+        let excludesLayer = quantization.contains { entries in
+            entries.values.contains { value in (value as? NSNumber).map(Self.isFalse) ?? false }
+        }
+        guard !quantization.isEmpty, !excludesLayer else { return .ungrouped }
         func integer(_ keys: [String]) -> Int? {
             for scope in scopes {
                 for key in keys {
@@ -181,7 +219,12 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
         let looksLikeMoE = labels.contains { $0.localizedCaseInsensitiveContains("moe") }
             || topK != nil
             || integer(["moe_intermediate_size"]) != nil
-        return looksLikeMoE ? .ungrouped : .unconstrained
+        return looksLikeMoE ? .ungrouped : .denseQuantized
+    }
+
+    /// A JSON `false` (a per-layer "do not quantize" entry).
+    private static func isFalse(_ value: NSNumber) -> Bool {
+        CFGetTypeID(value) == CFBooleanGetTypeID() && !value.boolValue
     }
 
     func allowsGrouping(chunkTokens: Int) -> Bool {

@@ -1,11 +1,19 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.12
+Version: v0.3.13
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.13 (2026-10-10, dense prefill route bound):**
+FR-CB2: the kernel-route rule covers every quantized projection, not only
+sorted-gather MoE experts. A shared prefill flattens `rows x chunk` into one
+quantized matmul, whose `qmv`/`qmm` switch sits at most at 33 rows, so a chunk
+co-batches only at or above 33 tokens on every model (MoE: the larger of 33
+and the sorted-gather bound). A model whose configuration declares no
+quantization, or excludes a layer from it, prefills every chunk alone.
+
 **Change log v0.3.12 (2026-10-10, kernel-route-invariant prefill groups):**
 FR-CB2: rows share a prefill forward only when the shared call takes the
 kernel route each row's own chunk takes alone. On sorted-gather MoE models a
@@ -584,7 +592,20 @@ MAY share a prefill forward only when `chunk x top-k >= max(16, 64,
 4 x experts)`, read from the loaded model's configuration (Qwen3.6-35B-A3B,
 256 experts, top-8: 128 tokens). A shorter chunk prefills alone. A model that
 reads as MoE without both an expert count and a top-k, or whose configuration
-cannot be read, prefills every chunk alone. Dense models are unconstrained.
+cannot be read, prefills every chunk alone.
+
+**(v0.3.13)** The rule also covers every dense quantized projection
+(attention, MLP, shared expert, router, linear-attention projections and the
+output head). A shared prefill feeds `[rows, chunk]` tokens, which MLX flattens
+into one quantized matmul of `rows x chunk` rows; the call takes `qmv` below
+the projection's vector limit and `qmm` at or above it, and that limit is at
+most 33 for every shape and device in the pinned MLX core. A chunk MAY
+therefore share a prefill forward only when it is at least 33 tokens on a
+dense model, and at least the larger of 33 and the sorted-gather bound on an
+MoE model (Qwen3.6-27B: 33 tokens; Qwen3.6-35B-A3B: 128). Unquantized matmuls
+choose split-K partitions from the row count, so a model whose configuration
+declares no `quantization` (or `quantization_config`) object, or excludes a
+layer from quantization, MUST prefill every chunk alone.
 
 For a fresh prompt, prefill MUST commit the complete prompt sequence; it MUST
 NOT hold back the final prompt token for a decode call. Every non-final chunk is

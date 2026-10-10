@@ -2931,10 +2931,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
-    // The grouping bound is the smallest chunk whose own expert selections
-    // already take `gather_qmm_rhs` (and the SwitchGLU sort): ceil(max(16,
-    // 64, 4 * experts) / top-k). An MoE configuration without both counts,
-    // or no readable configuration, never groups; a dense model always may.
+    // The grouping bound is the smallest chunk that already takes every
+    // grouped route by itself: `qmm` for each quantized projection (33, the
+    // core fork's largest `get_qmv_batch_limit`), and on MoE models also
+    // `gather_qmm_rhs` and the SwitchGLU sort: ceil(max(16, 64, 4 * experts)
+    // / top-k). An MoE configuration without both counts, an unquantized
+    // configuration, a per-layer quantization exclusion, or no readable
+    // configuration never groups.
     func testPrefillGroupingRuleFromModelConfiguration() {
         func rule(_ json: String?, modelID: String? = nil) -> Int {
             ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
@@ -2942,28 +2945,44 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 modelID: modelID
             ).minimumGroupedChunkTokens
         }
-        // Served Qwen3.6-35B-A3B: experts and top-k live in `text_config`.
+        let q4 = #""quantization":{"group_size":64,"bits":4,"mode":"affine"}"#
+        // Served Qwen3.6-35B-A3B: experts and top-k live in `text_config`;
+        // the router and shared expert carry 8-bit overrides.
         XCTAssertEqual(rule(#"""
             {"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"],
+             "quantization":{"group_size":64,"bits":4,"mode":"affine",
+                             "language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8}},
              "text_config":{"model_type":"qwen3_5_moe_text","num_experts":256,"num_experts_per_tok":8}}
             """#), 128)
-        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,"num_experts_per_tok":8}"#), 64)
-        XCTAssertEqual(rule(#"{"model_type":"glm4_moe","n_routed_experts":128,"num_experts_per_tok":8}"#), 64)
-        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":128,"num_experts_per_tok":4}"#), 128)
-        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":32,"experts_per_token":4}"#), 32)
-        XCTAssertEqual(rule(#"{"model_type":"gemma4","text_config":{"num_experts":128,"top_k_experts":8}}"#), 64)
-        // Few experts: the SwitchGLU sort bound (64 selections) dominates.
-        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":4,"num_experts_per_tok":2}"#), 32)
-        XCTAssertEqual(rule(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#), 1)
-        XCTAssertEqual(rule(#"{"model_type":"llama"}"#, modelID: "meta/llama-3.1-8b"), 1)
-        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128}"#), Int.max)
-        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe"}"#), Int.max)
-        XCTAssertEqual(rule(#"{"model_type":"custom","num_experts_per_tok":8}"#), Int.max)
-        XCTAssertEqual(rule(#"{"model_type":"custom","moe_intermediate_size":512}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,"num_experts_per_tok":8,\#(q4)}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"glm4_moe","n_routed_experts":128,"num_experts_per_tok":8,\#(q4)}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":128,"num_experts_per_tok":4,\#(q4)}"#), 128)
+        // gpt-oss-20b: the sorted-gather bound (32) is below the dense one.
+        XCTAssertEqual(rule(#"""
+            {"model_type":"gpt_oss","num_local_experts":32,"experts_per_token":4,
+             "quantization_config":{"group_size":32,"bits":4,"mode":"mxfp4"}}
+            """#), 33)
+        XCTAssertEqual(rule(#"{"model_type":"gemma4","text_config":{"num_experts":128,"top_k_experts":8,\#(q4)}}"#), 64)
+        // Few experts: the SwitchGLU sort bound (32) is below the dense one.
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":4,"num_experts_per_tok":2,\#(q4)}"#), 33)
+        // Dense quantized models (served Qwen3.6-27B) group from 33 tokens.
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"],\#(q4)}"#), 33)
+        XCTAssertEqual(rule(#"{"model_type":"llama",\#(q4)}"#, modelID: "meta/llama-3.1-8b"), 33)
+        // Unquantized or partly unquantized: never group.
+        XCTAssertEqual(rule(#"{"model_type":"llama"}"#, modelID: "meta/llama-3.1-8b"), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":256,"num_experts_per_tok":8}"#), Int.max)
+        XCTAssertEqual(rule(#"""
+            {"model_type":"llama","quantization":{"group_size":64,"bits":4,"model.layers.0.mlp.down_proj":false}}
+            """#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe",\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","num_experts_per_tok":8,\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","moe_intermediate_size":512,\#(q4)}"#), Int.max)
         XCTAssertEqual(rule(nil), Int.max)
         XCTAssertEqual(rule("not json"), Int.max)
         XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 0, topK: 8), .ungrouped)
         XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: Int.max, topK: 8), .ungrouped)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.denseQuantized.minimumGroupedChunkTokens, 33)
     }
 
     // A prefill chunk below the grouping bound runs alone even when another

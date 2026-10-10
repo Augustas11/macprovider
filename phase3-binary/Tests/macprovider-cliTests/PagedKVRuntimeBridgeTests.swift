@@ -1343,29 +1343,68 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     /// Grouped CB prefill must not change a row's kernel route. A tiny real
-    /// Qwen3.5 MoE (4 experts, top-2, 4-bit `switch_mlp`) has a grouping
-    /// bound of 32 tokens per chunk: a 24-token chunk alone carries 48 expert
-    /// selections (unsorted `gather_qmv`) and two of them carry 96
-    /// (sorted, `gather_qmm_rhs`). Two short prompts arriving together must
-    /// therefore prefill alone and generate exactly what each generates by
-    /// itself; two prompts at the bound share one forward and still match.
+    /// Qwen3.5 MoE (4 experts, top-2), every projection 4-bit, has a grouping
+    /// bound of 33 tokens per chunk: below it a chunk alone takes `qmv`
+    /// (`qmv_quad` at K 64) for its dense projections and an unsorted
+    /// `gather_qmv` for its experts (48 selections), while two grouped chunks
+    /// take `qmm` and the sorted gather. Two short prompts arriving together
+    /// must therefore prefill alone and generate exactly what each generates
+    /// by itself; two prompts at the bound share one forward and still match.
     func testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound() async throws {
         try requireMetal()
-        let configData = Data(Self.tinyQwen35MoEConfiguration.utf8)
-        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(configData, modelID: nil)
-        XCTAssertEqual(rule.minimumGroupedChunkTokens, 32)
+        try await assertPrefillGroupingFollowsTheKernelRouteBound(
+            configuration: Self.tinyQwen35MoEConfiguration,
+            expectedBound: 33,
+            requiresQuantizedExperts: true
+        )
+    }
+
+    /// The same for a dense model (Qwen3.6-27B shape class): a shared prefill
+    /// flattens rows x chunk into each quantized projection's M, so a
+    /// 24-token chunk takes `qmv` alone and `qmm` beside a second row. Below
+    /// the 33-token bound the rows prefill alone; at the bound they group,
+    /// and both match their lone serial greedy tokens.
+    func testRealQwen35DensePrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        try await assertPrefillGroupingFollowsTheKernelRouteBound(
+            configuration: Self.tinyQwen35DenseConfiguration,
+            expectedBound: 33,
+            requiresQuantizedExperts: false
+        )
+    }
+
+    private func assertPrefillGroupingFollowsTheKernelRouteBound(
+        configuration json: String,
+        expectedBound: Int,
+        requiresQuantizedExperts: Bool
+    ) async throws {
+        let configData = Data(json.utf8)
+        // The served artifacts declare 4-bit affine quantization at the top
+        // level of `config.json`; the rule reads it from there.
+        var served = try XCTUnwrap(JSONSerialization.jsonObject(with: configData) as? [String: Any])
+        served["quantization"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+            try JSONSerialization.data(withJSONObject: served),
+            modelID: nil
+        )
+        XCTAssertEqual(rule.minimumGroupedChunkTokens, expectedBound)
 
         let configuration = try JSONDecoder().decode(Qwen35TextConfiguration.self, from: configData)
         MLXRandom.seed(1906)
         let target = Qwen35TextModel(configuration)
-        quantize(model: target, groupSize: 64, bits: 4, mode: .affine, filter: { path, _ in
-            path.contains("switch_mlp")
-        })
+        quantize(model: target, groupSize: 64, bits: 4, mode: .affine)
         eval(target)
-        XCTAssertTrue(
-            target.leafModules().flattened().contains { $0.1 is QuantizedSwitchLinear },
-            "the expert projections must run the quantized gather kernels"
+        let leaves = target.leafModules().flattened().map(\.1)
+        XCTAssertFalse(
+            leaves.contains { type(of: $0) == Linear.self },
+            "every projection must run the quantized matmul kernels"
         )
+        if requiresQuantizedExperts {
+            XCTAssertTrue(
+                leaves.contains { $0 is QuantizedSwitchLinear },
+                "the expert projections must run the quantized gather kernels"
+            )
+        }
 
         func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
             let cache = try target.newCache(parameters: nil)
@@ -1383,7 +1422,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 128)
         for (length, expectedGroups) in [
             (24, [["hold"], ["row-a"], ["row-b"]]),
-            (32, [["hold"], ["row-a", "row-b"]]),
+            (expectedBound, [["hold"], ["row-a", "row-b"]]),
         ] {
             let prompts = [
                 "row-a": Self.tinyPrompt(length: length, salt: 31, vocabulary: 64),
@@ -3933,6 +3972,38 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
           "full_attention_interval": 2,
           "mtp_num_hidden_layers": 1,
           "mtp_use_dedicated_embeddings": false,
+          "rope_parameters": {
+            "type": "default",
+            "rope_theta": 100000.0,
+            "partial_rotary_factor": 0.25
+          }
+        }
+        """
+
+    /// Tiny dense Qwen3.5 (hybrid linear/full attention). Linear inputs are
+    /// 64 wide so every projection quantizes at group size 64.
+    private static let tinyQwen35DenseConfiguration = """
+        {
+          "model_type": "qwen3_5_text",
+          "hidden_size": 64,
+          "num_hidden_layers": 2,
+          "intermediate_size": 64,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 32,
+          "linear_num_value_heads": 2,
+          "linear_num_key_heads": 1,
+          "linear_key_head_dim": 32,
+          "linear_value_head_dim": 32,
+          "linear_conv_kernel_dim": 2,
+          "rms_norm_eps": 1e-6,
+          "vocab_size": 64,
+          "rope_theta": 100000.0,
+          "partial_rotary_factor": 0.25,
+          "max_position_embeddings": 256,
+          "tie_word_embeddings": true,
+          "attention_bias": false,
+          "full_attention_interval": 2,
           "rope_parameters": {
             "type": "default",
             "rope_theta": 100000.0,

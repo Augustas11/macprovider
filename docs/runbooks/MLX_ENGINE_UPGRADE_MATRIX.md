@@ -81,9 +81,26 @@ MLX core (`v0.32.2..v0.32.2-macprovider.2`):
 
 ### Bounded routing exceptions
 
-The batch-invariant routing covers `QuantizedMatmul`. These routes still
-depend on the call's shape:
+Within each route, `QuantizedMatmul` is batch invariant: a row's result
+does not depend on how many rows share the call. These routes still depend on
+the call's shape:
 
+- `QuantizedMatmul` (`mlx/backend/metal/quantized.cpp` ~1798) flattens
+  `[rows, chunk]` to `M = rows x chunk` and takes `qmv` (`qmv_quad` at K
+  64/128) below `vector_limit`, `qmm` at or above it.
+  `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed weights
+  (4 otherwise); across every architecture generation, device class and shape
+  its largest value is 33 (M3 Ultra: 32 for K, N <= 2048, 18 up to 4096, 12
+  above; M5-class: 33/25/13). **Prefill is enforced by the CB grouping
+  rule** below: a chunk co-batches only at 33 tokens or more, where it
+  already takes `qmm` alone. Before that bound, on the Studio every
+  Qwen3.6-27B projection has limit 12, so a 6-11-token chunk took `qmv` alone
+  and `qmm` beside a second row. Decode carries one token per row, so `M` is
+  the decode row count (at most 8). That stays below the limit on the Studio
+  (smallest limit 12) and on every Ultra and M3-or-later device, but M1/M2
+  non-Ultra devices have limit 6 for K or N above 4096, where 6-8 decode rows
+  switch to `qmm`. The grouping rule cannot cover decode; a CB tuple on such
+  a device needs its own batched-isolation evidence at 6-8 rows.
 - `GatherQMM` (`mlx/backend/metal/quantized.cpp` ~1901) takes
   `gather_qmm_rhs` for sorted gathers when `M == 1`, `B >= 16` and
   `B / E >= 4`, otherwise `gather_qmv`. MoE expert projections sort once a
@@ -104,17 +121,33 @@ depend on the call's shape:
   `38aff2880`: 69 of 108 grouped rows differed from their lone runs, exactly
   in the groups whose combined selections reach 1024). Now
   `ContinuousBatchPrefillGroupingRule` (`ContinuousBatchScheduler.swift`,
-  SPEC-038 FR-CB2 v0.3.11) co-batches a chunk only when
+  SPEC-038 FR-CB2 v0.3.11/v0.3.12) co-batches a chunk only when it is at
+  least 33 tokens (the `QuantizedMatmul` bound above) and, on MoE models,
   `chunk x top-k >= max(16, 64, 4 x experts)`, read from the loaded model's
-  `config.json` (A3B: 128 tokens). Shorter chunks prefill alone; an MoE
-  configuration without both counts prefills every chunk alone. The serve log
-  prints `event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=N`
-  at scheduler build. At the default 512-token chunk the scheduler balances
+  `config.json` (A3B: 128 tokens; Qwen3.6-27B: 33). Shorter chunks prefill
+  alone; an MoE configuration without both counts, or a configuration that
+  declares no quantization or excludes a layer from it, prefills every chunk
+  alone. The serve log prints
+  `event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=N` at
+  scheduler build. At the default 512-token chunk the scheduler balances
   the chunks of an uncached prompt of 128 or more tokens to at least 128
   tokens each, so long prompts still group (R015: 1536/4096 tokens in
   512-token chunks).
   The rule's constants are the fork's routing bounds: a rebase that changes
-  the `GatherQMM` condition or the `SwitchGLU` sort threshold updates them.
+  `get_qmv_batch_limit`, the `GatherQMM` condition or the `SwitchGLU` sort
+  threshold updates them.
+- Unquantized matmuls (steel GEMM) take `gemv_wide` for 2-15 rows and pick
+  split-K partitions and tiles from M. The served Qwen3.6 text paths have no
+  unquantized matmul (the only unquantized text weights are the depthwise
+  `conv1d` of the linear-attention layers, a per-row kernel; the unquantized
+  vision tower does not run for text). The grouping rule never groups a model
+  whose configuration declares no quantization or excludes a layer.
+- Attention picks its kernel from the query length, key length, head
+  dimensions and mask, never from the batch. Grouped rows share chunk length
+  and offset, so they take the same attention route as each row alone. With
+  head dimension 256 and more than 8 query tokens the unfused path runs
+  batched GEMMs whose tile size follows `rows x heads x L x keys`; tiles
+  change the blocking, not each element's K accumulation order.
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it
@@ -152,7 +185,7 @@ results in the evidence header.
 | Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
 | Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule`. |
-| Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. |
+| Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with prompts below and above the 33-token bound. |
 
 ## Package and toolchain preflight
 
