@@ -300,11 +300,27 @@ func TestRelayBlindPendingExpiresAndIsBounded(t *testing.T) {
 	if got := r.pendingOn("mine", "q", now); got != 1 {
 		t.Fatalf("pending=%d, want this account tracked whatever other accounts hold", got)
 	}
-	// Once those expire, the periodic sweep prunes idle accounts.
-	later := now.Add(2 * time.Minute)
-	r.notePending("fresh", "p", "b", later.Add(time.Minute).Unix(), later)
-	if r.pendingCount != 1 || len(r.pending) != 1 {
-		t.Fatalf("pending count=%d accounts=%d after expiry, want idle accounts swept", r.pendingCount, len(r.pending))
+}
+
+// Expired entries of idle accounts are swept by the timer with no further
+// reservation traffic, and the timer stops once the index is empty.
+func TestRelayBlindPendingSweepsWithoutTraffic(t *testing.T) {
+	r := &relayBlindService{sweepEvery: 10 * time.Millisecond}
+	now := time.Now()
+	r.notePending("idle-a", "p", "b1", now.Add(time.Second).Unix(), now)
+	r.notePending("idle-b", "q", "b2", now.Add(time.Second).Unix(), now)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.mu.Lock()
+		count, accounts, timer := r.pendingCount, len(r.pending), r.pendingTimer
+		r.mu.Unlock()
+		if count == 0 && accounts == 0 && timer == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pending count=%d accounts=%d timer armed=%v, want swept and stopped", count, accounts, timer != nil)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

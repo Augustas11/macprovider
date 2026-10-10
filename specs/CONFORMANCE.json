@@ -11687,7 +11687,8 @@
         "phase4-coordinator/internal/buyer/slot_queue.go:enterPinned",
         "phase4-coordinator/internal/buyer/slot_queue.go:reserveHead",
         "phase4-coordinator/internal/buyer/relay_blind.go:lockAccountSelection",
-        "phase4-coordinator/internal/buyer/slot_queue.go:hasStandardWaiters"
+        "phase4-coordinator/internal/buyer/slot_queue.go:hasStandardWaiters",
+        "phase4-coordinator/internal/buyer/relay_blind.go:sweepPending"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionSpreadsUndispatchedReservations",
@@ -11696,6 +11697,7 @@
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionPrefersFreeEnrolledProvider",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacySelectionIgnoresOtherAccountsPending",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacyChatWaitsThroughSustainedPlaintextLoad",
+        "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestRelayBlindPendingSweepsWithoutTraffic",
         "phase4-coordinator/internal/buyer/privacy_slot_aware_test.go:TestPrivacyReservationPendingClearsAtDispatch",
         "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueAlternatesLanesWhenBothWait",
         "phase4-coordinator/internal/buyer/slot_queue_fairness_test.go:TestSlotQueueSustainedPlaintextLoadGivesPinnedFairShare",

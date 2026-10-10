@@ -51,7 +51,11 @@ type relayBlindService struct {
 	// orders candidates only; it is never an eligibility input.
 	pending      map[string]map[string]map[string]int64
 	pendingCount int
-	pendingSwept time.Time
+	// pendingTimer sweeps expired entries of every account while the index
+	// is non-empty; it is nil when the index is empty. sweepEvery overrides
+	// relayBlindPendingSweep in tests.
+	pendingTimer *time.Timer
+	sweepEvery   time.Duration
 	// selecting serializes one account's selection through notePending, so
 	// two concurrent reservations of that account see each other.
 	selecting map[string]*relayBlindAccountGate
@@ -69,8 +73,9 @@ const relayBlindDurableWriteTimeout = 5 * time.Second
 // index; past it new reservations of that account are not tracked, which
 // only weakens that account's own spreading. There is no shared cap, so one
 // account's tracking never depends on another's. Every entry mirrors an
-// unexpired reservation row the store already holds, and a full sweep runs
-// at least once per relayBlindPendingSweep, so memory follows the store.
+// unexpired reservation row the store already holds, and a timer sweeps the
+// whole index every relayBlindPendingSweep while it is non-empty, so memory
+// follows the store whether or not reservation traffic continues.
 const (
 	relayBlindPendingPerAccount = 64
 	relayBlindPendingSweep      = 30 * time.Second
@@ -118,13 +123,6 @@ func (r *relayBlindService) notePending(accountID, providerID, binding string, e
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prunePendingLocked(accountID, now)
-	if now.Sub(r.pendingSwept) >= relayBlindPendingSweep {
-		// Idle accounts are pruned only here.
-		for other := range r.pending {
-			r.prunePendingLocked(other, now)
-		}
-		r.pendingSwept = now
-	}
 	account := r.pending[accountID]
 	held := 0
 	for _, bindings := range account {
@@ -149,6 +147,32 @@ func (r *relayBlindService) notePending(accountID, providerID, binding string, e
 		r.pendingCount++
 	}
 	bindings[binding] = expiresAtUnix
+	if r.pendingTimer == nil {
+		r.pendingTimer = time.AfterFunc(r.pendingSweepInterval(), r.sweepPending)
+	}
+}
+
+func (r *relayBlindService) pendingSweepInterval() time.Duration {
+	if r.sweepEvery > 0 {
+		return r.sweepEvery
+	}
+	return relayBlindPendingSweep
+}
+
+// sweepPending prunes expired entries of every account and re-arms itself
+// while any entry remains.
+func (r *relayBlindService) sweepPending() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for accountID := range r.pending {
+		r.prunePendingLocked(accountID, now)
+	}
+	if r.pendingCount == 0 {
+		r.pendingTimer = nil
+		return
+	}
+	r.pendingTimer = time.AfterFunc(r.pendingSweepInterval(), r.sweepPending)
 }
 
 // clearPending drops a reservation once it reaches the dispatch slot wait.
