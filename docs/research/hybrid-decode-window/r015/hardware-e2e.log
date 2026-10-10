@@ -1,0 +1,18 @@
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] serialA=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] decodeB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] serialB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570]
+[paged-kv] moe-isolation rejoin decodeA=[5396] serialA=[5396] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 13, 271, 248068, 198] serialA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 13, 271, 248068, 198] decodeB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436] serialB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436]
+[paged-kv] moe-isolation rejoin decodeA=[90700] serialA=[90700] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] serialA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] decodeB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15] serialB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
+[paged-kv] moe-isolation rejoin decodeA=[727] serialA=[727] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=9 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+event=batching_admitted action=scheduler_admitted
+{"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"qwen/qwen3.6-35b-a3b","target_sha256":"3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1","mtp_sha256":"fa01beecb6c1e76845e9880623c3b5a009baa602c52e9e9b5d12edc489a23fd2","admissions":3,"max_observed_batch_depth":2,"serve_path_verified":true}
