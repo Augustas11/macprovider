@@ -338,8 +338,9 @@ func TestPrivacyChatSaturatedThroughReservationExpiryIsPostureStale(t *testing.T
 	}
 }
 
-// Relay-blind waits are capped per provider so they cannot fill the slot
-// queue plaintext routing shares.
+// Pinned waiters wait in their own lane, capped per provider at half the
+// plaintext lane cap, so they can neither fill nor be crowded out of the
+// queue plaintext routing shares (SPEC-049-R029).
 func TestRelayBlindSlotWaitersAreCappedPerProvider(t *testing.T) {
 	var dispatches atomic.Int32
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
@@ -347,41 +348,55 @@ func TestRelayBlindSlotWaitersAreCappedPerProvider(t *testing.T) {
 	h.server.slotQueueDeadline = 5 * time.Second
 	h.server.slotQueuePollInterval = 5 * time.Millisecond
 	_, rawA, authA := h.consumePrivacy(t, "privacy-saturated-cap-a")
-	reservationB, rawB, authB := h.consumePrivacy(t, "privacy-saturated-cap-b")
+	_, rawB, authB := h.consumePrivacy(t, "privacy-saturated-cap-b")
+	reservationC, rawC, authC := h.consumePrivacy(t, "privacy-saturated-cap-c")
 	h.setSlots(t, pool.StateBusy, 0)
-
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", rawA, authA, nil)
-	}()
-	h.waitForSlotWaiter(t)
-	second := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", rawB, authB, nil)
-	if second.Code != http.StatusServiceUnavailable || !strings.Contains(second.Body.String(), `"code":"relay_blind_provider_unsupported"`) {
-		t.Fatalf("second waiter status=%d body=%s", second.Code, second.Body.String())
+	// The plaintext lane is full before any pinned waiter arrives.
+	for range 4 {
+		if _, ok := h.server.slotQueue.enter(h.provider.ProviderID); !ok {
+			t.Fatal("plaintext lane rejected a waiter below its cap")
+		}
 	}
-	row, err := h.store.LookupReservation(context.Background(), reservationB.ProviderBinding)
+
+	done := make(chan *httptest.ResponseRecorder, 2)
+	go func() { done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", rawA, authA, nil) }()
+	go func() { done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", rawB, authB, nil) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.server.slotQueue.mu.Lock()
+		pinned := h.server.slotQueue.laneLenLocked(h.provider.ProviderID, slotWaiterPinned)
+		h.server.slotQueue.mu.Unlock()
+		if pinned == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pinned waiters=%d, want 2 behind a full plaintext lane", pinned)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	third := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", rawC, authC, nil)
+	if third.Code != http.StatusServiceUnavailable || !strings.Contains(third.Body.String(), `"code":"relay_blind_provider_unsupported"`) {
+		t.Fatalf("third waiter status=%d body=%s", third.Code, third.Body.String())
+	}
+	row, err := h.store.LookupReservation(context.Background(), reservationC.ProviderBinding)
 	if err != nil || row.State != relayblind.ReservationStateRejected {
 		t.Fatalf("row=%#v err=%v", row, err)
 	}
-	h.server.slotQueue.mu.Lock()
-	queued := len(h.server.slotQueue.queues[h.provider.ProviderID])
-	h.server.slotQueue.mu.Unlock()
-	if queued != 1 {
-		t.Fatalf("relay-blind waiters in queue=%d, want 1", queued)
-	}
 	h.setSlots(t, pool.StateDraining, 0)
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("first chat never returned")
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("pinned chat never returned")
+		}
 	}
 	if dispatches.Load() != 0 {
 		t.Fatalf("dispatches=%d", dispatches.Load())
 	}
 }
 
-// A one-entry slot queue is never taken by a relay-blind waiter.
-func TestRelayBlindDoesNotQueueWhenQueueHasOnePosition(t *testing.T) {
+// A one-entry slot queue still gives the pinned lane one position.
+func TestRelayBlindQueuesWhenQueueHasOnePosition(t *testing.T) {
 	var dispatches atomic.Int32
 	h := newPrivacyHarness(t, privacyHarnessConfig{privacyKey: true, relayKey: true, relay: privacyCountingRelay(&dispatches)})
 	h.server.slotQueue = newSlotQueue(1)
@@ -389,9 +404,39 @@ func TestRelayBlindDoesNotQueueWhenQueueHasOnePosition(t *testing.T) {
 	h.server.slotQueuePollInterval = 5 * time.Millisecond
 	_, raw, authorization := h.consumePrivacy(t, "privacy-saturated-one-slot")
 	h.setSlots(t, pool.StateBusy, 0)
-	response := h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"relay_blind_provider_unsupported"`) || dispatches.Load() != 0 {
-		t.Fatalf("chat status=%d dispatches=%d body=%s", response.Code, dispatches.Load(), response.Body.String())
+	if _, ok := h.server.slotQueue.enter(h.provider.ProviderID); !ok {
+		t.Fatal("plaintext lane rejected its one waiter")
 	}
-	h.assertNoSlotLease(t)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- h.privacyRequest(t, http.MethodPost, "/v1/chat/completions", raw, authorization, nil)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		h.server.slotQueue.mu.Lock()
+		pinned := h.server.slotQueue.laneLenLocked(h.provider.ProviderID, slotWaiterPinned)
+		h.server.slotQueue.mu.Unlock()
+		if pinned == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pinned waiter never entered a one-position queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.setSlots(t, pool.StateDraining, 0)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("pinned chat never returned")
+	}
+	if dispatches.Load() != 0 {
+		t.Fatalf("dispatches=%d", dispatches.Load())
+	}
+	h.server.slotQueue.mu.Lock()
+	pinned := h.server.slotQueue.laneLenLocked(h.provider.ProviderID, slotWaiterPinned)
+	h.server.slotQueue.mu.Unlock()
+	if pinned != 0 {
+		t.Fatalf("pinned waiter leaked: %d", pinned)
+	}
 }

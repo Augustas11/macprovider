@@ -718,6 +718,7 @@ actor CoordinatorClient {
     private let autoupdateLocalHealthSleep: @Sendable () async -> Void
     private let autoupdateReloadHelperFence: ReloadHelperFence
     private let lifecycleStateStore: ProviderLifecycleStateStore
+    private let operatorResumeLeaseStore: ProviderLifecycleLeaseStore
     private let lifecycleOperationID: String?
     private var operatorPaused: Bool
     private var catalogWarmSwapInvalidated = false
@@ -801,6 +802,7 @@ actor CoordinatorClient {
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         privacyLabIdentityScope: PrivacyLabIdentityScope? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
+        operatorResumeLeaseStore: ProviderLifecycleLeaseStore? = nil,
         lifecycleOperationID: String? = nil,
         operatorPausedInitially: Bool = false,
         watchdogExitPreparation: @escaping @Sendable () -> Void = {},
@@ -1006,6 +1008,9 @@ actor CoordinatorClient {
         self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
         self.privacyLabIdentityScope = privacyLabIdentityScope
         self.lifecycleStateStore = lifecycleStateStore
+        self.operatorResumeLeaseStore = operatorResumeLeaseStore ?? ProviderLifecycleLeaseStore(
+            url: ProviderLifecycleLeaseStore.operatorResumeURL(lifecycleStateURL: lifecycleStateStore.url)
+        )
         self.lifecycleOperationID = lifecycleOperationID
         self.operatorPaused = operatorPausedInitially
         self.sleepAssertionFactory = sleepAssertionFactory
@@ -6118,6 +6123,16 @@ actor CoordinatorClient {
         }
 
         let operationID = "operator-resume:\(UUID().uuidString.lowercased())"
+        let resumeLease: ProviderLifecycleLeaseRecord
+        do {
+            // Publish grace before the durable pause fence is cleared. The
+            // watchdog must be able to read it while HTTP is still recovering.
+            // A separate slot cannot displace an update/maintenance lease.
+            // The unpaused replay guard above never renews an existing window.
+            resumeLease = try operatorResumeLeaseStore.acquireOperatorResumeGrace()
+        } catch {
+            return .rejected("operator_resume_grace_persistence_failed")
+        }
         do {
             _ = try recordLifecycleTransition(
                 to: .locallyReadyConnecting,
@@ -6128,6 +6143,7 @@ actor CoordinatorClient {
                 operatorPaused: false
             )
         } catch {
+            _ = try? operatorResumeLeaseStore.clear(ifLeaseID: resumeLease.leaseID)
             return .rejected("lifecycle_state_persistence_failed")
         }
 

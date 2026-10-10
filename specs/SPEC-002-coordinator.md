@@ -1,6 +1,16 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.13 (2026-10-10, revoked-release rollback signal)
+**Version:** 1.6.14 (2026-10-11, pinned slot-queue lane)
+
+**Change log v1.6.14 (2026-10-11, issue #1911):** the bounded slot queue
+(SPEC-006 §7.8) is FIFO per provider within each of two lanes. Plaintext
+requests keep their lane, cap, deadline and capacity shed. Relay-blind and
+privacy-class chats pinned to one session wait in a separate lane capped at
+half the plaintext cap (SPEC-049-R029). Queue grants alternate between the
+lanes while both wait. Reservation selection for those classes prefers
+providers with an unclaimed free seat, counting the buyer's own undispatched reservations,
+and starts each tier at a random provider. Plaintext candidate selection and
+sort order are unchanged. No wire-protocol change.
 
 **Change log v1.6.13 (2026-10-10, issue #1880, admission #1914):** SPEC-002-R004
 adds `compatibility_set_revoked` to the configured `hello_ack` and accepted
