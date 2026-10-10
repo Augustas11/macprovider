@@ -60,7 +60,7 @@ Verified 2026-10-10 against public release metadata, the release train
 | Admission | Repository policy (#1919): every well-formed release from this repository connects and gets the recommendation; 42 exact revocations (the v1.8.34–v1.8.123 seed) make those builds update-only. No accepted-id list. |
 | Canary | Studio canary on 1.8.232 passed with CB live-verified; e2e gate recorded as CF-232-E2E (below). |
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
-| Mirror discovery caveat | `download.malibu.tech/releases/latest.json` still reports `v1.8.224` (checked 2026-10-10); do not claim the mirror channel is synchronized. |
+| Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
 ## Next CLI release — net changes vs 1.8.232
 
@@ -76,6 +76,11 @@ fleet before the canary passes.
 | `cli/auto-cb-slots` | CB/MTP simplification: CB on by default, per-Mac self-check (batched-vs-alone exactness at every granted slot count, net-gain check) picks the served slots; signed CB/MTP policy becomes revocation-only; native MTP model-keyed | in progress (no PR yet; opens after #1927 merges) |
 | #1944 | Calendar-expiry removal (catalog, native-MTP sidecar, discovery head, autotune feed age) | in progress (audit fixes) |
 | `cli/revoked-build-downgrade` | Rollback lever: a Mac on an exactly revoked build may update down to the coordinator-recommended, validly signed release (coordinator path only, never the discovery rail) | in progress (must ship in this same release) |
+
+Before the cut: run the CLI train's pending one-time `privacy_release_setup` step
+(`privacy_class.release_code_identities` on Pearl, #1934), so the new build's
+privacy code identity is admitted from signed release metadata instead of a
+hand-added cdhash.
 
 Release plan:
 1. Cut the candidate from `main` after every row above is merged.
