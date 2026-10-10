@@ -215,7 +215,7 @@ printf '{"step":"signed_byte_verification","run_id":"111","candidate_sha":"%s","
 OLD="test/repo:v$LIVE@$(printf '0%.0s' $(seq 40))"
 pearl_config() {  # pearl_config "ACCEPTED_ID ..." METADATA_DIR_OR_EMPTY [APPROVED_CDHASH]
   {
-    printf 'listen:\n  bind_address: 127.0.0.1\ncoordinator:\n  compatibility_set:\n    target_id: %s\n    accepted_ids:\n' "$OLD"
+    printf 'listen:\n  bind_address: 127.0.0.1\ncoordinator:\n  compatibility_set:\n    target_id: %s\n    accepted_ids:\n' "${TARGET_ID:-$OLD}"
     for id in $1; do printf '    - %s\n' "$id"; done
     # The seed is applied unless NO_SEED is set; REVOKED adds one more id.
     if [ -z "${NO_SEED:-}" ] || [ -n "${REVOKED:-}" ]; then
@@ -421,6 +421,24 @@ if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator
   "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "seed not written as revoked_ids in one restart"; fi
 run_rc 0 "status after the seed" scripts/ops/cli-release.sh status
 if [ "$(state_of revocation_seed)" = done ]; then ok; else bad "seed not live"; fi
+# A seed id that is the current target is deferred, never a looping refusal:
+# the rest is revoked; after the target moves off it, the step revokes it.
+TARGET_ID="$SEED1" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
+run_rc 0 "seed with the incumbent target in it" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "seed applied except the deferred target" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == [sys.argv[2]] and c["target_id"] == sys.argv[3] else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED2" "$SEED1"; then ok; else bad "deferred target was revoked or the rest was not"; fi
+run_rc 0 "status with the deferred target" scripts/ops/cli-release.sh status
+case "$(state_of revocation_seed):$(next_field id)" in done:revocation_seed) bad "seed step loops on the deferred target" ;; done:*) ok ;; *) bad "deferred seed not done: $(state_of revocation_seed)" ;; esac
+REVOKED="$SEED2" NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot   # recommendation_bump moved the target
+run_rc 0 "deferred seed id after the target moved" scripts/ops/cli-release.sh status
+expect_next revocation_seed:mutate
+MACPROVIDER_OPS_OWNER=t run_rc 0 "deferred seed id revoked" scripts/ops/cli-release.sh next --run
+bash "$W/scripts/ops/live-lock.sh" release t 2>/dev/null
+if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if sorted(c["revoked_ids"]) == sorted(sys.argv[2:]) else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2"; then ok; else bad "deferred seed id not revoked after the target moved"; fi
 # An old runtime never gets the seed step as next.
 NO_SEED=1 pearl_config "$OLD $COMPAT" "$META"; pearl_boot
 health_legacy v9.0.0 "$LIVE"

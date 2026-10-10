@@ -62,7 +62,9 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   edit (that field is deprecated and ignored). Step `revocation_seed` applies
   the checked-in one-time seed
   (`phase4-coordinator/dist/compatibility-revoked-ids.txt`) to the live
-  `revoked_ids` with one restart, on a repository-mode runtime only.
+  `revoked_ids` with one restart, on a repository-mode runtime only; a seed
+  id that is the current target is deferred until `recommendation_bump`
+  moves the target, then revoked by the same step.
 - Release tags count only with an approved signer: list SSH signers in
   `MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS` (an allowed-signers file, default
   `~/.config/macprovider/release-tag-allowed-signers`) or OpenPGP fingerprints

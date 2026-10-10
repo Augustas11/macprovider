@@ -30,7 +30,9 @@
 #                           scripts/legacy-compatibility-revocations.py) must be in the live
 #                           /healthz compatibility_policy_revoked_ids; next --run: _revoke-seed
 #                           (_pearl-config --revoke, restart). Revoked releases stay connected
-#                           update-only and auto-update. Offered only on a repository-mode runtime
+#                           update-only and auto-update. Offered only on a repository-mode runtime.
+#                           A seed id that is the live target is deferred (never refused in a
+#                           loop) and revoked by this step after recommendation_bump moves it
 #   5 pearl_accepted_ids    read-only, no Pearl edit (SPEC-002-R004): done when the running
 #                           coordinator admits the candidate by policy (well-formed, from the
 #                           target_id repository, not in revoked_ids). The policy is read from
@@ -210,25 +212,33 @@ revocation_seed_ids() {
   grep -v '^#' "$REPO_ROOT/phase4-coordinator/dist/compatibility-revoked-ids.txt" | sed '/^$/d'
 }
 
-# revocation_seed_missing: seed ids the live /healthz policy does not revoke.
+# revocation_seed_missing [deferred]: seed ids the live /healthz policy does
+# not revoke, one per line. The live target can never be revoked, so a seed id
+# that is the current target is deferred: printed only with "deferred", and
+# revoked by this step once recommendation_bump has moved the target off it.
 revocation_seed_missing() {
-  python3 - "$OPS_TMP_DIR/healthz.json" <(revocation_seed_ids) <<'PY'
+  python3 - "$OPS_TMP_DIR/healthz.json" <(revocation_seed_ids) "${1:-}" <<'PY'
 import json, sys
 try:
-    live = set(json.load(open(sys.argv[1])).get("compatibility_policy_revoked_ids") or [])
+    health = json.load(open(sys.argv[1]))
 except (OSError, ValueError):
-    live = set()
+    health = {}
+live = set(health.get("compatibility_policy_revoked_ids") or [])
+target = health.get("compatibility_policy_target_id") or ""
 for line in open(sys.argv[2]):
-    if line.strip() and line.strip() not in live:
-        print(line.strip())
+    item = line.strip()
+    if item and item not in live and (item == target) == (sys.argv[3] == "deferred"):
+        print(item)
 PY
 }
 
-# _revoke-seed: add the checked-in seed to Pearl's revoked_ids (next --run only).
+# _revoke-seed: add the checked-in seed, except a deferred current target, to
+# Pearl's revoked_ids (next --run only).
 revoke_seed() {
   local ids
-  ids="$(revocation_seed_ids | tr '\n' ' ')"
-  [ -n "$ids" ] || refuse "the revocation seed is empty"
+  fetch_coordinator_health || refuse "live coordinator /healthz unreadable"
+  ids="$(revocation_seed_missing | tr '\n' ' ')"
+  [ -n "${ids// /}" ] || refuse "no seed id is due (the rest, if any, is deferred while it is the target)"
   # shellcheck disable=SC2086  # one argument per id
   pearl_config --revoke $ids
 }
@@ -451,10 +461,13 @@ bash scripts/release-staged-version-policy.sh v$V" \
   fi
   # 4c. one-time revocation seed (SPEC-002-R004), checked against the
   # policy the running coordinator reports; only on a repository-mode runtime.
-  local seed_missing
+  local seed_missing seed_deferred
   seed_missing="$(revocation_seed_missing)"
+  seed_deferred="$(revocation_seed_missing deferred)"
   if [ "$REG_MODE" != repository ]; then
     step revocation_seed pending "applies after the repository-admission runtime ships (live mode: ${REG_MODE:-unknown})"
+  elif [ -z "$seed_missing" ] && [ -n "$seed_deferred" ]; then
+    step revocation_seed "done" "seed revoked except deferred current target $seed_deferred; this step revokes it after recommendation_bump moves the target"
   elif [ -z "$seed_missing" ]; then
     step revocation_seed "done" "live revoked_ids hold the $(revocation_seed_ids | wc -l | tr -d ' ') seed ids"
   else

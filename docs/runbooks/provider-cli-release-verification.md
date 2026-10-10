@@ -28,7 +28,9 @@ tag's commit) and checked offline by `... check`. After the
 repository-admission runtime ships, `cli-release.sh` step `revocation_seed`
 (`next --run`: `_revoke-seed`, one restart) adds any missing seed id to Pearl's
 `revoked_ids` and is done when `/healthz` lists them all. Those releases stay
-connected update-only and auto-update. Fleet recommendation still requires the
+connected update-only and auto-update. A seed id that is the current target
+cannot be revoked, so it is deferred (the step is done with a note) and the
+same step revokes it once `recommendation_bump` has moved the target off it. Fleet recommendation still requires the
 matching target: a binary recommendation of 223 with compatibility target 207
 fails the consumer updater's exact manifest-target comparison.
 
