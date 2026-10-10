@@ -809,14 +809,21 @@ func runCoordinator() (exitCode int) {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("open onboarding postgres store")
 		}
-		if cfg.Onboarding.AppTrackRegisterEnabled && strings.TrimSpace(cfg.Onboarding.AppAttestRecordDSN) != "" {
-			if err := onboardingStore.AttachAppAttestRecorder(cfg.Onboarding.AppAttestRecordDSN); err != nil {
-				logger.Fatal().Err(err).Msg("open app attest record postgres store")
-			}
-		}
 		defer onboardingStore.Close()
 		if err := onboardingStore.Smoke(context.Background()); err != nil {
 			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")
+		}
+		// SPEC-033-R004: a recorder problem disables App Attest recording only
+		// (the endpoints answer 503 and Macs stay on dual control); it never
+		// stops the coordinator. The error text is not logged: it can quote
+		// the DSN.
+		if cfg.Onboarding.AppTrackRegisterEnabled && strings.TrimSpace(cfg.Onboarding.AppAttestRecordDSN) != "" {
+			if err := onboardingStore.AttachAppAttestRecorder(cfg.Onboarding.AppAttestRecordDSN); err != nil {
+				logger.Error().Str("event", "app_attest_recorder_unavailable").Str("reason", "open_failed").Msg("App Attest recording disabled")
+			} else if err := onboardingStore.SmokeAppAttestRecorder(context.Background()); err != nil {
+				onboardingStore.DetachAppAttestRecorder()
+				logger.Error().Str("event", "app_attest_recorder_unavailable").Str("reason", "least_privilege_check_failed").Msg("App Attest recording disabled")
+			}
 		}
 		if cfg.Onboarding.AppTrackRegisterEnabled {
 			wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))

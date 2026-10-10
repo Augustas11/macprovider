@@ -230,8 +230,12 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// Any authenticated submit spends the provider's outstanding challenge,
+	// whatever the outcome (SPEC-033 §5.7.1 step 3).
+	now := h.appAttestNow()
 	body, err := readBoundedBody(w, r, appAttestSubmitMaxBody)
 	if err != nil {
+		h.AppAttestChallenges.Consume(providerID, nil, now)
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 32 KiB")
 		return
 	}
@@ -239,6 +243,7 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil || dec.Decode(&struct{}{}) != io.EOF {
+		h.AppAttestChallenges.Consume(providerID, nil, now)
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "body must be exactly one {challenge, key_id, attestation} object")
 		return
 	}
@@ -247,10 +252,11 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 	attestation, errA := base64.StdEncoding.DecodeString(req.Attestation)
 	if errC != nil || errK != nil || errA != nil || len(challenge) != appAttestChallengeBytes ||
 		len(keyID) != appattest.KeyIDBytes || len(attestation) == 0 || len(attestation) > appattest.MaxAttestationBytes {
+		h.AppAttestChallenges.Consume(providerID, nil, now)
 		writeJSONError(w, http.StatusBadRequest, "invalid_request", "challenge, key_id and attestation must be standard base64 of the required sizes")
 		return
 	}
-	if !h.AppAttestChallenges.Consume(providerID, challenge, h.appAttestNow()) {
+	if !h.AppAttestChallenges.Consume(providerID, challenge, now) {
 		writeJSONError(w, http.StatusConflict, "challenge_invalid", "challenge is unknown, used, expired, or issued to another provider")
 		return
 	}

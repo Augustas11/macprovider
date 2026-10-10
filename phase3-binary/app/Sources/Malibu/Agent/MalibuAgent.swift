@@ -1158,6 +1158,10 @@ final class MalibuAgent: ObservableObject {
                     try? await self.control?.send(.metricsRequest)
                     try? await self.control?.send(.statusRequest)
                     await self.requestReferralStatusIfDue()
+                    // Retries a failed App Attest enrollment while Malibu stays
+                    // open; the enrollment's own persisted backoff and the
+                    // single-task guard bound how often it runs.
+                    await self.scheduleAppAttestEnrollment()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
                         let pidGone = InstalledProviderMonitor.launchdServicePID() == nil

@@ -2771,8 +2771,28 @@ func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
 	if err := onboardingStore.AttachAppAttestRecorder(fx.roleDSN("app_attest_recorder")); err != nil {
 		t.Fatalf("attach recorder: %v", err)
 	}
-	if err := onboardingStore.Smoke(ctx); err != nil {
-		t.Fatalf("onboarding smoke with recorder: %v", err)
+	if err := onboardingStore.SmokeAppAttestRecorder(ctx); err != nil {
+		t.Fatalf("recorder least-privilege smoke: %v", err)
+	}
+	// Drift the recorder: a column-level write on a trust table, or a
+	// table-level UPDATE on the verification table, fails the policy.
+	for _, drift := range []struct{ grant, revoke string }{
+		{`GRANT UPDATE (trusted_by) ON hardware_verification_trust TO app_attest_recorder`, `REVOKE ALL ON hardware_verification_trust FROM app_attest_recorder`},
+		{`GRANT UPDATE ON provider_app_attest_verifications TO app_attest_recorder`, `REVOKE UPDATE ON provider_app_attest_verifications FROM app_attest_recorder`},
+		{`GRANT SELECT (provider_id) ON provider_identities TO app_attest_recorder`, `REVOKE ALL ON provider_identities FROM app_attest_recorder`},
+	} {
+		if _, err := adminDB.ExecContext(ctx, drift.grant); err != nil {
+			t.Fatalf("%s: %v", drift.grant, err)
+		}
+		if err := onboardingStore.SmokeAppAttestRecorder(ctx); err == nil {
+			t.Fatalf("recorder smoke passed after %s", drift.grant)
+		}
+		if _, err := adminDB.ExecContext(ctx, drift.revoke); err != nil {
+			t.Fatalf("%s: %v", drift.revoke, err)
+		}
+	}
+	if err := onboardingStore.SmokeAppAttestRecorder(ctx); err != nil {
+		t.Fatalf("recorder smoke after revoking drift: %v", err)
 	}
 	// The recorder writes under the token-bound provider id, the same id the
 	// evidence job carries (SPEC-033-R004), so auto-trust matches it.

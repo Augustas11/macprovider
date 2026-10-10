@@ -44,6 +44,8 @@ with open(log, "a") as f:
 if "-f" not in sys.argv:
     sys.stdin.read()
     print(os.environ.get("FAKE_PSQL_VERIFY", "t"))
+if "-f" in sys.argv and os.environ.get("FAKE_PSQL_RC", "0") != "0":
+    print("ERROR: statement ALTER ROLE ... PASSWORD '" + os.environ.get("APP_ATTEST_RECORDER_PASSWORD_SCRAM", "") + "'")
 sys.exit(int(os.environ.get("FAKE_PSQL_RC", "0")) if "-f" in sys.argv else 0)
 """
 
@@ -56,6 +58,13 @@ class Helpers(unittest.TestCase):
                          ("app_attest_recorder", "p/w+d", "db.internal", 5433, "/stats", "sslmode=require"))
         with self.assertRaises(prov.ProvisionError):
             prov.recorder_dsn("mysql://h/db", "p")
+        for query in ("user=postgres", "password=x", "sslmode=disable&service=other", "host=evil"):
+            with self.assertRaises(prov.ProvisionError):
+                prov.recorder_dsn(f"postgres://u:p@h/db?{query}", "p")
+            with self.assertRaises(prov.ProvisionError):
+                prov.service_entry("s", f"postgres://u:p@h/db?{query}")
+        with self.assertRaises(prov.ProvisionError):
+            prov.recorder_dsn("postgres://u:p@h:notaport/db", "p")
 
     def test_scram_verifier_shape_and_keys(self) -> None:
         salt = b"0123456789abcdef"
@@ -147,8 +156,32 @@ class ProvisionWithFakePsql(unittest.TestCase):
         os.environ["FAKE_PSQL_RC"] = "3"
         result = self.run_script()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("bootstrap SQL failed", result.stderr)
+        self.assertIn("bootstrap SQL failed (rc=3)", result.stderr)
+        # Raw psql output (which could quote statements) is not echoed.
+        self.assertNotIn("SCRAM-SHA-256", result.stderr)
         self.assertEqual(self.env.read_text(), before)
+
+    def test_check_reports_absent_valid_invalid(self) -> None:
+        def check() -> subprocess.CompletedProcess:
+            return self.run_script("--check")
+        result = check()
+        self.assertEqual((result.returncode, result.stdout.strip()), (10, "absent"))
+        self.assertEqual(self.run_script().returncode, 0)
+        result = check()
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "valid"))
+        os.environ["FAKE_PSQL_VERIFY"] = "f"
+        result = check()
+        self.assertEqual((result.returncode, result.stdout.strip()), (11, "invalid"))
+        password = unquote(urlparse(prov.parse_env_file(str(self.env))["ONBOARDING_APP_ATTEST_RECORD_DSN"]).password)
+        self.assertNotIn(password, result.stdout + result.stderr)
+
+    def test_forbidden_onboarding_query_fails_before_any_sql(self) -> None:
+        self.env.write_text(
+            "COORDINATOR_PARTNER_KEYS_ADMIN_DSN=postgres://admin:adminpw@127.0.0.1:5432/stats\n"
+            "ONBOARDING_POSTGRES_DSN=postgres://provider_onboarding:obpw@127.0.0.1:5432/stats?user=postgres\n")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.calls(), [])
 
     def test_missing_admin_dsn_is_refused(self) -> None:
         self.env.write_text("ONBOARDING_POSTGRES_DSN=postgres://u:p@h/db\n")
@@ -197,6 +230,12 @@ GRANT SELECT, INSERT, UPDATE ON provider_app_attest_verifications TO app_attest_
             self.assertEqual(sql(dsn, "SELECT current_user;"), "app_attest_recorder")
             self.assertEqual(sql(admin, "SELECT has_table_privilege('app_attest_recorder', 'provider_app_attest_verifications', 'UPDATE');"), "f")
             self.assertNotIn(password, result.stdout + result.stderr)
+            # A column-level write on a trust table fails the policy; --rotate repairs it.
+            sql(admin, "CREATE TABLE hardware_verification_trust (trusted_by TEXT); GRANT UPDATE (trusted_by) ON hardware_verification_trust TO app_attest_recorder;")
+            run = lambda *a: subprocess.run([sys.executable, "-I", str(SCRIPT), "--env-file", str(env), "--sql", str(SQL), *a], capture_output=True, text=True)
+            self.assertEqual(run("--check").returncode, 11)
+            self.assertEqual(run("--rotate").returncode, 0)
+            self.assertEqual(run("--check").returncode, 0)
 
 
 if __name__ == "__main__":

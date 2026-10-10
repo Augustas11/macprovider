@@ -28,6 +28,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -39,16 +40,34 @@ ADMIN_KEY = "COORDINATOR_PARTNER_KEYS_ADMIN_DSN"
 ONBOARDING_KEY = "ONBOARDING_POSTGRES_DSN"
 ROLE = "app_attest_recorder"
 SCRAM_ITERATIONS = 4096
+# Connection parameters a DSN query string may not carry: they would override
+# the credentials or target this script sets.
+FORBIDDEN_QUERY_KEYS = {"user", "password", "passfile", "service", "servicefile", "host", "hostaddr", "port", "dbname"}
+SCRAM_RE = re.compile(r"^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$")
+# The bootstrap's own refusal messages; any other psql output is redacted.
+BOOTSTRAP_MESSAGES = (
+    "missing required APP_ATTEST_RECORDER_PASSWORD_SCRAM environment variable",
+    "APP_ATTEST_RECORDER_PASSWORD_SCRAM must be a SCRAM-SHA-256 verifier, not a plaintext password",
+    "app_attest_recorder or provider_app_attest_verifications is missing: apply stats migration 031 first",
+)
+EXIT_ABSENT = 10
+EXIT_INVALID = 11
 
+# onboarding.AppAttestRecorderPolicySQL verbatim; a Go test keeps the copies identical.
 VERIFY_SQL = """\
 SELECT current_user = 'app_attest_recorder'
    AND session_user = current_user
+   AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user OR g.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE r.rolname = current_user)
    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
-   AND NOT has_table_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
-   AND NOT has_table_privilege(current_user, 'provider_app_attest_verifications', 'DELETE')
-   AND NOT has_table_privilege(current_user, 'provider_app_attest_verifications', 'TRUNCATE')
-   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user);
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(name) WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.name))
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
+   AND (to_regprocedure('auto_trust_attested_hardware(bigint)') IS NULL OR NOT has_function_privilege(current_user, to_regprocedure('auto_trust_attested_hardware(bigint)'), 'EXECUTE'));
 """
 
 
@@ -86,23 +105,36 @@ def scram_sha256_verifier(password: str, salt: bytes | None = None, iterations: 
     return f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(stored_key)}:{b64(server_key)}"
 
 
+def checked_query(parsed) -> str:
+    keys = {k.lower() for k, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+    if keys & FORBIDDEN_QUERY_KEYS:
+        raise ProvisionError("a Postgres DSN query may not set " + ", ".join(sorted(keys & FORBIDDEN_QUERY_KEYS)))
+    return parsed.query
+
+
 def recorder_dsn(onboarding_dsn: str, password: str) -> str:
     parsed = urlparse(onboarding_dsn)
     if parsed.scheme not in ("postgres", "postgresql") or not parsed.hostname:
         raise ProvisionError(f"{ONBOARDING_KEY} is not a postgres:// URL with a host")
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ProvisionError(f"{ONBOARDING_KEY} has an invalid port") from None
+    query = checked_query(parsed)
     host = parsed.hostname
     if ":" in host:
         host = f"[{host}]"
     netloc = f"{ROLE}:{quote(password, safe='')}@{host}"
-    if parsed.port is not None:
-        netloc += f":{parsed.port}"
-    return urlunparse((parsed.scheme, netloc, parsed.path, "", parsed.query, ""))
+    if port is not None:
+        netloc += f":{port}"
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", query, ""))
 
 
 def service_entry(name: str, dsn: str) -> str:
     parsed = urlparse(dsn)
     if parsed.scheme not in ("postgres", "postgresql"):
         raise ProvisionError("unsupported Postgres DSN scheme")
+    checked_query(parsed)
     values = {
         "host": parsed.hostname or "",
         "user": unquote(parsed.username or ""),
@@ -176,6 +208,18 @@ def write_env_value(path: str, key: str, value: str) -> None:
         raise
 
 
+def check(env_file: str, psql: str) -> int:
+    """0 when the recorder DSN works under the policy, EXIT_ABSENT when it is
+    unset, EXIT_INVALID otherwise. Prints nothing secret."""
+    existing = parse_env_file(env_file).get(ENV_KEY, "")
+    if not existing:
+        return EXIT_ABSENT
+    try:
+        return 0 if recorder_login_ok(psql, existing) else EXIT_INVALID
+    except (ProvisionError, OSError, subprocess.SubprocessError):
+        return EXIT_INVALID
+
+
 def provision(env_file: str, sql_path: str, psql: str, rotate: bool) -> str:
     env = parse_env_file(env_file)
     existing = env.get(ENV_KEY, "")
@@ -188,11 +232,19 @@ def provision(env_file: str, sql_path: str, psql: str, rotate: bool) -> str:
     if not admin or not onboarding:
         raise ProvisionError(f"{env_file} must set {ADMIN_KEY} and {ONBOARDING_KEY}")
     password = secrets.token_urlsafe(36)
-    result = run_psql(psql, admin, ["-f", sql_path], extra_env={"APP_ATTEST_RECORDER_PASSWORD_SCRAM": scram_sha256_verifier(password)})
-    if result.returncode != 0:
-        # psql output names the failing check; it never contains the plaintext.
-        raise ProvisionError(f"bootstrap SQL failed (rc={result.returncode}): {(result.stdout + result.stderr).strip()[-400:]}")
+    # Everything that can fail statically fails before the role changes.
     dsn = recorder_dsn(onboarding, password)
+    service_entry("check", dsn)
+    service_entry("check", admin)
+    verifier = scram_sha256_verifier(password)
+    if not SCRAM_RE.fullmatch(verifier):
+        raise ProvisionError("generated SCRAM verifier is malformed")
+    result = run_psql(psql, admin, ["-f", sql_path], extra_env={"APP_ATTEST_RECORDER_PASSWORD_SCRAM": verifier})
+    if result.returncode != 0:
+        # Only the bootstrap's own refusal messages are shown; server
+        # diagnostics can quote statement text.
+        known = [m for m in BOOTSTRAP_MESSAGES if m in result.stdout + result.stderr]
+        raise ProvisionError(f"bootstrap SQL failed (rc={result.returncode})" + (f": {known[0]}" if known else ""))
     write_env_value(env_file, ENV_KEY, dsn)
     if not recorder_login_ok(psql, dsn):
         raise ProvisionError(f"{ENV_KEY} was written but does not log in as {ROLE} with least privilege")
@@ -206,7 +258,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sql", default=os.path.join(here, "app-attest-recorder-bootstrap.sql"))
     parser.add_argument("--psql", default="psql")
     parser.add_argument("--rotate", action="store_true", help="replace a set but non-working DSN")
+    parser.add_argument("--check", action="store_true",
+                        help=f"only report: exit 0 valid, {EXIT_ABSENT} unset, {EXIT_INVALID} set but failing the policy")
     args = parser.parse_args(argv)
+    if args.check:
+        try:
+            rc = check(args.env_file, args.psql)
+        except OSError:
+            rc = EXIT_INVALID
+        print({0: "valid", EXIT_ABSENT: "absent", EXIT_INVALID: "invalid"}[rc])
+        return rc
     try:
         outcome = provision(args.env_file, args.sql, args.psql, args.rotate)
     except (ProvisionError, OSError, subprocess.SubprocessError) as exc:

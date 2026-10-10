@@ -2718,34 +2718,29 @@ SQL
     # app_attest_recorder with SELECT and INSERT on the verification table and
     # nothing else (no other privilege on it, no trust-table access, no role
     # memberships, no elevated attributes).
-    psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_ATTEST_RECORD_DSN" <<SQL >/dev/null
-DO \$\$
-BEGIN
-  IF NOT (
-    current_user = 'app_attest_recorder'
-    AND session_user = current_user
-    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
-    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
-    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
-    AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
-    AND NOT EXISTS (
-      SELECT 1
-        FROM (VALUES ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS p(privilege_name)
-       WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.privilege_name)
-    )
-    AND NOT EXISTS (
-      SELECT 1
-        FROM (VALUES ('hardware_verification_trust'), ('hardware_trust_grants'), ('hardware_trust_pending'), ('hardware_verification_jobs'), ('provider_identities'), ('provider_hardware_profiles')) AS t(table_name)
-        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
-       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
-    )
-    AND NOT has_function_privilege(current_user, 'auto_trust_attested_hardware(bigint)'::regprocedure, 'EXECUTE')
-  ) THEN
-    RAISE EXCEPTION 'app attest record DSN does not map to the least-privilege app_attest_recorder role';
-  END IF;
-END
-\$\$;
+    # The predicate is onboarding.AppAttestRecorderPolicySQL verbatim (a Go
+    # test keeps the copies identical); a login failure or any drift aborts.
+    app_attest_policy_ok="$(psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_ATTEST_RECORD_DSN" <<'SQL' 2>/dev/null || true
+SELECT current_user = 'app_attest_recorder'
+   AND session_user = current_user
+   AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user OR g.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE r.rolname = current_user)
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(name) WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.name))
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
+   AND (to_regprocedure('auto_trust_attested_hardware(bigint)') IS NULL OR NOT has_function_privilege(current_user, to_regprocedure('auto_trust_attested_hardware(bigint)'), 'EXECUTE'));
 SQL
+)"
+    if [ "$app_attest_policy_ok" != "t" ]; then
+      echo "aborting deploy: ONBOARDING_APP_ATTEST_RECORD_DSN does not log in as the least-privilege app_attest_recorder role" >&2
+      echo "  repair it with scripts/ops/pearl-runtime.sh step app_attest_recorder (provision-app-attest-recorder.py --rotate)" >&2
+      exit 12
+    fi
     echo "  ok: app_attest_recorder DSN logs in with SELECT, INSERT only"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
     # FIX 8 (issue #582): reaching here means hardware-trust approval is enabled

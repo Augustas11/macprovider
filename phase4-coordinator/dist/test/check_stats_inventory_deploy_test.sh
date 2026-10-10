@@ -879,8 +879,10 @@ grep -qF 'psql_preflight_service app_attest_record_preflight "$ONBOARDING_APP_AT
   fail "deploy script must preflight the app attest record DSN through a root-only service file"
 grep -qF "current_user = 'app_attest_recorder'" "$DEPLOY_SH" ||
   fail "deploy script must validate the app_attest_recorder role identity"
-grep -qF "(VALUES ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER'))" "$DEPLOY_SH" ||
-  fail "deploy script must refuse a recorder with more than SELECT, INSERT"
+grep -qF 'if [ "$app_attest_policy_ok" != "t" ]; then' "$DEPLOY_SH" ||
+  fail "deploy script must abort unless the recorder passes the least-privilege policy"
+grep -qF "has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')" "$DEPLOY_SH" ||
+  fail "deploy script must refuse column-level recorder writes"
 grep -qF 'app_attest_record_dsn: env:ONBOARDING_APP_ATTEST_RECORD_DSN' "$DIST_DIR/coordinator.yaml" ||
   fail "coordinator.yaml must reference the recorder DSN through env:"
 grep -qF '\getenv recorder_scram APP_ATTEST_RECORDER_PASSWORD_SCRAM' "$APP_ATTEST_BOOTSTRAP" ||

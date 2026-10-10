@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -174,7 +175,11 @@ func TestAppAttestSubmitRecordsTokenBoundProvider(t *testing.T) {
 	// A body that names a provider is not the closed shape.
 	withProvider := strings.TrimSuffix(submitBody(ch.Challenge, att), "}") + `,"provider_id":"mp-bbbb"}`
 	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", withProvider), http.StatusBadRequest, "invalid_request")
+	// The rejected submit spent the challenge.
+	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusConflict, "challenge_invalid")
 
+	ch = h.challenge("tok-a")
+	att = h.attest(ch.ClientData, appattesttest.AttestOptions{})
 	wantStatus(t, h.post("/v1/providers/app-attest", "tok-a", submitBody(ch.Challenge, att)), http.StatusOK, `"status":"recorded"`)
 	if got := h.recorder.byProvider["mp-aaaa"]; !bytes.Equal(got, att.KeyID) || len(h.recorder.byProvider) != 1 {
 		t.Fatalf("recorded %v", h.recorder.byProvider)
@@ -283,5 +288,19 @@ func TestAppAttestChallengeStoreIsBounded(t *testing.T) {
 	}
 	if _, _, err := store.Issue("mp-3", now.Add(appAttestChallengeTTL)); err != nil {
 		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// TestAppAttestRecorderPolicyCopiesAreIdentical keeps the deploy preflight
+// and the provisioner on the same least-privilege policy as the startup smoke.
+func TestAppAttestRecorderPolicyCopiesAreIdentical(t *testing.T) {
+	for _, path := range []string{"../../dist/deploy-pearl-vps.sh", "../../dist/provision-app-attest-recorder.py"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), AppAttestRecorderPolicySQL+";\n") {
+			t.Fatalf("%s does not carry AppAttestRecorderPolicySQL verbatim", path)
+		}
 	}
 }

@@ -38,6 +38,59 @@ func (s *PGStore) AttachAppAttestRecorder(dsn string) error {
 	return nil
 }
 
+// AppAttestRecorderPolicySQL is the one least-privilege policy for the
+// app_attest_recorder login (SPEC-033 §2.7). It returns true only for exactly
+// that role with LOGIN and no elevated attributes, no role memberships, no
+// owned relations or functions, SELECT and INSERT (and nothing else, at table
+// or column level) on provider_app_attest_verifications, no privilege at any
+// level on the trust, job, identity and profile tables, and no EXECUTE on
+// auto_trust_attested_hardware. The deploy preflight
+// (dist/deploy-pearl-vps.sh) and the provisioner
+// (dist/provision-app-attest-recorder.py) carry this exact text; a test keeps
+// them identical.
+const AppAttestRecorderPolicySQL = `SELECT current_user = 'app_attest_recorder'
+   AND session_user = current_user
+   AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+   AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user OR g.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = current_user)
+   AND NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE r.rolname = current_user)
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'SELECT')
+   AND has_table_privilege(current_user, 'provider_app_attest_verifications', 'INSERT')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(name) WHERE has_table_privilege(current_user, 'provider_app_attest_verifications', p.name))
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'UPDATE')
+   AND NOT has_any_column_privilege(current_user, 'provider_app_attest_verifications', 'REFERENCES')
+   AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']) AS t(name) WHERE to_regclass(t.name) IS NOT NULL AND (has_any_column_privilege(current_user, t.name, 'SELECT') OR has_any_column_privilege(current_user, t.name, 'INSERT') OR has_any_column_privilege(current_user, t.name, 'UPDATE') OR has_any_column_privilege(current_user, t.name, 'REFERENCES') OR has_table_privilege(current_user, t.name, 'DELETE') OR has_table_privilege(current_user, t.name, 'TRUNCATE') OR has_table_privilege(current_user, t.name, 'TRIGGER')))
+   AND (to_regprocedure('auto_trust_attested_hardware(bigint)') IS NULL OR NOT has_function_privilege(current_user, to_regprocedure('auto_trust_attested_hardware(bigint)'), 'EXECUTE'))`
+
+// SmokeAppAttestRecorder checks the attached recorder against
+// AppAttestRecorderPolicySQL. On failure the caller detaches it: the
+// coordinator keeps running with App Attest recording unavailable
+// (SPEC-033-R004 failure isolation).
+func (s *PGStore) SmokeAppAttestRecorder(ctx context.Context) error {
+	if !s.AppAttestRecorderConfigured() {
+		return nil
+	}
+	timeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var ok bool
+	if err := s.appAttestRecordDB.QueryRowContext(timeout, AppAttestRecorderPolicySQL).Scan(&ok); err != nil {
+		return errors.New("app_attest_recorder smoke query failed")
+	}
+	if !ok {
+		return errors.New("app_attest_recorder DSN does not map to the least-privilege app_attest_recorder role")
+	}
+	return nil
+}
+
+// DetachAppAttestRecorder closes and drops the recorder connection.
+func (s *PGStore) DetachAppAttestRecorder() {
+	if s == nil || s.appAttestRecordDB == nil {
+		return
+	}
+	_ = s.appAttestRecordDB.Close()
+	s.appAttestRecordDB = nil
+}
+
 // AppAttestRecorderConfigured reports whether the app_attest_recorder
 // connection is attached.
 func (s *PGStore) AppAttestRecorderConfigured() bool {
@@ -310,29 +363,6 @@ SELECT j.generated_at, j.evidence
 			},
 			"request_hardware_trust_approval(uuid,bigint,text,timestamp with time zone,text,text)"); err != nil {
 			return err
-		}
-	}
-	if s.appAttestRecordDB != nil {
-		var currentUser string
-		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT current_user`).Scan(&currentUser); err != nil {
-			return fmt.Errorf("app_attest_recorder smoke current_user: %w", err)
-		}
-		if currentUser != "app_attest_recorder" {
-			return fmt.Errorf("app_attest_recorder smoke current_user = %q, want app_attest_recorder", currentUser)
-		}
-		// Least privilege (SPEC-033 §2.7): exactly SELECT and INSERT on the
-		// verification table, and no inherited role.
-		for privilege, want := range map[string]bool{
-			"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false, "REFERENCES": false, "TRIGGER": false,
-		} {
-			var has bool
-			if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT has_table_privilege(current_user, 'provider_app_attest_verifications', $1)`, privilege).Scan(&has); err != nil || has != want {
-				return fmt.Errorf("app_attest_recorder smoke: %s on provider_app_attest_verifications = %v, want %v (err=%v)", privilege, has, want, err)
-			}
-		}
-		var memberships int
-		if err := s.appAttestRecordDB.QueryRowContext(timeout, `SELECT COUNT(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = current_user`).Scan(&memberships); err != nil || memberships != 0 {
-			return fmt.Errorf("app_attest_recorder smoke: role memberships = %d, want 0 (err=%v)", memberships, err)
 		}
 	}
 	return nil

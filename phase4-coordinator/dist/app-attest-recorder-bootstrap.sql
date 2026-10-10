@@ -14,11 +14,21 @@
 --
 -- Every refusal raises, so psql exits non-zero under ON_ERROR_STOP (\quit takes
 -- no exit status). The verifier is read with \getenv, never from argv, and the plaintext
--- password never reaches this session, the server log or any output. The
--- grants are re-asserted so a drifted role ends with exactly SELECT, INSERT on
--- that one table and no role memberships.
+-- password never reaches this session, the server log or any output; for a
+-- superuser session statement logging is also switched off, so the verifier
+-- is not logged either. The grants are re-asserted so a drifted role ends with
+-- exactly SELECT, INSERT on that one table, no access to the trust tables and
+-- no role memberships (dist/provision-app-attest-recorder.py then checks
+-- onboarding.AppAttestRecorderPolicySQL).
 
 \set ON_ERROR_STOP on
+
+SELECT rolsuper AS bootstrap_is_superuser FROM pg_roles WHERE rolname = current_user \gset
+\if :bootstrap_is_superuser
+  SET log_statement = 'none';
+  SET log_min_duration_statement = -1;
+  SET log_min_error_statement = 'panic';
+\endif
 
 \getenv recorder_scram APP_ATTEST_RECORDER_PASSWORD_SCRAM
 \if :{?recorder_scram}
@@ -43,6 +53,22 @@ SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_attest_recorder')
 BEGIN;
 
 REVOKE ALL ON provider_app_attest_verifications FROM app_attest_recorder;
+DO $$
+DECLARE
+    t TEXT;
+BEGIN
+    -- Table-level REVOKE ALL also removes column-level grants.
+    FOREACH t IN ARRAY ARRAY['hardware_verification_trust', 'hardware_trust_grants', 'hardware_trust_pending', 'hardware_verification_jobs', 'provider_identities', 'provider_hardware_profiles']
+    LOOP
+        IF to_regclass(t) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON %I FROM app_attest_recorder', t);
+        END IF;
+    END LOOP;
+    IF to_regprocedure('auto_trust_attested_hardware(bigint)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION auto_trust_attested_hardware(bigint) FROM app_attest_recorder;
+    END IF;
+END
+$$;
 GRANT SELECT, INSERT ON provider_app_attest_verifications TO app_attest_recorder;
 GRANT USAGE ON SCHEMA public TO app_attest_recorder;
 

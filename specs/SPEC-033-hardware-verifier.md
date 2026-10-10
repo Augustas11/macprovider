@@ -528,7 +528,9 @@ nonce extension (`1.2.840.113635.100.8.2`, `SEQUENCE { [1] EXPLICIT OCTET STRING
 `SHA-256(authData ‖ clientDataHash)`; `rpIdHash = SHA-256(team_id "." bundle_id)`; the AT flag; sign
 counter 0; the **production** AAGUID (`"appattest"` followed by seven zero bytes — development
 attestations are refused); `credentialId = keyId`; the COSE key equals the leaf key; a validation
-category, when present, of Developer ID; and the Apple ACL extension
+category, when present, of Developer ID (real macOS 27 Developer ID attestations carry no
+authenticator extensions, so an absent category is accepted; the team-bound `rpIdHash`, the pinned
+Apple chain and the production AAGUID carry the assurance); and the Apple ACL extension
 (`1.2.840.113635.100.8.6`) equal to the macOS value for SIP and Full Security. A key whose ACL does
 not match is a valid Apple key on a Mac that does not meet policy: it is answered
 `422 app_attest_rejected` like any other failure and never recorded. The leaf certificate's
@@ -539,8 +541,13 @@ re-check after enrollment).
 Apple device with SIP and Full Security, running Malibu.app signed by the configured team, generated
 the key and held the provider's bearer credential at submission. It does **not** prove the
 self-reported chip, memory or hardware hash: those remain bound only by the §5.1–§5.4 gates, which
-still run on every job. Its Sybil cost is one real macOS 27 Mac per provider id (keys are unique and
-first-wins), and an operator revoke ends automatic trust for that provider permanently (step 5 below).
+still run on every job. Uniqueness is per **key**, not per device: one App Attest key vouches for one
+provider id (keys are unique and first-wins), but one genuine Mac can generate a fresh key for each
+provider id it holds a bearer for. The coordinator does not evaluate Apple's fraud-metric receipt, so
+device-level Sybil resistance is an open limitation: the cost of an automatically trusted identity is
+a genuine macOS 27 Mac with SIP and Full Security running the team's Malibu.app, plus a bearer
+credential obtained through the normal (invite-gated) onboarding, and an operator revoke ends automatic
+trust for that provider permanently (step 5 below).
 
 **SPEC-033-R004 — App Attest is recorded only for the token-bound provider after production
 verification.** The coordinator MUST record a `provider_app_attest_verifications` row only from the
@@ -554,7 +561,8 @@ AAGUID is not production, or whose ACL is not SIP and Full Security. A challenge
 most once and MUST expire after 5 minutes. A key id already recorded for another provider MUST NOT be
 recorded again, and a provider's first recorded key MUST NOT be replaced. Any failure MUST leave the
 provider on the dual-control path and MUST NOT reject or block registration, hardware evidence or
-serving.
+serving; a recorder that cannot log in or fails the least-privilege policy at coordinator startup
+disables recording only (the endpoints answer 503) and never stops the coordinator.
 
 **Decision.** For a job whose `Evaluate` result is `missing_trusted_hardware_identity` (every §5.1–
 §5.4 reject gate passed), the verifier calls `auto_trust_attested_hardware(job_id)` inside its batch

@@ -219,7 +219,7 @@ cat > "$tmp/bin/psql" <<'FAKEPSQL'
 #!/usr/bin/env bash
 for a in "$@"; do [ "$a" = -f ] && exit 0; done
 cat >/dev/null
-echo t
+echo "${FAKE_PSQL_VERIFY:-t}"
 FAKEPSQL
 chmod +x "$tmp/bin/psql"
 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "recorder provisioning runs" scripts/ops/pearl-runtime.sh next --run
@@ -232,6 +232,10 @@ if [ -n "$pw" ] && ! grep -qF -- "$pw" "$tmp/out" "$tmp/err"; then ok; else bad 
 COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the recorder DSN" scripts/ops/pearl-runtime.sh status
 if [ "$(state_of app_attest_recorder)" = "done" ]; then ok; else bad "recorder step state: $(state_of app_attest_recorder)"; fi
 case "$(next_field id)" in app_attest_recorder) bad "recorder step offered again" ;; *) ok ;; esac
+# A DSN that no longer passes the login/least-privilege check is offered for repair.
+FAKE_PSQL_VERIFY=f PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a failing recorder DSN" scripts/ops/pearl-runtime.sh status
+expect_next app_attest_recorder:mutate
+case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --rotate"*) ok ;; *) bad "repair command lacks --rotate: $(next_field command)" ;; esac
 rm -f "$tmp/bin/psql"
 unset PEARL_COORDINATOR_ENV
 
