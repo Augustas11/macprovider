@@ -92,17 +92,50 @@ func poolProvenSnapshotSQL(s string) string {
 // poolProvenVerdictSQL is the verdict half of the SPEC-047-R012 v0.2.9
 // counting predicate for verdict v against snapshot s.
 func poolProvenVerdictSQL(v, s string) string {
-	return `(` + s + `.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
+	// COALESCE: a NULL label (or no verdict row) is "not verified", never NULL.
+	return `COALESCE((` + s + `.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
              AND ` + v + `.route_snapshot_digest = ` + s + `.route_snapshot_digest
              AND ` + v + `.closed = 1
              AND ` + payableSettlementOutcomeSQL(v, s) + `
-             AND ` + v + `.pool_label_status = '` + PoolLabelStatusVerified + `')`
+             AND ` + v + `.pool_label_status = '` + PoolLabelStatusVerified + `'), 0)`
 }
 
 // poolProvenFinalitySQL is the coordinator-assigned finality time: when the
 // verdict closed.
 func poolProvenFinalitySQL(v string) string {
 	return `CASE WHEN ` + v + `.closed = 1 THEN COALESCE(` + v + `.updated_at_utc, ` + v + `.created_at_utc) END`
+}
+
+// poolProvenSnapshotDeleteCaptureSQL captures the attempt of snapshot row
+// old (being deleted). The verdict is found through the attempt's ledger
+// credit, whose settlement scope hash is the verdict's: every lookup is a
+// unique-key search, so the trigger never walks a provider's history.
+func poolProvenSnapshotDeleteCaptureSQL(old string) string {
+	return `SELECT ` + poolProvenCaptureValuesSQL(old, "srv.account_scope_hash") + `
+      FROM ledger_request_credits lrc
+      JOIN settlement_receipt_verdicts srv
+        ON srv.account_scope_hash = lrc.settlement_account_scope_hash
+       AND srv.request_id = lrc.request_id
+       AND srv.attempt_n = lrc.attempt_n
+       AND srv.provider_id = lrc.provider_id
+     WHERE lrc.request_id = ` + old + `.request_id
+       AND lrc.attempt_n = ` + old + `.attempt_n
+       AND lrc.provider_id = ` + old + `.provider_id
+       AND srv.route_snapshot_digest = ` + old + `.route_snapshot_digest
+       AND ` + poolProvenSnapshotSQL(old)
+}
+
+// poolProvenVerdictDeleteCaptureSQL captures the attempt of verdict row old
+// (being deleted), finding its snapshot by the SPEC-022 payable index.
+func poolProvenVerdictDeleteCaptureSQL(old string) string {
+	return `SELECT ` + poolProvenCaptureValuesSQL("srs", old+".account_scope_hash") + `
+      FROM settlement_route_snapshots srs
+     WHERE srs.request_id = ` + old + `.request_id
+       AND srs.attempt_n = ` + old + `.attempt_n
+       AND srs.provider_id = ` + old + `.provider_id
+       AND srs.route_snapshot_mode = '` + RouteSnapshotModeEnforce + `'
+       AND srs.route_snapshot_digest = ` + old + `.route_snapshot_digest
+       AND ` + poolProvenSnapshotSQL("srs")
 }
 
 // poolProvenTriggers freeze an attempt's verdict half at deletion. Each
@@ -119,13 +152,7 @@ CREATE TRIGGER trg_ppr_srs_delete BEFORE DELETE ON settlement_route_snapshots
 WHEN OLD.pool_id IS NOT NULL AND OLD.pool_id <> ''
 BEGIN
     INSERT OR IGNORE INTO pool_proven_rollup_attempts (` + poolProvenCaptureColumns + `)
-    SELECT ` + poolProvenCaptureValuesSQL("OLD", "srv.account_scope_hash") + `
-      FROM settlement_receipt_verdicts srv
-     WHERE srv.request_id = OLD.request_id
-       AND srv.attempt_n = OLD.attempt_n
-       AND srv.provider_id = OLD.provider_id
-       AND srv.route_snapshot_digest = OLD.route_snapshot_digest
-       AND ` + poolProvenSnapshotSQL("OLD") + `;
+    ` + poolProvenSnapshotDeleteCaptureSQL("OLD") + `;
     UPDATE pool_proven_rollup_attempts
        SET verdict_ok = (SELECT ` + poolProvenVerdictSQL("srv", "OLD") + `
                            FROM settlement_receipt_verdicts srv
@@ -140,13 +167,7 @@ CREATE TRIGGER trg_ppr_srv_delete BEFORE DELETE ON settlement_receipt_verdicts
 WHEN OLD.pool_id IS NOT NULL AND OLD.pool_id <> ''
 BEGIN
     INSERT OR IGNORE INTO pool_proven_rollup_attempts (` + poolProvenCaptureColumns + `)
-    SELECT ` + poolProvenCaptureValuesSQL("srs", "OLD.account_scope_hash") + `
-      FROM settlement_route_snapshots srs
-     WHERE srs.request_id = OLD.request_id
-       AND srs.attempt_n = OLD.attempt_n
-       AND srs.provider_id = OLD.provider_id
-       AND srs.route_snapshot_digest = OLD.route_snapshot_digest
-       AND ` + poolProvenSnapshotSQL("srs") + `;
+    ` + poolProvenVerdictDeleteCaptureSQL("OLD") + `;
     UPDATE pool_proven_rollup_attempts
        SET verdict_ok = (SELECT ` + poolProvenVerdictSQL("OLD", "srs") + `
                            FROM settlement_route_snapshots srs
@@ -343,11 +364,20 @@ type poolProvenEvaluation struct {
 	finality                     sql.NullString
 }
 
+// poolProvenChange is one evaluation result. A hot result rewrites the
+// verdict half only if both evidence rows still exist when the write commits:
+// a delete trigger that froze the verdict in between always wins. Otherwise
+// only counted is rewritten, from the verdict stored at write time.
 type poolProvenChange struct {
-	id               int64
-	verdict, counted bool
-	finality         sql.NullString
+	id                     int64
+	hot                    bool
+	verdict, creditPayable bool
+	finality               sql.NullString
 }
+
+// poolProvenAfterEvaluateReadHook runs between an evaluation read and its
+// writes (tests only).
+var poolProvenAfterEvaluateReadHook func()
 
 func evaluatePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB, windowStart time.Time) error {
 	since := windowStart.UTC().Format(time.RFC3339Nano)
@@ -365,6 +395,9 @@ func evaluatePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB, win
 			return nil
 		}
 		after = batch[len(batch)-1].id
+		if hook := poolProvenAfterEvaluateReadHook; hook != nil {
+			hook()
+		}
 		var changes []poolProvenChange
 		for _, e := range batch {
 			// Without both hot rows the verdict half stays as frozen at
@@ -375,7 +408,7 @@ func evaluatePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB, win
 			}
 			counted := verdict && e.creditPayable
 			if verdict != e.storedVerdict || counted != e.storedCounted || finality != e.storedFinality {
-				changes = append(changes, poolProvenChange{e.id, verdict, counted, finality})
+				changes = append(changes, poolProvenChange{e.id, e.hot, e.verdict, e.creditPayable, e.finality})
 			}
 		}
 		for len(changes) > 0 {
@@ -394,9 +427,31 @@ func evaluatePoolProvenAttempts(ctx context.Context, reader, writer *sql.DB, win
 func updatePoolProvenRows(ctx context.Context, writer *sql.DB, changes []poolProvenChange) error {
 	return withPoolProvenTx(ctx, writer, func(ctx context.Context, tx *sql.Tx) error {
 		for _, c := range changes {
+			if c.hot {
+				res, err := tx.ExecContext(ctx, `
+UPDATE pool_proven_rollup_attempts
+   SET verdict_ok = ?, counted = ?, finality_at_utc = ?
+ WHERE route_snapshot_id = ?
+   AND EXISTS (SELECT 1 FROM settlement_route_snapshots srs WHERE srs.id = pool_proven_rollup_attempts.route_snapshot_id)
+   AND EXISTS (SELECT 1 FROM settlement_receipt_verdicts srv
+                WHERE srv.account_scope_hash = pool_proven_rollup_attempts.account_scope_hash
+                  AND srv.request_id = pool_proven_rollup_attempts.request_id
+                  AND srv.attempt_n = pool_proven_rollup_attempts.attempt_n
+                  AND srv.provider_id = pool_proven_rollup_attempts.provider_id)`,
+					c.verdict, c.verdict && c.creditPayable, c.finality, c.id)
+				if err != nil {
+					return err
+				}
+				if n, err := res.RowsAffected(); err != nil || n == 1 {
+					if err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `
-UPDATE pool_proven_rollup_attempts SET verdict_ok = ?, counted = ?, finality_at_utc = ? WHERE route_snapshot_id = ?`,
-				c.verdict, c.counted, c.finality, c.id); err != nil {
+UPDATE pool_proven_rollup_attempts SET counted = CASE WHEN verdict_ok = 1 AND ? THEN 1 ELSE 0 END
+ WHERE route_snapshot_id = ?`, c.creditPayable, c.id); err != nil {
 				return err
 			}
 		}
@@ -416,7 +471,7 @@ SELECT a.route_snapshot_id,
        a.counted,
        a.finality_at_utc,
        srs.id IS NOT NULL AND srv.id IS NOT NULL,
-       COALESCE(` + poolProvenVerdictSQL("srv", "srs") + `, 0),
+       ` + poolProvenVerdictSQL("srv", "srs") + `,
        ` + poolProvenFinalitySQL("srv") + `,
        EXISTS (
            SELECT 1

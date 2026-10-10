@@ -247,6 +247,84 @@ func TestPoolProvenRollupPersistsAcrossArchivingAndReevaluates(t *testing.T) {
 	want(counted(), archived.RequestID, reversed.RequestID, hot.RequestID)
 }
 
+// A pass that read an attempt hot, then lost a race with a dispute and
+// retention's delete, never overwrites the verdict the delete trigger froze.
+// A NULL pool label freezes as not verified in either deletion order instead
+// of failing the delete.
+func TestPoolProvenRollupFreezeWinsOverAStaleEvaluation(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	base := settlementVerifierInputFromFixture(t, fixtures, firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done"), pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	simulateEvidenceRetentionView(t, store)
+	ctx := context.Background()
+	seed := func(requestID, label string) SettlementVerifyInput {
+		t.Helper()
+		in := base
+		in.RequestID = requestID
+		in.RouteSnapshot.RequestID = requestID
+		in.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+		in.RouteSnapshot = poolManifestSnapshot(in.RouteSnapshot)
+		in.RouteSnapshot.ExpectedCatalogModelHashAlgorithm = modelidentity.SnapshotManifestV1
+		in.RouteSnapshot.ProviderReportedModelHashAlgorithm = modelidentity.SnapshotManifestV1
+		seedSettlementReceiptEvidence(t, store, in)
+		insertSPEC022LedgerCredit(t, store.db, in, 600)
+		markSPEC022ReceiptVerified(t, store.db, in)
+		if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_id = ?, pool_label_status = NULLIF(?, '') WHERE request_id = ?`, testPoolID, label, requestID); err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	raced := seed("pp-raced", "verified")
+	nullVerdictFirst := seed("pp-null-label-verdict-first", "")
+	nullSnapshotFirst := seed("pp-null-label-snapshot-first", "")
+	since := time.UnixMilli(raced.ReceiptReceivedUnixMS).UTC().Add(-time.Hour)
+	poolProvenAfterEvaluateReadHook = func() {
+		poolProvenAfterEvaluateReadHook = nil
+		if _, err := store.db.Exec(`UPDATE settlement_receipt_verdicts SET pool_label_status = 'label_disputed' WHERE request_id = ?`, raced.RequestID); err != nil {
+			t.Error(err)
+		}
+		archiveEvidence(t, store, raced.RequestID)
+	}
+	t.Cleanup(func() { poolProvenAfterEvaluateReadHook = nil })
+	if err := RefreshPoolProvenRollup(ctx, store.db, store.db, since); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if err := RefreshPoolProvenRollup(ctx, store.db, store.db, since); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	var verdictOK, counted int
+	if err := store.db.QueryRow(`SELECT verdict_ok, counted FROM pool_proven_rollup_attempts WHERE request_id = ?`, raced.RequestID).Scan(&verdictOK, &counted); err != nil {
+		t.Fatal(err)
+	}
+	if verdictOK != 0 || counted != 0 {
+		t.Fatalf("stale evaluation overwrote the frozen dispute: verdict_ok=%d counted=%d", verdictOK, counted)
+	}
+	// NULL labels, deleted in both orders.
+	archiveEvidence(t, store, nullVerdictFirst.RequestID)
+	for _, stmt := range []string{
+		`UPDATE ledger_request_credits SET settled = 1 WHERE request_id = ?`,
+		`INSERT INTO settlement_evidence_archived_credits(request_credit_id) SELECT id FROM ledger_request_credits WHERE request_id = ?`,
+		`DELETE FROM settlement_route_snapshots WHERE request_id = ?`,
+		`DELETE FROM settlement_receipt_verdicts WHERE request_id = ?`,
+	} {
+		if _, err := store.db.Exec(stmt, nullSnapshotFirst.RequestID); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := RefreshPoolProvenRollup(ctx, store.db, store.db, since); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	var total int
+	if err := store.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(counted), 0) FROM pool_proven_rollup_attempts`).Scan(&total, &counted); err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || counted != 0 {
+		t.Fatalf("rollup rows=%d counted=%d, want three uncounted attempts", total, counted)
+	}
+}
+
 // The rollup's reads never scan the ledger, snapshot, or verdict tables: the
 // capture reads a rowid range and every evaluation join is a key lookup. The
 // pre-rollup query drove the payable view over every enforce-mode credit and
@@ -257,9 +335,15 @@ func TestPoolProvenRollupQueryPlansAvoidFullScans(t *testing.T) {
 	if _, err := store.db.Exec(`ANALYZE`); err != nil {
 		t.Fatal(err)
 	}
+	// The delete triggers' capture lookups, with OLD bound to one row.
+	triggerCapture := func(table, capture string) string {
+		return `SELECT o.id FROM ` + table + ` o WHERE o.id = ? AND EXISTS (` + capture + `)`
+	}
 	plans := map[string][]any{
-		"capture":  {poolProvenCaptureSQL(), 0, 10},
-		"evaluate": {poolProvenEvaluateSQL(), 0, time.Now().UTC().Format(time.RFC3339Nano), poolProvenEvaluateBatch},
+		"snapshot-delete capture": {triggerCapture("settlement_route_snapshots", poolProvenSnapshotDeleteCaptureSQL("o")), 1},
+		"verdict-delete capture":  {triggerCapture("settlement_receipt_verdicts", poolProvenVerdictDeleteCaptureSQL("o")), 1},
+		"capture":                 {poolProvenCaptureSQL(), 0, 10},
+		"evaluate":                {poolProvenEvaluateSQL(), 0, time.Now().UTC().Format(time.RFC3339Nano), poolProvenEvaluateBatch},
 	}
 	for name, p := range plans {
 		rows, err := store.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+p[0].(string), p[1:]...)
