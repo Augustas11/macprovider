@@ -1100,6 +1100,11 @@ actor CoordinatorClient {
     }
 
     func start() async {
+        if operatorPaused {
+            // A pause restored from the lifecycle state fences local admission
+            // before any session or model swap can mark the provider ready.
+            await providerStatus.setOperatorPauseFence(true)
+        }
         if !AutoUpdater.defaultHeadlessOperatorManagedTopology(config: appConfig),
            appConfig.autoUpdateEnabled != false,
            appConfig.autoupdateEnabled != false {
@@ -4323,6 +4328,7 @@ actor CoordinatorClient {
             // The first wire state of a fresh session must already carry the
             // pause; a stale local `ready` (e.g. left by a coordinator drain)
             // would otherwise route buyer traffic to a paused provider.
+            await providerStatus.setOperatorPauseFence(true)
             await providerStatus.setState(.unavailable, reason: "operator_paused")
         }
         try await sendStateUpdate(state: nil, reason: operatorPaused ? "operator_paused" : reason)
@@ -5937,6 +5943,7 @@ actor CoordinatorClient {
         // A paused provider is fenced from buyer work and is not serving, so it
         // must be allowed to sleep: drop the keep-awake assertion until resume.
         setSleepAssertionDesired(false)
+        await providerStatus.setOperatorPauseFence(true)
         await providerStatus.setState(.unavailable, reason: "operator_paused")
         do {
             try await sendStateUpdate(state: nil, reason: "operator_paused")
@@ -5966,6 +5973,7 @@ actor CoordinatorClient {
         }
 
         operatorPaused = false
+        await providerStatus.setOperatorPauseFence(false)
         // Resuming means the provider intends to serve again: re-arm keep-awake
         // so the reconnect/serving path cannot let the Mac sleep. The canServe
         // gate makes this a no-op if the loop already exited terminally (e.g.
@@ -6866,9 +6874,13 @@ actor CoordinatorClient {
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
+        // Heartbeat availability never advertises a paused provider as routable.
+        let heartbeatStatus: ProviderHealthState = operatorPaused && (snapshot.status == .ready || snapshot.status == .busy)
+            ? .unavailable
+            : snapshot.status
         var payload: [String: Any] = [
             "type": "heartbeat",
-            "status": snapshot.status.rawValue,
+            "status": heartbeatStatus.rawValue,
             "model_id": snapshotWireModelID,
             "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshotWireModelID),
             "ram_gb": snapshot.capacity.ramGB,

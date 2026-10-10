@@ -1958,6 +1958,39 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(reconnectedSnapshot.status, .unavailable)
     }
 
+    // #1880 audit R1: a model swap that completes after an accepted pause must
+    // not make the provider routable, locally or in the heartbeat.
+    func testModelSwapCompletingAfterOperatorPauseKeepsTheProviderUnavailable() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let pauseResult = await client.pauseByOperator()
+        XCTAssertEqual(pauseResult, .accepted)
+
+        await status.completeTargetSwap(modelID: "model-b", modelHash: nil)
+        let swappedSnapshot = await status.snapshot()
+        XCTAssertEqual(swappedSnapshot.status, .unavailable, "swap completion must not lift an operator pause")
+        let swappedRequest = await status.beginRequestIfAccepting(requestID: "after-swap")
+        XCTAssertNil(swappedRequest)
+        await status.setState(.ready, reason: "stray_ready")
+        let strayReady = await status.snapshot()
+        XCTAssertEqual(strayReady.status, .unavailable)
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertEqual(heartbeat["status"] as? String, "unavailable")
+
+        let resumeResult = await client.resumeByOperator()
+        XCTAssertEqual(resumeResult, .accepted)
+        let resumedSnapshot = await status.snapshot()
+        XCTAssertEqual(resumedSnapshot.status, .ready)
+    }
+
     func testOperatorPausedProviderIgnoresWarmUpAndCapacityTransitions() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
