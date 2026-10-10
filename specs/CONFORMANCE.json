@@ -3765,7 +3765,9 @@
         "phase4-coordinator/internal/onboarding/appattest.go:func (v AppleAppAttestVerifier) Verify",
         "phase4-coordinator/internal/onboarding/appattest_submit.go:func (h *Handler) HandleAppAttestChallenge",
         "phase4-coordinator/internal/onboarding/appattest_submit.go:func (h *Handler) HandleAppAttestSubmit",
-        "phase4-coordinator/internal/onboarding/store_pg.go:RecordAppAttestVerification"
+        "phase4-coordinator/internal/onboarding/store_pg.go:RecordAppAttestVerification",
+        "phase3-binary/Sources/macprovider-cli/AppAttestCommand.swift:struct AppAttestClient",
+        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome"
       ],
       "tests": [
         "phase4-coordinator/internal/appattest/real_macos27_test.go::TestRealMacOS27Attestation",
@@ -3774,7 +3776,10 @@
         "phase4-coordinator/internal/onboarding/appattest_test.go::TestAppleAppAttestVerifierRejectsCorruptRoot",
         "phase4-coordinator/internal/onboarding/appattest_submit_test.go::TestAppAttestSubmitRecordsTokenBoundProvider",
         "phase4-coordinator/internal/onboarding/appattest_submit_test.go::TestAppAttestChallengeIsSingleUseAndProviderBound",
-        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust"
+        "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust",
+        "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testSubmitBodyHasExactlyThreeKeysAndTrimsStdinWhitespace",
+        "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testCommandsNeverAcceptATokenOnArgv",
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift::testSuccessAttestsClientDataHashAndSubmitsExactArguments"
       ],
       "journeys": [],
       "evidence": [],

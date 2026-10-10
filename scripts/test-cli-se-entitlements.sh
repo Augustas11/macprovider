@@ -47,5 +47,42 @@ grep -Fq "must not attach CLI keychain-access-groups entitlements" "$acceptance_
   fail "acceptance security test must forbid CLI entitlements signing"
 grep -Fq "carries restricted keychain-access-groups" "$require" ||
   fail "require-cli-se-entitlements.sh must reject keychain-access-groups"
+grep -Fq "carries the restricted App Attest entitlement" "$require" ||
+  fail "require-cli-se-entitlements.sh must reject the App Attest entitlement"
+grep -Fq "the CLI must sign with none" "$require" ||
+  fail "require-cli-se-entitlements.sh must reject any CLI entitlement"
+# App Attest is granted to Malibu.app through its profile only.
+app_ents="$root/phase3-binary/app/Malibu.entitlements"
+local_ents="$root/phase3-binary/app/MalibuLocal.entitlements"
+grep -Fq "com.apple.developer.devicecheck.app-attest-opt-in" "$app_ents" ||
+  fail "Malibu.entitlements must declare the App Attest opt-in for release signing"
+if grep -Fq "<key>" "$local_ents"; then
+  fail "MalibuLocal.entitlements must stay empty so ad-hoc local builds can launch"
+fi
+for restricted in keychain-access-groups com.apple.application-identifier get-task-allow; do
+  if grep -Fq "$restricted" "$app_ents"; then
+    fail "Malibu.entitlements must not commit $restricted; it is derived from the profile at signing"
+  fi
+done
+
+# Behavioural proof against throwaway ad-hoc binaries (macOS hosts only).
+if command -v codesign >/dev/null 2>&1; then
+  work="$(mktemp -d "${TMPDIR:-/tmp}/cli-se-ents-test.XXXXXX")"
+  trap 'rm -rf "$work"' EXIT
+  cp /usr/bin/true "$work/plain"
+  codesign --force --sign - "$work/plain" >/dev/null 2>&1
+  bash "$require" "$work/plain" || fail "an entitlement-free CLI must pass"
+  cat > "$work/attest.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.developer.devicecheck.app-attest-opt-in</key><array><string>CDhash</string></array></dict></plist>
+PLIST
+  cp /usr/bin/true "$work/attest"
+  codesign --force --sign - --entitlements "$work/attest.plist" "$work/attest" >/dev/null 2>&1 ||
+    fail "could not sign the App Attest probe binary"
+  if bash "$require" "$work/attest" 2>/dev/null; then
+    fail "a CLI claiming App Attest must be rejected"
+  fi
+fi
 
 printf '[test-cli-se-entitlements] ok\n'

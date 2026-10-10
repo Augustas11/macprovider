@@ -52,8 +52,12 @@ targets:
       - Sources/Malibu/Resources/Brand
       - Sources/Malibu/Resources/MalibuFeature.xcstrings
       - Sources/Malibu/Resources/MalibuModelCapabilities.json
+    # Local and test builds sign with the empty MalibuLocal.entitlements: an
+    # ad-hoc app that claims App Attest without a profile cannot launch.
+    # Releases sign with Malibu.entitlements plus the Developer ID App Attest
+    # profile (scripts/prepare-malibu-app-attest-signing.py).
     entitlements:
-      path: Malibu.entitlements
+      path: MalibuLocal.entitlements
     info:
       path: Sources/Malibu/Info.plist
       properties:
@@ -72,7 +76,7 @@ targets:
       base:
         PRODUCT_NAME: Malibu
         PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.app
-        CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
+        CODE_SIGN_ENTITLEMENTS: MalibuLocal.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
     postBuildScripts:

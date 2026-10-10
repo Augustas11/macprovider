@@ -1034,6 +1034,7 @@ jobs:
         env:
           APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
           APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          MALIBU_APP_ATTEST_PROFILE_BASE64: ${{ secrets.MALIBU_APP_ATTEST_PROFILE_BASE64 }}
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
@@ -1145,17 +1146,40 @@ jobs:
               "$nested_bundle"
           done < <(find "$APP/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
 
+          # Malibu.app embeds the Developer ID profile that grants App Attest
+          # and signs with the entitlements derived from it. The embedded CLI
+          # keeps no entitlements and is not re-signed.
+          if [ -z "${MALIBU_APP_ATTEST_PROFILE_BASE64:-}" ]; then
+            echo "::error::MALIBU_APP_ATTEST_PROFILE_BASE64 is required for Malibu.app." >&2
+            exit 1
+          fi
+          APP_ATTEST_PROFILE="$RUNNER_TEMP/malibu-app-attest.provisionprofile"
+          MALIBU_ENTITLEMENTS="$RUNNER_TEMP/Malibu-release.entitlements"
+          ( umask 077; printf '%s' "$MALIBU_APP_ATTEST_PROFILE_BASE64" | base64 -d > "$APP_ATTEST_PROFILE" )
+          python3 scripts/prepare-malibu-app-attest-signing.py prepare \
+            --profile "$APP_ATTEST_PROFILE" \
+            --team "$APPLE_NOTARY_TEAM_ID" \
+            --base phase3-binary/app/Malibu.entitlements \
+            --app "$APP" \
+            --out "$MALIBU_ENTITLEMENTS"
+
           SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           source_cli_sha256="$(shasum -a 256 "$WORK/macprovider-cli" | awk '{print $1}')"
           codesign --force \
             --options runtime \
             --timestamp \
             --preserve-metadata=identifier \
-            --entitlements phase3-binary/app/Malibu.entitlements \
+            --entitlements "$MALIBU_ENTITLEMENTS" \
             --sign "$SIGNING_ID" \
             "$APP"
 
           codesign --verify --strict --verbose=2 --deep "$APP"
+          python3 scripts/prepare-malibu-app-attest-signing.py verify \
+            --app "$APP" \
+            --team "$APPLE_NOTARY_TEAM_ID" \
+            --entitlements "$MALIBU_ENTITLEMENTS" \
+            --profile "$APP_ATTEST_PROFILE"
+          rm -f "$APP_ATTEST_PROFILE"
           bundled_cli_sha256="$(shasum -a 256 "$APP/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
           if [ "$bundled_cli_sha256" != "$source_cli_sha256" ]; then
             echo "::error::Malibu embedded CLI sha256 differs from standalone CLI" >&2
