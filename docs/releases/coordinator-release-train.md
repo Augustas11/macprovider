@@ -291,9 +291,9 @@ renewal shipped only `catalog-release.py` to Pearl, so the under-lock
 continuity-check could not import `openrouter_pricing_engine.py`. It is fixed on
 `main` in `314d3fbc` (see the table below). The live feed still dates from the
 v1.8.182 release on 2026-09-23, so the 30-day provider freshness limit falls
-around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
-16:00 UTC), or earlier with a manual dispatch of
-`renew-autotune-static-feed-signed.yml`.
+around 2026-10-23. The fix took effect at the next renewal. The scheduled
+renewal has since been retired (#1938); a restamp is on demand
+(`scripts/renew-autotune-static-feed.sh`).
 
 ## Next coordinator release — tag unassigned, net changes vs v1.8.211
 

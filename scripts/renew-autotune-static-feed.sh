@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Renew the signed SPEC-023 autotune static feed WITHOUT changing its content —
-# a freshness re-stamp that clears the client 30-day freshness horizon
-# (AutotuneRecommend.swift loadSignedStatic: now - generated_at > 30d fails
-# closed and strands any provider that restarts). Since #1268 the coordinator
+# an on-demand freshness re-stamp. Providers since SPEC-023 v0.22.15 treat feed
+# age as advisory, and #1938 retired the weekly scheduled renewal; run this only
+# when an operator needs fresh dates (for example for a provider still on a CLI
+# that enforces the old 30-day horizon). Since #1268 the coordinator
 # hot-reloads the feed on SIGHUP, so this deploys with ZERO provider disruption:
 # no coordinator restart, every provider WebSocket stays connected.
 #
@@ -12,10 +13,10 @@
 # the key lives — operator laptop or a production-release GitHub Actions runner),
 # pushes only signed bytes to Pearl, and does the symlink swap + SIGHUP over SSH.
 #
-# Primary always-on signer: .github/workflows/renew-autotune-static-feed-signed.yml
-# (Wednesday 16:00 UTC, production-release). This script is that job's deploy
-# path and the laptop fallback. Do not install a Pearl systemd signer and do
-# not install a laptop LaunchAgent as the SLA.
+# There is no scheduled signer. Native-MTP revocation slots, which this script
+# also republishes for a native-bound release, have their own weekly job
+# (.github/workflows/publish-native-mtp-revocations.yml). Do not install a
+# Pearl systemd signer or a laptop LaunchAgent.
 #
 # Default is DRY-RUN: build + verify a re-dated release locally and stop. Pass
 # --deploy to push to the coordinator host. --deploy is fail-closed and atomic,

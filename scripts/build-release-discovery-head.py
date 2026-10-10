@@ -22,9 +22,9 @@ SET_ID = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:v[0-9]+\.[0-9]+\.[0-9]+@[0
 SEQUENCE_ATTEMPT_BITS = 16
 SEQUENCE_ATTEMPT_MAX = (1 << SEQUENCE_ATTEMPT_BITS) - 1
 UINT64_MAX = (1 << 64) - 1
-# Default to the full seven-day window. A release-built head is published at
-# rollout, often days after signing; a 24h default left it inside the 48h
-# discovery-head-freshness-alarm threshold the moment it went live.
+# Default to the full seven-day window: providers that predate SPEC-020 v0.1.22
+# still refuse a head past expires_at, and a release-built head is published
+# at rollout, often days after signing. Current providers ignore the date.
 DEFAULT_VALIDITY = dt.timedelta(hours=168)
 
 

@@ -1,24 +1,28 @@
 # Autotune Static Feed Renewal (freshness re-stamp)
 
-The coordinator's signed SPEC-023 autotune feed carries a **30-day freshness
-horizon** enforced client-side: `AutotuneRecommend.swift` `loadSignedStatic`
-fails closed when `now - generated_at > 30*24*3600`, which sets
-`rateCardUpdateRequired` / `candidateCatalogUpdateRequired` and aborts the
-provider daemon **before it connects** (`runModelCatalogPreflight`). The gate
-runs only at daemon start / join, so a stale feed silently arms and providers
-drop one-by-one as they restart or the coordinator cycles them. This is an
-ops-renewal gap, not a design flaw — the guard on month-old signed pricing data
-is correct.
+**No scheduled renewal (#1938, SPEC-023 v0.22.21).** Providers since SPEC-023
+v0.22.15 treat feed age as advisory: an old but validly signed feed still joins,
+prices and matches artifacts. The weekly signed restamp, its Tuesday watch and
+the 6-hourly freshness alarm are retired. A restamp is now an on-demand operator
+step, for example when a provider still runs a CLI that predates v0.22.15
+(those fail closed 30 days after `generated_at`) or a native-MTP admission must
+be re-signed for a CLI that predates v0.22.19 before its `expires_at`.
 
-**The fix is to re-date + re-sign the feed on a schedule.** Since #1268 the
-coordinator hot-reloads the feed on `SIGHUP` (`reloadCoordinatorConfig` swaps
-the WS admission catalog and the buyer-served `/v1/*` bytes atomically,
-fail-closed). A **dates-only restamp** is zero-disruption for already-connected
-sockets. A **content catalog cut** is not: hello `catalog_release_id` is frozen
-at `serve` start (live fetch or the CLI baked catalog). One `.previous-target`
-hop is the wrong primitive for that — it used up listed-v1 on 2026-09-19 and
-kicked Llama-3.2-3B boxes still advertising inband-v1 or baked gpt-oss-v1.
-See `docs/reports/2026-09-19-catalog-one-hop-admission-outage.md`.
+Native-MTP revocation slots are the exception: providers still need a current
+revocation body, so `.github/workflows/publish-native-mtp-revocations.yml`
+publishes a 14-day batch every Wednesday (environment `autotune-feed-renewal`,
+same secrets as below). A restamp of a native-bound release republishes them
+too.
+
+Since #1268 the coordinator hot-reloads the feed on `SIGHUP`
+(`reloadCoordinatorConfig` swaps the WS admission catalog and the buyer-served
+`/v1/*` bytes atomically, fail-closed). A **dates-only restamp** is
+zero-disruption for already-connected sockets. A **content catalog cut** is
+not: hello `catalog_release_id` is frozen at `serve` start (live fetch or the
+CLI baked catalog). One `.previous-target` hop is the wrong primitive for that
+— it used up listed-v1 on 2026-09-19 and kicked Llama-3.2-3B boxes still
+advertising inband-v1 or baked gpt-oss-v1. See
+`docs/reports/2026-09-19-catalog-one-hop-admission-outage.md`.
 
 `.previous-target` is a window of **at most three** `releases/<id>` lines.
 Publish prepends the outgoing current and keeps the next two unique retained
@@ -40,14 +44,12 @@ clients from a compromised coordinator serving forged feeds. It **MUST NOT**
 live on Pearl. A Pearl-root signer that mints client-trusted feeds and retargets
 `autotune/current` is the same mutation surface as `deploy-pearl-vps.sh`.
 
-Primary always-on signer: GitHub Actions
-`.github/workflows/renew-autotune-static-feed-signed.yml` (Wednesday 16:00 UTC,
-`environment: autotune-feed-renewal`, no reviewer gate). The runner signs with
-Swift CryptoKit, authenticates the previous signed release with a sealed Go
-verifier at `/private/var/macprovider-go-verifier/bin/go`, verifies signatures
-with a sealed OpenSSL 3 bottle, and rsyncs **only signed bytes** to Pearl.
-The private key is an `autotune-feed-renewal` secret, never a file on the
-coordinator host. `catalog-release.py` does not take Go from PATH.
+A restamp runs where the key already lives (an operator machine). It signs with
+Swift CryptoKit, authenticates the previous signed release with the Go
+verifier, verifies signatures with OpenSSL 3, and rsyncs **only signed bytes**
+to Pearl. The weekly revocation job uses the `autotune-feed-renewal`
+environment secret and a sealed OpenSSL 3 bottle. The private key is never a
+file on the coordinator host. `catalog-release.py` does not take Go from PATH.
 
 A Pearl compromise therefore still cannot mint a validly-signed feed.
 
@@ -63,7 +65,7 @@ fails closed on empty secrets. Do **not** commit key material.
 | `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | Dedicated OpenSSH private key for `root@<pearl-host>` (not `<operator-ssh-key>`, not the download.malibu.tech upload key). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read. Same capability as the `production-release` posture token; this environment does not inherit that secret. |
 
-## What the signed job does
+## What a restamp does
 
 `scripts/renew-autotune-static-feed.sh --deploy` (default without `--deploy` is
 dry-run):
@@ -91,8 +93,7 @@ dry-run):
    file, which is the source of truth there. The executable regression for the
    whole restamp → generate → verify sequence, in both the four-feed and
    five-feed states, is `RenewalFlowTest` in
-   `scripts/tests/test_catalog_artifact_feed.py`, run by
-   `scripts/test-renew-autotune-static-feed-signed.sh`.
+   `scripts/tests/test_catalog_artifact_feed.py`.
 3. `catalog-release.py generate` → canonical bytes + manifest + ledger, then
    `resign-autotune-static.sh` signs the three static feeds — four once the
    release is artifact-bound (`autotune-artifacts.json`). On Actions, generate
@@ -201,24 +202,18 @@ restart/upgrade plan. CLIs built after #1705 also refetch the signed live
 catalog on `catalog_incompatible` and adopt it when their served row is
 unchanged, so they recover without a restart.
 
-## Weekly schedule
+## Schedule
 
 | When (UTC) | What |
 | --- | --- |
-| Monday and Thursday 16:00 | discovery-head renewal (`renew-release-discovery-head.yml`) — different key, different artifact. Do not share this slot. |
-| Wednesday 16:00 | **signed autotune renew** (`renew-autotune-static-feed-signed.yml`, `autotune-feed-renewal`, unattended) |
-| Tuesday 16:00 | **watch** (`renew-autotune-static-feed.yml`) — fails if live `generated_at` is ≥ 7 days old (~6 days after a successful Wednesday) |
-| every 6 hours | **20-day alarm** (`autotune-feed-freshness-alarm.yml`) |
+| Wednesday 16:00 | native-MTP revocation batch (`publish-native-mtp-revocations.yml`, `autotune-feed-renewal`, unattended) |
 
-A red Tuesday watch means: inspect the Wednesday `autotune-feed-renewal` run
-(missed schedule or job failure). Do **not** install a laptop LaunchAgent as
-the SLA — a closed laptop misses the week. Do **not** put the feed key on
-Pearl. The signed job has no human approval gate.
+There is no scheduled feed restamp and no discovery-head renewal (SPEC-020
+v0.1.22). Do **not** install a laptop LaunchAgent or a Pearl signer.
 
-## Laptop fallback (not the SLA)
+## Running a restamp
 
-If the Actions signer cannot run, an operator at a machine that already holds
-the key can:
+An operator at a machine that already holds the key runs:
 
 ```bash
 scripts/renew-autotune-static-feed.sh            # build + verify, no prod contact
@@ -238,19 +233,6 @@ curl -s https://coordinator.malibu.tech/v1/rate-card \
 ```
 
 `pool_size` should be unchanged across the HUP.
-
-## GitHub Actions backstops (no signing, no Pearl SSH)
-
-The Tuesday cadence and 20-day alarm remain **read-only**. They fetch live
-`/v1/rate-card` and call `scripts/check-autotune-feed-freshness.py` (stdin JSON,
-no network, no secrets). The live URL is pinned to
-`https://coordinator.malibu.tech/v1/rate-card` (no dispatch override).
-
-```bash
-curl -fsS --proto '=https' --tlsv1.2 --max-time 20 \
-  https://coordinator.malibu.tech/v1/rate-card \
-  | python3 scripts/check-autotune-feed-freshness.py --max-age-days 20
-```
 
 ## Rollback
 

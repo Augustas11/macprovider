@@ -1,12 +1,21 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.20
+version: v0.22.21
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.21 (2026-10-10)** — Retires the scheduled calendar renewals
+  (#1938). The weekly signed autotune-feed restamp, its Tuesday watch and the
+  6-hourly feed freshness alarm are removed; a feed restamp is an on-demand
+  operator step. Native-MTP revocation slots keep a weekly publish job of
+  their own, because providers still require a current revocation body.
+  Pre-v0.22.15 CLIs strand 30 days after the last restamp and pre-v0.22.19
+  CLIs stop native MTP at the live admission's `expires_at`; both are
+  expected to be off the fleet by then.
 
 - **v0.22.20 (2026-10-10)** — Feed age stops gating releases and private
   prepare (#1938). The live coordinator release gate
@@ -1725,7 +1734,7 @@ Stage A is a weaker binding than Stage B **for the compatibility-set manifest on
 governs how an already-signed, already-committed release becomes the live
 catalog on the coordinator host (`/opt/macprovider/autotune/current`), how the
 host retains older releases, and which operator lane may do it. Every writer
-named here (the coordinator deploy, the weekly freshness renewal, the host
+named here (the coordinator deploy, an on-demand freshness renewal, the host
 updater, and the catalog-content lane) is bound by the same rules. None of
 these rules signs anything: every lane activates bytes that were signed off-host,
 signing keys MUST NOT be present on the coordinator host, and no activation path
@@ -1810,10 +1819,11 @@ not in the resulting admissible set is **uncovered**.
   coverage is unknown. A renewal cannot keep its release id: the id is the
   candidate feed `version`, and §3.7.8 permanently rejects a `release_id`
   rebound to different bytes, so every renewal consumes a window slot. Blocking
-  the renewal would instead risk the 30-day feed expiry that stable CLIs predating
-  SPEC-023 v0.22.15 still enforce. The weekly renewal and the 6-hourly freshness
-  alarm stay until the CLI with advisory age (§3.7.6 rule 4, §3.5 rule 10) is
-  the fleet's stable release; after that they can be retired.
+  the renewal would instead risk the 30-day feed expiry that CLIs predating
+  SPEC-023 v0.22.15 still enforce. The scheduled weekly renewal, its Tuesday
+  watch and the 6-hourly freshness alarm are retired (v0.22.21, #1938): the CLI
+  with advisory age (§3.7.6 rule 4, §3.5 rule 10) is the fleet's stable
+  release, so a renewal is an on-demand operator step.
 
 Coverage is a point-in-time check over connected providers. A provider that is
 offline during activation and returns later on an older release is an accepted
@@ -3027,9 +3037,9 @@ with a different candidate sha, is uncovered. An uncovered pair, a missing or
 malformed `/poolz`, or an unloadable window entry refuses a catalog activation
 unless an override is logged. A freshness renewal with the same uncovered pair
 publishes, raises a warning, and appends a `renewal_coverage_loss` record; a
-provider parked on one release is uncovered on the fourth weekly renewal. A
+provider parked on one release is uncovered on the fourth renewal. A
 CLI with advisory static-feed age (SPEC-023 v0.22.15) is not uncovered by crossing 30
-days; the weekly renewal stays until that CLI is the fleet's stable release.
+days; renewals are on demand since v0.22.21.
 
 AC-CAT-26 (`SPEC-023-R016`, renewal continuity): A renewal whose only
 differences are the stripped restamp fields passes. A renewal that changes any
@@ -3346,9 +3356,11 @@ reject or disable an admission because the wall clock has passed it, and MUST
 NOT bound the `issued_at`..`expires_at` window. A signed admission keeps
 authorizing its tuples until a superseding release replaces it, the emergency
 revocation feed below revokes a tuple, or emergency-off is set. Signers and the
-coordinator still keep the window at 90 days or less, and the weekly feed
-renewal keeps re-signing it, while CLIs that predate v0.22.19 (which enforce
-`expires_at > now` and the 90-day bound) remain in the fleet.
+coordinator still keep the window at 90 days or less while CLIs that predate
+v0.22.19 (which enforce `expires_at > now` and the 90-day bound) remain in the
+fleet. With the scheduled renewal retired (v0.22.21), an operator re-signs the
+admission on demand before its `expires_at` only if such CLIs still serve
+native MTP then.
 
 Every entry is the exact closed object below. `sha256` means lowercase 64-hex;
 `short_string` means 1..128 UTF-8 bytes with no control character; integers are
@@ -3605,8 +3617,10 @@ Publication: the canonical origin serves
 directory of pre-signed bodies, one per slot of at most 10 minutes with
 `issued_at` at the slot start, choosing the newest issued, unexpired,
 correctly signed slot (`Cache-Control: no-store`). Signing keys stay off the
-coordinator host. The signed weekly renewal signs at least 14 days of slots
-carrying the current revoked set. An emergency revocation is a replacement
+coordinator host. The weekly `publish-native-mtp-revocations.yml` job (an
+on-demand freshness renewal also republishes them) signs at least 14 days of
+slots carrying the current revoked set; it is the one scheduled signer left
+after v0.22.21. An emergency revocation is a replacement
 directory, signed off-host, whose generations exceed every served generation
 and whose revoked set is a superset; providers adopt it at their next poll.
 

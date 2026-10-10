@@ -25,14 +25,12 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 CLI = "scripts/ops/cli-release.sh"
 CAT = "scripts/ops/catalog-activate.sh"
 RT = "scripts/ops/pearl-runtime.sh"
-DISC = "scripts/ops/discovery-renew.sh"
 
 # Guarded workflow file stem -> entry point.
 WORKFLOWS = {
     "acceptance-candidate": CLI,
     "promote-acceptance-candidate": CLI,
     "release": CLI,
-    "renew-release-discovery-head": DISC,
     "verify-live-coordinator-release-rollout": CLI,
     "pearl-runtime-release": RT,
 }
@@ -41,7 +39,6 @@ FALLBACK_NAMES = {
     "acceptance-candidate": "Sign private acceptance candidate",
     "promote-acceptance-candidate": "Promote exact physically accepted candidate",
     "release": "Release macprovider-cli",
-    "renew-release-discovery-head": "Renew signed release discovery head",
     "verify-live-coordinator-release-rollout": "Verify live coordinator release rollout",
     "pearl-runtime-release": "Release Pearl runtime",
 }
