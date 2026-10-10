@@ -10,7 +10,9 @@
 // Heavy real-model fixture, skipped unless set:
 //   MACPROVIDER_DECODE_ISOLATION_MODEL=<model directory>
 //   MACPROVIDER_DECODE_ISOLATION_LENGTHS=600,901,1501,3000,9000 (optional)
-//   MACPROVIDER_DECODE_ISOLATION_STEPS=4 (optional)
+//   MACPROVIDER_DECODE_ISOLATION_WINDOW=<steps per lockstep window> (optional,
+//     default the serve window, 16)
+//   MACPROVIDER_DECODE_ISOLATION_STEPS=<total steps> (optional, default the window)
 // The fused A3B MoE path follows `MLX_LM_QWEN35_FUSED_MOE` as in serving.
 
 import Foundation
@@ -36,7 +38,11 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
         let lengths = (environment["MACPROVIDER_DECODE_ISOLATION_LENGTHS"] ?? "600,901,1501,3000,9000")
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-        let steps = Int(environment["MACPROVIDER_DECODE_ISOLATION_STEPS"] ?? "") ?? 4
+        // Rows decode in lockstep windows of this many steps on one set of
+        // batch caches, as the serve path does (16 for every layout).
+        let window = Int(environment["MACPROVIDER_DECODE_ISOLATION_WINDOW"] ?? "")
+            ?? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: [.recurrentMamba, .pagedAttention])
+        let steps = Int(environment["MACPROVIDER_DECODE_ISOLATION_STEPS"] ?? "") ?? max(4, window)
         let container = try await LLMModelFactory.shared.loadContainer(
             from: URL(fileURLWithPath: directory),
             using: #huggingFaceTokenizerLoader()
@@ -87,18 +93,24 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
                 }
             }
             var result: [String: (logits: [[Float]], tokens: [Int])] = [:]
-            for _ in 0 ..< steps {
-                let rowIDs = rows.map { ids[$0] }
-                let logits = try await backend.sharedDecodeLogitsForTest(
+            let rowIDs = rows.map { ids[$0] }
+            var done = 0
+            while done < steps {
+                let windowSteps = min(window, steps - done)
+                let perStep = try await backend.sharedDecodeLogitsForTest(
                     requestIDs: rowIDs,
-                    tokens: rowIDs.map { current[$0]! }
+                    tokens: rowIDs.map { current[$0]! },
+                    steps: windowSteps
                 )
-                for (index, id) in rowIDs.enumerated() {
-                    let next = logits[index].indices.max { logits[index][$0] < logits[index][$1] }!
-                    result[id, default: ([], [])].logits.append(logits[index])
-                    result[id, default: ([], [])].tokens.append(next)
-                    current[id] = next
+                for logits in perStep {
+                    for (index, id) in rowIDs.enumerated() {
+                        let next = logits[index].indices.max { logits[index][$0] < logits[index][$1] }!
+                        result[id, default: ([], [])].logits.append(logits[index])
+                        result[id, default: ([], [])].tokens.append(next)
+                        current[id] = next
+                    }
                 }
+                done += windowSteps
             }
             return result
         }
@@ -112,7 +124,7 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
             for step in 0 ..< steps {
                 let equal = lone.logits[step] == shared.logits[step]
                 let gap = zip(lone.logits[step], shared.logits[step]).map { abs($0 - $1) }.max() ?? 0
-                print("decode-isolation row=\(row) keys=\(lengths[row]) step=\(step) logits_bitwise=\(equal) max_abs_diff=\(gap) lone_token=\(lone.tokens[step]) batched_token=\(shared.tokens[step])")
+                print("decode-isolation rows=\(lengths.count) window=\(window) row=\(row) keys=\(lengths[row]) step=\(step) logits_bitwise=\(equal) max_abs_diff=\(gap) lone_token=\(lone.tokens[step]) batched_token=\(shared.tokens[step])")
                 if !equal || lone.tokens[step] != shared.tokens[step] {
                     failures.append("row \(row) (\(lengths[row]) keys) step \(step): max |diff| \(gap)")
                 }

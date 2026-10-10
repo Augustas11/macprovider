@@ -1624,6 +1624,53 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    /// The same isolation across a lockstep decode window: unequal rows take
+    /// several steps through one batch cache (the serve window reuses it),
+    /// crossing the 1024-key one-pass / two-pass switch mid-window, and every
+    /// step of every row matches that row decoded alone step by step.
+    func testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep() throws {
+        try requireMetal()
+        MLXRandom.seed(1953)
+        let (queryHeads, kvHeads, headDim) = (16, 2, 256)
+        let scale = 1 / Float(headDim).squareRoot()
+        let histories = [1019, 1500, 600, 9000]
+        let steps = 8
+        let historyKeys = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let historyValues = histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+        let inputs = (0 ..< steps).map { _ in (
+            queries: MLXRandom.normal([histories.count, queryHeads, 1, headDim]).asType(.bfloat16),
+            keys: MLXRandom.normal([histories.count, kvHeads, 1, headDim]).asType(.bfloat16),
+            values: MLXRandom.normal([histories.count, kvHeads, 1, headDim]).asType(.bfloat16)
+        ) }
+        eval(historyKeys + historyValues + inputs.flatMap { [$0.queries, $0.keys, $0.values] })
+        let rowCaches = histories.indices.map { Self.attentionRowCache(history: historyKeys[$0], historyValues[$0]) }
+        let windowed = PagedKVSharedForwardBackend.batchAttentionWindowForTest(
+            rowCaches: rowCaches,
+            steps: inputs,
+            scale: scale
+        )
+        for row in histories.indices {
+            let serial = Self.attentionRowCache(history: historyKeys[row], historyValues[row])
+            for step in 0 ..< steps {
+                let slice = { (array: MLXArray) in array[row ..< row + 1, 0..., 0..., 0...] }
+                let lone = attentionWithCacheUpdate(
+                    queries: slice(inputs[step].queries),
+                    keys: slice(inputs[step].keys),
+                    values: slice(inputs[step].values),
+                    cache: serial,
+                    scale: scale,
+                    mask: serial.makeMask(n: 1, windowSize: nil, returnArray: false)
+                )
+                XCTAssertTrue(
+                    arrayEqual(windowed[step][row ..< row + 1], lone).item(Bool.self),
+                    "row \(row) (\(histories[row]) keys) step \(step)"
+                )
+            }
+            XCTAssertEqual(rowCaches[row].offset, histories[row] + steps)
+            XCTAssertTrue(arrayEqual(rowCaches[row].state[0], serial.state[0]).item(Bool.self), "row \(row) keys")
+        }
+    }
+
     private struct BatchAttentionCase {
         let label: String
         let queryTokens: Int

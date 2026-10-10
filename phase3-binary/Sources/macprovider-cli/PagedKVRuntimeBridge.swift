@@ -3231,12 +3231,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
     }
 
-    /// One uncompiled shared decode step over retained rows, as
-    /// `performDecode` runs it (batch caches, prepared cache, model forward,
-    /// row sync), returning each row's last-position logits as float32.
-    /// Rows advance by one token. Decode-isolation probes compare these bits
-    /// against the same rows decoded alone.
-    func sharedDecodeLogitsForTest(requestIDs: [String], tokens: [Int]) async throws -> [[Float]] {
+    /// One uncompiled shared decode window over retained rows, as
+    /// `performDecode` runs it: the batch caches are built once, `steps`
+    /// forwards run on them with each row's greedy token fed back, and rows
+    /// are synced at the window end. Returns each step's last-position logits
+    /// per row as float32 (`[step][row][vocab]`). Decode-isolation probes
+    /// compare these bits against the same rows decoded alone.
+    func sharedDecodeLogitsForTest(requestIDs: [String], tokens: [Int], steps: Int = 1) async throws -> [[[Float]]] {
         try await container.perform { context in
             let states = try requestIDs.map { id -> RowState in
                 guard let state = self.existingRowState(for: id), state.state == nil else {
@@ -3246,18 +3247,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             }
             let batchedCaches = try self.makeBatchedCaches(from: states.map(\.caches))
             let caches = batchedCaches.map(\.cache)
-            let text = LMInput.Text(tokens: MLXArray(tokens.map(Int32.init)).reshaped([tokens.count, 1]))
-            let output = withPreparedCache(caches, lengths: text.sequenceLengths) {
-                context.model(text, cache: caches, state: nil)
+            var current = tokens
+            var perStep: [[[Float]]] = []
+            for _ in 0 ..< max(1, steps) {
+                let text = LMInput.Text(tokens: MLXArray(current.map(Int32.init)).reshaped([current.count, 1]))
+                let output = withPreparedCache(caches, lengths: text.sequenceLengths) {
+                    context.model(text, cache: caches, state: nil)
+                }
+                try batchedCaches.forEach { try $0.validateBatchState() }
+                let logits = output.logits[0..., -1, 0...].asType(.float32)
+                eval(logits)
+                let vocabulary = logits.dim(1)
+                let flat = logits.asArray(Float.self)
+                let rows = (0 ..< requestIDs.count).map { Array(flat[$0 * vocabulary ..< ($0 + 1) * vocabulary]) }
+                current = rows.map { row in row.indices.max { row[$0] < row[$1] }! }
+                perStep.append(rows)
             }
-            try batchedCaches.forEach { try $0.validateBatchState() }
-            let logits = output.logits[0..., -1, 0...].asType(.float32)
-            eval(logits)
             batchedCaches.forEach { $0.syncRowsFromBatch() }
             eval(states.flatMap(\.caches))
-            let vocabulary = logits.dim(1)
-            let flat = logits.asArray(Float.self)
-            return (0 ..< requestIDs.count).map { Array(flat[$0 * vocabulary ..< ($0 + 1) * vocabulary]) }
+            return perStep
         }
     }
 
@@ -3336,6 +3344,33 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         cache.syncRowsFromBatch()
         cache.finalize()
         return attended
+    }
+
+    /// Several consecutive decode steps through ONE shared decode batch
+    /// cache, as a lockstep window runs them (rows keep their own lengths and
+    /// the cache appends in place between steps). Returns each step's
+    /// attention output.
+    static func batchAttentionWindowForTest(
+        rowCaches: [PagedKVCache],
+        steps: [(queries: MLXArray, keys: MLXArray, values: MLXArray)],
+        scale: Float
+    ) -> [MLXArray] {
+        let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
+        let outputs = steps.map { step -> MLXArray in
+            let mask = cache.makeMask(n: step.queries.dim(2), windowSize: nil, returnArray: false)
+            let attended = attentionWithCacheUpdate(
+                queries: step.queries,
+                keys: step.keys,
+                values: step.values,
+                cache: cache,
+                scale: scale,
+                mask: mask
+            )
+            eval(attended)
+            return attended
+        }
+        cache.syncRowsFromBatch()
+        return outputs
     }
 
     static func exerciseMTPPackedCacheForTest(
