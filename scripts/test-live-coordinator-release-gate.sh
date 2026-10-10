@@ -987,11 +987,11 @@ if run_guard "$work/future-feed" >"$work/future-feed.out" 2>&1; then
 fi
 grep -q "generated_at '2026-07-30T12:15:01Z' is more than 10 minutes in the future" "$work/future-feed.out"
 
-make_fixture "$work/stale-feed" v1.8.68 v1.8.68 2026-06-30T12:04:59Z
-if run_guard "$work/stale-feed" >"$work/stale-feed.out" 2>&1; then
-  fail "accepted a live feed generated more than 30 days ago"
-fi
-grep -q "generated_at '2026-06-30T12:04:59Z' is more than 30 days old" "$work/stale-feed.out"
+# Feed age is advisory only (#1938): an old but validly signed live feed set
+# does not block a release.
+make_fixture "$work/old-feed" v1.8.68 v1.8.68 2026-06-30T12:04:59Z
+run_guard "$work/old-feed" >"$work/old-feed.out" 2>&1 ||
+  fail "refused a validly signed live feed generated more than 30 days ago: $(cat "$work/old-feed.out")"
 
 make_fixture "$work/bad-signature"
 python3 - "$work/bad-signature" <<'PY'

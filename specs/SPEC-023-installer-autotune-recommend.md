@@ -1,12 +1,22 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.19
+version: v0.22.20
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.20 (2026-10-10)** — Feed age stops gating releases and private
+  prepare (#1938). The live coordinator release gate
+  (`verify-live-coordinator-release-gate.py`) no longer refuses a CLI release
+  because the live feed set's `generated_at` is more than 30 days old; the
+  10-minute future bound, pairing, signature and policy checks are unchanged.
+  The signed Build-1 private prepare authority's `expires_at` is structural
+  only (`generated_at < expires_at`, future-dated `generated_at` still
+  refused) and its 14-day window bound is removed; withdrawal is a new
+  `release_id` in a CLI release.
 
 - **v0.22.19 (2026-10-10)** — The native-MTP admission sidecar's
   `expires_at` is structural only (#1938, AGENTS.md rule 10). The provider
