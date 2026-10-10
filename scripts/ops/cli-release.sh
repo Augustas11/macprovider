@@ -925,9 +925,16 @@ marker_canary_probe_matches() {
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("kind")')" = "status_probe_gateway_proof" ] || return 1
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "true" ] || return 1
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("paged_kv_decision")')" = "attached" ] || return 1
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_authorized")')" = "true" ] || return 1
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_local_proof_result")')" = "passed" ] || return 1
+  # CB authorization: either the legacy signed positive policy entry, or the
+  # #1947 on-device self-check grant (the signed policy is revocation-only).
+  if [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')" = "granted" ]; then
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'int(d.get("probe", {}).get("self_check_served_slots") or 0) >= 1')" = "true" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("emergency_off_override")')" = "false" ] || return 1
+  else
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_authorized")')" = "true" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_local_proof_result")')" = "passed" ] || return 1
+  fi
 }
 
 # check_journey_run RUN_ID CANDIDATE_SHA VERSION -> JSON evidence on stdout, or refuse.
@@ -996,6 +1003,9 @@ got = {
     "policy_load_status": policy.get("load_status"),
     "policy_authorized": policy.get("authorized"),
     "policy_local_proof_result": policy.get("local_proof_result"),
+    "self_check_decision": (cb.get("self_check") or {}).get("decision"),
+    "self_check_served_slots": (cb.get("self_check") or {}).get("served_slots"),
+    "emergency_off_override": policy.get("emergency_off_override"),
 }
 bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
@@ -1003,9 +1013,16 @@ if got["coordinator_connected"] is not True: bad.append("coordinator.connected i
 if compat and got["compatibility_set_id"] != compat: bad.append("compatibility_set_id %r != %r" % (got["compatibility_set_id"], compat))
 if got["continuous_batching_active"] is not True: bad.append("continuous_batching.active is not true")
 if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
-if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
-if got["policy_authorized"] is not True: bad.append("continuous_batching.policy.authorized is not true")
-if got["policy_local_proof_result"] != "passed": bad.append("continuous_batching.policy.local_proof_result %r != 'passed'" % (got["policy_local_proof_result"],))
+if got["self_check_decision"] == "granted":
+    # #1947: CB is authorized by the on-device self-check; the signed policy only revokes.
+    if not isinstance(got["self_check_served_slots"], int) or got["self_check_served_slots"] < 1:
+        bad.append("continuous_batching.self_check.served_slots %r < 1" % (got["self_check_served_slots"],))
+    if got["emergency_off_override"] is not False:
+        bad.append("continuous_batching.policy.emergency_off_override is not false")
+else:
+    if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
+    if got["policy_authorized"] is not True: bad.append("continuous_batching.policy.authorized is not true (and no self_check grant)")
+    if got["policy_local_proof_result"] != "passed": bad.append("continuous_batching.policy.local_proof_result %r != 'passed'" % (got["policy_local_proof_result"],))
 if bad:
     sys.stderr.write("; ".join(bad) + "\n"); sys.exit(1)
 print(json.dumps(got, sort_keys=True))

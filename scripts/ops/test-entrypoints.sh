@@ -309,8 +309,8 @@ case " $(step_ids) " in
   *) bad "privacy_release_identity is not right after signed_byte_verification: $(step_ids)" ;;
 esac
 status_doc() {
-  local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}"
-  printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s"},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
+  local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}" cb_self_check="${8:-null}"
+  printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","self_check":%s,"policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s","emergency_off_override":false},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_self_check" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
 }
 
 run_rc 0 "cli status" scripts/ops/cli-release.sh status
@@ -327,6 +327,9 @@ expect_err "continuous_batching.active is not true"
 status_doc $CAND true true false
 run_rc 3 "canary probe with CB unauthorized" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "continuous_batching.policy.authorized is not true"
+status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":0}'
+run_rc 3 "canary probe with a self-check grant of 0 slots" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "self_check.served_slots 0 < 1"
 run_rc 3 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
 expect_err "requires --probe"
 printf '{"step":"canary_smoke","candidate_sha":"%s","kind":"status_probe","evidence":"old status-only marker"}
@@ -339,7 +342,8 @@ export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 printf 'canary-test-id' > "$tmp/svc/provider_id"
 printf 'move' > "$tmp/svc/mode"
 rm -f "$tmp/svc/served"
-status_doc $CAND true
+# #1947: CB is authorized by the on-device self-check; the signed policy is revocation-only.
+status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
 printf '{"level":"warn","error":"relayblind: privacy posture rejected: posture_unapproved_code_identity","provider_id":"canary-test-id","message":"privacy key advertisement rejected"}\n' > "$tmp/svc/journal.txt"
 run_rc 3 "canary probe refused when Pearl rejects its privacy advertisement" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "rejected the canary's privacy advertisement 1 time"
