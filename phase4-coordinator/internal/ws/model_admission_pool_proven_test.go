@@ -19,6 +19,15 @@ type fakePoolProvenSource struct {
 	entries  map[string]map[trustpool.AcceptedCoreKey][]poolmanifest.PoolModelEntry
 	err      error
 	limits   []int
+	// refreshErr fails the rollup refresh; refreshed records each window
+	// start the build refreshed the rollup for.
+	refreshErr error
+	refreshed  []time.Time
+}
+
+func (f *fakePoolProvenSource) RefreshPoolProvenRollup(_ context.Context, windowStart time.Time) error {
+	f.refreshed = append(f.refreshed, windowStart)
+	return f.refreshErr
 }
 
 func (f *fakePoolProvenSource) PoolProvenAttempts(_ context.Context, _, _ time.Time, limit int) ([]billing.PoolProvenAttempt, error) {
@@ -169,6 +178,9 @@ func TestModelAdmissionPoolProvenEndpoint(t *testing.T) {
 	if src.limits[0] != modelAdmissionPoolProvenAttemptCeiling+1 {
 		t.Fatalf("attempt read limit = %d", src.limits[0])
 	}
+	if len(src.refreshed) != 1 || !src.refreshed[0].Equal(f.now.Add(-30*24*time.Hour)) {
+		t.Fatalf("rollup refreshed for %v, want the window start once before the read", src.refreshed)
+	}
 	code, body := c.do(http.MethodGet, path, "alice-secret", nil)
 	if code != http.StatusOK || len(body) != 7 || body["schema"] != modelAdmissionPoolProvenSchema || body["k_anonymity_min"] != float64(3) || len(body["nonce"].(string)) != 32 ||
 		body["window_end"] != body["generated_at"] || body["window_start"] != f.now.Add(-30*24*time.Hour).Format(time.RFC3339) {
@@ -205,6 +217,11 @@ func TestModelAdmissionPoolProvenEndpoint(t *testing.T) {
 	if err := s.buildModelAdmissionPoolProvenSnapshot(context.Background()); !errors.Is(err, errModelAdmissionPoolProvenCeiling) {
 		t.Fatalf("ceiling build err = %v", err)
 	}
+	src.attempts, src.refreshErr = []billing.PoolProvenAttempt{poolProvenAttempt("p1", "acct-1")}, errors.New("rollup refresh timed out")
+	if err := s.buildModelAdmissionPoolProvenSnapshot(context.Background()); err == nil {
+		t.Fatal("a failed rollup refresh built a snapshot")
+	}
+	src.refreshErr = nil
 	src.attempts, src.err = nil, errors.New("ledger unavailable")
 	if err := s.buildModelAdmissionPoolProvenSnapshot(context.Background()); err == nil {
 		t.Fatal("a source failure built a snapshot")

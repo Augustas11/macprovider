@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,29 +31,61 @@ const (
 	modelAdmissionPoolProvenAttemptCeiling = 100_000
 )
 
+const (
+	// modelAdmissionPoolProvenRefreshTimeout bounds one rollup refresh. The
+	// first pass after an upgrade captures the whole snapshot table in short
+	// batches whose progress commits, so a pass that runs out of time
+	// resumes where it stopped.
+	modelAdmissionPoolProvenRefreshTimeout = 5 * time.Minute
+)
+
 var (
-	_ PoolProvenSource                 = (*SQLiteModelAdmissionStore)(nil)
+	_ PoolProvenSource                 = sqlitePoolProvenSource{}
 	_ ModelAdmissionProbeEvidenceStore = (*SQLiteModelAdmissionStore)(nil)
 )
 
 var errModelAdmissionPoolProvenCeiling = errors.New("model admission pool-proven: counted-attempt ceiling exceeded")
 
-// PoolProvenSource reads the ledger attempts and the accepted pool cores the
-// aggregate is built from. The coordinator's SQLite admission store shares the
-// ledger and trust-pool database and implements it.
+// PoolProvenSource reads the counted attempts and the accepted pool cores the
+// aggregate is built from. RefreshPoolProvenRollup brings the counted-attempt
+// rollup current for a window starting at windowStart.
 type PoolProvenSource interface {
+	RefreshPoolProvenRollup(ctx context.Context, windowStart time.Time) error
 	PoolProvenAttempts(ctx context.Context, since, until time.Time, limit int) ([]billing.PoolProvenAttempt, error)
 	AcceptedPoolModelEntries(ctx context.Context, poolID string) (map[trustpool.AcceptedCoreKey][]poolmanifest.PoolModelEntry, error)
 }
 
-// PoolProvenAttempts implements PoolProvenSource on the shared database.
-func (s *SQLiteModelAdmissionStore) PoolProvenAttempts(ctx context.Context, since, until time.Time, limit int) ([]billing.PoolProvenAttempt, error) {
-	return billing.QueryPoolProvenAttempts(ctx, s.db, since, until, limit)
+// sqlitePoolProvenSource implements PoolProvenSource on the shared ledger and
+// trust-pool database: reads on reader (the read-only route-read handle when
+// configured), rollup writes on writer.
+type sqlitePoolProvenSource struct {
+	reader, writer *sql.DB
 }
 
-// AcceptedPoolModelEntries implements PoolProvenSource on the shared database.
-func (s *SQLiteModelAdmissionStore) AcceptedPoolModelEntries(ctx context.Context, poolID string) (map[trustpool.AcceptedCoreKey][]poolmanifest.PoolModelEntry, error) {
-	return trustpool.AcceptedPoolModelEntries(ctx, s.db, poolID)
+// newSQLitePoolProvenSource builds the source from the admission writer store
+// and, when it is a SQLite store, the read-only route-read store.
+func newSQLitePoolProvenSource(writer, reads ModelAdmissionStore) (PoolProvenSource, bool) {
+	w, ok := writer.(*SQLiteModelAdmissionStore)
+	if !ok || w == nil {
+		return nil, false
+	}
+	reader := w.db
+	if r, ok := reads.(*SQLiteModelAdmissionStore); ok && r != nil {
+		reader = r.db
+	}
+	return sqlitePoolProvenSource{reader: reader, writer: w.db}, true
+}
+
+func (s sqlitePoolProvenSource) RefreshPoolProvenRollup(ctx context.Context, windowStart time.Time) error {
+	return billing.RefreshPoolProvenRollup(ctx, s.reader, s.writer, windowStart)
+}
+
+func (s sqlitePoolProvenSource) PoolProvenAttempts(ctx context.Context, since, until time.Time, limit int) ([]billing.PoolProvenAttempt, error) {
+	return billing.QueryPoolProvenAttempts(ctx, s.reader, since, until, limit)
+}
+
+func (s sqlitePoolProvenSource) AcceptedPoolModelEntries(ctx context.Context, poolID string) (map[trustpool.AcceptedCoreKey][]poolmanifest.PoolModelEntry, error) {
+	return trustpool.AcceptedPoolModelEntries(ctx, s.reader, poolID)
 }
 
 // ModelAdmissionPoolProvenRow is one closed `rows` element.
@@ -192,10 +225,16 @@ func (s *Server) buildModelAdmissionPoolProvenSnapshot(ctx context.Context) erro
 	}
 	s.modelAdmissionPPBuild.Lock()
 	defer s.modelAdmissionPPBuild.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, modelAdmissionIntakeBuildTimeout)
-	defer cancel()
 	generatedAt := s.now().UTC().Truncate(time.Second)
 	windowStart := generatedAt.Add(-modelAdmissionIntakeWindow)
+	refreshCtx, cancelRefresh := context.WithTimeout(ctx, modelAdmissionPoolProvenRefreshTimeout)
+	err := s.poolProven.RefreshPoolProvenRollup(refreshCtx, windowStart)
+	cancelRefresh()
+	if err != nil {
+		return fmt.Errorf("rollup: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, modelAdmissionIntakeBuildTimeout)
+	defer cancel()
 	attempts, err := s.poolProven.PoolProvenAttempts(ctx, windowStart, generatedAt, modelAdmissionPoolProvenAttemptCeiling+1)
 	if err != nil {
 		return fmt.Errorf("attempts: %w", err)
