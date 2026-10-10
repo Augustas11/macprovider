@@ -1,0 +1,7 @@
+You are the SECURITY lane auditor, round 2, for PR #1919 (Augustas11/macprovider), branch codex/issue-1914-version-policy, checkout /Users/augstar/macprovider-1919. Review the COMPLETE diff `git diff origin/main...HEAD` (it will be squash-merged) and the code it touches. Do not edit files and do not contact any live host.
+
+Context: scope changed after round 1 (operator decision): no version floor, no bridge, no allowlist. Any well-formed compatibility id from the target repository connects and serves; every session gets the recommended version; the only serving block is an exact revocation (revoked builds stay connected update-only). A one-time list of 42 exact revocations (all releases older than v1.8.207) is applied by a new revocation_seed train step after the runtime ships. Round-1 findings are in /Users/augstar/macprovider-poc/audits/2026-10-10-1919-version-floor/R1_FINDINGS.md (many concerned the removed floor/migration); state for each whether it is FIXED / NO LONGER APPLICABLE / NOT FIXED, then report new issues.
+
+Lane focus: security: admission is now open to any well-formed id from the target repo — can a provider spoof a repo/sha/version, get routed while revoked, or bypass revocation with a near-duplicate id; does update-only really never route; can the revocation_seed step be abused; any mass-disconnect path on reload; trust of the generated revocation list.
+
+Output: findings with severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), file:line, failure scenario, fix; say "pre-existing" when relevant. End with "C/H/M/L = n/n/n/n". Gate: 0 C/H/M.
