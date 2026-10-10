@@ -1,6 +1,6 @@
 1:event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 emergency_off=true
-47:  continuous_batching: off
-48:  continuous_batch_queue_limit: <unset, 2 * max_batch>
-49:  continuous_batch_queue_wait_timeout_ms: <unset, 30000>
-50:  continuous_batch_prefill_tokens_per_iteration: <unset, 2048>
-51:  continuous_batching_cached_turns: false
+43:  continuous_batching: off
+44:  continuous_batch_queue_limit: <unset, 2 * max_batch>
+45:  continuous_batch_queue_wait_timeout_ms: <unset, 30000>
+46:  continuous_batch_prefill_tokens_per_iteration: <unset, 2048>
+47:  continuous_batching_cached_turns: false

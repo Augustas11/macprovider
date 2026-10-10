@@ -27,9 +27,10 @@ provider behaviour: the released 1.8.232 CLI (release commit `36758c05`,
 `mlx-swift` 0.31.4, `mlx-swift-lm` fork `ca8c384c`), SHA-256
 `16bd99286b4d4278b4eb930dd7ba58933ef7c651bad0e3cf644abffe8be3dbcb`, with its
 own metallib `84e48718…`, copied into the lab directory and run the same way.
-Its run (`runs/gptoss20b-prebump`) used an earlier probe revision that expected
-200 on the GPT-OSS tool-history turn. Both binaries return the same
-fail-closed 400 there.
+In its run (`runs/gptoss20b-prebump`), plain, reasoning and tools pass, with
+the same fail-closed 400 on the tool-history turn. The `max_tokens: 400` essay
+request returns the SPEC-018 fail-closed 502 because analysis used up the
+budget (see F3), and the stop-string request hits F2.
 
 ## Gemma 4 26B-A4B artifact
 
@@ -184,7 +185,7 @@ staged with both binaries under `<studio-home>/lab-700/`.
   provider's `requests_total` before and after each run so contention is visible.
   ```
   cd <studio-home>/lab-700
-  ./issue700_t1_02_moe_decode_delta.sh prepare   # fetches Qwen2.5-7B-Instruct-4bit @ c26a38f6 (not on the Studio yet), writes manifest
+  ./issue700_t1_02_moe_decode_delta.sh prepare   # done 2026-10-10: Qwen2.5-7B-Instruct-4bit @ c26a38f6 fetched to lab-700/models, t1-02/manifest.txt written
   ./issue700_t1_02_moe_decode_delta.sh run
   ./issue700_t1_02_moe_decode_delta.sh summary   # t1-02/summary.json: p50s, delta %, gate PASS/BELOW_GATE, >5% regression flag
   ```
