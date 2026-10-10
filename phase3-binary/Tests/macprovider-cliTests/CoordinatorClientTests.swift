@@ -1991,6 +1991,55 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(resumedSnapshot.status, .ready)
     }
 
+    // #1880 audit R2: a heartbeat built while ready and suspended across an
+    // accepted pause must not publish the stale ready.
+    func testHeartbeatSuspendedAcrossOperatorPauseSendsUnavailable() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.setHeartbeatBeforeSendForTest {
+            let paused = await client.pauseByOperator()
+            XCTAssertEqual(paused, .accepted)
+        }
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last { $0["type"] as? String == "heartbeat" })
+        XCTAssertEqual(heartbeat["status"] as? String, "unavailable")
+    }
+
+    // #1880 audit R2: a local-only (no coordinator client) pause fences a model
+    // swap completion, and only a persisted resume lifts it.
+    func testLocalOnlyOperatorPauseFencesSwapCompletionUntilResume() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let paused = await LocalOnlyOperatorPause.pause(providerStatus: status, drainTimeoutSeconds: 1, persist: {})
+        XCTAssertEqual(paused, .accepted)
+        await status.completeTargetSwap(modelID: "model-b", modelHash: nil)
+        let swapped = await status.snapshot()
+        XCTAssertEqual(swapped.status, .unavailable)
+        let admitted = await status.beginRequestIfAccepting(requestID: "local-after-swap")
+        XCTAssertNil(admitted)
+
+        struct PersistFailed: Error {}
+        let failedResume = await LocalOnlyOperatorPause.resume(providerStatus: status, persist: { throw PersistFailed() })
+        XCTAssertEqual(failedResume, .rejected("lifecycle_state_persistence_failed"))
+        await status.setState(.ready, reason: "stray_ready")
+        let stillPaused = await status.snapshot()
+        XCTAssertEqual(stillPaused.status, .unavailable, "a failed resume must keep the fence")
+
+        let resumed = await LocalOnlyOperatorPause.resume(providerStatus: status, persist: {})
+        XCTAssertEqual(resumed, .accepted)
+        let ready = await status.snapshot()
+        XCTAssertEqual(ready.status, .ready)
+    }
+
     func testOperatorPausedProviderIgnoresWarmUpAndCapacityTransitions() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(

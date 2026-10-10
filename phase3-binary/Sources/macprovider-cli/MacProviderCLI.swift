@@ -3034,6 +3034,9 @@ struct ServeCommand: AsyncParsableCommand {
             providerID: resolved.providerID
         )
         if operatorPausedInitially {
+            // Fence first: no swap completion or request accounting may make a
+            // restored pause routable, with or without a coordinator session.
+            await providerStatus.setOperatorPauseFence(true)
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
@@ -3412,46 +3415,39 @@ struct ServeCommand: AsyncParsableCommand {
             resumeProvider = { await coordinatorClient.resumeByOperator() }
         } else {
             pauseProvider = {
-                await providerStatus.setState(.draining, reason: "operator_pause_draining")
-                guard await providerStatus.waitUntilDrained(timeoutSeconds: lifecycleControlDrainTimeout) else {
-                    await providerStatus.setState(.ready, reason: "operator_pause_drain_timeout")
-                    return .rejected("drain_timeout")
-                }
-                do {
-                    _ = try lifecycleStateStore.transition(
-                        to: .pausedByOperator,
-                        reasonCode: "operator_pause_confirmed",
-                        writer: .operatorCommand,
-                        providerID: lifecycleControlProviderID,
-                        modelID: lifecycleControlModelID,
-                        compatibilitySetID: lifecycleControlCompatibilitySetID,
-                        operationID: "operator-pause:\(UUID().uuidString.lowercased())",
-                        operatorPaused: true
-                    )
-                } catch {
-                    await providerStatus.setState(.ready, reason: "operator_pause_persistence_failed")
-                    return .rejected("lifecycle_state_persistence_failed")
-                }
-                await providerStatus.setState(.unavailable, reason: "operator_paused")
-                return .accepted
+                await LocalOnlyOperatorPause.pause(
+                    providerStatus: providerStatus,
+                    drainTimeoutSeconds: lifecycleControlDrainTimeout,
+                    persist: {
+                        _ = try lifecycleStateStore.transition(
+                            to: .pausedByOperator,
+                            reasonCode: "operator_pause_confirmed",
+                            writer: .operatorCommand,
+                            providerID: lifecycleControlProviderID,
+                            modelID: lifecycleControlModelID,
+                            compatibilitySetID: lifecycleControlCompatibilitySetID,
+                            operationID: "operator-pause:\(UUID().uuidString.lowercased())",
+                            operatorPaused: true
+                        )
+                    }
+                )
             }
             resumeProvider = {
-                do {
-                    _ = try lifecycleStateStore.transition(
-                        to: .degradedServing,
-                        reasonCode: "operator_resume_local_only",
-                        writer: .operatorCommand,
-                        providerID: lifecycleControlProviderID,
-                        modelID: lifecycleControlModelID,
-                        compatibilitySetID: lifecycleControlCompatibilitySetID,
-                        operationID: "operator-resume:\(UUID().uuidString.lowercased())",
-                        operatorPaused: false
-                    )
-                } catch {
-                    return .rejected("lifecycle_state_persistence_failed")
-                }
-                await providerStatus.setState(.ready, reason: "operator_resumed")
-                return .accepted
+                await LocalOnlyOperatorPause.resume(
+                    providerStatus: providerStatus,
+                    persist: {
+                        _ = try lifecycleStateStore.transition(
+                            to: .degradedServing,
+                            reasonCode: "operator_resume_local_only",
+                            writer: .operatorCommand,
+                            providerID: lifecycleControlProviderID,
+                            modelID: lifecycleControlModelID,
+                            compatibilitySetID: lifecycleControlCompatibilitySetID,
+                            operationID: "operator-resume:\(UUID().uuidString.lowercased())",
+                            operatorPaused: false
+                        )
+                    }
+                )
             }
         }
         // Every serve instance exposes the same owner-only control contract.
@@ -4657,4 +4653,45 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  idle_prewarm.run_on_battery: \(config.idlePrewarmRunOnBattery)")
     print("  stream_interval: \(config.streamInterval)")
     print("  prefill_step_size: \(config.prefillStepSize)")
+}
+
+/// Operator pause and resume for a serve with no coordinator client (local
+/// only). The pause fence is set once the pause is persisted and cleared only
+/// after a resume is persisted, so a model swap or request accounting can never
+/// make a paused provider routable (#1880 audit R2).
+enum LocalOnlyOperatorPause {
+    static func pause(
+        providerStatus: ProviderStatus,
+        drainTimeoutSeconds: Int,
+        persist: () throws -> Void
+    ) async -> ProviderControlCommandResult {
+        await providerStatus.setState(.draining, reason: "operator_pause_draining")
+        guard await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds) else {
+            await providerStatus.setState(.ready, reason: "operator_pause_drain_timeout")
+            return .rejected("drain_timeout")
+        }
+        do {
+            try persist()
+        } catch {
+            await providerStatus.setState(.ready, reason: "operator_pause_persistence_failed")
+            return .rejected("lifecycle_state_persistence_failed")
+        }
+        await providerStatus.setOperatorPauseFence(true)
+        await providerStatus.setState(.unavailable, reason: "operator_paused")
+        return .accepted
+    }
+
+    static func resume(
+        providerStatus: ProviderStatus,
+        persist: () throws -> Void
+    ) async -> ProviderControlCommandResult {
+        do {
+            try persist()
+        } catch {
+            return .rejected("lifecycle_state_persistence_failed")
+        }
+        await providerStatus.setOperatorPauseFence(false)
+        await providerStatus.setState(.ready, reason: "operator_resumed")
+        return .accepted
+    }
 }

@@ -2603,6 +2603,37 @@ struct BYOMDiscoveryEnvironment: Sendable {
         return production
     }
 
+    /// `production` for a `models` command: the serve port and the configured
+    /// loopback engine origin both come from the same provider config, so
+    /// discover, evaluate, propose, offer, admission status/withdraw and
+    /// catalog-economics resolve engines identically (#1880 audit R2).
+    static func productionForConfig(
+        configPath: String?,
+        namespacePath: String?,
+        mlxCacheDir: String?,
+        ollamaOrigin: String?,
+        openAICompatibleOrigin: String? = nil,
+        lmstudioOrigin: String? = nil,
+        llamacppOrigin: String? = nil,
+        llamacppSelector: BYOMLlamaCppArtifactSelector = .none,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> BYOMDiscoveryEnvironment {
+        production(
+            namespacePath: namespacePath,
+            mlxCacheDir: mlxCacheDir,
+            ollamaOrigin: ollamaOrigin,
+            openAICompatibleOrigin: openAICompatibleOrigin,
+            lmstudioOrigin: lmstudioOrigin,
+            llamacppOrigin: llamacppOrigin,
+            llamacppSelector: llamacppSelector,
+            servePort: configuredServePort(configPath: configPath),
+            configuredLoopback: configuredLoopback(configPath: configPath),
+            environment: environment,
+            homeDirectory: homeDirectory
+        )
+    }
+
     /// The loopback engine the provider config serves: its served model ref
     /// (`model`) and `loopback_origin`.
     struct ConfiguredLoopback: Equatable, Sendable {

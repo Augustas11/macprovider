@@ -504,6 +504,27 @@ final class BYOMLoopbackAdapterTests: XCTestCase {
         XCTAssertEqual(env(nil).ollamaOrigin, OllamaLoopbackServeModel.defaultOrigin)
     }
 
+    // #1880 audit R2: every models command builds its environment from the
+    // same config, so admission status/withdraw and catalog-economics see the
+    // configured engine port that propose/offer used.
+    func testProductionForConfigReadsServePortAndLoopbackOriginFromTheConfigFile() throws {
+        let root = try temporaryDirectory("byom-config-origin")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configURL = root.appendingPathComponent("config.yaml")
+        try Data("model: ollama:llama3.2\nloopback_origin: http://127.0.0.1:11500\nport: 9191\n".utf8).write(to: configURL)
+        let env = BYOMDiscoveryEnvironment.productionForConfig(
+            configPath: configURL.path,
+            namespacePath: root.appendingPathComponent("ns").path,
+            mlxCacheDir: root.appendingPathComponent("hf").path,
+            ollamaOrigin: OllamaLoopbackServeModel.defaultOrigin,
+            lmstudioOrigin: BYOMLMStudioDiscovery.defaultOrigin,
+            homeDirectory: root
+        )
+        XCTAssertEqual(env.ollamaOrigin, "http://127.0.0.1:11500")
+        XCTAssertEqual(env.lmstudioOrigin, BYOMLMStudioDiscovery.defaultOrigin)
+        XCTAssertEqual(env.mlxlmExcludedPort, 9191)
+    }
+
     // MARK: - Digest cache never persists a model path (audit LOW)
 
     func testDigestCachePersistsAPathTokenNotThePathAndDiscardsV1Files() throws {

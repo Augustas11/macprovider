@@ -6874,13 +6874,9 @@ actor CoordinatorClient {
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
-        // Heartbeat availability never advertises a paused provider as routable.
-        let heartbeatStatus: ProviderHealthState = operatorPaused && (snapshot.status == .ready || snapshot.status == .busy)
-            ? .unavailable
-            : snapshot.status
         var payload: [String: Any] = [
             "type": "heartbeat",
-            "status": heartbeatStatus.rawValue,
+            "status": snapshot.status.rawValue,
             "model_id": snapshotWireModelID,
             "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshotWireModelID),
             "ram_gb": snapshot.capacity.ramGB,
@@ -6977,7 +6973,26 @@ actor CoordinatorClient {
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
         )
+        if let heartbeatBeforeSendForTest {
+            await heartbeatBeforeSendForTest()
+        }
+        // Clamp at send time, after every await above: a pause accepted while
+        // this heartbeat was being built must not be overtaken by a stale
+        // ready/busy (#1880 audit R2).
+        if operatorPaused,
+           let status = payload["status"] as? String,
+           status == ProviderHealthState.ready.rawValue || status == ProviderHealthState.busy.rawValue {
+            payload["status"] = ProviderHealthState.unavailable.rawValue
+        }
         try await send(payload)
+    }
+
+    /// Test seam: runs inside sendHeartbeat after the payload is built and
+    /// before the send-time pause clamp.
+    private var heartbeatBeforeSendForTest: (@Sendable () async -> Void)?
+
+    func setHeartbeatBeforeSendForTest(_ hook: (@Sendable () async -> Void)?) {
+        heartbeatBeforeSendForTest = hook
     }
 
     private func applyAdmissionCanaryHeartbeatOverride(to payload: inout [String: Any]) throws {
