@@ -435,11 +435,13 @@ jobs:
         with:
           path: phase3-binary/.build
           key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
-          # A pin or toolchain change restores the nearest prior cache so only
-          # changed packages rebuild instead of a cold build.
+          # A pin change restores the nearest prior cache for the SAME Xcode so
+          # only changed packages rebuild. Never fall back across toolchains: a
+          # .build from another Swift fails with "module compiled with Swift
+          # X cannot be imported" (Modules-tool macro plugins), so a toolchain
+          # change starts cold.
           restore-keys: |
             spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
-            spm-${{ runner.os }}-
 
       - name: Build Swift tests
         id: build
@@ -508,7 +510,6 @@ jobs:
           key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
           restore-keys: |
             spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
-            spm-${{ runner.os }}-
 
       - name: Run BYOM CLI onboarding E2E (hermetic)
         # #1381 F8: this hermetic harness (fake Ollama loopback + in-process
