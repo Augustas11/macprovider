@@ -82,6 +82,12 @@ Before the cut: run the CLI train's pending one-time `privacy_release_setup` ste
 privacy code identity is admitted from signed release metadata instead of a
 hand-added cdhash.
 
+Deploy steps this release adds (from the CB/MTP bundle):
+- Re-baseline the signed native-MTP challenge bank on the #1927 runtime before the
+  coordinator canary runs; otherwise the canary correctly fails native MTP.
+- Raise Pearl `pool.max_concurrency_ceiling` (default 8) so a Mac's self-checked
+  grant above 8 (the Studio measured 16 for Qwen3.6) is routed in full.
+
 Release plan:
 1. Cut the candidate from `main` after every row above is merged.
 2. Studio canary through `cli-release.sh` (`canary_smoke`), with the self-check
