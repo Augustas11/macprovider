@@ -44,9 +44,10 @@ one of these is true:
   snapshot, and at deletion every scope's settlement finality is closed. The
   job stores that finality with the deletion, so a buyer reservation still
   held at the gateway settles from it later.
-- Every pool-scoped route snapshot is held, with its finality, in the
-  SPEC-047-R012 pool-proven rollup (`pool_proven_rollup_attempts`). Without
-  that table, pool-scoped requests stay hot
+- Every route snapshot the SPEC-047-R012 pool-proven rollup counts
+  (enforce-mode `pool_manifest` snapshots with a `pool_id`) is held, with its
+  finality, in `pool_proven_rollup_attempts`; until the rollup refresh
+  records it, the request stays hot
   (`skipped_requests.pool_proven_rollup_pending`).
 
 ## Configuration

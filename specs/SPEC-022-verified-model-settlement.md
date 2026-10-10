@@ -1987,11 +1987,11 @@ eligible only when every one of the following holds:
   (R-15.6);
 - at deletion, the settlement finality of every account scope of the request
   is closed and complete (no pending attempt, scope complete);
-- every pool-scoped route snapshot of the request (non-empty `pool_id`) is
-  held with a recorded finality in the SPEC-047-R012 pool-proven rollup
-  (`pool_proven_rollup_attempts`), so the aggregate keeps counting it after
-  its evidence leaves. Without that rollup table, pool-scoped requests stay
-  hot.
+- every route snapshot of the request that the SPEC-047-R012 pool-proven
+  rollup counts (an enforce-mode `pool_manifest` snapshot with a `pool_id`)
+  is held with a recorded finality in `pool_proven_rollup_attempts`, so the
+  aggregate keeps counting it after its evidence leaves; the rollup's delete
+  triggers freeze its state as the rows are deleted.
 
 A request that fails any condition stays hot in full. When a run deletes a
 request's rows, it re-checks these conditions inside the delete transaction.
@@ -2400,7 +2400,8 @@ the release that wrote the snapshot, stays valid. No path may lower the floor.
   - an unmaterialized output journal row;
   - an unmirrored route-snapshot journal row;
   - its provider's earliest verified verdict;
-  - a pool-scoped route snapshot not yet final in the pool-proven rollup.
+  - a route snapshot the pool-proven rollup counts that is not yet final
+    there.
 - **AC-022-72 (v0.4.0):** Retention deletes nothing when any of these fail:
   - the archive checksum, size, parse, or row-count check;
   - the off-host confirmation, when an off-host command is configured.

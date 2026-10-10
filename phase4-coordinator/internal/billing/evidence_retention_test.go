@@ -1217,27 +1217,27 @@ func TestEvidenceRetentionRefusesBelowArchiveDiskFloor(t *testing.T) {
 	}
 }
 
-// SPEC-047-R012 compatibility: a pool-scoped attempt stays hot until the
-// pool-proven rollup holds its final state, so archiving never shrinks the
-// pool-proven aggregate. Without the rollup table (an aggregate that recounts
-// hot evidence) pool-scoped requests are never archived.
+// SPEC-047-R012 compatibility: an attempt the pool-proven rollup counts
+// stays hot until the rollup holds it with a recorded finality; a pool
+// snapshot the rollup does not count is archived like any other.
 func TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
 	f.seed(t, "first")
 	pool := f.seed(t, "pool")
+	other := f.seed(t, "pool-not-counted")
 	f.seed(t, "plain")
 	f.settle(t)
-	// This exercises retention's own guard, independent of the pool-proven
-	// rollup's schema and freeze triggers when that branch is present.
-	if _, err := f.store.db.Exec(`
-DROP TRIGGER trg_srs_immutable;
-DROP TRIGGER IF EXISTS trg_ppr_srs_delete;
-DROP TRIGGER IF EXISTS trg_ppr_srv_delete;
-DROP TABLE IF EXISTS pool_proven_rollup_attempts;`); err != nil {
+	if _, err := f.store.db.Exec(`DROP TRIGGER trg_srs_immutable`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.store.db.Exec(`UPDATE settlement_route_snapshots SET pool_id = 'pool-a' WHERE request_id = ?`, pool.RequestID); err != nil {
+	if _, err := f.store.db.Exec(`UPDATE settlement_route_snapshots
+   SET pool_id = 'pool-a',
+       route_snapshot_json = json_set(route_snapshot_json, '$.expected_model_hash_source', ?)
+ WHERE request_id = ?`, ExpectedModelHashSourcePoolManifest, pool.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`UPDATE settlement_route_snapshots SET pool_id = 'pool-a' WHERE request_id = ?`, other.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
@@ -1245,29 +1245,26 @@ DROP TABLE IF EXISTS pool_proven_rollup_attempts;`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.DeletedRequests != 1 || f.hotRows(t, "plain") != 0 || f.hotRows(t, "pool") != 3 ||
-		report.SkippedRequests[retentionSkipPoolProvenUnrolled] != 1 {
-		t.Fatalf("no rollup table: report=%+v hot(pool)=%d", report, f.hotRows(t, "pool"))
+	if report.DeletedRequests != 2 || f.hotRows(t, "plain") != 0 || f.hotRows(t, "pool-not-counted") != 0 ||
+		f.hotRows(t, "pool") != 3 || report.SkippedRequests[retentionSkipPoolProvenUnrolled] != 1 {
+		t.Fatalf("before the rollup holds the attempt: report=%+v hot(pool)=%d", report, f.hotRows(t, "pool"))
 	}
 	snapshotID := scalar(t, f.store.db, `SELECT id FROM settlement_route_snapshots WHERE request_id = ?`, pool.RequestID)
-	if _, err := f.store.db.Exec(`
-CREATE TABLE pool_proven_rollup_attempts (route_snapshot_id INTEGER PRIMARY KEY, counted INTEGER NOT NULL DEFAULT 0, finality_at_utc TEXT NULL);
-INSERT INTO pool_proven_rollup_attempts (route_snapshot_id, counted, finality_at_utc) VALUES (?, 1, NULL);
-UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0;`, snapshotID); err != nil {
+	if err := RefreshPoolProvenRollup(ctx, f.store.db, f.store.db, f.windowStart.AddDate(-1, 0, 0)); err != nil {
 		t.Fatal(err)
 	}
-	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
-	if err != nil || report.DeletedRequests != 0 || f.hotRows(t, "pool") != 3 || report.SkippedRequests[retentionSkipPoolProvenUnrolled] != 1 {
-		t.Fatalf("rollup row without finality: report=%+v err=%v", report, err)
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id = ? AND finality_at_utc IS NOT NULL`, snapshotID); got != 1 {
+		t.Fatalf("rollup did not record the attempt's finality: rows=%d", got)
 	}
-	if _, err := f.store.db.Exec(`
-UPDATE pool_proven_rollup_attempts SET finality_at_utc = '2026-07-01T00:00:00.000000000Z';
-UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0;`); err != nil {
+	if _, err := f.store.db.Exec(`UPDATE settlement_evidence_retention_state SET scan_cursor_credit_id = 0`); err != nil {
 		t.Fatal(err)
 	}
 	report, err = f.store.RunEvidenceRetention(ctx, retentionTestOptions(dir, nil))
 	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "pool") != 0 {
-		t.Fatalf("final rollup row: report=%+v err=%v", report, err)
+		t.Fatalf("after the rollup holds the attempt: report=%+v err=%v", report, err)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id = ? AND finality_at_utc IS NOT NULL`, snapshotID); got != 1 {
+		t.Fatalf("archived attempt left the pool-proven rollup: rows=%d", got)
 	}
 }
 

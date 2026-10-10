@@ -437,9 +437,9 @@ type requestEvidenceBundle struct {
 	outputJournal []archiveRow
 	// routeJournal holds the journal rows from the route-snapshot journal DB.
 	routeJournal []archiveRow
-	// poolProvenUnrolled is true when a pool-manifest route snapshot of the
-	// request is not yet captured with a final state in the SPEC-047-R012
-	// pool-proven rollup, which must keep counting it after archival.
+	// poolProvenUnrolled is true when a route snapshot of the request that the
+	// SPEC-047-R012 pool-proven rollup counts is not yet held there with a
+	// final state.
 	poolProvenUnrolled bool
 }
 
@@ -607,35 +607,34 @@ func collectRequestEvidence(ctx context.Context, q evidenceQueryer, requestID st
 	return b, nil
 }
 
-// poolProvenRollupPending reports whether any pool-scoped route snapshot is
-// still needed raw by the SPEC-047-R012 pool-proven aggregate: the rollup
-// table is absent (an aggregate that recounts hot evidence), or the snapshot
-// has no rollup row with a recorded finality. Retention keeps such a request
-// hot until the rollup holds the attempt's final state.
+// poolProvenRollupPending reports whether a route snapshot of the request
+// that the SPEC-047-R012 pool-proven rollup captures (poolProvenSnapshotSQL)
+// has no rollup row with a recorded finality yet. Retention keeps such a
+// request hot until the rollup holds the attempt's final state; the
+// rollup's delete triggers then freeze it as the rows leave.
 func poolProvenRollupPending(ctx context.Context, q evidenceQueryer, snapshots []archiveRow) (bool, error) {
-	var poolIDs []int64
+	pooled := false
 	for _, row := range snapshots {
 		if pool, ok := row.str("pool_id"); ok && strings.TrimSpace(pool) != "" {
-			id, _ := row.int64("id")
-			poolIDs = append(poolIDs, id)
+			pooled = true
+			break
 		}
 	}
-	if len(poolIDs) == 0 {
+	if !pooled {
 		return false, nil
 	}
-	var tables int
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pool_proven_rollup_attempts'`).Scan(&tables); err != nil {
-		return false, err
-	}
-	if tables == 0 {
-		return true, nil
-	}
-	ph, args := int64Placeholders(poolIDs)
-	var final int
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id IN (`+ph+`) AND finality_at_utc IS NOT NULL`, args...).Scan(&final); err != nil {
-		return false, err
-	}
-	return final != len(poolIDs), nil
+	requestID, _ := snapshots[0].str("request_id")
+	var pending int
+	err := q.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM settlement_route_snapshots srs
+ WHERE srs.request_id = ?
+   AND `+poolProvenSnapshotSQL("srs")+`
+   AND NOT EXISTS (
+       SELECT 1 FROM pool_proven_rollup_attempts a
+        WHERE a.route_snapshot_id = srs.id
+          AND a.finality_at_utc IS NOT NULL)`, requestID).Scan(&pending)
+	return pending > 0, err
 }
 
 // collectRouteJournal reads the request's rows from the separate
