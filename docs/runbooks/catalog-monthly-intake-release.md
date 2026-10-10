@@ -61,6 +61,11 @@ curl -sS -H "Authorization: Bearer $INTAKE_PARTNER_KEY" -H "Accept-Encoding: ide
 curl -sS -H "Authorization: Bearer $OPERATOR_ACTOR_KEY" -H "Accept-Encoding: identity" \
   http://127.0.0.1:8443/admin/model-admission/intake -o "$DIR/model-admission-intake.json"
 
+# Pool-proven pairs (SPEC-047-R012), only when this release uses the pool_proven
+# clause. Retain it no more than 24 hours before the intake decision's generated_at.
+curl -sS -H "Authorization: Bearer $OPERATOR_ACTOR_KEY" -H "Accept-Encoding: identity" \
+  http://127.0.0.1:8443/admin/model-admission/pool-proven -o "$DIR/model-admission-pool-proven.json"
+
 sha256sum "$DIR"/*.json     # these digests go into intake-decision.json
 chmod 0600 "$DIR"/*.json    # operator-private; the generator refuses a file readable by others
 ```
@@ -77,6 +82,10 @@ that lists that key — the store holds private coordinator data and is not
 kept indefinitely. Include the store in the operator's encrypted backup;
 a lost file breaks reconstructibility for that release and MUST be
 recorded in the next release's notes.
+
+Retain only the files the decision cites: the generator refuses an uncited
+retained file. A `503 pool_proven_unavailable` means the pool-proven clause
+cannot be used this release.
 
 A `503 stats_stale` or `503 intake_unavailable` means the source is not
 usable this month: record that signal as `null` with
@@ -111,6 +120,19 @@ For each key you consider admitting to `listed`:
      `spec017_amendment_not_landed` is no longer a valid reason: the
      amendment is recorded in `CONFORMANCE.json` (SPEC-017 ≥ 0.2.1) and the
      generator refuses it — an unreadable endpoint is `source_unavailable`.
+   - `pool_proven` (SPEC-023 §16.9, needs `macprovider.intake-decision.v2`
+     and `thresholds.intake_pool_paid_request_floor`, default 100): the
+     key's verified artifact pair has an unsuppressed row in
+     `model-admission-pool-proven.json` with `paid_request_count` at or above
+     that floor, `distinct_provider_count >= INTAKE_OFFER_FLOOR`, a non-null
+     `license_id` you have reviewed, and a non-null `probe_evidence_digest`.
+     Do not write the value by hand; print it and paste it as the decision's
+     `pool_proven_evidence`:
+     `python3 scripts/catalog-release.py intake-pool-proven-value --release-id "$RELEASE_ID" --model-key <key>`
+     (add `--artifact-hash` when several verified artifacts of the key have
+     rows). Every non-pool decision in a v2 file carries
+     `"pool_proven_evidence": null`. Listing keeps the pool bindings; only a
+     later promotion to `recommendable` moves the pair to catalog pricing.
    - `coldstart_slot`: at most `INTAKE_COLDSTART_SLOTS` (1) per release,
      only when `tier_target` is under-covered, and only with a fit term.
 3. **Fit** — at least one:

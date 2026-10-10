@@ -213,7 +213,16 @@ type Server struct {
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
 	modelAdmissionRouteReads       ModelAdmissionStore
+	// probeEvidence is the SPEC-047-R011 known-answer evidence store, set
+	// when the model admission store implements it.
+	probeEvidence ModelAdmissionProbeEvidenceStore
+	// knownAnswerInFlight counts, per provider\x00candidate key, the offer
+	// handlers whose known-answer probe has not yet recorded (SPEC-047-R011
+	// probe before bind).
+	knownAnswerInFlightMu sync.Mutex
+	knownAnswerInFlight   map[string]int
 	modelAdmissionIntakeState
+	modelAdmissionPoolProvenState
 	modelAdmissionSubmitDisabled bool
 	modelAdmissionAttemptMu      sync.Mutex
 	modelAdmissionAttempts       map[string][]time.Time
@@ -1057,6 +1066,9 @@ func WithModelAdmissionStore(store ModelAdmissionStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.modelAdmissions = store
+			if evidence, ok := store.(ModelAdmissionProbeEvidenceStore); ok {
+				s.probeEvidence = evidence
+			}
 		}
 	}
 }
@@ -1269,6 +1281,13 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		opt(s)
 	}
 	s.loadNativeMTPCanaryBank()
+	// SPEC-047-R012 reads the shared ledger database, preferring the
+	// read-only route-read handle.
+	if source, ok := s.modelAdmissionRouteReads.(PoolProvenSource); ok {
+		s.poolProven = source
+	} else if source, ok := s.modelAdmissions.(PoolProvenSource); ok {
+		s.poolProven = source
+	}
 	s.modelAdmissions = splitModelAdmissionRouteReads(s.modelAdmissions, s.modelAdmissionRouteReads)
 	if tier2.ModelHashActive(s.tier2) || strings.TrimSpace(s.tier2.ModelHashLegacyUntil) != "" {
 		s.scheduleModelHashLegacyDeadline(s.tier2.ModelHashLegacyUntil)
@@ -1277,6 +1296,10 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// SPEC-047 v0.1.6: materialize the intake aggregate at startup and on
 		// a fixed cadence; GET never scans.
 		go s.runModelAdmissionIntakeLoop()
+	}
+	if s.poolProven != nil && s.probeEvidence != nil {
+		// SPEC-047-R012: materialized on the same cadence; GET never scans.
+		go s.runModelAdmissionPoolProvenLoop()
 	}
 	if s.idlePrewarm != nil {
 		s.idlePrewarmQueue = make(chan idlePrewarmRecord, idlePrewarmEventQueueSize)
@@ -2029,6 +2052,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/model-admission/decisions/", s.handleAdminModelAdmissionApprove)
 	mux.HandleFunc("/admin/model-admission/offers", s.handleAdminModelAdmissionOffers)
 	mux.HandleFunc("/admin/model-admission/intake", s.handleAdminModelAdmissionIntake)
+	mux.HandleFunc("/admin/model-admission/pool-proven", s.handleAdminModelAdmissionPoolProven)
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
 	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)

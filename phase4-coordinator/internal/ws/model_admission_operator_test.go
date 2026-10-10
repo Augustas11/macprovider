@@ -47,6 +47,8 @@ func (c operatorClient) do(method, path, token string, body any) (int, map[strin
 		c.s.handleAdminModelAdmissionDecisions(rr, req)
 	case strings.HasPrefix(path, "/admin/model-admission/intake"):
 		c.s.handleAdminModelAdmissionIntake(rr, req)
+	case strings.HasPrefix(path, "/admin/model-admission/pool-proven"):
+		c.s.handleAdminModelAdmissionPoolProven(rr, req)
 	default:
 		c.s.handleAdminModelAdmissionOffers(rr, req)
 	}

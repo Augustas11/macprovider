@@ -213,6 +213,11 @@ func (s *Server) SetPoolModelSource(source PoolModelSource, bounds func() *poolm
 	if activations, ok := source.(poolManifestActivationSource); ok {
 		activations.SetManifestActivationHook(s.kickPoolManifestBindingSweep)
 	}
+	if s.poolProven != nil && s.probeEvidence != nil {
+		// The R012 owner-account resolution reads this registry: rebuild now
+		// rather than serve a startup snapshot built without it.
+		go s.refreshModelAdmissionPoolProven()
+	}
 }
 
 // poolManifestActivationSource is a PoolModelSource that reports, at
@@ -618,9 +623,16 @@ func (s *Server) evaluatePoolManifestBindingsLocked(ctx context.Context, provide
 	}
 	appended := false
 	for _, head := range events {
+		if !head.PoolScoped() && s.knownAnswerProbeInFlight(providerID, head.CandidateID) {
+			// The offer handler re-evaluates once its probe has recorded.
+			continue
+		}
 		decision, ok := poolBindingDecisionForHead(wiring, providerID, head, s.classifyCatalogPair, s.now())
 		if !ok {
 			continue
+		}
+		if decision.PoolScoped() && decision.State == "catalog_priced" {
+			decision.PoolProbeEvidenceDigest = s.linkedProbeEvidenceDigest(ctx, decision)
 		}
 		stored, err := s.modelAdmissions.AppendModelAdmissionDecision(ctx, decision)
 		if err != nil {
@@ -667,6 +679,9 @@ func (s *Server) reevaluatePoolManifestBindings(ctx context.Context, providerID 
 // poolManifestBindingSweepFullEvery ticks. Route time re-checks every
 // predicate, so the sweep only records the durable transitions.
 func (s *Server) RunPoolManifestBindingSweep(ctx context.Context) {
+	// SPEC-047-R011: the known-answer evidence refresh shares this loop's
+	// lifetime.
+	go s.RunModelAdmissionProbeEvidenceRefresh(ctx)
 	ticker := time.NewTicker(poolManifestBindingSweepInterval)
 	defer ticker.Stop()
 	kick := s.poolManifestSweepKick()

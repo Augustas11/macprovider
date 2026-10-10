@@ -1,12 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.18
+version: v0.22.19
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.19 (2026-10-10)** — #1880 catalog graduation: `SPEC-023-R026`
+  is executable. The generator accepts `macprovider.intake-decision.v2`,
+  re-derives every `pool_proven_evidence` value from the retained
+  `model-admission-pool-proven.json`, requires the pair to be a verified
+  artifact of the key, applies both floors, the licence and current-probe
+  preconditions and the 24-hour source age (a frame newer than the
+  decision is refused), and rejects a v1 record
+  selecting `pool_proven`. `intake-pool-proven-value` prints the value for
+  a key. §16.9's "specified, not built" status is replaced; no admission
+  rule changes and promotion to `recommendable` stays an operator decision.
 
 - **v0.22.18 (2026-10-09)** — Makes the #1906 concurrency changes safe to
   roll back and tightens the R009 TTFT measurement (round-1 audit).
@@ -4028,11 +4039,11 @@ The manifest is a **closed schema at every level**. An unknown key, a missing ke
 
 ### 16.9 Pool-proven intake and graduation (SPEC-023-R026)
 
-**Implementation status [v0.22.8].** This section is specified, not built. The SPEC-047-R012 `GET /admin/model-admission/pool-proven` aggregate, the SPEC-047-R011 `model_admission_probe_evidence.v1` record (every pool binding's `probe_evidence_digest` is `null`), and the generator's `macprovider.intake-decision.v2` schema do not exist; `scripts/catalog-release.py` accepts only `macprovider.intake-decision.v1` and rejects a v2 decision. Until all three land, no key is pool-proven and an operator MUST NOT author a pool-proven decision. A pool model reaches the global catalog only through the existing §16.1-§16.5 intake, with v1 decisions and that intake's own evidence; its pool earning is unaffected meanwhile (SPEC-042-R015). CONFORMANCE keeps `SPEC-023-R026` and `SPEC-047-R012` pending until the pieces and their tests exist.
+**Implementation status [v0.22.19].** The producers and the consumer exist: the coordinator serves the SPEC-047-R012 `GET /admin/model-admission/pool-proven` aggregate, records the SPEC-047-R011 `model_admission_probe_evidence.v1` known-answer evidence and links it from pool bindings, and `scripts/catalog-release.py` validates `macprovider.intake-decision.v1` and `macprovider.intake-decision.v2`. `catalog-release.py intake-pool-proven-value --release-id <id> --model-key <key> [--artifact-hash <hex>]` prints the closed pool-proven value for a key from the retained frame and the committed artifact feed source, so the operator records the frame and the decision but never assembles the value by hand. A pool model reaches the global catalog through this clause or through the existing §16.1-§16.5 intake; its pool earning is unaffected meanwhile (SPEC-042-R015).
 
 **Ownership.** SPEC-047 owns the producers: the offer-time hash-derived `intake_model_key` (`artifact/<artifact_hash_algorithm>/<artifact_hash>`) and the opt-in `model_admission_intake_offer_counts.v2` frame (SPEC-047-R009), the pool-proven aggregate `model_admission_pool_proven.v1` (SPEC-047-R012), and the known-answer evidence record `model_admission_probe_evidence.v1` (SPEC-047-R011). This section owns only how the release generator consumes them and the catalog decision. A generator that reads the v2 offer-count frame MUST treat a hash-derived key only as an exact artifact pair, never as a catalog identity, and MUST reject an unknown schema. A v1 frame stays valid for releases that do not use hash-derived keys.
 
-**Source retention.** A release that cites pool-proven evidence retains the one SPEC-047-R012 response byte-exact as `model-admission-pool-proven.json` in the private intake audit store, under every §16.8 rule 9 obligation (identity encoding, retention before authoring, append-only, `0600`/`0700`, retention lifetime, closed-schema parse, and re-derivation). The generator MUST re-derive every recorded value from that file, select the row for the exact pair, and fail closed on any disagreement, on a missing row, or on a frame whose `generated_at` is more than 24 hours older than the release's `generated_at`.
+**Source retention.** A release that cites pool-proven evidence retains the one SPEC-047-R012 response byte-exact as `model-admission-pool-proven.json` in the private intake audit store, under every §16.8 rule 9 obligation (identity encoding, retention before authoring, append-only, `0600`/`0700`, retention lifetime, closed-schema parse, and re-derivation). The generator MUST re-derive every recorded value from that file, select the row for the exact pair, and fail closed on any disagreement, on a missing row, or on a frame whose `generated_at` is more than 24 hours older than, or later than, the release's `generated_at` (the intake decision's `generated_at`). Every recorded value is compared type-exactly with the derived one. **[v0.22.19]** The pair MUST be the `hash_algorithm`/`hash` of a `verified` artifact of the decision's `model_key` in the artifact feed, and the retained frame is parsed closed: rows ascend by algorithm then hash, both counts are null exactly when suppressed, an unsuppressed `distinct_provider_count` is at least `k_anonymity_min`, and a non-null `probe_evaluated_at` lies in the frame's trailing 30 days.
 
 **Pool-proven value.** The closed value recorded for one key is exactly:
 
@@ -4063,6 +4074,6 @@ The first eight fields are the R012 row verbatim, including its nullability: whe
 
 An operator MAY publish an out-of-band release that adds only pool-proven keys as `listed`, plus the necessary signed artifact/feed/ledger records; this is the sole addition exception to §16.5. It MUST NOT promote a row, change a rate, or make a row recommendable. Safety blocking remains allowed in the same release. **Pool earning through graduation.** Admitting the pair as `listed` (or authoring a `candidate` row for it) does not end its pool bindings: those tiers pay nothing (§3.2), so SPEC-042-R015 keeps the pool binding as the pair's paid path. Only promotion to `recommendable`, with a verified member usable by a bound runtime class, supersedes the binding for that class (SPEC-047-R011 `pool_manifest_catalog_superseded`) and hands the pair to the catalog path, so earnings move from pool price to catalog price without a gap. A `recommendable` pair can no longer be a pool entry.
 
-**Intake decision v2.** A release that selects the pool-proven clause MUST use `macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision adds nullable `pool_proven_evidence` with exactly the closed value above, and `admission_clause` gains `pool_proven`; the field is non-null exactly when the clause is `pool_proven`, and null for every other clause and every `promote_recommendable` decision. The `thresholds` object adds `intake_pool_paid_request_floor`. Version 1 remains valid for releases that do not select the clause. A generator or verifier MUST reject an unknown field, a v1 record selecting `pool_proven`, a `pool_proven` decision with a missing, suppressed, or null-probe value, a value whose `source_sha256` names no retained file, or a non-pool decision carrying the value.
+**Intake decision v2.** A release that selects the pool-proven clause MUST use `macprovider.intake-decision.v2`. Relative to v1, each `admit_listed` decision adds nullable `pool_proven_evidence` with exactly the closed value above, and `admission_clause` gains `pool_proven`; the field is non-null exactly when the clause is `pool_proven`, and null for every other clause and every `promote_recommendable` decision. The `thresholds` object adds `intake_pool_paid_request_floor` (the §16.4 `INTAKE_POOL_PAID_REQUEST_FLOOR`, an integer >= 1), present exactly in v2. **[v0.22.19]** P3 for a pool-proven key is satisfied only when the recorded `license_id` is non-null; the operator's reviewed licence record for that identifier remains an operator obligation the generator does not see. Version 1 remains valid for releases that do not select the clause. A generator or verifier MUST reject an unknown field, a v1 record selecting `pool_proven`, a `pool_proven` decision with a missing, suppressed, or null-probe value, a value whose `source_sha256` names no retained file, or a non-pool decision carrying the value.
 
 **Graduation to `recommendable`** still requires every §16.3 promotion condition, the minimum listed duration, a published rate row, bench provenance, demand-rank eligibility, and an explicit operator decision. Neither pool paid volume, provider count, nor a passing probe auto-promotes a model. Pool earning is creator-scoped evidence, not permissionless global earning; the latter remains out of scope until SPEC-036 compute-integrity requirements are normatively adopted and implemented.

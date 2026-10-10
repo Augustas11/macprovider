@@ -4320,6 +4320,12 @@ def require_rate_card_unchanged_at_activation(rate_card_obj: dict, history: dict
 # ---------------------------------------------------------------------------
 
 INTAKE_DECISION_SCHEMA = "macprovider.intake-decision.v1"
+# SPEC-023 §16.9 (SPEC-023-R026): v2 adds the pool_proven clause.
+INTAKE_DECISION_SCHEMA_V2 = "macprovider.intake-decision.v2"
+MODEL_ADMISSION_POOL_PROVEN_SCHEMA = "model_admission_pool_proven.v1"
+MODEL_ADMISSION_POOL_PROVEN_FILE = "model-admission-pool-proven.json"
+INTAKE_POOL_PROVEN_MAX_AGE = _dt.timedelta(hours=24)  # §16.9 source retention
+INTAKE_POOL_PROVEN_ALGORITHMS = ("macprovider.gguf-file.v1", "macprovider.snapshot-manifest.v1")
 STATS_INTAKE_SCHEMA = "macprovider.stats-intake.v1"
 MODEL_ADMISSION_INTAKE_SCHEMA = "model_admission_intake_offer_counts.v1"
 INTAKE_K_ANONYMITY_MIN = 3  # SPEC-023 v0.10.4 §16.4: fixed, not release-tunable
@@ -4344,6 +4350,7 @@ INTAKE_THRESHOLD_INT_KEYS = (
     "INTAKE_MIN_LISTED_DAYS",
 )
 INTAKE_THRESHOLD_KEYS = frozenset(INTAKE_THRESHOLD_INT_KEYS) | {"tier_target"}
+INTAKE_THRESHOLD_KEYS_V2 = INTAKE_THRESHOLD_KEYS | {"intake_pool_paid_request_floor"}
 INTAKE_DECISION_KEYS = frozenset({
     "model_key", "action", "observation_window_start", "observation_window_end", "as_of",
     "signals", "admission_clause", "fit_clause", "coldstart_slot_used", "listed_since",
@@ -4361,12 +4368,14 @@ INTAKE_SIGNAL_KEYS = frozenset({
     "fleet_fit_fraction_ppm", "fleet_fit_absent_reason", "fleet_fit_source_sha256",
     "fleet_fit_window_start", "fleet_fit_window_end",
 })
+INTAKE_DECISION_KEYS_V2 = INTAKE_DECISION_KEYS | {"pool_proven_evidence"}
 INTAKE_PROMOTION_KEYS = frozenset({
     "listed_days_elapsed", "rate_class", "rate_row_resolved", "rate_card_source_sha256",
     "demand_rank_recommendable", "demand_rank_source_sha256", "bench_provenance_source",
     "operator_admission_reference",
 })
 INTAKE_ADMISSION_CLAUSES = ("demand_rank", "provider_offer", "buyer_request", "coldstart_slot")
+INTAKE_ADMISSION_CLAUSES_V2 = INTAKE_ADMISSION_CLAUSES + ("pool_proven",)
 INTAKE_FIT_CLAUSES = ("fleet_fit", "tier_target")
 INTAKE_ABSENT_REASONS = {
     "demand_rank_absent_reason": ("unranked",),
@@ -4395,6 +4404,11 @@ STATS_INTAKE_CLASS_KEYS = frozenset({"ram_gb_floor", "provider_count", "suppress
 STATS_INTAKE_TOP_KEYS = frozenset({"schema_version", "generated_at", "stale_after", "unmatched_models", "fleet_ram", "methodology"})
 MODEL_ADMISSION_INTAKE_KEYS = frozenset({"schema", "nonce", "generated_at", "window_start", "window_end", "k_anonymity_min", "rows"})
 MODEL_ADMISSION_INTAKE_ROW_KEYS = frozenset({"catalog_model_key", "distinct_provider_offer_count", "suppressed"})
+MODEL_ADMISSION_POOL_PROVEN_ROW_KEYS = (
+    "artifact_hash_algorithm", "artifact_hash", "paid_request_count", "distinct_provider_count",
+    "suppressed", "license_id", "probe_evidence_digest", "probe_evaluated_at",
+)
+POOL_PROVEN_VALUE_KEYS = frozenset(MODEL_ADMISSION_POOL_PROVEN_ROW_KEYS) | {"window_start", "window_end", "source_sha256"}
 INTAKE_THRESHOLD_TO_PARAMETER = {
     "INTAKE_UNKNOWN_KEY_BUCKETS": "key_buckets",
     "INTAKE_UNKNOWN_PRINCIPALS_PER_BUCKET": "principals_per_bucket",
@@ -4464,9 +4478,12 @@ def _intake_digest(value: object, label: str, nullable: bool = True) -> str | No
     return value
 
 
-def validate_intake_thresholds(thresholds: object) -> dict:
-    """§16.8 rule 5: every §16.4 knob, no more, no less; the fixed k floor."""
-    t = _intake_closed(thresholds, INTAKE_THRESHOLD_KEYS, "intake-decision.thresholds")
+def validate_intake_thresholds(thresholds: object, v2: bool = False) -> dict:
+    """§16.8 rule 5: every §16.4 knob, no more, no less; the fixed k floor.
+    A v2 decision (§16.9) also carries intake_pool_paid_request_floor."""
+    t = _intake_closed(thresholds, INTAKE_THRESHOLD_KEYS_V2 if v2 else INTAKE_THRESHOLD_KEYS, "intake-decision.thresholds")
+    if v2:
+        _intake_int(t["intake_pool_paid_request_floor"], "intake-decision.thresholds.intake_pool_paid_request_floor", minimum=1)
     for key in INTAKE_THRESHOLD_INT_KEYS:
         _intake_int(t[key], f"intake-decision.thresholds.{key}", minimum=0)
     if t["INTAKE_K_ANONYMITY_MIN"] != INTAKE_K_ANONYMITY_MIN:
@@ -4662,6 +4679,117 @@ def validate_model_admission_intake_source(data: bytes) -> dict:
     return top
 
 
+def validate_model_admission_pool_proven_source(data: bytes) -> dict:
+    """Closed-schema parse of `model_admission_pool_proven.v1` (SPEC-047-R012),
+    the only source a §16.9 pool-proven value may cite."""
+    label = MODEL_ADMISSION_POOL_PROVEN_FILE
+    obj = strict_json(data, label)
+    top = _intake_closed(obj, MODEL_ADMISSION_INTAKE_KEYS, label)
+    if top["schema"] != MODEL_ADMISSION_POOL_PROVEN_SCHEMA:
+        fail(f"{label}: schema must be {MODEL_ADMISSION_POOL_PROVEN_SCHEMA}")
+    if not isinstance(top["nonce"], str) or not INTAKE_WINDOW_ID_RE.fullmatch(top["nonce"]):
+        fail(f"{label}.nonce must be 32-hex (one build, one byte string)")
+    generated = _intake_rfc3339(top["generated_at"], f"{label}.generated_at")
+    start = _intake_rfc3339(top["window_start"], f"{label}.window_start")
+    end = _intake_rfc3339(top["window_end"], f"{label}.window_end")
+    if end != generated or start != generated - _dt.timedelta(days=30):
+        fail(f"{label}: window_end must equal generated_at and window_start generated_at - 30 days")
+    if top["k_anonymity_min"] != INTAKE_K_ANONYMITY_MIN:
+        fail(f"{label}.k_anonymity_min must be {INTAKE_K_ANONYMITY_MIN}")
+    if not isinstance(top["rows"], list):
+        fail(f"{label}.rows must be an array")
+    previous = None
+    for index, row in enumerate(top["rows"]):
+        where = f"{label}.rows[{index}]"
+        r = _intake_closed(row, frozenset(MODEL_ADMISSION_POOL_PROVEN_ROW_KEYS), where)
+        if r["artifact_hash_algorithm"] not in INTAKE_POOL_PROVEN_ALGORITHMS:
+            fail(f"{where}.artifact_hash_algorithm must be one of {INTAKE_POOL_PROVEN_ALGORITHMS}")
+        _intake_digest(r["artifact_hash"], f"{where}.artifact_hash", nullable=False)
+        key = (r["artifact_hash_algorithm"].encode(), r["artifact_hash"].encode())
+        if previous is not None and key <= previous:
+            fail(f"{label}.rows must ascend by artifact_hash_algorithm then artifact_hash with no repeats")
+        previous = key
+        suppressed = _intake_bool(r["suppressed"], f"{where}.suppressed")
+        paid = _intake_int(r["paid_request_count"], f"{where}.paid_request_count", minimum=1, nullable=True)
+        distinct = _intake_int(r["distinct_provider_count"], f"{where}.distinct_provider_count", minimum=INTAKE_K_ANONYMITY_MIN, nullable=True)
+        if suppressed != (paid is None) or suppressed != (distinct is None):
+            fail(f"{where}: paid_request_count and distinct_provider_count are null exactly when suppressed")
+        if r["license_id"] is not None and (not isinstance(r["license_id"], str) or not r["license_id"].strip() or len(r["license_id"]) > 128):
+            fail(f"{where}.license_id must be null or a non-empty string")
+        digest = _intake_digest(r["probe_evidence_digest"], f"{where}.probe_evidence_digest")
+        at = _intake_rfc3339(r["probe_evaluated_at"], f"{where}.probe_evaluated_at", nullable=True)
+        if (digest is None) != (at is None):
+            fail(f"{where}: probe_evidence_digest and probe_evaluated_at are null together")
+        if at is not None and not (generated - _dt.timedelta(days=30) <= at <= generated):
+            fail(f"{where}.probe_evaluated_at must lie in the trailing 30 days (a current passing record)")
+    return top
+
+
+def pool_proven_value_from_source(frame: dict, source_sha256: str, algorithm: str, artifact_hash: str) -> dict | None:
+    """SPEC-023 §16.9: the closed pool-proven value for one exact pair,
+    re-derived from the retained frame; None when the frame has no row."""
+    row = next((r for r in frame["rows"] if r["artifact_hash_algorithm"] == algorithm and r["artifact_hash"] == artifact_hash), None)
+    if row is None:
+        return None
+    value = {key: row[key] for key in MODEL_ADMISSION_POOL_PROVEN_ROW_KEYS}
+    value["window_start"] = frame["window_start"]
+    value["window_end"] = frame["window_end"]
+    value["source_sha256"] = source_sha256
+    return value
+
+
+def intake_verified_artifact_pairs(artifact_obj: dict | None, key: str) -> list[tuple[str, str]]:
+    """(hash_algorithm, hash) of every verified artifact of the key."""
+    if artifact_obj is None:
+        return []
+    model = (artifact_obj.get("models") or {}).get(key) or {}
+    out = []
+    for artifact in (model.get("artifacts") or {}).values():
+        if isinstance(artifact, dict) and artifact.get("verification_status") == "verified":
+            out.append((artifact.get("hash_algorithm"), artifact.get("hash")))
+    return out
+
+
+def validate_pool_proven_evidence(value: object, *, key: str, thresholds: dict, artifact_obj: dict | None,
+                                  sources: "IntakeSources", cited: set[str], release_generated: _dt.datetime, label: str) -> None:
+    """SPEC-023 §16.9 admission: the closed value equals the retained
+    SPEC-047-R012 row for an exact verified artifact pair of the key,
+    unsuppressed, at or above both floors, with a licence and a current
+    passing known-answer record; the frame is at most 24 hours older than
+    the release."""
+    v = _intake_closed(value, POOL_PROVEN_VALUE_KEYS, f"{label}.pool_proven_evidence")
+    source_digest = _intake_digest(v["source_sha256"], f"{label}.pool_proven_evidence.source_sha256", nullable=False)
+    frame, digest = sources.pool_proven()
+    cited.add(MODEL_ADMISSION_POOL_PROVEN_FILE)
+    if source_digest != digest:
+        fail(f"{label}.pool_proven_evidence.source_sha256 names no retained {MODEL_ADMISSION_POOL_PROVEN_FILE}")
+    frame_generated = _intake_rfc3339(frame["generated_at"], f"{MODEL_ADMISSION_POOL_PROVEN_FILE}.generated_at")
+    if frame_generated > release_generated:
+        fail(f"{label}: {MODEL_ADMISSION_POOL_PROVEN_FILE} was generated after the intake decision; it cannot be evidence for it")
+    if release_generated - frame_generated > INTAKE_POOL_PROVEN_MAX_AGE:
+        fail(f"{label}: {MODEL_ADMISSION_POOL_PROVEN_FILE} was generated more than 24 hours before the release (SPEC-023 §16.9)")
+    pair = (v["artifact_hash_algorithm"], v["artifact_hash"])
+    if pair not in intake_verified_artifact_pairs(artifact_obj, key):
+        fail(f"{label}: the pool-proven pair is not a verified artifact of {key!r} in the artifact feed")
+    expected = pool_proven_value_from_source(frame, digest, *pair)
+    if expected is None:
+        fail(f"{label}: the retained {MODEL_ADMISSION_POOL_PROVEN_FILE} has no row for the pool-proven pair")
+    # Type-exact comparison: JSON true never equals 1, nor 120 equal 120.0.
+    differing = sorted(k for k in POOL_PROVEN_VALUE_KEYS if type(v[k]) is not type(expected[k]) or v[k] != expected[k])
+    if differing:
+        fail(f"{label}.pool_proven_evidence disagrees with the retained source on {differing}")
+    if v["suppressed"]:
+        fail(f"{label}: a suppressed pool-proven value satisfies no floor")
+    if v["paid_request_count"] < thresholds["intake_pool_paid_request_floor"]:
+        fail(f"{label}: paid_request_count is below intake_pool_paid_request_floor")
+    if v["distinct_provider_count"] < thresholds["INTAKE_OFFER_FLOOR"]:
+        fail(f"{label}: distinct_provider_count is below INTAKE_OFFER_FLOOR")
+    if v["probe_evidence_digest"] is None:
+        fail(f"{label}: no current passing known-answer record for the pair (SPEC-047-R011)")
+    if v["license_id"] is None:
+        fail(f"{label}: no agreed licence for the pair (§16.1 P3)")
+
+
 def select_intake_window(stats_intake: dict, as_of: _dt.datetime) -> dict | None:
     """SPEC-023 §16.2(a) [v0.10.4]: the complete window with the latest
     window_start whose window_end is within one cadence period before as_of."""
@@ -4686,6 +4814,8 @@ class IntakeSources:
         self._stats_bytes = None
         self._offers = None
         self._offers_bytes = None
+        self._pool_proven = None
+        self._pool_proven_bytes = None
 
     def _read(self, name: str) -> bytes:
         if self.dir is None:
@@ -4709,6 +4839,12 @@ class IntakeSources:
             self._offers = validate_model_admission_intake_source(self._offers_bytes)
         return self._offers, sha256(self._offers_bytes)
 
+    def pool_proven(self) -> tuple[dict, str]:
+        if self._pool_proven is None:
+            self._pool_proven_bytes = self._read(MODEL_ADMISSION_POOL_PROVEN_FILE)
+            self._pool_proven = validate_model_admission_pool_proven_source(self._pool_proven_bytes)
+        return self._pool_proven, sha256(self._pool_proven_bytes)
+
     def uncited(self, cited: set[str]) -> list[str]:
         if self.dir is None or not self.dir.is_dir():
             return []
@@ -4724,7 +4860,8 @@ def _intake_absent_pair(signals: dict, value_key: str, reason_key: str, label: s
 
 
 def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None,
-                                demand_obj: dict, demand_digest: str, sources: IntakeSources, cited: set[str], label: str) -> None:
+                                demand_obj: dict, demand_digest: str, sources: IntakeSources, cited: set[str], label: str,
+                                v2: bool = False, release_generated: _dt.datetime | None = None) -> None:
     key = entry["model_key"]
     as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
     if entry["listed_since"] is not None:
@@ -4734,8 +4871,11 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
     if entry["operator_decision"] != "admitted":
         fail(f"{label}.operator_decision must be 'admitted' for admit_listed")
     signals = _intake_closed(entry["signals"], INTAKE_SIGNAL_KEYS, f"{label}.signals")
-    if entry["admission_clause"] not in INTAKE_ADMISSION_CLAUSES:
-        fail(f"{label}.admission_clause must be one of {INTAKE_ADMISSION_CLAUSES}")
+    clauses = INTAKE_ADMISSION_CLAUSES_V2 if v2 else INTAKE_ADMISSION_CLAUSES
+    if entry["admission_clause"] not in clauses:
+        fail(f"{label}.admission_clause must be one of {clauses}")
+    if v2 and (entry["pool_proven_evidence"] is None) != (entry["admission_clause"] != "pool_proven"):
+        fail(f"{label}.pool_proven_evidence is non-null exactly when admission_clause is pool_proven")
     if entry["fit_clause"] not in INTAKE_FIT_CLAUSES:
         fail(f"{label}.fit_clause must be one of {INTAKE_FIT_CLAUSES}")
     if _intake_bool(entry["coldstart_slot_used"], f"{label}.coldstart_slot_used") != (entry["admission_clause"] == "coldstart_slot"):
@@ -4882,6 +5022,9 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
     elif clause == "buyer_request":
         if unmatched_count is None or unmatched_count < thresholds["INTAKE_BUYER_REQUEST_FLOOR"]:
             fail(f"{label}: buyer_request clause is not satisfied")
+    elif clause == "pool_proven":
+        validate_pool_proven_evidence(entry["pool_proven_evidence"], key=key, thresholds=thresholds, artifact_obj=artifact_obj,
+                                      sources=sources, cited=cited, release_generated=release_generated, label=label)
     fit = entry["fit_clause"]
     if fit == "fleet_fit":
         if fleet_ppm is None or fleet_ppm < thresholds["INTAKE_FLEET_FIT_MIN_PCT"] * 10_000:
@@ -4895,8 +5038,8 @@ def validate_intake_admit_entry(entry: dict, thresholds: dict, candidate_obj: di
 def validate_intake_promote_entry(entry: dict, thresholds: dict, candidate_obj: dict, artifact_obj: dict | None, demand_obj: dict, demand_digest: str, label: str) -> None:
     key = entry["model_key"]
     as_of = _intake_rfc3339(entry["as_of"], f"{label}.as_of")
-    for field in ("signals", "admission_clause", "fit_clause"):
-        if entry[field] is not None:
+    for field in ("signals", "admission_clause", "fit_clause", "pool_proven_evidence"):
+        if entry.get(field) is not None:
             fail(f"{label}.{field} must be null for promote_recommendable")
     if _intake_bool(entry["coldstart_slot_used"], f"{label}.coldstart_slot_used"):
         fail(f"{label}.coldstart_slot_used must be false for promote_recommendable")
@@ -4955,12 +5098,13 @@ def validate_intake_decision(
     disagreement."""
     obj = strict_json(data, "intake-decision.json")
     top = _intake_closed(obj, frozenset({"schema_version", "release_id", "generated_at", "thresholds", "decisions"}), "intake-decision")
-    if top["schema_version"] != INTAKE_DECISION_SCHEMA:
-        fail(f"intake-decision.schema_version must be {INTAKE_DECISION_SCHEMA}")
+    if top["schema_version"] not in (INTAKE_DECISION_SCHEMA, INTAKE_DECISION_SCHEMA_V2):
+        fail(f"intake-decision.schema_version must be {INTAKE_DECISION_SCHEMA} or {INTAKE_DECISION_SCHEMA_V2}")
+    v2 = top["schema_version"] == INTAKE_DECISION_SCHEMA_V2
     if top["release_id"] != release_id:
         fail(f"intake-decision.release_id must equal the release id {release_id!r}")
-    _intake_rfc3339(top["generated_at"], "intake-decision.generated_at")
-    thresholds = validate_intake_thresholds(top["thresholds"])
+    release_generated = _intake_rfc3339(top["generated_at"], "intake-decision.generated_at")
+    thresholds = validate_intake_thresholds(top["thresholds"], v2=v2)
     if not isinstance(top["decisions"], list):
         fail("intake-decision.decisions must be an array")
     current_tiers = candidate_admission_tiers(candidate_obj)
@@ -4979,7 +5123,7 @@ def validate_intake_decision(
     coldstart = 0
     for index, entry in enumerate(top["decisions"]):
         label = f"intake-decision.decisions[{index}]"
-        e = _intake_closed(entry, INTAKE_DECISION_KEYS, label)
+        e = _intake_closed(entry, INTAKE_DECISION_KEYS_V2 if v2 else INTAKE_DECISION_KEYS, label)
         key = e["model_key"]
         if not isinstance(key, str) or not INTAKE_MODEL_KEY_RE.fullmatch(key) or key in seen:
             fail(f"{label}.model_key must be a unique normalized key")
@@ -4998,7 +5142,8 @@ def validate_intake_decision(
         if not isinstance(e["operator_role"], str) or not e["operator_role"].strip():
             fail(f"{label}.operator_role must be a non-empty string")
         if e["action"] == "admit_listed":
-            validate_intake_admit_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, sources, cited, label)
+            validate_intake_admit_entry(e, thresholds, candidate_obj, artifact_obj, demand_obj, demand_digest, sources, cited, label,
+                                        v2=v2, release_generated=release_generated)
             if e["coldstart_slot_used"]:
                 coldstart += 1
         else:
@@ -5013,6 +5158,29 @@ def validate_intake_decision(
     if uncited:
         fail(f"intake-decision: retained source file(s) not cited by the manifest: {uncited}")
     return top
+
+
+def cmd_intake_pool_proven_value(release_id: str, model_key: str, audit_dir: pathlib.Path | None, artifact_hash: str | None) -> None:
+    """SPEC-023 §16.9: print the closed pool_proven_evidence value for one
+    candidate key, derived from the retained SPEC-047-R012 frame and the
+    committed artifact feed, so no operator assembles it by hand. Exactly one
+    verified artifact pair of the key must have a row (or --artifact-hash
+    names it); the value is printed whatever its floors, and the generator
+    still decides admission."""
+    if not INTAKE_MODEL_KEY_RE.fullmatch(model_key):
+        fail(f"intake-pool-proven-value: {model_key!r} is not a normalized key")
+    if artifact_hash is not None and not HEX64.fullmatch(artifact_hash):
+        fail("intake-pool-proven-value: --artifact-hash must be lowercase 64-hex")
+    artifact_obj = json.loads(ARTIFACT_SOURCE_PATH.read_bytes()) if ARTIFACT_SOURCE_PATH.exists() else None
+    pairs = [pair for pair in intake_verified_artifact_pairs(artifact_obj, model_key) if artifact_hash is None or pair[1] == artifact_hash]
+    if not pairs:
+        fail(f"intake-pool-proven-value: {model_key!r} has no verified artifact{'' if artifact_hash is None else ' with that hash'} in the artifact feed source")
+    sources = IntakeSources(audit_dir if audit_dir is not None else default_intake_audit_dir(), release_id)
+    frame, digest = sources.pool_proven()
+    values = [v for v in (pool_proven_value_from_source(frame, digest, *pair) for pair in pairs) if v is not None]
+    if len(values) != 1:
+        fail(f"intake-pool-proven-value: {len(values)} verified artifact pairs of {model_key!r} have a row in the retained frame; name one with --artifact-hash")
+    print(json.dumps(values[0], indent=2, sort_keys=True))
 
 
 def check_intake_decision_manifest(
@@ -7022,6 +7190,17 @@ def main() -> int:
         "status",
         help="print the artifact-feed activation state and its outstanding prerequisites",
     )
+    pool_proven_parser = sub.add_parser(
+        "intake-pool-proven-value",
+        help=(
+            "print the SPEC-023 §16.9 pool_proven_evidence value for a candidate key from the retained "
+            "<release_id>/model-admission-pool-proven.json and the artifact feed source"
+        ),
+    )
+    pool_proven_parser.add_argument("--release-id", required=True)
+    pool_proven_parser.add_argument("--model-key", required=True)
+    pool_proven_parser.add_argument("--artifact-hash")
+    pool_proven_parser.add_argument("--intake-audit-dir", type=pathlib.Path, help="see generate --intake-audit-dir")
     continuity_parser = sub.add_parser(
         "continuity-check",
         help=(
@@ -7264,6 +7443,8 @@ def main() -> int:
             verify(args.previous_release_dir, args.intake_audit_dir)
         elif args.command == "status":
             cmd_status()
+        elif args.command == "intake-pool-proven-value":
+            cmd_intake_pool_proven_value(args.release_id, args.model_key, args.intake_audit_dir, args.artifact_hash)
         elif args.command == "continuity-check":
             cmd_continuity_check(args.incoming, args.live)
         elif args.command == "compare-live":

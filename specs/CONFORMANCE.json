@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.18",
+      "version": "v0.22.19",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1281,7 +1281,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.3.1",
+      "version": "0.3.3",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1432,7 +1432,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.2.8",
+      "version": "0.2.9",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11638,15 +11638,23 @@
       "requirement_id": "SPEC-023-R026",
       "spec_id": "SPEC-023",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "scripts/catalog-release.py:def validate_pool_proven_evidence",
+        "scripts/catalog-release.py:def validate_model_admission_pool_proven_source",
+        "scripts/catalog-release.py:def pool_proven_value_from_source",
+        "scripts/catalog-release.py:def cmd_intake_pool_proven_value",
+        "scripts/catalog-release.py:def validate_intake_decision"
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_artifact_feed.py::IntakeDecisionManifestTest"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "The release generator does not consume the SPEC-047-R009 v2 frame or the SPEC-047-R012 pool-proven aggregate, does not retain or re-derive model-admission-pool-proven.json, and has no macprovider.intake-decision.v2, pool_proven clause, INTAKE_POOL_PAID_REQUEST_FLOOR, or current-passing-probe check. Producers are tracked by SPEC-047-R009/R011/R012. Out-of-band listed release generation is not implemented or evidenced."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 step 5: scripts/catalog-release.py accepts macprovider.intake-decision.v2, re-derives each pool_proven_evidence value from the retained model-admission-pool-proven.json (closed parse, 24-hour source age, exact verified artifact pair of the key), applies INTAKE_POOL_PAID_REQUEST_FLOOR, INTAKE_OFFER_FLOOR, the licence and current-probe preconditions, rejects v1 records selecting pool_proven, and intake-pool-proven-value derives the value; the producers are SPEC-047-R011/R012. Pending until a released pool-proven listed key is evidenced."
       }
     },
     {
@@ -11721,15 +11729,20 @@
       "requirement_id": "SPEC-043-R014",
       "spec_id": "SPEC-043",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func policyPoolModels",
+        "phase4-coordinator/internal/trustpool/creator_selfserve.go:selfServePoolModelText"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/pool_model_disclosure_test.go:TestPolicyAndStatusEnumeratePoolModels"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "Creator policy/status, reviewed-artifact, and announcement enumeration of pool models against the active pool_model_entries/v1 extension, activation and announcement failure on mismatch, and creator-admin/Agreement copy are not implemented or evidenced. The buyer API surface is tracked by SPEC-006-R018."
+        "rationale": "#1880 step 5: pool_policy.json and pool_status.json enumerate the active core pool_model_entries/v1 as policy.pool_models (identity, engine set, creator-signed price, disclosure class, pool-attested, not network-verified), derived at read time; the reviewed distribution artifact and announcement approval stay bound to manifest_core_digest, and the self-serve Creator Agreement carries the R014 creator copy. Pending until a publicly announced pool exercises the announcement path and signed journey evidence exists. Buyer API disclosure is SPEC-006-R018."
       }
     },
     {
@@ -11740,13 +11753,23 @@
         "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolBindingDecisionForHead",
         "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func (s *Server) RunPoolManifestBindingSweep",
         "phase4-coordinator/internal/ws/model_admission_pool_manifest.go:func poolBindingEarningNow",
-        "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelRouteBinding"
+        "phase4-coordinator/internal/buyer/pool_model_route.go:func (s *Server) poolModelRouteBinding",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence.go:func (s *Server) runModelAdmissionKnownAnswerProbe",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence.go:func (s *Server) linkedProbeEvidenceDigest",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence.go:func (s *Server) refreshModelAdmissionProbeEvidence",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence.go:func (s *SQLiteModelAdmissionStore) AppendModelAdmissionProbeEvidence"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolManifestCatalogPrecedence",
         "phase4-coordinator/internal/ws/model_admission_pool_manifest_test.go:TestPoolScopedStatusEarningReevaluatesCurrentPredicate",
         "phase4-coordinator/internal/ws/spec047_pool_status_fixture_test.go:TestSPEC047PoolScopedStatusSharedFixture",
-        "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney"
+        "test/integration/trusted_pool_model_journey_test.go:TestTrustedPoolModelJourney",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestModelAdmissionProbeEvidenceRecordDigest",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestModelAdmissionProbeEvidenceStoresAreAppendOnly",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestPoolManifestBindLinksProbeEvidence",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestKnownAnswerProbeDueAndNormalization",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestRunModelAdmissionKnownAnswerProbeRecordsResult",
+        "phase4-coordinator/internal/ws/model_admission_probe_evidence_test.go:TestPoolManifestBindWaitsForInFlightOfferProbe"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -11756,22 +11779,35 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
-        "rationale": "#1816 coordinator lane (merged on the campaign branch, unshipped): admission events record the closed pool_binding object, the pool_manifest signed-manifest actor, the bind edge from offer_submitted and (v0.2.6) from the synthetic-probe interim states sandbox_probe_only, network_visible_unpriced and network_admitted_unsettled, the catalog_priced self-rebind, the pool-manifest bind/rebind/revocation reasons, pool model identity/price, manifest_core_digest provenance, observed_catalog_model_key, pool_attested_earning status (claimed only while the current pool predicate holds), native mlx_cache binding, pool_manifest_catalog_superseded, single-pool cardinality, pool-only route/snapshot/settlement, no settlement_capable, and the generation rebind sweep (internal/ws/model_admission_pool_manifest.go, internal/buyer/pool_model_route.go, test/integration/trusted_pool_model_journey_test.go). Still missing: the coordinator-owned model_admission_probe_evidence.v1 record (probe_evidence_digest is always null) and signed journey evidence from a deployed build. Pending until both exist."
+        "rationale": "#1816 coordinator lane (merged on the campaign branch, unshipped): admission events record the closed pool_binding object, the pool_manifest signed-manifest actor, the bind edge from offer_submitted and (v0.2.6) from the synthetic-probe interim states sandbox_probe_only, network_visible_unpriced and network_admitted_unsettled, the catalog_priced self-rebind, the pool-manifest bind/rebind/revocation reasons, pool model identity/price, manifest_core_digest provenance, observed_catalog_model_key, pool_attested_earning status (claimed only while the current pool predicate holds), native mlx_cache binding, pool_manifest_catalog_superseded, single-pool cardinality, pool-only route/snapshot/settlement, no settlement_capable, and the generation rebind sweep (internal/ws/model_admission_pool_manifest.go, internal/buyer/pool_model_route.go, test/integration/trusted_pool_model_journey_test.go). #1880 step 5 adds the coordinator-owned model_admission_probe_evidence.v1 record: the known-answer probe macprovider.known_answer_probe.v1 runs through the provider session at offer submit and from a 10-minute refresh pass, records pass/fail/error append-only (SHA-256 of JCS), and bind/rebind events link the newest record in the trailing 30 days (internal/ws/model_admission_probe_evidence.go). Still missing: signed journey evidence from a deployed build. Pending until it exists."
       }
     },
     {
       "requirement_id": "SPEC-047-R012",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func (s *Server) handleAdminModelAdmissionPoolProven",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func (s *Server) buildModelAdmissionPoolProvenSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func BuildModelAdmissionPoolProvenRows",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func poolProvenOwnerAccount",
+        "phase4-coordinator/internal/billing/pool_proven.go:func QueryPoolProvenAttempts",
+        "phase4-coordinator/internal/trustpool/accepted_entries.go:func AcceptedPoolModelEntries"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestBuildModelAdmissionPoolProvenRows",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestPoolProvenOwnerAccountResolution",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestModelAdmissionPoolProvenEndpoint",
+        "phase4-coordinator/internal/billing/pool_proven_test.go:TestQueryPoolProvenAttemptsCountingPredicate",
+        "phase4-coordinator/internal/trustpool/accepted_entries_test.go:TestAcceptedPoolModelEntriesReplaysEveryAcceptedCore"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "GET /admin/model-admission/pool-proven and the closed model_admission_pool_proven.v1 frame are not implemented: no materialized build over pool-manifest route snapshots and final settlement rows, k-anonymity suppression, licence agreement, probe-evidence currency, ceilings, or pool_proven_unavailable handling."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 step 5 implements GET /admin/model-admission/pool-proven: the closed model_admission_pool_proven.v1 frame materialized every 15 minutes and at startup from settled enforce-mode pool_manifest attempts (closed payable verdict, verified pool label, payable credit with positive debit and credit) by verdict finality time, distinct owner accounts with k=3 suppression, licence agreement from the accepted core each snapshot names, the newest current passing known-answer record, the 100 000 counted-attempt ceiling and 10-second timeout leaving the previous snapshot, and pool_proven_unavailable when missing or stale. Pending until production evidence from a deployed build exists."
       }
     },
     {
