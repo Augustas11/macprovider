@@ -134,6 +134,15 @@ setup_byom_e2e_harness() {
 }
 assert_detect "byom e2e harness (run swift)" setup_byom_e2e_harness true true
 
+# The Swift test-shard runner decides which tests each shard runs; editing it
+# must run the Swift jobs that execute it.
+setup_swift_shard_runner() {
+  mkdir -p scripts; echo x >scripts/ci-swift-test-shard.py
+  commit_all base >/dev/null; git rev-parse HEAD
+  echo y >scripts/ci-swift-test-shard.py; commit_all change >/dev/null
+}
+assert_detect "swift test-shard runner (run swift)" setup_swift_shard_runner true true
+
 # A normal coordinator .go change must NOT drag in swift (savings preserved).
 setup_coordinator_go() {
   mkdir -p phase4-coordinator/internal; echo x >phase4-coordinator/internal/ws.go

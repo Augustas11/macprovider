@@ -61,10 +61,10 @@ classify() {
       # job runs via `make test-byom-e2e`; a harness-only edit must still gate.
       #
       # scripts/ is matched file by file (#1920) so a script-only PR does not
-      # run the macOS Swift job. Listed: what the Swift job's steps run (Sparkle
-      # checks, XcodeGen install, SwiftPM lock, the BYOM discovery-journey gate
-      # and the Python it imports), the fixtures Swift tests read, any Swift
-      # source, and this detector. test-ci-detect-changed-paths.sh fails if a
+      # run the macOS Swift job. Listed: what the Swift job's steps run (the
+      # test-shard runner, Sparkle checks, XcodeGen install, SwiftPM lock, the
+      # BYOM discovery-journey gate and the Python it imports), the fixtures
+      # Swift tests read, any Swift source, and this detector. test-ci-detect-changed-paths.sh fails if a
       # Swift test reads a repo path this list does not cover.
       phase3-binary/*|Makefile|.gitattributes|.github/workflows/ci.yml|\
       test/e2e/byom/*|test/fixtures/*|\
@@ -72,7 +72,7 @@ classify() {
       docs/research/spec048-r015/policy-template.json|\
       scripts/*.swift|scripts/fixtures/*|scripts/tests/fixtures/*|\
       scripts/lab/1690-m6/testdata/*|scripts/lab/privacy-class-beta/extract-primary-evidence.py|\
-      scripts/ci-detect-changed-paths.sh|\
+      scripts/ci-detect-changed-paths.sh|scripts/ci-swift-test-shard.py|\
       scripts/test-malibu-sparkle-generator-integration.sh|\
       scripts/test-malibu-sparkle-validator-integration.sh|\
       scripts/generate-malibu-appcast.sh|scripts/install-pinned-xcodegen.sh|\
