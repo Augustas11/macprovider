@@ -1342,6 +1342,112 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    /// Grouped CB prefill must not change a row's kernel route. A tiny real
+    /// Qwen3.5 MoE (4 experts, top-2, 4-bit `switch_mlp`) has a grouping
+    /// bound of 32 tokens per chunk: a 24-token chunk alone carries 48 expert
+    /// selections (unsorted `gather_qmv`) and two of them carry 96
+    /// (sorted, `gather_qmm_rhs`). Two short prompts arriving together must
+    /// therefore prefill alone and generate exactly what each generates by
+    /// itself; two prompts at the bound share one forward and still match.
+    func testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        let configData = Data(Self.tinyQwen35MoEConfiguration.utf8)
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(configData, modelID: nil)
+        XCTAssertEqual(rule.minimumGroupedChunkTokens, 32)
+
+        let configuration = try JSONDecoder().decode(Qwen35TextConfiguration.self, from: configData)
+        MLXRandom.seed(1906)
+        let target = Qwen35TextModel(configuration)
+        quantize(model: target, groupSize: 64, bits: 4, mode: .affine, filter: { path, _ in
+            path.contains("switch_mlp")
+        })
+        eval(target)
+        XCTAssertTrue(
+            target.leafModules().flattened().contains { $0.1 is QuantizedSwitchLinear },
+            "the expert projections must run the quantized gather kernels"
+        )
+
+        func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
+            let cache = try target.newCache(parameters: nil)
+            var logits = target(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: cache)
+            var tokens: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                tokens.append(next)
+                logits = target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return tokens
+        }
+
+        let steps = 6
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 128)
+        for (length, expectedGroups) in [
+            (24, [["hold"], ["row-a"], ["row-b"]]),
+            (32, [["hold"], ["row-a", "row-b"]]),
+        ] {
+            let prompts = [
+                "row-a": Self.tinyPrompt(length: length, salt: 31, vocabulary: 64),
+                "row-b": Self.tinyPrompt(length: length, salt: 32, vocabulary: 64),
+            ]
+            let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
+                container: ModelContainer(context: ModelContext(
+                    configuration: ModelConfiguration(id: descriptor.modelID),
+                    model: target,
+                    processor: StandInUserInputProcessor(),
+                    tokenizer: RuntimeBridgeFakeTokenizer()
+                )),
+                descriptor: descriptor,
+                layerCount: 2,
+                cacheKinds: [.recurrentMamba, .pagedAttention]
+            ))
+            let holdGate = RuntimeBridgeTestGate()
+            backend.onPrefill = { ids in
+                if ids.contains("hold") { await holdGate.wait() }
+            }
+            let scheduler = try Self.makeScheduler(
+                maxActiveRows: 4,
+                backend: backend,
+                maxPhysicalBlocks: 128,
+                maxPromptChunkTokens: 64,
+                maxPrefillRowsPerIteration: 4,
+                maxPrefillTokensPerIteration: 128,
+                prefillGrouping: rule
+            )
+            // `hold` parks the pump inside its prefill so both rows queue and
+            // are admitted in one pass with one cursor and chunk length.
+            let hold = Task {
+                try await scheduler.submit(Self.schedulerRequest(id: "hold", promptTokens: [1, 2], maxOutputTokens: 1))
+            }
+            try await Self.eventually { backend.prefillRequestGroups().count == 1 }
+            var rows: [Task<ContinuousBatchSchedulerResult, Error>] = []
+            for (index, id) in ["row-a", "row-b"].enumerated() {
+                rows.append(Task {
+                    try await scheduler.submit(Self.schedulerRequest(
+                        id: id,
+                        promptTokens: prompts[id]!,
+                        maxOutputTokens: steps
+                    ))
+                })
+                try await Self.eventually { await scheduler.metrics().waitingCount == index + 1 }
+            }
+            await holdGate.open()
+            _ = try await hold.value
+            var generated: [String: [Int]] = [:]
+            for (id, task) in zip(["row-a", "row-b"], rows) {
+                generated[id] = try await task.value.outputTokens
+            }
+
+            XCTAssertEqual(backend.prefillRequestGroups(), expectedGroups, "length \(length)")
+            for id in ["row-a", "row-b"] {
+                XCTAssertEqual(
+                    generated[id],
+                    try serialGreedy(prompts[id]!, count: steps),
+                    "\(id) at length \(length) diverged from its lone serial run"
+                )
+            }
+        }
+    }
+
     /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
     /// commits keyed rows in serial format hands back the same terminal
     /// conversation-cache entry as the ordinary row: same tokens, same token
@@ -1657,11 +1763,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     /// Deterministic pseudo-random prompt over the tiny vocabulary.
-    private static func tinyPrompt(length: Int, salt: Int) -> [Int] {
+    private static func tinyPrompt(length: Int, salt: Int, vocabulary: UInt64 = 8) -> [Int] {
         var state = UInt64(truncatingIfNeeded: 0x9E37_79B9 &+ salt)
         return (0 ..< length).map { _ in
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
-            return Int((state >> 33) % 8)
+            return Int((state >> 33) % vocabulary)
         }
     }
 
@@ -3681,6 +3787,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         backend: any ContinuousBatchSchedulerBackend,
         maxPhysicalBlocks: Int = 16,
         maxPromptChunkTokens: Int = 256,
+        maxPrefillRowsPerIteration: Int = 1,
+        maxPrefillTokensPerIteration: Int? = nil,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
@@ -3717,6 +3826,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 tuple: tuple,
                 maxActiveRows: maxActiveRows,
                 decodeHeadroomTokens: 4,
+                maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
+                prefillGrouping: prefillGrouping,
+                maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
                 maxPromptChunkTokens: maxPromptChunkTokens,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
@@ -3821,6 +3933,43 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
           "full_attention_interval": 2,
           "mtp_num_hidden_layers": 1,
           "mtp_use_dedicated_embeddings": false,
+          "rope_parameters": {
+            "type": "default",
+            "rope_theta": 100000.0,
+            "partial_rotary_factor": 0.25
+          }
+        }
+        """
+
+    /// Tiny Qwen3.5 MoE: 4 experts, top-2. Linear inputs are 64 wide so the
+    /// expert projections quantize at group size 64.
+    private static let tinyQwen35MoEConfiguration = """
+        {
+          "model_type": "qwen3_5_moe_text",
+          "hidden_size": 64,
+          "num_hidden_layers": 2,
+          "intermediate_size": 64,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 32,
+          "linear_num_value_heads": 2,
+          "linear_num_key_heads": 1,
+          "linear_key_head_dim": 32,
+          "linear_value_head_dim": 32,
+          "linear_conv_kernel_dim": 2,
+          "rms_norm_eps": 1e-6,
+          "vocab_size": 64,
+          "rope_theta": 100000.0,
+          "partial_rotary_factor": 0.25,
+          "max_position_embeddings": 256,
+          "tie_word_embeddings": true,
+          "attention_bias": false,
+          "full_attention_interval": 2,
+          "num_experts": 4,
+          "num_experts_per_tok": 2,
+          "moe_intermediate_size": 64,
+          "shared_expert_intermediate_size": 64,
+          "norm_topk_prob": true,
           "rope_parameters": {
             "type": "default",
             "rope_theta": 100000.0,
@@ -4146,6 +4295,8 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     private var proposals: [String: [Int: [Int]]] = [:]
     private var capturedDecodeSteps: [String: [Int]] = [:]
     private var verifyHook: (@Sendable ([String]) async -> Void)?
+    private var prefillHook: (@Sendable ([String]) async -> Void)?
+    private var prefillGroups: [[String]] = []
 
     /// Runs before each packed verify with the round's request IDs.
     var onVerify: (@Sendable ([String]) async -> Void)? {
@@ -4161,8 +4312,29 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         }
     }
 
+    /// Runs before each prefill call with the call's request IDs.
+    var onPrefill: (@Sendable ([String]) async -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return prefillHook
+        }
+        set {
+            lock.lock()
+            prefillHook = newValue
+            lock.unlock()
+        }
+    }
+
     init(_ base: PagedKVSharedForwardBackend) {
         self.base = base
+    }
+
+    /// Request IDs of every prefill call, in call order.
+    func prefillRequestGroups() -> [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return prefillGroups
     }
 
     func finalizedRounds() -> [[ContinuousBatchNativeMTPFinalizeInput]] {
@@ -4186,7 +4358,13 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        try await base.prefill(rows: rows)
+        let ids = rows.map(\.requestID)
+        lock.lock()
+        prefillGroups.append(ids)
+        let hook = prefillHook
+        lock.unlock()
+        await hook?(ids)
+        return try await base.prefill(rows: rows)
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {

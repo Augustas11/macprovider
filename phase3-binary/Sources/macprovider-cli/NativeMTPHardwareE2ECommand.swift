@@ -418,6 +418,7 @@ final class NativeMTPHardwareE2ERunner {
         )
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
+        let prefillGrouping = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(configData, modelID: modelID)
         let modelCapabilities = ModelRuntime.pagedKVModelCapabilities(
             modelID: modelID,
             configJSONData: configData
@@ -480,6 +481,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: placeholderProof,
             observed: observedIdentity(from: placeholderProof),
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: PagedKVSharedForwardBackend(
                 container: targetContainer,
@@ -528,6 +530,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: proof,
             observed: observed,
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: ordinaryBackend,
             nativeCapability: nil,
@@ -542,6 +545,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: proof,
             observed: observed,
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: nativeBackend,
             nativeCapability: nativeCapability,
@@ -563,6 +567,7 @@ final class NativeMTPHardwareE2ERunner {
         proof: PagedKVHardwareSizingProof,
         observed: PagedKVObservedRuntimeIdentity,
         modelCapabilities: PagedKVRuntimeModelCapabilities,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule,
         targetContainer: ModelContainer,
         backend: PagedKVSharedForwardBackend,
         nativeCapability: NativeMTPCapability?,
@@ -598,6 +603,7 @@ final class NativeMTPHardwareE2ERunner {
             pagedKVModelCapabilities: modelCapabilities,
             container: targetContainer,
             continuousBatchingBackend: backend,
+            continuousBatchPrefillGrouping: prefillGrouping,
             loader: { _ in throw NativeMTPHardwareE2EError.unexpectedLoader }
         )
     }

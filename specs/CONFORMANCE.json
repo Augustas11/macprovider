@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.11",
+      "version": "v0.3.12",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4686,6 +4686,9 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillChunksBelowTheGroupingBoundPrefillAlone",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillGroupingRuleFromModelConfiguration",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringFailingPrefillWinsTerminalRace",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow",

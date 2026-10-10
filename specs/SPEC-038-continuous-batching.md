@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.11
+Version: v0.3.12
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.12 (2026-10-10, kernel-route-invariant prefill groups):**
+FR-CB2: rows share a prefill forward only when the shared call takes the
+kernel route each row's own chunk takes alone. On sorted-gather MoE models a
+chunk co-batches only at or above `ceil(max(16, 64, 4 x experts) / top-k)`
+tokens; shorter chunks prefill alone, and an MoE model whose expert count or
+top-k cannot be read from its configuration prefills every chunk alone.
+
 **Change log v0.3.11 (2026-10-09, ragged shared prefill):** FR-CB2 now lets
 prompt rows at different prompt offsets share one prefill forward when every
 row prefills the same chunk length from its own committed KV and the backend
@@ -565,6 +572,19 @@ cap and token budget. Fallback MUST
 preserve FCFS accounting, cancellation boundaries, receipt boundaries,
 request-local block-table isolation, and every FR-CB6 per-request isolation
 rule.
+
+**(v0.3.12)** A compatible prefill group MUST NOT change any row's kernel
+route: the shared call MUST take, for each row, the kernels that row's own
+chunk takes alone, so a row's prefill numerics never depend on its batch
+neighbours. MLX's sorted-gather quantized MoE projections switch from
+`gather_qmv` to `gather_qmm_rhs` once a call carries at least 16 expert
+selections and at least 4 per expert, and mlx-swift-lm sorts the gather at 64
+selections; a group carries every row's selections. On such a model a chunk
+MAY share a prefill forward only when `chunk x top-k >= max(16, 64,
+4 x experts)`, read from the loaded model's configuration (Qwen3.6-35B-A3B,
+256 experts, top-8: 128 tokens). A shorter chunk prefills alone. A model that
+reads as MoE without both an expert count and a top-k, or whose configuration
+cannot be read, prefills every chunk alone. Dense models are unconstrained.
 
 For a fresh prompt, prefill MUST commit the complete prompt sequence; it MUST
 NOT hold back the final prompt token for a decode call. Every non-final chunk is

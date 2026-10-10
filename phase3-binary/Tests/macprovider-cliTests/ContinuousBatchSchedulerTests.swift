@@ -2922,10 +2922,102 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 prefillStepSize: 512,
                 maxDecodeLockstepWindow: 1,
                 nativeMTPRoundByteCapacity: nil,
-                nativeMTPStatusSink: nil
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .sortedGatherMoE(numExperts: 256, topK: 8)
             )
             XCTAssertEqual(configuration.maxRequestTokens, context)
+            XCTAssertEqual(configuration.prefillGrouping.minimumGroupedChunkTokens, 128)
             XCTAssertGreaterThanOrEqual(configuration.maxQueuedTokens, context)
+        }
+    }
+
+    // The grouping bound is the smallest chunk whose own expert selections
+    // already take `gather_qmm_rhs` (and the SwitchGLU sort): ceil(max(16,
+    // 64, 4 * experts) / top-k). An MoE configuration without both counts,
+    // or no readable configuration, never groups; a dense model always may.
+    func testPrefillGroupingRuleFromModelConfiguration() {
+        func rule(_ json: String?, modelID: String? = nil) -> Int {
+            ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+                json.map { Data($0.utf8) },
+                modelID: modelID
+            ).minimumGroupedChunkTokens
+        }
+        // Served Qwen3.6-35B-A3B: experts and top-k live in `text_config`.
+        XCTAssertEqual(rule(#"""
+            {"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"],
+             "text_config":{"model_type":"qwen3_5_moe_text","num_experts":256,"num_experts_per_tok":8}}
+            """#), 128)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,"num_experts_per_tok":8}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"glm4_moe","n_routed_experts":128,"num_experts_per_tok":8}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":128,"num_experts_per_tok":4}"#), 128)
+        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":32,"experts_per_token":4}"#), 32)
+        XCTAssertEqual(rule(#"{"model_type":"gemma4","text_config":{"num_experts":128,"top_k_experts":8}}"#), 64)
+        // Few experts: the SwitchGLU sort bound (64 selections) dominates.
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":4,"num_experts_per_tok":2}"#), 32)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#), 1)
+        XCTAssertEqual(rule(#"{"model_type":"llama"}"#, modelID: "meta/llama-3.1-8b"), 1)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe"}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","num_experts_per_tok":8}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","moe_intermediate_size":512}"#), Int.max)
+        XCTAssertEqual(rule(nil), Int.max)
+        XCTAssertEqual(rule("not json"), Int.max)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 0, topK: 8), .ungrouped)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: Int.max, topK: 8), .ungrouped)
+    }
+
+    // A prefill chunk below the grouping bound runs alone even when another
+    // row shares its cursor and chunk length; at or above it the rows share
+    // one forward, and their short tails split again (7 tokens at a 4-token
+    // chunk limit balance to 4 + 3).
+    func testPrefillChunksBelowTheGroupingBoundPrefillAlone() async throws {
+        for (length, expectedOrder, expectedChunkTokens) in [
+            (3, [["row-a"], ["row-b"]], [3, 3]),
+            (7, [["row-a", "row-b"], ["row-a"], ["row-b"]], [8, 3, 3]),
+        ] {
+            let decodeGate = AsyncGate()
+            let backend = ScriptedBackend(
+                scripts: ["active": [90, 91], "row-a": [101], "row-b": [102]],
+                decodeGate: decodeGate
+            )
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 3,
+                maxPromptChunkTokens: 4,
+                maxPrefillRowsPerIteration: 2,
+                maxPrefillTokensPerIteration: 8,
+                prefillGrouping: ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: 4),
+                backend: backend
+            )
+            let active = Task {
+                try await scheduler.submit(.init(
+                    id: "active", conversationKey: "", promptTokens: [1],
+                    maxOutputTokens: 2, temperature: 0.0, topP: 1.0
+                ))
+            }
+            try await eventually { await backend.decodeCallCount() == 1 }
+            func queued(_ id: String, base: Int) -> Task<ContinuousBatchSchedulerResult, Error> {
+                Task {
+                    try await scheduler.submit(.init(
+                        id: id, conversationKey: "", promptTokens: Array(base ..< base + length),
+                        maxOutputTokens: 1, temperature: 0.0, topP: 1.0
+                    ))
+                }
+            }
+            let rowA = queued("row-a", base: 10)
+            try await eventually { await scheduler.metrics().waitingCount == 1 }
+            let rowB = queued("row-b", base: 20)
+            try await eventually { await scheduler.metrics().waitingCount == 2 }
+            await decodeGate.open()
+
+            _ = try await active.value
+            let aResult = try await rowA.value
+            let bResult = try await rowB.value
+            XCTAssertEqual(aResult.outputTokens, [101], "length \(length)")
+            XCTAssertEqual(bResult.outputTokens, [102], "length \(length)")
+            let order = await backend.prefillOrder().map { $0.filter { $0 != "active" } }.filter { !$0.isEmpty }
+            XCTAssertEqual(order, expectedOrder, "length \(length)")
+            let tokens = await backend.prefillTokenCountsByCall().suffix(expectedChunkTokens.count)
+            XCTAssertEqual(Array(tokens), expectedChunkTokens, "length \(length)")
         }
     }
 
@@ -6960,6 +7052,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .init(
@@ -6985,6 +7078,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             queueLimit: queueLimit,
             decodeHeadroomTokens: decodeHeadroomTokens,
             maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
+            prefillGrouping: prefillGrouping,
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
