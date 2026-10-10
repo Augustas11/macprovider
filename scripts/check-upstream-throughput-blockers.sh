@@ -450,15 +450,15 @@ out = {
             "(3.32.3-macprovider.6) with mlx-swift 0.32.3 on a batch-invariant "
             "small-M quantized matmul MLX core fork (0.32.3-macprovider.2); it is "
             "not approved until Studio validation and the freeze audits pass; "
-            "native MTP stays default-off; upstream #645 remains the tagged-release "
-            "replacement tracker"
+            "native MTP stays default-off; the forks are the permanent production "
+            "runtime, and an upstream equivalent (for example #645) only retires the "
+            "matching fork patch during a reviewed rebase"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
         "approved": native_mtp_exception_approved,
         "approved_at": None,
         "approved_by": None,
-        "review_due_at": "2026-12-27",
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
         "fork_revision": native_mtp_exception_revision,
         "upstream_base_revision": native_mtp_exception_base,
@@ -476,13 +476,14 @@ out = {
             "declared_compile_state_for_every_qwen35_trace_plus_"
             "mlx_swift_and_mlx_core_batch_invariant_small_m_quantized_matmul_fork"
         ),
-        "removal_trigger": (
-            "first reviewed upstream tag with equivalent standalone-checkpoint "
-            "loading and public transaction, packed verification, continuation, "
-            "and recurrent-cache surfaces that passes the MacProvider qualification "
-            "artifact"
-        ),
-        "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
+        "fork_model": "permanent_production_fork_rebased_per_upstream_release",
+        # Upstream equivalents never retire the fork; each is a candidate to
+        # drop the matching fork patch during a reviewed rebase.
+        "patch_retirement_candidates": {
+            "public_mtp_transactions_and_packed_verification": (
+                "https://github.com/ml-explore/mlx-swift-lm/issues/645"
+            ),
+        },
     },
 }
 

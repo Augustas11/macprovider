@@ -395,13 +395,12 @@
     "native_mtp_required_merges_in_latest_release": true,
     "native_mtp_public_row_mapped_transactions_reviewed": false,
     "native_mtp_status": "candidate_step_overhead_revision_pending_review",
-    "note": "The reviewed Qwen MTP transaction surfaces and the exact-layout Qwen3.6 A3B fused-MoE path (approved 2026-10-05 at b1811029) remain present; the candidate adds a single-pass checkpointed GDN verify kernel and skips the all-true SSM mask for unpadded packed verification, and is not approved until Studio validation and the freeze audits pass; native MTP stays default-off; upstream #645 remains the tagged-release replacement tracker"
+    "note": "The reviewed Qwen MTP transaction surfaces and the exact-layout Qwen3.6 A3B fused-MoE path (approved 2026-10-05 at b1811029) remain present; the candidate adds a single-pass checkpointed GDN verify kernel and skips the all-true SSM mask for unpadded packed verification, and is not approved until Studio validation and the freeze audits pass; native MTP stays default-off; the forks are the permanent production runtime, and an upstream equivalent (for example #645) only retires the matching fork patch during a reviewed rebase"
   },
   "native_mtp_immutable_dependency_exception": {
     "approved": false,
     "approved_at": null,
     "approved_by": null,
-    "review_due_at": "2026-12-27",
     "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
     "fork_revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
     "remote_revision_verified": true,
@@ -409,8 +408,10 @@
     "upstream_base_revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
     "review_status": "candidate_extension_pending_studio_and_freeze_audits",
     "scope": "standalone_qwen_mtp_loading_public_cache_transaction_packed_verification_strict_continuation_and_packed_recurrent_cache_surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked_plus_single_pass_checkpointed_gdn_verify_and_unpadded_packed_ssm_mask_skip",
-    "removal_trigger": "first reviewed upstream tag with equivalent standalone-checkpoint loading and public transaction, packed verification, continuation, and recurrent-cache surfaces that passes the MacProvider qualification artifact",
-    "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645"
+    "fork_model": "permanent_production_fork_rebased_per_upstream_release",
+    "patch_retirement_candidates": {
+      "public_mtp_transactions_and_packed_verification": "https://github.com/ml-explore/mlx-swift-lm/issues/645"
+    }
   },
   "last_changed_at": "2026-10-03T01:20:31Z",
   "last_checked_at": "2026-10-03T01:20:31Z",

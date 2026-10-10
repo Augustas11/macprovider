@@ -271,6 +271,25 @@ class ProductionForkTupleTests(unittest.TestCase):
 
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
+    def test_fork_record_has_no_temporary_exception_lifecycle(self):
+        root = Path(__file__).parents[2]
+        script = (root / "scripts" / "check-upstream-throughput-blockers.sh").read_text()
+        baseline = json.loads(
+            (root / "beta" / "throughput-engineering" / "UPSTREAM_WATCH.json").read_text()
+        )
+        record = baseline["native_mtp_immutable_dependency_exception"]
+        for field in ("review_due_at", "removal_trigger", "replacement_tracker"):
+            with self.subTest(field=field):
+                self.assertNotIn(f'"{field}"', script)
+                self.assertNotIn(field, record)
+        self.assertEqual(
+            record["fork_model"], "permanent_production_fork_rebased_per_upstream_release"
+        )
+        self.assertIn(
+            "https://github.com/ml-explore/mlx-swift-lm/issues/645",
+            record["patch_retirement_candidates"].values(),
+        )
+
     def test_checked_in_watch_baseline_is_valid_and_complete(self):
         watch_path = (
             Path(__file__).parents[2]
