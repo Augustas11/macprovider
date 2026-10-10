@@ -2,10 +2,12 @@
 
 **Version:** 1.6.12 (2026-10-10, provider release admission policy)
 
-**Change log v1.6.12 (2026-10-10, issue #1914):** Adds SPEC-002-R004,
-minimum-version and exact release revocation admission, SIGHUP policy reload,
-and actionable provider rejection. Release identity remains provider-reported
-metadata; signed installer/update verification remains authenticity authority.
+**Change log v1.6.12 (2026-10-10, issue #1914):** Adds SPEC-002-R004:
+provider release admission by target repository with exact revocations
+(revoked releases connect update-only), the recommendation driving updates,
+deprecated allowlist/bridge fields, SIGHUP policy reload, and actionable
+provider rejection. Release identity remains provider-reported metadata;
+signed installer/update verification remains authenticity authority.
 
 **Change log v1.6.11 (2026-10-09, issue #1906):** A known model with
 serving-capable supply whose providers are all full now sheds as `429
@@ -5164,66 +5166,63 @@ the strict clean-room policy inherited from SPEC-001 section 7.2.
 
 ## SPEC-002-R004 — Provider release admission policy
 
-`coordinator.compatibility_set` MUST support `target_id`, `minimum_version`,
-`revoked_ids`, and optional `first_hop_bridge_ids`. The target remains the
-exact signed-manifest recommendation identity, in `owner/repo:vMAJOR.MINOR.PATCH@commit`
-form. It is not an admission allowlist. Buyer-serving release admission MUST
-accept any valid identity from the target repository at or above the numeric
-three-component minimum, except an exact identity in `revoked_ids`. Numeric
-overflow, malformed versions, and noncanonical leading-zero components (for
-example `v1.8.0224`) MUST fail closed. Revocation matches the identity the
-provider reports; it fences a release from routing and is not a
-cryptographic ban, because a modified binary can report another identity. For buyer-serving admission, the reported binary version
-MUST agree numerically with the identity's version. These reported fields do
-not authenticate a binary or grant a trust tier; provider authentication,
-attestation, catalog admission, and signed update verification remain separate.
+`coordinator.compatibility_set` MUST support `target_id` and `revoked_ids`.
+`target_id` is the exact signed-manifest recommendation identity, in
+`owner/repo:vMAJOR.MINOR.PATCH@commit` form; its repository is the admitted
+repository. A provider whose `compatibility_set_id` is well-formed and from
+that repository MUST be admitted to a session and MAY serve buyers, whatever
+its version: there is no allowlist, no allowlist cap, no version floor and no
+eviction. Malformed identities (including noncanonical leading-zero version
+components such as `v1.8.0224` and components that overflow int64) and
+identities from another repository MUST be rejected with a stable code.
 
-The target MUST itself satisfy the policy. Duplicate or malformed revocations,
-a malformed minimum, and contradictory bridge/revocation entries MUST reject
-configuration. Explicit revocation MUST take precedence over update bridges.
-Bridge identities below the buyer-serving floor may open update-only sessions
-and MUST remain unroutable.
+Every admitted session MUST receive the recommended compatibility set
+(`target_id`) and the recommended binary version (`latest_binary_version`) so
+the provider's updater moves it forward.
 
-The deprecated `accepted_ids` policy MAY remain available for deployment
-migration when `minimum_version` and `revoked_ids` are absent. Configuration
-MUST reject mixing the legacy allowlist with the new policy. An entirely
-unconfigured policy retains existing local/lab behavior. Release tooling MUST
-verify that the running coordinator admits the candidate under its applied
-policy. During migration, a legacy allowlist MAY satisfy this gate only when
-the exact candidate identity is already admitted; missing policy metadata
-MUST NOT imply admission. Version-floor policies MUST enforce the floor,
-repository, and revocation checks. Version-floor tooling MUST NOT request a
-per-release allowlist edit; the legacy train MUST keep its existing verified
-admission step, and a runtime that reports no policy mode is treated as the
-legacy allowlist. Release tooling MUST read the mode from the applied
-configuration and `/healthz`, and MUST fail closed when the two disagree. The
-migration from the legacy allowlist MUST be an opt-in, locked, scripted
-release-train step that edits only the compatibility policy in place,
-validates it with the running coordinator, and verifies the applied policy
-after the coordinator restarts. It MUST refuse a floor above the latest
-reported release of any provider seen within the release train's in-use
-window, refuse a floor above the target, and never move an existing floor.
-Signed candidate verification and canary proof remain required.
+The only buyer-routing block is `revoked_ids`: canonical, exact identities from
+the target repository, never the target itself. A revoked release MUST still be
+admitted, as an update-only session that is never buyer-routable and still
+receives the recommendation, so it can update itself. Revocation matches the
+identity the provider reports; it fences a release from routing and is not a
+cryptographic ban, because a modified binary can report another identity.
+These reported fields do not authenticate a binary or grant a trust tier;
+provider authentication, attestation, catalog admission and signed update
+verification remain separate.
+
+The former `accepted_ids` allowlist and `first_hop_bridge_ids` (#610 update
+bridge) MUST still parse so existing configurations load; they MUST be ignored
+for admission and reported as deprecated at startup and reload. An entirely
+unconfigured policy retains existing local/lab behavior.
+
+`/healthz` MUST expose the applied policy for release tooling: mode
+`repository`, `target_id` and `revoked_ids`. It remains public and reports
+policy metadata, never credentials or proof of binary authenticity. Release
+tooling MUST NOT request a per-release Pearl admission edit. It MUST prove
+admission against the running coordinator's policy: the `/healthz` policy MUST
+equal the applied configuration, and any difference (or an unreadable
+`/healthz`) MUST block every Pearl-mutating step. A runtime that reports no
+policy mode predates this requirement; tooling MAY accept a candidate only when
+that runtime already lists the exact identity, and otherwise MUST direct the
+operator to the coordinator runtime release. Signed candidate verification and
+canary proof remain required.
 
 A validated SIGHUP reload MUST publish one immutable compatibility policy
-snapshot after fallible reload preparation succeeds. A rejected reload MUST
-leave the prior policy intact. Before publication, a reload MUST refuse a
-policy that would reject any authenticated connected session through a floor,
-repository, or legacy allowlist change. This guard MUST be serialized with
-admission and policy publication. Explicit exact revocations remain intentional:
-newly revoked connected sessions MUST become unroutable and close; an in-flight admission MUST recheck the
-current policy before becoming routable so it cannot escape reload enforcement.
-After durable credential mutation, an admission invalidated by reload MUST
-remain held out of routing, deliver its credential-bearing acknowledgement,
-and then close. It MUST NOT strand a minted credential by refusing late
-registration. The policy verdict and release of the acknowledgement routing
-hold MUST be serialized against policy publication.
-The policy target is reloadable; this does not by itself make the separate
-`latest_binary_version` recommendation reloadable.
+snapshot after fallible reload preparation succeeds; `revoked_ids` and
+`target_id` are reloadable. A rejected reload MUST leave the prior policy
+intact. Before publication, a reload MUST refuse a policy that would reject an
+authenticated connected session for any reason other than an exact
+revocation, so a mistyped repository never disconnects the fleet. A newly
+revoked buyer-serving session MUST become unroutable at once and close, so it
+reconnects as an update-only session; no other session is closed. This guard
+MUST be serialized with admission and policy publication, and an in-flight
+admission MUST recheck the current policy before becoming routable. After
+durable credential mutation, an admission invalidated by reload MUST remain
+held out of routing, deliver its credential-bearing acknowledgement, and then
+close; it MUST NOT strand a minted credential. `latest_binary_version` is not
+made reloadable by this requirement.
 
 A rejected v2 initial auth request MUST receive an `auth_response` rejection
 with a stable reason code and an actionable message before the close. The
 provider MUST preserve that rejection when waiting for `auth_challenge`,
-rather than replacing it with a protocol-shape error. `/healthz` MUST expose
-the applied compatibility policy for release preflight. It remains public and
-reports policy metadata, never credentials or proof of binary authenticity.
+rather than replacing it with a protocol-shape error.

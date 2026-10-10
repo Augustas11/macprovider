@@ -4,29 +4,36 @@
 
 For each signed provider CLI release recommended to the fleet, read the exact
 `compatibility_set_id` from its verified signed manifest. Before advancing the
-advertised recommendation, ensure Pearl's `compatibility_set.accepted_ids`
-contains that identity and `compatibility_set.target_id` names that same
-release. Preserve the prior target as an accepted rollback identity and the
-other active accepted sets; the accepted list is capped at eight.
+advertised recommendation, ensure Pearl's running compatibility policy admits
+that identity and `compatibility_set.target_id` names that same release.
 
-An isolated live candidate test adds its identity to `accepted_ids` while
-keeping the existing target. Fleet recommendation additionally requires the
-matching target: a binary recommendation of 223 with compatibility target
-207 fails the consumer updater's exact manifest-target comparison.
+Admission (SPEC-002-R004) needs no per-release edit: the coordinator admits
+every well-formed release identity from the `target_id` repository, at any
+version, and every session receives the recommended set and
+`latest_binary_version` so its updater moves forward. The only routing block
+is `compatibility_set.revoked_ids`, exact identities: a revoked build stays
+connected update-only (never routed) and still receives the recommendation.
+Revocation matches the identity a provider reports; it is a routing fence,
+not a binary ban. `accepted_ids` and `first_hop_bridge_ids` still parse but
+are ignored (startup warning). Fleet recommendation still requires the
+matching target: a binary recommendation of 223 with compatibility target 207
+fails the consumer updater's exact manifest-target comparison.
 
-Both edits are `scripts/ops/cli-release.sh` steps that `next --run` executes:
-`pearl_accepted_ids` (add the candidate id; at the cap evict the oldest
-accepted version that is not the target, not the previous target/stable, and
-not the latest connection version of any provider seen in the last 14 days,
-`_anonymous` excluded; the step prints that per-version table and refuses with
-it when nothing is evictable) and
-`recommendation_bump` (`latest_binary_version` and `target_id` to the release,
-prior target kept accepted). Each prints the expected downtime first, holds
+`pearl_accepted_ids` is a read-only check that the running policy admits the
+candidate. The policy is read from `/healthz` (`compatibility_policy_mode`
+`repository`, target, revocations) and must equal the applied config; any
+difference blocks every Pearl-mutating step. A coordinator runtime that
+reports no mode predates repository admission: the train then points at the
+runtime release (`scripts/ops/pearl-runtime.sh`), never at an `accepted_ids`
+edit. The Pearl edit is the `scripts/ops/cli-release.sh` step that
+`next --run` executes:
+`recommendation_bump` (`latest_binary_version` and `target_id` to the
+release). It prints the expected downtime first, holds
 the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
 an anchored transform, backs it up under `/root/macprovider-backups`,
 validates the new file with the running coordinator's binary, user and exact
-environment, restarts the coordinator (older runtimes do not reload this policy on SIGHUP and `latest_binary_version` never reloads),
-waits for `/healthz`, checks that the restarted coordinator logged the on-disk
+environment, restarts the coordinator (`latest_binary_version` does not
+reload on SIGHUP), waits for `/healthz`, checks that the restarted coordinator logged the on-disk
 config as its boot config, and records the step. `recommendation_bump` is
 complete only when `/healthz` recommends the release AND the applied
 `compatibility_set.target_id` names it. When the requested edit is already on
@@ -35,33 +42,6 @@ restart), the step validates and restarts instead of reporting success. Nobody
 pastes a restart. Publication or a healthy advertised version alone does not
 prove that the new provider compatibility set is accepted and targeted; the
 `registrations` gate reads the running coordinator's applied config.
-
-### Version-floor admission (SPEC-002-R004)
-
-A coordinator runtime that reports `compatibility_policy_mode` on `/healthz`
-also supports `compatibility_set.minimum_version` with exact `revoked_ids`
-instead of `accepted_ids`. Under that `version_floor` policy a release is
-admitted when its `compatibility_set_id` is from the target's repository, at
-or above the floor (canonical numeric components; `v1.8.0224` is rejected)
-and not exactly revoked. `pearl_accepted_ids` then edits nothing; it and the
-`registrations` gate check that the applied policy admits the candidate.
-`recommendation_bump` moves only `target_id` and `latest_binary_version`; the
-prior target stays admitted by the floor. Revocation matches the
-`compatibility_set_id` the provider reports: it fences a release the operator
-no longer wants routed, and it does not authenticate binaries (signed
-installer and update verification, attestation and catalog admission do).
-
-The migration is one step of the CLI train, opt-in and one way. After the
-floor-capable coordinator runtime is live (`scripts/ops/pearl-runtime.sh`),
-choose a floor at or below every provider's latest connection version and
-run `COMPATIBILITY_MINIMUM_VERSION=<x.y.z> scripts/ops/cli-release.sh next
---run`. Step `compatibility_policy` replaces `accepted_ids` with
-`minimum_version` through the same locked, validated, in-place edit and
-restart. It refuses a floor above the latest connection version of any
-provider seen in the last 14 days and prints the per-version table, and it is
-done only when `/healthz` reports `version_floor` at that floor. SIGHUP
-reloads refuse a compatibility policy that would reject a connected provider,
-except an exact revocation.
 
 
 This runbook covers release/updater correctness only. Keep product-specific
