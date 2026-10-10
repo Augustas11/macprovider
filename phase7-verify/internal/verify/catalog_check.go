@@ -113,7 +113,7 @@ func applyCatalogCheck(parsed receipt.Parsed, opts VerifyOpts, now time.Time) ca
 	}
 	_ = fromCache
 
-	// Parse + Verify (signature + expiry). If the bytes came from
+	// Parse + Verify (signature; expires_at is structural only). If the bytes came from
 	// the cache they were already parse+verify-clean at write time;
 	// re-running here costs ~100µs and protects against a corrupted
 	// cache file regardless.
@@ -126,20 +126,11 @@ func applyCatalogCheck(parsed receipt.Parsed, opts VerifyOpts, now time.Time) ca
 	}
 	if verifyErr := catalog.Verify(c, pubkey, now); verifyErr != nil {
 		var sigErr *catalog.ErrSignatureInvalid
-		var expErr *catalog.ErrExpired
 		switch {
 		case errors.As(verifyErr, &sigErr):
 			v.Result = resultInvalid
 			v.Reason = reasonCatalogSignatureInvalid
 			v.Details = &Details{Field: "signature", Cause: sigErr.Reason, Alg: sigErr.ObservedAlg}
-		case errors.As(verifyErr, &expErr):
-			v.Result = resultInconclusive
-			v.Reason = reasonCatalogExpired
-			v.Details = &Details{
-				Field:     "expires_at",
-				CatalogID: expErr.CatalogID,
-				ExpiresAt: expErr.ExpiresAt.UTC().Format(time.RFC3339),
-			}
 		default:
 			v.Result = resultInvalid
 			v.Reason = reasonCatalogSignatureInvalid

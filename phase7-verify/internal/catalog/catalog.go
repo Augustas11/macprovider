@@ -25,9 +25,6 @@ import (
 // coordinator validator).
 const signatureAlg = "Ed25519"
 
-// SPEC-015 §M.3.2 step 5 — 60-second skew grace on expires_at.
-const expiryGrace = 60 * time.Second
-
 // SPEC-015 §M.3.2 step 3 — catalog sha256 fields MUST match this
 // pattern (raw 64-char lowercase hex, no `sha256:` prefix per
 // SPEC-011 R-3.3.1).
@@ -174,14 +171,16 @@ func Parse(data []byte) (*Catalog, error) {
 	}, nil
 }
 
-// Verify checks the catalog's ed25519 signature against pubkey, then
-// asserts non-expiry per §M.3.2 step 5 (60-second skew grace).
+// Verify checks the catalog's ed25519 signature against pubkey.
+// expires_at is structural only (Parse enforces issued_at < expires_at):
+// a validly signed catalog keeps verifying receipts after its calendar
+// date; withdrawal is a superseding signed catalog (SPEC-015 §M.3.2).
 // pubkey MUST be the 32-byte ed25519 public key produced by
 // base64.RawURLEncoding decoding of the operator-published key per
 // SPEC-008 §5.2.1 wire form.
 //
 // Returns nil on success, or one of the typed errors below.
-func Verify(c *Catalog, pubkey ed25519.PublicKey, now time.Time) error {
+func Verify(c *Catalog, pubkey ed25519.PublicKey, _ time.Time) error {
 	if c == nil {
 		return errors.New("catalog: nil catalog")
 	}
@@ -233,13 +232,6 @@ func Verify(c *Catalog, pubkey ed25519.PublicKey, now time.Time) error {
 			ObservedAlg: f.Signature.Alg,
 		}
 	}
-
-	if now.After(c.ExpiresAt.Add(expiryGrace)) {
-		return &ErrExpired{
-			CatalogID: c.CatalogID,
-			ExpiresAt: c.ExpiresAt,
-		}
-	}
 	return nil
 }
 
@@ -288,15 +280,4 @@ type ErrSignatureInvalid struct {
 
 func (e *ErrSignatureInvalid) Error() string {
 	return "catalog: signature invalid: " + e.Reason
-}
-
-// ErrExpired is returned by Verify when the catalog's `expires_at`
-// is more than 60 seconds in the past relative to `now`.
-type ErrExpired struct {
-	CatalogID string
-	ExpiresAt time.Time
-}
-
-func (e *ErrExpired) Error() string {
-	return fmt.Sprintf("catalog: catalog %q expired at %s", e.CatalogID, e.ExpiresAt.Format(time.RFC3339))
 }

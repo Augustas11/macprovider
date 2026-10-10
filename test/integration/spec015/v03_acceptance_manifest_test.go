@@ -104,13 +104,13 @@ var spec015V03ACs = []acceptanceCriterion{
 	},
 	{
 		Number:   36,
-		Summary:  "v0.3 verifier reports inconclusive with reason catalog_expired when catalog expires_at > now + 60s grace",
+		Summary:  "v0.3 verifier keeps verifying a validly signed catalog after its expires_at (structural only; #1938)",
 		SpecStep: "SPEC-015 §M.5 AC-36",
-		Commands: []string{"cd phase7-verify && go test ./internal/catalog/ -run 'TestVerifyRejectsExpiredBeyondGrace|TestVerifyAcceptsWithin60sGrace|TestVerifyExpiryBoundaryAt60s' -count=1"},
+		Commands: []string{"cd phase7-verify && go test ./internal/catalog/ ./internal/verify/ -run 'TestVerifyAcceptsCatalogPastExpiresAt|TestCatalogCheckHashMatchPastCatalogExpiresAt' -count=1"},
 		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase7-verify/internal/catalog/catalog_test.go", "TestVerifyExpiryBoundaryAt60s"},
-			{"phase7-verify/internal/catalog/catalog_test.go", "TestVerifyAcceptsWithin60sGrace"},
+			{"phase7-verify/internal/catalog/catalog_test.go", "TestVerifyAcceptsCatalogPastExpiresAt"},
+			{"phase7-verify/internal/verify/catalog_check_test.go", "TestCatalogCheckHashMatchPastCatalogExpiresAt"},
 		},
 	},
 	{

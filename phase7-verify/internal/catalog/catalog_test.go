@@ -203,10 +203,11 @@ func TestVerifyRejectsTamperedBody(t *testing.T) {
 	}
 }
 
-// SPEC-015 §M.3.2 step 5 — expired beyond 60s grace → ErrExpired.
-func TestVerifyRejectsExpiredBeyondGrace(t *testing.T) {
+// expires_at is structural only: a validly signed catalog past its
+// calendar date still verifies (AGENTS.md rule 10, #1938).
+func TestVerifyAcceptsCatalogPastExpiresAt(t *testing.T) {
 	issued := time.Now().Add(-2 * time.Hour)
-	expires := issued.Add(time.Hour) // expired 1h ago
+	expires := issued.Add(time.Hour) // calendar date passed 1h ago
 	raw, pub := signFixtureAtTime(t, "tc", issued, expires, []ModelEntry{{
 		ArtifactKind: "mlx_weight_file",
 		HashScope:    "primary_weight_file",
@@ -218,33 +219,8 @@ func TestVerifyRejectsExpiredBeyondGrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	err = Verify(c, pub, time.Now())
-	var expErr *ErrExpired
-	if !errors.As(err, &expErr) {
-		t.Fatalf("Verify err = %v, want ErrExpired", err)
-	}
-	if expErr.CatalogID != "tc" {
-		t.Fatalf("ErrExpired.CatalogID = %q", expErr.CatalogID)
-	}
-}
-
-// SPEC-015 §M.3.2 step 5 — within the 60-second grace window: OK.
-func TestVerifyAcceptsWithin60sGrace(t *testing.T) {
-	issued := time.Now().Add(-time.Hour)
-	expires := time.Now().Add(-30 * time.Second) // 30s expired, within grace
-	raw, pub := signFixtureAtTime(t, "tc", issued, expires, []ModelEntry{{
-		ArtifactKind: "mlx_weight_file",
-		HashScope:    "primary_weight_file",
-		ModelID:      "model-a",
-		SHA256:       validHash,
-		Source:       "operator-curated",
-	}})
-	c, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := Verify(c, pub, time.Now()); err != nil {
-		t.Fatalf("Verify within grace: %v", err)
+	if err := Verify(c, pub, time.Now().Add(365*24*time.Hour)); err != nil {
+		t.Fatalf("Verify past expires_at = %v, want nil", err)
 	}
 }
 
@@ -376,49 +352,6 @@ func TestParseRejectsUnsupportedModelEntryFields(t *testing.T) {
 				t.Fatalf("Parse accepted unsupported model entry: %+v", model)
 			}
 		})
-	}
-}
-
-// SPEC-015 §M.3.2 step 5 — 60s skew grace boundaries: exactly at +60s
-// MUST be accepted; +61s MUST be rejected as ErrExpired.
-func TestVerifyExpiryBoundaryAt60s(t *testing.T) {
-	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
-	issued := now.Add(-2 * time.Hour)
-
-	// expires_at = now - 60s → boundary inclusive: still accepted.
-	expiresAtBoundary := now.Add(-60 * time.Second)
-	raw, pub := signFixtureAtTime(t, "tc", issued, expiresAtBoundary, []ModelEntry{{
-		ArtifactKind: "mlx_weight_file",
-		HashScope:    "primary_weight_file",
-		ModelID:      "model-a",
-		SHA256:       validHash,
-		Source:       "operator-curated",
-	}})
-	c, err := Parse(raw)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := Verify(c, pub, now); err != nil {
-		t.Fatalf("Verify at exactly +60s grace boundary: %v", err)
-	}
-
-	// expires_at = now - 61s → just over boundary: ErrExpired.
-	expiresJustOver := now.Add(-61 * time.Second)
-	raw2, pub2 := signFixtureAtTime(t, "tc", issued, expiresJustOver, []ModelEntry{{
-		ArtifactKind: "mlx_weight_file",
-		HashScope:    "primary_weight_file",
-		ModelID:      "model-a",
-		SHA256:       validHash,
-		Source:       "operator-curated",
-	}})
-	c2, err := Parse(raw2)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	err = Verify(c2, pub2, now)
-	var expErr *ErrExpired
-	if !errors.As(err, &expErr) {
-		t.Fatalf("Verify at +61s: err = %v, want ErrExpired", err)
 	}
 }
 

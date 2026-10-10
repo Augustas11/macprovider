@@ -48,11 +48,13 @@ const (
 	reasonModelIDNotInCatalog     = "model_id_not_in_catalog"
 	reasonCatalogSignatureInvalid = "catalog_signature_invalid"
 	reasonCatalogUnreachable      = "catalog_unreachable"
-	reasonCatalogExpired          = "catalog_expired"
-	reasonCatalogFormatInvalid    = "catalog_format_invalid"
-	reasonUnknownReceiptVersion   = "unknown_receipt_version"
-	reasonExtraField              = "extra_field"
-	reasonMissingField            = "missing_field"
+	// RESERVED: reasonCatalogExpired stays in the output schema enum for receipts
+	// verified by older builds; expires_at no longer produces it (#1938).
+	reasonCatalogExpired        = "catalog_expired"
+	reasonCatalogFormatInvalid  = "catalog_format_invalid"
+	reasonUnknownReceiptVersion = "unknown_receipt_version"
+	reasonExtraField            = "extra_field"
+	reasonMissingField          = "missing_field"
 
 	// SPEC-015 v0.3 §M.3.2.1 — new warning kinds.
 	warningCatalogSkippedNullHash      = "catalog_skipped_null_hash"
