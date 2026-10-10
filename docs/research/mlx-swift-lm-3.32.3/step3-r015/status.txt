@@ -1,0 +1,5 @@
+started_at=2026-10-09T14:32:34Z policy_sha256=7c6d65793399ac95613837298105cf78df584c950ec3ca756361a119eb287278 binary_sha256=38fc549b25b28efe2a7ef417b3ba8f9a7bc872ed8db0e38902d88e9ddaa99472 metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 provider_commit=f424aa9d6d381b24056e556b9d6386c47ce2bf10
+phase=hardware_e2e exit_code=0 at=2026-10-09T14:33:37Z
+phase=matrix exit_code=0 lines=     133 at=2026-10-09T14:56:17Z
+phase=sustained exit_code=143 lines=     133 jsonl_sha256=5d277956ed622c8c53cc32befaf984b572fc89eac26c904c7053d64aeef1ddab at=2026-10-09T14:56:34Z
+R015_DONE

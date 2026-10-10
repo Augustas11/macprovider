@@ -1696,7 +1696,7 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             temperature: temperature,
             topP: topP,
-            prefillStepSize: prefillStepSize
+            prefill: .legacyRemainder(stepSize: prefillStepSize)
         )
     }
 
@@ -3064,6 +3064,7 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
         container: ModelContainer? = nil,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
+        continuousBatchPrefillGrouping: ContinuousBatchPrefillGroupingRule? = nil,
         pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
@@ -3264,6 +3265,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 from: self.currentNativeMTPAdmissionCapability
             ),
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
+            // A backend over a real model must name its rule; unnamed, it
+            // fails safe to prefilling every chunk alone.
+            prefillGrouping: continuousBatchPrefillGrouping
+                ?? (container == nil ? .unconstrained : .ungrouped),
             replayAuthority: replayAuthority
         )
         self.continuousBatchScheduler = continuousBatchScheduler
@@ -4574,6 +4579,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxDecodeLockstepWindow: Int,
         nativeMTPRoundByteCapacity: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink?,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule,
         allowsRaggedPrefillOffsets: Bool = false
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
@@ -4587,6 +4593,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 maxBatch,
                 ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
             ),
+            prefillGrouping: prefillGrouping,
             maxPrefillTokensPerIteration: prefillTokensPerIteration
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
             maxPromptChunkTokens: min(
@@ -4629,6 +4636,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxDecodeLockstepWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -4664,6 +4672,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink,
+                prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
                     .supportsRaggedPrefillOffsets ?? false
             ),
@@ -4721,6 +4730,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 maxDecodeLockstepWindow: decodeLockstepWindow(backendOverride: backendOverride),
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 nativeMTPStatusSink: nativeMTPStatusSink,
+                // Test backends run no MLX kernels.
+                prefillGrouping: .unconstrained,
                 replayAuthority: replayAuthority
             )
         }
@@ -4737,6 +4748,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let isHybrid = cacheKinds.contains(.recurrentMamba)
         let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
         let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
+        let prefillGrouping = await continuousBatchPrefillGrouping(container: container, modelID: modelID)
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
@@ -4770,9 +4782,29 @@ actor ModelRuntime: ModelRuntimeServing {
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink,
+            prefillGrouping: prefillGrouping,
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// The loaded model's prefill grouping rule, from its own `config.json`.
+    /// A container not loaded from a local directory has no readable
+    /// configuration and fails safe to `.ungrouped`.
+    private static func continuousBatchPrefillGrouping(
+        container: ModelContainer,
+        modelID: String?
+    ) async -> ContinuousBatchPrefillGroupingRule {
+        guard case .directory(let directory) = await container.configuration.id else {
+            return .ungrouped
+        }
+        let configData = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(configData, modelID: modelID)
+        let bound = rule.minimumGroupedChunkTokens == Int.max ? "none" : String(rule.minimumGroupedChunkTokens)
+        FileHandle.standardError.write(Data(
+            "event=continuous_batch_prefill_grouping min_grouped_chunk_tokens=\(bound)\n".utf8
+        ))
+        return rule
     }
 
     /// Hybrid recurrent state is split/repacked only at decode window
@@ -7444,7 +7476,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             cacheOnly: request.conversationCacheOnly,
                             leaseAllowed: conversationCacheAllowed,
                             lease: lease,
-                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+                            modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
                         ))
                     }
                     #endif
@@ -8231,7 +8263,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             cacheOnly: request.conversationCacheOnly,
                             leaseAllowed: conversationCacheAllowed,
                             lease: lease,
-                            modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
+                            modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
                         ))
                     }
                     #endif
@@ -8849,7 +8881,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     kvBits: kvBitsOverride,
                     temperature: 0.0,
                     topP: 1.0,
-                    prefillStepSize: prefillStepSize
+                    prefill: .legacyRemainder(stepSize: prefillStepSize)
                 )
                 return try await speculativeTokenIDs(
                     input: lmInput,
@@ -8888,7 +8920,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kvBits: kvBitsOverride,
                 temperature: 0.0,
                 topP: 1.0,
-                prefillStepSize: prefillStepSize
+                prefill: .legacyRemainder(stepSize: prefillStepSize)
             )
             let plain = try await plainTokenIDs(
                 input: lmInput,

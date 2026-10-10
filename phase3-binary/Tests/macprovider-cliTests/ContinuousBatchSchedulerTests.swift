@@ -2427,7 +2427,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 10_000_000)
 
         let drain = Task { try await scheduler.drain() }
-        try await Task.sleep(nanoseconds: 40_000_000)
+        // Release the blocked sink only once the drain has passed its timeout
+        // and started forced cancellation; a fixed sleep let a slow executor
+        // open the gate first and turn this into a quiescent drain.
+        try await eventually {
+            await scheduler.metrics().diagnostics.contains(.forcedDrainStarted)
+        }
         await blockedSinkGate.open()
 
         let fastResult = try await fast.value
@@ -2917,10 +2922,125 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 prefillStepSize: 512,
                 maxDecodeLockstepWindow: 1,
                 nativeMTPRoundByteCapacity: nil,
-                nativeMTPStatusSink: nil
+                nativeMTPStatusSink: nil,
+                prefillGrouping: .sortedGatherMoE(numExperts: 256, topK: 8)
             )
             XCTAssertEqual(configuration.maxRequestTokens, context)
+            XCTAssertEqual(configuration.prefillGrouping.minimumGroupedChunkTokens, 128)
             XCTAssertGreaterThanOrEqual(configuration.maxQueuedTokens, context)
+        }
+    }
+
+    // The grouping bound is the smallest chunk that already takes every
+    // grouped route by itself: `qmm` for each quantized projection (33, the
+    // core fork's largest `get_qmv_batch_limit`), and on MoE models also
+    // `gather_qmm_rhs` and the SwitchGLU sort: ceil(max(16, 64, 4 * experts)
+    // / top-k). An MoE configuration without both counts, an unquantized
+    // configuration, a per-layer quantization exclusion, or no readable
+    // configuration never groups.
+    func testPrefillGroupingRuleFromModelConfiguration() {
+        func rule(_ json: String?, modelID: String? = nil) -> Int {
+            ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+                json.map { Data($0.utf8) },
+                modelID: modelID
+            ).minimumGroupedChunkTokens
+        }
+        let q4 = #""quantization":{"group_size":64,"bits":4,"mode":"affine"}"#
+        // Served Qwen3.6-35B-A3B: experts and top-k live in `text_config`;
+        // the router and shared expert carry 8-bit overrides.
+        XCTAssertEqual(rule(#"""
+            {"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"],
+             "quantization":{"group_size":64,"bits":4,"mode":"affine",
+                             "language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8}},
+             "text_config":{"model_type":"qwen3_5_moe_text","num_experts":256,"num_experts_per_tok":8}}
+            """#), 128)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,"num_experts_per_tok":8,\#(q4)}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"glm4_moe","n_routed_experts":128,"num_experts_per_tok":8,\#(q4)}"#), 64)
+        XCTAssertEqual(rule(#"{"model_type":"gpt_oss","num_local_experts":128,"num_experts_per_tok":4,\#(q4)}"#), 128)
+        // gpt-oss-20b: the sorted-gather bound (32) is below the dense one.
+        XCTAssertEqual(rule(#"""
+            {"model_type":"gpt_oss","num_local_experts":32,"experts_per_token":4,
+             "quantization_config":{"group_size":32,"bits":4,"mode":"mxfp4"}}
+            """#), 33)
+        XCTAssertEqual(rule(#"{"model_type":"gemma4","text_config":{"num_experts":128,"top_k_experts":8,\#(q4)}}"#), 64)
+        // Few experts: the SwitchGLU sort bound (32) is below the dense one.
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":4,"num_experts_per_tok":2,\#(q4)}"#), 33)
+        // Dense quantized models (served Qwen3.6-27B) group from 33 tokens.
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"],\#(q4)}"#), 33)
+        XCTAssertEqual(rule(#"{"model_type":"llama",\#(q4)}"#, modelID: "meta/llama-3.1-8b"), 33)
+        // Unquantized or partly unquantized: never group.
+        XCTAssertEqual(rule(#"{"model_type":"llama"}"#, modelID: "meta/llama-3.1-8b"), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe_text","num_experts":256,"num_experts_per_tok":8}"#), Int.max)
+        XCTAssertEqual(rule(#"""
+            {"model_type":"llama","quantization":{"group_size":64,"bits":4,"model.layers.0.mlp.down_proj":false}}
+            """#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_moe","num_experts":128,\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"qwen3_5_moe",\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","num_experts_per_tok":8,\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(#"{"model_type":"custom","moe_intermediate_size":512,\#(q4)}"#), Int.max)
+        XCTAssertEqual(rule(nil), Int.max)
+        XCTAssertEqual(rule("not json"), Int.max)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: 0, topK: 8), .ungrouped)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.sortedGatherMoE(numExperts: Int.max, topK: 8), .ungrouped)
+        XCTAssertEqual(ContinuousBatchPrefillGroupingRule.denseQuantized.minimumGroupedChunkTokens, 33)
+    }
+
+    // A prefill chunk below the grouping bound runs alone even when another
+    // row shares its cursor and chunk length; at or above it the rows share
+    // one forward, and their short tails split again (7 tokens at a 4-token
+    // chunk limit balance to 4 + 3). The equal-offset and the ragged
+    // (SPEC-038 FR-CB2) selectors apply the same bound.
+    func testPrefillChunksBelowTheGroupingBoundPrefillAlone() async throws {
+        for ragged in [false, true] {
+            for (length, expectedOrder, expectedChunkTokens) in [
+                (3, [["row-a"], ["row-b"]], [3, 3]),
+                (7, [["row-a", "row-b"], ["row-a"], ["row-b"]], [8, 3, 3]),
+            ] {
+                let decodeGate = AsyncGate()
+                let backend = ScriptedBackend(
+                    scripts: ["active": [90, 91], "row-a": [101], "row-b": [102]],
+                    decodeGate: decodeGate
+                )
+                let scheduler = try await makeScheduler(
+                    maxActiveRows: 3,
+                    maxPromptChunkTokens: 4,
+                    maxPrefillRowsPerIteration: 2,
+                    maxPrefillTokensPerIteration: 8,
+                    allowsRaggedPrefillOffsets: ragged,
+                    prefillGrouping: ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: 4),
+                    backend: backend
+                )
+                let active = Task {
+                    try await scheduler.submit(.init(
+                        id: "active", conversationKey: "", promptTokens: [1],
+                        maxOutputTokens: 2, temperature: 0.0, topP: 1.0
+                    ))
+                }
+                try await eventually { await backend.decodeCallCount() == 1 }
+                func queued(_ id: String, base: Int) -> Task<ContinuousBatchSchedulerResult, Error> {
+                    Task {
+                        try await scheduler.submit(.init(
+                            id: id, conversationKey: "", promptTokens: Array(base ..< base + length),
+                            maxOutputTokens: 1, temperature: 0.0, topP: 1.0
+                        ))
+                    }
+                }
+                let rowA = queued("row-a", base: 10)
+                try await eventually { await scheduler.metrics().waitingCount == 1 }
+                let rowB = queued("row-b", base: 20)
+                try await eventually { await scheduler.metrics().waitingCount == 2 }
+                await decodeGate.open()
+
+                _ = try await active.value
+                let aResult = try await rowA.value
+                let bResult = try await rowB.value
+                XCTAssertEqual(aResult.outputTokens, [101], "length \(length)")
+                XCTAssertEqual(bResult.outputTokens, [102], "length \(length)")
+                let order = await backend.prefillOrder().map { $0.filter { $0 != "active" } }.filter { !$0.isEmpty }
+                XCTAssertEqual(order, expectedOrder, "length \(length) ragged \(ragged)")
+                let tokens = await backend.prefillTokenCountsByCall().suffix(expectedChunkTokens.count)
+                XCTAssertEqual(Array(tokens), expectedChunkTokens, "length \(length) ragged \(ragged)")
+            }
         }
     }
 
@@ -4942,10 +5062,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens() {
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
-                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
-                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 1024
@@ -4953,18 +5073,53 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 512, requestIDs: ["a", "c"]))
     }
 
-    func testRaggedPrefillGroupingShrinksToAPeerFinalChunkWhenThatAdvancesMore() {
+    func testRaggedPrefillGroupingNeverShortensARowsChunkToMeetAPeer() {
+        // Shortening the head to b's or d's final chunk would advance more
+        // tokens, but it would change a's chunk partition (and its later
+        // chunks) from the one a takes alone. Only rows whose own next chunk
+        // is the head's join.
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 600, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
-                .init(requestID: "c", promptOffset: 1100, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
-                .init(requestID: "d", promptOffset: 700, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "a", promptOffset: 600, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 1100, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 700, naturalChunkTokens: 260, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 2048
         )
-        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 260, requestIDs: ["a", "b", "c", "d"]))
+        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 512, requestIDs: ["a", "c"]))
+        // A 40-token final head chunk never cuts a peer's chunk either.
+        let finalHead = ContinuousBatchPrefillGrouping.select(
+            [
+                .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40, sharesRaggedOffsets: true),
+                .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "short", promptOffset: 800, naturalChunkTokens: 70, sharesRaggedOffsets: true),
+                .init(requestID: "same", promptOffset: 900, naturalChunkTokens: 40, sharesRaggedOffsets: true),
+            ],
+            maxRows: 4,
+            tokenBudget: 1024
+        )
+        XCTAssertEqual(finalHead, ContinuousBatchPrefillGroup(chunkTokens: 40, requestIDs: ["head", "same"]))
+    }
+
+    func testRaggedPrefillGroupingKeepsChunksBelowTheGroupingBoundAlone() {
+        func group(_ chunk: Int) -> ContinuousBatchPrefillGroup? {
+            ContinuousBatchPrefillGrouping.select(
+                [
+                    .init(requestID: "a", promptOffset: 40, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
+                    .init(requestID: "b", promptOffset: 20, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
+                    .init(requestID: "c", promptOffset: 40, naturalChunkTokens: chunk, sharesRaggedOffsets: true),
+                ],
+                maxRows: 4,
+                tokenBudget: 2048,
+                minimumGroupedChunkTokens: 33
+            )
+        }
+        // Below the bound neither a ragged peer (b) nor an equal-offset peer
+        // (c) shares the head's forward.
+        XCTAssertEqual(group(32), ContinuousBatchPrefillGroup(chunkTokens: 32, requestIDs: ["a"]))
+        XCTAssertEqual(group(33), ContinuousBatchPrefillGroup(chunkTokens: 33, requestIDs: ["a", "b", "c"]))
     }
 
     func testRaggedPrefillGroupingCapsTheKeySpread() {
@@ -4976,22 +5131,21 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(ContinuousBatchPrefillGrouping.withinKeySpread(minOffset: 0, maxOffset: 513, chunkTokens: 512))
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 1536, sharesRaggedOffsets: true),
-                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, spanTokens: 300, sharesRaggedOffsets: true),
-                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
-                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, spanTokens: 260, sharesRaggedOffsets: true),
-                .init(requestID: "far", promptOffset: 4000, naturalChunkTokens: 512, spanTokens: 1024, sharesRaggedOffsets: true),
+                .init(requestID: "a", promptOffset: 0, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "b", promptOffset: 900, naturalChunkTokens: 300, sharesRaggedOffsets: true),
+                .init(requestID: "c", promptOffset: 512, naturalChunkTokens: 512, sharesRaggedOffsets: true),
+                .init(requestID: "d", promptOffset: 100, naturalChunkTokens: 260, sharesRaggedOffsets: true),
+                .init(requestID: "far", promptOffset: 4000, naturalChunkTokens: 512, sharesRaggedOffsets: true),
             ],
             maxRows: 4,
             tokenBudget: 2048
         )
-        // Without the cap the 260-token chunk would take all of a, b, c, d
-        // and the 512-token chunk would take a, c and far.
+        // Without the cap the 512-token chunk would also take far.
         XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 512, requestIDs: ["a", "c"]))
         // Equal offsets are never limited by the cap.
         let same = ContinuousBatchPrefillGrouping.select(
             (0 ..< 4).map {
-                ContinuousBatchPrefillCandidate(requestID: "s\($0)", promptOffset: 3000, naturalChunkTokens: 256, spanTokens: 1024, sharesRaggedOffsets: false)
+                ContinuousBatchPrefillCandidate(requestID: "s\($0)", promptOffset: 3000, naturalChunkTokens: 256, sharesRaggedOffsets: false)
             },
             maxRows: 4,
             tokenBudget: 2048
@@ -4999,28 +5153,14 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(same?.requestIDs, ["s0", "s1", "s2", "s3"])
     }
 
-    func testRaggedPrefillGroupingNeverCutsAChunkBelowHalfItsOwnLength() {
-        // A 40-token final head chunk would cut the 512-token peer to a sliver.
-        let group = ContinuousBatchPrefillGrouping.select(
-            [
-                .init(requestID: "head", promptOffset: 1000, naturalChunkTokens: 40, spanTokens: 40, sharesRaggedOffsets: true),
-                .init(requestID: "long", promptOffset: 0, naturalChunkTokens: 512, spanTokens: 2048, sharesRaggedOffsets: true),
-                .init(requestID: "short", promptOffset: 800, naturalChunkTokens: 70, spanTokens: 70, sharesRaggedOffsets: true),
-            ],
-            maxRows: 4,
-            tokenBudget: 1024
-        )
-        XCTAssertEqual(group, ContinuousBatchPrefillGroup(chunkTokens: 40, requestIDs: ["head", "short"]))
-    }
-
     func testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset() {
         let group = ContinuousBatchPrefillGrouping.select(
             [
-                .init(requestID: "head", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 8, sharesRaggedOffsets: true),
-                .init(requestID: "native-elsewhere", promptOffset: 4, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: false),
-                .init(requestID: "native-same", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 8, sharesRaggedOffsets: false),
-                .init(requestID: "ordinary-elsewhere", promptOffset: 8, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: true),
-                .init(requestID: "ordinary-same", promptOffset: 0, naturalChunkTokens: 4, spanTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "head", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "native-elsewhere", promptOffset: 4, naturalChunkTokens: 4, sharesRaggedOffsets: false),
+                .init(requestID: "native-same", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: false),
+                .init(requestID: "ordinary-elsewhere", promptOffset: 8, naturalChunkTokens: 4, sharesRaggedOffsets: true),
+                .init(requestID: "ordinary-same", promptOffset: 0, naturalChunkTokens: 4, sharesRaggedOffsets: true),
             ],
             maxRows: 8,
             tokenBudget: 64
@@ -5037,7 +5177,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 requestID: "r\($0)",
                 promptOffset: $0 * 64,
                 naturalChunkTokens: 256,
-                spanTokens: 1024,
                 sharesRaggedOffsets: true
             )
         }
@@ -6955,6 +7094,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .init(
@@ -6980,6 +7120,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             queueLimit: queueLimit,
             decodeHeadroomTokens: decodeHeadroomTokens,
             maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
+            prefillGrouping: prefillGrouping,
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,

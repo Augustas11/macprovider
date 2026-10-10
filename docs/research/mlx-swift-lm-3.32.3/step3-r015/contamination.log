@@ -1,0 +1,150 @@
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:32:34Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:32:44Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:32:54Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:33:04Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:33:14Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:33:24Z out_lines=0 gpu=0 other=0.1
+<studio-home>/lab-332/r015-332.sh: line 10: <studio-home>/lab-332/runs3/step3-r015/r015-a3b-332.jsonl: No such file or directory
+2026-10-09T14:33:34Z out_lines=0 gpu=93 other=0.1
+2026-10-09T14:33:45Z out_lines=       1 gpu=0 other=0.1
+2026-10-09T14:33:55Z out_lines=       1 gpu=0 other=0.1
+2026-10-09T14:34:05Z out_lines=       1 gpu=0 other=0.1
+2026-10-09T14:34:15Z out_lines=       1 gpu=95 other=0.1
+2026-10-09T14:34:25Z out_lines=       3 gpu=81 other=0
+2026-10-09T14:34:35Z out_lines=       7 gpu=83 other=0
+2026-10-09T14:34:45Z out_lines=      13 gpu=98 other=0.1
+2026-10-09T14:34:55Z out_lines=      17 gpu=98 other=0.1
+2026-10-09T14:35:05Z out_lines=      23 gpu=0 other=0.1
+2026-10-09T14:35:15Z out_lines=      23 gpu=0 other=0.1
+2026-10-09T14:35:25Z out_lines=      23 gpu=0 other=0.1
+2026-10-09T14:35:35Z out_lines=      23 gpu=83 other=0
+2026-10-09T14:35:45Z out_lines=      24 gpu=89 other=0.1
+2026-10-09T14:35:55Z out_lines=      25 gpu=83 other=0.1
+2026-10-09T14:36:05Z out_lines=      27 gpu=83 other=0.1
+2026-10-09T14:36:16Z out_lines=      29 gpu=83 other=0.1
+2026-10-09T14:36:26Z out_lines=      31 gpu=98 other=0.1
+2026-10-09T14:36:36Z out_lines=      33 gpu=98 other=0.1
+2026-10-09T14:36:46Z out_lines=      35 gpu=83 other=0
+2026-10-09T14:36:56Z out_lines=      37 gpu=100 other=0.1
+2026-10-09T14:37:06Z out_lines=      39 gpu=98 other=0.1
+2026-10-09T14:37:16Z out_lines=      41 gpu=96 other=0.1
+2026-10-09T14:37:26Z out_lines=      43 gpu=81 other=0.1
+2026-10-09T14:37:36Z out_lines=      45 gpu=0 other=0.1
+2026-10-09T14:37:46Z out_lines=      45 gpu=0 other=0.1
+2026-10-09T14:37:56Z out_lines=      45 gpu=85 other=0
+2026-10-09T14:38:06Z out_lines=      45 gpu=0 other=0.1
+2026-10-09T14:38:16Z out_lines=      47 gpu=0 other=0.1
+2026-10-09T14:38:26Z out_lines=      49 gpu=0 other=0.1
+2026-10-09T14:38:37Z out_lines=      51 gpu=0 other=0.1
+2026-10-09T14:38:47Z out_lines=      53 gpu=0 other=0.1
+2026-10-09T14:38:57Z out_lines=      55 gpu=0 other=0.1
+2026-10-09T14:39:07Z out_lines=      57 gpu=0 other=0.1
+2026-10-09T14:39:17Z out_lines=      59 gpu=0 other=0.1
+2026-10-09T14:39:27Z out_lines=      61 gpu=0 other=0.1
+2026-10-09T14:39:37Z out_lines=      63 gpu=0 other=0.1
+2026-10-09T14:39:47Z out_lines=      65 gpu=0 other=0.1
+2026-10-09T14:39:57Z out_lines=      67 gpu=0 other=0.1
+2026-10-09T14:40:07Z out_lines=      67 gpu=0 other=0.1
+2026-10-09T14:40:17Z out_lines=      67 gpu=0 other=0.1
+2026-10-09T14:40:27Z out_lines=      67 gpu=87 other=0.1
+2026-10-09T14:40:37Z out_lines=      67 gpu=85 other=0.1
+2026-10-09T14:40:47Z out_lines=      68 gpu=81 other=0.1
+2026-10-09T14:40:58Z out_lines=      69 gpu=82 other=0.1
+2026-10-09T14:41:08Z out_lines=      71 gpu=0 other=0.1
+2026-10-09T14:41:18Z out_lines=      71 gpu=81 other=0.1
+2026-10-09T14:41:28Z out_lines=      73 gpu=80 other=0.1
+2026-10-09T14:41:38Z out_lines=      75 gpu=0 other=0.1
+2026-10-09T14:41:48Z out_lines=      75 gpu=91 other=0
+2026-10-09T14:41:58Z out_lines=      77 gpu=90 other=0.1
+2026-10-09T14:42:08Z out_lines=      77 gpu=81 other=0.1
+2026-10-09T14:42:18Z out_lines=      79 gpu=82 other=0.1
+2026-10-09T14:42:28Z out_lines=      81 gpu=0 other=0.1
+2026-10-09T14:42:38Z out_lines=      81 gpu=98 other=0.1
+2026-10-09T14:42:48Z out_lines=      83 gpu=99 other=0.1
+2026-10-09T14:42:58Z out_lines=      83 gpu=80 other=0
+2026-10-09T14:43:08Z out_lines=      85 gpu=81 other=0
+2026-10-09T14:43:19Z out_lines=      87 gpu=0 other=0.1
+2026-10-09T14:43:29Z out_lines=      87 gpu=99 other=0.1
+2026-10-09T14:43:39Z out_lines=      89 gpu=0 other=0.1
+2026-10-09T14:43:49Z out_lines=      89 gpu=0 other=0.1
+2026-10-09T14:43:59Z out_lines=      89 gpu=82 other=0.1
+2026-10-09T14:44:09Z out_lines=      89 gpu=0 other=0.1
+2026-10-09T14:44:19Z out_lines=      90 gpu=96 other=0.1
+2026-10-09T14:44:29Z out_lines=      91 gpu=77 other=0
+2026-10-09T14:44:39Z out_lines=      91 gpu=82 other=0
+2026-10-09T14:44:49Z out_lines=      93 gpu=82 other=0.1
+2026-10-09T14:44:59Z out_lines=      93 gpu=82 other=0.1
+2026-10-09T14:45:09Z out_lines=      95 gpu=99 other=0.1
+2026-10-09T14:45:19Z out_lines=      97 gpu=96 other=0.1
+2026-10-09T14:45:29Z out_lines=      97 gpu=82 other=0
+2026-10-09T14:45:40Z out_lines=      99 gpu=83 other=0
+2026-10-09T14:45:50Z out_lines=      99 gpu=82 other=0
+2026-10-09T14:46:00Z out_lines=     101 gpu=81 other=0.1
+2026-10-09T14:46:10Z out_lines=     103 gpu=100 other=0.1
+2026-10-09T14:46:20Z out_lines=     103 gpu=83 other=0.1
+2026-10-09T14:46:30Z out_lines=     105 gpu=83 other=0.1
+2026-10-09T14:46:40Z out_lines=     105 gpu=83 other=0.1
+2026-10-09T14:46:50Z out_lines=     107 gpu=0 other=0
+2026-10-09T14:47:00Z out_lines=     109 gpu=0 other=0.1
+2026-10-09T14:47:10Z out_lines=     109 gpu=84 other=0.1
+2026-10-09T14:47:20Z out_lines=     111 gpu=0 other=0.1
+2026-10-09T14:47:30Z out_lines=     111 gpu=0 other=0.1
+2026-10-09T14:47:40Z out_lines=     111 gpu=0 other=0.1
+2026-10-09T14:47:51Z out_lines=     111 gpu=84 other=0.1
+2026-10-09T14:48:01Z out_lines=     111 gpu=96 other=0.1
+2026-10-09T14:48:11Z out_lines=     111 gpu=89 other=0
+2026-10-09T14:48:21Z out_lines=     112 gpu=100 other=0.1
+2026-10-09T14:48:31Z out_lines=     112 gpu=89 other=0.1
+2026-10-09T14:48:41Z out_lines=     113 gpu=0 other=0.1
+2026-10-09T14:48:51Z out_lines=     113 gpu=90 other=0.1
+2026-10-09T14:49:01Z out_lines=     113 gpu=90 other=0.1
+2026-10-09T14:49:11Z out_lines=     113 gpu=0 other=0
+2026-10-09T14:49:21Z out_lines=     113 gpu=90 other=0.1
+2026-10-09T14:49:31Z out_lines=     115 gpu=84 other=0.1
+2026-10-09T14:49:41Z out_lines=     115 gpu=91 other=0.1
+2026-10-09T14:49:51Z out_lines=     115 gpu=96 other=0.1
+2026-10-09T14:50:02Z out_lines=     115 gpu=90 other=0.1
+2026-10-09T14:50:12Z out_lines=     117 gpu=0 other=0.1
+2026-10-09T14:50:22Z out_lines=     117 gpu=90 other=0
+2026-10-09T14:50:32Z out_lines=     117 gpu=90 other=0
+2026-10-09T14:50:42Z out_lines=     117 gpu=88 other=0
+2026-10-09T14:50:52Z out_lines=     117 gpu=90 other=0
+2026-10-09T14:51:02Z out_lines=     119 gpu=100 other=0.1
+2026-10-09T14:51:12Z out_lines=     119 gpu=90 other=0
+2026-10-09T14:51:22Z out_lines=     119 gpu=100 other=0.1
+2026-10-09T14:51:32Z out_lines=     119 gpu=87 other=0
+2026-10-09T14:51:42Z out_lines=     121 gpu=0 other=0.1
+2026-10-09T14:51:52Z out_lines=     121 gpu=91 other=0.1
+2026-10-09T14:52:02Z out_lines=     121 gpu=90 other=0.1
+2026-10-09T14:52:13Z out_lines=     121 gpu=95 other=0.1
+2026-10-09T14:52:23Z out_lines=     121 gpu=91 other=0.1
+2026-10-09T14:52:33Z out_lines=     123 gpu=97 other=0.1
+2026-10-09T14:52:43Z out_lines=     123 gpu=91 other=0
+2026-10-09T14:52:53Z out_lines=     123 gpu=100 other=0.1
+2026-10-09T14:53:03Z out_lines=     123 gpu=91 other=0.1
+2026-10-09T14:53:13Z out_lines=     125 gpu=0 other=0.1
+2026-10-09T14:53:23Z out_lines=     125 gpu=90 other=0.1
+2026-10-09T14:53:33Z out_lines=     125 gpu=0 other=0
+2026-10-09T14:53:43Z out_lines=     125 gpu=97 other=0.1
+2026-10-09T14:53:53Z out_lines=     125 gpu=91 other=0
+2026-10-09T14:54:03Z out_lines=     127 gpu=0 other=0.1
+2026-10-09T14:54:13Z out_lines=     127 gpu=91 other=0.1
+2026-10-09T14:54:24Z out_lines=     127 gpu=89 other=0.1
+2026-10-09T14:54:34Z out_lines=     127 gpu=90 other=0
+2026-10-09T14:54:44Z out_lines=     127 gpu=89 other=0.1
+2026-10-09T14:54:54Z out_lines=     129 gpu=85 other=0.1
+2026-10-09T14:55:04Z out_lines=     129 gpu=91 other=0.1
+2026-10-09T14:55:14Z out_lines=     129 gpu=93 other=0.1
+2026-10-09T14:55:24Z out_lines=     129 gpu=92 other=0.1
+2026-10-09T14:55:34Z out_lines=     131 gpu=0 other=0.1
+2026-10-09T14:55:44Z out_lines=     131 gpu=85 other=0
+2026-10-09T14:55:54Z out_lines=     131 gpu=91 other=0
+2026-10-09T14:56:04Z out_lines=     131 gpu=90 other=0.1
+2026-10-09T14:56:14Z out_lines=     131 gpu=90 other=0.1
+2026-10-09T14:56:24Z out_lines=     133 gpu=0 other=0.1

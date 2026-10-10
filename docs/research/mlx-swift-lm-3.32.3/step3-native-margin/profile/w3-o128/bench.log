@@ -1,0 +1,161 @@
+start 15:42:49 tag=w3-o128 bin=3e004f3fd8059232 env=
+[labev] t=449431.163 chunk.ord.total=244.943ms
+[labev] t=449431.177 chunk.ord.total=13.829ms
+[labev] t=449432.632 chunk.ord.total=27.417ms
+[labev] t=449432.659 chunk.ord.total=26.955ms
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068] serialA=[248068] decodeB=[248068] serialB=[248068]
+[labev] t=449432.802 chunk.ord.total=27.705ms
+[paged-kv] moe-isolation rejoin decodeA=[198] serialA=[198] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[labev] t=449434.269 chunk.ord.total=241.885ms
+[labev] t=449434.278 chunk.ord.total=8.523ms
+[labev] t=449435.703 chunk.ord.total=27.145ms
+[labev] t=449435.731 chunk.ord.total=27.863ms
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[labev] t=449435.867 chunk.ord.total=28.839ms
+[paged-kv] moe-isolation rejoin decodeA=[4097] serialA=[4097] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[labev] t=449437.337 chunk.ord.total=243.819ms
+[labev] t=449437.345 chunk.ord.total=8.501ms
+[labev] t=449438.768 chunk.ord.total=24.014ms
+[labev] t=449438.795 chunk.ord.total=26.969ms
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478] serialA=[478] decodeB=[406] serialB=[406]
+[labev] t=449438.926 chunk.ord.total=27.868ms
+[paged-kv] moe-isolation rejoin decodeA=[292] serialA=[292] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=9 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-35b-a3b
+[paged-kv] runtime-identity model=qwen/qwen3.6-35b-a3b model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756 kernel_identifier=macprovider_paged_kv_gather_v1
+[labev] t=449442.467 req.start s1-p4096-o128-b-1-r0=0.001ms
+[labev] t=449442.467 req.handle=0.151ms
+[labev] t=449442.487 tok.prepare=19.538ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449442.794 chunk.ord.total=306.426ms
+[labev] t=449443.047 chunk.ord.total=253.004ms
+[labev] t=449443.303 chunk.ord.total=255.449ms
+[labev] t=449443.561 chunk.ord.total=257.713ms
+[labev] t=449443.822 chunk.ord.total=261.217ms
+[labev] t=449444.085 chunk.ord.total=263.107ms
+[labev] t=449444.352 chunk.ord.total=266.329ms
+[labev] t=449444.658 chunk.ord.total=306.649ms
+[labev] t=449444.659 req.firsttoken s1-p4096-o128-b-1-r0=2191.733ms
+[labev] t=449445.739 req.start s1-p4096-o128-b-1-r0=0.000ms
+[labev] t=449445.739 req.handle=0.028ms
+[labev] t=449445.759 tok.prepare=19.770ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449446.027 chunk.native.total=267.209ms
+[labev] t=449446.293 chunk.native.total=266.485ms
+[labev] t=449446.563 chunk.native.total=269.488ms
+[labev] t=449446.835 chunk.native.total=272.701ms
+[labev] t=449447.113 chunk.native.total=277.017ms
+[labev] t=449447.391 chunk.native.total=278.843ms
+[labev] t=449447.674 chunk.native.total=282.005ms
+[labev] t=449447.990 chunk.native.total=316.472ms
+[labev] t=449447.990 req.firsttoken s1-p4096-o128-b-1-r0=2251.048ms
+[labev] t=449452.294 req.start s1-p4096-o128-b0-r0=0.001ms
+[labev] t=449452.294 req.handle=0.126ms
+[labev] t=449452.313 tok.prepare=19.108ms
+event=batching_admitted action=scheduler_admitted
+[labprof] d0.performDecode.call=13.703ms/n296 f0.finalize.total=1.675ms/n68 f1.finalize.build=0.466ms/n68 f2.finalize.eval=1.177ms/n68 fc.finalize.call=1.682ms/n68 o1.ord.build=1.107ms/n415 o2.ord.eval=8.452ms/n415 p0.propose=0.002ms/n68 r0.round.interval=13.248ms/n67 s1.native.prefill.target=36.056ms/n9 s1.ord.prefill.target=26.112ms/n23 s2.native.prefill.drafter+eval=238.555ms/n8 s2.ord.prefill.eval=111.976ms/n23 s9.native.prefill.chunk.total=278.817ms/n8 s9.ord.prefill.chunk.total=138.150ms/n23 v0.verify.call=11.444ms/n68 v1.verify.build=0.893ms/n68 v2.verify.eval=10.449ms/n68
+[labev] t=449452.640 chunk.native.total=327.051ms
+[labev] t=449452.906 chunk.native.total=265.368ms
+[labev] t=449453.176 chunk.native.total=270.057ms
+[labev] t=449453.448 chunk.native.total=272.234ms
+[labev] t=449453.726 chunk.native.total=277.707ms
+[labev] t=449454.005 chunk.native.total=279.077ms
+[labev] t=449454.286 chunk.native.total=281.180ms
+[labev] t=449454.603 chunk.native.total=316.791ms
+[labev] t=449454.603 req.firsttoken s1-p4096-o128-b0-r0=2309.703ms
+[labev] t=449455.452 req.start s1-p4096-o128-b0-r0=0.000ms
+[labev] t=449455.452 req.handle=0.046ms
+[labev] t=449455.472 tok.prepare=19.572ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449455.726 chunk.ord.total=254.001ms
+[labev] t=449455.978 chunk.ord.total=252.429ms
+[labev] t=449456.235 chunk.ord.total=256.113ms
+[labev] t=449456.492 chunk.ord.total=257.429ms
+[labev] t=449456.754 chunk.ord.total=262.101ms
+[labev] t=449457.018 chunk.ord.total=263.081ms
+[labev] t=449457.283 chunk.ord.total=264.935ms
+[labev] t=449457.590 chunk.ord.total=307.243ms
+[labev] t=449457.590 req.firsttoken s1-p4096-o128-b0-r0=2137.994ms
+[labev] t=449462.092 req.start s1-p4096-o128-b1-r0=0.001ms
+[labev] t=449462.093 req.handle=0.120ms
+[labev] t=449462.112 tok.prepare=19.394ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449462.441 chunk.native.total=328.867ms
+[labev] t=449462.713 chunk.native.total=271.233ms
+[labev] t=449462.990 chunk.native.total=276.902ms
+[labev] t=449463.262 chunk.native.total=272.073ms
+[labev] t=449463.538 chunk.native.total=276.324ms
+[labev] t=449463.819 chunk.native.total=280.176ms
+[labev] t=449464.101 chunk.native.total=282.021ms
+[labev] t=449464.418 chunk.native.total=316.887ms
+[labev] t=449464.418 req.firsttoken s1-p4096-o128-b1-r0=2325.269ms
+[labev] t=449465.286 req.start s1-p4096-o128-b1-r0=0.000ms
+[labev] t=449465.286 req.handle=0.053ms
+[labev] t=449465.306 tok.prepare=19.406ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449465.560 chunk.ord.total=253.824ms
+[labev] t=449465.813 chunk.ord.total=252.687ms
+[labev] t=449466.068 chunk.ord.total=255.167ms
+[labev] t=449466.326 chunk.ord.total=257.419ms
+[labev] t=449466.587 chunk.ord.total=261.331ms
+[labev] t=449466.851 chunk.ord.total=263.903ms
+[labev] t=449467.117 chunk.ord.total=266.278ms
+[labev] t=449467.424 chunk.ord.total=306.805ms
+[labev] t=449467.424 req.firsttoken s1-p4096-o128-b1-r0=2137.996ms
+[labev] t=449471.882 req.start s1-p4096-o128-b2-r0=0.001ms
+[labev] t=449471.882 req.handle=0.125ms
+[labev] t=449471.901 tok.prepare=19.259ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449472.216 chunk.ord.total=314.191ms
+[labprof] d0.performDecode.call=135.070ms/n16 f0.finalize.total=1.643ms/n131 f1.finalize.build=0.462ms/n131 f2.finalize.eval=1.150ms/n131 fc.finalize.call=1.650ms/n131 o1.ord.build=1.082ms/n254 o2.ord.eval=7.400ms/n254 p0.propose=0.002ms/n131 r0.round.interval=13.101ms/n129 s1.native.prefill.target=42.840ms/n15 s1.ord.prefill.target=36.038ms/n18 s2.native.prefill.drafter+eval=246.783ms/n16 s2.ord.prefill.eval=230.696ms/n18 s9.native.prefill.chunk.total=287.168ms/n16 s9.ord.prefill.chunk.total=267.624ms/n17 v0.verify.call=11.336ms/n131 v1.verify.build=0.784ms/n131 v2.verify.eval=10.452ms/n131
+[labev] t=449472.468 chunk.ord.total=252.370ms
+[labev] t=449472.725 chunk.ord.total=256.186ms
+[labev] t=449472.983 chunk.ord.total=257.996ms
+[labev] t=449473.244 chunk.ord.total=261.771ms
+[labev] t=449473.507 chunk.ord.total=262.545ms
+[labev] t=449473.774 chunk.ord.total=266.493ms
+[labev] t=449474.081 chunk.ord.total=306.714ms
+[labev] t=449474.081 req.firsttoken s1-p4096-o128-b2-r0=2198.798ms
+[labev] t=449475.165 req.start s1-p4096-o128-b2-r0=0.000ms
+[labev] t=449475.165 req.handle=0.052ms
+[labev] t=449475.185 tok.prepare=19.462ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449475.451 chunk.native.total=266.008ms
+[labev] t=449475.716 chunk.native.total=264.832ms
+[labev] t=449475.986 chunk.native.total=269.808ms
+[labev] t=449476.258 chunk.native.total=272.302ms
+[labev] t=449476.536 chunk.native.total=277.637ms
+[labev] t=449476.815 chunk.native.total=279.182ms
+[labev] t=449477.098 chunk.native.total=282.854ms
+[labev] t=449477.414 chunk.native.total=316.203ms
+[labev] t=449477.414 req.firsttoken s1-p4096-o128-b2-r0=2249.325ms
+[labev] t=449481.674 req.start s1-p4096-o128-b3-r0=0.000ms
+[labev] t=449481.675 req.handle=0.100ms
+[labev] t=449481.694 tok.prepare=19.735ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449482.006 chunk.ord.total=311.579ms
+[labev] t=449482.260 chunk.ord.total=253.583ms
+[labev] t=449482.516 chunk.ord.total=255.657ms
+[labev] t=449482.774 chunk.ord.total=258.670ms
+[labev] t=449483.036 chunk.ord.total=261.872ms
+[labev] t=449483.300 chunk.ord.total=263.283ms
+[labev] t=449483.566 chunk.ord.total=266.356ms
+[labev] t=449483.872 chunk.ord.total=305.570ms
+[labev] t=449483.872 req.firsttoken s1-p4096-o128-b3-r0=2197.593ms
+[labev] t=449484.956 req.start s1-p4096-o128-b3-r0=0.000ms
+[labev] t=449484.956 req.handle=0.051ms
+[labev] t=449484.976 tok.prepare=19.641ms
+event=batching_admitted action=scheduler_admitted
+[labev] t=449485.243 chunk.native.total=266.664ms
+[labev] t=449485.509 chunk.native.total=265.756ms
+[labev] t=449485.778 chunk.native.total=269.158ms
+[labev] t=449486.051 chunk.native.total=272.932ms
+[labev] t=449486.328 chunk.native.total=277.149ms
+[labev] t=449486.607 chunk.native.total=278.906ms
+[labev] t=449486.890 chunk.native.total=283.010ms
+[labev] t=449487.207 chunk.native.total=316.229ms
+[labev] t=449487.207 req.firsttoken s1-p4096-o128-b3-r0=2250.495ms
+exit=0 tag=w3-o128 end 15:44:21

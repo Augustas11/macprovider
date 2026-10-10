@@ -122,6 +122,9 @@ promote_input = re.search(
 )
 if promote_input is None:
     raise SystemExit("release workflow must expose a string promote_run_id input")
+openssl_preflight = text.split("\n  openssl_preflight:\n", 1)[1].split(
+    "\n  build:\n", 1
+)[0] if "\n  openssl_preflight:\n" in text else ""
 build = text.split("\n  build:\n", 1)[1].split(
     "\n  verify_provider_runtime:\n", 1
 )[0]
@@ -334,7 +337,6 @@ PROTECTED_OPENSSL_CANDIDATE_STEP = r'''        if: ${{ github.event.inputs.promo
           candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
           "$sealed_bin" version | grep -E '^OpenSSL 3\.'
-          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 '''
 PROMOTED_CANDIDATE_RESTORE_REQUIREMENTS = (
     "        if: ${{ github.event.inputs.promote_run_id != '' }}",
@@ -378,6 +380,7 @@ PROTECTED_OPENSSL_OUTPUT_ENV = (
 )
 SEALED_OPENSSL_RUNNER = "    runs-on: macos-15-intel"
 PROTECTED_OPENSSL_CONSUMERS = (
+    ("Reverify catalog signatures with sealed verifiers", 0, 0),
     ("Sign + notarize binary", 1, 0),
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
@@ -387,27 +390,33 @@ PROTECTED_OPENSSL_CONSUMERS = (
 )
 
 
-def validate_candidate_openssl(job):
-    if job.count(SEALED_OPENSSL_RUNNER) != 1:
+SWIFT_BUILD_RUNNER = "    runs-on: macos-26-intel"
+
+
+def validate_candidate_openssl(preflight, build_job):
+    # The sealed bottle is reviewed only for macos-15-intel while the Swift
+    # 6.3 build needs macos-26, so the seal preflight is its own job that the
+    # build depends on.
+    if preflight.count(SEALED_OPENSSL_RUNNER) != 1:
         raise SystemExit(
             "candidate release runner must match the reviewed Intel OpenSSL bottle"
         )
-    preflight = unique_step(
-        job, "Preflight protected OpenSSL seal before tag creation"
+    preflight_step = unique_step(
+        preflight, "Preflight protected OpenSSL seal before tag creation"
     )
-    if preflight.strip("\n") != PROTECTED_OPENSSL_CANDIDATE_STEP.strip("\n"):
+    if preflight_step.strip("\n") != PROTECTED_OPENSSL_CANDIDATE_STEP.strip("\n"):
         raise SystemExit(
             "candidate release must execute the exact protected OpenSSL seal preflight"
         )
-    preflight_position = job.find(
-        "- name: Preflight protected OpenSSL seal before tag creation"
-    )
-    package_position = job.find("- name: Build package")
-    if min(preflight_position, package_position) < 0 or not (
-        preflight_position < package_position
-    ):
+    if "    needs: openssl_preflight\n" not in build_job:
         raise SystemExit(
-            "protected OpenSSL seal preflight must run before candidate packaging"
+            "protected OpenSSL seal preflight must gate candidate packaging"
+        )
+    if build_job.count(SWIFT_BUILD_RUNNER) != 1:
+        raise SystemExit("release build must run on the Swift 6.3 macos-26-intel image")
+    if "install-sealed-release-openssl.sh" in build_job or "GITHUB_ENV" in preflight:
+        raise SystemExit(
+            "sealed OpenSSL must not be installed on, or exported to, the build image"
         )
 
 
@@ -597,7 +606,7 @@ def validate_protected_openssl(job):
     selector_position = job.find(
         "- name: Seal OpenSSL 3 for protected release verification"
     )
-    toolchain_position = job.find("- name: Reverify captured release toolchain")
+    toolchain_position = job.find("- name: Select and verify reviewed signer toolchain")
     signing_position = job.find("- name: Sign + notarize binary")
     discovery_position = job.find(
         "- name: Require an advancing immutable discovery head"
@@ -1050,10 +1059,76 @@ if re.search(r"(?m)^\s*openssl\s+dgst", checksums_guard):
     raise SystemExit("release checksum verifier falls back to PATH-selected OpenSSL")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
-validate_candidate_openssl(build)
+validate_candidate_openssl(openssl_preflight, build)
 validate_malibu_candidate_preflight(build)
 pearl_build = validate_pearl_toolchain(build)
 validate_protected_openssl(publish)
+
+
+def validate_sealed_catalog_reverify(job):
+    # The build image checks the catalog with Homebrew OpenSSL only as an early
+    # signal; the protected signer must re-run package.sh's catalog
+    # verification on the root-sealed OpenSSL and Go verifiers, bind the
+    # restored payload catalog to those bytes, and do it before any signing.
+    step = unique_step(job, "Reverify catalog signatures with sealed verifiers")
+    for requirement in (
+        PROTECTED_OPENSSL_OUTPUT_ENV,
+        "          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n"
+        "            python3 scripts/catalog-release.py verify\n",
+        'cmp "$verified" "$restored"',
+        'cmp "phase3-binary/dist/static/$feed" "$restored"',
+        "restored payload catalog has $actual_count entries",
+    ):
+        if requirement not in step:
+            raise SystemExit(f"protected signer catalog reverify is incomplete: {requirement!r}")
+    if "|| true" in step or "continue-on-error" in step or "\n        if:" in step:
+        raise SystemExit("protected signer catalog reverify must fail closed and always run")
+    go_seal = unique_step(job, "Seal the protected Tier-2 verifier toolchain")
+    if "sudo test -x /private/var/macprovider-go-verifier/bin/go" not in go_seal:
+        raise SystemExit("protected signer must seal the Tier-2 Go verifier")
+    positions = [
+        job.find("- name: Restore captured unsigned inputs"),
+        job.find("- name: Seal the protected Tier-2 verifier toolchain"),
+        job.find("- name: Seal OpenSSL 3 for protected release verification"),
+        job.find("- name: Reverify catalog signatures with sealed verifiers"),
+        job.find("- name: Sign + notarize binary"),
+        job.find("- name: Create verified draft GitHub release"),
+    ]
+    if min(positions) < 0 or positions != sorted(positions):
+        raise SystemExit(
+            "sealed catalog reverify must run on restored inputs after both seals "
+            "and before any signing or publication"
+        )
+
+
+validate_sealed_catalog_reverify(publish)
+for description, mutation in (
+    (
+        "sealed catalog reverify removal",
+        publish.replace("- name: Reverify catalog signatures with sealed verifiers", "- name: Skip catalog", 1),
+    ),
+    (
+        "sealed Go verifier drop",
+        publish.replace("CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \\\n", "", 1),
+    ),
+    (
+        "catalog reverify after signing",
+        publish.replace(
+            "- name: Sign + notarize binary", "- name: Sign early", 1
+        ).replace(
+            "- name: Reverify catalog signatures with sealed verifiers",
+            "- name: Sign + notarize binary\n      - name: Reverify catalog signatures with sealed verifiers",
+            1,
+        ),
+    ),
+):
+    try:
+        validate_sealed_catalog_reverify(mutation)
+    except SystemExit:
+        continue
+    raise SystemExit(f"{description} mutation unexpectedly passed")
+if "./package.sh" not in build:
+    raise SystemExit("release build must keep package.sh's early catalog verification")
 for requirement in (
     "GOTOOLCHAIN=local",
     "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
@@ -1177,17 +1252,18 @@ malibu_post_capture_mutation = build.replace(
     "\n      - name: Verify staged Pearl Go binaries\n",
     1,
 )
-candidate_openssl_removal_mutation = build.replace(
+candidate_openssl_removal_mutation = openssl_preflight.replace(
     "\n      - name: Preflight protected OpenSSL seal before tag creation\n"
     + PROTECTED_OPENSSL_CANDIDATE_STEP,
     "",
     1,
 )
-candidate_openssl_runner_mutation = build.replace(
+candidate_openssl_runner_mutation = openssl_preflight.replace(
     SEALED_OPENSSL_RUNNER,
-    "    runs-on: macos-15",
+    "    runs-on: macos-26-intel",
     1,
 )
+candidate_openssl_ungated_mutation = build.replace("    needs: openssl_preflight\n", "", 1)
 protected_openssl_removal_mutation = publish.replace(
     "\n      - name: Seal OpenSSL 3 for protected release verification\n"
     + PROTECTED_OPENSSL3_STEP,
@@ -1281,17 +1357,23 @@ for description, mutation in (
         continue
     raise SystemExit(f"{description} mutation unexpectedly passed")
 try:
-    validate_candidate_openssl(candidate_openssl_removal_mutation)
+    validate_candidate_openssl(candidate_openssl_removal_mutation, build)
 except SystemExit:
     pass
 else:
     raise SystemExit("candidate OpenSSL seal removal mutation unexpectedly passed")
 try:
-    validate_candidate_openssl(candidate_openssl_runner_mutation)
+    validate_candidate_openssl(candidate_openssl_runner_mutation, build)
 except SystemExit:
     pass
 else:
     raise SystemExit("candidate OpenSSL runner mismatch mutation unexpectedly passed")
+try:
+    validate_candidate_openssl(openssl_preflight, candidate_openssl_ungated_mutation)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("ungated candidate build mutation unexpectedly passed")
 for description, mutation in (
     ("candidate Malibu preflight removal", malibu_preflight_removal_mutation),
     ("candidate Malibu preflight failure suppression", malibu_preflight_suppression_mutation),
@@ -1452,8 +1534,17 @@ if "scripts/install-pinned-xcodegen.sh" not in build or "scripts/verify-app-buil
 toolchain_position = build.find("scripts/verify-release-toolchain.sh")
 if toolchain_position < 0 or toolchain_position > build.find("Install reviewed XcodeGen artifact"):
     raise SystemExit("exact release toolchain must be verified before build tooling or compilation")
-if "/Applications/Xcode_16.4.app/Contents/Developer" not in build:
-    raise SystemExit("release build must select the reviewed Xcode app path")
+if "sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer" not in build:
+    raise SystemExit("release build must select the reviewed Xcode 26.6 app path")
+if "Xcode_16.4" in build or "/Applications/Xcode.app" in build:
+    raise SystemExit("release build must not select the signer or floating Xcode")
+signer_toolchain = unique_step(publish, "Select and verify reviewed signer toolchain")
+if (
+    "sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer" not in signer_toolchain
+    or 'bash scripts/verify-release-toolchain.sh --signer "$RUNNER_TEMP/signing-release-toolchain.json"'
+    not in signer_toolchain
+):
+    raise SystemExit("protected signer must pin and verify the reviewed signer toolchain")
 if "release-toolchain.json" not in build or "release-toolchain.json" not in publish:
     raise SystemExit("verified build toolchain must cross the artifact boundary into publication")
 if "actions/checkout v6.0.3" not in build:

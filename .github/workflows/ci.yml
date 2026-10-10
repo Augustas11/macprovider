@@ -403,7 +403,7 @@ jobs:
     # exactly its assigned tests. Aggregated into `phase3-binary (swift test)`.
     name: phase3-binary (swift test shard ${{ matrix.shard }}/4)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 35
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
@@ -424,7 +424,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
           echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
@@ -466,7 +466,7 @@ jobs:
     # single Swift job (#1920).
     name: phase3-binary (BYOM journeys, Sparkle)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 35
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
@@ -490,7 +490,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Verify one-time Malibu Sparkle generator integration
@@ -531,7 +531,7 @@ jobs:
     # SwiftPM build, and pairing them balances this job with swift-journeys.
     name: phase3-binary (Malibu app tests, recovery)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
@@ -544,7 +544,7 @@ jobs:
           persist-credentials: false
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Install reviewed XcodeGen artifact
         shell: bash
@@ -608,14 +608,14 @@ jobs:
 
   swift-package-lock:
     name: phase3-binary (locked SwiftPM resolve)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 15
     needs: changes
     # Same path gate as swift-tests: Package.resolved lives under
     # phase3-binary/, and a Go-only PR cannot drift the Swift lock.
     # ci-required treats a skip as a pass only when the detector is false.
-    # Must use Xcode 16.4 — the default Xcode.app on macos-15 can resolve a
-    # different graph and would hide the #1360 incomplete-lock failure.
+    # Must use the pinned Xcode 26.6 — the default Xcode.app on macos-26 floats
+    # and can resolve a different graph, hiding the #1360 incomplete-lock failure.
     if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
       - name: Checkout
@@ -625,8 +625,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Select Xcode 16.4 (match acceptance-candidate / release toolchain)
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Select Xcode 26.6 (match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Verify locked Package.resolved under the release toolchain
         run: bash scripts/verify-swift-package-lock.sh

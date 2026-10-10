@@ -10,10 +10,18 @@ def fail(message: str) -> None:
     raise SystemExit(f"build-release-provenance: {message}")
 
 
-if len(sys.argv) < 8:
-    fail("usage: TAG COMMIT OWNER/REPO PRERELEASE TOOLCHAIN_JSON OUTPUT ASSET...")
+args = sys.argv[1:]
+# --signer-toolchain: a Go-only release (Pearl runtime) signed on the protected
+# macos-15-intel runner records the reviewed signer toolchain, not the Swift
+# 6.3 build toolchain, because it compiles no Swift.
+toolchain_profile = "build"
+if args[:1] == ["--signer-toolchain"]:
+    toolchain_profile = "signer"
+    args = args[1:]
+if len(args) < 7:
+    fail("usage: [--signer-toolchain] TAG COMMIT OWNER/REPO PRERELEASE TOOLCHAIN_JSON OUTPUT ASSET...")
 
-tag, commit, repository, prerelease_raw, toolchain_name, output, *asset_names = sys.argv[1:]
+tag, commit, repository, prerelease_raw, toolchain_name, output, *asset_names = args
 if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
     fail("invalid tag")
 if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -29,21 +37,39 @@ toolchain_path = pathlib.Path(toolchain_name)
 if not toolchain_path.is_file() or toolchain_path.is_symlink():
     fail("toolchain record is not a regular file")
 toolchain = json.loads(toolchain_path.read_text(encoding="utf-8"))
-expected_toolchain = {
-    "macos_sdk": {
-        "path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk",
-        "version": "15.5",
+reviewed_toolchains = {
+    "build": {
+        "macos_sdk": {
+            "path": "/Applications/Xcode_26.6.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+            "version": "26.5",
+        },
+        "swift": {
+            "driver_version": "1.148.6",
+            "version": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)",
+        },
+        "xcode": {
+            "build": "17F113",
+            "developer_dir": "/Applications/Xcode_26.6.app/Contents/Developer",
+            "version": "26.6",
+        },
     },
-    "swift": {
-        "driver_version": "1.120.5",
-        "version": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)",
-    },
-    "xcode": {
-        "build": "16F6",
-        "developer_dir": "/Applications/Xcode_16.4.app/Contents/Developer",
-        "version": "16.4",
+    "signer": {
+        "macos_sdk": {
+            "path": "/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk",
+            "version": "15.5",
+        },
+        "swift": {
+            "driver_version": "1.120.5",
+            "version": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)",
+        },
+        "xcode": {
+            "build": "16F6",
+            "developer_dir": "/Applications/Xcode_16.4.app/Contents/Developer",
+            "version": "16.4",
+        },
     },
 }
+expected_toolchain = reviewed_toolchains[toolchain_profile]
 if toolchain != expected_toolchain:
     fail("toolchain record differs from the reviewed release toolchain")
 

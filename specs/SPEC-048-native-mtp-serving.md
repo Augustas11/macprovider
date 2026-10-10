@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.27
+**Version:** 0.1.29
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.26",
+  "version": "0.1.29",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -67,8 +67,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 ### In scope for v0.1
 
 - immutable native-MTP capability and artifact binding;
-- an upstream MLX Swift MTP dependency with stable row-mapped transaction
-  primitives;
+- the operator-owned MLX fork dependency tuple (MTP-3) with stable
+  row-mapped transaction primitives;
 - exact greedy, and seeded sampled, token and terminal parity against
   ordinary decode;
 - per-row proposal, verification, prefix commit, discard, and rewind;
@@ -221,7 +221,7 @@ result, and the signed SPEC-023/SPEC-010 identity. The capability MUST bind:
 - target and MTP tensor quantization modes;
 - cache/state classes proven stageable and rewindable;
 - supported request-feature matrix;
-- exact upstream MLX runtime revision used for qualification; and
+- exact MLX runtime (fork) revision used for qualification; and
 - the provider revision and SPEC-023 `live_executable_cdhash` CodeDirectory
   identity of the signed provider executable that qualified the tuple, as
   recorded provenance that does not gate capability (0.1.27).
@@ -299,9 +299,17 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 `separate_artifact` layout with the matching
 `mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
 
-The observer MUST inspect the same recursive set of `.safetensors` files that
-the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
-files, scan every parsed tensor name before representation filters, and reject
+The observer MUST inspect every `.safetensors` file that the R003-authorized
+mlx-swift-lm loader can consume. At `3.32.3-macprovider.6` the loader
+(`safetensorWeightURLs`) takes the files named by
+`model.safetensors.index.json`, which may sit in subdirectories, else the
+top-level conventional names, plus files the model declares as additional
+weights; the observer inspects every `.safetensors` file under the snapshot
+root recursively, a superset of that set. Each fork rebase MUST re-establish,
+under the per-rebase acceptance gate, that every file the rebased loader can
+consume is in the observer's set; a loader that can reach a file the observer
+does not inspect blocks the rebase. The observer MUST reject symlinked or
+hidden weight files, scan every parsed tensor name before representation filters, and reject
 every target tensor the family sanitizer would silently discard, including any
 target name containing the `mtp.` namespace when `source_layout` is
 `separate_artifact`.
@@ -335,99 +343,115 @@ credentials, or unbounded tensor-name lists.
 
 ### MTP-3 — qualified upstream transaction interface (SPEC-048-R003)
 
-Production implementation MUST use an immutable reviewed MLX Swift release,
-not a floating branch. A compile-tested qualification artifact MUST exercise
+Production implementation MUST resolve the exact, immutable dependency tuple
+authorized below, never a floating branch, a version range, or a movable
+reference. A compile-tested qualification artifact MUST exercise
 stable operations for proposal, target verification, stage, contiguous-prefix
 commit, rejected-tail discard, and exact rewind with explicit row and position
 maps. The production adapter MUST use only interfaces covered by that artifact.
 A high-level serial iterator alone is insufficient evidence.
 
-The qualification MUST include the upstream MTP and cache tests, Swift strict
+The qualification MUST include the fork's MTP and cache tests, Swift strict
 concurrency diagnostics, supported macOS deployment target, dependency/license
-review, and cache-boundary rejection tests. If the necessary row-mapped
-operations require unstable or private dependency internals, production work
-is blocked until a reviewed upstream API is available. A commit pin may be
-used only under an explicitly reviewed immutable-dependency exception; a
-tagged release is the default production requirement.
+review, and cache-boundary rejection tests.
 
-The campaign's immutable-dependency exception is exact. The candidate pin may
-be built and tested while the review gate below is pending, but it MUST NOT be
-signed, activated, or treated as production-qualified until that gate closes:
+**Fork model.** MacProvider's production MLX runtime is three operator-owned
+forks under `Augustas11`: mlx-swift-lm, mlx-swift, and MLX core. They are the
+permanent production runtime, not a temporary exception awaiting an upstream
+release. MacProvider does not contribute these patches upstream and does not
+wait for upstream to carry them. Each upstream release MacProvider adopts is
+taken by rebasing every fork's patch stack onto the new upstream tag, cutting
+new fork tags, and passing the per-rebase acceptance gate in
+`docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`. A fork tag is immutable once
+pinned: a change is a new tag and a new SPEC revision naming it, never a moved
+tag.
 
-- repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `ca8c384c4fb6bc7d2fbb7c70a18c34b935701805` (candidate; parent
-  `b181102984a4d1875efbd9e0eab3a7dfd1c012c5`, whose review closed on
-  2026-10-05);
-- upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
-  (`3.31.4`);
-- reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
+The authorized dependency tuple is exact:
+
+| Repository | Fork tag | Revision | Upstream base |
+|---|---|---|---|
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.6` | `72c4ab082a08f291ba270a7303880e90036742e3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.2` | `ca2f61d22c5e8afe87170525ebc1769f72da5b41` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.2-macprovider.2` | `c9196eb7161358f1e4a7f0605182186f8686e5f8` | `ml-explore/mlx` `v0.32.2` (`1f8e74e3f12f31365464a6867c6579f0e9b29d85`) |
+
+Each link pins the next by full revision: `phase3-binary/Package.swift` pins
+the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the
+mlx-swift fork's `Source/Cmlx/mlx` submodule commit pins the MLX core fork.
+The `Source/Cmlx/mlx-c` submodule stays at upstream mlx-swift `0.32.3`'s
+commit. `phase3-binary/Package.resolved` MUST resolve the mlx-swift-lm and
+mlx-swift revisions above, and `scripts/read_swiftpm_pins.py` fails closed
+when the resolved mlx-swift-lm revision differs from
+`SPEC048_MLX_SWIFT_LM_REVISION`. The KV cold-tier build identity
+(`KVBuildIdentity.mlxSwiftLMRevision`) and the native-MTP bench's runtime
+revision bind to the same mlx-swift-lm revision.
+
+Authorized surface:
+
+- mlx-swift-lm fork: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
   `MTPKVCacheTransactionPosition`, `MTPKVCacheTransactionCommit`, and
-  `reconcileMTPSharedKVState`; plus `MTPPackedVerificationCache`,
+  `reconcileMTPSharedKVState`; `MTPPackedVerificationCache`,
   `MTPPackedVerificationRowMap`, `MTPPackedVerificationRowState`,
   `MTPPackedVerificationOutput`, `MTPPackedVerificationError`, and
-  `verifyMTPPackedTargets`, including the strict
-  `requireContinuationState` overload for row-local multi-round continuation;
-  plus `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement
-  of caller-owned drafter state without model-global mutation or unsafe
-  `Sendable` capture; plus standalone Qwen 3.5 MTP checkpoint normalization,
+  `verifyMTPPackedTargets`, including the strict `requireContinuationState`
+  overload for row-local multi-round continuation;
+  `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement of
+  caller-owned drafter state without model-global mutation or unsafe
+  `Sendable` capture; standalone Qwen 3.5 MTP checkpoint normalization,
   `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction` (including the
   deferred-evaluation `stageCommit(retaining:)`), and the
-  `mtpPackedCheckpointIndex` contract needed for row-isolated commit across
-  hybrid attention/Mamba verification; plus the
-  `mtpPackedHostBatchOffsets` host offset mirror the packed facade validates
-  instead of reading `batchOffset` back from the device; plus
-  `MTPPackedStatefulDrafterModel`, `MTPPackedDrafterAdvanceRow`,
-  `MTPPackedDrafterAdvanceResult`, `MTPPackedDrafterError`, and the Qwen 3.5
-  `advanceAndProposePacked` implementation that advances every native row's
-  drafter state and proposes its next token in one drafter forward; plus the
-  Qwen3.5/3.6 sparse-MoE fused small-token path, including its exact affine
-  quantization-layout gate, per-call scratch, overlapping-call safety,
-  chunked evaluation of decode- and verify-shaped calls above seven flattened
-  tokens, stock fallback for rows longer than seven tokens, and exact
-  dtype/shape validation of every packed weight, scale, and bias the fused
-  kernels index (any mismatch keeps the block on the stock path); plus
-  `gatedDeltaUpdateCheckpointed`, the single-pass Gated DeltaNet recurrence
-  that returns the state after `checkpointAfter` steps bit-identically to two
-  split `gatedDeltaUpdate` calls, used by the Qwen 3.5 verify-row checkpoint;
-  plus packed verification leaving recurrent caches unprepared (no SSM mask)
-  when no row is right-padded;
-- review date and owner: `2026-10-05`, `@Augustas11`;
-- mandatory exception re-review date: `2026-12-27`;
-- review gate: upstream-focused build-tests, MacProvider qualification and
-  real-hardware tests, plus an independent adversarial review with zero
-  Critical, High, or Medium findings. The prior transaction surface passed
-  15/15 focused upstream tests and real Qwen target/MTP parity. The fused-MoE
-  path is qualified on the ordinary path: the focused upstream fused tests on
-  Mac Studio hardware, eight-slot ordinary/native parity and run-to-run
-  determinism, and one-, two-, and eight-slot ordinary throughput against the
-  stock kernel, followed by the frozen-diff audit. Native-MTP R015 evidence is
-  not part of this gate; it gates signing and activation of a native tuple
-  (R007, R015) and never the ordinary path;
-- review result (2026-10-05): closed for parent revision `b1811029…`. Mac Studio fused
-  tests 133/133, hardware E2E pass, 0 ordinary/native parity mismatches and
-  bit-identical run-to-run output in 36 paired blocks across one, two, and
-  eight slots, ordinary decode throughput 1.25x / 1.15x / 0.97x stock, and a
-  three-lane freeze audit at 0 Critical, 0 High, 0 Medium
-  (`docs/research/spec048-fused-moe/evidence-2026-10-05/qualification-7d55924eb/`,
-  `audits/2026-10-05-native-mtp-fused-freeze/`). The exception is approved
-  for the ordinary path; native MTP remains default-off and unqualified;
-- review result for `ca8c384c…`: pending. Its two commits change only the
-  native verify path (the checkpointed recurrence runs only when a verify row
-  requests a checkpoint, and the mask skip only inside packed verification),
-  so ordinary decode is unchanged. The gate is the upstream GDN and MTP
-  tests, the Mac Studio fused harness and hardware E2E with zero
-  ordinary/native parity mismatches, and the frozen-diff audit; until it
-  closes the pin is not signed or activated;
-- removal trigger: replace the fork pin with the first reviewed upstream tag
-  that contains equivalent standalone-checkpoint loading, public transaction,
-  packed target-verification, and hybrid recurrent-cache surfaces and passes
-  the same MacProvider qualification artifact.
+  `mtpPackedCheckpointIndex` contract for row-isolated commit across hybrid
+  attention/Mamba verification; the `mtpPackedHostBatchOffsets` host offset
+  mirror the packed facade validates instead of reading `batchOffset` back
+  from the device; `MTPPackedStatefulDrafterModel`,
+  `MTPPackedDrafterAdvanceRow`, `MTPPackedDrafterAdvanceResult`,
+  `MTPPackedDrafterError`, and the Qwen 3.5 `advanceAndProposePacked`
+  implementation; the Qwen3.5/3.6 sparse-MoE fused small-token path
+  (`MLX_LM_QWEN35_FUSED_MOE`), eligible only for the exact stock module types
+  (`SwitchGLU`, `QuantizedSwitchLinear`, `QuantizedLinear`; any subclass such
+  as a rotation or adapter keeps the stock path) with the exact affine
+  quantization layout and exact dtype/shape of every packed weight, scale, and
+  bias the kernels index, with per-call scratch, overlapping-call safety,
+  chunked evaluation above seven flattened tokens, and stock fallback for rows
+  longer than seven tokens; `gatedDeltaUpdateCheckpointed`, bit-identical to
+  two split `gatedDeltaUpdate` calls; packed verification leaving recurrent
+  caches unprepared when no row is right-padded; the compiled Qwen 3.5 MTP
+  verification step (kill switch `MLX_LM_QWEN35_COMPILED_VERIFY`),
+  bit-identical to the general path; and compile state declared for every
+  Qwen 3.5 trace, including the fused GDN input projection (upstream #631,
+  cherry-picked), so no trace reads a model array as a tape constant.
+- mlx-swift fork: the core submodule moved to the MLX core fork, and the
+  compiled-function erase documented for the per-thread cache. No API change.
+- MLX core fork: small-M quantized matmuls route batch-invariantly (`qmv`
+  below the vector limit, `qmm` without split-K at or above it, no
+  `qmv_wide`), so a continuously batched row matches its serial result; the
+  routing exceptions that remain are bounded in the runbook. A freed compiled
+  function is erased from every thread's compile cache, so a later function
+  allocated at the same address never replays a dead trace.
 
-No other fork URL, revision, API, or transitive source substitution is covered
-by this exception. The exception qualifies standalone-checkpoint loading and
-the public cache-transaction, packed target-verification, row-local
-continuation-state, and hybrid recurrent-cache boundaries only. It
-does not make a model/artifact tuple eligible, satisfy the serial or multi-row
+Review gate for a tuple: the fork tests for every touched surface; the
+per-rebase acceptance gate in `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`
+(startup batched-isolation probes with the fused MoE path on and off,
+continuous-batching enable-gate rows, cross-thread model reload with zero
+stale trace replays, fused-layout eligibility and fallback, and compile-state
+ownership); native-MTP R015 only when a decode-path line changed since the
+last R015 evidence; and a three-lane freeze audit with zero Critical, High,
+or Medium findings. Native-MTP R015 gates signing and activation of a native
+tuple (R007, R015), never the ordinary path.
+
+Review record for this tuple (2026-10-10, `@Augustas11`): Mac Studio startup
+batched-isolation probes pass with the fused MoE path on and off, continuous
+batching attaches, and native-MTP R015 passed on the compile-state fix
+(`docs/research/mlx-swift-lm-3.32.3/`). `3.32.3-macprovider.6` changes no
+decode math relative to the R015 build's mlx-swift-lm fork (fused-MoE
+eligibility restricted to exact stock types, tests, and the manifest tools
+version), so R015 was not rerun. The freeze audit and its fixes are in
+`audits/2026-10-10-mlx-swift-lm-332/`.
+
+Earlier tuples, the 3.31.4-based fork revisions up to `ca8c384c…`, and their
+review records are in the changelog and are superseded by this tuple. No
+other fork URL, revision, API, or transitive source substitution is
+authorized. This authorization qualifies dependency boundaries only. It does
+not make a model/artifact tuple eligible, satisfy the serial or multi-row
 parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
@@ -930,7 +954,7 @@ malformed. The provider revision, source commit, reproducible-build digest, and
 live executable CDHash are recorded provenance of the qualifying build
 (SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
 provider CLI, so a signed admission keeps serving across signed CLI releases.
-The upstream MLX runtime revision and target artifact remain bound to the
+The MLX runtime (fork) revision and target artifact remain bound to the
 running build. Regressions under a new CLI are caught by the SPEC-031-R033
 native-MTP self-test canary, which compares exact token IDs. Loader
 success or a serial correctness pass is not sufficient for
@@ -1320,7 +1344,7 @@ the journey must include its independent and combined evidence.
 | `SPEC-048-R014/R015` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Production enablement and preregistered Studio/advertised-tier benchmarking remain pending. |
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
-| Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
+| MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1334,7 +1358,7 @@ signed journey, or settlement/integrity evidence exists yet. The issue #1770
 planning/review artifacts and this branch's local checks are design and
 implementation evidence only, not production conformance.
 
-The first implementation PR must record the selected upstream release and
+The first implementation PR must record the selected dependency tuple and
 artifact hashes rather than replacing the unknowns in this draft with mutable
 model names. Hardware evidence must identify the exact Mac model, SoC/GPU,
 RAM, OS, toolchain, power/thermal conditions, provider release, dependency
@@ -1360,6 +1384,25 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.29 (2026-10-10)** — MTP-2 names the R003-authorized loader instead
+  of the retired 3.31.4 loader (#1906). The observer must inspect every weight
+  file the authorized mlx-swift-lm loader can consume; at
+  `3.32.3-macprovider.6` its recursive scan is a superset of the loader's
+  index-or-top-level selection. Every fork rebase re-establishes that
+  containment under the per-rebase acceptance gate.
+- **0.1.28 (2026-10-10)** — MTP-3 adopts the operator's permanent fork model
+  (#1906). The Augustas11 forks of mlx-swift-lm, mlx-swift, and MLX core are
+  the production runtime; MacProvider makes no upstream contributions and
+  rebases the fork patch stacks onto each adopted upstream release. R003 now
+  authorizes the exact tuple `3.32.3-macprovider.6` (`72c4ab08…`, upstream
+  `3.32.3`) / `0.32.3-macprovider.2` (`ca2f61d2…`, upstream `0.32.3`) /
+  `v0.32.2-macprovider.2` (`c9196eb7…`, upstream `v0.32.2`), adds the
+  compiled MTP verification step, declared compile state for every trace,
+  exact-stock-type fused-MoE eligibility, batch-invariant small-M quantized
+  routing, and every-thread compiled-function erase to the authorized
+  surface, and defines the per-rebase review gate. The upstream-replacement
+  removal trigger, the exception re-review date, and the `ca8c384c…`
+  candidate authorization are removed.
 - **0.1.27 (2026-10-09)** — CLI identity is provenance, not a gate (#1893).
   MTP-13 follows SPEC-023 v0.22.13: the admission's provider revision, source
   commit, reproducible-build digest, and `live_executable_cdhash` stay signed

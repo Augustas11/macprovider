@@ -38,6 +38,8 @@ SDK_VERSION="$(xcrun -sdk macosx --show-sdk-version)"
 
 kernels=(
   arg_reduce
+  dot
+  searchsorted
   conv
   gemv
   layer_norm
@@ -80,6 +82,7 @@ if [ "$METAL_VERSION" -ge 400 ] && version_ge "$SDK_VERSION" "26.2"; then
     steel/gemm/kernels/steel_gemm_fused_nax
     steel/gemm/kernels/steel_gemm_gather_nax
     steel/gemm/kernels/steel_gemm_splitk_nax
+    steel/gemm/kernels/steel_gemm_segmented_nax
     quantized_nax
     fp_quantized_nax
     steel/attn/kernels/steel_attention_nax

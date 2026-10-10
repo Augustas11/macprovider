@@ -273,7 +273,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
                 maxTokens: maxTokens,
                 temperature: 0.0,
                 topP: 1.0,
-                prefillStepSize: prefillStepSize
+                prefill: .legacyRemainder(stepSize: prefillStepSize)
             )
             // Create the cache separately so we hold a reference to the same
             // KVCache instances the model will mutate during prefill. After
@@ -285,7 +285,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             // `.tokens` → need one more model call for the remaining token chunk.
             // `.logits` → first-token logits are already available.
             let firstTokenArray: MLXArray
-            switch try context.model.prepare(lmInput, cache: cache, windowSize: parameters.prefillStepSize) {
+            switch try context.model.prepare(lmInput, cache: cache, state: nil, prefill: parameters.prefill) {
             case .tokens(let textInput):
                 // Process the remaining prefix tokens to get first-token logits.
                 // `withPreparedCache` is a no-op when sequenceLengths is nil
@@ -387,7 +387,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
                 maxTokens: maxTokens,
                 temperature: 0.0,
                 topP: 1.0,
-                prefillStepSize: prefillStepSize
+                prefill: .legacyRemainder(stepSize: prefillStepSize)
             )
             let result: GenerateResult = try generate(
                 input: lmInput,

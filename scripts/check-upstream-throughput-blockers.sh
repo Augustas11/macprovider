@@ -34,16 +34,27 @@ need python3
 need curl
 
 read_pin() {
-  python3 "$ROOT/scripts/read_swiftpm_pins.py" "$ROOT/phase3-binary/Package.resolved"
+  # Reporting only: the watch describes whatever graph is pinned and records
+  # local_pin_matches itself; production consumers use the strict default.
+  python3 "$ROOT/scripts/read_swiftpm_pins.py" --historical "$ROOT/phase3-binary/Package.resolved"
 }
 
 PINS="$(read_pin)"
 
-snapshot="$(python3 - <<'PY' "$PINS"
+snapshot="$(python3 - <<'PY' "$PINS" "$ROOT/scripts"
 import json, subprocess, sys, urllib.request
 from datetime import datetime, timezone
 
 pins = json.loads(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from read_swiftpm_pins import (  # single source of the reviewed fork tuple
+    SPEC048_MLX_SWIFT_FORK,
+    SPEC048_MLX_SWIFT_LM_FORK,
+    SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+    SPEC048_MLX_SWIFT_REVISION,
+    SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+)
 
 def gh_json(args):
     out = subprocess.check_output(["gh"] + args, text=True)
@@ -148,17 +159,27 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
-native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
-native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
+# The reviewed fork tuple comes from read_swiftpm_pins.py (the mlx-swift fork
+# revision also pins the MLX core fork through its submodule gitlink).
+native_mtp_exception_revision = SPEC048_MLX_SWIFT_LM_REVISION
+native_mtp_exception_base = SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE
+native_mtp_exception_repo = SPEC048_MLX_SWIFT_LM_FORK.removeprefix("https://github.com/")
+native_mtp_exception_mlx_swift_revision = SPEC048_MLX_SWIFT_REVISION
+native_mtp_exception_mlx_swift_base = SPEC048_MLX_SWIFT_UPSTREAM_BASE
+native_mtp_exception_mlx_swift_repo = SPEC048_MLX_SWIFT_FORK.removeprefix("https://github.com/")
 native_mtp_exception_review_approved = False
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,
     native_mtp_exception_base,
     native_mtp_exception_revision,
+) and commit_is_descendant(
+    native_mtp_exception_mlx_swift_repo,
+    native_mtp_exception_mlx_swift_base,
+    native_mtp_exception_mlx_swift_revision,
 )
 native_mtp_exception_pin_matches = (
     pins.get("mlx_swift_lm_revision") == native_mtp_exception_revision
+    and pins.get("mlx_swift_revision") == native_mtp_exception_mlx_swift_revision
 )
 native_mtp_exception_approved = (
     native_mtp_exception_remote_verified
@@ -433,38 +454,44 @@ out = {
             else "candidate_step_overhead_revision_pending_review"
         ),
         "note": (
-            "The reviewed Qwen MTP transaction surfaces and the exact-layout Qwen3.6 "
-            "A3B fused-MoE path (approved 2026-10-05 at b1811029) remain present; the "
-            "candidate adds a single-pass checkpointed GDN verify kernel and skips the "
-            "all-true SSM mask for unpadded packed verification, and is not approved "
-            "until Studio validation and the freeze audits pass; native MTP stays "
-            "default-off; upstream #645 remains the tagged-release replacement tracker"
+            "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
+            "(3.32.3-macprovider.6) with mlx-swift 0.32.3 on a batch-invariant "
+            "small-M quantized matmul MLX core fork (0.32.3-macprovider.2); it is "
+            "not approved until Studio validation and the freeze audits pass; "
+            "native MTP stays default-off; the forks are the permanent production "
+            "runtime, and an upstream equivalent (for example #645) only retires the "
+            "matching fork patch during a reviewed rebase"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
         "approved": native_mtp_exception_approved,
         "approved_at": None,
         "approved_by": None,
-        "review_due_at": "2026-12-27",
         "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
         "fork_revision": native_mtp_exception_revision,
         "upstream_base_revision": native_mtp_exception_base,
+        "mlx_swift_fork_location": "https://github.com/Augustas11/mlx-swift",
+        "mlx_swift_fork_revision": native_mtp_exception_mlx_swift_revision,
+        "mlx_swift_upstream_base_revision": native_mtp_exception_mlx_swift_base,
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
         "review_status": "candidate_extension_pending_studio_and_freeze_audits",
         "scope": (
-            "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
-            "verification_strict_continuation_and_packed_recurrent_cache_"
-            "surfaces_plus_exact_qwen36_a3b_fused_moe_v3_rows_t1_through_t7_chunked_"
-            "plus_single_pass_checkpointed_gdn_verify_and_unpadded_packed_ssm_mask_skip"
+            "packed_mtp_target_verification_public_cache_transactions_and_packed_"
+            "drafter_plus_fused_qwen36_a3b_moe_behind_MLX_LM_QWEN35_FUSED_MOE_"
+            "with_layout_validation_plus_one_pass_gdn_verify_checkpoint_plus_"
+            "unpadded_packed_ssm_mask_skip_plus_compiled_mtp_verify_step_plus_"
+            "declared_compile_state_for_every_qwen35_trace_plus_"
+            "mlx_swift_and_mlx_core_batch_invariant_small_m_quantized_matmul_fork"
         ),
-        "removal_trigger": (
-            "first reviewed upstream tag with equivalent standalone-checkpoint "
-            "loading and public transaction, packed verification, continuation, "
-            "and recurrent-cache surfaces that passes the MacProvider qualification "
-            "artifact"
-        ),
-        "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
+        "fork_model": "permanent_production_fork_rebased_per_upstream_release",
+        # Upstream equivalents never retire the fork; each is a candidate to
+        # drop the matching fork patch during a reviewed rebase.
+        "patch_retirement_candidates": {
+            "public_mtp_transactions_and_packed_verification": (
+                "https://github.com/ml-explore/mlx-swift-lm/issues/645"
+            ),
+        },
     },
 }
 

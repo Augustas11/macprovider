@@ -914,7 +914,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var generationTokens = 0
         try await container.perform { context in
             let lmInput = LMInput(tokens: MLXArray(promptTokens.map { Int32($0) }))
-            let parameters = GenerateParameters(maxTokens: timedDecodeTokens + 1, temperature: 0.0, topP: 1.0)
+            let parameters = GenerateParameters(
+                maxTokens: timedDecodeTokens + 1, temperature: 0.0, topP: 1.0,
+                prefill: .legacyRemainder(stepSize: nil))
             let result: GenerateResult = try generate(
                 input: lmInput, parameters: parameters, context: context
             ) { tokens in

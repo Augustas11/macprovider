@@ -604,7 +604,8 @@ private final class PackedVerificationModel: Module, LanguageModel, KVCacheDimen
     func prepare(
         _ input: LMInput,
         cache: [KVCache],
-        windowSize _: Int?
+        state _: LMOutput.State?,
+        prefill _: PrefillParameters
     ) throws -> PrepareResult {
         .tokens(input.text)
     }

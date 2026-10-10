@@ -1,0 +1,283 @@
+diff -ruN cmpbase/Sources/macprovider-cli/LabProf.swift prof-phase3/Sources/macprovider-cli/LabProf.swift
+--- Sources/macprovider-cli/LabProf.swift	1970-01-01 08:00:00
++++ Sources/macprovider-cli/LabProf.swift
+@@ -0,0 +1,41 @@
++import Foundation
++
++/// Lab-only phase timer (never committed). MACPROVIDER_LAB_PROF=1 enables it.
++enum LabProf {
++    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_PROF"] == "1"
++    nonisolated(unsafe) static var sums: [String: (Double, Int)] = [:]
++    nonisolated(unsafe) static var lastReport = Date()
++    static let lock = NSLock()
++    @inline(__always) static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
++    nonisolated(unsafe) static var lastRound: UInt64 = 0
++    static func round(_ t: UInt64) {
++        guard enabled else { return }
++        let prev = lastRound; lastRound = t
++        if prev != 0, t &- prev < 200_000_000 { add("r0.round.interval", prev, t) }
++    }
++    static func event(_ key: String, _ start: UInt64, _ end: UInt64 = now()) {
++        guard enabled else { return }
++        let ms = Double(end &- start) / 1e6
++        let t = Double(end) / 1e9
++        FileHandle.standardError.write(("[labev] t=\(String(format: "%.3f", t)) \(key)=\(String(format: "%.3f", ms))ms\n").data(using: .utf8)!)
++    }
++    static func timed<T>(_ key: String, _ body: () async throws -> T) async rethrows -> T {
++        let s = now(); defer { event(key, s) }
++        return try await body()
++    }
++    static func add(_ key: String, _ start: UInt64, _ end: UInt64 = now()) {
++        guard enabled else { return }
++        lock.lock(); defer { lock.unlock() }
++        let ms = Double(end &- start) / 1e6
++        let cur = sums[key] ?? (0, 0)
++        sums[key] = (cur.0 + ms, cur.1 + 1)
++        if Date().timeIntervalSince(lastReport) > 20 {
++            lastReport = Date()
++            let line = sums.keys.sorted().map { k in
++                let v = sums[k]!; return "\(k)=\(String(format: "%.3f", v.0 / Double(v.1)))ms/n\(v.1)"
++            }.joined(separator: " ")
++            FileHandle.standardError.write(("[labprof] " + line + "\n").data(using: .utf8)!)
++            sums = [:]
++        }
++    }
++}
+diff -ruN cmpbase/Sources/macprovider-cli/ModelRuntime.swift prof-phase3/Sources/macprovider-cli/ModelRuntime.swift
+--- Sources/macprovider-cli/ModelRuntime.swift
++++ Sources/macprovider-cli/ModelRuntime.swift
+@@ -5300,7 +5300,7 @@
+                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                     templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                 )
+-                let lmInput = try await context.processor.prepare(input: input)
++                let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                 try handle.drainCancelled.check()
+                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+             }
+@@ -5328,7 +5328,7 @@
+                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                         templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                     )
+-                    let prepared = try await context.processor.prepare(input: input)
++                    let prepared = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                     let count = prepared.text.tokens.size
+                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
+                     return count
+@@ -6260,7 +6260,7 @@
+                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                 templateSupportsPreserveThinking: templateSupportsPreserveThinking
+             )
+-            let lmInput = try await context.processor.prepare(input: input)
++            let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+@@ -6709,7 +6709,7 @@
+                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                 templateSupportsPreserveThinking: templateSupportsPreserveThinking
+             )
+-            let lmInput = try await context.processor.prepare(input: input)
++            let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
+             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
+             let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+@@ -7111,7 +7111,7 @@
+                     throw CancellationError()
+                 }
+                 let input = UserInput(chat: [.user(prompt)])
+-                let lmInput = try await context.processor.prepare(input: input)
++                let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                 let parameters = Self.makeServeGenerateParameters(
+                     maxTokens: boundedMaxTokens,
+@@ -7304,7 +7304,7 @@
+                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                         templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                     )
+-                    let lmInput = try await context.processor.prepare(input: input)
++                    let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                     let parameters = Self.makeServeGenerateParameters(
+                         maxTokens: Self.labSerialEffectiveMaxTokens(
+@@ -8023,7 +8023,7 @@
+                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                         templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                     )
+-                    let lmInput = try await context.processor.prepare(input: input)
++                    let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                     let parameters = Self.makeServeGenerateParameters(
+                         maxTokens: Self.labSerialEffectiveMaxTokens(
+@@ -8539,7 +8539,7 @@
+         let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
+             try await container.perform { context -> [KVLayerGeometry]? in
+                 let input = UserInput(chat: [.user("warmup")])
+-                let lmInput = try await context.processor.prepare(input: input)
++                let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                 let parameters = Self.makeServeGenerateParameters(
+                     maxTokens: 1,
+                     maxContextTokens: maxContextTokens,
+@@ -8700,7 +8700,7 @@
+             let result: BlockingGenerateResult = try await inferenceGate.withPermit {
+                 try await container.perform { context in
+                     let input = UserInput(chat: [.user(Self.startupThroughputProbePrompt)])
+-                    let lmInput = try await context.processor.prepare(input: input)
++                    let lmInput = try await LabProf.timed("tok.prepare") { try await context.processor.prepare(input: input) }
+                     let parameters = Self.makeServeGenerateParameters(
+                         maxTokens: maxTokens,
+                         maxContextTokens: maxContextTokens,
+diff -ruN cmpbase/Sources/macprovider-cli/NativeMTPBenchCommand.swift prof-phase3/Sources/macprovider-cli/NativeMTPBenchCommand.swift
+--- Sources/macprovider-cli/NativeMTPBenchCommand.swift
++++ Sources/macprovider-cli/NativeMTPBenchCommand.swift
+@@ -592,12 +592,16 @@
+             throw NativeMTPBenchError.assertionFailed("request missing id")
+         }
+         let start = Date()
++        let __r0 = LabProf.now()
++        LabProf.event("req.start " + requestID, __r0)
+         let handle = try await runtime.acquireRequestHandle(request)
++        LabProf.event("req.handle", __r0)
+         let chunks = NativeMTPChunkTimeRecorder()
+         let completion: CompletionResult
+         do {
+             completion = try await runtime.stream(request, with: handle) { chunk in
+                 if case .content(let text) = chunk, !text.isEmpty {
++                    if chunks.snapshot().isEmpty { LabProf.event("req.firsttoken " + requestID, __r0) }
+                     chunks.append(Date())
+                 }
+             }
+diff -ruN cmpbase/Sources/macprovider-cli/PagedKVRuntimeBridge.swift prof-phase3/Sources/macprovider-cli/PagedKVRuntimeBridge.swift
+--- Sources/macprovider-cli/PagedKVRuntimeBridge.swift
++++ Sources/macprovider-cli/PagedKVRuntimeBridge.swift
+@@ -841,9 +841,11 @@
+                             modelState = modelState ?? LMOutput.State()
+                             modelState?[mtpEmitFlagKey] = true
+                         }
++                        let __s0 = LabProf.now()
+                         let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                             context.model(text, cache: state.caches, state: modelState)
+                         }
++                        defer { LabProf.event(input.nativeMTPPromptPrefill ? "chunk.native.total" : "chunk.ord.total", __s0); LabProf.add(input.nativeMTPPromptPrefill ? "s9.native.prefill.chunk.total" : "s9.ord.prefill.chunk.total", __s0) }
+                         if input.sampleFirstToken {
+                             sampledToken = ContinuousBatchRowSampler.sample(
+                                 logits: output.logits[0..., -1, 0...],
+@@ -852,6 +854,9 @@
+                         } else {
+                             sampledToken = nil
+                         }
++                        LabProf.add(input.nativeMTPPromptPrefill ? "s1.native.prefill.target" : "s1.ord.prefill.target", __s0)
++                        let __s1 = LabProf.now()
++                        defer { LabProf.add(input.nativeMTPPromptPrefill ? "s2.native.prefill.drafter+eval" : "s2.ord.prefill.eval", __s1) }
+                         if input.nativeMTPPromptPrefill {
+                             guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
+                                 throw ContinuousBatchSchedulerError.unsupported(
+@@ -1085,6 +1090,8 @@
+         rows inputs: [ContinuousBatchNativeMTPProposalInput]
+     ) async throws -> [String: [Int]]? {
+         guard !inputs.isEmpty else { return [:] }
++        let __p0 = LabProf.now()
++        defer { LabProf.add("p0.propose", __p0); LabProf.event("ev.propose", __p0) }
+         guard let drafterContainer else { return nil }
+         guard beginOperation() else {
+             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+@@ -1150,6 +1157,9 @@
+             throw ContinuousBatchSchedulerError.unsupported("native_mtp_duplicate_packed_row")
+         }
+ 
++        let __vc = LabProf.now()
++        defer { LabProf.add("v0.verify.call", __vc); LabProf.event("ev.verify", __vc) }
++        LabProf.round(__vc)
+         clearDecodeSession()
+         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+             let rowStates = inputs.map {
+@@ -1177,6 +1187,7 @@
+                     proposalCount: $0.proposalTokens.count
+                 )
+             }
++            let __v0 = LabProf.now()
+             let output = try verifyMTPPackedTargets(
+                 model: context.model,
+                 tokens: tokens,
+@@ -1207,6 +1218,9 @@
+             }
+             // One selection and one host transfer for the whole packed round
+             // instead of two blocking GPU round trips per row.
++            LabProf.add("v1.verify.build", __v0)
++            let __v1 = LabProf.now()
++            defer { LabProf.add("v2.verify.eval", __v1) }
+             let topTokenIDsByRow = Self.packedTargetTokenIDs(
+                 rows: output.rows.map { ($0.proposalLogits, $0.bonusLogits) },
+                 samplers: output.rows.map { row in
+@@ -1234,6 +1248,8 @@
+ 
+     func finalizeNativeMTPPackedRound(rows inputs: [ContinuousBatchNativeMTPFinalizeInput]) async throws {
+         guard !inputs.isEmpty else { return }
++        let __fc = LabProf.now()
++        defer { LabProf.add("fc.finalize.call", __fc); LabProf.event("ev.finalize", __fc) }
+         guard beginOperation() else {
+             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+         }
+@@ -1285,6 +1301,8 @@
+             // Advance every committing row's drafter with one packed forward
+             // that also proposes each row's next token. It validates every
+             // row before staging anything, and mutates no stored state.
++            let __f0 = LabProf.now()
++            defer { LabProf.add("f0.finalize.total", __f0) }
+             let advance = try await self.advanceNativeMTPDrafters(
+                 targetModel: context.model,
+                 rows: committing
+@@ -1305,7 +1323,10 @@
+                 staged += advance.states.flatMap { $0.cache.flatMap(\.state) }
+                 staged.append(seedTokens)
+             }
++            LabProf.add("f1.finalize.build", __f0)
++            let __f1 = LabProf.now()
+             eval(staged)
++            LabProf.add("f2.finalize.eval", __f1)
+             if let advance, let seedTokens {
+                 let seeds = seedTokens.asArray(Int32.self).map(Int.init)
+                 self.storeNativeMTPDrafterAdvance(
+@@ -1686,6 +1707,8 @@
+         onStep: ContinuousBatchDecodeWindowStepObserver? = nil
+     ) throws -> [ContinuousBatchDecodeOutcome] {
+         let decodeSteps = max(1, steps)
++        let __d0 = LabProf.now()
++        defer { LabProf.add("d0.performDecode.call", __d0); LabProf.event("ev.decode.rows\(supportedInputs.count).cap\(supportedInputs.filter(\.captureNativeMTPDrafterColumns).count)", __d0) }
+         var rowStates = supportedInputs.map {
+             self.rowState(
+                 for: $0.requestID,
+@@ -1805,14 +1828,18 @@
+                     emit[mtpEmitFlagKey] = true
+                     stepState = emit
+                 }
++                let __o0 = LabProf.now()
+                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                     model(text, cache: cachesAsKV, state: stepState)
+                 }
+                 try batchedCaches.forEach { try $0.validateBatchState() }
++                LabProf.add(captureIndices.isEmpty ? "o1.ord.build" : "c1.capture.build", __o0)
++                let __o1 = LabProf.now()
+                 let stepSampled = ContinuousBatchRowSampler.sample(
+                     logits: output.logits[0..., -1, 0...],
+                     rows: Self.samplerRows(supportedInputs, step: stepIndex)
+                 ).asArray(Int.self)
++                LabProf.add(captureIndices.isEmpty ? "o2.ord.eval" : "c2.capture.eval", __o1)
+                 guard stepSampled.count == supportedInputs.count else {
+                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                 }
+--- Package.swift
++++ Package.swift
+@@ -23,11 +23,8 @@
+         // (tag 0.32.3-macprovider.1), whose MLX core keeps small-M quantized
+         // matmuls on one kernel route so a row decodes the same tokens alone
+         // and inside a continuous batch (the startup batched-isolation gate).
++        .package(path: "../mlx-swift-lm"),
+         .package(
+-            url: "https://github.com/Augustas11/mlx-swift-lm.git",
+-            revision: "37f0d7ceacf6f5eca3ec2ceddc96d0f6e91ed2f1"
+-        ),
+-        .package(
+             url: "https://github.com/huggingface/swift-transformers.git",
+             exact: "1.3.4"
+         ),

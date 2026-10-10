@@ -1,0 +1,14 @@
+{"type": "pause_ack", "accepted": true}
+LIVE_PAUSED 13:58:51
+LIVE_DRAINED 13:58:51
+start 13:58:51 binary 6a0f923919b4c521
+paged r=1 exit=0 msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=1 block=16 serial_tps_p50=159.6 engine_1row_tps_p50=115.7 aggregate_tps_p50=115.8 uplift_vs_1row=1.00x aggregate_vs_serial=0.73x peak_rss_mb=39262
+paged r=2 exit=0 msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=2 block=16 serial_tps_p50=158.9 engine_1row_tps_p50=114.5 aggregate_tps_p50=158.2 uplift_vs_1row=1.38x aggregate_vs_serial=1.00x peak_rss_mb=39261
+paged r=4 exit=0 msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=4 block=16 serial_tps_p50=159.7 engine_1row_tps_p50=116.5 aggregate_tps_p50=215.7 uplift_vs_1row=1.85x aggregate_vs_serial=1.35x peak_rss_mb=39266
+paged r=8 exit=0 msb-throughput: model=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1 engine=paged compile=true rows=8 block=16 serial_tps_p50=159.4 engine_1row_tps_p50=115.7 aggregate_tps_p50=262.1 uplift_vs_1row=2.27x aggregate_vs_serial=1.64x peak_rss_mb=39247
+scenario msb03 exit=0 14:03:36
+scenario msb05 exit=0 14:04:24
+scenario leftovers exit=0 14:04:45
+MSB_DONE 14:04:45
+{"accepted": true, "type": "resume_ack"}
+LIVE_RESUMED 14:05:52

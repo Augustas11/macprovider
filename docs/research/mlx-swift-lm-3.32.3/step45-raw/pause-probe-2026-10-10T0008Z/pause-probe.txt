@@ -1,0 +1,35 @@
+{"accepted": true, "type": "pause_ack"}
+LIVE_PAUSED 00:08:40
+LIVE_DRAINED 00:08:41
+00:08:41 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:08:47 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:08:52 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:08:58 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:09:03 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:09:08 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77459 total=60165
+00:09:14 in_flight=0 state=paused_by_operator paused=True rows=1 fwd=77463 total=60165
+00:09:19 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:24 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:30 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:35 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:41 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:46 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:51 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:09:57 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:02 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:08 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:13 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:18 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:24 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:29 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:34 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:40 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:45 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:51 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:10:56 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:11:01 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:11:07 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:11:12 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+00:11:18 in_flight=0 state=paused_by_operator paused=True rows=0 fwd=77493 total=60165
+{"type": "resume_ack", "accepted": true}
+LIVE_RESUMED 00:11:39

@@ -1,9 +1,23 @@
+import ast
 import json
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.read_swiftpm_pins import read_pins
+from scripts import read_swiftpm_pins
+from scripts.read_swiftpm_pins import (
+    SPEC048_MLX_SWIFT_FORK,
+    SPEC048_MLX_SWIFT_LM_FORK,
+    SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+    SPEC048_MLX_SWIFT_REVISION,
+    SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+    read_pins,
+    read_production_pins,
+)
 from scripts.compare_upstream_watch import material_changes, merge_snapshot
 
 
@@ -74,7 +88,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            "revision": "72c4ab082a08f291ba270a7303880e90036742e3"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -84,11 +98,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
+            "72c4ab082a08f291ba270a7303880e90036742e3",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805",
+            "72c4ab082a08f291ba270a7303880e90036742e3",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -104,6 +118,76 @@ class SwiftPMPinParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
                 read_pins(resolved)
 
+    def test_fails_closed_when_spec048_fork_uses_previous_reviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_accepts_mlx_swift_fork_at_exact_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+
+            pins = read_pins(resolved)
+
+        self.assertEqual(pins["mlx_swift"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41")
+        self.assertEqual(
+            pins["mlx_swift_revision"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+        )
+
+    def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "19601207e9a0de51e03ee6ec0c3c5f3784275075"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_fails_closed_when_mlx_swift_fork_also_carries_a_version(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
+        payload["pins"][0]["state"] = {
+            "revision": "ca2f61d22c5e8afe87170525ebc1769f72da5b41",
+            "version": "0.32.3",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_reads_checked_in_package_resolved(self):
+        resolved = Path(__file__).parents[2] / "phase3-binary" / "Package.resolved"
+
+        pins = read_pins(resolved)
+
+        self.assertEqual(
+            pins["mlx_swift_lm_revision"], "72c4ab082a08f291ba270a7303880e90036742e3"
+        )
+        self.assertEqual(
+            pins["mlx_swift_revision"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+        )
+
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
         fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
         payload = json.loads(fixture.read_text())
@@ -117,7 +201,159 @@ class SwiftPMPinParsingTests(unittest.TestCase):
                 read_pins(resolved)
 
 
+class ProductionForkTupleTests(unittest.TestCase):
+    """read_production_pins accepts only the complete SPEC-048 fork tuple."""
+
+    LM_FORK = (SPEC048_MLX_SWIFT_LM_FORK + ".git", SPEC048_MLX_SWIFT_LM_REVISION)
+    SWIFT_FORK = (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION)
+
+    def resolve(self, lm=None, swift=None):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        for index, fork in ((0, swift), (1, lm)):
+            if fork is not None:
+                payload["pins"][index]["location"] = fork[0]
+                payload["pins"][index]["state"] = {"revision": fork[1]}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        resolved = Path(temporary.name) / "Package.resolved"
+        resolved.write_text(json.dumps(payload))
+        return resolved
+
+    def test_accepts_full_fork_tuple(self):
+        pins = read_production_pins(self.resolve(lm=self.LM_FORK, swift=self.SWIFT_FORK))
+
+        self.assertEqual(pins["mlx_swift_lm_revision"], SPEC048_MLX_SWIFT_LM_REVISION)
+        self.assertEqual(pins["mlx_swift_revision"], SPEC048_MLX_SWIFT_REVISION)
+
+    def test_accepts_checked_in_package_resolved(self):
+        resolved = Path(__file__).parents[2] / "phase3-binary" / "Package.resolved"
+
+        pins = read_production_pins(resolved)
+
+        self.assertEqual(pins["mlx_swift_lm_revision"], SPEC048_MLX_SWIFT_LM_REVISION)
+        self.assertEqual(pins["mlx_swift_revision"], SPEC048_MLX_SWIFT_REVISION)
+
+    def test_rejects_lm_fork_with_upstream_mlx_swift(self):
+        resolved = self.resolve(lm=self.LM_FORK)
+        self.assertIn("mlx_swift", read_pins(resolved))
+        with self.assertRaisesRegex(ValueError, "fork tuple.*: mlx-swift$"):
+            read_production_pins(resolved)
+
+    def test_rejects_upstream_lm_with_mlx_swift_fork(self):
+        resolved = self.resolve(swift=self.SWIFT_FORK)
+        self.assertIn("mlx_swift_lm", read_pins(resolved))
+        with self.assertRaisesRegex(ValueError, "fork tuple.*: mlx-swift-lm$"):
+            read_production_pins(resolved)
+
+    def test_rejects_fully_upstream_stack(self):
+        with self.assertRaisesRegex(ValueError, "fork tuple"):
+            read_production_pins(self.resolve())
+
+    def test_rejects_wrong_fork_revision(self):
+        for lm, swift in (
+            ((self.LM_FORK[0], "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"), self.SWIFT_FORK),
+            (self.LM_FORK, (self.SWIFT_FORK[0], "19601207e9a0de51e03ee6ec0c3c5f3784275075")),
+        ):
+            with self.subTest(lm=lm, swift=swift):
+                with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                    read_production_pins(self.resolve(lm=lm, swift=swift))
+
+    def test_cli_defaults_to_production_gate(self):
+        script = Path(__file__).parents[1] / "read_swiftpm_pins.py"
+        resolved = self.resolve(lm=self.LM_FORK)
+        strict = subprocess.run(
+            [sys.executable, str(script), str(resolved)], capture_output=True, text=True
+        )
+        historical = subprocess.run(
+            [sys.executable, str(script), "--historical", str(resolved)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(strict.returncode, 1, strict.stdout)
+        self.assertIn("fork tuple", strict.stderr)
+        self.assertEqual(historical.returncode, 0, historical.stderr)
+
+
+class ReviewedForkTupleSourceTests(unittest.TestCase):
+    ROOT = Path(__file__).parents[2]
+    EXCEPTION_FIELDS = {
+        "native_mtp_exception_revision": SPEC048_MLX_SWIFT_LM_REVISION,
+        "native_mtp_exception_base": SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+        "native_mtp_exception_repo": "Augustas11/mlx-swift-lm",
+        "native_mtp_exception_mlx_swift_revision": SPEC048_MLX_SWIFT_REVISION,
+        "native_mtp_exception_mlx_swift_base": SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+        "native_mtp_exception_mlx_swift_repo": "Augustas11/mlx-swift",
+    }
+
+    def test_watch_takes_the_fork_tuple_from_the_pin_reader(self):
+        script = (self.ROOT / "scripts" / "check-upstream-throughput-blockers.sh").read_text()
+        self.assertIsNone(
+            re.search(r"\b[0-9a-f]{40}\b", script),
+            "the watch must not hardcode a revision; it imports read_swiftpm_pins",
+        )
+        body = script.split("<<'PY' \"$PINS\" \"$ROOT/scripts\"\n", 1)[1].split("\nPY\n", 1)[0]
+        tree = ast.parse(body)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "read_swiftpm_pins"
+            for alias in node.names
+        }
+        namespace = {name: getattr(read_swiftpm_pins, name) for name in imported}
+        assignments = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self.EXCEPTION_FIELDS
+        ]
+        self.assertEqual(
+            {node.targets[0].id for node in assignments}, set(self.EXCEPTION_FIELDS)
+        )
+        exec(compile(ast.Module(body=assignments, type_ignores=[]), "watch", "exec"), namespace)
+        for name, expected in self.EXCEPTION_FIELDS.items():
+            with self.subTest(name=name):
+                self.assertEqual(namespace[name], expected)
+
+    def test_reviewed_fork_tuple_matches_the_spec048_fork_table(self):
+        spec = (self.ROOT / "specs" / "SPEC-048-native-mtp-serving.md").read_text()
+        rows = {
+            line.split("|")[1].strip().strip("`").removesuffix(".git"): line
+            for line in spec.splitlines()
+            if line.startswith("| `https://github.com/Augustas11/")
+        }
+        for fork, revision, base in (
+            (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
+            (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
+        ):
+            with self.subTest(fork=fork):
+                cells = [cell.strip() for cell in rows[fork].split("|")]
+                self.assertEqual(cells[3], f"`{revision}`")
+                self.assertIn(f"(`{base}`)", cells[4])
+
+
 class UpstreamWatchComparisonTests(unittest.TestCase):
+    def test_fork_record_has_no_temporary_exception_lifecycle(self):
+        root = Path(__file__).parents[2]
+        script = (root / "scripts" / "check-upstream-throughput-blockers.sh").read_text()
+        baseline = json.loads(
+            (root / "beta" / "throughput-engineering" / "UPSTREAM_WATCH.json").read_text()
+        )
+        record = baseline["native_mtp_immutable_dependency_exception"]
+        for field in ("review_due_at", "removal_trigger", "replacement_tracker"):
+            with self.subTest(field=field):
+                self.assertNotIn(f'"{field}"', script)
+                self.assertNotIn(field, record)
+        self.assertEqual(
+            record["fork_model"], "permanent_production_fork_rebased_per_upstream_release"
+        )
+        self.assertIn(
+            "https://github.com/ml-explore/mlx-swift-lm/issues/645",
+            record["patch_retirement_candidates"].values(),
+        )
+
     def test_checked_in_watch_baseline_is_valid_and_complete(self):
         watch_path = (
             Path(__file__).parents[2]

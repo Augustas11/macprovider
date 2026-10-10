@@ -106,6 +106,132 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
     let weightsGeneration: Int
 }
 
+/// Which prefill chunks may share one forward with other rows.
+///
+/// A grouped prefill forward must give every row the kernels it would get
+/// alone; otherwise a row's numerics depend on its batch neighbours. A shared
+/// prefill feeds `[rows, chunk]` tokens, and every quantized projection
+/// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.2`):
+/// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
+/// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
+/// weights and 4 otherwise. Within each route a row's result does not depend
+/// on M (the fork removed `qmv_wide` and `qmm_splitk`), but a chunk below
+/// `vector_limit` takes `qmv` alone and `qmm` beside a neighbour. So every
+/// chunk that co-batches must be at least the largest `vector_limit` of any
+/// projection: `get_qmv_batch_limit` returns at most 33 for any shape and
+/// device (`quantizedMatmulVectorLimitBound`), which also keeps grouped
+/// chunks off the M-dependent `gemv_wide` and `sdpa_vector` routes.
+///
+/// Sorted-gather MoE expert projections add a second bound:
+/// `GatherQMM::eval_gpu` takes `gather_qmm_rhs` when `M == 1`, `B >= 16`, the
+/// gather is right-sorted and `B / E >= 4` (B = expert selections in the
+/// call, E = experts), else `gather_qmv`. mlx-swift-lm's `SwitchGLU` (fork
+/// `3.32.3-macprovider.6`) sorts, and Qwen3.5 then takes the direct weighted
+/// reduction, once a call carries 64 selections. A grouped call carries the
+/// selections of every row (A3B, 256 experts, top-8: a 32-127-token chunk
+/// takes `gather_qmv` alone, `gather_qmm_rhs` beside a second row). The fused
+/// Qwen3.5 MoE kernels select per row (at most 7 tokens per row) and are
+/// batch invariant, so they need no bound of their own.
+///
+/// A chunk co-batches only when it already takes every grouped route by
+/// itself; any other chunk prefills alone. Unquantized matmuls are not
+/// covered: steel GEMM picks split-K partitions from M, so a model whose
+/// configuration does not declare quantization, or excludes a layer from it,
+/// never groups.
+struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
+    /// Smallest chunk (tokens per row) that may share a prefill forward.
+    let minimumGroupedChunkTokens: Int
+
+    /// No neighbour-dependent route: test backends that run no MLX kernels.
+    static let unconstrained = ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: 1)
+    /// Fail safe: every chunk prefills alone (unreadable or unquantized
+    /// configuration, MoE with unreadable expert counts).
+    static let ungrouped = ContinuousBatchPrefillGroupingRule(minimumGroupedChunkTokens: Int.max)
+
+    /// Maximum of `get_qmv_batch_limit` over every branch (architecture
+    /// generation, device class, K and N) in the core fork. A chunk this long
+    /// takes `qmm` alone for every quantized projection of any shape.
+    static let quantizedMatmulVectorLimitBound = 33
+    /// A dense quantized model: only the `qmv`/`qmm` bound applies.
+    static let denseQuantized = ContinuousBatchPrefillGroupingRule(
+        minimumGroupedChunkTokens: quantizedMatmulVectorLimitBound
+    )
+
+    // `GatherQMM` `gather_qmm_rhs` bounds and the `SwitchGLU` sort bound.
+    static let gatherQMMRHSMinimumSelections = 16
+    static let gatherQMMRHSMinimumSelectionsPerExpert = 4
+    static let switchGLUSortMinimumSelections = 64
+
+    /// An MoE model: the sorted-gather bound, and never below the bound its
+    /// dense projections (attention, shared expert, router) need.
+    static func sortedGatherMoE(numExperts: Int, topK: Int) -> ContinuousBatchPrefillGroupingRule {
+        guard numExperts > 0, topK > 0 else { return .ungrouped }
+        let (perExpert, overflow) = numExperts.multipliedReportingOverflow(
+            by: gatherQMMRHSMinimumSelectionsPerExpert
+        )
+        guard !overflow else { return .ungrouped }
+        let selections = max(gatherQMMRHSMinimumSelections, switchGLUSortMinimumSelections, perExpert)
+        return ContinuousBatchPrefillGroupingRule(
+            minimumGroupedChunkTokens: max(
+                (selections + topK - 1) / topK,
+                quantizedMatmulVectorLimitBound
+            )
+        )
+    }
+
+    /// Derives the rule from the loaded model's `config.json` (top level or
+    /// `text_config`). A configuration that cannot be read, declares no
+    /// `quantization` (or `quantization_config`) object, or excludes a layer
+    /// from quantization is `.ungrouped`; so is a model that reads as MoE
+    /// without both an expert count and a top-k.
+    static func fromModelConfiguration(_ data: Data?, modelID: String?) -> ContinuousBatchPrefillGroupingRule {
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return .ungrouped }
+        let scopes = [root] + ((root["text_config"] as? [String: Any]).map { [$0] } ?? [])
+        let quantization = scopes.flatMap { scope in
+            ["quantization", "quantization_config"].compactMap { scope[$0] as? [String: Any] }
+        }
+        let excludesLayer = quantization.contains { entries in
+            entries.values.contains { value in (value as? NSNumber).map(Self.isFalse) ?? false }
+        }
+        guard !quantization.isEmpty, !excludesLayer else { return .ungrouped }
+        func integer(_ keys: [String]) -> Int? {
+            for scope in scopes {
+                for key in keys {
+                    if let value = scope[key] as? NSNumber, !(value is Bool) { return value.intValue }
+                }
+            }
+            return nil
+        }
+        let numExperts = integer(["num_experts", "n_routed_experts", "num_local_experts"])
+        let topK = integer(["num_experts_per_tok", "experts_per_token", "top_k_experts"])
+        if let numExperts, numExperts > 1 {
+            guard let topK else { return .ungrouped }
+            return sortedGatherMoE(numExperts: numExperts, topK: topK)
+        }
+        var labels: [String] = modelID.map { [$0] } ?? []
+        for scope in scopes {
+            if let modelType = scope["model_type"] as? String { labels.append(modelType) }
+            if let architectures = scope["architectures"] as? [String] { labels.append(contentsOf: architectures) }
+        }
+        let looksLikeMoE = labels.contains { $0.localizedCaseInsensitiveContains("moe") }
+            || topK != nil
+            || integer(["moe_intermediate_size"]) != nil
+        return looksLikeMoE ? .ungrouped : .denseQuantized
+    }
+
+    /// A JSON `false` (a per-layer "do not quantize" entry).
+    private static func isFalse(_ value: NSNumber) -> Bool {
+        CFGetTypeID(value) == CFBooleanGetTypeID() && !value.boolValue
+    }
+
+    func allowsGrouping(chunkTokens: Int) -> Bool {
+        chunkTokens >= minimumGroupedChunkTokens
+    }
+}
+
 struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let descriptor: PagedKVDescriptor
     let tuple: ContinuousBatchingRequestedTuple
@@ -114,6 +240,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let queueLimit: Int
     let decodeHeadroomTokens: Int
     let maxPrefillRowsPerIteration: Int
+    let prefillGrouping: ContinuousBatchPrefillGroupingRule
     let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
     /// Whether one prefill group may hold rows at different prompt offsets
@@ -170,6 +297,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         queueLimit: Int? = nil,
         decodeHeadroomTokens: Int,
         maxPrefillRowsPerIteration: Int = 1,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
         allowsRaggedPrefillOffsets: Bool = false,
@@ -207,6 +335,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         )
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.maxPrefillRowsPerIteration = max(1, maxPrefillRowsPerIteration)
+        self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
         self.allowsRaggedPrefillOffsets = allowsRaggedPrefillOffsets
         self.maxPrefillTokensPerIteration = max(
@@ -666,11 +795,9 @@ struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
     let requestID: String
     let promptOffset: Int
     /// The row's own next chunk: the balanced partition under the per-row
-    /// chunk limit and the group token budget.
+    /// chunk limit and the group token budget, the chunk the row prefills
+    /// when it runs alone.
     let naturalChunkTokens: Int
-    /// Tokens before the row's next hard boundary (prompt end or a recurrent
-    /// checkpoint). A shared chunk never crosses it.
-    let spanTokens: Int
     /// False for a row that may share a forward only with rows at its own
     /// offset (native-MTP prompt rows).
     let sharesRaggedOffsets: Bool
@@ -691,72 +818,54 @@ enum ContinuousBatchPrefillGrouping {
     static let maxRaggedKeySpreadFactor = 2
 
     /// Picks one group whose rows all prefill exactly `chunkTokens` tokens in
-    /// one shared forward. The FCFS head always leads. The chunk length is
-    /// the head's own chunk or a shorter peer chunk the head may shrink to,
-    /// whichever advances the most prompt tokens within `maxRows` and
-    /// `tokenBudget` (ties keep the longer chunk). A row joins when its span
-    /// fits the chunk and the chunk is at least half of the row's own next
-    /// chunk, so a short final chunk does not cut a long prompt into slivers.
-    /// A row at another offset joins only within the key-spread cap.
+    /// one shared forward. The FCFS head always leads and sets the length:
+    /// its own next chunk. A peer joins only when its own next chunk has that
+    /// length, so no row's chunk partition differs from the one it takes
+    /// alone (a shortened chunk would also move the row's later chunks, and
+    /// a short remainder can take another kernel route). A peer at another
+    /// offset joins only within the key-spread cap. A chunk shorter than
+    /// `minimumGroupedChunkTokens` (`ContinuousBatchPrefillGroupingRule`)
+    /// never shares a forward.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
-        tokenBudget: Int
+        tokenBudget: Int,
+        minimumGroupedChunkTokens: Int = 1
     ) -> ContinuousBatchPrefillGroup? {
         guard let head = candidates.first, head.naturalChunkTokens > 0 else { return nil }
-        var lengths = [head.naturalChunkTokens]
-        for candidate in candidates.dropFirst() {
-            let length = candidate.naturalChunkTokens
-            if length > 0,
-               length < head.naturalChunkTokens,
-               mayRun(length, naturalChunkTokens: head.naturalChunkTokens),
-               !lengths.contains(length) {
-                lengths.append(length)
+        let length = head.naturalChunkTokens
+        let rowCap = length >= minimumGroupedChunkTokens
+            ? max(1, min(maxRows, tokenBudget / length))
+            : 1
+        var ids = [head.requestID]
+        var sameOffset = true
+        var allRagged = head.sharesRaggedOffsets
+        var minOffset = head.promptOffset
+        var maxOffset = head.promptOffset
+        for candidate in candidates.dropFirst() where ids.count < rowCap {
+            guard candidate.naturalChunkTokens == length else { continue }
+            let atHeadOffset = candidate.promptOffset == head.promptOffset
+            guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
+                continue
             }
+            let groupMin = min(minOffset, candidate.promptOffset)
+            let groupMax = max(maxOffset, candidate.promptOffset)
+            guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
+                continue
+            }
+            ids.append(candidate.requestID)
+            sameOffset = sameOffset && atHeadOffset
+            allRagged = allRagged && candidate.sharesRaggedOffsets
+            minOffset = groupMin
+            maxOffset = groupMax
         }
-        lengths.sort(by: >)
-        var best: ContinuousBatchPrefillGroup?
-        for length in lengths {
-            let rowCap = max(1, min(maxRows, tokenBudget / length))
-            var ids = [head.requestID]
-            var sameOffset = true
-            var allRagged = head.sharesRaggedOffsets
-            var minOffset = head.promptOffset
-            var maxOffset = head.promptOffset
-            for candidate in candidates.dropFirst() where ids.count < rowCap {
-                guard candidate.naturalChunkTokens > 0,
-                      candidate.spanTokens >= length,
-                      mayRun(length, naturalChunkTokens: candidate.naturalChunkTokens)
-                else { continue }
-                let atHeadOffset = candidate.promptOffset == head.promptOffset
-                guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
-                    continue
-                }
-                let groupMin = min(minOffset, candidate.promptOffset)
-                let groupMax = max(maxOffset, candidate.promptOffset)
-                guard withinKeySpread(minOffset: groupMin, maxOffset: groupMax, chunkTokens: length) else {
-                    continue
-                }
-                ids.append(candidate.requestID)
-                sameOffset = sameOffset && atHeadOffset
-                allRagged = allRagged && candidate.sharesRaggedOffsets
-                minOffset = groupMin
-                maxOffset = groupMax
-            }
-            if best.map({ ids.count * length > $0.requestIDs.count * $0.chunkTokens }) ?? true {
-                best = ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
-            }
-        }
-        return best
-    }
-
-    private static func mayRun(_ length: Int, naturalChunkTokens: Int) -> Bool {
-        length * 2 >= naturalChunkTokens
+        return ContinuousBatchPrefillGroup(chunkTokens: length, requestIDs: ids)
     }
 
     static func withinKeySpread(minOffset: Int, maxOffset: Int, chunkTokens: Int) -> Bool {
         maxOffset + chunkTokens <= maxRaggedKeySpreadFactor * (minOffset + chunkTokens)
     }
+
 }
 
 struct ContinuousBatchPrefillInput: Sendable, Equatable {
@@ -5089,8 +5198,11 @@ actor ContinuousBatchScheduler {
         return released
     }
 
-    /// Rows at one prompt offset whose balanced chunks have the head's length.
+    /// Rows at one prompt offset whose own balanced chunks have the head's
+    /// length. Every row keeps the chunk it prefills alone, so grouping never
+    /// changes a row's chunk partition.
     private func selectEqualOffsetPrefillGroup() -> [(row: Row, end: Int)] {
+        let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []
         var selectedOffset: Int?
         var selectedChunkCount: Int?
@@ -5099,12 +5211,7 @@ actor ContinuousBatchScheduler {
             guard selected.count < configuration.maxPrefillRowsPerIteration,
                   let row = activePrompt[id]
             else { continue }
-            let remainingBudget = configuration.maxPrefillTokensPerIteration - selectedTokenCount
-            guard remainingBudget > 0 else { break }
-            let chunkLimit = min(
-                configuration.maxPromptChunkTokens,
-                selectedChunkCount ?? remainingBudget
-            )
+            guard configuration.maxPrefillTokensPerIteration - selectedTokenCount > 0 else { break }
             let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
             let chunkCount = end - row.prefillCursor
             guard chunkCount > 0 else { continue }
@@ -5119,6 +5226,9 @@ actor ContinuousBatchScheduler {
             }
             selected.append((row, end))
             selectedTokenCount += chunkCount
+            // Every grouped row has this chunk length; below the rule's bound
+            // the group's kernel route could differ from each row's own.
+            if !configuration.prefillGrouping.allowsGrouping(chunkTokens: chunkCount) { break }
         }
         return selected
     }
@@ -5137,7 +5247,6 @@ actor ContinuousBatchScheduler {
                 requestID: id,
                 promptOffset: row.prefillCursor,
                 naturalChunkTokens: naturalChunk,
-                spanTokens: prefillSpanEnd(for: row) - row.prefillCursor,
                 sharesRaggedOffsets: !row.usesNativeMTP
             ))
             rowsByID[id] = row
@@ -5145,7 +5254,8 @@ actor ContinuousBatchScheduler {
         guard let group = ContinuousBatchPrefillGrouping.select(
             candidates,
             maxRows: configuration.maxPrefillRowsPerIteration,
-            tokenBudget: configuration.maxPrefillTokensPerIteration
+            tokenBudget: configuration.maxPrefillTokensPerIteration,
+            minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens
         ) else {
             return []
         }

@@ -1,0 +1,39 @@
+ 7437 |                                         firstToken.recordIfMissing()
+
+<studio-home>/lab-332/src/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:7388:97: error: call can throw but is not marked with 'try'
+ 7386 |                             leaseAllowed: conversationCacheAllowed,
+ 7387 |                             lease: lease,
+ 7388 |                             modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+      |                                                                                                 |- error: call can throw but is not marked with 'try'
+      |                                                                                                 |- note: did you mean to use 'try'?
+      |                                                                                                 |- note: did you mean to handle error as optional value?
+      |                                                                                                 `- note: did you mean to disable error propagation?
+ 7389 |                         ))
+ 7390 |                     }
+
+<studio-home>/lab-332/src/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:7764:21: warning: 'init()' is deprecated: use withNewDefaultStream instead [#DeprecatedDeclaration]
+ 7762 |                         output += text
+ 7763 |                     }
+ 7764 |                     Stream().synchronize()
+      |                     `- warning: 'init()' is deprecated: use withNewDefaultStream instead [#DeprecatedDeclaration]
+ 7765 |                     let telemetry = iterator.speculativeDecodingTelemetry
+--
+ 8241 |                                 // Round-2 code LOW: only start the decode timer
+
+<studio-home>/lab-332/src/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:8175:97: error: call can throw but is not marked with 'try'
+ 8173 |                             leaseAllowed: conversationCacheAllowed,
+ 8174 |                             lease: lease,
+ 8175 |                             modelHasRecurrentLayers: ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
+      |                                                                                                 |- error: call can throw but is not marked with 'try'
+      |                                                                                                 |- note: did you mean to use 'try'?
+      |                                                                                                 |- note: did you mean to handle error as optional value?
+      |                                                                                                 `- note: did you mean to disable error propagation?
+ 8176 |                         ))
+ 8177 |                     }
+
+<studio-home>/lab-332/src/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:8559:44: warning: 'generate(input:context:iterator:didGenerate:)' is deprecated: Use the AsyncStream-based generate(input:cache:state:parameters:context:) instead for better Swift concurrency support [#DeprecatedDeclaration]
+ 8557 |                 // all the seed needs (only the geometry is read, never the values).
+ 8558 |                 _ = try await blockingInferenceExecutor.run { _ in
+ 8559 |                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
+      |                                            `- warning: 'generate(input:context:iterator:didGenerate:)' is deprecated: Use the AsyncStream-based generate(input:cache:state:parameters:context:) instead for better Swift concurrency support [#DeprecatedDeclaration]
+ 8560 |                         GenerateDisposition.stop

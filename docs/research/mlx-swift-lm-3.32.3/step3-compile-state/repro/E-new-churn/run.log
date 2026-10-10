@@ -1,0 +1,2 @@
+start 2026-10-09T20:59:47Z tag=E-new-churn build=new2 bin=137c9373c3be81a0 env=LAB_REPEAT=6 LAB_CHURN_GB=16
+exit=0 end 2026-10-09T21:25:46Z

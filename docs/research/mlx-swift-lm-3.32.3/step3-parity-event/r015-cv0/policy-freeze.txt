@@ -1,0 +1,1 @@
+frozen_at=2026-10-09T18:39:27Z policy_sha256=8722ddbf4393a49fdfa48850d33fe6e9bdbf3c76954d913825b7f46165c0c9d2 env=MLX_LM_QWEN35_COMPILED_VERIFY=0 note=byte-identical to the d07d policy; only the process env differs

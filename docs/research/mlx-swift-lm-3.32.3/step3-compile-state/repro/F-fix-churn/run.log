@@ -1,0 +1,2 @@
+start 2026-10-09T22:38:05Z tag=F-fix-churn build=fix2 bin=4258d97c70cb4e58 env=LAB_REPEAT=6 LAB_CHURN_GB=16
+exit=0 end 2026-10-09T23:09:51Z

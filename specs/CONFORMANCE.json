@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.11",
+      "version": "v0.3.14",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.27",
+      "version": "0.1.29",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4686,6 +4686,10 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillChunksBelowTheGroupingBoundPrefillAlone",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillGroupingRuleFromModelConfiguration",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRealQwen35DensePrefillGroupingFollowsTheKernelRouteBound",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringFailingPrefillWinsTerminalRace",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow",
@@ -4702,8 +4706,10 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRaggedPrefillMaskIsPerRowCausalAndHidesShorterRowPadding",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupsRowsAtDifferentOffsetsWithOneChunkLength",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingKeepsTheHeadChunkWhenItAdvancesMostTokens",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingShrinksToAPeerFinalChunkWhenThatAdvancesMore",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingNeverCutsAChunkBelowHalfItsOwnLength",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingNeverShortensARowsChunkToMeetAPeer",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingKeepsChunksBelowTheGroupingBoundAlone",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingKeepsNativeRowsAtTheHeadOffset",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingHonoursRowCapAndTokenBudget",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingCapsTheKeySpread",
@@ -10500,7 +10506,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "Candidate fork revision ca8c384c4fb6bc7d2fbb7c70a18c34b935701805 (pending review) adds to b181102984a4d1875efbd9e0eab3a7dfd1c012c5 only a single-pass checkpointed Gated DeltaNet verify kernel, bit-identical to the split recurrence, and an unmasked recurrent path when no packed verification row is padded; ordinary decode is unchanged. Parent revision b181102984a4d1875efbd9e0eab3a7dfd1c012c5 retains the previously reviewed standalone Qwen MTP loading, public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized drafter-state access, packed recurrent Mamba transactions, and round-overhead reductions from ef4ff8568c38c640bc90a8176dc3acfe943a288d. It additionally introduces a default-on, kill-switchable fused Qwen3.6-35B-A3B MoE path only for the exact affine layout and decode- or verify-shaped calls of at most 7 tokens per row, run in chunks of at most 7 flattened tokens at any batch size, with stock for prefill-shaped rows. The exception for the parent revision was approved on 2026-10-05 after the fused ordinary-path Studio qualification (fork tests 133/133, hardware E2E pass, 0 parity mismatches and bit-identical run-to-run output in 36 paired blocks at one, two, and eight slots, ordinary decode 1.25x / 1.15x / 0.97x stock) and a three-lane freeze audit at 0 Critical/High/Medium. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "SPEC-048 v0.1.28 authorizes the operator's permanent three-fork MLX runtime: mlx-swift-lm 3.32.3-macprovider.6 (72c4ab082a08f291ba270a7303880e90036742e3, upstream 3.32.3), mlx-swift 0.32.3-macprovider.2 (ca2f61d22c5e8afe87170525ebc1769f72da5b41, upstream 0.32.3), and MLX core v0.32.2-macprovider.2 (c9196eb7161358f1e4a7f0605182186f8686e5f8, upstream v0.32.2), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, plus the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, and every-thread compiled-function erase. Mac Studio startup batched-isolation probes pass with fused MoE on and off and native-MTP R015 passed on the compile-state fix (docs/research/mlx-swift-lm-3.32.3/). R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

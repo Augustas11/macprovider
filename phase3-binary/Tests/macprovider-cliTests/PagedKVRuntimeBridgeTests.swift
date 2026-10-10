@@ -1342,6 +1342,322 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ])
     }
 
+    /// Grouped CB prefill must not change a row's kernel route. A tiny real
+    /// Qwen3.5 MoE (4 experts, top-2), every projection 4-bit, has a grouping
+    /// bound of 33 tokens per chunk: below it a chunk alone takes `qmv`
+    /// (`qmv_quad` at K 64) for its dense projections and an unsorted
+    /// `gather_qmv` for its experts (48 selections), while two grouped chunks
+    /// take `qmm` and the sorted gather. Two short prompts arriving together
+    /// must therefore prefill alone and generate exactly what each generates
+    /// by itself; two prompts at the bound share one forward and still match.
+    func testRealQwen35MoEPrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        try await assertPrefillGroupingFollowsTheKernelRouteBound(
+            configuration: Self.tinyQwen35MoEConfiguration,
+            expectedBound: 33,
+            requiresQuantizedExperts: true
+        )
+    }
+
+    /// The same for a dense model (Qwen3.6-27B shape class): a shared prefill
+    /// flattens rows x chunk into each quantized projection's M, so a
+    /// 24-token chunk takes `qmv` alone and `qmm` beside a second row. Below
+    /// the 33-token bound the rows prefill alone; at the bound they group,
+    /// and both match their lone serial greedy tokens.
+    func testRealQwen35DensePrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        try await assertPrefillGroupingFollowsTheKernelRouteBound(
+            configuration: Self.tinyQwen35DenseConfiguration,
+            expectedBound: 33,
+            requiresQuantizedExperts: false
+        )
+    }
+
+    private func assertPrefillGroupingFollowsTheKernelRouteBound(
+        configuration json: String,
+        expectedBound: Int,
+        requiresQuantizedExperts: Bool
+    ) async throws {
+        let configData = Data(json.utf8)
+        // The served artifacts declare 4-bit affine quantization at the top
+        // level of `config.json`; the rule reads it from there.
+        var served = try XCTUnwrap(JSONSerialization.jsonObject(with: configData) as? [String: Any])
+        served["quantization"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+            try JSONSerialization.data(withJSONObject: served),
+            modelID: nil
+        )
+        XCTAssertEqual(rule.minimumGroupedChunkTokens, expectedBound)
+
+        let configuration = try JSONDecoder().decode(Qwen35TextConfiguration.self, from: configData)
+        MLXRandom.seed(1906)
+        let target = Qwen35TextModel(configuration)
+        quantize(model: target, groupSize: 64, bits: 4, mode: .affine)
+        eval(target)
+        let leaves = target.leafModules().flattened().map(\.1)
+        XCTAssertFalse(
+            leaves.contains { type(of: $0) == Linear.self },
+            "every projection must run the quantized matmul kernels"
+        )
+        if requiresQuantizedExperts {
+            XCTAssertTrue(
+                leaves.contains { $0 is QuantizedSwitchLinear },
+                "the expert projections must run the quantized gather kernels"
+            )
+        }
+
+        func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
+            let cache = try target.newCache(parameters: nil)
+            var logits = target(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: cache)
+            var tokens: [Int] = []
+            for _ in 0 ..< count {
+                let next = argMax(logits[0, -1], axis: -1).item(Int.self)
+                tokens.append(next)
+                logits = target(MLXArray([Int32(next)]).reshaped(1, 1), cache: cache)
+            }
+            return tokens
+        }
+
+        let steps = 6
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 128)
+        for (length, expectedGroups) in [
+            (24, [["hold"], ["row-a"], ["row-b"]]),
+            (expectedBound, [["hold"], ["row-a", "row-b"]]),
+        ] {
+            let prompts = [
+                "row-a": Self.tinyPrompt(length: length, salt: 31, vocabulary: 64),
+                "row-b": Self.tinyPrompt(length: length, salt: 32, vocabulary: 64),
+            ]
+            let backend = RuntimeBridgeRecordingNativeMTPBackend(PagedKVSharedForwardBackend(
+                container: ModelContainer(context: ModelContext(
+                    configuration: ModelConfiguration(id: descriptor.modelID),
+                    model: target,
+                    processor: StandInUserInputProcessor(),
+                    tokenizer: RuntimeBridgeFakeTokenizer()
+                )),
+                descriptor: descriptor,
+                layerCount: 2,
+                cacheKinds: [.recurrentMamba, .pagedAttention]
+            ))
+            let holdGate = RuntimeBridgeTestGate()
+            backend.onPrefill = { ids in
+                if ids.contains("hold") { await holdGate.wait() }
+            }
+            let scheduler = try Self.makeScheduler(
+                maxActiveRows: 4,
+                backend: backend,
+                maxPhysicalBlocks: 128,
+                maxPromptChunkTokens: 64,
+                maxPrefillRowsPerIteration: 4,
+                maxPrefillTokensPerIteration: 128,
+                prefillGrouping: rule
+            )
+            // `hold` parks the pump inside its prefill so both rows queue and
+            // are admitted in one pass with one cursor and chunk length.
+            let hold = Task {
+                try await scheduler.submit(Self.schedulerRequest(id: "hold", promptTokens: [1, 2], maxOutputTokens: 1))
+            }
+            try await Self.eventually { backend.prefillRequestGroups().count == 1 }
+            var rows: [Task<ContinuousBatchSchedulerResult, Error>] = []
+            for (index, id) in ["row-a", "row-b"].enumerated() {
+                rows.append(Task {
+                    try await scheduler.submit(Self.schedulerRequest(
+                        id: id,
+                        promptTokens: prompts[id]!,
+                        maxOutputTokens: steps
+                    ))
+                })
+                try await Self.eventually { await scheduler.metrics().waitingCount == index + 1 }
+            }
+            await holdGate.open()
+            _ = try await hold.value
+            var generated: [String: [Int]] = [:]
+            for (id, task) in zip(["row-a", "row-b"], rows) {
+                generated[id] = try await task.value.outputTokens
+            }
+
+            XCTAssertEqual(backend.prefillRequestGroups(), expectedGroups, "length \(length)")
+            for id in ["row-a", "row-b"] {
+                XCTAssertEqual(
+                    generated[id],
+                    try serialGreedy(prompts[id]!, count: steps),
+                    "\(id) at length \(length) diverged from its lone serial run"
+                )
+            }
+        }
+    }
+
+    /// The grouping bound also holds for ragged shared prefill (SPEC-038
+    /// FR-CB2): a row mid-prompt and a row at offset 0 whose chunks share one
+    /// length share a forward only at or above the bound. Below it (20-token
+    /// chunks, bound 33) every chunk prefills alone; at 40-token chunks the
+    /// second chunk of `row-a` and the first of `row-b` share one ragged
+    /// forward. Either way each row generates exactly what it generates when
+    /// it is the only row in the scheduler (same chunk partition).
+    func testRealQwen35RaggedPrefillGroupingFollowsTheKernelRouteBound() async throws {
+        try requireMetal()
+        let configData = Data(Self.tinyQwen35DenseConfiguration.utf8)
+        var served = try XCTUnwrap(JSONSerialization.jsonObject(with: configData) as? [String: Any])
+        served["quantization"] = ["group_size": 64, "bits": 4, "mode": "affine"]
+        let rule = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
+            try JSONSerialization.data(withJSONObject: served),
+            modelID: nil
+        )
+        XCTAssertEqual(rule.minimumGroupedChunkTokens, 33)
+        let configuration = try JSONDecoder().decode(Qwen35TextConfiguration.self, from: configData)
+        MLXRandom.seed(1906)
+        let target = Qwen35TextModel(configuration)
+        quantize(model: target, groupSize: 64, bits: 4, mode: .affine)
+        eval(target)
+
+        let steps = 6
+        let descriptor = Self.bridgeDescriptor(maxPhysicalBlocks: 128)
+        for (chunk, expectedGroups) in [
+            (20, [["row-a"], ["row-a"], ["row-b"]]),
+            (40, [["row-a"], ["row-a", "row-b"]]),
+        ] {
+            let prompts = [
+                "row-a": Self.tinyPrompt(length: 2 * chunk, salt: 41, vocabulary: 64),
+                "row-b": Self.tinyPrompt(length: chunk, salt: 42, vocabulary: 64),
+            ]
+            /// Runs `ids` through one scheduler; `row-b` is submitted while
+            /// `row-a`'s first chunk is parked in the backend.
+            func run(_ ids: [String]) async throws -> (groups: [[String]], tokens: [String: [Int]]) {
+                let sharedBackend = PagedKVSharedForwardBackend(
+                    container: ModelContainer(context: ModelContext(
+                        configuration: ModelConfiguration(id: descriptor.modelID),
+                        model: target,
+                        processor: StandInUserInputProcessor(),
+                        tokenizer: RuntimeBridgeFakeTokenizer()
+                    )),
+                    descriptor: descriptor,
+                    layerCount: 2,
+                    cacheKinds: [.recurrentMamba, .pagedAttention]
+                )
+                XCTAssertTrue(sharedBackend.supportsRaggedPrefillOffsets)
+                let backend = RuntimeBridgeRecordingNativeMTPBackend(sharedBackend)
+                let firstChunkGate = RuntimeBridgeTestGate()
+                let parksFirstChunk = ids.count > 1
+                backend.onPrefill = { prefillIDs in
+                    if parksFirstChunk, prefillIDs == ["row-a"], backend.prefillRequestGroups().count == 1 {
+                        await firstChunkGate.wait()
+                    }
+                }
+                let scheduler = try Self.makeScheduler(
+                    maxActiveRows: 4,
+                    backend: backend,
+                    maxPhysicalBlocks: 128,
+                    maxPromptChunkTokens: chunk,
+                    maxPrefillRowsPerIteration: 4,
+                    maxPrefillTokensPerIteration: 4 * chunk,
+                    prefillGrouping: rule,
+                    allowsRaggedPrefillOffsets: true
+                )
+                var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+                for (index, id) in ids.enumerated() {
+                    tasks.append(Task {
+                        try await scheduler.submit(Self.schedulerRequest(
+                            id: id,
+                            promptTokens: prompts[id]!,
+                            maxOutputTokens: steps
+                        ))
+                    })
+                    if parksFirstChunk, index == 0 {
+                        try await Self.eventually { backend.prefillRequestGroups().count == 1 }
+                    }
+                }
+                if parksFirstChunk {
+                    try await Self.eventually { await scheduler.metrics().waitingCount == 1 }
+                    await firstChunkGate.open()
+                }
+                var tokens: [String: [Int]] = [:]
+                for (id, task) in zip(ids, tasks) {
+                    tokens[id] = try await task.value.outputTokens
+                }
+                return (backend.prefillRequestGroups(), tokens)
+            }
+
+            let grouped = try await run(["row-a", "row-b"])
+            XCTAssertEqual(grouped.groups, expectedGroups, "chunk \(chunk)")
+            for id in ["row-a", "row-b"] {
+                let alone = try await run([id])
+                XCTAssertEqual(grouped.tokens[id]?.count, steps, "\(id) chunk \(chunk)")
+                XCTAssertEqual(grouped.tokens[id], alone.tokens[id], "\(id) at chunk \(chunk) diverged from its lone run")
+            }
+        }
+    }
+
+    /// SPEC-038 FR-CB2 ragged shared prefill: a ragged batch cache attends
+    /// each row over its own left-aligned keys `[0, offset + L)` of the
+    /// zero-padded batch buffer with the causal mask
+    /// (`PagedKVRaggedPrefillBatchLayerCache.updateAndAttend`). That must be
+    /// bit-identical to the row's lone causal attention for the fused steel
+    /// kernel (head dim 128) and for the unfused SDPA (head dim 256, every
+    /// Qwen3.5/3.6 attention layer), including key lengths on both sides of
+    /// the 4096-key softmax switch. The padded batch call under the per-row
+    /// boolean mask is not used for head dim 256: there it is not
+    /// bit-identical to the lone call.
+    func testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise() throws {
+        try requireMetal()
+        MLXRandom.seed(1906)
+        let queryHeads = 16
+        let kvHeads = 2
+        for headDim in [128, 256] {
+            for (chunk, offsets) in [
+                (33, [0, 7, 30]),
+                (64, [500, 37, 900]),
+                (128, [3000, 3968, 2100]),
+                (128, [3900, 4100]),
+                (128, [7000, 8100]),
+            ] {
+                let keyCount = offsets.max()! + chunk
+                var queries: [MLXArray] = []
+                var keys: [MLXArray] = []
+                var values: [MLXArray] = []
+                for offset in offsets {
+                    queries.append(MLXRandom.normal([1, queryHeads, chunk, headDim]).asType(.bfloat16))
+                    keys.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
+                    values.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
+                }
+                func padded(_ rows: [MLXArray]) -> MLXArray {
+                    concatenated(rows.map { row in
+                        let pad = keyCount - row.dim(2)
+                        guard pad > 0 else { return row }
+                        return concatenated(
+                            [row, MLXArray.zeros([1, kvHeads, pad, headDim], dtype: row.dtype)],
+                            axis: 2
+                        )
+                    }, axis: 0)
+                }
+                let batchQueries = concatenated(queries, axis: 0)
+                let batchKeys = padded(keys)
+                let batchValues = padded(values)
+                let scale = 1 / Float(headDim).squareRoot()
+                for (row, offset) in offsets.enumerated() {
+                    let own = offset + chunk
+                    let perRow = MLXFast.scaledDotProductAttention(
+                        queries: batchQueries[row ..< row + 1, 0..., 0..., 0...],
+                        keys: batchKeys[row ..< row + 1, 0..., ..<own, 0...],
+                        values: batchValues[row ..< row + 1, 0..., ..<own, 0...],
+                        scale: scale,
+                        mask: .causal
+                    )
+                    let lone = MLXFast.scaledDotProductAttention(
+                        queries: queries[row],
+                        keys: keys[row],
+                        values: values[row],
+                        scale: scale,
+                        mask: .causal
+                    )
+                    XCTAssertTrue(
+                        arrayEqual(perRow, lone).item(Bool.self),
+                        "head dim \(headDim), chunk \(chunk), offset \(offset) of \(offsets)"
+                    )
+                }
+            }
+        }
+    }
+
     /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
     /// commits keyed rows in serial format hands back the same terminal
     /// conversation-cache entry as the ordinary row: same tokens, same token
@@ -1430,8 +1746,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let drafter = Qwen35MTPDraftModel(configuration)
         eval(target, drafter)
 
-        func serialGreedy(_ prompt: [Int], count: Int) -> [Int] {
-            let cache = target.newCache(parameters: nil)
+        func serialGreedy(_ prompt: [Int], count: Int) throws -> [Int] {
+            let cache = try target.newCache(parameters: nil)
             var logits = target(MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count), cache: cache)
             var tokens: [Int] = []
             for _ in 0 ..< count {
@@ -1552,7 +1868,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             XCTAssertEqual(result.terminalStatus, .length, id)
             XCTAssertEqual(
                 result.generatedTokens,
-                serialGreedy(prompts[id]!, count: budgets[id]!),
+                try serialGreedy(prompts[id]!, count: budgets[id]!),
                 "\(id) diverged from serial ordinary greedy"
             )
         }
@@ -1562,7 +1878,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertLessThan(cancelled.generatedTokens.count, budgets["cancelled"]!)
         XCTAssertEqual(
             cancelled.generatedTokens,
-            Array(serialGreedy(prompts["cancelled"]!, count: budgets["cancelled"]!)
+            Array(try serialGreedy(prompts["cancelled"]!, count: budgets["cancelled"]!)
                 .prefix(cancelled.generatedTokens.count))
         )
 
@@ -1657,11 +1973,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     /// Deterministic pseudo-random prompt over the tiny vocabulary.
-    private static func tinyPrompt(length: Int, salt: Int) -> [Int] {
+    private static func tinyPrompt(length: Int, salt: Int, vocabulary: UInt64 = 8) -> [Int] {
         var state = UInt64(truncatingIfNeeded: 0x9E37_79B9 &+ salt)
         return (0 ..< length).map { _ in
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
-            return Int((state >> 33) % 8)
+            return Int((state >> 33) % vocabulary)
         }
     }
 
@@ -1680,7 +1996,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         emit[mtpEmitFlagKey] = true
         let output = target(
             LMInput.Text(tokens: MLXArray(committed.map(Int32.init)).reshaped(1, committed.count)),
-            cache: target.newCache(parameters: nil),
+            cache: try target.newCache(parameters: nil),
             state: emit
         )
         var state = drafter.makeState(parameters: nil)
@@ -3681,6 +3997,10 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         backend: any ContinuousBatchSchedulerBackend,
         maxPhysicalBlocks: Int = 16,
         maxPromptChunkTokens: Int = 256,
+        maxPrefillRowsPerIteration: Int = 1,
+        maxPrefillTokensPerIteration: Int? = nil,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
+        allowsRaggedPrefillOffsets: Bool = false,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
@@ -3717,7 +4037,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 tuple: tuple,
                 maxActiveRows: maxActiveRows,
                 decodeHeadroomTokens: 4,
+                maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
+                prefillGrouping: prefillGrouping,
+                maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
                 maxPromptChunkTokens: maxPromptChunkTokens,
+                allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
@@ -3821,6 +4145,75 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
           "full_attention_interval": 2,
           "mtp_num_hidden_layers": 1,
           "mtp_use_dedicated_embeddings": false,
+          "rope_parameters": {
+            "type": "default",
+            "rope_theta": 100000.0,
+            "partial_rotary_factor": 0.25
+          }
+        }
+        """
+
+    /// Tiny dense Qwen3.5 (hybrid linear/full attention). Linear inputs are
+    /// 64 wide so every projection quantizes at group size 64.
+    private static let tinyQwen35DenseConfiguration = """
+        {
+          "model_type": "qwen3_5_text",
+          "hidden_size": 64,
+          "num_hidden_layers": 2,
+          "intermediate_size": 64,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 32,
+          "linear_num_value_heads": 2,
+          "linear_num_key_heads": 1,
+          "linear_key_head_dim": 32,
+          "linear_value_head_dim": 32,
+          "linear_conv_kernel_dim": 2,
+          "rms_norm_eps": 1e-6,
+          "vocab_size": 64,
+          "rope_theta": 100000.0,
+          "partial_rotary_factor": 0.25,
+          "max_position_embeddings": 256,
+          "tie_word_embeddings": true,
+          "attention_bias": false,
+          "full_attention_interval": 2,
+          "rope_parameters": {
+            "type": "default",
+            "rope_theta": 100000.0,
+            "partial_rotary_factor": 0.25
+          }
+        }
+        """
+
+    /// Tiny Qwen3.5 MoE: 4 experts, top-2. Linear inputs are 64 wide so the
+    /// expert projections quantize at group size 64.
+    private static let tinyQwen35MoEConfiguration = """
+        {
+          "model_type": "qwen3_5_moe_text",
+          "hidden_size": 64,
+          "num_hidden_layers": 2,
+          "intermediate_size": 64,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 32,
+          "linear_num_value_heads": 2,
+          "linear_num_key_heads": 1,
+          "linear_key_head_dim": 32,
+          "linear_value_head_dim": 32,
+          "linear_conv_kernel_dim": 2,
+          "rms_norm_eps": 1e-6,
+          "vocab_size": 64,
+          "rope_theta": 100000.0,
+          "partial_rotary_factor": 0.25,
+          "max_position_embeddings": 256,
+          "tie_word_embeddings": true,
+          "attention_bias": false,
+          "full_attention_interval": 2,
+          "num_experts": 4,
+          "num_experts_per_tok": 2,
+          "moe_intermediate_size": 64,
+          "shared_expert_intermediate_size": 64,
+          "norm_topk_prob": true,
           "rope_parameters": {
             "type": "default",
             "rope_theta": 100000.0,
@@ -4089,7 +4482,9 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 
@@ -4144,6 +4539,8 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     private var proposals: [String: [Int: [Int]]] = [:]
     private var capturedDecodeSteps: [String: [Int]] = [:]
     private var verifyHook: (@Sendable ([String]) async -> Void)?
+    private var prefillHook: (@Sendable ([String]) async -> Void)?
+    private var prefillGroups: [[String]] = []
 
     /// Runs before each packed verify with the round's request IDs.
     var onVerify: (@Sendable ([String]) async -> Void)? {
@@ -4159,8 +4556,29 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
         }
     }
 
+    /// Runs before each prefill call with the call's request IDs.
+    var onPrefill: (@Sendable ([String]) async -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return prefillHook
+        }
+        set {
+            lock.lock()
+            prefillHook = newValue
+            lock.unlock()
+        }
+    }
+
     init(_ base: PagedKVSharedForwardBackend) {
         self.base = base
+    }
+
+    /// Request IDs of every prefill call, in call order.
+    func prefillRequestGroups() -> [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return prefillGroups
     }
 
     func finalizedRounds() -> [[ContinuousBatchNativeMTPFinalizeInput]] {
@@ -4184,7 +4602,13 @@ private final class RuntimeBridgeRecordingNativeMTPBackend: ContinuousBatchSched
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        try await base.prefill(rows: rows)
+        let ids = rows.map(\.requestID)
+        lock.lock()
+        prefillGroups.append(ids)
+        let hook = prefillHook
+        lock.unlock()
+        await hook?(ids)
+        return try await base.prefill(rows: rows)
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -4476,7 +4900,9 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
         .tokens(input.text)
     }
 

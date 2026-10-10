@@ -1,0 +1,8 @@
+{"type": "pause_ack", "accepted": true}
+LIVE_PAUSED 14:16:27
+LIVE_DRAINED 14:16:27
+<studio-home>/lab-332/r015-332.sh: line 16: <studio-home>/lab-332/runs2/step3-r015/r015-a3b-332.jsonl: No such file or directory
+<studio-home>/lab-332/r015-332.sh: line 18: <studio-home>/lab-332/runs2/step3-r015/r015-a3b-332.jsonl: No such file or directory
+shasum: <studio-home>/lab-332/runs2/step3-r015/r015-a3b-332.jsonl: No such file or directory
+{"type": "resume_ack", "accepted": true}
+LIVE_RESUMED 14:19:01

@@ -17,9 +17,19 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Fork tag 3.32.3-macprovider.6: upstream mlx-swift-lm 3.32.3 plus the
+        // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
+        // MTP verification step commits upstream does not carry, and upstream
+        // #631 with every Qwen3.5 trace declaring the arrays it reads as
+        // compile state. It resolves the Augustas11/mlx-swift fork
+        // (tag 0.32.3-macprovider.2), whose MLX core keeps small-M quantized
+        // matmuls on one kernel route so a row decodes the same tokens alone
+        // and inside a continuous batch (the startup batched-isolation gate),
+        // and erases a freed compiled function from every thread's compile
+        // cache so a model reload cannot replay a dead trace.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+            revision: "72c4ab082a08f291ba270a7303880e90036742e3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

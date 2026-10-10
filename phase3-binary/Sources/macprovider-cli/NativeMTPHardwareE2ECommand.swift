@@ -122,7 +122,9 @@ struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
 
 final class NativeMTPHardwareE2ERunner {
     static let defaultModelID = nativeMTPHardwareDefaultModelID
-    static let upstreamRevision = "ca8c384c4fb6bc7d2fbb7c70a18c34b935701805"
+    /// The pinned mlx-swift-lm revision; single source is `KVBuildIdentity`, whose
+    /// drift test fails CI when it disagrees with Package.resolved.
+    static let upstreamRevision = KVBuildIdentity.mlxSwiftLMRevision
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let reproducibleBuildSHA256 = String(repeating: "1", count: 64)
@@ -416,6 +418,7 @@ final class NativeMTPHardwareE2ERunner {
         )
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
+        let prefillGrouping = ContinuousBatchPrefillGroupingRule.fromModelConfiguration(configData, modelID: modelID)
         let modelCapabilities = ModelRuntime.pagedKVModelCapabilities(
             modelID: modelID,
             configJSONData: configData
@@ -478,6 +481,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: placeholderProof,
             observed: observedIdentity(from: placeholderProof),
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: PagedKVSharedForwardBackend(
                 container: targetContainer,
@@ -526,6 +530,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: proof,
             observed: observed,
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: ordinaryBackend,
             nativeCapability: nil,
@@ -540,6 +545,7 @@ final class NativeMTPHardwareE2ERunner {
             proof: proof,
             observed: observed,
             modelCapabilities: modelCapabilities,
+            prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
             backend: nativeBackend,
             nativeCapability: nativeCapability,
@@ -561,6 +567,7 @@ final class NativeMTPHardwareE2ERunner {
         proof: PagedKVHardwareSizingProof,
         observed: PagedKVObservedRuntimeIdentity,
         modelCapabilities: PagedKVRuntimeModelCapabilities,
+        prefillGrouping: ContinuousBatchPrefillGroupingRule,
         targetContainer: ModelContainer,
         backend: PagedKVSharedForwardBackend,
         nativeCapability: NativeMTPCapability?,
@@ -596,6 +603,7 @@ final class NativeMTPHardwareE2ERunner {
             pagedKVModelCapabilities: modelCapabilities,
             container: targetContainer,
             continuousBatchingBackend: backend,
+            continuousBatchPrefillGrouping: prefillGrouping,
             loader: { _ in throw NativeMTPHardwareE2EError.unexpectedLoader }
         )
     }
