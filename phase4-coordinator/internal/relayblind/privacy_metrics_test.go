@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 )
@@ -50,7 +49,7 @@ func (r *recordingPrivacyMetrics) lastVersions() string {
 // advertisement and the posture paths, and a quarantine is counted too.
 func TestPrivacyRejectionsAreCountedByReason(t *testing.T) {
 	unapproved := newPrivacyFixture(t, func(cfg *config.PrivacyClassConfig) {
-		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash, time.Unix(1_800_000_000, 0).Add(time.Hour))}
+		cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash)}
 	})
 	metrics := &recordingPrivacyMetrics{}
 	unapproved.auth.UseMetrics(metrics)

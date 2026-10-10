@@ -259,7 +259,7 @@ class EmitApprovedIdentityTest(unittest.TestCase):
             check=True,
         )
 
-    def emit(self, expires_at: str | None = None) -> subprocess.CompletedProcess:
+    def emit(self, *extra: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
                 sys.executable,
@@ -270,7 +270,7 @@ class EmitApprovedIdentityTest(unittest.TestCase):
                 "--public-key",
                 str(self.public_key),
             ]
-            + (["--expires-at", expires_at] if expires_at is not None else []),
+            + list(extra),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -290,10 +290,11 @@ class EmitApprovedIdentityTest(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE", result.stdout + result.stderr)
 
-    def test_expiry_is_emitted_only_when_given(self) -> None:
-        result = self.emit("2099-01-01T00:00:00Z")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.endswith('  binary_version: "1.8.214"\n  expires_at: "2099-01-01T00:00:00Z"\n'))
+    def test_expiry_option_is_gone(self) -> None:
+        # #1938: approved code identities carry no calendar expiry.
+        result = self.emit("--expires-at", "2099-01-01T00:00:00Z")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unrecognized arguments", result.stderr)
 
     def test_rejects_tampered_metadata(self) -> None:
         with self.metadata.open("a", encoding="utf-8") as handle:
@@ -328,19 +329,6 @@ class EmitApprovedIdentityTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(result.stdout, "")
-
-    def test_rejects_past_or_malformed_expiry(self) -> None:
-        for expires_at, message in (
-            ("2000-01-01T00:00:00Z", "must be in the future"),
-            ("2099-01-01", "RFC3339"),
-            ("2099-13-01T00:00:00Z", "RFC3339"),
-        ):
-            with self.subTest(expires_at=expires_at):
-                result = self.emit(expires_at)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(message, result.stderr)
-
-
 
 def load_producer():
     import importlib.util

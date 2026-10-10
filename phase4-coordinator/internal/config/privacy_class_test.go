@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,11 +37,10 @@ func TestPrivacyClassDefaultOff(t *testing.T) {
 	}
 
 	pin := testPrivacySEPin(t)
-	expiry := time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC)
 	block := PrivacyClassConfig{
 		Enabled:                         false,
 		ProviderSEPublicKeys:            map[string]string{"provider-a": pin},
-		ApprovedCodeIdentities:          []ApprovedCodeIdentity{testApprovedIdentity(expiry)},
+		ApprovedCodeIdentities:          []ApprovedCodeIdentity{testApprovedIdentity()},
 		AllowedSEKeyBackends:            []string{"file", "keychain"},
 		PostureChallengeIntervalSeconds: 60,
 		PostureMaxAgeSeconds:            150,
@@ -60,8 +58,8 @@ func TestPrivacyClassDefaultOff(t *testing.T) {
 	if decoded.ProviderSEPublicKeys["provider-a"] != pin {
 		t.Fatal("SE pin did not round-trip as standard base64")
 	}
-	if len(decoded.ApprovedCodeIdentities) != 1 || !decoded.ApprovedCodeIdentities[0].ExpiresAt.Equal(expiry) {
-		t.Fatalf("expires_at = %s", decoded.ApprovedCodeIdentities[0].ExpiresAt)
+	if len(decoded.ApprovedCodeIdentities) != 1 || decoded.ApprovedCodeIdentities[0] != testApprovedIdentity() {
+		t.Fatalf("approved identity = %+v", decoded.ApprovedCodeIdentities)
 	}
 }
 
@@ -118,8 +116,8 @@ func TestPrivacyClassValidation(t *testing.T) {
 		{name: "se pin without identity pin", want: "requires relay_blind.identity_public_keys", mutate: func(cfg *Config) {
 			cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{"provider-b": testPrivacySEPin(t)}
 		}},
-		{name: "expired identity", want: "unexpired", enabled: true, mutate: func(cfg *Config) {
-			cfg.PrivacyClass.ApprovedCodeIdentities[0].ExpiresAt = time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+		{name: "no approved identity", want: "approved_code_identities entry", enabled: true, mutate: func(cfg *Config) {
+			cfg.PrivacyClass.ApprovedCodeIdentities = nil
 		}},
 		{name: "directory key required", want: "directory.signing_key_path", enabled: true, mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.SigningKeyPath = "" }},
 		{name: "directory key relative", want: "directory.signing_key_path", mutate: func(cfg *Config) { cfg.PrivacyClass.Directory.SigningKeyPath = "relative.key" }},
@@ -194,7 +192,7 @@ func privacyReadyConfig(t *testing.T) Config {
 	}
 	cfg.RelayBlind.IdentityPublicKeys = map[string]string{"provider-a": base64.RawURLEncoding.EncodeToString(public)}
 	cfg.PrivacyClass.ProviderSEPublicKeys = map[string]string{"provider-a": testPrivacySEPin(t)}
-	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity(time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC))}
+	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity()}
 	cfg.PrivacyClass.Directory.SigningKeyPath = "/etc/macprovider/privacy-directory.key"
 	return cfg
 }
@@ -215,7 +213,7 @@ func TestPrivacyClassAutomaticEnrollmentConfig(t *testing.T) {
 		t.Fatalf("pinless release-derived config rejected: %v", err)
 	}
 	cfg.PrivacyClass.ReleaseCodeIdentities = PrivacyReleaseCodeIdentitiesConfig{}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "release_code_identities or an unexpired") {
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "release_code_identities or an approved_code_identities entry") {
 		t.Fatalf("no approval source = %v", err)
 	}
 	relayOnly := privacyReadyConfig(t)
@@ -229,13 +227,12 @@ func TestPrivacyClassAutomaticEnrollmentConfig(t *testing.T) {
 	}
 }
 
-func testApprovedIdentity(expiry time.Time) ApprovedCodeIdentity {
+func testApprovedIdentity() ApprovedCodeIdentity {
 	return ApprovedCodeIdentity{
 		TeamID:            "AB12CD34EF",
 		SigningIdentifier: "live.malibu.provider.cli",
 		CDHash:            "0123456789abcdef0123456789abcdef01234567",
 		BinaryVersion:     "0.0.0-fixture",
-		ExpiresAt:         expiry,
 	}
 }
 
@@ -259,7 +256,7 @@ func privacySEPoint(priv *ecdsa.PrivateKey) []byte {
 func TestPrivacyClassApprovalWithoutExpiry(t *testing.T) {
 	cfg := privacyReadyConfig(t)
 	cfg.PrivacyClass.Enabled = true
-	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity(time.Time{})}
+	cfg.PrivacyClass.ApprovedCodeIdentities = []ApprovedCodeIdentity{testApprovedIdentity()}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("approval without expiry rejected: %v", err)
 	}

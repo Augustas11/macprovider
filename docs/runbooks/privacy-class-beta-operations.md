@@ -105,10 +105,10 @@ Before the edit it checks that `/usr/local/share/macprovider/release-signing-pub
 Overrides, in this order:
 
 1. `denied_code_cdhashes: [<40 hex>]` refuses that cdhash from any source and quarantines a provider that presents it.
-2. An `approved_code_identities` entry for the same team, signing identifier, and cdhash takes over from the release. Set its `expires_at` in the past to withdraw a release.
+2. An `approved_code_identities` entry for the same team, signing identifier, and cdhash takes over from the release. Give it a different `binary_version` (or use `denied_code_cdhashes`) to withdraw a release. Entries have no `expires_at` (SPEC-049 0.2.4).
 3. An `approved_code_identities` entry can also approve a build that has no release metadata, as in v0.1.
 
-An identity that is only unapproved (for example a release whose metadata has not reached `metadata_dir` yet) is refused by routing and not quarantined. To fill an entry by hand from a signed release (it carries no `expires_at` unless you pass `--expires-at`):
+An identity that is only unapproved (for example a release whose metadata has not reached `metadata_dir` yet) is refused by routing and not quarantined. To fill an entry by hand from a signed release:
 
 ```bash
 scripts/provider-code-identity.py --emit-approved-identity --pearl-release-json pearl-release.json --signature pearl-release.json.sig

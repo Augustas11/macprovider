@@ -178,7 +178,7 @@ func TestEnrollmentIsDurableAndBecomesThePin(t *testing.T) {
 	}
 	// Restart: a new authority over the same store holds no session state.
 	restarted, err := NewPrivacyAuthority(f.store, config.PrivacyClassConfig{
-		Enabled: true, ApprovedCodeIdentities: []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash, f.now.Add(24*time.Hour))},
+		Enabled: true, ApprovedCodeIdentities: []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash)},
 		AllowedSEKeyBackends: []string{PrivacySEBackendFile}, PostureChallengeIntervalSeconds: 60, PostureMaxAgeSeconds: 150,
 		PostureResponseTimeoutSeconds: 10, QuarantineSeconds: 86400,
 	}, nil, 8, 5*time.Minute)
@@ -938,7 +938,7 @@ func TestLoadReleaseCodeIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(identities) != 1 || identities[0].CDHash != fixtureCDHash || identities[0].BinaryVersion != "1.8.220" || identities[0].TeamID != fixtureTeamID || !identities[0].ExpiresAt.IsZero() {
+	if len(identities) != 1 || identities[0].CDHash != fixtureCDHash || identities[0].BinaryVersion != "1.8.220" || identities[0].TeamID != fixtureTeamID {
 		t.Fatalf("identities = %+v", identities)
 	}
 	if len(rejected) != 6 {
@@ -1018,9 +1018,13 @@ func TestReleaseDerivedApprovalAndOverrides(t *testing.T) {
 		}
 		mustReject(t, postureAt(f, "1.8.231"), "posture_unapproved_code_identity")
 	})
-	t.Run("expired config entry withdraws approval", func(t *testing.T) {
+	// #1938: config entries have no calendar expiry; a configured entry that
+	// does not match the posture still withdraws release-derived approval.
+	t.Run("non-matching config entry withdraws approval", func(t *testing.T) {
 		f := setup(t, func(cfg *config.PrivacyClassConfig) {
-			cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{approvedIdentity(fixtureCDHash, time.Unix(1_700_000_000, 0))}
+			entry := approvedIdentity(fixtureCDHash)
+			entry.BinaryVersion = "9.9.9"
+			cfg.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{entry}
 		})
 		mustReject(t, f.acceptClaim(), "posture_unapproved_code_identity")
 	})

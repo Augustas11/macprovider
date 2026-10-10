@@ -236,8 +236,11 @@ served catalog state and coordinator-train interactions.
 | Tier-2 catalog | `macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1`, 17 models, expires **2026-12-25** |
 | Retained window | `…2026-09-23-tier2-buyer-closure-v1`, `…2026-09-22-qwen36-27b-hash-fix-v1`, `…2026-09-19-openrouter-priced-v1` |
 
-Renew the Tier-2 catalog before 2026-12-25. An expiry-only re-sign stays in
-the freshness lane.
+The Tier-2 `expires_at` is structural only from the coordinator that carries
+#1938 (SPEC-008 v0.7.1): past that date the catalog stays active and reloads.
+The coordinator running before that deploy still deactivates it on
+2026-12-25, so deploy #1938 before then; no re-sign is needed after it.
+Release tooling still writes a future `expires_at` on each new catalog.
 
 **First artifact-feed activation (GGUF), cut but not deployed.** #1830 merged
 the signed `published-2026-10-01-artifact-feed-activation-v1` release. It has

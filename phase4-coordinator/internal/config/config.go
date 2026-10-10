@@ -1141,14 +1141,13 @@ const RelayBlindSettlementProfileV1 = "relay-blind-settlement-v1"
 
 // ApprovedCodeIdentity is one operator-approved privacy-class code identity.
 // BinaryVersion is optional; when set, the posture binary_version must match.
-// ExpiresAt is optional; zero means the approval does not expire. When set it
-// is exclusive: a posture at that instant is expired.
+// An approval has no calendar expiry (#1938); it is withdrawn by removing it
+// or listing its cdhash in denied_code_cdhashes.
 type ApprovedCodeIdentity struct {
-	TeamID            string    `yaml:"team_id"`
-	SigningIdentifier string    `yaml:"signing_identifier"`
-	CDHash            string    `yaml:"code_cdhash"`
-	BinaryVersion     string    `yaml:"binary_version"`
-	ExpiresAt         time.Time `yaml:"expires_at"`
+	TeamID            string `yaml:"team_id"`
+	SigningIdentifier string `yaml:"signing_identifier"`
+	CDHash            string `yaml:"code_cdhash"`
+	BinaryVersion     string `yaml:"binary_version"`
 }
 
 // PrivacyClassConfig is the default-off SPEC-049 coordinator gate.
@@ -4497,8 +4496,6 @@ func (c Config) validatePrivacyClass() error {
 			return fmt.Errorf("privacy_class.provider_se_public_keys.%s must be a P-256 point", providerID)
 		}
 	}
-	live := 0
-	now := time.Now()
 	for i, identity := range pc.ApprovedCodeIdentities {
 		field := fmt.Sprintf("privacy_class.approved_code_identities[%d]", i)
 		if !privacyTeamID(identity.TeamID) {
@@ -4512,9 +4509,6 @@ func (c Config) validatePrivacyClass() error {
 		}
 		if identity.BinaryVersion != "" && !privacyVisibleASCII(identity.BinaryVersion, 128) {
 			return fmt.Errorf("%s.binary_version must be visible ASCII", field)
-		}
-		if identity.ExpiresAt.IsZero() || identity.ExpiresAt.After(now) {
-			live++
 		}
 	}
 	seenDenied := make(map[string]struct{}, len(pc.DeniedCodeCDHashes))
@@ -4545,8 +4539,8 @@ func (c Config) validatePrivacyClass() error {
 	if !c.RelayBlind.Enabled {
 		return fmt.Errorf("privacy_class.enabled requires relay_blind.enabled")
 	}
-	if live == 0 && !release.Configured() {
-		return fmt.Errorf("privacy_class.enabled requires release_code_identities or an unexpired approved_code_identities entry")
+	if len(pc.ApprovedCodeIdentities) == 0 && !release.Configured() {
+		return fmt.Errorf("privacy_class.enabled requires release_code_identities or an approved_code_identities entry")
 	}
 	if pc.Directory.SigningKeyPath == "" {
 		return fmt.Errorf("privacy_class.directory.signing_key_path must be set when enabled")

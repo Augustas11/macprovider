@@ -784,7 +784,7 @@ func (a *PrivacyAuthority) approve(teamID, signingID, cdhash, binary string, req
 			continue
 		}
 		configured = true
-		if (identity.ExpiresAt.IsZero() || identity.ExpiresAt.After(now)) && (identity.BinaryVersion == "" || identity.BinaryVersion == binary) {
+		if identity.BinaryVersion == "" || identity.BinaryVersion == binary {
 			return approvalApproved
 		}
 	}

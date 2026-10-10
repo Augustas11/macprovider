@@ -17,7 +17,6 @@ release signing public key and prints ready-to-paste SPEC-049
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import hashlib
 import json
 import os
@@ -47,7 +46,6 @@ SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
-RFC3339 = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$")
 CODESIGN_KEYS = ("CDHash", "TeamIdentifier", "Identifier")
 MAX_MEMBER_BYTES = 1024 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
@@ -265,23 +263,7 @@ def derive(args: argparse.Namespace) -> dict:
     return validate_identity(identity)
 
 
-def parse_expiry(value: str | None) -> str | None:
-    # No expiry unless the operator asks for one (AGENTS.md rule 10).
-    if value is None:
-        return None
-    if not RFC3339.fullmatch(value):
-        fail("--expires-at must be an RFC3339 timestamp")
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        fail("--expires-at must be an RFC3339 timestamp")
-    if parsed <= dt.datetime.now(dt.timezone.utc):
-        fail("--expires-at must be in the future")
-    return value
-
-
 def emit_approved_identity(args: argparse.Namespace) -> str:
-    expires_at = parse_expiry(args.expires_at)
     metadata_path = args.pearl_release_json
     if metadata_path is None or not metadata_path.is_file():
         fail("--pearl-release-json must be an existing file")
@@ -327,8 +309,6 @@ def emit_approved_identity(args: argparse.Namespace) -> str:
             f"  code_cdhash: {row['code_cdhash']}",
             f"  binary_version: \"{identity['binary_version']}\"",
         ]
-        if expires_at is not None:
-            lines.append(f"  expires_at: \"{expires_at}\"")
     return "\n".join(lines) + "\n"
 
 
@@ -345,7 +325,6 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--signature", type=pathlib.Path, help="default: <pearl-release.json>.sig")
     root.add_argument("--public-key", type=pathlib.Path, default=DEFAULT_PUBLIC_KEY)
     root.add_argument("--openssl", default="openssl")
-    root.add_argument("--expires-at", help="optional RFC3339 expiry; omitted, the entry has none")
     return root
 
 
