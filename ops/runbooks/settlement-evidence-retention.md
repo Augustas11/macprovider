@@ -56,7 +56,7 @@ one of these is true:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Arms the nightly 03:00 UTC run and `POST .../run`. `false` is the kill switch. Dry runs work either way. |
-| `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Empty means `retention-archive/` next to `storage.db_path` (for a database at `/var/lib/macprovider/coordinator.db`: `/var/lib/macprovider/retention-archive/`). Created with mode `0700` on first use. |
+| `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Empty means `retention-archive/` in the directory of the coordinator database file (for a database at `/var/lib/macprovider/coordinator.db`: `/var/lib/macprovider/retention-archive/`). Created with mode `0700` on first use. |
 | `archive_min_free_bytes` | `21474836480` (20 GiB) | A run that would write a new archive is refused (`refused_archive_disk_low`) while the archive filesystem has less free space. `0` disables this bound. |
 | `archive_min_free_percent` | `10` | Same, as a percentage of the archive filesystem. `0` disables this bound. |
 | `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
@@ -153,9 +153,11 @@ persisted cursor and writes nothing.
    `deleted_requests`, `delete_batches`, `tables.<table>.deleted_rows`,
    `archive_file`, `archive_sha256`, and `archive_bytes` set;
    `archive_free_bytes` and `archive_disk_bytes` show the archive
-   filesystem at the start of the run. The coordinator logs the same fields
-   in its `settlement_evidence_retention` event. Other statuses:
-   - `refused_archive_disk_low` (logged as a warning): the archive
+   filesystem at the start of the run. Each nightly run logs a
+   `settlement evidence retention: level=... status=... archive_bytes=...`
+   line with these fields, next to the `settlement_evidence_retention`
+   event. Other statuses:
+   - `refused_archive_disk_low` (logged with `level=warn`): the archive
      filesystem is below `archive_min_free_bytes` or
      `archive_min_free_percent`. Nothing is exported or deleted. Free space
      or move `archive_dir`.
