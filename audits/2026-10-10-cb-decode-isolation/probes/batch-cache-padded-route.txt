@@ -1,0 +1,27 @@
+decode-isolation padded single call differs from lone (26):
+  decode 16/2x256 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 16/2x256 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00048828125
+  prefill 16/2x256 histories [3000, 3968, 2100] row 0 (3000 keys) max |diff| 0.00024414062
+  prefill 16/2x256 histories [3000, 3968, 2100] row 2 (2100 keys) max |diff| 7.6293945e-06
+  prefill 16/2x256 histories [3900, 4100] row 0 (3900 keys) max |diff| 0.00048828125
+  prefill 16/2x256 histories [7000, 8100] row 0 (7000 keys) max |diff| 1.9073486e-06
+  decode 24/4x256 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.001953125
+  decode 24/4x256 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 24/4x256 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00048828125
+  prefill 24/4x256 histories [3000, 3968, 2100] row 0 (3000 keys) max |diff| 3.0517578e-05
+  prefill 24/4x256 histories [3000, 3968, 2100] row 2 (2100 keys) max |diff| 6.1035156e-05
+  prefill 24/4x256 histories [3900, 4100] row 0 (3900 keys) max |diff| 0.00048828125
+  prefill 24/4x256 histories [7000, 8100] row 0 (7000 keys) max |diff| 0.00012207031
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 0 (600 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 1 (901 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [600, 901, 1501, 3000, 9000] row 4 (9000 keys) max |diff| 0.00024414062
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 0 (1022 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 1 (1023 keys) max |diff| 0.0009765625
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 2 (4095 keys) max |diff| 0.00048828125
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 3 (16383 keys) max |diff| 0.00024414062
+  decode 16/2x128 histories [1022, 1023, 4095, 16383, 16400] row 4 (16400 keys) max |diff| 0.00024414062

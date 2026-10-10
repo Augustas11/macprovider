@@ -1,0 +1,21 @@
+	 Executed 1 test, with 0 failures (0 unexpected) in 31.424 (31.424) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 31.424 (31.424) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 31.424 (31.425) seconds
+decode-isolation row=0 keys=600 step=0 logits_bitwise=true max_abs_diff=0.0 lone_token=18913 batched_token=18913
+decode-isolation row=0 keys=600 step=1 logits_bitwise=true max_abs_diff=0.0 lone_token=220 batched_token=220
+decode-isolation row=0 keys=600 step=2 logits_bitwise=true max_abs_diff=0.0 lone_token=16 batched_token=16
+decode-isolation row=0 keys=600 step=3 logits_bitwise=true max_abs_diff=0.0 lone_token=15 batched_token=15
+decode-isolation row=1 keys=901 step=0 logits_bitwise=true max_abs_diff=0.0 lone_token=13 batched_token=13
+decode-isolation row=1 keys=901 step=1 logits_bitwise=true max_abs_diff=0.0 lone_token=198 batched_token=198
+decode-isolation row=1 keys=901 step=2 logits_bitwise=true max_abs_diff=0.0 lone_token=248046 batched_token=248046
+decode-isolation row=1 keys=901 step=3 logits_bitwise=true max_abs_diff=0.0 lone_token=198 batched_token=198
+decode-isolation row=2 keys=1501 step=0 logits_bitwise=true max_abs_diff=0.0 lone_token=248046 batched_token=248046
+decode-isolation row=2 keys=1501 step=1 logits_bitwise=true max_abs_diff=0.0 lone_token=198 batched_token=198
+decode-isolation row=2 keys=1501 step=2 logits_bitwise=true max_abs_diff=0.0 lone_token=248045 batched_token=248045
+decode-isolation row=2 keys=1501 step=3 logits_bitwise=true max_abs_diff=0.0 lone_token=74455 batched_token=74455
+decode-isolation row=3 keys=3000 step=0 logits_bitwise=true max_abs_diff=0.0 lone_token=1513 batched_token=1513
+decode-isolation row=3 keys=3000 step=1 logits_bitwise=true max_abs_diff=0.0 lone_token=248046 batched_token=248046
+decode-isolation row=3 keys=3000 step=2 logits_bitwise=true max_abs_diff=0.0 lone_token=198 batched_token=198
+decode-isolation row=3 keys=3000 step=3 logits_bitwise=true max_abs_diff=0.0 lone_token=248045 batched_token=248045
+decode-isolation row=4 keys=9000 step=0 logits_bitwise=true max_abs_diff=0.0 lone_token=16 batched_token=16
+decode-isolation row=4 keys=9000 step=1 logits_bitwise=true max_abs_diff=0.0 lone_token=15 batched_token=15
