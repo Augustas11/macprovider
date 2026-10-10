@@ -1484,15 +1484,14 @@ SELECT lrc.*
    )
    AND (
        COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
-       -- SPEC-022 R-15.6: a settled credit whose evidence retention archived
-       -- was payable when archived and stays payable.
-       OR (
-           lrc.settled = 1
-           AND EXISTS (
-               SELECT 1
-                 FROM settlement_evidence_archived_credits archived
-                WHERE archived.request_credit_id = lrc.id
-           )
+       -- SPEC-022 R-15.6: a credit whose evidence retention archived was
+       -- payable when archived and stays payable. Its archived evidence is
+       -- immutable, so, as before archival, payability does not depend on
+       -- the settled stamp (a voided payout keeps it payable for re-settle).
+       OR EXISTS (
+           SELECT 1
+             FROM settlement_evidence_archived_credits archived
+            WHERE archived.request_credit_id = lrc.id
        )
        OR (
            lrc.settlement_policy_mode = 'enforce'

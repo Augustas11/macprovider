@@ -255,6 +255,13 @@ func (r *Runner) countVerifiedReceipts(ctx context.Context, providerID string) (
 	return count, err
 }
 
+// CountVerifiedReceipts is the E1 verified-receipt count of providerID read
+// from the billing database: closed, valid, verified verdicts still hot plus
+// those SPEC-022 R-15 retention archived.
+func CountVerifiedReceipts(ctx context.Context, billingDB *sql.DB, providerID string) (int, error) {
+	return (&Runner{payoutReader: billingDB}).countVerifiedReceipts(ctx, providerID)
+}
+
 func indexExists(ctx context.Context, db *sql.DB, name string) bool {
 	var found string
 	err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&found)

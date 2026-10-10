@@ -10,10 +10,12 @@ package billing
 //
 // Correctness does not depend on knowing which code paths write billing rows:
 //
-//   - Every input of the view and of the endpoint's figures lives in five
+//   - Every input of the view and of the endpoint's figures lives in six
 //     tables (ledger_request_credits, ledger_quarantine_resolutions,
 //     settlement_route_snapshots, settlement_receipt_verdicts,
-//     settlement_attempt_outputs). Triggers on all five bump the generation
+//     settlement_attempt_outputs, and the SPEC-022 R-15.6 retention
+//     tombstones settlement_evidence_archived_credits). Triggers on all six
+//     bump the generation
 //     of every (provider, hour) bucket a write can affect, inside the
 //     writer's own transaction: AFTER INSERT/UPDATE/DELETE for the written
 //     row, and BEFORE INSERT/UPDATE for any existing row a REPLACE conflict
@@ -21,8 +23,9 @@ package billing
 //     recursive_triggers is on).
 //   - A bucket is cached for the (generation, epoch) it was computed from.
 //     The recompute reads both and the view in one read snapshot and commits
-//     only if neither moved. Rows are never deleted, so a generation only
-//     grows within an epoch, and a reset only grows the epoch: no ABA.
+//     only if neither moved. Buckets are never deleted (settled-evidence
+//     retention deletes input rows, which bumps generations like any other
+//     write), so a generation only grows within an epoch, and a reset only grows the epoch: no ABA.
 //   - The only input that changes without a write is time: a force credit
 //     becomes payable when force_credit_matures_at_utc passes. Each bucket
 //     stores the earliest future maturity of its rows (read before the view)
@@ -199,6 +202,13 @@ BEGIN
     ` + earningsMarkSQL("ledger_request_credits c", lrcConflict) + `
 END`},
 	}
+	// SPEC-022 R-15.6 retention tombstones keep an archived credit payable
+	// after its evidence rows leave; the table is append-only (its own
+	// triggers abort UPDATE and DELETE), so an insert is its only write.
+	out = append(out, earningsRollupTrigger{"trg_per_seac_insert", `CREATE TRIGGER trg_per_seac_insert AFTER INSERT ON settlement_evidence_archived_credits
+BEGIN
+    ` + earningsMarkSQL("ledger_request_credits c", "c.id = NEW.request_credit_id") + `
+END`})
 	for _, t := range []struct{ short, table string }{
 		{"lqr", "ledger_quarantine_resolutions"},
 		{"srs", "settlement_route_snapshots"},
