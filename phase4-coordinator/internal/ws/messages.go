@@ -97,6 +97,11 @@ type HelloAck struct {
 	CompatibilityPolicy           string `json:"compatibility_policy,omitempty"`
 	AcceptedCompatibilitySetID    string `json:"accepted_compatibility_set_id,omitempty"`
 	RecommendedCompatibilitySetID string `json:"recommended_compatibility_set_id,omitempty"`
+	// CompatibilitySetRevoked is true only when AcceptedCompatibilitySetID is
+	// exactly revoked (an update-only session, SPEC-002-R004). It is the one
+	// signal that lets the provider move down to the recommendation
+	// (SPEC-020-R007). Omitted otherwise, so older providers see no change.
+	CompatibilitySetRevoked bool `json:"compatibility_set_revoked,omitempty"`
 }
 
 type AuthRequest struct {
@@ -218,6 +223,8 @@ type AuthResponse struct {
 	CompatibilityPolicy                 string `json:"compatibility_policy,omitempty"`
 	AcceptedCompatibilitySetID          string `json:"accepted_compatibility_set_id,omitempty"`
 	RecommendedCompatibilitySetID       string `json:"recommended_compatibility_set_id,omitempty"`
+	// See HelloAck.CompatibilitySetRevoked.
+	CompatibilitySetRevoked bool `json:"compatibility_set_revoked,omitempty"`
 }
 
 type OwnershipEvent struct {

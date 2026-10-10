@@ -1,6 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.12 (2026-10-10, provider release admission policy)
+**Version:** 1.6.13 (2026-10-10, revoked-release rollback signal)
+
+**Change log v1.6.13 (2026-10-10, issue #1880, admission #1914):** SPEC-002-R004
+adds `compatibility_set_revoked` to the configured `hello_ack` and accepted
+`auth_response` for an exactly revoked set, and states that the recommendation
+may be older than a revoked release. Together they are the operator's rollback
+lever (SPEC-020-R007). Omitted for every other session, so older providers see
+no wire change.
 
 **Change log v1.6.12 (2026-10-10, issue #1914):** Adds SPEC-002-R004:
 provider release admission by target repository with exact revocations
@@ -5183,6 +5190,19 @@ Every admitted session MUST receive the recommended compatibility set
 (`target_id`) and the recommended binary version (`latest_binary_version`) so
 the provider's updater moves it forward.
 
+Under a configured policy, the acknowledgement MUST carry
+`compatibility_set_revoked: true` exactly when the session's
+`accepted_compatibility_set_id` is in `revoked_ids`, judged against the same
+policy snapshot that supplies `recommended_compatibility_set_id` (the
+recommended binary version, `latest_binary_version`, is not reloadable and
+comes from the running config); it MUST be
+omitted otherwise, including for a release that is update-only only because it
+is below `required_binary_version`. The recommendation is not required to be
+monotonic: `target_id` and `latest_binary_version` MAY name a release older
+than a revoked one. Recommending the previous good release and revoking the bad
+release V in one edit is the rollback lever: providers on V then move down to
+the recommendation (SPEC-020-R007). `target_id` itself MUST never be revoked.
+
 The only buyer-routing block is `revoked_ids`: canonical, exact identities from
 the target repository, never the target itself. A revoked release MUST still be
 admitted, as an update-only session that is never buyer-routable and still
@@ -5208,7 +5228,13 @@ for admission and reported as deprecated at startup and reload. An entirely
 unconfigured policy retains existing local/lab behavior.
 
 `/healthz` MUST expose the applied policy for release tooling: mode
-`repository`, `target_id` and `revoked_ids`. It remains public and reports
+`repository`, `target_id` and `revoked_ids`, plus
+`compatibility_policy_revoked_signal: true` on a runtime that sends
+`compatibility_set_revoked`. Rollback tooling MUST require that field, and a
+live policy equal to the applied configuration, both before it recommends an
+older release and revokes the current one and before it reports the rollback
+complete, because on a runtime without it the revoked build would be fenced
+but never moved down. It remains public and reports
 policy metadata, never credentials or proof of binary authenticity. Release
 tooling MUST NOT request a per-release Pearl admission edit. It MUST prove
 admission against the running coordinator's policy: the `/healthz` policy MUST

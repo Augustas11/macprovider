@@ -112,9 +112,27 @@ struct AutoUpdateEvent: Sendable {
         self.failureClass = failureClass
         self.inflightRequests = inflightRequests
         self.recommendedBinaryVersionSHA256 = recommendedBinaryVersionSHA256
-        self.extraMetadata = extraMetadata.mapValues(Self.redact)
+        var metadata = extraMetadata
+        if metadata["update_direction"] == nil,
+           Self.isRevokedBuildDowngradeTransaction(phase: phase, currentVersion: currentVersion, targetVersion: targetVersion) {
+            metadata["update_direction"] = AutoUpdater.downgradeFromRevokedReason
+        }
+        self.extraMetadata = metadata.mapValues(Self.redact)
         self.attemptHistory = attemptHistory.map(Self.redact)
         self.releaseURL = releaseURL.flatMap(Self.redactedURL)
+    }
+
+    /// SPEC-020-R007: from the drain on, a transaction whose target is older
+    /// than the running build exists only as a revoked-build downgrade (R-2.1
+    /// refuses every other downgrade before it starts), so its events, from
+    /// whichever producer, carry the direction.
+    static func isRevokedBuildDowngradeTransaction(phase: AutoUpdatePhase, currentVersion: String, targetVersion: String) -> Bool {
+        let transactionPhases: Set<AutoUpdatePhase> = [.drain, .backup, .swap, .restart, .postStart, .rollback]
+        guard transactionPhases.contains(phase),
+              let current = try? AutoUpdateRecommendation.validate(currentVersion).normalized,
+              let target = try? AutoUpdateRecommendation.validate(targetVersion).normalized
+        else { return false }
+        return SelfUpdate.compareSemver(current, target) == .orderedDescending
     }
 
     func wireObject() -> [String: Any] {

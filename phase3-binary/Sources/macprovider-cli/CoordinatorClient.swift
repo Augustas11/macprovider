@@ -590,6 +590,15 @@ actor CoordinatorClient {
     private var testSignedRecoveryInvocationCount = 0
     private var testLastSignedRecoveryWasAcceptedRecovery: Bool?
     private var recommendedCompatibilitySetID: String?
+    /// SPEC-020-R007: set only for an accepted session whose ack revoked this
+    /// exact build; cleared with the recommendation on every session change.
+    private var coordinatorRevocationNotice: CoordinatorRevocationNotice?
+    /// SPEC-020-R007: retries the recommendation of a held revoked session once
+    /// its per-target cooldown expires; cancelled on every session change.
+    private var revokedSessionRetryTask: Task<Void, Never>?
+    /// Bumped by every connection teardown; a stale restore compares it so it
+    /// never tears down a newer connection's state.
+    private var connectionEpoch: UInt64 = 0
     private var webSocket: ProviderWebSocketTask?
     private var coordinatorSessionAccepted = false
     private var runTask: Task<Void, Never>?
@@ -1147,6 +1156,9 @@ actor CoordinatorClient {
         autoupdateDemotionReason = "coordinator_disconnected"
         autoupdateDisabledForSessionReason = nil
         recommendedCompatibilitySetID = nil
+        coordinatorRevocationNotice = nil
+        revokedSessionRetryTask?.cancel()
+        revokedSessionRetryTask = nil
         currentCoordinatorRecommendation = nil
         coordinatorRecommendationGeneration &+= 1
         try? autoupdateMarkerStore.clearCompatibilityAdmission()
@@ -2205,6 +2217,7 @@ actor CoordinatorClient {
     }
 
     private func restoreReceiptRotationSession(on socket: ProviderWebSocketTask) async throws {
+        let restoreEpoch = connectionEpoch
         do {
             let authAttempt = Tier2AuthAttempt()
             let initialMessage = trustedPoolCapableInitialMessage(await authInitialMessage(attempt: authAttempt))
@@ -2232,7 +2245,10 @@ actor CoordinatorClient {
                 webSocket = nil
             }
             socket.cancel(with: .goingAway, reason: nil)
-            await cleanupConnection()
+            // A restore that timed out was already cleaned up, and a newer
+            // connection may own the session state now: clean up only when no
+            // teardown happened since this restore began.
+            await cleanupConnection(ifEpoch: restoreEpoch)
             throw error
         }
     }
@@ -2533,7 +2549,14 @@ actor CoordinatorClient {
         }
     }
 
+    /// `cleanupConnection` only if no teardown happened since `epoch` was read.
+    private func cleanupConnection(ifEpoch epoch: UInt64) async {
+        guard connectionEpoch == epoch else { return }
+        await cleanupConnection()
+    }
+
     private func cleanupConnection() async {
+        connectionEpoch &+= 1
         heartbeatTask?.cancel()
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
@@ -2564,6 +2587,9 @@ actor CoordinatorClient {
         autoupdateAssignedProviderTokenAdopted = false
         autoupdateDemotionReason = "coordinator_disconnected"
         recommendedCompatibilitySetID = nil
+        coordinatorRevocationNotice = nil
+        revokedSessionRetryTask?.cancel()
+        revokedSessionRetryTask = nil
         currentCoordinatorRecommendation = nil
         coordinatorRecommendationGeneration &+= 1
         try? autoupdateMarkerStore.clearCompatibilityAdmission()
@@ -3737,6 +3763,22 @@ actor CoordinatorClient {
         recommendedCompatibilitySetID
     }
 
+    func coordinatorRevocationNoticeForTest() -> CoordinatorRevocationNotice? {
+        coordinatorRevocationNotice
+    }
+
+    func connectionEpochForTest() -> UInt64 {
+        connectionEpoch
+    }
+
+    func cleanupConnectionIfEpochForTest(_ epoch: UInt64) async {
+        await cleanupConnection(ifEpoch: epoch)
+    }
+
+    func revokedSessionRetryScheduledForTest() -> Bool {
+        revokedSessionRetryTask != nil
+    }
+
     func mutateRecommendedCompatibilitySetIDForTest(_ compatibilitySetID: String?) {
         recommendedCompatibilitySetID = compatibilitySetID
         coordinatorRecommendationGeneration &+= 1
@@ -4211,9 +4253,14 @@ actor CoordinatorClient {
         }
     }
 
+    /// SPEC-002-R004 / SPEC-020-R007: `compatibility_set_revoked` is true only
+    /// when the coordinator admitted this exact set as an exact revocation. Absent
+    /// (an older coordinator) means not revoked. It is bound to the accepted set,
+    /// which must equal the set this provider reported, so it can only ever speak
+    /// about the running build.
     private func validateCompatibilitySetAcceptance(
         _ payload: [String: Any]
-    ) throws -> (accepted: String, recommended: String)? {
+    ) throws -> (accepted: String, recommended: String, revoked: Bool)? {
         guard let compatibilitySetID else {
             return nil
         }
@@ -4231,10 +4278,24 @@ actor CoordinatorClient {
                     "coordinator compatibility-set acknowledgement did not match installed signed set"
                 )
             }
-            return (compatibilitySetID, recommended)
+            let revoked: Bool
+            switch payload["compatibility_set_revoked"] {
+            case nil:
+                revoked = false
+            // JSONSerialization yields NSNumber for both booleans and numbers;
+            // only a JSON boolean (CFBoolean) is accepted, never 0/1.
+            case let flag as NSNumber where CFGetTypeID(flag) == CFBooleanGetTypeID():
+                revoked = flag.boolValue
+            default:
+                throw CoordinatorAuthError.invalidMessage(
+                    "coordinator returned a malformed compatibility_set_revoked"
+                )
+            }
+            return (compatibilitySetID, recommended, revoked)
         case "unconfigured":
             guard payload["accepted_compatibility_set_id"] == nil,
-                  payload["recommended_compatibility_set_id"] == nil else {
+                  payload["recommended_compatibility_set_id"] == nil,
+                  payload["compatibility_set_revoked"] == nil else {
                 throw CoordinatorAuthError.invalidMessage(
                     "unconfigured coordinator returned a contradictory compatibility-set acknowledgement"
                 )
@@ -4248,11 +4309,12 @@ actor CoordinatorClient {
     }
 
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
-        let compatibilityAdmission: (accepted: String, recommended: String)?
+        let compatibilityAdmission: (accepted: String, recommended: String, revoked: Bool)?
         do {
             compatibilityAdmission = try validateCompatibilitySetAcceptance(payload)
         } catch {
             recommendedCompatibilitySetID = nil
+            coordinatorRevocationNotice = nil
             try? autoupdateMarkerStore.clearCompatibilityAdmission()
             throw error
         }
@@ -4289,6 +4351,9 @@ actor CoordinatorClient {
         }
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         let isV2 = payload["type"] as? String == "auth_response" && payload["status"] as? String == "accepted"
+        // A cancelled (timed-out) restore must not publish a stale session's
+        // admission, recommendation or revocation after cleanup.
+        try Task.checkCancellation()
         autoupdateCoordinatorPayload = payload
         autoupdateCoordinatorPayloadIsV2 = isV2
         autoupdateAssignedProviderTokenAdopted = assignedProviderTokenAdopted
@@ -4304,6 +4369,14 @@ actor CoordinatorClient {
         autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
         autoupdateAttemptedTargets.removeAll()
         recommendedCompatibilitySetID = compatibilityAdmission?.recommended
+        coordinatorRevocationNotice = compatibilityAdmission.flatMap { admission in
+            admission.revoked
+                ? CoordinatorRevocationNotice(
+                    revokedCompatibilitySetID: admission.accepted,
+                    recommendedCompatibilitySetID: admission.recommended
+                )
+                : nil
+        }
         coordinatorRecommendationGeneration &+= 1
         autoupdateDisabledForSessionReason = nil
         do {
@@ -4360,7 +4433,30 @@ actor CoordinatorClient {
             return
         }
         var buyerServingHeldForAdmission = false
-        if lifecycleOperationID != nil {
+        if lifecycleOperationID != nil, coordinatorRevocationNotice != nil {
+            // SPEC-020-R007 / SPEC-002-R004: the coordinator admitted this exact
+            // build as revoked, an update-only session it never routes. The
+            // buyer-serving readiness gate can never confirm it, and dropping the
+            // session would leave the recommendation (the only way back) unrun.
+            // Hold it, non-serving, and let the updater act below. Connect and
+            // auth alone never retire a rollback: a pending marker commits only
+            // through the same proofs as any held session.
+            buyerServingHeldForAdmission = true
+            print("Coordinator session accepted update-only: this build is revoked; following the coordinator recommendation")
+            do {
+                _ = try recordLifecycleTransition(
+                    to: .locallyReadyConnecting,
+                    reasonCode: Self.revokedUpdateOnlyLifecycleReasonCode,
+                    compatibilitySetID: installedCompatibilitySetID()
+                )
+            } catch {
+                // A lifecycle matrix miss must not drop the update-only session.
+            }
+            await finalizeAdmissionBoundaryAfterServingProof(
+                successReason: "revoked_update_only_session_held",
+                servingConfirmed: false
+            )
+        } else if lifecycleOperationID != nil {
             // #1816: a native pool-entry session has no catalog envelope by
             // design, exactly like a loopback one, so it is held the same way
             // instead of flapping on the catalog readiness gate. The
@@ -4452,7 +4548,11 @@ actor CoordinatorClient {
         // A session that connected before any offer (ordinary catalog
         // readiness) still has to enter the hold when an offer later
         // flips buyer_serving to false. The watch is cheap HTTP.
-        startAdmissionPendingReadinessWatch()
+        // A revoked update-only session is never buyer-serving; the watch
+        // would close it as an unrecognized not-serving verdict (SPEC-020-R007).
+        if coordinatorRevocationNotice == nil {
+            startAdmissionPendingReadinessWatch()
+        }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
@@ -4747,7 +4847,7 @@ actor CoordinatorClient {
         {
             guard completedAutoupdate.previousVersion == Self.binaryVersion,
                   previousCompatibilitySetMatchesInstalled(completedAutoupdate),
-                  await waitForCoordinatorServingCapability(),
+                  await restoredPreviousAdmissionProven(completedAutoupdate),
                   await waitForStableRestoredPreviousContinuousBatching(completedAutoupdate)
             else {
                 return .pendingRollback
@@ -4874,16 +4974,56 @@ actor CoordinatorClient {
                 attempt: 1
             ))
         } else if case .restoredPrevious(let completedAutoupdate) = updateBoundary {
+            let restoredRevoked = coordinatorRevocationNotice?.revokedCompatibilitySetID != nil
+                && coordinatorRevocationNotice?.revokedCompatibilitySetID == completedAutoupdate.previousCompatibilitySetID
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: completedAutoupdate.updateID,
                 currentVersion: Self.binaryVersion,
                 targetVersion: completedAutoupdate.targetVersion,
                 phase: .rollback,
                 outcome: .success,
-                reason: "previous_compatibility_set_admitted_and_buyer_serving",
-                attempt: 1
+                reason: restoredRevoked
+                    ? "previous_compatibility_set_restored_update_only"
+                    : "previous_compatibility_set_admitted_and_buyer_serving",
+                attempt: 1,
+                extraMetadata: Self.downgradeDirectionMetadata(target: completedAutoupdate.targetVersion)
             ))
         }
+    }
+
+    /// The restored previous set is admitted again. Ordinarily that means
+    /// coordinator buyer-serving. SPEC-020-R007: when the restored set is the
+    /// exactly revoked build a failed downgrade rolled back to, buyer serving
+    /// can never come; the proof is instead that this live session revokes
+    /// exactly that set and the restored process is stably healthy locally.
+    /// The routing fence stays (the session remains update-only).
+    private func restoredPreviousAdmissionProven(_ marker: AutoUpdatePendingMarker) async -> Bool {
+        if let notice = coordinatorRevocationNotice,
+           let previousID = marker.previousCompatibilitySetID,
+           notice.revokedCompatibilitySetID == previousID {
+            return await waitForStableRestoredPreviousLocalHealth(marker)
+        }
+        return await waitForCoordinatorServingCapability()
+    }
+
+    private func waitForStableRestoredPreviousLocalHealth(_ marker: AutoUpdatePendingMarker) async -> Bool {
+        let expectedInstanceKey = "\(getpid()):\(RouterHandler.serviceInstanceID)"
+        for sample in 0 ..< autoupdateLocalHealthRequiredConsecutiveSamples {
+            guard !Task.isCancelled else { return false }
+            let status = await autoupdateLocalStatusProbe()
+            guard Self.restoredPreviousContinuousBatchingInstanceKey(
+                status,
+                marker: marker,
+                expectedServiceInstanceID: RouterHandler.serviceInstanceID,
+                expectedProcessID: getpid()
+            ) == expectedInstanceKey else {
+                return false
+            }
+            if sample + 1 < autoupdateLocalHealthRequiredConsecutiveSamples {
+                await autoupdateLocalHealthSleep()
+            }
+        }
+        return true
     }
 
     private func localSignedSetRecoveryAllowed(_ marker: AutoUpdatePendingMarker) -> Bool {
@@ -5176,6 +5316,8 @@ actor CoordinatorClient {
     }
 
     static let admissionPendingLifecycleReasonCode = "byom_admission_pending_buyer_serving"
+
+    static let revokedUpdateOnlyLifecycleReasonCode = "compatibility_set_revoked_update_only"
     static let admissionConfirmedLifecycleReasonCode = "coordinator_buyer_serving_confirmed_after_admission"
     static let catalogMaterialMissingLifecycleReasonCode = "catalog_material_missing_buyer_serving"
     static let catalogMaterialConfirmedLifecycleReasonCode = "coordinator_buyer_serving_confirmed_after_catalog_material"
@@ -6170,12 +6312,36 @@ actor CoordinatorClient {
         let capturedCompat = recommendedCompatibilitySetID
         let capturedGeneration = coordinatorRecommendationGeneration
         let outcome = await makeCoordinatorRecommendationUpdater().handleCoordinatorRecommendation(recommended)
-        await applyPrimaryRecommendationOutcome(
-            outcome,
-            normalizedVersion: normalized,
-            capturedCompatibilitySetID: capturedCompat,
-            capturedGeneration: capturedGeneration
-        )
+        // SPEC-020-R007: a recommendation that is not newer is never an R005
+        // stuck signal (R005's signed rail never downgrades); a revoked build's
+        // downgrade is retried by the held-session retry below instead.
+        if SelfUpdate.compareSemver(Self.binaryVersion, normalized) == .orderedAscending {
+            await applyPrimaryRecommendationOutcome(
+                outcome,
+                normalizedVersion: normalized,
+                capturedCompatibilitySetID: capturedCompat,
+                capturedGeneration: capturedGeneration
+            )
+        }
+        if capturedGeneration == coordinatorRecommendationGeneration {
+            await reconcileRevokedSessionAfterUnfinishedAutoupdate()
+            scheduleRevokedSessionRetryIfNeeded(normalizedVersion: normalized, recommended: recommended)
+        }
+    }
+
+    /// SPEC-020-R007: an attempt that returned without restarting may have left
+    /// a held revoked session draining with its heartbeat stopped. Restore the
+    /// local state (the coordinator still never routes the session, it stays
+    /// update-only) and the keepalive, so the session survives to retry and a
+    /// restored build can prove local health.
+    private func reconcileRevokedSessionAfterUnfinishedAutoupdate() async {
+        guard coordinatorRevocationNotice != nil, coordinatorSessionAccepted else { return }
+        if await providerStatus.snapshot().status == .draining {
+            await setReadyUnlessOperatorPaused(reason: "autoupdate_not_completed")
+        }
+        if heartbeatTask == nil {
+            startHeartbeat(intervalSeconds: max(Self.intValue(autoupdateCoordinatorPayload["heartbeat_interval_s"]) ?? 30, 1))
+        }
     }
 
     /// Post-outcome handling shared by the primary coordinator rail. Folds the
@@ -6208,12 +6374,101 @@ actor CoordinatorClient {
         await runSignedRecoveryDiscoveryIfDue()
     }
 
+    /// A coordinator-rail move to an older target only exists under
+    /// SPEC-020-R007, so its events carry the downgrade direction.
+    static func downgradeDirectionMetadata(target: String) -> [String: String] {
+        SelfUpdate.compareSemver(binaryVersion, target) == .orderedDescending
+            ? ["update_direction": AutoUpdater.downgradeFromRevokedReason]
+            : [:]
+    }
+
+    /// SPEC-020-R007 critical section: `body` sees the live snapshot and runs
+    /// on this actor, so no session change can interleave with it.
+    private func withLiveDowngradeAuthorization(
+        _ body: @Sendable (LiveDowngradeAuthorization) throws -> Void
+    ) throws {
+        try body(liveRevocationSnapshot())
+    }
+
+    private func liveRevocationSnapshot() -> LiveDowngradeAuthorization {
+        LiveDowngradeAuthorization(
+            trust: currentAutoupdateTrustState(),
+            notice: coordinatorRevocationNotice,
+            recommendedCompatibilitySetID: recommendedCompatibilitySetID,
+            recommendedBinaryVersion: (autoupdateCoordinatorPayload["recommended_binary_version"] as? String)
+                .flatMap { try? AutoUpdateRecommendation.validate($0).normalized },
+            sessionGeneration: coordinatorRecommendationGeneration
+        )
+    }
+
+    /// SPEC-020-R007: a held revoked session has no buyer traffic and no other
+    /// way back, and `autoupdateAttemptedTargets` allows one attempt per
+    /// session. When an attempt did not end the process, retry the same
+    /// recommendation after its persisted cooldown, while this exact session
+    /// (generation) still holds the same revocation. The updater re-checks
+    /// every gate, so a retry is never weaker than the first attempt.
+    private func scheduleRevokedSessionRetryIfNeeded(normalizedVersion: String, recommended: String) {
+        // Only a recorded failure (a cooldown) is retried; a refusal or a
+        // not-attempted recommendation is not.
+        guard coordinatorRevocationNotice != nil, revokedSessionRetryTask == nil,
+              let until = autoupdateMarkerStore.activeCooldown(target: normalizedVersion)?.until
+        else { return }
+        let generation = coordinatorRecommendationGeneration
+        let notice = coordinatorRevocationNotice
+        let delay = max(until.timeIntervalSinceNow, 1)
+        revokedSessionRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await self.retryRevokedSessionRecommendation(
+                generation: generation,
+                notice: notice,
+                normalizedVersion: normalizedVersion,
+                recommended: recommended
+            )
+        }
+    }
+
+    private func retryRevokedSessionRecommendation(
+        generation: Int,
+        notice: CoordinatorRevocationNotice?,
+        normalizedVersion: String,
+        recommended: String
+    ) async {
+        revokedSessionRetryTask = nil
+        guard coordinatorSessionAccepted,
+              generation == coordinatorRecommendationGeneration,
+              notice != nil,
+              notice == coordinatorRevocationNotice
+        else { return }
+        // An in-process restore (a failure after activation) leaves the
+        // restored transaction awaiting readiness; retire it on the same proof
+        // as at session acceptance before retrying, or the retry would only
+        // meet the pending transaction.
+        await reconcileRevokedSessionAfterUnfinishedAutoupdate()
+        await finalizeAdmissionBoundaryAfterServingProof(
+            successReason: "revoked_update_only_session_held",
+            servingConfirmed: false
+        )
+        // Retry only once no transaction is pending; otherwise it would only
+        // meet `autoupdate_already_pending`. Reconnect recovery still applies.
+        guard coordinatorSessionAccepted,
+              generation == coordinatorRecommendationGeneration,
+              notice == coordinatorRevocationNotice,
+              (try? autoupdateMarkerStore.readPending()) == nil
+        else { return }
+        autoupdateAttemptedTargets.remove(normalizedVersion)
+        await runAutoupdateIfEligible(recommended)
+    }
+
     private func makeCoordinatorRecommendationUpdater() -> AutoUpdater {
         AutoUpdater(
             config: appConfig,
             currentVersion: Self.binaryVersion,
             providerStatus: providerStatus,
             expectedCompatibilitySetID: recommendedCompatibilitySetID,
+            coordinatorRevocation: coordinatorRevocationNotice,
+            liveRevocation: { body in try await self.withLiveDowngradeAuthorization(body) },
+            downgradeSessionGeneration: coordinatorRecommendationGeneration,
             markerStore: autoupdateMarkerStore,
             trustProvider: { await self.currentAutoupdateTrustState() },
             drain: { target in try await self.autoupdateDrain(target: target) },
@@ -6756,7 +7011,8 @@ actor CoordinatorClient {
             outcome: .inProgress,
             reason: "soft_drain_timeout",
             attempt: 1,
-            inflightRequests: snapshot.requestsInFlight
+            inflightRequests: snapshot.requestsInFlight,
+            extraMetadata: Self.downgradeDirectionMetadata(target: target)
         ))
         let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
         if hardDrained {

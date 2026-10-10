@@ -269,6 +269,22 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         ) != nil
     }
 
+    /// Repository and version of a canonical compatibility-set ID, or nil. The
+    /// version must be canonical (no leading zeros, in range), as the coordinator's
+    /// `config.ValidateCompatibilitySetID` requires.
+    static func compatibilitySetIDParts(_ value: String) -> (repository: String, version: String)? {
+        guard isCanonicalCompatibilitySetID(value),
+              let at = value.lastIndex(of: "@"),
+              let colon = value[..<at].lastIndex(of: ":")
+        else { return nil }
+        let repository = String(value[..<colon])
+        let version = String(value[value.index(colon, offsetBy: 2)..<at])
+        guard version.range(of: #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
+              (try? AutoUpdateRecommendation.validate(version).normalized) == version
+        else { return nil }
+        return (repository, version)
+    }
+
     static func loadValidated(
         from payloadDirectory: URL,
         expectedProviderVersion: String? = nil,

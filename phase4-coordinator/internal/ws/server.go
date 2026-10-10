@@ -4240,6 +4240,7 @@ func (s *Server) populateCompatibilityHelloAck(ack *HelloAck, acceptedID string)
 	ack.CompatibilityPolicy = "configured"
 	ack.AcceptedCompatibilitySetID = acceptedID
 	ack.RecommendedCompatibilitySetID = policy.TargetID
+	ack.CompatibilitySetRevoked = policy.IsUpdateOnly(acceptedID)
 }
 
 func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, acceptedID string) {
@@ -4254,6 +4255,7 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 	response.CompatibilityPolicy = "configured"
 	response.AcceptedCompatibilitySetID = acceptedID
 	response.RecommendedCompatibilitySetID = policy.TargetID
+	response.CompatibilitySetRevoked = policy.IsUpdateOnly(acceptedID)
 }
 
 func compatibilityPolicyMode(policy config.CompatibilitySetConfig) string {
@@ -7374,6 +7376,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
 		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id,omitempty"`
 		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+		// CompatibilityPolicyRevokedSignal tells release tooling this runtime
+		// sends compatibility_set_revoked to exactly revoked sessions, so a
+		// rollback (recommend older + revoke) moves them down (SPEC-020-R007).
+		CompatibilityPolicyRevokedSignal bool `json:"compatibility_policy_revoked_signal,omitempty"`
 	}{
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
@@ -7393,6 +7399,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		CompatibilityPolicyMode:       compatibilityPolicyMode,
 		CompatibilityPolicyTargetID:   compatibilityPolicy.TargetID,
 		CompatibilityPolicyRevokedIDs: compatibilityPolicyRevokedIDs,
+		// Repository mode is the only mode that revokes.
+		CompatibilityPolicyRevokedSignal: compatibilityPolicyMode == "repository",
 	}
 	for _, p := range providers {
 		switch p.State {

@@ -1,0 +1,374 @@
+diff --git a/docs/runbooks/provider-cli-release-verification.md b/docs/runbooks/provider-cli-release-verification.md
+index 7cc182e69..b446ffda9 100644
+--- a/docs/runbooks/provider-cli-release-verification.md
++++ b/docs/runbooks/provider-cli-release-verification.md
+@@ -111,7 +111,10 @@ scripts/ops/cli-release.sh status      # rollback: done
+ validated with the running coordinator binary, one restart, then `/healthz`
+ must recommend P, target P's id and list V's id. `CLI_ROLLBACK_TO_ID` must
+ name P's signed release identity: its commit must be the commit of origin tag
+-`v<P>`, or the step refuses. If a run stops after the edit but before the
++`v<P>`, and the whole id must equal `repository:tag@commit` from P's
++`pearl-release.json`, whose `.sig` is verified with
++`ops/pearl-updater/release-signing-public.pem` (the key the train uses for
++candidates), or the step refuses. If a run stops after the edit but before the
+ restart, `status` shows the edit as pending and `next --run` resumes it with
+ one validated restart. The step refuses when P is
+ not strictly older than V, the ids are from different repositories, P is not a
+diff --git a/phase3-binary/Sources/macprovider-cli/AutoUpdater.swift b/phase3-binary/Sources/macprovider-cli/AutoUpdater.swift
+index 2a9e4ca7a..e4cd376a2 100644
+--- a/phase3-binary/Sources/macprovider-cli/AutoUpdater.swift
++++ b/phase3-binary/Sources/macprovider-cli/AutoUpdater.swift
+@@ -94,6 +94,12 @@ struct AutoUpdater: Sendable {
+     /// The live session's revocation notice and recommended set, read again at
+     /// every downgrade phase (SPEC-020-R007). Without it no downgrade proceeds.
+     let liveRevocation: LiveRevocation?
++    #if DEBUG
++    /// Test-only stand-in for release resolution and verified preparation, so
++    /// tests can drive a full swap without a signed release. Compiled out of
++    /// release builds; production always resolves and verifies the release.
++    var preparedReleaseForTest: (@Sendable (_ target: String) async throws -> PreparedSelfUpdate)?
++    #endif
+     /// The coordinator session generation this updater was built for. A
+     /// downgrade proceeds only while the live session is still that one.
+     let downgradeSessionGeneration: Int?
+@@ -376,13 +382,22 @@ struct AutoUpdater: Sendable {
+             mutationLock = heldMutationLock
+             let previousContinuousBatching = try await currentContinuousBatchingPreservationSnapshot()
+             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
+-            let release: GitHubRelease
+-            do {
++            var preparedForTest: PreparedSelfUpdate?
++            #if DEBUG
++            if let preparedReleaseForTest {
+                 try await ensureEligible(phase: .download, downgrade: downgradeAuthorization, target: target)
+-                release = try await update.resolveReleaseByTags(normalizedTarget: target)
+-            } catch UpdateError.releaseNotFound {
+-                await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found", extraMetadata: downgradeMetadata)
+-                return .forwardProgressFailure
++                preparedForTest = try await preparedReleaseForTest(target)
++            }
++            #endif
++            var release: GitHubRelease?
++            if preparedForTest == nil {
++                do {
++                    try await ensureEligible(phase: .download, downgrade: downgradeAuthorization, target: target)
++                    release = try await update.resolveReleaseByTags(normalizedTarget: target)
++                } catch UpdateError.releaseNotFound {
++                    await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found", extraMetadata: downgradeMetadata)
++                    return .forwardProgressFailure
++                }
+             }
+             // The coordinator's recommended compatibility-set target is a precondition
+             // known without downloading the release payload. Check it here — after the
+@@ -405,7 +420,13 @@ struct AutoUpdater: Sendable {
+             }
+             let prepared: PreparedSelfUpdate
+             do {
+-                prepared = try await update.prepareValidatedUpdate(from: release)
++                if let preparedForTest {
++                    prepared = preparedForTest
++                } else if let release {
++                    prepared = try await update.prepareValidatedUpdate(from: release)
++                } else {
++                    throw UpdateError.releaseNotFound
++                }
+             } catch {
+                 let failure = Self.failureClass(for: error)
+                 await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error), extraMetadata: downgradeMetadata)
+diff --git a/phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift b/phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift
+index a4d2ab9d4..0fa55bb6d 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift
+@@ -2268,6 +2268,155 @@ final class AutoUpdateTests: XCTestCase {
+     // precedence check. When it returns .abort at the swap boundary, the payload is
+     // NOT activated (binary unchanged) and the pending marker is unwound — proving
+     // the gate sits AT the swap and aborts the terminal action itself.
++    /// Where the live downgrade authorization is withdrawn in a full
++    /// coordinator-rail downgrade run.
++    private enum R007Withdrawal { case never, duringDrain, afterEviction }
++
++    /// Drives a full SPEC-020-R007 downgrade (1.8.233 -> 1.8.232) through drain,
++    /// swap, eviction and restart, withdrawing the live authorization at the
++    /// given point. Returns the updater outcome, the bytes the restart callback
++    /// saw (nil when no restart ran), and the final live binary bytes.
++    private func runR007Downgrade(withdraw: R007Withdrawal) async throws -> (
++        outcome: AutoUpdater.RecommendationOutcome,
++        restartSaw: [String],
++        binary: String,
++        store: AutoUpdateMarkerStore
++    ) {
++        let fixture = try TempHome()
++        let manifestSigningKey = P256.Signing.PrivateKey()
++        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
++        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url, compatibilityManifestPublicKeyPEM: manifestPublicKey)
++        try store.ensureTrustedRoot()
++        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
++        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
++        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
++        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
++        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
++        let newBinary = payload.appendingPathComponent("macprovider-cli")
++        try Data("revoked-binary".utf8).write(to: binary)
++        try Data("previous-binary".utf8).write(to: newBinary)
++        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
++        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
++        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
++        try writeOwnedReleaseResources(in: payload, prefix: "new")
++        let installed = try CompatibilityManifestFixture(
++            root: binaryDirectory, privateKey: manifestSigningKey,
++            version: "1.8.233", providerCLIVersion: "1.8.233", malibuAppVersion: "1.8.233",
++            commit: "1111111111111111111111111111111111111111", populateResources: false
++        )
++        _ = try CompatibilityManifestFixture(
++            root: payload, privateKey: manifestSigningKey,
++            version: "1.8.232", providerCLIVersion: "1.8.232", malibuAppVersion: "1.8.232",
++            commit: "2222222222222222222222222222222222222222", populateResources: false
++        )
++        let manifest = try CompatibilitySetManifest.loadValidated(
++            from: payload, expectedProviderVersion: "1.8.232", publicKeyPEM: manifestPublicKey
++        )
++        let scratch = fixture.url.appendingPathComponent("prepare-scratch", isDirectory: true)
++        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
++        let prepared = PreparedSelfUpdate(
++            tempDir: scratch, newBinary: newBinary, stagedMalibuApp: nil, signedPolicy: nil,
++            compatibilityManifest: manifest, artifactIndexSHA256: String(repeating: "a", count: 64)
++        )
++        let notice = CoordinatorRevocationNotice(
++            revokedCompatibilitySetID: installed.compatibilitySetID,
++            recommendedCompatibilitySetID: manifest.compatibilitySetID
++        )
++        let live = AutoUpdateLiveFlag()
++        live.value = true
++        let trust = r005PinnedTrust()
++        let restartSaw = LockedStringRecorder()
++        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
++        config.providerID = "provider-test"
++        var updater = AutoUpdater(
++            config: config,
++            currentVersion: "1.8.233",
++            providerStatus: r005Status(),
++            expectedCompatibilitySetID: manifest.compatibilitySetID,
++            coordinatorRevocation: notice,
++            liveRevocation: { body in
++                try body(LiveDowngradeAuthorization(
++                    trust: trust,
++                    notice: live.value ? notice : nil,
++                    recommendedCompatibilitySetID: manifest.compatibilitySetID,
++                    recommendedBinaryVersion: "1.8.232",
++                    sessionGeneration: 5
++                ))
++            },
++            downgradeSessionGeneration: 5,
++            markerStore: store,
++            trustProvider: { trust },
++            drain: { _ in
++                if withdraw == .duringDrain { live.value = false }
++                return true
++            },
++            sendReady: {},
++            restartLaunchd: { restartSaw.append((try? String(contentsOf: binary, encoding: .utf8)) ?? "?") },
++            fenceReloadJobs: {},
++            currentBinaryURL: { binary },
++            rollbackObserverAvailable: { true },
++            launchdProviderAvailable: { true },
++            headlessOperatorManagedTopology: { false },
++            lifecycleLeaseStore: ProviderLifecycleLeaseStore(
++                url: ProviderLifecycleLeaseStore.candidateURL(rootDirectory: fixture.url)
++            ),
++            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() },
++            evictStaleLocalStatusOwner: { _, _ in
++                if withdraw == .afterEviction { live.value = false }
++            }
++        )
++        updater.preparedReleaseForTest = { _ in prepared }
++        let outcome = await updater.handleCoordinatorRecommendation("1.8.232")
++        return (outcome, restartSaw.snapshot(), try String(contentsOf: binary, encoding: .utf8), store)
++    }
++
++    // SPEC-020-R007: authorization withdrawn during the drain aborts before any
++    // backup or activation: the revoked build keeps running, nothing restarts,
++    // and the abort event is emitted.
++    func testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnDuringDrain() async throws {
++        await AutoUpdateEventStore.shared.clear()
++        SessionAutoupdateGate.shared.resetForTest()
++        defer { SessionAutoupdateGate.shared.resetForTest() }
++        let run = try await runR007Downgrade(withdraw: .duringDrain)
++        XCTAssertEqual(run.binary, "revoked-binary", "no activation")
++        XCTAssertEqual(run.restartSaw, [], "no restart")
++        XCTAssertNil(try run.store.readPending())
++        let event = await AutoUpdateEventStore.shared.lastWireObject()
++        XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
++        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
++    }
++
++    // SPEC-020-R007: authorization withdrawn after the pre-restart eviction
++    // refuses the restart into the older release inside the critical section:
++    // the swap is rolled back, the older release never starts (the only
++    // restart is the rollback's, of the restored revoked build), and the abort
++    // event is emitted.
++    func testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnAfterEviction() async throws {
++        await AutoUpdateEventStore.shared.clear()
++        SessionAutoupdateGate.shared.resetForTest()
++        defer { SessionAutoupdateGate.shared.resetForTest() }
++        let run = try await runR007Downgrade(withdraw: .afterEviction)
++        XCTAssertEqual(run.binary, "revoked-binary", "the swap is rolled back")
++        XCTAssertEqual(run.restartSaw, ["revoked-binary"], "only the rollback's restart of the restored revoked build ran; the older release never started")
++        let event = await AutoUpdateEventStore.shared.lastWireObject()
++        XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
++        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
++    }
++
++    // Control for the two withdrawal tests: with the authorization live the
++    // same run activates the older release and restarts into it.
++    func testRevokedBuildDowngradeHarnessCompletesWhileAuthorized() async throws {
++        await AutoUpdateEventStore.shared.clear()
++        SessionAutoupdateGate.shared.resetForTest()
++        defer { SessionAutoupdateGate.shared.resetForTest() }
++        let run = try await runR007Downgrade(withdraw: .never)
++        XCTAssertEqual(run.binary, "previous-binary")
++        XCTAssertEqual(run.restartSaw, ["previous-binary"])
++        let event = await AutoUpdateEventStore.shared.lastWireObject()
++        XCTAssertEqual(event?["reason"] as? String, "launchctl_restart_invoked")
++        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
++    }
++
+     // The signed-policy lock serializes a policy persist (for example from a
+     // concurrent manual `update --check` in another process) behind a
+     // downgrade's final policy check and mutation.
+diff --git a/scripts/ops/cli-release.sh b/scripts/ops/cli-release.sh
+index 50820a094..35448709a 100755
+--- a/scripts/ops/cli-release.sh
++++ b/scripts/ops/cli-release.sh
+@@ -389,12 +389,41 @@ print(to.group(2), revoke.group(2))
+ PY
+ }
+ 
++# signed_release_compat_id VER: the compatibility_set_id
++# (repository:tag@commit) that release v<VER>'s signed pearl-release.json
++# binds, after verifying its signature with the release signing key the train
++# uses for candidates; exit 1 when the metadata is missing, unsigned, tampered
++# or does not describe v<VER>.
++signed_release_compat_id() {
++  local ver="$1" dir
++  is_semver "$ver" || return 1
++  dir="$(mktemp -d "$OPS_TMP_DIR/signed-release.XXXXXX")"
++  gh release download "v$ver" -R "$(gh_repo)" -p pearl-release.json -p pearl-release.json.sig -D "$dir" \
++    >/dev/null 2>&1 || return 1
++  openssl dgst -sha256 -verify "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
++    -signature "$dir/pearl-release.json.sig" "$dir/pearl-release.json" >/dev/null 2>&1 || return 1
++  python3 - "$dir/pearl-release.json" "$ver" <<'PY'
++import json, re, sys
++try:
++    d = json.load(open(sys.argv[1]))
++except (OSError, ValueError):
++    sys.exit(1)
++ver = sys.argv[2]
++repo, tag, commit = d.get("repository"), d.get("tag"), d.get("commit")
++if not (isinstance(repo, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}", repo)
++        and tag == "v" + ver and d.get("release_version") == ver
++        and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)):
++    sys.exit(1)
++print("%s:%s@%s" % (repo, tag, commit))
++PY
++}
++
+ # decide_rollback L: the revoked-build rollback (SPEC-020-R007, runbook
+ # "Revoked-build rollback"). One mutate step: recommend the previous good
+ # release and exactly revoke the bad one in one Pearl edit and restart.
+ # Macs on the revoked build then auto-update down to the recommendation.
+ decide_rollback() {
+-  local L="$1" ids to_ver revoke_ver live_target live_revoked pub signal tag_commit
++  local L="$1" ids to_ver revoke_ver live_target live_revoked pub signal tag_commit signed_id
+   NEXT_RUNBOOK="$VERIFY_DOC#revoked-build-rollback"
+   if ! ids="$(rollback_ids_check "${CLI_ROLLBACK_TO_ID:-}" "${CLI_ROLLBACK_REVOKE_ID:-}" 2>&1)"; then
+     step rollback blocked "$ids"
+@@ -428,6 +457,16 @@ decide_rollback() {
+       "CLI_ROLLBACK_TO_ID does not name release v$to_ver: origin tag v$to_ver is at ${tag_commit:-nothing}, the id names ${CLI_ROLLBACK_TO_ID##*@}"
+     return
+   fi
++  # ...and exactly the full compatibility_set_id its signed release metadata
++  # binds (signature verified with the train's release signing key).
++  signed_id="$(signed_release_compat_id "$to_ver" || true)"
++  fact rollback_to_signed_id "${signed_id:-unverified}"
++  if [ "$signed_id" != "$CLI_ROLLBACK_TO_ID" ]; then
++    step rollback blocked "signed release metadata of v$to_ver names ${signed_id:-nothing verifiable}"
++    set_next rollback blocked "Roll back the fleet to v$to_ver" "" \
++      "CLI_ROLLBACK_TO_ID is not the signed identity of v$to_ver: its verified pearl-release.json names ${signed_id:-nothing (missing, unsigned or tampered)}"
++    return
++  fi
+   if [ "$signal" != true ]; then
+     step rollback blocked "the running coordinator does not report compatibility_policy_revoked_signal"
+     set_next rollback blocked "Ship the coordinator runtime that signals revocations before rolling back" \
+diff --git a/scripts/ops/test-entrypoints.sh b/scripts/ops/test-entrypoints.sh
+index 2c0e23d6c..5e328a98f 100755
+--- a/scripts/ops/test-entrypoints.sh
++++ b/scripts/ops/test-entrypoints.sh
+@@ -698,6 +698,15 @@ if [ -z "$PREV_COMMIT" ]; then
+   PREV_COMMIT="$B"
+ fi
+ PREV="test/repo:v$LIVE@$PREV_COMMIT"
++# P's signed release metadata (pearl-release.json + .sig, the train's release key).
++prev_release() {  # prev_release COMMIT [TAG]: stage v$LIVE's signed metadata naming COMMIT
++  mkdir -p "$tmp/gh/downloads/v$LIVE"
++  printf '{"schema_version":1,"repository":"test/repo","tag":"%s","commit":"%s","release_version":"%s","provider_advertised_version":"%s"}\n' \
++    "${2:-v$LIVE}" "$1" "$LIVE" "$LIVE" > "$tmp/gh/downloads/v$LIVE/pearl-release.json"
++  openssl dgst -sha256 -sign "$tmp/keys/release.key" -out "$tmp/gh/downloads/v$LIVE/pearl-release.json.sig" \
++    "$tmp/gh/downloads/v$LIVE/pearl-release.json"
++}
++prev_release "$PREV_COMMIT"
+ rollback_live
+ fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$LIVE"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-08T00:00:00Z"}}}'
+ export CLI_ROLLBACK_TO_ID="$PREV" CLI_ROLLBACK_REVOKE_ID="$COMPAT"
+@@ -718,6 +727,20 @@ expect_next rollback:blocked
+ CLI_ROLLBACK_TO_ID="test/repo:v$LIVE@$(printf 'e%.0s' $(seq 40))" run_rc 0 "rollback id that is not the release tag commit" scripts/ops/cli-release.sh status
+ expect_next rollback:blocked
+ case "$(next_field reason)" in *"does not name release"*) ok ;; *) bad "wrong-commit rollback reason: $(next_field reason)" ;; esac
++# The full id must equal what P's verified signed release metadata binds.
++prev_release "$(printf 'f%.0s' $(seq 40))"
++run_rc 0 "rollback id that differs from the signed release identity" scripts/ops/cli-release.sh status
++expect_next rollback:blocked
++case "$(next_field reason)" in *"is not the signed identity"*"test/repo:v$LIVE@ffff"*) ok ;; *) bad "signed-identity mismatch reason: $(next_field reason)" ;; esac
++prev_release "$PREV_COMMIT"
++printf '{"tampered":true}\n' >> "$tmp/gh/downloads/v$LIVE/pearl-release.json"
++run_rc 0 "rollback with tampered signed release metadata" scripts/ops/cli-release.sh status
++expect_next rollback:blocked
++case "$(next_field reason)" in *"nothing (missing, unsigned or tampered)"*) ok ;; *) bad "tampered metadata reason: $(next_field reason)" ;; esac
++rm -f "$tmp/gh/downloads/v$LIVE/pearl-release.json.sig"
++run_rc 0 "rollback without a release signature" scripts/ops/cli-release.sh status
++expect_next rollback:blocked
++prev_release "$PREV_COMMIT"
+ fixture '{"latest_stable": "v'"$CAND"'", "releases": {}}'
+ run_rc 0 "rollback to an unpublished release" scripts/ops/cli-release.sh status
+ expect_next rollback:blocked
+diff --git a/scripts/ops/tests/gh_stub.py b/scripts/ops/tests/gh_stub.py
+index 129d7eecb..b57bf49fc 100755
+--- a/scripts/ops/tests/gh_stub.py
++++ b/scripts/ops/tests/gh_stub.py
+@@ -12,6 +12,8 @@ Fixture keys:
+   artifacts:   {id: [artifact objects]}    (gh api .../runs/ID/artifacts)
+   releases:    {tag: release object}       (gh release view TAG)
+   latest_stable: tag                       (gh release list --exclude-pre-releases)
++Release assets for `gh release download TAG -p NAME... -D DIR` are copied
++from $GH_STUB_DIR/downloads/TAG/NAME (exact names only).
+ """
+ import json
+ import os
+@@ -80,5 +82,18 @@ if pos[:2] == ["release", "view"]:
+         sys.stderr.write("release not found\n")
+         sys.exit(1)
+     emit(rel)
++if pos[:2] == ["release", "download"]:
++    tag, dest = pos[2], opt("-D")
++    names = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-p"]
++    if not dest or not names:
++        sys.exit(1)
++    import shutil
++    for name in names:
++        src = os.path.join(stub_dir, "downloads", tag, name)
++        if not os.path.isfile(src):
++            sys.stderr.write("no asset matches %s\n" % name)
++            sys.exit(1)
++        shutil.copyfile(src, os.path.join(dest, name))
++    sys.exit(0)
+ sys.stderr.write("gh stub: unhandled %r\n" % argv)
+ sys.exit(1)

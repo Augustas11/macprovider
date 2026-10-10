@@ -721,6 +721,117 @@ if [ "$(state_of mirror_latest)" = "done" ]; then ok; else bad "mirror_latest no
 if [ "$(next_field id)" != "mirror_latest" ]; then ok; else bad "mirror_latest still next after it matches"; fi
 unset MALIBU_DOWNLOAD_SSH_KEY
 
+# ==== cli-release revoked-build rollback (SPEC-020-R007) ======================
+# The candidate is live (target + recommendation). The rollback recommends the
+# previous release and revokes the candidate in one Pearl edit and restart.
+rollback_live() {
+  TARGET_ID="$COMPAT" pearl_config "$OLD" "$META"
+  python3 - "$tmp/pearl/coordinator.yaml" "$CAND" <<'PYCFG'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+open(p, "w").write(re.sub(r'latest_binary_version: "[^"]*"', 'latest_binary_version: "%s"' % sys.argv[2], s))
+PYCFG
+  pearl_boot
+  health v9.0.0 "$CAND"
+}
+# P's identity is the commit its release tag points at.
+PREV_COMMIT="$(git -C "$W" ls-remote origin "refs/tags/v$LIVE^{}" "refs/tags/v$LIVE" | awk '$2 ~ /\^\{\}$/ {p=$1} {a=$1} END {print (p != "" ? p : a)}')"
+if [ -z "$PREV_COMMIT" ]; then
+  git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a "v$LIVE" -m "previous release" "$B"
+  git -C "$W" push -q origin "refs/tags/v$LIVE"
+  PREV_COMMIT="$B"
+fi
+PREV="test/repo:v$LIVE@$PREV_COMMIT"
+# P's signed release metadata (pearl-release.json + .sig, the train's release key).
+prev_release() {  # prev_release COMMIT [TAG]: stage v$LIVE's signed metadata naming COMMIT
+  mkdir -p "$tmp/gh/downloads/v$LIVE"
+  printf '{"schema_version":1,"repository":"test/repo","tag":"%s","commit":"%s","release_version":"%s","provider_advertised_version":"%s"}\n' \
+    "${2:-v$LIVE}" "$1" "$LIVE" "$LIVE" > "$tmp/gh/downloads/v$LIVE/pearl-release.json"
+  openssl dgst -sha256 -sign "$tmp/keys/release.key" -out "$tmp/gh/downloads/v$LIVE/pearl-release.json.sig" \
+    "$tmp/gh/downloads/v$LIVE/pearl-release.json"
+}
+prev_release "$PREV_COMMIT"
+rollback_live
+fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$LIVE"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-08T00:00:00Z"}}}'
+export CLI_ROLLBACK_TO_ID="$PREV" CLI_ROLLBACK_REVOKE_ID="$COMPAT"
+run_rc 0 "rollback status" scripts/ops/cli-release.sh status
+expect_next rollback:mutate
+case "$(next_field command)" in "scripts/ops/cli-release.sh _pearl-config --recommend $LIVE $PREV --revoke $COMPAT") ok ;; *) bad "rollback command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in *"coordinator restart"*) ok ;; *) bad "no downtime banner for the rollback" ;; esac
+printf '{"status":"ok","version":"v9.0.0","recommended_binary_version":"%s","uptime_s":100,"_policy":"running","_no_revoked_signal":true}' "$CAND" > "$tmp/svc/healthz.json"
+run_rc 0 "rollback on a runtime without the revocation signal" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field command):$(next_field reason)" in "scripts/ops/pearl-runtime.sh status:"*"compatibility_policy_revoked_signal"*) ok ;; *) bad "no-signal rollback reason: $(next_field reason)" ;; esac
+health v9.0.0 "$CAND"
+CLI_ROLLBACK_TO_ID="$COMPAT" CLI_ROLLBACK_REVOKE_ID="$PREV" run_rc 0 "rollback to a newer release" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field reason)" in *"strictly older"*) ok ;; *) bad "newer rollback reason: $(next_field reason)" ;; esac
+CLI_ROLLBACK_REVOKE_ID="" run_rc 0 "rollback with one id" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+CLI_ROLLBACK_TO_ID="test/repo:v$LIVE@$(printf 'e%.0s' $(seq 40))" run_rc 0 "rollback id that is not the release tag commit" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field reason)" in *"does not name release"*) ok ;; *) bad "wrong-commit rollback reason: $(next_field reason)" ;; esac
+# The full id must equal what P's verified signed release metadata binds.
+prev_release "$(printf 'f%.0s' $(seq 40))"
+run_rc 0 "rollback id that differs from the signed release identity" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field reason)" in *"is not the signed identity"*"test/repo:v$LIVE@ffff"*) ok ;; *) bad "signed-identity mismatch reason: $(next_field reason)" ;; esac
+prev_release "$PREV_COMMIT"
+# Valid JSON naming the right identity but with a changed field: only the
+# signature check can refuse it.
+python3 - "$tmp/gh/downloads/v$LIVE/pearl-release.json" <<'PYTAMPER'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["provider_advertised_version"] = "9.9.9"
+open(p, "w").write(json.dumps(d) + "\n")
+PYTAMPER
+run_rc 0 "rollback with tampered signed release metadata" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field reason)" in *"nothing (missing, unsigned or tampered)"*) ok ;; *) bad "tampered metadata reason: $(next_field reason)" ;; esac
+rm -f "$tmp/gh/downloads/v$LIVE/pearl-release.json.sig"
+run_rc 0 "rollback without a release signature" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+prev_release "$PREV_COMMIT"
+fixture '{"latest_stable": "v'"$CAND"'", "releases": {}}'
+run_rc 0 "rollback to an unpublished release" scripts/ops/cli-release.sh status
+expect_next rollback:blocked
+case "$(next_field reason)" in *"not a published stable release"*) ok ;; *) bad "unpublished rollback reason: $(next_field reason)" ;; esac
+fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$LIVE"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-08T00:00:00Z"}}}'
+before="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "rollback runs" scripts/ops/cli-release.sh next --run
+expect_lock_free
+if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; sys.exit(0 if c["target_id"] == sys.argv[2] and sys.argv[3] in c["revoked_ids"] and d["coordinator_advertised_version"]["latest_binary_version"] == sys.argv[4] else 1)' \
+  "$tmp/pearl/coordinator.yaml" "$PREV" "$COMPAT" "$LIVE" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "rollback did not recommend the previous release and revoke the candidate in one restart"; fi
+run_rc 0 "rollback status after the run" scripts/ops/cli-release.sh status
+if [ "$(state_of rollback)" = "done" ]; then ok; else bad "rollback not live"; fi
+expect_next done:done
+# A completed-looking policy on a runtime without the signal is not done.
+printf '{"status":"ok","version":"v9.0.0","recommended_binary_version":"%s","uptime_s":100,"_policy":"running","_no_revoked_signal":true}' "$LIVE" > "$tmp/svc/healthz.json"
+run_rc 0 "completed-looking rollback on a runtime without the signal" scripts/ops/cli-release.sh status
+if [ "$(state_of rollback)" = "blocked" ]; then ok; else bad "rollback reported $(state_of rollback) without the revocation signal"; fi
+expect_next rollback:blocked
+# An interrupted run (edit on disk, restart not done) resumes through next --run.
+rollback_live
+python3 - "$tmp/pearl/coordinator.yaml" "$PREV" "$COMPAT" "$LIVE" <<'PYCFG'
+import re, sys
+p, prev, bad, live = sys.argv[1:5]
+s = open(p).read()
+s = re.sub(r'target_id: \S+', 'target_id: %s' % prev, s, count=1)
+s = re.sub(r'latest_binary_version: "[^"]*"', 'latest_binary_version: "%s"' % live, s)
+s = s.replace("    revoked_ids:\n", "    revoked_ids:\n    - %s\n" % bad, 1)
+open(p, "w").write(s)
+PYCFG
+run_rc 0 "interrupted rollback status" scripts/ops/cli-release.sh status
+expect_next rollback:mutate
+before="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "interrupted rollback resumes" scripts/ops/cli-release.sh next --run
+expect_lock_free
+run_rc 0 "rollback status after the resumed run" scripts/ops/cli-release.sh status
+if [ "$(state_of rollback)" = "done" ] && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "interrupted rollback not resumed by one restart"; fi
+unset CLI_ROLLBACK_TO_ID CLI_ROLLBACK_REVOKE_ID
+
 # ==== discovery-renew =========================================================
 fixture '{"runs": {"renew-release-discovery-head.yml": []}}'
 MACPROVIDER_DISCOVERY_RENEWAL_VALIDITY_HOURS=24 run_rc 3 "short discovery renewal validity refused" scripts/ops/discovery-renew.sh status

@@ -72,6 +72,20 @@ class RevokeTest(unittest.TestCase):
             with self.assertRaises(pcc.Refused):
                 pcc.plan(CONFIG, args(revoke=[item]), NOW)
 
+    def test_rollback_recommends_older_and_revokes_the_current_target(self):
+        # SPEC-020-R007: one edit moves the target back and revokes the release
+        # it moves off; the new target itself stays unrevocable.
+        bad = "test/repo:v1.8.233@%s" % ("cd" * 20)
+        config = CONFIG.replace(TARGET, bad, 1).replace('"1.8.232"', '"1.8.233"')
+        new, summary = pcc.plan(config, args(recommend=("1.8.232", TARGET), revoke=[bad]), NOW)
+        self.assertEqual(summary, {"target_id": TARGET, "latest_binary_version": "1.8.232", "revoked_added": [bad]})
+        self.assertIn("    target_id: %s\n" % TARGET, new)
+        self.assertIn("    - %s\n" % bad, new)
+        with self.assertRaisesRegex(pcc.Refused, "refusing to revoke the target"):
+            pcc.plan(config, args(recommend=("1.8.232", TARGET), revoke=[bad, TARGET]), NOW)
+        with self.assertRaisesRegex(pcc.Refused, "refusing to revoke the target"):
+            pcc.plan(config, args(revoke=[bad]), NOW)
+
     def test_checked_in_seed_is_consistent(self):
         script = pathlib.Path(__file__).resolve().parents[1] / "legacy-compatibility-revocations.py"
         out = subprocess.run([sys.executable, str(script), "check"], capture_output=True, text=True)

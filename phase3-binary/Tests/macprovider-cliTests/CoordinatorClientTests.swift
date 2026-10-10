@@ -3981,6 +3981,78 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: markerStore.compatibilityAdmissionURL.path))
     }
 
+    // SPEC-020-R007: compatibility_set_revoked is bound to the accepted set (the
+    // set this provider reported) and the recommended set; absent means not
+    // revoked; a malformed or contradictory value fails the acknowledgement.
+    func testCompatibilitySetRevokedBindsARevocationNoticeToTheAcceptedSession() async throws {
+        let installed = "Augustas11/macprovider:v1.8.233@cccccccccccccccccccccccccccccccccccccccc"
+        let target = "Augustas11/macprovider:v1.8.232@dddddddddddddddddddddddddddddddddddddddd"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        func ack(_ extra: [String: Any], policy: String = "configured") -> [String: Any] {
+            var payload: [String: Any] = [
+                "type": "hello_ack",
+                "assigned_id": "assigned-v1",
+                "heartbeat_interval_s": 30,
+                "compatibility_policy": policy,
+            ]
+            if policy == "configured" {
+                payload["accepted_compatibility_set_id"] = installed
+                payload["recommended_compatibility_set_id"] = target
+            }
+            return payload.merging(extra) { _, new in new }
+        }
+
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coordinator-revocation-notice-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let markerStore = AutoUpdateMarkerStore(homeDirectory: home)
+        func makeRevocationClient() async throws -> CoordinatorClient {
+            try await makeClient(
+                status: status,
+                recorder: CoordinatorFrameRecorder(),
+                compatibilitySetIDOverride: installed,
+                autoupdateMarkerStore: markerStore
+            )
+        }
+
+        let client = try await makeRevocationClient()
+        try await client.handleCoordinatorPayloadForTest(ack(["compatibility_set_revoked": true]))
+        let notice = await client.coordinatorRevocationNoticeForTest()
+        XCTAssertEqual(notice, CoordinatorRevocationNotice(revokedCompatibilitySetID: installed, recommendedCompatibilitySetID: target))
+        await client.stop()
+        let cleared = await client.coordinatorRevocationNoticeForTest()
+        XCTAssertNil(cleared, "a disconnect must clear the revocation notice")
+
+        for flag: Any? in [nil, false] {
+            let other = try await makeRevocationClient()
+            try await other.handleCoordinatorPayloadForTest(ack(flag.map { ["compatibility_set_revoked": $0] } ?? [:]))
+            let none = await other.coordinatorRevocationNoticeForTest()
+            XCTAssertNil(none, "no notice without compatibility_set_revoked: true (\(String(describing: flag)))")
+            await other.stop()
+        }
+
+        for (extra, policy) in [
+            (["compatibility_set_revoked": 1] as [String: Any], "configured"),
+            (["compatibility_set_revoked": "true"], "configured"),
+            (["compatibility_set_revoked": true], "unconfigured"),
+        ] {
+            let other = try await makeRevocationClient()
+            do {
+                try await other.handleCoordinatorPayloadForTest(ack(extra, policy: policy))
+                XCTFail("expected \(extra) under \(policy) to fail the acknowledgement")
+            } catch CoordinatorAuthError.invalidMessage {
+            }
+            let none = await other.coordinatorRevocationNoticeForTest()
+            XCTAssertNil(none)
+            await other.stop()
+        }
+    }
+
     func testConfiguredAuthResponseRejectsMismatchedCompatibilitySetBeforeSessionAcceptance() async throws {
         let recorder = CoordinatorFrameRecorder()
         let installed = "Augustas11/macprovider:v1.8.3@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -7748,6 +7820,83 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         XCTAssertEqual(hello["model_id"] as? String, "model-a")
         XCTAssertNil(hello["runtime_source"], "native keeps no runtime_source")
+        await client.cleanupConnectionForTest()
+    }
+
+    /// A timed-out receipt-rotation restore that fails later must not tear
+    /// down the newer connection's state: its cleanup is gated on the
+    /// connection epoch it started under.
+    func testStaleRestoreCleanupDoesNotClearANewerConnection() async throws {
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder()
+        )
+        let target = "Augustas11/macprovider:v1.8.232@dddddddddddddddddddddddddddddddddddddddd"
+        let staleEpoch = await client.connectionEpochForTest()
+        await client.cleanupConnectionForTest()   // the timeout's own teardown
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "1.8.232", compatibilitySetID: target)
+        await client.cleanupConnectionIfEpochForTest(staleEpoch)
+        let kept = await client.recommendedCompatibilitySetIDForTest()
+        XCTAssertEqual(kept, target, "a stale restore must not clear the newer connection")
+        await client.cleanupConnectionIfEpochForTest(await client.connectionEpochForTest())
+        let cleared = await client.recommendedCompatibilitySetIDForTest()
+        XCTAssertNil(cleared)
+        await client.stop()
+    }
+
+    /// SPEC-020-R007: an exactly revoked build is admitted update-only and can
+    /// never confirm buyer serving. Its session is held (not dropped) so the
+    /// coordinator recommendation, its only way back, runs.
+    func testRevokedUpdateOnlySessionIsHeldInsteadOfDropped() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let installed = "Augustas11/macprovider:v1.8.233@cccccccccccccccccccccccccccccccccccccccc"
+        let target = "Augustas11/macprovider:v1.8.232@dddddddddddddddddddddddddddddddddddddddd"
+        let script = ReadinessScript([.notServing(hold: nil)], then: .notServing(hold: nil))
+        let client = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder(),
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            compatibilitySetIDOverride: installed,
+            installedCompatibilityManifest: { _, _ in nil },
+            coordinatorReadiness: { _, _, _ in await script.next() },
+            coordinatorReadinessAttempts: 3,
+            admissionPendingReadinessPollNanoseconds: 20_000_000,
+            lifecycleStateStore: fixture.store,
+            lifecycleOperationID: fixture.operationID,
+            autoupdateMarkerStore: AutoUpdateMarkerStore(homeDirectory: fixture.root)
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-revoked",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "compatibility_policy": "configured",
+            "accepted_compatibility_set_id": installed,
+            "recommended_compatibility_set_id": target,
+            "compatibility_set_revoked": true,
+        ])
+        // Several readiness-watch intervals pass: the watch would close a
+        // not-serving session, so it must not run for a revoked one.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let calls = await script.calls
+        XCTAssertEqual(calls, 0, "a revoked update-only session never waits on or polls buyer-serving readiness")
+        let notice = await client.coordinatorRevocationNoticeForTest()
+        XCTAssertNotNil(notice, "the held session keeps its revocation notice")
+        let record = try await waitForLifecycleReason(fixture, CoordinatorClient.revokedUpdateOnlyLifecycleReasonCode)
+        XCTAssertEqual(record.reasonCode, CoordinatorClient.revokedUpdateOnlyLifecycleReasonCode)
         await client.cleanupConnectionForTest()
     }
 

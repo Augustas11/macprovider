@@ -25,7 +25,10 @@ release identity from compatibility_set.target_id's repository is admitted
 unless exactly listed in revoked_ids. --recommend moves only target_id and
 latest_binary_version, and refuses a target that is foreign or revoked.
 --revoke adds exact ids to compatibility_set.revoked_ids (the checked-in
-one-time seed); /healthz must then report every one of them.
+one-time seed, or the release a rollback moves off); /healthz must then report
+every one of them. --recommend PREV --revoke CURRENT_TARGET together is the
+revoked-build rollback (SPEC-020-R007): the target after the edit is never
+revoked.
 Nothing secret is printed.
 """
 import argparse
@@ -159,7 +162,10 @@ def plan(text, args, now):
         for item in args.revoke:
             if compat_repo(item) is None or compat_repo(item) != compat_repo(target):
                 raise Refused("revocation %s is malformed or not from the target's repository" % item)
-            if item == target or (args.recommend and item == args.recommend[1]):
+            # The target after this edit may not be revoked. With --recommend
+            # that is the new target, so revoking the release being moved off
+            # is the revoked-build rollback (SPEC-020-R007).
+            if item == (args.recommend[1] if args.recommend else target):
                 raise Refused("refusing to revoke the target %s" % item)
             if item not in existing and item not in revoked_added:
                 revoked_added.append(item)

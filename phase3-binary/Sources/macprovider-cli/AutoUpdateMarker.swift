@@ -486,6 +486,35 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         root.appendingPathComponent("signed-policy.json")
     }
 
+    var policyLockURL: URL {
+        root.appendingPathComponent("signed-policy.lock")
+    }
+
+    /// Serializes every signed-policy read-merge-write with a SPEC-020-R007
+    /// downgrade's final policy check and the mutation that follows it, across
+    /// processes (a concurrent manual `update --check` persists policy too).
+    /// Blocking and exclusive; `body` must not persist policy itself.
+    func withSignedPolicyLock<T>(_ body: () throws -> T) throws -> T {
+        try ensureTrustedRoot()
+        let fd = open(policyLockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw AutoUpdateMarkerError.openFailed(policyLockURL.path, errno) }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & (S_IRWXG | S_IRWXO) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("signed_policy_lock_invalid")
+        }
+        while flock(fd, LOCK_EX) != 0 {
+            guard errno == EINTR else { throw AutoUpdateMarkerError.openFailed(policyLockURL.path, errno) }
+        }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+
     var compatibilityAdmissionURL: URL {
         root.appendingPathComponent("compatibility-admission.json")
     }
@@ -2590,15 +2619,17 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     func updateSignedPolicy(minimum: String?, revoked: [String]) async throws {
-        var policy = (try? readPolicy()) ?? SignedPolicy()
-        if let minimum, !minimum.isEmpty,
-           policy.persistedMinimum.isEmpty || SelfUpdate.compareSemver(policy.persistedMinimum, minimum) == .orderedAscending {
-            policy.persistedMinimum = minimum
-        }
-        policy.persistedRevoked.formUnion(revoked)
         do {
-            let data = try JSONEncoder().encode(policy)
-            try atomicWrite(data: data, finalURL: policyURL, mode: S_IRUSR | S_IWUSR)
+            try withSignedPolicyLock {
+                var policy = (try? readPolicy()) ?? SignedPolicy()
+                if let minimum, !minimum.isEmpty,
+                   policy.persistedMinimum.isEmpty || SelfUpdate.compareSemver(policy.persistedMinimum, minimum) == .orderedAscending {
+                    policy.persistedMinimum = minimum
+                }
+                policy.persistedRevoked.formUnion(revoked)
+                let data = try JSONEncoder().encode(policy)
+                try atomicWrite(data: data, finalURL: policyURL, mode: S_IRUSR | S_IWUSR)
+            }
         } catch {
             let marker = try? readPending()
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
@@ -2609,7 +2640,12 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 outcome: .failure,
                 reason: "signed_policy_persist_failed",
                 attempt: 1,
-                failureClass: .other
+                failureClass: .other,
+                extraMetadata: marker.flatMap { pending in
+                    pending.previousVersion.map {
+                        AutoUpdateEvent.isRevokedBuildDowngradeTransaction(phase: .swap, currentVersion: $0, targetVersion: pending.targetVersion)
+                    }
+                } == true ? ["update_direction": AutoUpdater.downgradeFromRevokedReason] : [:]
             ))
             SessionAutoupdateGate.shared.disable(reason: "signed_policy_persist_failed")
             throw AutoUpdateSignedPolicyPersistError(underlying: String(describing: error).prefix(128).description)

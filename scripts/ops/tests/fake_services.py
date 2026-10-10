@@ -5,6 +5,8 @@ scripts/ops/test-entrypoints.sh. Usage: fake_services.py STATE_DIR (prints the p
 Files in STATE_DIR steer it:
   healthz.json            coordinator/gateway /healthz body; with "_policy": "running" the
                           compatibility policy fields come from running.yaml
+                          ("_no_revoked_signal": true models a runtime without
+                          compatibility_policy_revoked_signal)
   running.yaml            the coordinator config the fake coordinator is running
   autotune-release.json   /v1/autotune-release body (404 when absent)
   status.json             provider /v1/status base body
@@ -61,6 +63,10 @@ class Handler(BaseHTTPRequestHandler):
                 d["compatibility_policy_mode"] = "repository" if cs else "unconfigured"
                 d["compatibility_policy_target_id"] = str(cs.get("target_id") or "")
                 d["compatibility_policy_revoked_ids"] = [str(x) for x in cs.get("revoked_ids") or []]
+                # A runtime that sends compatibility_set_revoked (SPEC-020-R007),
+                # unless the fixture models one that predates it.
+                if cs and not d.pop("_no_revoked_signal", False):
+                    d["compatibility_policy_revoked_signal"] = True
             return self.send(200, json.dumps(d))
         if self.path == "/releases/latest.json" and read("mirror-latest.json"):
             return self.send(200, read("mirror-latest.json"))

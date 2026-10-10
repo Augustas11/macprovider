@@ -62,6 +62,89 @@ prove that the new provider compatibility set is accepted and targeted; the
 This runbook covers release/updater correctness only. Keep product-specific
 smokes, such as Buzz tool-schema/null behavior, in a separate QA checklist.
 
+## Revoked-build rollback
+
+The one lever when a fleet-wide release V misbehaves (SPEC-020-R007,
+SPEC-002-R004): recommend the previous good release P and exactly revoke V in
+one Pearl edit. Macs on V connect update-only, are told
+`compatibility_set_revoked: true` for their own set, and auto-update **down**
+to P through every upgrade check (signature, SHA-256, compatibility manifest,
+code identity, drain, pending marker, local health, rollback). Macs on P keep
+serving. No other downgrade is possible: the signed discovery rail and manual
+`update` never downgrade, and the provider refuses a target that is not
+exactly the recommended set's version, is signed-revoked or below the signed
+minimum, or is below the compiled-in floor (v1.8.232).
+
+Preconditions:
+
+- The running coordinator reports `compatibility_policy_revoked_signal: true`
+  on `/healthz` (the runtime that ships with this change). On an older runtime
+  the step is blocked and points at `scripts/ops/pearl-runtime.sh`: revoking V
+  there would fence it without moving it down.
+- V carries the lever: it is the first release cut after PR #1880's lever
+  landed, or later. Releases before it never downgrade.
+- P is a published stable release at or above v1.8.232, and its
+  `compatibility_set_id` is known (its signed `compatibility-set.json`, or the
+  `target_id` Pearl ran before V's `recommendation_bump`, in the backup under
+  `/root/macprovider-backups`).
+- `required_binary_version` is at or below P (the coordinator refuses
+  `required_binary_version` above `latest_binary_version`; lower it in the same
+  change window if needed).
+- V's release manifest did not raise the signed policy minimum above P. If it
+  did, Macs that installed V refuse P (`target_revoked_or_below_minimum`) and
+  only a forward-fix release helps.
+
+Procedure (state the Pearl downtime first: one coordinator restart, a few
+seconds of buyer outage):
+
+```bash
+export CLI_ROLLBACK_TO_ID='<owner/repo>:v<P>@<commit>'       # previous good release
+export CLI_ROLLBACK_REVOKE_ID='<owner/repo>:v<V>@<commit>'   # bad release
+scripts/ops/cli-release.sh status      # shows one step: rollback (mutate)
+MACPROVIDER_OPS_OWNER=<session> scripts/ops/cli-release.sh next --run
+scripts/ops/cli-release.sh status      # rollback: done
+```
+
+`next --run` takes the live-ops lock and runs
+`_pearl-config --recommend <P> <P id> --revoke <V id>`: one anchored edit of
+`latest_binary_version`, `compatibility_set.target_id` and `revoked_ids`,
+validated with the running coordinator binary, one restart, then `/healthz`
+must recommend P, target P's id and list V's id. `CLI_ROLLBACK_TO_ID` must
+name P's signed release identity: its commit must be the commit of origin tag
+`v<P>`, and the whole id must equal `repository:tag@commit` from P's
+`pearl-release.json`, whose `.sig` is verified with
+`ops/pearl-updater/release-signing-public.pem` (the key the train uses for
+candidates), or the step refuses. If a run stops after the edit but before the
+restart, `status` shows the edit as pending and `next --run` resumes it with
+one validated restart. The step refuses when P is
+not strictly older than V, the ids are from different repositories, P is not a
+published stable release, the live target is neither V nor P, or the live
+policy differs from the applied config; and it is never reported done (nor
+run) on a coordinator without `compatibility_policy_revoked_signal`. `pearl-cli-config.py` refuses to
+revoke the target that remains after the edit, so P can never be revoked.
+
+Expected timing: the edit and restart take about a minute. Connected Macs on V
+are closed by the restart and reconnect within seconds to a minute as
+update-only sessions; each then drains (in-flight requests finish, up to the
+drain timeout), downloads and verifies P, swaps, restarts and proves local
+health. Estimate 2 to 5 minutes per Mac, all in parallel, so the fleet should
+be back on P within about 10 minutes of the restart; long in-flight requests
+extend the drain. Watch each provider's
+`last_autoupdate_event` for `extra_metadata.update_direction:
+downgrade_from_revoked`, `binary_swap_complete` and then post-start success on
+P (P's own post-start event predates the field, so it shows only the version
+change). A revoked Mac's session is held update-only, never routed, while it
+moves. A Mac whose downgrade fails rolls back to V, completes that rollback on
+local health (`previous_compatibility_set_restored_update_only`) and retries
+in the same session when the per-target cooldown (5 minutes, doubling to at
+most 1 hour) expires.
+
+After the rollback, the signed discovery head still names V until the next
+release. A Mac on P with no accepted coordinator session can therefore
+discover V, install it, reconnect revoked and roll back again. Ship the
+forward fix as the next release; it moves the head and the recommendation
+past V. Leave V in `revoked_ids`.
+
 ## Hard release invariants
 
 - The standalone tarball CLI and the Malibu.app embedded CLI must be the same

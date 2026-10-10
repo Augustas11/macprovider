@@ -12,6 +12,8 @@ Fixture keys:
   artifacts:   {id: [artifact objects]}    (gh api .../runs/ID/artifacts)
   releases:    {tag: release object}       (gh release view TAG)
   latest_stable: tag                       (gh release list --exclude-pre-releases)
+Release assets for `gh release download TAG -p NAME... -D DIR` are copied
+from $GH_STUB_DIR/downloads/TAG/NAME (exact names only).
 """
 import json
 import os
@@ -83,5 +85,18 @@ if pos[:2] == ["release", "view"]:
         sys.stderr.write("release not found\n")
         sys.exit(1)
     emit(rel)
+if pos[:2] == ["release", "download"]:
+    tag, dest = pos[2], opt("-D")
+    names = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-p"]
+    if not dest or not names:
+        sys.exit(1)
+    import shutil
+    for name in names:
+        src = os.path.join(stub_dir, "downloads", tag, name)
+        if not os.path.isfile(src):
+            sys.stderr.write("no asset matches %s\n" % name)
+            sys.exit(1)
+        shutil.copyfile(src, os.path.join(dest, name))
+    sys.exit(0)
 sys.stderr.write("gh stub: unhandled %r\n" % argv)
 sys.exit(1)

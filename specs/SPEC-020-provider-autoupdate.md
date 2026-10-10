@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.23
+Version: v0.1.24
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -51,6 +51,9 @@ guards still apply). Production MALIBU-verified providers emit `trusted`, not
 v0.1.20 pages the SPEC-020-R001 discovery listing (bounded pages and a
 per-page byte cap) so frequent numeric prereleases cannot push every
 append-only transport out of a single listing page.
+v0.1.24 adds SPEC-020-R007, the one rollback lever: a build the coordinator
+exactly revoked moves down to exactly the recommended release, through the
+same verification as an upgrade. Every other downgrade stays refused.
 
 ## Goal
 
@@ -512,7 +515,98 @@ covered by the acceptance criteria AC-V0.1-R005-1 through AC-V0.1-R005-4.
 
 R-2.1. The provider MUST refuse downgrades. If the recommended target version is
 less than or equal to the current binary version, autoupdate MUST be a no-op and
-MUST emit an observability event explaining the no-op.
+MUST emit an observability event explaining the no-op. The only exception is
+SPEC-020-R007 below.
+
+**SPEC-020-R007 — Revoked-build downgrade (v0.1.24, #1880).** The operator's
+rollback for a bad release V is one Pearl edit: recommend the previous good
+release and exactly revoke V (SPEC-002-R004). A provider running V MUST then
+move down to the recommended release, and only then. On the coordinator
+recommendation rail a recommended version lower than the running version MUST
+be installed only when ALL of the following hold, and otherwise MUST remain the
+R-2.1 no-op:
+
+1. The accepted session's acknowledgement (v2 `auth_response`; a legacy
+   `hello_ack` is notify-only) carried `compatibility_set_revoked: true`
+   together with `accepted_compatibility_set_id` equal to the compatibility set
+   the provider reported. The provider MUST reject the acknowledgement when the
+   field is present with a non-boolean value, or present under an unconfigured
+   policy, and MUST drop the signal on every session change. An absent field
+   means not revoked, so older coordinators and older providers see no change.
+2. The revoked identity encodes exactly the running version, and the
+   recommended identity (`recommended_compatibility_set_id`) is canonical, from
+   the same repository, different from the revoked identity, and encodes
+   exactly the recommended version. The updater's expected compatibility set is
+   that recommended identity, so the prepared release's signed compatibility
+   manifest MUST name it.
+3. The recommended version is strictly lower than the running version and not
+   lower than the compiled-in downgrade floor (v1.8.232, a release the fleet
+   ran; a later release MAY raise the floor and MUST NOT
+   lower it).
+4. The target passes R-2.2 (not below the effective minimum, not in the
+   effective revoked set) and every check an upgrade runs: release resolution
+   from the pinned repository (or the SPEC-020-R006 mirror under the same
+   checks), checksum signature, SHA-256, archive validation, compatibility
+   manifest and artifact index, staged binary version, code-signing identity,
+   Malibu bundle, opt-out, trust state, drain, mutation lock, pending marker,
+   activation, local health and rollback. A downgrade MUST NOT skip or weaken
+   any of them.
+
+The authorization MUST stay live for the whole attempt. At every eligibility,
+download, drain, backup and restart check, at the swap boundary, and again
+after the pre-restart eviction, one atomic snapshot of the live session MUST
+show eligible trust, the same session generation, the same revocation notice,
+the same recommended set and exactly the target as the recommended version,
+and the effective signed policy (which a concurrent manual check may have
+advanced) MUST still allow the target. Otherwise the attempt MUST stop with
+reason `downgrade_authorization_changed`: before activation it is unwound with
+no pending state; after activation the swapped bytes are restored.
+Activation and the restart into the older release MUST each run inside the
+coordinator session's own critical section, immediately after that proof, so
+no session change can interleave between the proof and the mutation; the
+signed-policy lock, which every policy persist also takes, MUST span the final
+policy read and the mutation. A cancelled or timed-out session-restore task
+MUST NOT publish its session's admission, recommendation or revocation, nor
+tear down a connection established after it began. Release-by-tag resolution (every rail) MUST
+refuse a release object whose tag is not the requested one.
+
+An accepted session that carries the signal for its own set is update-only and
+can never confirm coordinator buyer serving. The provider MUST hold that
+session non-serving (lifecycle reason `compatibility_set_revoked_update_only`)
+instead of dropping it at the buyer-serving readiness gate or the
+admission-pending readiness watch, so the recommendation runs. Holding it never retires a pending transaction by itself.
+When a failed downgrade has restored V (`restoring_previous` /
+`awaiting_previous_readiness`), the restored transaction MUST complete when the
+live session revokes exactly the restored set and the restored process passes
+the same consecutive local-health proof as startup recovery (event reason
+`previous_compatibility_set_restored_update_only`); the routing fence remains
+and the target's cooldown is kept. While such a held session stays connected,
+the provider MUST retry the same recommendation once its recorded cooldown
+expires, re-running every gate above; it MUST NOT retry a refusal. Before
+that retry it MUST restore the held session's local state and keepalive (the
+coordinator keeps it update-only) and retire an in-process restored
+transaction on the same proof; it MUST NOT retry while a transaction is still
+pending. SPEC-020-R005 does not
+apply to a downgrade: a recommendation that is not newer is never counted
+toward R005 and never invokes its signed rail, which never downgrades.
+
+The signed discovery rail (SPEC-020-R001, R005) and manual `update` MUST NOT
+downgrade; they never consult the coordinator signal. Every event the
+downgrading build records for the attempt MUST carry
+`extra_metadata.update_direction: "downgrade_from_revoked"`: the updater's
+own detection-to-restart events, and every drain, backup, swap, restart,
+post-start or rollback event whose target version is lower than the running
+version (only R007 can produce one), whichever component records it. The
+eligibility event MUST use reason `downgrade_from_revoked`. Post-start events come from the older target
+release, which may predate this requirement and then cannot carry the field;
+the target version below the previous version identifies them. A refused downgrade MUST emit a no-op with a stable
+reason (`target_not_newer`, `downgrade_revocation_notice_invalid`,
+`downgrade_revoked_set_not_running_build`,
+`downgrade_target_not_recommended_set`, `downgrade_target_below_floor`). The
+pending marker keeps `update_authority_mode: "coordinator_recommendation"` so
+the older target release can confirm or roll back the transaction; a failed
+downgrade rolls back to V through R-4. The operator procedure is
+`docs/runbooks/provider-cli-release-verification.md` "Revoked-build rollback".
 
 R-2.2. Autoupdate MUST fail closed for target versions below
 `effective_minimum_safe_binary_version` or in
@@ -1136,7 +1230,19 @@ readiness separately at `binary_version: N+1`.
 
 AC-V0.1-2. Downgrade rejected: given current version `N` and coordinator
 recommendation `< N`, the provider emits a no-op event, does not download
-artifacts, does not enter drain, and does not mutate the binary.
+artifacts, does not enter drain, and does not mutate the binary, unless
+AC-V0.1-R007 applies.
+
+AC-V0.1-R007. Revoked-build downgrade: a provider whose accepted session
+carries `compatibility_set_revoked: true` for its own set, recommended exactly
+the older recommended set's version at or above the floor, enters the same
+release path as an upgrade with `update_direction: downgrade_from_revoked`.
+Without the signal, with a target other than the recommended set's version, a
+revocation naming another build, a target below the floor, a target in the
+signed revoked set, a bad checksum signature, a live session that no longer
+carries the same notice, or on the signed discovery rail, nothing is
+downloaded or swapped. A revoked build's accepted session is held update-only
+rather than dropped at the buyer-serving readiness gate.
 
 AC-V0.1-3. Signature mismatch rejected: given a release whose
 `checksums.txt.sig` does not validate under the pinned ECDSA P-256 key, the
@@ -1481,15 +1587,28 @@ T-3. Attacker controls the coordinator and lies about
 `recommended_binary_version`. The coordinator cannot make the provider install
 an unsigned, non-GitHub, missing, checksum-mismatched, or downgrade artifact.
 It can cause the provider to install a legitimately signed newer release sooner
-than the operator intended, subject to opt-out, drain, and cooldown. Residual
-risk accepted in v0.1.0: coordinator compromise remains a fleet-policy
-compromise for signed newer releases.
+than the operator intended, subject to opt-out, drain, and cooldown. The one
+exception to "no downgrade artifact" is the bounded SPEC-020-R007 rollback in
+T-4. Residual risk accepted in v0.1.0: coordinator compromise remains a
+fleet-policy compromise for signed newer releases.
 
 T-4. Attacker controls a coordinator that advertises a malicious binary version
 that legitimately existed in GitHub release history but is older than the
 current provider. R-2.1 defends against this downgrade attempt: lower and equal
-versions are no-ops. Residual risk: if the provider is already running an older
-vulnerable version, SPEC-020 cannot make that current binary safe.
+versions are no-ops. SPEC-020-R007 narrows that defense by design: a
+compromised coordinator can mark a provider's own build revoked and recommend
+an older signed release from the pinned repository. It still cannot choose an
+unsigned, foreign-repository, signed-revoked or below-minimum release, or one
+below the compiled-in downgrade floor (v1.8.232), so the reachable releases are
+signed releases at or above the floor; repeated hops cannot go below it. The
+signed minimum and revocations bind only as far as this provider has already
+observed them (persisted signed policy plus compiled-in values). Signing proves
+a release is authentic, not that it is still safe: within those bounds a
+compromised coordinator can restore a signed release whose vulnerabilities a
+later release fixed. That residual is the accepted cost of the rollback lever;
+raising the floor in a later release narrows it. Residual risk: if the
+provider is already running an older vulnerable version, SPEC-020 cannot make
+that current binary safe.
 
 T-5. Attacker controls a coordinator and also publishes a malicious signed
 newer GitHub release before discovery. The provider's cryptographic checks
@@ -1575,6 +1694,18 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.24 (2026-10-10): SPEC-020-R007 revoked-build downgrade (#1880;
+  admission #1914). A bad release V could not be rolled back: R-2.1 refused
+  every downgrade, the target could not be revoked, and a revoked V connected
+  update-only with nothing to update to. The coordinator now tells a session
+  `compatibility_set_revoked: true` for an exactly revoked set
+  (SPEC-002-R004 v1.6.13), and such a provider installs the older recommended
+  release under every upgrade check, bound to its own set, the recommended set
+  and a compiled-in floor, re-checked live at every phase. A revoked build's
+  session is held update-only instead of dropped at the buyer-serving gate; a
+  failed downgrade's restored V completes on local health and retries after
+  cooldown. Discovery and manual update never downgrade. T-3/T-4 record the
+  residual. R-2.1 and AC-V0.1-2 name the exception.
 - v0.1.23 (2026-10-10): `renew-release-discovery-head.yml` and
   `scripts/ops/discovery-renew.sh` are kept as an unscheduled, on-demand
   renewal for CLIs that predate v0.1.22 (#1938 audit round 1); the schedule

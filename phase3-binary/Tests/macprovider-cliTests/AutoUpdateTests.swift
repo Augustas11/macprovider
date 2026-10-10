@@ -2287,6 +2287,328 @@ final class AutoUpdateTests: XCTestCase {
     // precedence check. When it returns .abort at the swap boundary, the payload is
     // NOT activated (binary unchanged) and the pending marker is unwound — proving
     // the gate sits AT the swap and aborts the terminal action itself.
+    /// Where the live downgrade authorization is withdrawn in a full
+    /// coordinator-rail downgrade run.
+    private enum R007Withdrawal { case never, duringDrain, afterEviction }
+
+    /// Drives a full SPEC-020-R007 downgrade (1.8.233 -> 1.8.232) through drain,
+    /// swap, eviction and restart, withdrawing the live authorization at the
+    /// given point. Returns the updater outcome, the bytes the restart callback
+    /// saw (nil when no restart ran), and the final live binary bytes.
+    private func runR007Downgrade(withdraw: R007Withdrawal) async throws -> (
+        outcome: AutoUpdater.RecommendationOutcome,
+        restartSaw: [String],
+        binary: String,
+        pendingAfter: AutoUpdatePendingMarker?
+    ) {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url, compatibilityManifestPublicKeyPEM: manifestPublicKey)
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("revoked-binary".utf8).write(to: binary)
+        try Data("previous-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        let installed = try CompatibilityManifestFixture(
+            root: binaryDirectory, privateKey: manifestSigningKey,
+            version: "1.8.233", providerCLIVersion: "1.8.233", malibuAppVersion: "1.8.233",
+            commit: "1111111111111111111111111111111111111111", populateResources: false
+        )
+        _ = try CompatibilityManifestFixture(
+            root: payload, privateKey: manifestSigningKey,
+            version: "1.8.232", providerCLIVersion: "1.8.232", malibuAppVersion: "1.8.232",
+            commit: "2222222222222222222222222222222222222222", populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload, expectedProviderVersion: "1.8.232", publicKeyPEM: manifestPublicKey
+        )
+        let scratch = fixture.url.appendingPathComponent("prepare-scratch", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: false)
+        let prepared = PreparedSelfUpdate(
+            tempDir: scratch, newBinary: newBinary, stagedMalibuApp: nil, signedPolicy: nil,
+            compatibilityManifest: manifest, artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let notice = CoordinatorRevocationNotice(
+            revokedCompatibilitySetID: installed.compatibilitySetID,
+            recommendedCompatibilitySetID: manifest.compatibilitySetID
+        )
+        let live = AutoUpdateLiveFlag()
+        live.value = true
+        let trust = r005PinnedTrust()
+        let restartSaw = LockedStringRecorder()
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.providerID = "provider-test"
+        var updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.8.233",
+            providerStatus: r005Status(),
+            expectedCompatibilitySetID: manifest.compatibilitySetID,
+            coordinatorRevocation: notice,
+            liveRevocation: { body in
+                try body(LiveDowngradeAuthorization(
+                    trust: trust,
+                    notice: live.value ? notice : nil,
+                    recommendedCompatibilitySetID: manifest.compatibilitySetID,
+                    recommendedBinaryVersion: "1.8.232",
+                    sessionGeneration: 5
+                ))
+            },
+            downgradeSessionGeneration: 5,
+            markerStore: store,
+            trustProvider: { trust },
+            drain: { _ in
+                if withdraw == .duringDrain { live.value = false }
+                return true
+            },
+            sendReady: {},
+            restartLaunchd: { restartSaw.append((try? String(contentsOf: binary, encoding: .utf8)) ?? "?") },
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false },
+            lifecycleLeaseStore: ProviderLifecycleLeaseStore(
+                url: ProviderLifecycleLeaseStore.candidateURL(rootDirectory: fixture.url)
+            ),
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() },
+            evictStaleLocalStatusOwner: { _, _ in
+                if withdraw == .afterEviction { live.value = false }
+            }
+        )
+        updater.preparedReleaseForTest = { _ in prepared }
+        let outcome = await updater.handleCoordinatorRecommendation("1.8.232")
+        // Inspect while the fixture still exists (TempHome deletes it on return).
+        let pendingAfter = try store.readPending()
+        return (outcome, restartSaw.snapshot(), try String(contentsOf: binary, encoding: .utf8), pendingAfter)
+    }
+
+    // SPEC-020-R007: authorization withdrawn during the drain aborts before any
+    // backup or activation: the revoked build keeps running, nothing restarts,
+    // and the abort event is emitted.
+    func testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnDuringDrain() async throws {
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let run = try await runR007Downgrade(withdraw: .duringDrain)
+        XCTAssertEqual(run.binary, "revoked-binary", "no activation")
+        XCTAssertEqual(run.restartSaw, [], "no restart")
+        XCTAssertNil(run.pendingAfter, "no pending transaction remains")
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+        // The post-drain check refused before any backup: a refusal that only
+        // came from the later activation gate would be a .swap-phase event.
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.eligibility.rawValue)
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+    }
+
+    // SPEC-020-R007: authorization withdrawn after the pre-restart eviction
+    // refuses the restart into the older release inside the critical section:
+    // the swap is rolled back, the older release never starts (the only
+    // restart is the rollback's, of the restored revoked build), and the abort
+    // event is emitted.
+    func testRevokedBuildDowngradeAbortsWhenAuthorizationIsWithdrawnAfterEviction() async throws {
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let run = try await runR007Downgrade(withdraw: .afterEviction)
+        XCTAssertEqual(run.binary, "revoked-binary", "the swap is rolled back")
+        XCTAssertEqual(run.restartSaw, ["revoked-binary"], "only the rollback's restart of the restored revoked build ran; the older release never started")
+        // The restored revoked build awaits its readiness proof (retired by the
+        // held session on local health, SPEC-020-R007); it is not the target.
+        XCTAssertEqual(run.pendingAfter?.transactionState, .awaitingPreviousReadiness)
+        XCTAssertEqual(run.pendingAfter?.previousVersion, "1.8.233")
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+    }
+
+    // Control for the two withdrawal tests: with the authorization live the
+    // same run activates the older release and restarts into it.
+    func testRevokedBuildDowngradeHarnessCompletesWhileAuthorized() async throws {
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let run = try await runR007Downgrade(withdraw: .never)
+        XCTAssertEqual(run.binary, "previous-binary")
+        XCTAssertEqual(run.restartSaw, ["previous-binary"])
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "launchctl_restart_invoked")
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+    }
+
+    // The signed-policy lock serializes a policy persist (for example from a
+    // concurrent manual `update --check` in another process) behind a
+    // downgrade's final policy check and mutation.
+    func testSignedPolicyPersistWaitsForTheSignedPolicyLock() async throws {
+        let fixture = try TempHome()
+        let holder = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let writer = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try holder.ensureTrustedRoot()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            try? holder.withSignedPolicyLock {
+                entered.signal()
+                release.wait()
+            }
+        }
+        thread.start()
+        entered.wait()
+        let written = AutoUpdateLiveFlag()
+        let persist = Task {
+            try await writer.updateSignedPolicy(minimum: nil, revoked: ["1.8.232"])
+            written.value = true
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(written.value, "the persist must wait while the lock is held")
+        XCTAssertFalse(writer.effectivePolicy().revoked.contains("1.8.232"))
+        release.signal()
+        try await persist.value
+        XCTAssertTrue(writer.effectivePolicy().revoked.contains("1.8.232"))
+    }
+
+    // SPEC-020-R007: a downgrade activates only inside the session actor's
+    // critical section, after the live authorization is proven there. A
+    // withdrawn authorization aborts before activation and leaves no pending
+    // transaction; a live one activates.
+    func testDowngradeActivationRunsOnlyInsideTheLiveAuthorizationSection() async throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        _ = try CompatibilityManifestFixture(
+            root: binaryDirectory,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "1111111111111111111111111111111111111111",
+            populateResources: false
+        )
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: payload,
+            privateKey: manifestSigningKey,
+            version: "1.8.50",
+            providerCLIVersion: "1.8.50",
+            malibuAppVersion: "1.8.43",
+            commit: "2222222222222222222222222222222222222222",
+            populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload,
+            expectedProviderVersion: "1.8.50",
+            publicKeyPEM: manifestPublicKey
+        )
+        XCTAssertEqual(manifest.compatibilitySetID, manifestFixture.compatibilitySetID)
+        let prepared = PreparedSelfUpdate(
+            tempDir: fixture.url,
+            newBinary: newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: manifest.compatibilitySetID,
+            targetArtifactIndexSHA256: prepared.artifactIndexSHA256,
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        let notice = CoordinatorRevocationNotice(
+            revokedCompatibilitySetID: "Augustas11/macprovider:v1.8.48@1111111111111111111111111111111111111111",
+            recommendedCompatibilitySetID: manifest.compatibilitySetID
+        )
+        let live = AutoUpdateLiveFlag()
+        let bodies = AutoUpdateCounter()
+        let trust = r005PinnedTrust()
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.48",
+            providerStatus: r005Status(),
+            expectedCompatibilitySetID: manifest.compatibilitySetID,
+            coordinatorRevocation: notice,
+            liveRevocation: { body in
+                try body(LiveDowngradeAuthorization(
+                    trust: trust,
+                    notice: notice,
+                    recommendedCompatibilitySetID: manifest.compatibilitySetID,
+                    recommendedBinaryVersion: "1.8.50",
+                    sessionGeneration: live.value ? 3 : 4
+                ))
+                _ = bodies.incrementAndGet()
+            },
+            downgradeSessionGeneration: 3,
+            markerStore: store,
+            trustProvider: { trust },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
+        )
+
+        live.value = false
+        do {
+            try await updater.preserveMarkerAndSwapForTest(
+                updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                target: "1.8.50",
+                prepared: prepared,
+                downgrade: notice
+            )
+            XCTFail("expected a withdrawn authorization to abort before activation")
+        } catch let abort as AutoUpdateSwapPrecedenceAborted {
+            XCTAssertEqual(abort.reason, "downgrade_authorization_changed")
+        }
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertNil(try store.readPending())
+        XCTAssertEqual(bodies.current, 0)
+
+        live.value = true
+        try await updater.preserveMarkerAndSwapForTest(
+            updateID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            target: "1.8.50",
+            prepared: prepared,
+            downgrade: notice
+        )
+        XCTAssertEqual(try String(contentsOf: binary), "new-binary")
+        XCTAssertEqual(bodies.current, 1, "activation ran inside the live authorization section")
+    }
+
     func testSwapBoundaryGateAbortPreventsActivation() async throws {
         let fixture = try TempHome()
         let manifestSigningKey = P256.Signing.PrivateKey()
@@ -3259,6 +3581,27 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(release.tagName, "1.7.0")
     }
 
+    // A release object for another (older) tag served for the requested tag is
+    // refused, so it can never stand in for the target.
+    func testSelfUpdateRefusesAReleaseObjectNamingAnotherTag() async throws {
+        let latest = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let vTag = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/v1.8.232")!
+        AutoUpdateMockURLProtocol.responses = [
+            vTag: (200, Data(#"{"tag_name":"v1.8.200","assets":[]}"#.utf8)),
+        ]
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AutoUpdateMockURLProtocol.self]
+        let update = SelfUpdate(currentVersion: "1.8.233", releasesAPIURL: latest.absoluteString, session: URLSession(configuration: configuration))
+
+        do {
+            _ = try await update.resolveReleaseByTags(normalizedTarget: "1.8.232")
+            XCTFail("expected a mismatched release tag to be refused")
+        } catch UpdateError.invalidReleaseVersion(let tag) {
+            XCTAssertEqual(tag, "v1.8.200")
+        }
+    }
+
     // MARK: - SPEC-020-R005 handleCoordinatorRecommendation outcome mapping
 
     private func r005PinnedTrust() -> AutoUpdateTrustState {
@@ -3700,6 +4043,326 @@ final class AutoUpdateTests: XCTestCase {
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
 
         XCTAssertEqual(outcome, .forwardProgressFailure)
+    }
+
+    // MARK: - SPEC-020-R007 revoked-build downgrade
+
+    private static let r007Revoked = "Augustas11/macprovider:v1.8.233@cccccccccccccccccccccccccccccccccccccccc"
+    private static let r007Recommended = "Augustas11/macprovider:v1.8.232@dddddddddddddddddddddddddddddddddddddddd"
+    private static let r007Notice = CoordinatorRevocationNotice(
+        revokedCompatibilitySetID: r007Revoked,
+        recommendedCompatibilitySetID: r007Recommended
+    )
+
+    func testRevokedBuildDowngradeDecisionMatrix() {
+        func decide(
+            current: String = "1.8.233",
+            target: String = "1.8.232",
+            notice: CoordinatorRevocationNotice? = AutoUpdateTests.r007Notice,
+            expected: String? = AutoUpdateTests.r007Recommended
+        ) -> RevokedBuildDowngradeDecision {
+            AutoUpdater.revokedBuildDowngradeDecision(
+                currentVersion: current,
+                target: target,
+                notice: notice,
+                expectedCompatibilitySetID: expected
+            )
+        }
+        // Exactly revoked running build, recommended older set: allow.
+        XCTAssertEqual(decide(), .allow)
+        // Not revoked: R-2.1 unchanged.
+        XCTAssertEqual(decide(notice: nil), .deny(reason: "target_not_newer"))
+        // Revoked, but the target is not the recommended set's version.
+        XCTAssertEqual(decide(target: "1.8.231"), .deny(reason: "downgrade_target_not_recommended_set"))
+        // Revoked, but the updater's expected set is not the recommended set.
+        XCTAssertEqual(
+            decide(expected: "Augustas11/macprovider:v1.8.232@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+            .deny(reason: "downgrade_target_not_recommended_set")
+        )
+        XCTAssertEqual(decide(expected: nil), .deny(reason: "downgrade_target_not_recommended_set"))
+        // The revocation names another build than the one running.
+        XCTAssertEqual(decide(current: "1.8.234"), .deny(reason: "downgrade_revoked_set_not_running_build"))
+        // Equal versions are never a downgrade.
+        XCTAssertEqual(
+            decide(current: "1.8.232", notice: CoordinatorRevocationNotice(
+                revokedCompatibilitySetID: "Augustas11/macprovider:v1.8.232@cccccccccccccccccccccccccccccccccccccccc",
+                recommendedCompatibilitySetID: Self.r007Recommended
+            )),
+            .deny(reason: "target_not_newer")
+        )
+        // Malformed, foreign-repository, leading-zero and self-recommending notices.
+        for (revoked, recommended) in [
+            ("bad", Self.r007Recommended),
+            (Self.r007Revoked, "Augustas11/other:v1.8.232@dddddddddddddddddddddddddddddddddddddddd"),
+            (Self.r007Revoked, "Augustas11/macprovider:v1.8.0232@dddddddddddddddddddddddddddddddddddddddd"),
+            (Self.r007Revoked, Self.r007Revoked),
+        ] {
+            XCTAssertEqual(
+                decide(notice: CoordinatorRevocationNotice(revokedCompatibilitySetID: revoked, recommendedCompatibilitySetID: recommended), expected: recommended),
+                .deny(reason: "downgrade_revocation_notice_invalid"),
+                "\(revoked) -> \(recommended)"
+            )
+        }
+        // Below the compiled-in floor, even when everything else binds.
+        let old = "Augustas11/macprovider:v1.8.200@dddddddddddddddddddddddddddddddddddddddd"
+        XCTAssertEqual(
+            decide(target: "1.8.200", notice: CoordinatorRevocationNotice(revokedCompatibilitySetID: Self.r007Revoked, recommendedCompatibilitySetID: old), expected: old),
+            .deny(reason: "downgrade_target_below_floor")
+        )
+    }
+
+    func testSignedDiscoveryRailNeverDowngrades() {
+        XCTAssertFalse(AutoUpdater.signedDiscoveryAllowsTarget(installedReleaseVersion: "1.8.233", target: "1.8.232"))
+        XCTAssertFalse(AutoUpdater.signedDiscoveryAllowsTarget(installedReleaseVersion: "1.8.233", target: "1.8.233"))
+        XCTAssertTrue(AutoUpdater.signedDiscoveryAllowsTarget(installedReleaseVersion: "1.8.232", target: "1.8.233"))
+    }
+
+    private func r007Updater(
+        fixture: TempHome,
+        store: AutoUpdateMarkerStore,
+        binary: URL?,
+        notice: CoordinatorRevocationNotice?,
+        session: URLSession = .shared,
+        live: CoordinatorRevocationNotice?? = .none,
+        liveSnapshot: AutoUpdater.LiveRevocation? = nil
+    ) -> AutoUpdater {
+        // By default the live session still says what the captured notice said.
+        let liveNotice: CoordinatorRevocationNotice? = live ?? notice
+        let trust = r005PinnedTrust()
+        return AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.233",
+            providerStatus: r005Status(),
+            expectedCompatibilitySetID: Self.r007Recommended,
+            coordinatorRevocation: notice,
+            liveRevocation: liveSnapshot ?? { body in
+                try body(LiveDowngradeAuthorization(
+                    trust: trust,
+                    notice: liveNotice,
+                    recommendedCompatibilitySetID: liveNotice?.recommendedCompatibilitySetID,
+                    recommendedBinaryVersion: "1.8.232",
+                    sessionGeneration: 7
+                ))
+            },
+            downgradeSessionGeneration: 7,
+            releasesAPIURL: "https://api.github.com/repos/Augustas11/macprovider/releases/latest",
+            markerStore: store,
+            session: session,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
+        )
+    }
+
+    private func r007MockSession(_ responses: [URL: (status: Int, body: Data)]) -> URLSession {
+        AutoUpdateMockURLProtocol.responses = responses
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AutoUpdateMockURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    // Not revoked: an older recommendation stays a no-op and touches no network.
+    func testOlderRecommendationWithoutRevocationIsNotAttempted() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let session = r007MockSession([:])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let outcome = await r007Updater(fixture: fixture, store: store, binary: nil, notice: nil, session: session)
+            .handleCoordinatorRecommendation("1.8.232")
+        XCTAssertEqual(outcome, .notAttempted)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "target_not_newer")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+    }
+
+    // Revoked, recommended, older: the downgrade enters the same release path as
+    // an upgrade (here the tag is absent, so it stops at release resolution), and
+    // every event of the attempt carries update_direction=downgrade_from_revoked.
+    func testRevokedBuildDowngradeEntersTheUpgradeReleasePath() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let base = "https://api.github.com/repos/Augustas11/macprovider/releases/tags/"
+        let session = r007MockSession([
+            URL(string: base + "v1.8.232")!: (404, Data("{}".utf8)),
+            URL(string: base + "1.8.232")!: (404, Data("{}".utf8)),
+        ])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        try Data("revoked-binary".utf8).write(to: binary)
+        let outcome = await r007Updater(fixture: fixture, store: store, binary: binary, notice: Self.r007Notice, session: session)
+            .handleCoordinatorRecommendation("1.8.232")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "target_release_not_found")
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+    }
+
+    // The downgrade stays authorized only while the live session still revokes
+    // this build with the same recommendation: a reconnect to a session that no
+    // longer does stops it before any download.
+    func testRevokedBuildDowngradeStopsWhenTheLiveSessionNoLongerRevokes() async throws {
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let session = r007MockSession([:])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let other = CoordinatorRevocationNotice(
+            revokedCompatibilitySetID: Self.r007Revoked,
+            recommendedCompatibilitySetID: "Augustas11/macprovider:v1.8.232@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        )
+        for live: CoordinatorRevocationNotice? in [nil, other] {
+            let fixture = try TempHome()
+            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            try store.ensureTrustedRoot()
+            let outcome = await r007Updater(fixture: fixture, store: store, binary: nil, notice: Self.r007Notice, session: session, live: .some(live))
+                .handleCoordinatorRecommendation("1.8.232")
+            XCTAssertEqual(outcome, .forwardProgressFailure)
+            let event = await AutoUpdateEventStore.shared.lastWireObject()
+            XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+            XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        }
+    }
+
+    // The live snapshot must also keep the session generation and the exact
+    // recommended version; a signed policy advanced mid-attempt (for example by
+    // a concurrent manual check) stops the downgrade too.
+    func testRevokedBuildDowngradeStopsOnGenerationVersionOrPolicyChange() async throws {
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let session = r007MockSession([:])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let trust = r005PinnedTrust()
+        func snapshot(generation: Int = 7, version: String? = "1.8.232") -> LiveDowngradeAuthorization {
+            LiveDowngradeAuthorization(
+                trust: trust,
+                notice: Self.r007Notice,
+                recommendedCompatibilitySetID: Self.r007Recommended,
+                recommendedBinaryVersion: version,
+                sessionGeneration: generation
+            )
+        }
+        for live in [snapshot(generation: 8), snapshot(version: "1.8.233"), snapshot(version: nil)] {
+            let fixture = try TempHome()
+            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            try store.ensureTrustedRoot()
+            let outcome = await r007Updater(fixture: fixture, store: store, binary: nil, notice: Self.r007Notice, session: session, liveSnapshot: { body in try body(live) })
+                .handleCoordinatorRecommendation("1.8.232")
+            XCTAssertEqual(outcome, .forwardProgressFailure)
+            let event = await AutoUpdateEventStore.shared.lastWireObject()
+            XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+        }
+
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let calls = AutoUpdateCounter()
+        let advancing: AutoUpdater.LiveRevocation = { body in
+            if calls.incrementAndGet() == 2 {
+                try? await store.updateSignedPolicy(minimum: nil, revoked: ["1.8.232"])
+            }
+            try body(snapshot())
+        }
+        let outcome = await r007Updater(fixture: fixture, store: store, binary: nil, notice: Self.r007Notice, session: session, liveSnapshot: advancing)
+            .handleCoordinatorRecommendation("1.8.232")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "downgrade_authorization_changed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+    }
+
+    // Events of a downgrade transaction carry the direction whichever producer
+    // records them; an upgrade's and a refused recommendation's never do.
+    func testDowngradeTransactionEventsCarryTheDirection() {
+        func direction(_ phase: AutoUpdatePhase, current: String, target: String) -> String? {
+            AutoUpdateEvent(
+                updateID: "u", currentVersion: current, targetVersion: target,
+                phase: phase, outcome: .failure, reason: "r", attempt: 1
+            ).wireObject()["extra_metadata"].flatMap { ($0 as? [String: String])?["update_direction"] }
+        }
+        for phase: AutoUpdatePhase in [.drain, .backup, .swap, .restart, .postStart, .rollback] {
+            XCTAssertEqual(direction(phase, current: "1.8.233", target: "1.8.232"), "downgrade_from_revoked", phase.rawValue)
+            XCTAssertNil(direction(phase, current: "1.8.232", target: "1.8.233"), phase.rawValue)
+        }
+        XCTAssertNil(direction(.eligibility, current: "1.8.233", target: "1.8.232"))
+        XCTAssertNil(direction(.rollback, current: "", target: "1.8.232"))
+    }
+
+    // A recommended target that is itself revoked by signed policy is refused
+    // before any download, even for a revoked running build.
+    func testRevokedBuildDowngradeRefusesASignedRevokedTarget() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        try await store.updateSignedPolicy(minimum: nil, revoked: ["1.8.232"])
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let session = r007MockSession([:])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let outcome = await r007Updater(fixture: fixture, store: store, binary: nil, notice: Self.r007Notice, session: session)
+            .handleCoordinatorRecommendation("1.8.232")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "target_revoked_or_below_minimum")
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+    }
+
+    // A downgrade target whose checksums signature does not verify is refused
+    // exactly as an upgrade would be: nothing is swapped, no marker is written.
+    func testRevokedBuildDowngradeRefusesABadSignature() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        try Data("revoked-binary".utf8).write(to: binary)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let download = "https://github.com/Augustas11/macprovider/releases/download/v1.8.232/"
+        let names = [
+            "macprovider-cli-v1.8.232-darwin-arm64.tar.gz",
+            "Malibu-v1.8.232.dmg",
+            CompatibilityArtifactIndex.fileName,
+            "checksums.txt",
+            "checksums.txt.sig",
+        ]
+        let assets = names.map { ["name": $0, "browser_download_url": download + $0] }
+        let release = try JSONSerialization.data(withJSONObject: ["tag_name": "v1.8.232", "assets": assets])
+        let session = r007MockSession([
+            URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/v1.8.232")!: (200, release),
+            URL(string: download + "checksums.txt")!: (200, Data("deadbeef  macprovider-cli-v1.8.232-darwin-arm64.tar.gz\n".utf8)),
+            URL(string: download + "checksums.txt.sig")!: (200, Data("not-a-signature".utf8)),
+        ])
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let outcome = await r007Updater(fixture: fixture, store: store, binary: binary, notice: Self.r007Notice, session: session)
+            .handleCoordinatorRecommendation("1.8.232")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.signatureInvalid.rawValue)
+        XCTAssertEqual((event?["extra_metadata"] as? [String: String])?["update_direction"], "downgrade_from_revoked")
+        XCTAssertEqual(try String(contentsOf: binary, encoding: .utf8), "revoked-binary")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
     }
 
     // SPEC-020-R005 round-4 MEDIUM-2 / R-6.8: an R005-triggered signed-recovery
@@ -4578,6 +5241,22 @@ private final class AutoUpdateCounter: @unchecked Sendable {
         defer { lock.unlock() }
         value += 1
         return value
+    }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class AutoUpdateLiveFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    var value: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
     }
 }
 
