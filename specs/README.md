@@ -56,7 +56,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.1 | draft | complete | conformant: 3, pending: 5 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | pending: 9 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.8 | draft | complete | conformant: 5, pending: 7 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
-| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.27 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
+| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.28 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
 | SPEC-049 | Operator-Constrained Privacy Class | 0.2.3 | draft | complete | pending: 28 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 <!-- AUTOGEN:spec-index END -->
 
