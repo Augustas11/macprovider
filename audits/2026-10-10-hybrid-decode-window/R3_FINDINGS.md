@@ -60,10 +60,32 @@ C/H/M/L = 0/0/1/1
 
 - ARCHITECTURE MEDIUM (self-check key omits the decode window, so a stored
   hybrid grant measured at window 1 would be reused at window 16): fixed in
-  `aa1e5435b` ("Key the continuous-batching self-check on the decode
-  window") and SPEC-038 v0.3.16 FR-CB10 item 2. Closure verification of this
-  fix (build, XCTest, one lane check) is pending: the Studio is frozen for the
-  1.8.238 canary.
+  `aa1e5435b` (`69150f6a7` after the rebase onto main at `eff5ccffd`;
+  "Key the continuous-batching self-check on the decode window") and
+  SPEC-038 v0.3.16 FR-CB10 item 2. CI (25/25 green on #1953) built it and ran
+  its tests. Closure check below: **MEDIUM closed**.
 - CODE INFO (CONFORMANCE rationale cited v0.3.11): fixed.
 - LOW (carried): no real-backend retention test of checkpoint retirement after
   `commitTerminalKV`.
+
+## Round-3 closure check (architecture lane, scoped to the MEDIUM)
+
+Prompt: `AUDIT_R3_CLOSURE_ARCHITECTURE_PROMPT.md`. Raw output, unedited:
+
+```text
+**MEDIUM closed.** No new findings in the scoped fix.
+
+- `ContinuousBatchingSelfCheck.swift:74,477`: missing `decode_window` decodes as 0; exact key equality prevents legacy or W=1 records from satisfying W=16. Both v5 and v6 remain readable.
+- `ContinuousBatchingSelfCheck.swift:621,639,648,721`: an older grant permits continuation but does not suppress measurement. Progress and crash markers use the new key.
+- `ContinuousBatchingSelfCheck.swift:393,643,273,292`: continuation cannot widen the older valid grant; completed reconciliation and serving remain bounded by freshly verified slots and scheduler capacity.
+- `ModelRuntime.swift:4492,4605`; `ContinuousBatchScheduler.swift:2043,2998`: the key reads the attached scheduler’s actual configured maximum window, and the self-check submits through that scheduler.
+- `ContinuousBatchingSelfCheckTests.swift:241,262`: tests cover legacy loading, cross-window cache misses, continuation, and window round-tripping. SPEC-038 FR-CB10 item 2 matches the implementation.
+
+Read-only inspection completed. CI success is operator-reported; no builds, tests, edits, or remote access performed.
+
+C/H/M/L = 0/0/0/0
+```
+
+Final verdict across all three lanes: 0 CRITICAL / 0 HIGH / 0 MEDIUM. Carried
+LOW: no real-backend retention test of checkpoint retirement after
+`commitTerminalKV`.
