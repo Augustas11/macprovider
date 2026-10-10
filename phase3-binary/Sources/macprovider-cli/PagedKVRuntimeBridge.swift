@@ -3261,6 +3261,47 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// One packed native-MTP verification forward over retained rows, as
+    /// `verifyNativeMTPPackedRound` runs it, returning each row's logits for
+    /// its real columns (`[inputCount * vocab]` float32, proposal rows then
+    /// the bonus row). Nothing is committed and no transaction is kept, so a
+    /// probe compares one verify step per prefilled state.
+    func sharedVerifyLogitsForTest(requestIDs: [String], tokenRows: [[Int]]) async throws -> [[Float]] {
+        try await container.perform { context in
+            let states = try requestIDs.map { id -> RowState in
+                guard let state = self.existingRowState(for: id), state.state == nil else {
+                    throw ContinuousBatchSchedulerError.unsupported("verify_probe_missing_row")
+                }
+                return state
+            }
+            let batchedCaches = try self.makeBatchedCaches(from: states.map(\.caches), nativeMTP: true)
+            let width = tokenRows.map(\.count).max() ?? 1
+            let tokens = MLXArray(
+                tokenRows.flatMap { $0.map(Int32.init) + Array(repeating: Int32(0), count: width - $0.count) },
+                [tokenRows.count, width]
+            )
+            let rowMaps = tokenRows.enumerated().map { index, row in
+                MTPPackedVerificationRowMap(
+                    rowIndex: index,
+                    queryOffset: states[index].caches.compactMap { $0 as? PagedKVCache }.first?.offset ?? 0,
+                    inputCount: row.count,
+                    proposalCount: row.count - 1
+                )
+            }
+            let output = try verifyMTPPackedTargets(
+                model: context.model,
+                tokens: tokens,
+                rowMaps: rowMaps,
+                cache: batchedCaches.map(\.cache)
+            )
+            let perRow = output.rows.sorted { $0.map.rowIndex < $1.map.rowIndex }.map {
+                concatenated([$0.proposalLogits, $0.bonusLogits], axis: 0).asType(.float32)
+            }
+            eval(perRow)
+            return perRow.map { $0.asArray(Float.self) }
+        }
+    }
+
     /// One attention layer of a shared forward through the batch cache the
     /// backend builds for it (`raggedPrefill` selects the ragged prefill
     /// cache; `mtpPackedRowMaps` prepares packed MTP verification), with the

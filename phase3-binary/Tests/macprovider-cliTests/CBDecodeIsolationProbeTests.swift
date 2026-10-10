@@ -120,4 +120,97 @@ final class CBDecodeIsolationProbeTests: XCTestCase {
         }
         XCTAssertEqual(failures, [], "batched decode rows differ from their lone runs")
     }
+
+    /// Packed native-MTP verification: each row verifies `width` columns
+    /// (its last token and `width - 1` proposals), so a shared verify feeds
+    /// rows x width tokens into every quantized matmul. Each row's verify
+    /// logits must be bit-identical to the same row verified alone.
+    /// `MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH` (default 3) sets the width.
+    func testServedModelVerifyRowsMatchTheirLoneLogitsBitwise() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let directory = environment["MACPROVIDER_DECODE_ISOLATION_MODEL"], !directory.isEmpty,
+              environment["MACPROVIDER_DECODE_ISOLATION_VERIFY"] == "1"
+        else {
+            throw XCTSkip("set MACPROVIDER_DECODE_ISOLATION_MODEL and MACPROVIDER_DECODE_ISOLATION_VERIFY=1")
+        }
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let lengths = (environment["MACPROVIDER_DECODE_ISOLATION_LENGTHS"] ?? "600,901,1501,3000,9000")
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let width = Int(environment["MACPROVIDER_DECODE_ISOLATION_VERIFY_WIDTH"] ?? "") ?? 3
+        let container = try await LLMModelFactory.shared.loadContainer(
+            from: URL(fileURLWithPath: directory),
+            using: #huggingFaceTokenizerLoader()
+        )
+        let cacheKinds = try await container.perform { context in
+            try context.model.newCache(parameters: nil as GenerateParameters?).map { cache in
+                try XCTUnwrap(PagedKVSharedForwardBackend.CacheKind.recognized(from: cache))
+            }
+        }
+        let ids = lengths.indices.map { "row-\($0)" }
+        let prompts = lengths.enumerated().map { row, length in
+            (0 ..< length).map { 1_000 + ($0 * 7_919 + row * 104_729) % 30_000 }
+        }
+
+        func run(_ rows: [Int]) async throws -> [String: [Float]] {
+            let blockSize = 32
+            let blocks = 4_096
+            let backend = PagedKVSharedForwardBackend(
+                container: container,
+                blockSizeTokens: blockSize,
+                maxPhysicalBlocks: blocks,
+                poolEpoch: 1,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds
+            )
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: blockSize, maxPhysicalBlocks: blocks)
+            var tokenRows: [[Int]] = []
+            for row in rows {
+                let prompt = prompts[row]
+                let handle = try await allocator.allocate(conversationKey: ids[row], maxTokens: prompt.count + width + 8)
+                var first = 0
+                for start in stride(from: 0, to: prompt.count, by: 512) {
+                    let end = min(start + 512, prompt.count)
+                    _ = try await allocator.extend(handle, by: end - start)
+                    let output = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                        requestID: ids[row],
+                        promptTokens: Array(prompt[start ..< end]),
+                        binding: try await allocator.binding(for: handle),
+                        promptTokenOffset: start,
+                        committedKVTokenCount: start,
+                        targetKVTokenCount: end,
+                        isFinalChunk: end == prompt.count
+                    )])
+                    XCTAssertNil(output.first?.failureCode, ids[row])
+                    if end == prompt.count { first = try XCTUnwrap(output.first?.sampledToken, ids[row]) }
+                }
+                // Fixed proposals: the verify forward's numerics do not depend
+                // on whether they would be accepted.
+                tokenRows.append([first] + (1 ..< width).map { 2_000 + 37 * $0 + row })
+            }
+            let logits = try await backend.sharedVerifyLogitsForTest(requestIDs: rows.map { ids[$0] }, tokenRows: tokenRows)
+            return Dictionary(uniqueKeysWithValues: zip(rows.map { ids[$0] }, logits))
+        }
+
+        let batched = try await run(Array(lengths.indices))
+        var failures: [String] = []
+        for row in lengths.indices {
+            let id = ids[row]
+            let lone = try await run([row])[id]!
+            let shared = batched[id]!
+            let gap = zip(lone, shared).map { abs($0 - $1) }.max() ?? 0
+            let vocabulary = lone.count / width
+            let argmax = { (logits: [Float]) in
+                (0 ..< width).map { column in
+                    let slice = logits[column * vocabulary ..< (column + 1) * vocabulary]
+                    return slice.indices.max { slice[$0] < slice[$1] }! - column * vocabulary
+                }
+            }
+            print("verify-isolation rows=\(lengths.count) width=\(width) row=\(row) keys=\(lengths[row]) logits_bitwise=\(lone == shared) max_abs_diff=\(gap) lone_top=\(argmax(lone)) batched_top=\(argmax(shared))")
+            if lone != shared { failures.append("row \(row) (\(lengths[row]) keys): max |diff| \(gap)") }
+        }
+        XCTAssertEqual(failures, [], "batched verify rows differ from their lone runs")
+    }
 }
