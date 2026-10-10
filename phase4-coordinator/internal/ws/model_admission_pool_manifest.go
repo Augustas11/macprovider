@@ -213,6 +213,11 @@ func (s *Server) SetPoolModelSource(source PoolModelSource, bounds func() *poolm
 	if activations, ok := source.(poolManifestActivationSource); ok {
 		activations.SetManifestActivationHook(s.kickPoolManifestBindingSweep)
 	}
+	if s.poolProven != nil && s.probeEvidence != nil {
+		// The R012 owner-account resolution reads this registry: rebuild now
+		// rather than serve a startup snapshot built without it.
+		go s.refreshModelAdmissionPoolProven()
+	}
 }
 
 // poolManifestActivationSource is a PoolModelSource that reports, at

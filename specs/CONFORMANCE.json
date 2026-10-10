@@ -11772,15 +11772,28 @@
       "requirement_id": "SPEC-047-R012",
       "spec_id": "SPEC-047",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func (s *Server) handleAdminModelAdmissionPoolProven",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func (s *Server) buildModelAdmissionPoolProvenSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func BuildModelAdmissionPoolProvenRows",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven.go:func poolProvenOwnerAccount",
+        "phase4-coordinator/internal/billing/pool_proven.go:func QueryPoolProvenAttempts",
+        "phase4-coordinator/internal/trustpool/accepted_entries.go:func AcceptedPoolModelEntries"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestBuildModelAdmissionPoolProvenRows",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestPoolProvenOwnerAccountResolution",
+        "phase4-coordinator/internal/ws/model_admission_pool_proven_test.go:TestModelAdmissionPoolProvenEndpoint",
+        "phase4-coordinator/internal/billing/pool_proven_test.go:TestQueryPoolProvenAttemptsCountingPredicate",
+        "phase4-coordinator/internal/trustpool/accepted_entries_test.go:TestAcceptedPoolModelEntriesReplaysEveryAcceptedCore"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1816",
-        "rationale": "GET /admin/model-admission/pool-proven and the closed model_admission_pool_proven.v1 frame are not implemented: no materialized build over pool-manifest route snapshots and final settlement rows, k-anonymity suppression, licence agreement, probe-evidence currency, ceilings, or pool_proven_unavailable handling."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1880",
+        "rationale": "#1880 step 5 implements GET /admin/model-admission/pool-proven: the closed model_admission_pool_proven.v1 frame materialized every 15 minutes and at startup from settled enforce-mode pool_manifest attempts (closed payable verdict, undisputed label, payable credit with positive debit and credit) by verdict finality time, distinct owner accounts with k=3 suppression, licence agreement from the accepted core each snapshot names, the newest current passing known-answer record, the 100 000 counted-attempt ceiling and 10-second timeout leaving the previous snapshot, and pool_proven_unavailable when missing or stale. Pending until production evidence from a deployed build exists."
       }
     },
     {
