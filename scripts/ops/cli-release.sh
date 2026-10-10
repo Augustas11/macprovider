@@ -19,13 +19,16 @@
 #   4 signed_byte_verification  checksums, pearl-release.json signature,
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
 #                           verify-malibu-release-artifacts.sh
-#   4a privacy_release_setup  operator-owned one-time Pearl setup of
-#                           privacy_class.release_code_identities (printed; recorded with
-#                           --evidence); done only while Pearl's config names a metadata_dir
+#   4a privacy_release_setup  one-time Pearl setup of privacy_class.release_code_identities
+#                           (next --run: _pearl-config edit + restart, sharing the restart with
+#                           step 5 when due, then stages 4b); done while Pearl's config names it
 #   4b privacy_release_identity  copy the verified candidate pearl-release.json + .sig to
 #                           Pearl's privacy_class.release_code_identities.metadata_dir as
 #                           v<ver>.json/.sig (hot: re-read every ~60 s, no restart)
-#   5 pearl_accepted_ids    add the candidate compatibility_set_id, keep target_id
+#   5 pearl_accepted_ids    next --run: _pearl-config adds the candidate compatibility_set_id
+#                           (keep target_id; at the cap of 8 evict the least recently seen id
+#                           with no provider connected in 7 days) and restarts; done when the
+#                           running coordinator's applied config lists it
 #   6 canary_smoke          exact signed-candidate install/join smoke; recorded only with
 #                           structured evidence: `next --done canary_smoke --probe` (the script
 #                           reads the canary's /v1/status over STUDIO_SSH: binary_version ==
@@ -54,7 +57,9 @@
 #                           v<ver> exists unsigned/untrusted, on another commit, or lightweight
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
 #                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
-#   8 recommendation_bump   Pearl latest_binary_version + compatibility target
+#   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
+#                           compatibility_set.target_id (prior target stays accepted), restarts,
+#                           and checks /healthz recommended_binary_version
 #   9 verify_live_rollout   _check-privacy-rejections (two samples of the
 #                           posture_unapproved_code_identity counter over
 #                           PRIVACY_REJECTION_WINDOW_SECONDS, default 180; journal fallback),
@@ -101,28 +106,38 @@ registrations_remote() {
   pearl_ssh "python3 - $*" < "$OPS_LIB_DIR/release-registrations.py"
 }
 
-# The one-time Pearl setup that turns on hot release-derived approval
-# ($PRIVACY_DOC "One-time setup"): an operator-owned config edit and restart,
-# recorded like pearl_accepted_ids.
-privacy_setup_text() {
-  local key_sha
-  key_sha="$(shasum -a 256 "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" | awk '{print $1}')"
-  printf '%s\n' \
-"# $PRIVACY_DOC 'One-time setup (operator, Pearl)'. On Pearl, under both locks:
-# 1. Preflight: the pinned release key is the repo key and the coordinator user can read it:
-#      sha256sum /usr/local/share/macprovider/release-signing-public.pem   # == $key_sha
-#      runuser -u macprovider -- test -r /usr/local/share/macprovider/release-signing-public.pem
-# 2. install -d -o root -g macprovider -m 0750 /opt/macprovider/privacy-release-identities
-# 3. Back up, then edit $PEARL_COORDINATOR_CONFIG IN PLACE (never restore a whole-file backup),
-#    under privacy_class:
-#      release_code_identities:
-#        metadata_dir: /opt/macprovider/privacy-release-identities
-#        public_key_path: /usr/local/share/macprovider/release-signing-public.pem
-# 4. Validate with the running coordinator's service environment, then RESTART the coordinator
-#    (the key is read at startup; an unreadable key stops startup, so restore the backup if
-#    /healthz does not come back) and verify the applied config hash and public /healthz.
-# 5. Record it (status then reads privacy_release_metadata_dir from Pearl itself):
-#      $0 next --done privacy_release_setup --evidence '<applied config sha256 + healthz>'"
+# Pearl layout for the coordinator.yaml edits (defaults: production).
+PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
+PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
+PEARL_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+PEARL_CONNECTION_EVENTS_DB="${PEARL_CONNECTION_EVENTS_DB:-/var/lib/macprovider/provider_connection_events.db}"
+PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
+PEARL_COORDINATOR_HEALTHZ_URL="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8443/healthz}"
+PEARL_PROC_ROOT="${PEARL_PROC_ROOT:-/proc}"
+PRIVACY_METADATA_DIR="${PEARL_PRIVACY_METADATA_DIR:-/opt/macprovider/privacy-release-identities}"
+PRIVACY_PUBLIC_KEY_PATH="${PEARL_RELEASE_PUBLIC_KEY_PATH:-/usr/local/share/macprovider/release-signing-public.pem}"
+
+# _pearl-config ARGS...: the train's coordinator.yaml edits plus one restart,
+# by lib/pearl-cli-config.py on Pearl (both Pearl locks, anchored edit,
+# backup, validation with the running coordinator's environment, restart,
+# /healthz, postconditions). Only `next --run` may call it: it holds the
+# live-ops lock and has printed the downtime banner.
+pearl_config() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_pearl-config runs only from '$0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  local a guard_sha
+  guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}')"
+  for a in "$@" "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" \
+    "$PEARL_INSTALL_ROOT" "$PEARL_CONFIG_GUARD" "$PEARL_UPDATER_LOCK" "$PEARL_CONNECTION_EVENTS_DB" \
+    "$PEARL_BACKUP_ROOT" "$PEARL_COORDINATOR_HEALTHZ_URL" "$PEARL_PROC_ROOT"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./:@+=-]+$ ]] || die "unsafe argument for the Pearl config helper: $a"
+  done
+  pearl_ssh "python3 - apply --config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY \
+--unit $PEARL_COORDINATOR_UNIT --install-root $PEARL_INSTALL_ROOT --guard $PEARL_CONFIG_GUARD \
+--guard-sha256 $guard_sha --updater-lock $PEARL_UPDATER_LOCK --events-db $PEARL_CONNECTION_EVENTS_DB \
+--backup-root $PEARL_BACKUP_ROOT --healthz $PEARL_COORDINATOR_HEALTHZ_URL --proc $PEARL_PROC_ROOT $*" \
+    < "$OPS_LIB_DIR/pearl-cli-config.py"
 }
 
 # candidate_release_bytes V -> 'PRJ<TAB>SIG' of the verified candidate, or nothing.
@@ -140,7 +155,7 @@ candidate_release_bytes() {
 # REG_DIR, REG_BY, REG_MISSING and REG_ERR.
 load_registrations() {
   local V="$1" compat="$2" bytes prj="" sig=""
-  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""
+  REG_STATE=unknown; REG_DIR=""; REG_BY=""; REG_MISSING=""; REG_ERR=""; REG_COMPAT_ACCEPTED=false
   if [ -z "${PEARL_SSH:-}" ]; then
     REG_ERR="PEARL_SSH is unset"
   elif ! registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" \
@@ -155,6 +170,7 @@ load_registrations() {
       REG_STATE="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd["metadata_state"]')"
       REG_BY="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("approved_by")')"
       REG_MISSING="$(json_field "$OPS_TMP_DIR/reg-verdict.json" '"; ".join(d["missing"])')"
+      REG_COMPAT_ACCEPTED="$(json_field "$OPS_TMP_DIR/reg-verdict.json" 'd.get("compat_accepted", False)')"
     else
       REG_ERR="registration evaluation failed: $(tail -n1 "$OPS_TMP_DIR/reg-verdict.err")"
     fi
@@ -364,20 +380,25 @@ bash scripts/release-staged-version-policy.sh v$V" \
   # 4b. privacy release identity: the hot SPEC-049-R027 registration of the
   # candidate's code identity. Read live every time; never a local marker.
   load_registrations "$V" "$compat_id"
-  # 4a. one-time Pearl setup of the release metadata dir (operator-owned).
+  # 4a. one-time Pearl setup of the release metadata dir. It shares its one
+  # restart with the accepted_ids edit when that is still due, and stages the
+  # candidate identity right after (hot), so 4a, 4b and 5 take one run.
   case "$REG_STATE" in
     unknown) step privacy_release_setup unknown "$REG_ERR" ;;
     unconfigured)
       step privacy_release_setup pending "Pearl has no release_code_identities.metadata_dir"
-      if marker_done "$OPS_SCOPE" privacy_release_setup; then
-        set_next privacy_release_setup blocked "Finish the one-time privacy release setup on Pearl" "" \
-          "privacy_release_setup was recorded but Pearl's config still has no metadata_dir; check the edit and the restart"
-      else
-        set_next privacy_release_setup manual "One-time: configure privacy_class.release_code_identities on Pearl" \
-          "$(privacy_setup_text)" \
-          "Pearl has no privacy_class.release_code_identities.metadata_dir; v$V's code identity cannot be registered hot until this one-time setup is done"
+      local key_sha setup_cmd setup_also=""
+      key_sha="$(shasum -a 256 "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" | awk '{print $1}')"
+      setup_cmd="scripts/ops/cli-release.sh _pearl-config --privacy-setup $PRIVACY_METADATA_DIR $PRIVACY_PUBLIC_KEY_PATH $key_sha"
+      if [ "$published" != true ] && [ -n "$compat_id" ] && [ "$REG_COMPAT_ACCEPTED" != true ]; then
+        setup_cmd="$setup_cmd --accepted-id $compat_id"; setup_also=" and add $compat_id to accepted_ids"
       fi
-      next_meta privacy_release_setup "$PRIVACY_DOC#one-time-setup-operator-pearl" "coordinator restart: a few seconds of buyer outage" ;;
+      [ -z "$(candidate_release_bytes "$V")" ] || setup_cmd="$setup_cmd
+scripts/ops/cli-release.sh _stage-privacy-identity $V"
+      set_next privacy_release_setup mutate "One-time: configure privacy_class.release_code_identities on Pearl$setup_also" \
+        "$setup_cmd"
+      next_meta privacy_release_setup "$PRIVACY_DOC#one-time-setup-pearl" \
+        "coordinator restart: a few seconds of buyer outage" privacy_release_setup ;;
     *) step privacy_release_setup "done" "metadata_dir $REG_DIR" ;;
   esac
   if [ "$REG_STATE" = staged ] || { [ "$published" = true ] && [ "$REG_STATE" = present ]; }; then
@@ -404,19 +425,23 @@ bash scripts/release-staged-version-policy.sh v$V" \
     esac
   fi
 
-  # 5. Pearl accepted_ids (keep target).
-  if [ "$published" = true ] || marker_done "$OPS_SCOPE" pearl_accepted_ids; then
-    step pearl_accepted_ids "done" ""
+  # 5. Pearl accepted_ids (keep target): read live from the applied config.
+  if [ "$published" = true ]; then
+    step pearl_accepted_ids "done" "v$V published"
+  elif [ "$REG_COMPAT_ACCEPTED" = true ]; then
+    step pearl_accepted_ids "done" "$compat_id accepted by the running coordinator"
   else
     step pearl_accepted_ids pending ""
-    set_next pearl_accepted_ids manual "Add $compat_id to Pearl compatibility_set.accepted_ids (keep target_id)" \
-"# docs/releases/cli-release-train.md Session protocol, docs/runbooks/provider-cli-release-verification.md
-# On Pearl, under both locks, edit coordinator.yaml IN PLACE (never restore a whole-file backup):
-#   compatibility_set.accepted_ids += \"$compat_id\"   (cap 8, keep target_id, drop oldest unused)
-# Validate with the running coordinator's service environment, then RESTART the coordinator
-# (s.cfg is a value copy; SIGHUP does not reload compatibility_set) and verify the applied
-# config hash and public /healthz."
-    next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage"
+    if [ "$REG_STATE" = unknown ]; then
+      set_next pearl_accepted_ids blocked "Read Pearl's compatibility_set" "" "$REG_ERR"
+    elif [ -z "$compat_id" ]; then
+      set_next pearl_accepted_ids blocked "Accept v$V on Pearl" "" "no verified compatibility_set_id for v$V is recorded"
+    else
+      # SIGHUP does not reload compatibility_set (s.cfg is a value copy): restart.
+      set_next pearl_accepted_ids mutate "Add $compat_id to Pearl compatibility_set.accepted_ids (keep target_id) and restart" \
+        "scripts/ops/cli-release.sh _pearl-config --accepted-id $compat_id"
+      next_meta pearl_accepted_ids "$ROLLOUT_DOC" "coordinator restart: a few seconds of buyer outage" pearl_accepted_ids
+    fi
   fi
 
   # 6. canary install/join smoke.
@@ -517,12 +542,14 @@ bash scripts/release-staged-version-policy.sh v$V" \
     step recommendation_bump "done" "live recommends $V"
   else
     step recommendation_bump pending "live recommends $L"
-    set_next recommendation_bump manual "Move Pearl latest_binary_version and compatibility_set.target_id to $V" \
-"# docs/runbooks/provider-cli-release-verification.md 'Pearl compatibility gate before fleet recommendation'
-# On Pearl, under both locks, in place: latest_binary_version: \"$V\";
-#   compatibility_set.target_id = v$V's compatibility_set_id; keep the prior target in accepted_ids.
-# Restart the coordinator, then confirm /healthz recommended_binary_version == $V."
-    next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" "coordinator restart: a few seconds of buyer outage"
+    if [ -z "$compat_id" ]; then
+      set_next recommendation_bump blocked "Recommend v$V" "" "no verified compatibility_set_id for v$V is recorded"
+    else
+      set_next recommendation_bump mutate "Move Pearl latest_binary_version and compatibility_set.target_id to $V (prior target stays accepted) and restart" \
+        "scripts/ops/cli-release.sh _pearl-config --recommend $V $compat_id"
+      next_meta recommendation_bump "$VERIFY_DOC#pearl-compatibility-gate-before-fleet-recommendation" \
+        "coordinator restart: a few seconds of buyer outage" recommendation_bump
+    fi
   fi
 
   # 9. verify-live-coordinator-release-rollout. The process-lifetime
@@ -937,7 +964,7 @@ stage_privacy_identity() {
   registrations_remote facts "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$PEARL_COORDINATOR_UNIT" "$V" - \
     > "$OPS_TMP_DIR/reg-facts.json" || refuse "Pearl coordinator config unreadable"
   dir="$(json_field "$OPS_TMP_DIR/reg-facts.json" 'd["metadata_dir"]')"
-  [ -n "$dir" ] || { privacy_setup_text >&2; refuse "Pearl has no privacy_class.release_code_identities.metadata_dir; do the one-time setup above first"; }
+  [ -n "$dir" ] || refuse "Pearl has no privacy_class.release_code_identities.metadata_dir; run the privacy_release_setup step with '$0 next --run' first"
   [[ "$dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "unexpected metadata_dir path: $dir"
   out="$(registrations_remote stage "$dir" "$V" "$PEARL_RELEASE_IDENTITY_OWNER" "$PEARL_RELEASE_IDENTITY_GROUP" \
     "$(base64 < "$prj" | tr -d '\n')" "$(base64 < "$sig" | tr -d '\n')")" || refuse "staging v$V.json on Pearl failed"
@@ -956,6 +983,7 @@ internal() {
     _verify-candidate) shift; verify_candidate "$@" ;;
     _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
     _release-tag) shift; release_tag "$@" ;;
+    _pearl-config) shift; pearl_config "$@" ;;
     _check-privacy-rejections) shift; check_privacy_rejections "$@" ;;
     *) usage >&2; exit 2 ;;
   esac

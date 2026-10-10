@@ -345,7 +345,9 @@ def evaluate(facts_path, version, compat_id, prj, prjsig):
                     "with (or its boot digest is unreadable): restart-only registrations are not proven live")
     if not f.get("privacy_class_enabled"):
         miss.append("privacy_class.enabled is not true in the Pearl coordinator config")
-    if compat_id and compat_id != f.get("target_id") and compat_id not in f.get("accepted_ids", []):
+    listed = bool(compat_id) and (compat_id == f.get("target_id") or compat_id in f.get("accepted_ids", []))
+    out["compat_accepted"] = listed and out["config_applied"]
+    if compat_id and not listed:
         miss.append("compatibility_set.accepted_ids lacks %s (pearl_accepted_ids step)" % compat_id)
     if local is None and remote is not None and f.get("public_key_pem") and verify_sig(f["public_key_pem"], remote, remote_sig):
         # A published release with no local bytes: the signed file names the identity.

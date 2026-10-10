@@ -795,10 +795,11 @@ mainland-provider installer handoff.
    `privacy_release_identity` copies the verified candidate
    `pearl-release.json` + `.sig` into Pearl's
    `privacy_class.release_code_identities.metadata_dir` as `v<ver>.json`
-   (hot, no restart). While Pearl has no `metadata_dir`, the operator-owned
-   step `privacy_release_setup` comes first and prints the one-time setup
-   (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup"); record
-   it with `next --done privacy_release_setup --evidence ...`. CLI 1.8.230 shipped without this and
+   (hot, no restart). While Pearl has no `metadata_dir`, step
+   `privacy_release_setup` comes first and `next --run` performs the one-time
+   setup (`docs/runbooks/privacy-class-beta-operations.md` "One-time setup"),
+   sharing its single coordinator restart with the `pearl_accepted_ids` edit
+   and staging the identity right after. CLI 1.8.230 shipped without this and
    every upgraded provider's privacy advertisement was refused for ~12 h.
 5. Exact signed-candidate install/join smoke. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
@@ -868,11 +869,13 @@ mainland-provider installer handoff.
 - Republish `get.malibu.tech/install.sh` from `main` or from a tag → update
   this file the same day (date, SHA-256, whether parity vs current stable is
   expected red).
-- Live-coordinator candidate test: add its `compatibility_set_id` to
-  `accepted_ids` (keep `target_id`). The list is capped at 8 and must
-  include `target_id`; drop the oldest unused set if at cap. Restart the
-  coordinator (`s.cfg` is a value copy — SIGHUP does not reload
-  compatibility_set). Keep the id while it is the Studio serving canary;
+- Live-coordinator candidate test: `scripts/ops/cli-release.sh next --run`
+  at step `pearl_accepted_ids` adds its `compatibility_set_id` to
+  `accepted_ids` (keep `target_id`) and restarts the coordinator (`s.cfg` is
+  a value copy — SIGHUP does not reload compatibility_set). The list is
+  capped at 8 and must include `target_id`; at the cap the step evicts the
+  least recently seen non-target id that no provider has connected with in
+  7 days, and refuses with the list when none qualifies. Keep the id while it is the Studio serving canary;
   revert after a throwaway test. An unaccepted set is closed 4001
   `compatibility_set_unaccepted`; the CLI reports that as
   `Expected auth_challenge v2`.

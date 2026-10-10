@@ -42,9 +42,20 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
 - Runbook commands are never read from the Markdown at run time. They are
   constants in `lib/runbook-commands.sh`; `test-runbook-commands.sh` fails when
   one drifts from its fenced block on `origin/main`.
+- `cli-release.sh` edits Pearl's `coordinator.yaml` itself for
+  `privacy_release_setup`, `pearl_accepted_ids` and `recommendation_bump`:
+  `next --run` prints the downtime, holds the live-ops lock, and runs
+  `lib/pearl-cli-config.py` over `PEARL_SSH` under both Pearl locks (refusing
+  on a pricing transaction journal): anchored in-place edit, backup under
+  `/root/macprovider-backups`, validation with the running coordinator's
+  binary, user and exact environment, atomic replace, one restart,
+  `/healthz` and the live postcondition, then the step is recorded. Steps that
+  can share a restart do (setup plus accepted_ids). No step asks anyone to
+  paste a restart; the ops guard still blocks a typed restart and a direct
+  `_pearl-config`.
 - `cli-release.sh` registers each new CLI on Pearl before it can be
-  promoted. The operator-owned `privacy_release_setup` step prints the
-  one-time Pearl setup while Pearl has no privacy release metadata dir. Step
+  promoted. `privacy_release_setup` configures the privacy release metadata
+  dir once. Step
   `privacy_release_identity` stages the verified `pearl-release.json` as
   `v<ver>.json` there (hot, no restart). The read-only `registrations` gate,
   evaluated on every status, requires the running coordinator to hold the
@@ -61,8 +72,8 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `v<ver>` is annotated, peels to the candidate SHA and its exact remote tag
   object passes `git verify-tag`; it refuses an unsigned, untrusted,
   lightweight or other-commit `v<ver>`.
-- Steps the operator owns are `manual`: an environment approval click, a
-  Pearl `coordinator.yaml` edit, or a provider restart. `next` prints the
+- Steps the operator owns are `manual`: an environment approval click or a
+  provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
   it with `next --done`. `canary_smoke` and `e2e_gate` refuse free text: they
   take a canary status probe the script reads itself, signed journey run ids
@@ -106,6 +117,13 @@ PEARL_COORDINATOR_OVERLAY=/etc/macprovider/coordinator.pearl-overlays.yaml
 PEARL_COORDINATOR_UNIT=macprovider-coordinator
 PEARL_COORDINATOR_METRICS_URL=http://127.0.0.1:8444/metrics
 PEARL_RELEASE_IDENTITY_OWNER=root PEARL_RELEASE_IDENTITY_GROUP=macprovider
+PEARL_INSTALL_ROOT=/opt/macprovider PEARL_BACKUP_ROOT=/root/macprovider-backups
+PEARL_CONFIG_GUARD=/usr/local/share/macprovider/scripts/coordinator_config_guard.py
+PEARL_UPDATER_LOCK=/run/lock/macprovider-pearl-updater.lock
+PEARL_CONNECTION_EVENTS_DB=/var/lib/macprovider/provider_connection_events.db
+PEARL_COORDINATOR_HEALTHZ_URL=http://127.0.0.1:8443/healthz
+PEARL_PRIVACY_METADATA_DIR=/opt/macprovider/privacy-release-identities
+PEARL_RELEASE_PUBLIC_KEY_PATH=/usr/local/share/macprovider/release-signing-public.pem
 ```
 
 When a script needs ssh and its variable is unset, it fails and names the
