@@ -379,7 +379,12 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         let recorder = MixedCacheRecorder()
         let container = ModelContainer(context: ModelContext(
             configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
-            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            model: MixedCacheFakeModel(
+                recorder: recorder,
+                nextTokenByInput: [:],
+                attentionDType: .float16,
+                attendsThroughCache: true
+            ),
             processor: MixedCacheUserInputProcessor(),
             tokenizer: MixedCacheTokenizer()
         ))
@@ -443,6 +448,95 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         let bSnapshot = try XCTUnwrap(maybeBSnapshot)
         XCTAssertEqual(aSnapshot.states[0]?.first?.asArray(Float.self), [201, 202])
         XCTAssertEqual(bSnapshot.states[0]?.first?.asArray(Float.self), [211, 212])
+    }
+
+    /// A ragged group whose model calls SDPA itself (here: `update` and its
+    /// own attention) attended over the padded batch. The backend rejects
+    /// that forward before sampling or committing anything: both rows fail
+    /// and are released (their paged KV took the chunk in place, so a retry
+    /// would append it twice). Later ragged groups prefill serially.
+    func testRaggedPrefillThatBypassesPerRowAttentionFailsItsRowsAndLaterGroupsRunSerially() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let recorder = MixedCacheRecorder()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 32,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        XCTAssertTrue(backend.supportsRaggedPrefillOffsets)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+
+        func raggedGroup(_ short: String, _ long: String) async throws -> [ContinuousBatchPrefillOutput] {
+            let shortHandle = try await allocator.allocate(conversationKey: short, maxTokens: 8)
+            let longHandle = try await allocator.allocate(conversationKey: long, maxTokens: 8)
+            _ = try await allocator.extend(longHandle, by: 1)
+            let first = try await backend.prefill(rows: [
+                ContinuousBatchPrefillInput(
+                    requestID: long,
+                    promptTokens: [10],
+                    binding: try await allocator.binding(for: longHandle),
+                    promptTokenOffset: 0,
+                    committedKVTokenCount: 0,
+                    targetKVTokenCount: 1,
+                    isFinalChunk: false
+                ),
+            ])
+            XCTAssertNil(first.first?.failureCode)
+            _ = try await allocator.extend(shortHandle, by: 2)
+            _ = try await allocator.extend(longHandle, by: 2)
+            return try await backend.prefill(rows: [
+                ContinuousBatchPrefillInput(
+                    requestID: short,
+                    promptTokens: [1, 2],
+                    binding: try await allocator.binding(for: shortHandle),
+                    promptTokenOffset: 0,
+                    committedKVTokenCount: 0,
+                    targetKVTokenCount: 2,
+                    isFinalChunk: true
+                ),
+                ContinuousBatchPrefillInput(
+                    requestID: long,
+                    promptTokens: [11, 12],
+                    binding: try await allocator.binding(for: longHandle),
+                    promptTokenOffset: 1,
+                    committedKVTokenCount: 1,
+                    targetKVTokenCount: 3,
+                    isFinalChunk: true
+                ),
+            ])
+        }
+
+        let before = recorder.forwardBatchSizes().count
+        let rejected = try await raggedGroup("row-a", "row-b")
+        XCTAssertEqual(rejected, [
+            ContinuousBatchPrefillOutput(requestID: "row-a", failureCode: "continuous_batching_prefill_failed"),
+            ContinuousBatchPrefillOutput(requestID: "row-b", failureCode: "continuous_batching_prefill_failed"),
+        ])
+        XCTAssertEqual(Array(recorder.forwardBatchSizes().dropFirst(before)), [1, 2])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 0, "rejected rows are released")
+        XCTAssertFalse(backend.supportsRaggedPrefillOffsets)
+
+        let fallbackStart = recorder.forwardBatchSizes().count
+        let fallback = try await raggedGroup("row-c", "row-d")
+        XCTAssertTrue(fallback.allSatisfy { $0.failureCode == nil && $0.sampledToken != nil }, "\(fallback)")
+        XCTAssertEqual(
+            Array(recorder.forwardBatchSizes().dropFirst(fallbackStart)),
+            [1, 1, 1],
+            "the later ragged group prefills each row alone"
+        )
+        XCTAssertEqual(backend.retainedRowCountForTest(), 2)
     }
 
     func testUnequalLengthPrefillUsesSerialForwardsForMixedCache() async throws {
@@ -830,19 +924,24 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     /// follows the forward's length and tests can read a prefill's full
     /// input back from it. On: one value per row, as real recurrent state.
     private let fixedShapeRecurrentState: Bool
+    /// Attend through `attentionWithCacheUpdate` like the served models,
+    /// instead of calling `update` and attending itself.
+    private let attendsThroughCache: Bool
 
     init(
         recorder: MixedCacheRecorder,
         nextTokenByInput: [Int: Int],
         attentionDType: DType = .float32,
         returnsBackendStateForBatches: Bool = false,
-        fixedShapeRecurrentState: Bool = false
+        fixedShapeRecurrentState: Bool = false,
+        attendsThroughCache: Bool = false
     ) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
         self.attentionDType = attentionDType
         self.returnsBackendStateForBatches = returnsBackendStateForBatches
         self.fixedShapeRecurrentState = fixedShapeRecurrentState
+        self.attendsThroughCache = attendsThroughCache
         super.init()
     }
 
@@ -894,9 +993,22 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
             if cache.count > 1 {
                 let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1]).asType(attentionDType)
                 let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1]).asType(attentionDType)
-                let updated = cache[1].update(keys: keys, values: values)
-                eval(updated.0, updated.1)
-                recorder.recordPagedAttentionBatch(updated.0.dim(0))
+                if attendsThroughCache {
+                    let attended = attentionWithCacheUpdate(
+                        queries: keys,
+                        keys: keys,
+                        values: values,
+                        cache: cache[1],
+                        scale: 1,
+                        mask: sequenceLength > 1 ? .causal : .none
+                    )
+                    eval(attended)
+                    recorder.recordPagedAttentionBatch(attended.dim(0))
+                } else {
+                    let updated = cache[1].update(keys: keys, values: values)
+                    eval(updated.0, updated.1)
+                    recorder.recordPagedAttentionBatch(updated.0.dim(0))
+                }
             } else {
                 recorder.recordBadLayout()
             }

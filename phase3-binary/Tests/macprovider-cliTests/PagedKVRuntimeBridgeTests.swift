@@ -1587,75 +1587,250 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
-    /// SPEC-038 FR-CB2 ragged shared prefill: a ragged batch cache attends
-    /// each row over its own left-aligned keys `[0, offset + L)` of the
-    /// zero-padded batch buffer with the causal mask
-    /// (`PagedKVRaggedPrefillBatchLayerCache.updateAndAttend`). That must be
-    /// bit-identical to the row's lone causal attention for the fused steel
-    /// kernel (head dim 128) and for the unfused SDPA (head dim 256, every
-    /// Qwen3.5/3.6 attention layer), including key lengths on both sides of
-    /// the 4096-key softmax switch. The padded batch call under the per-row
-    /// boolean mask is not used for head dim 256: there it is not
-    /// bit-identical to the lone call.
+    /// SPEC-038 FR-CB2 ragged shared prefill, driven through the ragged batch
+    /// cache the backend builds and `attentionWithCacheUpdate`, at the served
+    /// attention shapes (Qwen3.6-35B-A3B 16 query / 2 KV heads and 27B 24 / 4
+    /// at head dim 256; head dim 128): every row's output is bit-identical to
+    /// the same row attended alone, and each row cache holds exactly its
+    /// history plus its own chunk. Key lengths straddle the 4096-key softmax
+    /// switch of the unfused path, which a single padded call chooses from
+    /// the longest row.
     func testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise() throws {
         try requireMetal()
         MLXRandom.seed(1906)
-        let queryHeads = 16
-        let kvHeads = 2
-        for headDim in [128, 256] {
-            for (chunk, offsets) in [
-                (33, [0, 7, 30]),
-                (64, [500, 37, 900]),
-                (128, [3000, 3968, 2100]),
-                (128, [3900, 4100]),
-                (128, [7000, 8100]),
-            ] {
-                let keyCount = offsets.max()! + chunk
-                var queries: [MLXArray] = []
-                var keys: [MLXArray] = []
-                var values: [MLXArray] = []
-                for offset in offsets {
-                    queries.append(MLXRandom.normal([1, queryHeads, chunk, headDim]).asType(.bfloat16))
-                    keys.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
-                    values.append(MLXRandom.normal([1, kvHeads, offset + chunk, headDim]).asType(.bfloat16))
+        try assertBatchCacheAttentionMatchesLoneBits([
+            BatchAttentionCase(label: "prefill", queryTokens: 33, histories: [0, 7, 30], ragged: true),
+            BatchAttentionCase(label: "prefill", queryTokens: 128, histories: [3000, 3968, 2100], ragged: true),
+            BatchAttentionCase(label: "prefill", queryTokens: 128, histories: [3900, 4100], ragged: true),
+            BatchAttentionCase(label: "prefill", queryTokens: 128, histories: [7000, 8100], ragged: true),
+        ])
+    }
+
+    /// SPEC-038 FR-CB2 decode and packed MTP verification isolation, through
+    /// the shared decode batch cache, at the served attention shapes. Decode
+    /// histories straddle the one-pass / two-pass switch (1024 keys) and the
+    /// two-pass partition-count switch (16384 keys) of the vector kernels,
+    /// which a single padded call chooses from the longest row; verification
+    /// rows differ in offset and in real columns.
+    func testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims() throws {
+        try requireMetal()
+        MLXRandom.seed(1906)
+        try assertBatchCacheAttentionMatchesLoneBits([
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [600, 901, 1501, 3000, 9000]),
+            BatchAttentionCase(label: "decode", queryTokens: 1, histories: [1022, 1023, 4095, 16383, 16400]),
+            BatchAttentionCase(label: "decode equal", queryTokens: 1, histories: [1501, 1501]),
+            BatchAttentionCase(label: "verify", queryTokens: 3, histories: [600, 901, 1501, 3000], inputCounts: [3, 1, 2, 3]),
+            BatchAttentionCase(label: "verify equal", queryTokens: 2, histories: [901, 901], inputCounts: [2, 2]),
+        ])
+    }
+
+    private struct BatchAttentionCase {
+        let label: String
+        let queryTokens: Int
+        let histories: [Int]
+        var ragged = false
+        /// Packed MTP verification: each row's `1 + proposals` columns.
+        var inputCounts: [Int]?
+    }
+
+    /// Rows with their own histories share one call through the batch cache;
+    /// each row's output must equal the same row attended alone (the serial
+    /// cache path, and a one-row batch cache) bit for bit, and each row cache
+    /// must hold exactly its history plus its own new tokens (verification
+    /// stages and commits nothing). Prints, without asserting, the rows that
+    /// a single padded call would have given other bits (device dependent).
+    private func assertBatchCacheAttentionMatchesLoneBits(_ cases: [BatchAttentionCase]) throws {
+        var paddedRouteDifferences: [String] = []
+        for (queryHeads, kvHeads, headDim) in [(16, 2, 256), (24, 4, 256), (16, 2, 128)] {
+            let scale = 1 / Float(headDim).squareRoot()
+            for testCase in cases {
+                let rows = testCase.histories.count
+                let width = testCase.queryTokens
+                let label = "\(testCase.label) \(queryHeads)/\(kvHeads)x\(headDim) histories \(testCase.histories)"
+                let historyKeys = testCase.histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+                let historyValues = testCase.histories.map { MLXRandom.normal([1, kvHeads, $0, headDim]).asType(.bfloat16) }
+                let queries = MLXRandom.normal([rows, queryHeads, width, headDim]).asType(.bfloat16)
+                let keys = MLXRandom.normal([rows, kvHeads, width, headDim]).asType(.bfloat16)
+                let values = MLXRandom.normal([rows, kvHeads, width, headDim]).asType(.bfloat16)
+                eval(historyKeys + historyValues + [queries, keys, values])
+                func caches(_ indices: [Int]) -> [PagedKVCache] {
+                    indices.map { Self.attentionRowCache(history: historyKeys[$0], historyValues[$0]) }
                 }
-                func padded(_ rows: [MLXArray]) -> MLXArray {
-                    concatenated(rows.map { row in
-                        let pad = keyCount - row.dim(2)
-                        guard pad > 0 else { return row }
-                        return concatenated(
-                            [row, MLXArray.zeros([1, kvHeads, pad, headDim], dtype: row.dtype)],
-                            axis: 2
+                func rowMaps(_ indices: [Int]) -> [MTPPackedVerificationRowMap]? {
+                    testCase.inputCounts.map { counts in
+                        indices.enumerated().map { position, row in
+                            MTPPackedVerificationRowMap(
+                                rowIndex: position,
+                                queryOffset: testCase.histories[row],
+                                inputCount: counts[row],
+                                proposalCount: counts[row] - 1
+                            )
+                        }
+                    }
+                }
+
+                let rowCaches = caches(Array(0 ..< rows))
+                let batched = try PagedKVSharedForwardBackend.batchAttentionForTest(
+                    rowCaches: rowCaches,
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    scale: scale,
+                    raggedPrefill: testCase.ragged,
+                    mtpPackedRowMaps: rowMaps(Array(0 ..< rows))
+                )
+                XCTAssertEqual(batched.shape, queries.shape, label)
+
+                for row in 0 ..< rows {
+                    let columns = testCase.inputCounts?[row] ?? width
+                    let rowQueries = queries[row ..< row + 1, 0..., ..<columns, 0...]
+                    let rowKeys = keys[row ..< row + 1, 0..., ..<columns, 0...]
+                    let rowValues = values[row ..< row + 1, 0..., ..<columns, 0...]
+                    let ownOutput = batched[row ..< row + 1, 0..., ..<columns, 0...]
+                    let oneRowBatch = try PagedKVSharedForwardBackend.batchAttentionForTest(
+                        rowCaches: caches([row]),
+                        queries: rowQueries,
+                        keys: rowKeys,
+                        values: rowValues,
+                        scale: scale,
+                        raggedPrefill: testCase.ragged,
+                        mtpPackedRowMaps: rowMaps([row])
+                    )
+                    XCTAssertTrue(arrayEqual(ownOutput, oneRowBatch).item(Bool.self), "\(label) row \(row) vs one-row batch")
+                    if testCase.inputCounts == nil {
+                        let serial = caches([row])[0]
+                        let lone = attentionWithCacheUpdate(
+                            queries: rowQueries,
+                            keys: rowKeys,
+                            values: rowValues,
+                            cache: serial,
+                            scale: scale,
+                            mask: serial.makeMask(n: columns, windowSize: nil, returnArray: false)
                         )
-                    }, axis: 0)
+                        XCTAssertTrue(arrayEqual(ownOutput, lone).item(Bool.self), "\(label) row \(row) vs serial")
+                        let state = rowCaches[row].state
+                        XCTAssertEqual(rowCaches[row].offset, testCase.histories[row] + width, label)
+                        XCTAssertTrue(arrayEqual(
+                            state[0],
+                            concatenated([historyKeys[row], rowKeys], axis: 2)
+                        ).item(Bool.self), "\(label) row \(row) keys")
+                        XCTAssertTrue(arrayEqual(
+                            state[1],
+                            concatenated([historyValues[row], rowValues], axis: 2)
+                        ).item(Bool.self), "\(label) row \(row) values")
+                    } else {
+                        // Verification stages; nothing reaches the row cache.
+                        XCTAssertEqual(rowCaches[row].offset, testCase.histories[row], label)
+                        XCTAssertTrue(arrayEqual(rowCaches[row].state[0], historyKeys[row]).item(Bool.self), label)
+                        if columns < width {
+                            XCTAssertTrue(
+                                all(batched[row ..< row + 1, 0..., columns..., 0...] .== 0).item(Bool.self),
+                                "\(label) row \(row) padded columns"
+                            )
+                        }
+                    }
                 }
-                let batchQueries = concatenated(queries, axis: 0)
-                let batchKeys = padded(keys)
-                let batchValues = padded(values)
-                let scale = 1 / Float(headDim).squareRoot()
-                for (row, offset) in offsets.enumerated() {
-                    let own = offset + chunk
-                    let perRow = MLXFast.scaledDotProductAttention(
-                        queries: batchQueries[row ..< row + 1, 0..., 0..., 0...],
-                        keys: batchKeys[row ..< row + 1, 0..., ..<own, 0...],
-                        values: batchValues[row ..< row + 1, 0..., ..<own, 0...],
+
+                // Evidence only: the single padded call the batch cache used
+                // to make for unequal rows. Not asserted (its route depends
+                // on the device).
+                if testCase.inputCounts == nil, Set(testCase.histories).count > 1 {
+                    let longest = testCase.histories.max()! + width
+                    func padded(_ history: [MLXArray], _ incoming: MLXArray) -> MLXArray {
+                        concatenated((0 ..< rows).map { row in
+                            let own = concatenated([history[row], incoming[row ..< row + 1, 0..., 0..., 0...]], axis: 2)
+                            let pad = longest - own.dim(2)
+                            return pad == 0 ? own : concatenated(
+                                [own, MLXArray.zeros([1, kvHeads, pad, headDim], dtype: own.dtype)],
+                                axis: 2
+                            )
+                        }, axis: 0)
+                    }
+                    let mask = PagedKVSharedForwardBackend.batchLayerMaskForTest(
+                        rowCaches: caches(Array(0 ..< rows)),
+                        n: width,
+                        windowSize: nil
+                    )
+                    let single = MLXFast.scaledDotProductAttention(
+                        queries: queries,
+                        keys: padded(historyKeys, keys),
+                        values: padded(historyValues, values),
                         scale: scale,
-                        mask: .causal
+                        mask: mask
                     )
-                    let lone = MLXFast.scaledDotProductAttention(
-                        queries: queries[row],
-                        keys: keys[row],
-                        values: values[row],
-                        scale: scale,
-                        mask: .causal
-                    )
-                    XCTAssertTrue(
-                        arrayEqual(perRow, lone).item(Bool.self),
-                        "head dim \(headDim), chunk \(chunk), offset \(offset) of \(offsets)"
-                    )
+                    for row in 0 ..< rows where !arrayEqual(single[row ..< row + 1], batched[row ..< row + 1]).item(Bool.self) {
+                        let gap = abs(single[row ..< row + 1].asType(.float32) - batched[row ..< row + 1].asType(.float32))
+                            .max().item(Float.self)
+                        paddedRouteDifferences.append("\(label) row \(row) (\(testCase.histories[row]) keys) max |diff| \(gap)")
+                    }
                 }
             }
         }
+        print("decode-isolation padded single call differs from lone (\(paddedRouteDifferences.count)):")
+        paddedRouteDifferences.forEach { print("  \($0)") }
+    }
+
+    /// Which batched attention calls split per row: only padded ones.
+    func testRowAttentionExtentsSplitOnlyPaddedRows() {
+        typealias Extent = PagedKVRowAttentionExtent
+        XCTAssertNil(PagedKVRowAttention.extents(queryTokens: 1, offsetsBefore: [900], packedRows: nil))
+        XCTAssertNil(PagedKVRowAttention.extents(queryTokens: 1, offsetsBefore: [900, 900], packedRows: nil))
+        XCTAssertEqual(
+            PagedKVRowAttention.extents(queryTokens: 1, offsetsBefore: [900, 1500], packedRows: nil),
+            [Extent(queryTokens: 1, keyTokens: 901), Extent(queryTokens: 1, keyTokens: 1501)]
+        )
+        XCTAssertEqual(
+            PagedKVRowAttention.extents(queryTokens: 33, offsetsBefore: [0, 7], packedRows: nil),
+            [Extent(queryTokens: 33, keyTokens: 33), Extent(queryTokens: 33, keyTokens: 40)]
+        )
+        // Packed verification: equal offsets and full widths share one call;
+        // a narrower row or a different offset splits.
+        XCTAssertNil(PagedKVRowAttention.extents(
+            queryTokens: 3,
+            offsetsBefore: [900, 900],
+            packedRows: [(900, 3), (900, 3)]
+        ))
+        XCTAssertEqual(
+            PagedKVRowAttention.extents(queryTokens: 3, offsetsBefore: [900, 900], packedRows: [(900, 3), (900, 2)]),
+            [Extent(queryTokens: 3, keyTokens: 903), Extent(queryTokens: 2, keyTokens: 902)]
+        )
+        XCTAssertNil(PagedKVRowAttention.extents(
+            queryTokens: 3,
+            offsetsBefore: [900, 900],
+            packedRows: [(900, 4), (900, 2)]
+        ), "an input wider than the call is malformed: one call")
+    }
+
+    private static func attentionRowCache(history keys: MLXArray, _ values: MLXArray) -> PagedKVCache {
+        let blockSize = 256
+        let blocks = 128
+        let handle = PagedKVBlockTableHandle(id: UUID(), conversationKey: "attention-row", poolEpoch: 1)
+        let cache = PagedKVCache(
+            blockSizeTokens: blockSize,
+            maxPhysicalBlocks: blocks,
+            poolEpoch: 1,
+            binding: PagedKVStorageBinding(
+                handle: handle,
+                blockSizeTokens: blockSize,
+                maxLogicalTokens: blockSize * blocks,
+                currentTable: PagedKVBlockTable(
+                    handleID: handle.handleID,
+                    blockSizeTokens: blockSize,
+                    logicalTokenCount: 0,
+                    physicalBlocks: [],
+                    tailValidTokenCount: 0,
+                    poolEpoch: 1
+                ),
+                poolEpoch: 1
+            ),
+            initialOffset: 0,
+            reconstructViaGather: false
+        )
+        if keys.dim(2) > 0 {
+            let stored = cache.update(keys: keys, values: values)
+            eval(stored.0, stored.1)
+        }
+        return cache
     }
 
     /// SPEC-048-R009 (G7): a keyed native row on a hybrid runtime that
