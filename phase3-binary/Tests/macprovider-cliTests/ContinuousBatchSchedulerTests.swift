@@ -2938,6 +2938,85 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     // / top-k). An MoE configuration without both counts, an unquantized
     // configuration, a per-layer quantization exclusion, or no readable
     // configuration never groups.
+    /// The decode row bound ports core `get_qmv_batch_limit`
+    /// (`v0.32.2-macprovider.2`): a decode forward of `M` rows stays on
+    /// `qmv` for every quantized projection while `M` is below the device's
+    /// smallest vector limit.
+    func testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice() {
+        typealias Bound = ContinuousBatchDecodeRouteBound
+        // (architecture, limits for K/N <= 2048, <= 4096, above, decode rows)
+        let table: [(String, [Int], Int)] = [
+            ("applegpu_g15d", [32, 18, 12], 11), // M3 Ultra (the Studio)
+            ("applegpu_g14d", [32, 18, 12], 11), // M2 Ultra
+            ("applegpu_g13d", [32, 18, 12], 11), // M1 Ultra
+            ("applegpu_g13g", [14, 10, 6], 5), // M1
+            ("applegpu_g13s", [14, 10, 6], 5), // M1 Pro
+            ("applegpu_g14g", [14, 10, 6], 5), // M2
+            ("applegpu_g14s", [14, 10, 6], 5), // M2 Pro
+            ("applegpu_g15g", [13, 15, 13], 12), // M3
+            ("applegpu_g16s", [13, 15, 13], 12), // M4 Pro
+            ("applegpu_g17s", [33, 25, 13], 12), // generation 17
+            ("applegpu_g17d", [32, 18, 12], 11),
+            ("Unknown", [18, 12, 10], 9),
+        ]
+        for (architecture, limits, rows) in table {
+            XCTAssertEqual(
+                [(2048, 2048), (4096, 1024), (2048, 151_936)].map {
+                    Bound.quantizedMatmulVectorLimit(inputDims: $0.0, outputDims: $0.1, architecture: architecture)
+                },
+                limits,
+                architecture
+            )
+            XCTAssertEqual(Bound.maxDecodeRowsPerForward(architecture: architecture), rows, architecture)
+            XCTAssertLessThan(
+                Bound.maxDecodeRowsPerForward(architecture: architecture),
+                limits.min()!,
+                "\(architecture): a decode forward must stay below every vector limit"
+            )
+        }
+    }
+
+    /// More active rows than the decode row bound decode in consecutive
+    /// forwards of at most that many rows, and every row still produces its
+    /// own tokens.
+    func testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound() async throws {
+        let ids = ["b-0", "b-1", "b-2", "b-3", "b-4"]
+        let scripts = Dictionary(uniqueKeysWithValues: ids.enumerated().map { index, id in
+            (id, (0 ..< 4).map { 10 * (index + 1) + $0 })
+        })
+        let backend = ScriptedBackend(scripts: scripts)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: ids.count,
+            maxDecodeRowsPerForward: 2,
+            maxPrefillRowsPerIteration: ids.count,
+            backend: backend
+        )
+        let results = try await withThrowingTaskGroup(of: (String, [Int]).self) { group in
+            for (index, id) in ids.enumerated() {
+                group.addTask {
+                    let result = try await scheduler.submit(.init(
+                        id: id,
+                        conversationKey: "",
+                        promptTokens: [index + 1],
+                        maxOutputTokens: 4,
+                        samplerSeed: index
+                    ))
+                    return (id, result.outputTokens)
+                }
+            }
+            var outputs: [String: [Int]] = [:]
+            for try await (id, tokens) in group {
+                outputs[id] = tokens
+            }
+            return outputs
+        }
+        XCTAssertEqual(results, scripts)
+        let batches = await backend.decodeBatches()
+        XCTAssertFalse(batches.isEmpty)
+        XCTAssertTrue(batches.allSatisfy { $0.count <= 2 }, "\(batches)")
+        XCTAssertTrue(batches.contains { $0.count == 2 }, "\(batches)")
+    }
+
     func testPrefillGroupingRuleFromModelConfiguration() {
         func rule(_ json: String?, modelID: String? = nil) -> Int {
             ContinuousBatchPrefillGroupingRule.fromModelConfiguration(
@@ -7123,6 +7202,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         tokenDeliveryBufferLimit: Int = 16,
         maxDecodeLockstepWindow: Int = 1,
         maxDecodeStepsWhilePrefilling: Int = 1,
+        maxDecodeRowsPerForward: Int = Int.max,
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
@@ -7166,6 +7246,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling,
+            maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPRoundSystemMemoryProbe: nativeMTPRoundSystemMemoryProbe,
             nativeMTPStatusSink: nativeMTPStatusSink

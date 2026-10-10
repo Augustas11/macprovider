@@ -232,6 +232,54 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
     }
 }
 
+/// Decode carries one token per row, so every quantized projection of a
+/// decode forward multiplies `M` = decode rows. `QuantizedMatmul` takes `qmv`
+/// below `get_qmv_batch_limit(K, N, device)` and `qmm` at or above it, so a
+/// row decoded beside enough neighbours would switch kernels and reduction
+/// order. A decode forward carries at most `vector limit - 1` rows, where the
+/// limit is the smallest `get_qmv_batch_limit` of the device over every K and
+/// N (core `v0.32.2-macprovider.2`, `mlx/backend/metal/quantized.cpp`). The
+/// smallest value belongs to the K or N above 4096 branch, which every served
+/// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1/M2
+/// non-Ultra: 6, so 5 rows; M3-M5 non-Ultra: 13, so 12 rows.
+enum ContinuousBatchDecodeRouteBound {
+    /// Port of core `get_qmv_batch_limit` for transposed quantized weights.
+    /// `architecture` is the Metal architecture name (`applegpu_g15d`), or
+    /// `MLX_METAL_GPU_ARCH` when set, exactly what core reads.
+    static func quantizedMatmulVectorLimit(inputDims: Int, outputDims: Int, architecture: String) -> Int {
+        let bytes = Array(architecture.utf8)
+        func digit(_ index: Int) -> Int {
+            guard index >= 0, index < bytes.count else { return 0 }
+            let value = Int(bytes[index]) - 48
+            return (0 ..< 10).contains(value) ? value : 0
+        }
+        let generation = bytes.count >= 3 ? digit(bytes.count - 3) * 10 + digit(bytes.count - 2) : 0
+        let isUltra = bytes.last == UInt8(ascii: "d")
+        let small = inputDims <= 2048 && outputDims <= 2048
+        let medium = inputDims <= 4096 && outputDims <= 4096
+        if generation >= 17 && !isUltra {
+            return small ? 33 : (medium ? 25 : 13)
+        } else if generation >= 15 && !isUltra {
+            return small ? 13 : (medium ? 15 : 13)
+        } else if generation >= 13 {
+            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 14 : (medium ? 10 : 6))
+        } else {
+            return isUltra ? (small ? 32 : (medium ? 18 : 12)) : (small ? 18 : (medium ? 12 : 10))
+        }
+    }
+
+    /// Smallest vector limit of the device over every K and N.
+    static func smallestQuantizedMatmulVectorLimit(architecture: String) -> Int {
+        [2048, 4096, 8192].map {
+            quantizedMatmulVectorLimit(inputDims: $0, outputDims: $0, architecture: architecture)
+        }.min() ?? 1
+    }
+
+    static func maxDecodeRowsPerForward(architecture: String) -> Int {
+        max(1, smallestQuantizedMatmulVectorLimit(architecture: architecture) - 1)
+    }
+}
+
 struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let descriptor: PagedKVDescriptor
     let tuple: ContinuousBatchingRequestedTuple
@@ -281,6 +329,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// costs about as much as 30-50 decode steps. Production uses
     /// `defaultDecodeStepsWhilePrefilling` (SPEC-038 FR-CB2).
     let maxDecodeStepsWhilePrefilling: Int
+    /// Most rows one ordinary decode forward carries
+    /// (`ContinuousBatchDecodeRouteBound`); more active rows decode in
+    /// consecutive forwards of at most this many. `Int.max` for test
+    /// backends that run no MLX kernels.
+    let maxDecodeRowsPerForward: Int
     /// Signed admission/static bound for all in-flight native-MTP complete
     /// windows. This is a contract ceiling, not proof that the host currently
     /// has the unified-memory headroom; `nativeMTPRoundSystemMemoryProbe`
@@ -321,6 +374,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         snapshot: ContinuousBatchSchedulerSnapshot,
         maxDecodeLockstepWindow: Int = 1,
         maxDecodeStepsWhilePrefilling: Int = 1,
+        maxDecodeRowsPerForward: Int = Int.max,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .system,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil
@@ -379,6 +433,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.snapshot = snapshot
         self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
         self.maxDecodeStepsWhilePrefilling = max(1, maxDecodeStepsWhilePrefilling)
+        self.maxDecodeRowsPerForward = max(1, maxDecodeRowsPerForward)
         self.nativeMTPRoundByteCapacity = max(
             0,
             nativeMTPRoundByteCapacity ?? Int.max
@@ -4327,6 +4382,18 @@ actor ContinuousBatchScheduler {
 
     private func runOrdinaryDecodeStep(rows: [Row]) async {
         guard !rows.isEmpty else { return }
+        let rowBound = configuration.maxDecodeRowsPerForward
+        if rows.count > rowBound {
+            // Each forward stays below the device's quantized-matmul vector
+            // limit (`ContinuousBatchDecodeRouteBound`).
+            for start in stride(from: 0, to: rows.count, by: rowBound) {
+                let part = rows[start ..< min(start + rowBound, rows.count)]
+                    .compactMap { activeDecode[$0.request.id] }
+                await runOrdinaryDecodeStep(rows: part)
+                guard !cleanupFailedClosed else { return }
+            }
+            return
+        }
         let windowSteps = lockstepDecodeWindowSteps(for: rows)
         var prepared: [(row: Row, input: ContinuousBatchDecodeInput)] = []
         prepared.reserveCapacity(rows.count)

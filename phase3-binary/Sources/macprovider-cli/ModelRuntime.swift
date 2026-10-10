@@ -3321,6 +3321,7 @@ actor ModelRuntime: ModelRuntimeServing {
             // fails safe to prefilling every chunk alone.
             prefillGrouping: continuousBatchPrefillGrouping
                 ?? (container == nil ? .unconstrained : .ungrouped),
+            maxDecodeRowsPerForward: container == nil ? Int.max : Self.continuousBatchDecodeRowBound(),
             replayAuthority: replayAuthority
         )
         self.continuousBatchScheduler = continuousBatchScheduler
@@ -4903,7 +4904,8 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRoundByteCapacity: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
-        allowsRaggedPrefillOffsets: Bool = false
+        allowsRaggedPrefillOffsets: Bool = false,
+        maxDecodeRowsPerForward: Int = Int.max
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
@@ -4938,6 +4940,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
+            maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink
         )
@@ -4960,6 +4963,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
+        maxDecodeRowsPerForward: Int = Int.max,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -4997,7 +5001,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
-                    .supportsRaggedPrefillOffsets ?? false
+                    .supportsRaggedPrefillOffsets ?? false,
+                maxDecodeRowsPerForward: maxDecodeRowsPerForward
             ),
             allocator: allocator,
             backend: backend,
@@ -5106,9 +5111,29 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink,
             prefillGrouping: prefillGrouping,
+            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(),
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`
+    /// overrides the device's own).
+    static func metalArchitectureForQuantizedRoutes() -> String {
+        if let override = ProcessInfo.processInfo.environment["MLX_METAL_GPU_ARCH"], !override.isEmpty {
+            return override
+        }
+        return GPU.deviceInfo().architecture
+    }
+
+    /// The decode row bound for this device (`ContinuousBatchDecodeRouteBound`).
+    private static func continuousBatchDecodeRowBound() -> Int {
+        let architecture = metalArchitectureForQuantizedRoutes()
+        let bound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
+        FileHandle.standardError.write(Data(
+            "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(bound)\n".utf8
+        ))
+        return bound
     }
 
     /// The loaded model's prefill grouping rule, from its own `config.json`.
