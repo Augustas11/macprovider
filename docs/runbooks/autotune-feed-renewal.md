@@ -1,16 +1,16 @@
 # Autotune Static Feed Renewal (freshness re-stamp)
 
-**No scheduled renewal (#1938, SPEC-023 v0.22.21).** Providers since SPEC-023
+**No scheduled renewal (#1938, SPEC-023 v0.22.22).** Providers since SPEC-023
 v0.22.15 treat feed age as advisory: an old but validly signed feed still joins,
 prices and matches artifacts. The weekly signed restamp, its Tuesday watch and
 the 6-hourly freshness alarm are retired. A restamp is now an on-demand operator
 step, for example when a provider still runs a CLI that predates v0.22.15
 (those fail closed 30 days after `generated_at`) or a native-MTP admission must
-be re-signed for a CLI that predates v0.22.19 before its `expires_at`.
+be re-signed for a CLI that predates v0.22.20 before its `expires_at`.
 
 Native-MTP revocation slots are published on demand too. Providers keep
 enforcing the newest verified revocation body they hold after it ages out
-(SPEC-023 v0.22.22), so a missed publish never turns native MTP off.
+(SPEC-023 v0.22.23), so a missed publish never turns native MTP off.
 `scripts/publish-native-mtp-revocations.sh --deploy` publishes a batch, and a
 restamp of a native-bound release runs it.
 
@@ -203,7 +203,7 @@ unchanged, so they recover without a restart.
 ## Schedule
 
 None. There is no scheduled feed restamp, revocation publish, or discovery-head
-renewal (SPEC-020 v0.1.22, SPEC-023 v0.22.22). The discovery head can still be
+renewal (SPEC-020 v0.1.22, SPEC-023 v0.22.23). The discovery head can still be
 renewed on demand through `scripts/ops/discovery-renew.sh` for CLIs older than
 SPEC-020 v0.1.22. Do **not** install a laptop
 LaunchAgent or a Pearl signer.

@@ -15,7 +15,7 @@
 #
 # There is no scheduled signer. For a native-bound release this script also
 # republishes the native-MTP revocation slots; providers keep enforcing the
-# newest verified slot after it ages out (SPEC-023 v0.22.22). Do not install a
+# newest verified slot after it ages out (SPEC-023 v0.22.23). Do not install a
 # Pearl systemd signer or a laptop LaunchAgent.
 #
 # Default is DRY-RUN: build + verify a re-dated release locally and stop. Pass

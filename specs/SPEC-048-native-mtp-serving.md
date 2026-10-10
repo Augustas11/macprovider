@@ -1389,7 +1389,7 @@ requests.
 ## 9. Changelog and history
 
 - **0.1.31 (2026-10-10)** — The emergency revocation feed fails to last-known
-  (#1938, follows SPEC-023 v0.22.22). `revocation_state_unavailable` now means
+  (#1938, follows SPEC-023 v0.22.23). `revocation_state_unavailable` now means
   no usable authenticated revocation state (none ever verified, or a local
   store/cache/anchor integrity failure); an aged, unreachable or rejected feed
   keeps the newest verified revoked set in force and native MTP on.
@@ -1399,7 +1399,7 @@ requests.
   a superseding release, a revocation, or emergency-off. Requalification is
   triggered by a decode-path change, not by age; the 180-day matrix reuse
   limit and the 90-day sidecar/journey lifetime are removed. Follows SPEC-023
-  v0.22.19.
+  v0.22.20.
 - **0.1.29 (2026-10-10)** — MTP-2 names the R003-authorized loader instead
   of the retired 3.31.4 loader (#1906). The observer must inspect every weight
   file the authorized mlx-swift-lm loader can consume; at

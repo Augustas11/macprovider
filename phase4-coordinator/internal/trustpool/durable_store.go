@@ -2956,7 +2956,7 @@ func (s *ReconstructedState) applyProductionRouteGates(gate productionActivation
 			reason = "oncall_readiness_missing"
 		} else {
 			// A lapsed confirmation is a status warning, never a routing
-			// deadline (#1938, SPEC-043 0.3.2).
+			// deadline (#1938, SPEC-043 0.3.4).
 			if !rec.LastConfirmedAtUTC.IsZero() {
 				p.OnCallReadinessExpiresAtUTC = rec.LastConfirmedAtUTC.UTC().Add(rec.ttl())
 			}
@@ -3042,7 +3042,7 @@ type ReconstructedPoolState struct {
 	CreatorGateExpiresAtUTC time.Time
 	// OnCallReadinessExpiresAtUTC is when the launch environment's current
 	// on-call confirmation lapses. Status only; routing never stops at it
-	// (#1938, SPEC-043 0.3.2).
+	// (#1938, SPEC-043 0.3.4).
 	OnCallReadinessExpiresAtUTC time.Time
 	// StatusWarnings lists calendar lapses (creator_agreement_expired,
 	// oncall_readiness_expired) that need operator or creator attention but

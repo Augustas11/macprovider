@@ -5,7 +5,7 @@
 # `autotune.native_mtp_revocations_dir` (deployed as
 # $REMOTE_REVOCATION_DIR/current, a symlink to one batch directory), choosing
 # the newest issued, correctly signed slot, also after its expires_at
-# (providers keep the newest verified body in force, SPEC-023 v0.22.22). This script signs a
+# (providers keep the newest verified body in force, SPEC-023 v0.22.23). This script signs a
 # batch of slots OFF the coordinator host with the static-feed key, verifies
 # it, uploads it as a new batch, and atomically retargets `current`.
 #

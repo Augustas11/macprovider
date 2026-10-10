@@ -97,7 +97,7 @@ Missing or expired on-call fail-closes operator production promote
 (`on_call_readiness_rejected`, 409). Re-confirm on every on-call rotation change;
 the record lapses at `last_confirmed_at + confirmation_ttl`. A lapsed record on
 an already-active pool does not stop routing: the pool status shows the
-`oncall_readiness_expired` warning until it is re-confirmed (SPEC-043 0.3.2). A
+`oncall_readiness_expired` warning until it is re-confirmed (SPEC-043 0.3.4). A
 Creator Agreement past its grace end likewise shows `creator_agreement_expired`
 and keeps routing. An upsert republishes the routing registry immediately, so a
 replaced record takes effect on the next request (a failed republish returns

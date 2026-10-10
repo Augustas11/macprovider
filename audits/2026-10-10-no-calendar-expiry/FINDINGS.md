@@ -22,4 +22,4 @@ R2 LOWs (code), fixed in the follow-up commit:
 
 Prompts: AUDIT_R{1,2}_{CODE,SECURITY,ARCHITECTURE}_PROMPT.md. Results: R{1,2}_*_RESULT.md.
 
-SPEC-048 was renumbered on rebase onto #1927 (which took 0.1.28/0.1.29): this campaign's entries are 0.1.30 (structural sidecar/journey expiry) and 0.1.31 (revocation fail-to-last-known). The audit prompts cite the pre-rebase numbers.
+SPEC-048 was renumbered on rebase onto #1927 (which took 0.1.28/0.1.29): this campaign's entries are 0.1.30 (structural sidecar/journey expiry) and 0.1.31 (revocation fail-to-last-known). The audit prompts cite the pre-rebase numbers. After the later rebase onto #1945, this campaign's SPEC-023 entries are v0.22.20 to v0.22.23 and its SPEC-043 entries are 0.3.4 and 0.3.5.

@@ -187,7 +187,7 @@ PY
     set_next live_state blocked "Read live coordinator state" "" "COORDINATOR_URL is unset"
   fi
 
-  # #1938 (SPEC-023 v0.22.22): providers keep the newest verified revocation
+  # #1938 (SPEC-023 v0.22.23): providers keep the newest verified revocation
   # body in force after it ages, and the coordinator keeps serving the newest
   # issued slot, so any served slot is enough. A batch is published only when
   # none is served; batch age is reported, never a reason to republish.
