@@ -70,14 +70,14 @@ final class ConsumeTrustedPricingTests: XCTestCase {
         XCTAssertTrue(stale.stale)
         XCTAssertEqual(stale.statusWarningCodes, ["stale_pricing"])
 
-        let oldLoader = fresh.loader(now: "2026-10-09T00:00:00Z")
+        let oldLoader = fresh.loader(now: "2026-10-11T00:00:00Z")
         let old = try oldLoader.verify(rateCardBytes: fresh.body, sidecarBytes: fresh.sidecar)
         XCTAssertTrue(old.stale)
         XCTAssertEqual(old.statusWarningCodes, ["stale_pricing"])
         XCTAssertEqual(old.match(model: "llama-test")?.source, .exact)
 
         let revalidated = ConsumeTrustedPricingState.available(stale).revalidated(
-            now: SignedRateCardFixture.date("2026-10-09T00:00:00Z")
+            now: SignedRateCardFixture.date("2026-10-11T00:00:00Z")
         )
         XCTAssertEqual(revalidated, .available(old))
     }
@@ -275,8 +275,8 @@ private struct SignedRateCardFixture {
     // SPEC-045 mapped tests freeze 2026-09-02/03; shift past the baked rate-card so they are not a rollback.
     private static func freshnessAlignedClock(_ raw: String) -> String {
         switch raw {
-        case "2026-09-02T12:00:00Z": return "2026-10-09T12:00:00Z"
-        case "2026-09-03T00:00:00Z": return "2026-10-10T00:00:00Z"
+        case "2026-09-02T12:00:00Z": return "2026-10-11T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-10-12T00:00:00Z"
         default: return raw
         }
     }

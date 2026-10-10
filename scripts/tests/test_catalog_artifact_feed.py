@@ -2220,6 +2220,9 @@ class IntakeDecisionTest(unittest.TestCase):
         self.assertIsNone(catalog_release.previous_candidate_admission(changed, history, None))
 
 
+HISTORICAL_CB_POLICY_EXPIRES_AT = "2026-12-25T00:00:00Z"
+
+
 class HermeticRelease:
     """A throwaway copy of the release inputs the real `generate` can mutate.
 
@@ -2343,6 +2346,9 @@ class HermeticRelease:
                 release_id=release_id,
                 generated_at=generated_at,
                 candidate_catalog_sha256=candidate_sha,
+                # Releases cut before #1947 carried this fixed expires_at; the
+                # generator now writes the structural never-expires value.
+                expires_at=HISTORICAL_CB_POLICY_EXPIRES_AT,
             ),
         }
         for name, body in rewound.items():

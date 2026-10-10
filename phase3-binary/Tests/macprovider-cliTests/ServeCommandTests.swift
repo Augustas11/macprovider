@@ -1746,7 +1746,7 @@ final class ServeCommandTests: XCTestCase {
         configuredModel: String?,
         rateCardKey: String,
         rateCardSidecarMissing: Bool = false,
-        rateCardGeneratedAt: String = "2026-10-09T03:00:00Z"
+        rateCardGeneratedAt: String = "2026-10-11T03:00:00Z"
     ) async throws {
         let hub = try tempDir()
         let resolver = CachedModelArtifactResolver(hubRoot: hub)
@@ -1818,7 +1818,7 @@ final class ServeCommandTests: XCTestCase {
         var staticInputs: AutotuneStaticInputs
     }
 
-    private static let currentStaticFixtureGeneratedAt = "2026-10-09T03:00:00Z"
+    private static let currentStaticFixtureGeneratedAt = "2026-10-11T03:00:00Z"
 
     private func makeCatalogBoundFixture() async throws -> CatalogBoundFixture {
         let hub = try tempDir()
@@ -1886,7 +1886,7 @@ final class ServeCommandTests: XCTestCase {
 
     private static func validRateCardJSON(
         keys: [String],
-        generatedAt: String = "2026-10-09T03:00:00Z"
+        generatedAt: String = "2026-10-11T03:00:00Z"
     ) -> String {
         var rows: [String: RateCardProjection.Row] = [
             "default": RateCardProjection.Row(
@@ -1923,7 +1923,7 @@ final class ServeCommandTests: XCTestCase {
     private static func validDemandRankJSON(
         keys: [String],
         version: String,
-        generatedAt: String = "2026-10-09T03:00:00Z"
+        generatedAt: String = "2026-10-11T03:00:00Z"
     ) -> String {
         let rowsJSON = keys.sorted().enumerated().map { index, key -> String in
             "\(Self.jsonStringLiteral(key)):{\"demand_weight\":0.5,\"rank\":\(index + 1),\"recommendable\":true,\"min_provider_target\":1}"
