@@ -431,7 +431,13 @@ func TestCIWiresAcceptanceSuite(t *testing.T) {
 		"- integration",
 		"INTEGRATION_RESULT",
 		"name: phase3-binary (swift test)",
-		"run: swift test --parallel",
+		// The XCTest suite runs as four shards; the runner fails unless the
+		// shards cover every listed test exactly once, and the
+		// phase3-binary (swift test) aggregator requires every shard.
+		"run: swift build --build-tests",
+		"run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4",
+		"- swift-test-shard",
+		"SHARD_RESULT: ${{ needs.swift-test-shard.result }}",
 		"name: deploy tooling (check-deploy-config gate)",
 		"run: make test-dist",
 		"spec-015-acceptance",

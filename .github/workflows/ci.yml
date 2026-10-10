@@ -459,7 +459,7 @@ jobs:
       - name: Run Swift test shard ${{ matrix.shard }}/4
         working-directory: phase3-binary
         timeout-minutes: 20
-        run: python3 ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
+        run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
 
   swift-journeys:
     # Hermetic BYOM journeys, Sparkle key checks, and installer recovery
