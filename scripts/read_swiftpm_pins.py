@@ -38,13 +38,18 @@ EXPECTED_LOCATIONS = {
     "swift-jinja": "https://github.com/huggingface/swift-jinja",
 }
 
+# The reviewed SPEC-048 fork tuple (R003). This module is its single source in
+# scripts: the upstream watch imports these names, and a test checks them
+# against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # Fork tag 3.32.3-macprovider.6 on upstream mlx-swift-lm 3.32.3.
 SPEC048_MLX_SWIFT_LM_REVISION = "72c4ab082a08f291ba270a7303880e90036742e3"
+SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 # Fork tag 0.32.3-macprovider.2: upstream mlx-swift 0.32.3 with the MLX core
 # submodule on the batch-invariant small-M quantized matmul fork.
 SPEC048_MLX_SWIFT_REVISION = "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
 
 # Each reviewed fork is accepted only at its exact revision with no version.
 REVIEWED_FORK_PINS = {

@@ -158,14 +158,24 @@ isolation probe and re-derives these bounds before it serves.
 
 ### Pin sites
 
-Moving a tag changes these together; CI fails if they disagree:
-`phase3-binary/Package.swift`, `phase3-binary/Package.resolved`,
-`KVBuildIdentity.mlxSwiftLMRevision`
-(`KVConversationColdTierAdapter.swift`, checked by
-`KVBuildIdentityDriftTests`), `scripts/read_swiftpm_pins.py` (fails closed on
-an unreviewed fork revision), `scripts/check-upstream-throughput-blockers.sh`,
-`scripts/tests/test_upstream_watch.py`, and SPEC-048 MTP-3. The native-MTP
-bench (`NativeMTPHardwareE2ERunner.upstreamRevision`) reads
+Moving a tag changes these together. The checks that catch a disagreement:
+
+- `phase3-binary/Package.swift` against `phase3-binary/Package.resolved`: the
+  CI `swift-package-lock` job resolves with
+  `-onlyUsePackageVersionsFromResolvedFile`.
+- `Package.resolved` against `KVBuildIdentity.mlxSwiftLMRevision`
+  (`KVConversationColdTierAdapter.swift`): `KVBuildIdentityDriftTests`.
+- `Package.resolved` against `scripts/read_swiftpm_pins.py`, which holds the
+  reviewed fork tuple (fork revisions and upstream bases): the reader fails
+  closed on an unreviewed fork revision, and
+  `scripts/tests/test_upstream_watch.py` reads the checked-in file.
+- `read_swiftpm_pins.py` against the SPEC-048 R003 fork table:
+  `ReviewedForkTupleSourceTests` in `test_upstream_watch.py`.
+- `scripts/check-upstream-throughput-blockers.sh` imports the tuple from
+  `read_swiftpm_pins.py` and carries no revision of its own; the same test
+  class fails if it hardcodes one or binds a different value.
+
+The native-MTP bench (`NativeMTPHardwareE2ERunner.upstreamRevision`) reads
 `KVBuildIdentity`, and `scripts/native_mtp_rehearsal_release.py` reads
 `Package.resolved` through `read_swiftpm_pins.py`.
 

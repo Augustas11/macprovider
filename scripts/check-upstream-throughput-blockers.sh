@@ -41,11 +41,20 @@ read_pin() {
 
 PINS="$(read_pin)"
 
-snapshot="$(python3 - <<'PY' "$PINS"
+snapshot="$(python3 - <<'PY' "$PINS" "$ROOT/scripts"
 import json, subprocess, sys, urllib.request
 from datetime import datetime, timezone
 
 pins = json.loads(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from read_swiftpm_pins import (  # single source of the reviewed fork tuple
+    SPEC048_MLX_SWIFT_FORK,
+    SPEC048_MLX_SWIFT_LM_FORK,
+    SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+    SPEC048_MLX_SWIFT_REVISION,
+    SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+)
 
 def gh_json(args):
     out = subprocess.check_output(["gh"] + args, text=True)
@@ -150,15 +159,14 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-# mlx-swift-lm fork tag 3.32.3-macprovider.6 on upstream tag 3.32.3.
-native_mtp_exception_revision = "72c4ab082a08f291ba270a7303880e90036742e3"
-native_mtp_exception_base = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
-native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
-# mlx-swift fork tag 0.32.3-macprovider.2 on upstream tag 0.32.3; its MLX core
-# submodule points at Augustas11/mlx v0.32.2-macprovider.2 (c9196eb7).
-native_mtp_exception_mlx_swift_revision = "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
-native_mtp_exception_mlx_swift_base = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-native_mtp_exception_mlx_swift_repo = "Augustas11/mlx-swift"
+# The reviewed fork tuple comes from read_swiftpm_pins.py (the mlx-swift fork
+# revision also pins the MLX core fork through its submodule gitlink).
+native_mtp_exception_revision = SPEC048_MLX_SWIFT_LM_REVISION
+native_mtp_exception_base = SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE
+native_mtp_exception_repo = SPEC048_MLX_SWIFT_LM_FORK.removeprefix("https://github.com/")
+native_mtp_exception_mlx_swift_revision = SPEC048_MLX_SWIFT_REVISION
+native_mtp_exception_mlx_swift_base = SPEC048_MLX_SWIFT_UPSTREAM_BASE
+native_mtp_exception_mlx_swift_repo = SPEC048_MLX_SWIFT_FORK.removeprefix("https://github.com/")
 native_mtp_exception_review_approved = False
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,

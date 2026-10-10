@@ -1,15 +1,20 @@
+import ast
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from scripts import read_swiftpm_pins
 from scripts.read_swiftpm_pins import (
     SPEC048_MLX_SWIFT_FORK,
     SPEC048_MLX_SWIFT_LM_FORK,
     SPEC048_MLX_SWIFT_LM_REVISION,
+    SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
     SPEC048_MLX_SWIFT_REVISION,
+    SPEC048_MLX_SWIFT_UPSTREAM_BASE,
     read_pins,
     read_production_pins,
 )
@@ -268,6 +273,65 @@ class ProductionForkTupleTests(unittest.TestCase):
         self.assertEqual(strict.returncode, 1, strict.stdout)
         self.assertIn("fork tuple", strict.stderr)
         self.assertEqual(historical.returncode, 0, historical.stderr)
+
+
+class ReviewedForkTupleSourceTests(unittest.TestCase):
+    ROOT = Path(__file__).parents[2]
+    EXCEPTION_FIELDS = {
+        "native_mtp_exception_revision": SPEC048_MLX_SWIFT_LM_REVISION,
+        "native_mtp_exception_base": SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
+        "native_mtp_exception_repo": "Augustas11/mlx-swift-lm",
+        "native_mtp_exception_mlx_swift_revision": SPEC048_MLX_SWIFT_REVISION,
+        "native_mtp_exception_mlx_swift_base": SPEC048_MLX_SWIFT_UPSTREAM_BASE,
+        "native_mtp_exception_mlx_swift_repo": "Augustas11/mlx-swift",
+    }
+
+    def test_watch_takes_the_fork_tuple_from_the_pin_reader(self):
+        script = (self.ROOT / "scripts" / "check-upstream-throughput-blockers.sh").read_text()
+        self.assertIsNone(
+            re.search(r"\b[0-9a-f]{40}\b", script),
+            "the watch must not hardcode a revision; it imports read_swiftpm_pins",
+        )
+        body = script.split("<<'PY' \"$PINS\" \"$ROOT/scripts\"\n", 1)[1].split("\nPY\n", 1)[0]
+        tree = ast.parse(body)
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "read_swiftpm_pins"
+            for alias in node.names
+        }
+        namespace = {name: getattr(read_swiftpm_pins, name) for name in imported}
+        assignments = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self.EXCEPTION_FIELDS
+        ]
+        self.assertEqual(
+            {node.targets[0].id for node in assignments}, set(self.EXCEPTION_FIELDS)
+        )
+        exec(compile(ast.Module(body=assignments, type_ignores=[]), "watch", "exec"), namespace)
+        for name, expected in self.EXCEPTION_FIELDS.items():
+            with self.subTest(name=name):
+                self.assertEqual(namespace[name], expected)
+
+    def test_reviewed_fork_tuple_matches_the_spec048_fork_table(self):
+        spec = (self.ROOT / "specs" / "SPEC-048-native-mtp-serving.md").read_text()
+        rows = {
+            line.split("|")[1].strip().strip("`").removesuffix(".git"): line
+            for line in spec.splitlines()
+            if line.startswith("| `https://github.com/Augustas11/")
+        }
+        for fork, revision, base in (
+            (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
+            (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
+        ):
+            with self.subTest(fork=fork):
+                cells = [cell.strip() for cell in rows[fork].split("|")]
+                self.assertEqual(cells[3], f"`{revision}`")
+                self.assertIn(f"(`{base}`)", cells[4])
 
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
