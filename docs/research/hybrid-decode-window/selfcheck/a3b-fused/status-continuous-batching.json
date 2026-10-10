@@ -1,0 +1,46 @@
+{
+  "continuous_batching": {
+    "self_check": {
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "verified_k": 1,
+      "metallib_sha256": "f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1",
+      "model_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+      "served_slots": 1,
+      "deferrals": 6,
+      "os_build": "Version 27.0.1 (Build 26A434)",
+      "runtime_build": "72c4ab082a08f291ba270a7303880e90036742e3/0.32.3+ca2f61d22c5e8afe87170525ebc1769f72da5b41",
+      "decision": "deferred"
+    },
+    "policy": {
+      "rollout_mode": "off",
+      "tuple_sha256": null,
+      "release_id": null,
+      "authorization_source": "baked_empty_off",
+      "decision_reason": "absent_empty_off_fallback",
+      "cached_turns_authorized": false,
+      "policy_version": null,
+      "emergency_off_override": false,
+      "signer_key_id": null,
+      "expires_at": null,
+      "authorized": false,
+      "local_proof_result": "passed",
+      "load_status": "absent_empty_off_fallback",
+      "policy_sha256": null
+    },
+    "mode": "off",
+    "paged_kv_decision": "attached",
+    "active": false,
+    "scheduler": {
+      "active_decode_rows": 0,
+      "max_observed_batch_depth": 7,
+      "waiting_count": 0,
+      "slots_total": 32,
+      "slots_free": 32,
+      "shared_forward_calls": 559
+    },
+    "unsupported_reason": null,
+    "cache_class": "mixed"
+  },
+  "binary_version": "1.8.238"
+}

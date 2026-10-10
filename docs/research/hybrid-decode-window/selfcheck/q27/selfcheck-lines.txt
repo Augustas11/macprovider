@@ -1,0 +1,23 @@
+event=served_slots action=planned rows=14 served=1 reason=self_check_pending configured=8 source=autotune
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068, 271, 248069, 271, 40, 635, 524, 599, 2528, 310, 1865, 7019, 795, 11, 2583, 3756] serialA=[248068, 271, 248069, 271, 40, 635, 524, 599, 2528, 310, 1865, 7019, 795, 11, 2583, 3756] decodeB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] serialB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570]
+[paged-kv] moe-isolation rejoin decodeA=[8831] serialA=[8831] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 11, 42744, 11, 28279] serialA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 11, 42744, 11, 28279] decodeB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436] serialB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436]
+[paged-kv] moe-isolation rejoin decodeA=[11] serialA=[11] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] serialA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] decodeB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15] serialB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
+[paged-kv] moe-isolation rejoin decodeA=[727] serialA=[727] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-27b established=true nLayers=16 nNew=32 gatherKernelCalls=1024 expectCalls=1024 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=served_slots action=applied slots=1 rows=14 reason=self_check_pending
+event=cb_self_check action=step max_slots=14 resumed_at=0 remeasure=false model_sha256=518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931
+event=cb_self_check action=measured slots=2 rung=true conformant=true divergent_rows=none aggregate_tps=35.4 serial_tps=29.2 gain=1.21
+event=cb_self_check action=measured slots=3 rung=true conformant=true divergent_rows=none aggregate_tps=24.1 serial_tps=21.2 gain=1.14
+event=cb_self_check action=measured slots=4 rung=true conformant=true divergent_rows=none aggregate_tps=17.7 serial_tps=16.3 gain=1.09
+event=cb_self_check action=measured slots=5 rung=true conformant=true divergent_rows=none aggregate_tps=20.9 serial_tps=16.3 gain=1.28
+event=cb_self_check action=measured slots=6 rung=true conformant=true divergent_rows=none aggregate_tps=22.2 serial_tps=16.2 gain=1.37
+event=cb_self_check action=measured slots=7 rung=true conformant=true divergent_rows=none aggregate_tps=21.2 serial_tps=16.3 gain=1.30
+event=cb_self_check action=measured slots=8 rung=true conformant=true divergent_rows=2@34/48:near_tie:tokens=7309->660:margin=0.000 aggregate_tps=18.6 serial_tps=16.2 gain=1.15
+event=cb_self_check action=measured slots=9 rung=false conformant=true divergent_rows=none aggregate_tps=20.2 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=10 rung=false conformant=true divergent_rows=none aggregate_tps=21.1 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=11 rung=false conformant=true divergent_rows=none aggregate_tps=20.4 serial_tps=0.0 gain=0.00

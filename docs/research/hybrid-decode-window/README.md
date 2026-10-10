@@ -32,6 +32,7 @@ is the hardware evidence for that change (#1906).
 | Exactness 27B (§1) | 09:02-09:18 | no, live serving | no | correctness only; tok/s discarded |
 | Throughput, 32 slots (§3) | 09:19-09:56 | yes | yes, every 2 s | clean cells only |
 | Rebased-build self-check serve | after 09:56 | no, live serving | no | contaminated, discarded; it loaded the live box |
+| Self-check composition (§5) | 14:56:15-15:20:45 | yes (`bench-norestart.sh`) | yes, every 2 s: 564 at 0, 4 timeouts (`-1`), never nonzero; no other process at 5% CPU or more | clean |
 
 ## 1. Exactness: window 16 vs window 1 (`hybrid-window-proof.sh`)
 
@@ -182,16 +183,51 @@ most +10%; gated decode LB at least -5%, TTFT UB at most +5%, TPOT UB at most
   the idle co-hosted providers blipped at 3% to 4%. No lab load ran beside the
   bench.
 
+## 5. FR-CB10 self-check at the serve window (#1947 composition)
+
+Build: the #1953 head `d74eccdc0` (rebased onto main with #1947), `swift build
+-c release --product macprovider-cli` outside the window, SHA-256
+`cd27902ebef10de826d4e1218bab77bdef2ec612d8f446fd85752939093a33c4`. One
+`bench-norestart.sh` window (live paused 14:56:15, `LIVE_RESUMED` 15:20:45
+UTC; that copy of `bench.sh` never restarts live). Isolated loopback serves on
+18190/18191 with `--no-join` and without `--autotune-candidate`, so the
+self-check runs; lab config with `max_concurrency_override: 8` and
+`continuous_batch_queue_limit: 16`. Each model was given 12 minutes
+(`build/sc-window.sh`, `build/sc-one.sh`).
+
+The self-check submits through the serve-path scheduler, whose hybrid window
+is 16, and compares every row of a k-row batch with that prompt run alone.
+
+| Model | Startup probes (window 16) | Self-check slot counts checked | Conformant | Decision when the cap ended |
+| --- | --- | --- | --- | --- |
+| A3B, fused MoE | parity 640/640, isolation `proven=true`, 0 divergences | k = 2 to 16 | all 15, no divergent row | `deferred`: every step at k = 17 failed with `backpressure` (see below) |
+| 27B | parity 1024/1024, isolation `proven=true`, 0 divergences | k = 2 to 11 | all 10; at k = 8 one row first differed at a near-tie (token 34 of 48, margin 0.000), which FR-CB10 accepts | `pending` (27B steps are slow; the cap ended the run) |
+
+No row diverged at the 16-step window in either model. Neither check reached a
+decision inside the cap, so this window proves composition (the self-check
+exercises and passes the hybrid window at every k it reached), not a final
+grant. The tok/s in these lines are the self-check's own 48-token measurements,
+not throughput evidence.
+
+Side finding, not from this branch: with `continuous_batch_queue_limit: 16`
+the A3B scheduler had 32 rows (`served_slots action=planned rows=32
+configured=8 source=autotune`), and the self-check step at k = 17 is rejected
+with `backpressure` every time (6 deferrals, backing off to 320 s), so the
+ladder cannot pass 16 under that queue limit. The live config has the same
+queue limit.
+
 ## Files
 
 Studio home paths are replaced with `<studio-home>`.
 
 - `build/`: the Studio scripts (`lab-serve.sh`, `probe.sh`, `exact.sh`,
-  `tput.sh`, `sampler.sh`, `r015.sh`, `seq-c.sh`, `seq-d.sh`).
+  `tput.sh`, `sampler.sh`, `r015.sh`, `seq-c.sh`, `seq-d.sh`, `sc-window.sh`, `sc-one.sh`, `lab-serve-noat.sh`, `bench-norestart.sh`).
 - `exact/<model>/`: proof header, log and JSON report.
 - `probes/<probe>/`: the probe log lines and the `continuous_batching`
   section of `/v1/status`.
 - `tput/` (8 slots) and `tput32/` (32 slots): `sweep.jsonl` (every attempt),
   `cells.txt` (span and verdict per attempt), `samples.log`, `header.txt`.
+- `selfcheck/`: window console, live samples, and per model the header,
+  probe and self-check log lines, and the `continuous_batching` status section.
 - `r015/`: frozen policy and freeze record, status, hardware-e2e and bench
   logs, contamination and sample logs, gzipped JSONL, analyzer output.

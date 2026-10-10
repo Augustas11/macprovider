@@ -1,0 +1,57 @@
+{"accepted": true, "type": "pause_ack"}
+LIVE_PAUSED 14:56:15
+LIVE_DRAINED 14:56:16
+WINDOW_RUN_START 14:56:16
+== a3b-fused ended=15:08:21
+event=served_slots action=planned rows=32 served=1 reason=self_check_pending configured=8 source=autotune
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=served_slots action=applied slots=1 rows=32 reason=self_check_pending
+event=cb_self_check action=step max_slots=32 resumed_at=0 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=measured slots=2 rung=true conformant=true divergent_rows=none aggregate_tps=121.6 serial_tps=119.6 gain=1.01
+event=cb_self_check action=measured slots=3 rung=true conformant=true divergent_rows=none aggregate_tps=98.3 serial_tps=93.4 gain=1.05
+event=cb_self_check action=measured slots=4 rung=true conformant=true divergent_rows=none aggregate_tps=77.9 serial_tps=76.2 gain=1.03
+event=cb_self_check action=measured slots=5 rung=true conformant=true divergent_rows=none aggregate_tps=90.7 serial_tps=76.2 gain=1.19
+event=cb_self_check action=measured slots=6 rung=true conformant=true divergent_rows=none aggregate_tps=97.9 serial_tps=76.2 gain=1.29
+event=cb_self_check action=measured slots=7 rung=true conformant=true divergent_rows=none aggregate_tps=96.5 serial_tps=76.2 gain=1.27
+event=cb_self_check action=measured slots=8 rung=true conformant=true divergent_rows=none aggregate_tps=82.5 serial_tps=76.0 gain=1.08
+event=cb_self_check action=measured slots=9 rung=false conformant=true divergent_rows=none aggregate_tps=93.3 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=10 rung=false conformant=true divergent_rows=none aggregate_tps=94.6 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=11 rung=false conformant=true divergent_rows=none aggregate_tps=93.9 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=12 rung=true conformant=true divergent_rows=none aggregate_tps=92.3 serial_tps=76.3 gain=1.21
+event=cb_self_check action=measured slots=13 rung=false conformant=true divergent_rows=none aggregate_tps=95.6 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=14 rung=false conformant=true divergent_rows=none aggregate_tps=101.3 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=15 rung=false conformant=true divergent_rows=none aggregate_tps=96.7 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=16 rung=true conformant=true divergent_rows=none aggregate_tps=90.7 serial_tps=76.1 gain=1.19
+event=cb_self_check action=deferred deferrals=1 retry_in_s=10 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=2 retry_in_s=20 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=3 retry_in_s=40 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=4 retry_in_s=80 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=5 retry_in_s=160 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=6 retry_in_s=320 reason=step_failed error=backpressure
+status: active=False paged=attached proof=passed slots=32 self_check={"hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb", "verified_k": 1, "metallib_sha256": "f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756", "kernel_identifier": "macprovider_paged_kv_gather_v1", "model_sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1", "served_slots": 1, "deferrals": 6, "os_build": "Version 27.0.1 (Build 26A434)", "runtime_build": "72c4ab082a08f291ba270a7303880e90036742e3/0.32.3+ca2f61d22c5e8afe87170525ebc1769f72da5b41", "decision": "deferred"}
+== q27 ended=15:20:25
+event=served_slots action=planned rows=14 served=1 reason=self_check_pending configured=8 source=autotune
+[paged-kv] parity model=qwen/qwen3.6-27b established=true nLayers=16 nNew=32 gatherKernelCalls=1024 expectCalls=1024 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=served_slots action=applied slots=1 rows=14 reason=self_check_pending
+event=cb_self_check action=step max_slots=14 resumed_at=0 remeasure=false model_sha256=518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931
+event=cb_self_check action=measured slots=2 rung=true conformant=true divergent_rows=none aggregate_tps=35.4 serial_tps=29.2 gain=1.21
+event=cb_self_check action=measured slots=3 rung=true conformant=true divergent_rows=none aggregate_tps=24.1 serial_tps=21.2 gain=1.14
+event=cb_self_check action=measured slots=4 rung=true conformant=true divergent_rows=none aggregate_tps=17.7 serial_tps=16.3 gain=1.09
+event=cb_self_check action=measured slots=5 rung=true conformant=true divergent_rows=none aggregate_tps=20.9 serial_tps=16.3 gain=1.28
+event=cb_self_check action=measured slots=6 rung=true conformant=true divergent_rows=none aggregate_tps=22.2 serial_tps=16.2 gain=1.37
+event=cb_self_check action=measured slots=7 rung=true conformant=true divergent_rows=none aggregate_tps=21.2 serial_tps=16.3 gain=1.30
+event=cb_self_check action=measured slots=8 rung=true conformant=true divergent_rows=2@34/48:near_tie:tokens=7309->660:margin=0.000 aggregate_tps=18.6 serial_tps=16.2 gain=1.15
+event=cb_self_check action=measured slots=9 rung=false conformant=true divergent_rows=none aggregate_tps=20.2 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=10 rung=false conformant=true divergent_rows=none aggregate_tps=21.1 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=11 rung=false conformant=true divergent_rows=none aggregate_tps=20.4 serial_tps=0.0 gain=0.00
+status: active=False paged=attached proof=passed slots=14 self_check={"model_sha256": "518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931", "metallib_sha256": "f42aef609211980ad87cf72f75b5551b767a0160858257b997bac49f0e95a756", "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb", "deferrals": 0, "runtime_build": "72c4ab082a08f291ba270a7303880e90036742e3/0.32.3+ca2f61d22c5e8afe87170525ebc1769f72da5b41", "decision": "pending", "served_slots": 1, "verified_k": 1, "kernel_identifier": "macprovider_paged_kv_gather_v1", "os_build": "Version 27.0.1 (Build 26A434)"}
+WINDOW_RUN_END 15:20:27
+{"accepted": true, "type": "resume_ack"}
+LIVE_RESUMED 15:20:45

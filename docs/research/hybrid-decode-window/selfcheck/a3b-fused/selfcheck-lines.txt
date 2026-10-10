@@ -1,0 +1,39 @@
+event=served_slots action=planned rows=32 served=1 reason=self_check_pending configured=8 source=autotune
+[paged-kv] moe-isolation first prefill=[271,271] serial=[271,271] decodeA=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] serialA=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] decodeB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570] serialB=[248068, 198, 8160, 579, 264, 7047, 1817, 25, 271, 16, 13, 220, 2972, 2014, 53983, 2570]
+[paged-kv] moe-isolation rejoin decodeA=[5396] serialA=[5396] decodeB=[248068] serialB=[248068]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 0 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[2943,414] serial=[2943,414] decodeA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 13, 271, 248068, 198] serialA=[11, 4097, 11, 4590, 11, 7840, 11, 7810, 11, 11292, 11, 5600, 13, 271, 248068, 198] decodeB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436] serialB=[11, 458, 11, 426, 11, 469, 11, 462, 11, 353, 11, 604, 11, 710, 11, 436]
+[paged-kv] moe-isolation rejoin decodeA=[90700] serialA=[90700] decodeB=[11] serialB=[11]
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b challenge pair 1 not distinguishing; trying next
+[paged-kv] moe-isolation first prefill=[264,198] serial=[264,198] decodeA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] serialA=[478, 292, 271, 727, 31192, 2784, 11, 292, 1590, 198, 262, 460, 264, 471, 292, 271] decodeB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15] serialB=[406, 220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]
+[paged-kv] moe-isolation rejoin decodeA=[727] serialA=[727] decodeB=[406] serialB=[406]
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=served_slots action=applied slots=1 rows=32 reason=self_check_pending
+event=cb_self_check action=step max_slots=32 resumed_at=0 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=measured slots=2 rung=true conformant=true divergent_rows=none aggregate_tps=121.6 serial_tps=119.6 gain=1.01
+event=cb_self_check action=measured slots=3 rung=true conformant=true divergent_rows=none aggregate_tps=98.3 serial_tps=93.4 gain=1.05
+event=cb_self_check action=measured slots=4 rung=true conformant=true divergent_rows=none aggregate_tps=77.9 serial_tps=76.2 gain=1.03
+event=cb_self_check action=measured slots=5 rung=true conformant=true divergent_rows=none aggregate_tps=90.7 serial_tps=76.2 gain=1.19
+event=cb_self_check action=measured slots=6 rung=true conformant=true divergent_rows=none aggregate_tps=97.9 serial_tps=76.2 gain=1.29
+event=cb_self_check action=measured slots=7 rung=true conformant=true divergent_rows=none aggregate_tps=96.5 serial_tps=76.2 gain=1.27
+event=cb_self_check action=measured slots=8 rung=true conformant=true divergent_rows=none aggregate_tps=82.5 serial_tps=76.0 gain=1.08
+event=cb_self_check action=measured slots=9 rung=false conformant=true divergent_rows=none aggregate_tps=93.3 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=10 rung=false conformant=true divergent_rows=none aggregate_tps=94.6 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=11 rung=false conformant=true divergent_rows=none aggregate_tps=93.9 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=12 rung=true conformant=true divergent_rows=none aggregate_tps=92.3 serial_tps=76.3 gain=1.21
+event=cb_self_check action=measured slots=13 rung=false conformant=true divergent_rows=none aggregate_tps=95.6 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=14 rung=false conformant=true divergent_rows=none aggregate_tps=101.3 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=15 rung=false conformant=true divergent_rows=none aggregate_tps=96.7 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=16 rung=true conformant=true divergent_rows=none aggregate_tps=90.7 serial_tps=76.1 gain=1.19
+event=cb_self_check action=deferred deferrals=1 retry_in_s=10 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=2 retry_in_s=20 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=3 retry_in_s=40 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=4 retry_in_s=80 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=5 retry_in_s=160 reason=step_failed error=backpressure
+event=cb_self_check action=step max_slots=32 resumed_at=15 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=deferred deferrals=6 retry_in_s=320 reason=step_failed error=backpressure
