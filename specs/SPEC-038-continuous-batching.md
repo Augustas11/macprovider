@@ -7,7 +7,7 @@ Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (orig
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.15 (2026-10-10, default-on CB qualified per Mac):**
-Follows SPEC-023 v0.22.19, SPEC-039 v0.1.15 and SPEC-048 v0.1.30. Continuous
+Follows SPEC-023 v0.22.20, SPEC-039 v0.1.15 and SPEC-048 v0.1.30. Continuous
 batching is on by default for every model the local SPEC-039 engine admits.
 Each Mac qualifies itself (FR-CB10): the load-time SPEC-039 parity and
 isolation probes stay the quality gate against stock serial decode, and a new
