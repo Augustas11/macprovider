@@ -171,22 +171,81 @@ func checkRollupMatchesView(t *testing.T, store *Store, providers []string, wins
 	}
 }
 
+// drainRollup runs after fixture writers and refresh jobs have stopped. More
+// describes a bounded pass, not an empty backlog: a backed-off bucket can be
+// skipped by a pass that reports More=false and Recomputed=0.
 func drainRollup(t *testing.T, store *Store) {
 	t.Helper()
 	for i := 0; ; i++ {
 		if i > 10000 {
 			t.Fatal("rollup did not drain")
 		}
-		pass, err := store.RefreshProviderEarningsRollup(context.Background(), DefaultProviderEarningsRollupLimit)
+		// Advance only the test scheduler's retry times instead of waiting a
+		// minute for a bucket that hit its slice during the concurrent phase.
+		// Keep failure counts so the normal larger retry slice still applies.
+		store.earningsRollupSched.mu.Lock()
+		for k, backoff := range store.earningsRollupSched.backoff {
+			backoff.retryAt = time.Time{}
+			store.earningsRollupSched.backoff[k] = backoff
+		}
+		store.earningsRollupSched.mu.Unlock()
+		if _, err := store.RefreshProviderEarningsRollup(context.Background(), DefaultProviderEarningsRollupLimit); err != nil {
+			t.Fatal(err)
+		}
+		backlog, err := store.ProviderEarningsRollupBacklog(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !pass.More && pass.Recomputed == 0 {
+		if backlog.BackfillComplete && backlog.Dirty == 0 && backlog.Stale == 0 && backlog.OldEpoch == 0 {
 			break
 		}
 	}
 	if n := scalar(t, store.db, `SELECT COUNT(*) FROM provider_earnings_rollup_buckets b, provider_earnings_rollup_state s WHERE b.gen != b.computed_gen OR b.computed_epoch != s.epoch`); n != 0 {
 		t.Fatalf("dirty or old-epoch buckets after drain=%d", n)
+	}
+}
+
+// Reproduce the concurrent test's false drain without timing or load: the
+// background job can leave its last bucket in backoff after a slice timeout.
+func TestProviderEarningsRollupDrainRetriesBackedOffBuckets(t *testing.T) {
+	for _, state := range []string{"dirty", "old epoch", "stale"} {
+		t.Run(state, func(t *testing.T) {
+			_, store := newRequestAndBillingStores(t)
+			insertRollupCredit(t, store.db, rollupCredit{requestID: "backoff", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+			if state != "dirty" {
+				drainRollup(t, store)
+				var err error
+				if state == "old epoch" {
+					_, err = store.db.Exec(`UPDATE provider_earnings_rollup_state SET epoch = epoch + 1`)
+				} else {
+					_, err = store.db.Exec(`UPDATE provider_earnings_rollup_buckets SET stale_at_utc = '2000-01-01T00:00:00.000000000Z'`)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			key := earningsBucketKey{provider: "p", hour: "2026-09-16T05"}
+			store.earningsRollupSched.fail(key, time.Now())
+			pass, err := store.RefreshProviderEarningsRollup(context.Background(), DefaultProviderEarningsRollupLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pass.More || pass.Recomputed != 0 {
+				t.Fatalf("pass=%+v; want the backed-off bucket skipped", pass)
+			}
+			backlog, err := store.ProviderEarningsRollupBacklog(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if backlog.Dirty+backlog.Stale+backlog.OldEpoch == 0 {
+				t.Fatalf("backlog=%+v; want pending work despite the idle pass", backlog)
+			}
+			drainRollup(t, store)
+			if store.earningsRollupSched.deferred(key, time.Now()) {
+				t.Fatal("drain left the bucket backed off")
+			}
+			checkRollupMatchesView(t, store, []string{"p"}, rollupTestWindows(time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)))
+		})
 	}
 }
 

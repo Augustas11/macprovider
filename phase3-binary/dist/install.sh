@@ -12017,6 +12017,7 @@ CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
 LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
 LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
+OPERATOR_RESUME_LEASE_PATH="${MACPROVIDER_OPERATOR_RESUME_LEASE_PATH:-$(dirname "$LIFECYCLE_LEASE_PATH")/operator-resume-lease.json}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -12260,15 +12261,18 @@ valid_lifecycle_lease() {
 valid_lifecycle_lease_record() {
   expected_kind="$1"
   expected_pid="${2:-}"
+  lease_path="${3:-$LIFECYCLE_LEASE_PATH}"
+  maximum_override_ms="${4:-0}"
   boot_id="$(current_boot_id || true)"
   [ -n "$boot_id" ] || return 1
   "${MACPROVIDER_PYTHON3:-python3}" - \
-    "$LIFECYCLE_LEASE_PATH" \
+    "$lease_path" \
     "$LIFECYCLE_LEASE_OWNER_UID" \
     "$boot_id" \
     "$expected_kind" \
     "$expected_pid" \
-    "$BINARY_PATH" <<'PY'
+    "$BINARY_PATH" \
+    "$maximum_override_ms" <<'PY'
 import ctypes
 import json
 import os
@@ -12343,9 +12347,10 @@ def live_process_identity(pid):
         "executable_path": os.path.realpath(executable_path),
     }
 
-path, owner_uid_text, boot_id, expected_kind, expected_pid_text, binary_path = sys.argv[1:]
+path, owner_uid_text, boot_id, expected_kind, expected_pid_text, binary_path, maximum_override_text = sys.argv[1:]
 try:
     owner_uid = int(owner_uid_text)
+    maximum_override_ms = int(maximum_override_text)
 except ValueError:
     sys.exit(1)
 try:
@@ -12434,6 +12439,8 @@ if (
     sys.exit(1)
 
 maximum_ms = 30 * 60 * 1000 if kind == "startup" else 20 * 60 * 1000
+if maximum_override_ms > 0:
+    maximum_ms = min(maximum_ms, maximum_override_ms)
 fields = (
     "issued_wall_ms",
     "expires_wall_ms",
@@ -12790,6 +12797,10 @@ run_tick() {
   # empty value could spuriously satisfy it.
   [ -n "$boot_id" ] || return 0
   if ! local_provider_health_ok "$provider_pid"; then
+    if valid_lifecycle_lease_record startup "$provider_pid" "$OPERATOR_RESUME_LEASE_PATH" 60000; then
+      log "provider process $provider_pid is inside a validated operator-resume lease; watchdog grants bounded grace"
+      return 0
+    fi
     if valid_lifecycle_lease "$provider_pid"; then
       log "provider process $provider_pid is inside a validated startup/maintenance lease; watchdog grants bounded grace"
       return 0
