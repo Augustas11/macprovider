@@ -1,0 +1,23 @@
+event=served_slots action=planned rows=16 served=16 reason=owner_pinned configured=16 source=owner
+[paged-kv] parity model=qwen/qwen3.6-35b-a3b established=true nLayers=10 nNew=32 gatherKernelCalls=640 expectCalls=640 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=served_slots action=applied slots=16 rows=16 reason=owner_pinned
+event=cb_self_check action=step max_slots=16 resumed_at=0 remeasure=false model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+event=cb_self_check action=measured slots=2 rung=true conformant=true divergent_rows=none aggregate_tps=121.1 serial_tps=120.3 gain=1.01
+event=cb_self_check action=measured slots=3 rung=true conformant=true divergent_rows=none aggregate_tps=98.1 serial_tps=93.7 gain=1.05
+event=cb_self_check action=measured slots=4 rung=true conformant=true divergent_rows=none aggregate_tps=77.3 serial_tps=76.1 gain=1.01
+event=cb_self_check action=measured slots=5 rung=true conformant=true divergent_rows=none aggregate_tps=90.6 serial_tps=76.3 gain=1.19
+event=cb_self_check action=measured slots=6 rung=true conformant=true divergent_rows=none aggregate_tps=96.6 serial_tps=76.1 gain=1.27
+event=cb_self_check action=measured slots=7 rung=true conformant=true divergent_rows=none aggregate_tps=95.7 serial_tps=76.2 gain=1.26
+event=cb_self_check action=measured slots=8 rung=true conformant=true divergent_rows=none aggregate_tps=85.1 serial_tps=75.8 gain=1.12
+event=cb_self_check action=measured slots=9 rung=false conformant=true divergent_rows=none aggregate_tps=93.1 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=10 rung=false conformant=true divergent_rows=none aggregate_tps=96.3 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=11 rung=false conformant=true divergent_rows=none aggregate_tps=93.6 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=12 rung=true conformant=true divergent_rows=none aggregate_tps=91.4 serial_tps=76.2 gain=1.20
+event=cb_self_check action=measured slots=13 rung=false conformant=true divergent_rows=none aggregate_tps=96.7 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=14 rung=false conformant=true divergent_rows=none aggregate_tps=99.2 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=15 rung=false conformant=true divergent_rows=none aggregate_tps=95.9 serial_tps=0.0 gain=0.00
+event=cb_self_check action=measured slots=16 rung=true conformant=true divergent_rows=none aggregate_tps=91.3 serial_tps=76.2 gain=1.20
+event=cb_self_check action=applied source=measured reason=granted slots=16 verified_k=16 model_sha256=3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1
+binary_sha256 98952ac604cb750082cbb72a775627a99684fd43a363f712717813d78cda4a0a tree=after cfg=a3b env= started=2026-10-10T23:24:02Z

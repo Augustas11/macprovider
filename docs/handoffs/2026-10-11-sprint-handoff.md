@@ -35,6 +35,7 @@ Ship with the **next CLI release** (provider side):
 - #1965 watchdog grace after an operator-pause resume (#1961)
 - #1966 non-streaming decode stops at the buyer stop string (#1948)
 - #1968 App Attest auto-trust: Malibu.app signing + CLI challenge/submit
+- #1974 decode isolation
 
 Ship with the **next Pearl runtime release** (coordinator side):
 - #1962 canary visibility (logs, `/admin/providers` field)
@@ -47,15 +48,11 @@ Also merged: #1963 (privacy evidence scanner, #1959), the #1952 test fix
 
 ## Open — needs the operator
 
-1. **PR #1974 decode isolation** (CB-throughput session): per-forward decode
-   row bound (Ultra 11, M3+ 12, M1/M2 non-Ultra 5), verify token bound,
-   isolation by route class; R015 formal PASS on the final build; three-lane
-   audit clean. Being rebased to SPEC-038 v0.3.18. **Merging needs operator
-   approval.** It is a hard dependency of #1960's grants above 11: on the
-   Studio a decode forward with 12+ rows flips buyer tokens (qmv→qmm).
+1. **#1974 decode isolation MERGED** (7663f463d, operator-approved, SPEC-038 v0.3.18). #1960's grants above 11 are now safe on main.
 2. **Next CLI release is PARKED** until the operator resumes work. When
-   resumed and #1974 is merged: freeze main, the CB session runs its isolated
-   e2e of the exact main SHA (two windows ≤25 min), then cut through
+   resumed: freeze main, the CB session runs its isolated e2e of the exact
+   main SHA on the lab stack at `/Users/a1/lab-e2e-1953/` (two windows ≤25
+   min), then cut through
    `scripts/ops/cli-release.sh` one step at a time; Studio canary in an
    announced window. Plan and table: `docs/releases/cli-release-train.md`
    "Next CLI release".
