@@ -3321,6 +3321,7 @@ actor ModelRuntime: ModelRuntimeServing {
             // fails safe to prefilling every chunk alone.
             prefillGrouping: continuousBatchPrefillGrouping
                 ?? (container == nil ? .unconstrained : .ungrouped),
+            maxDecodeRowsPerForward: container == nil ? Int.max : Self.continuousBatchDecodeRowBound(),
             replayAuthority: replayAuthority
         )
         self.continuousBatchScheduler = continuousBatchScheduler
@@ -4497,6 +4498,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
+                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild,
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
@@ -4903,7 +4905,8 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRoundByteCapacity: Int?,
         nativeMTPStatusSink: NativeMTPStatusSink?,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
-        allowsRaggedPrefillOffsets: Bool = false
+        allowsRaggedPrefillOffsets: Bool = false,
+        maxDecodeRowsPerForward: Int = Int.max
     ) -> ContinuousBatchSchedulerConfiguration {
         ContinuousBatchSchedulerConfiguration(
             descriptor: descriptor,
@@ -4938,6 +4941,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
+            maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink
         )
@@ -4960,6 +4964,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
+        maxDecodeRowsPerForward: Int = Int.max,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -4997,7 +5002,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: prefillGrouping,
                 allowsRaggedPrefillOffsets: (backend as? PagedKVSharedForwardBackend)?
-                    .supportsRaggedPrefillOffsets ?? false
+                    .supportsRaggedPrefillOffsets ?? false,
+                maxDecodeRowsPerForward: maxDecodeRowsPerForward
             ),
             allocator: allocator,
             backend: backend,
@@ -5106,9 +5112,51 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPStatusSink: nativeMTPStatusSink,
             prefillGrouping: prefillGrouping,
+            maxDecodeRowsPerForward: continuousBatchDecodeRowBound(),
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
+    }
+
+    /// The runtime identity the FR-CB10 self-check result is stored under:
+    /// the MLX pin plus this build's row-isolation policy (SPEC-038 FR-CB2
+    /// v0.3.17: per-row attention routes and the decode and verify forward
+    /// bounds of this device). A result measured before the policy, or at
+    /// other bounds, matches no live key, so the check re-runs; an earlier
+    /// grant carries the Mac through the re-run as for an MLX pin change.
+    static var continuousBatchingSelfCheckRuntimeBuild: String {
+        continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
+    }
+
+    static func continuousBatchingSelfCheckRuntimeBuild(forwardBound bound: Int) -> String {
+        "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
+    }
+
+    /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`
+    /// overrides the device's own).
+    static func metalArchitectureForQuantizedRoutes() -> String {
+        if let override = ProcessInfo.processInfo.environment["MLX_METAL_GPU_ARCH"], !override.isEmpty {
+            return override
+        }
+        return GPU.deviceInfo().architecture
+    }
+
+    /// The decode row bound for this device (`ContinuousBatchDecodeRouteBound`).
+    private static func continuousBatchDecodeRowBound() -> Int {
+        let architecture = metalArchitectureForQuantizedRoutes()
+        let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(architecture: architecture)
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only: capped vs uncapped decode forwards.
+        let bound = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_DECODE_ROW_BOUND"]
+            .flatMap { Int($0) }
+            .flatMap { $0 >= 1 ? $0 : nil } ?? deviceBound
+        #else
+        let bound = deviceBound
+        #endif
+        FileHandle.standardError.write(Data(
+            "event=continuous_batch_decode_row_bound max_decode_rows_per_forward=\(bound)\n".utf8
+        ))
+        return bound
     }
 
     /// The loaded model's prefill grouping rule, from its own `config.json`.

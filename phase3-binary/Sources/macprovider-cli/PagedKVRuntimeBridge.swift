@@ -668,13 +668,54 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// the paged-KV accounting does not see, for long held completions.
     static let defaultNativeMTPDrafterColumnCap = 1024
     let nativeMTPDrafterColumnCap: Int
+    /// Most target tokens (rows x verify width) one packed native-MTP
+    /// verification forward carries. Every quantized projection of that
+    /// forward multiplies that many tokens, and MLX switches it from `qmv` to
+    /// `qmm` at the projection's vector limit (`ContinuousBatchDecodeRouteBound`),
+    /// so a larger round verifies in consecutive forwards and every row keeps
+    /// the kernel route of its lone verification (SPEC-038 FR-CB2).
+    let maxVerifyTokensPerForward: Int
+    static let deviceVerifyTokenBound: Int = {
+        let deviceBound = ContinuousBatchDecodeRouteBound.maxDecodeRowsPerForward(
+            architecture: PagedKVVectorAttentionRoute.deviceArchitecture
+        )
+        #if MACPROVIDER_LAB_HARNESS
+        // Lab measurement only, shared with the decode row bound override.
+        return ProcessInfo.processInfo.environment["MACPROVIDER_LAB_DECODE_ROW_BOUND"]
+            .flatMap { Int($0) }
+            .flatMap { $0 >= 1 ? $0 : nil } ?? deviceBound
+        #else
+        return deviceBound
+        #endif
+    }()
+
+    /// Consecutive packed-verify groups in packed-row order, each carrying at
+    /// most `maxTokens` target tokens (rows x the group's widest row), and at
+    /// least one row.
+    static func verifyGroups(widths: [Int], maxTokens: Int) -> [Range<Int>] {
+        var groups: [Range<Int>] = []
+        var start = 0
+        var widest = 0
+        for (index, width) in widths.enumerated() {
+            let candidate = max(widest, width)
+            if index > start, candidate * (index - start + 1) > maxTokens {
+                groups.append(start ..< index)
+                start = index
+                widest = width
+            } else {
+                widest = candidate
+            }
+        }
+        if start < widths.count { groups.append(start ..< widths.count) }
+        return groups
+    }
     private var activeOperations = 0
     private var cancelRequested = false
     /// Set once a ragged prefill forward attended outside
-    /// `PagedKVRaggedPrefillBatchLayerCache.updateAndAttend` (a model that
-    /// calls SDPA itself). Its rows stay correct under the per-row boolean
-    /// mask, but their attention then depends on the group's padded key
-    /// length, so later ragged groups take the serial path.
+    /// `PagedKVBatchLayerCache.updateAndAttend` (a model that calls SDPA
+    /// itself). That forward's rows are failed before sampling; their
+    /// attention depended on the group's padded key length. Later ragged
+    /// groups take the serial path.
     private var raggedPrefillAttentionBypassed = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -696,11 +737,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        maxVerifyTokensPerForward: Int? = nil
     ) {
         self.container = container
         self.drafterContainer = drafterContainer
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
+        self.maxVerifyTokensPerForward = max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound)
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
@@ -726,7 +769,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
-        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap
+        nativeMTPDrafterColumnCap: Int = PagedKVSharedForwardBackend.defaultNativeMTPDrafterColumnCap,
+        maxVerifyTokensPerForward: Int? = nil
     ) {
         self.init(
             container: container,
@@ -738,7 +782,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode,
             drafterContainer: drafterContainer,
-            nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap
+            nativeMTPDrafterColumnCap: nativeMTPDrafterColumnCap,
+            maxVerifyTokensPerForward: maxVerifyTokensPerForward
         )
     }
 
@@ -790,10 +835,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     let promptHidden = hasNativeRows
                         ? Self.sharedPrefillPromptHidden(output.state, rows: inputs.count, chunkLength: chunkLength)
                         : nil
-                    if raggedOffsets {
-                        self.noteRaggedPrefillAttentionBypass(batchedCaches)
-                    }
-                    if hasNativeRows ? promptHidden != nil : output.state == nil,
+                    // A ragged forward that attended outside the per-row
+                    // path is rejected before anything is sampled or
+                    // committed; its rows fail below.
+                    let attentionBypassed = raggedOffsets
+                        && self.noteRaggedPrefillAttentionBypass(batchedCaches)
+                    if !attentionBypassed,
+                       hasNativeRows ? promptHidden != nil : output.state == nil,
                        Self.hasValidBatchState(batchedCaches) {
                         let sampledTokens: [Int]?
                         if inputs.contains(where: \.sampleFirstToken) {
@@ -852,7 +900,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     // back, so discard them and use the isolated serial path.
                     // A ragged group is different: each row's paged cache took
                     // its chunk in place during the forward, so a serial retry
-                    // would append the chunk twice. Fail those rows instead.
+                    // would append the chunk twice. Fail those rows instead
+                    // (also when the forward bypassed per-row attention).
                     if raggedOffsets {
                         for input in inputs {
                             self.removeRowState(for: input.requestID)
@@ -1013,20 +1062,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try? makeBatchedCaches(from: rowCaches, raggedPrefill: raggedPrefill)
     }
 
-    private func noteRaggedPrefillAttentionBypass(_ batches: [PagedKVSharedLayerBatch]) {
-        let bypassed = batches.contains {
-            ($0.cache as? PagedKVRaggedPrefillBatchLayerCache)?.attendedOutsidePerRowPath == true
-        }
-        guard bypassed else { return }
+    /// True when this ragged forward attended outside
+    /// `PagedKVBatchLayerCache.updateAndAttend`; later ragged groups then
+    /// take the serial path.
+    private func noteRaggedPrefillAttentionBypass(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
+        notePaddedAttentionBypass(batches, phase: "prefill")
+    }
+
+    /// SPEC-038 FR-CB2: a padded forward (rows of different key extents)
+    /// whose model called SDPA itself attended over the padded batch, so its
+    /// rows' attention followed the padded route. The caller fails that
+    /// forward's rows before sampling. From then on the backend forms no
+    /// ragged prefill groups and decodes and verifies rows one per forward
+    /// (`serializesPaddedRows`).
+    private func notePaddedAttentionBypass(_ batches: [PagedKVSharedLayerBatch], phase: String) -> Bool {
+        guard Self.attendedOutsideCachePath(batches) else { return false }
         lock.lock()
         let first = !raggedPrefillAttentionBypassed
         raggedPrefillAttentionBypassed = true
         lock.unlock()
         if first {
             try? FileHandle.standardError.write(contentsOf: Data(
-                "event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache\n".utf8
+                "event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache phase=\(phase)\n".utf8
             ))
         }
+        return true
+    }
+
+    private static func attendedOutsideCachePath(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
+        batches.contains { ($0.cache as? PagedKVBatchLayerCache)?.attendedOutsideCachePath == true }
+    }
+
+    /// True once a padded forward bypassed per-row attention: the scheduler
+    /// then decodes one row per forward and verification runs one row per
+    /// packed forward, so no row attends over another row's padding.
+    var serializesPaddedRows: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raggedPrefillAttentionBypassed
     }
 
     private static func hasValidBatchState(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
@@ -1236,7 +1309,58 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         clearDecodeSession()
+        let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
+        let groups = Self.verifyGroups(
+            widths: ordered.map(\.verifiedInputTokenCount),
+            maxTokens: serializesPaddedRows ? 1 : maxVerifyTokensPerForward
+        )
+        guard groups.count > 1 else {
+            return try await verifyNativeMTPPackedGroup(rows: inputs)
+        }
+        var verifiedRows: [NativeMTPVerifiedRow] = []
+        for group in groups {
+            // Each group verifies as its own packed round, rows re-indexed
+            // from 0; results keep the round's packed row indices.
+            let groupInputs = ordered[group].enumerated().map { index, input in
+                ContinuousBatchNativeMTPVerifyInput(
+                    requestID: input.requestID,
+                    currentToken: input.currentToken,
+                    proposalTokens: input.proposalTokens,
+                    generatedTokens: input.generatedTokens,
+                    samplerSeed: input.samplerSeed,
+                    binding: input.binding,
+                    blockTable: input.blockTable,
+                    committedKVTokenCount: input.committedKVTokenCount,
+                    verifiedInputTokenCount: input.verifiedInputTokenCount,
+                    targetKVTokenCount: input.targetKVTokenCount,
+                    packedRowIndex: index,
+                    samplerStep: input.samplerStep,
+                    temperature: input.temperature,
+                    topP: input.topP
+                )
+            }
+            let groupRows = try await verifyNativeMTPPackedGroup(rows: groupInputs)
+            verifiedRows += groupRows.map { row in
+                NativeMTPVerifiedRow(
+                    schedulerRowID: row.schedulerRowID,
+                    packedRowIndex: ordered[group.lowerBound + row.packedRowIndex].packedRowIndex,
+                    proposedTokenIDs: row.proposedTokenIDs,
+                    targetTopTokenIDs: row.targetTopTokenIDs
+                )
+            }
+        }
+        return verifiedRows.sorted { $0.packedRowIndex < $1.packedRowIndex }
+    }
+
+    /// One packed verification forward over `inputs` (packed row indices
+    /// `0 ..< inputs.count`).
+    private func verifyNativeMTPPackedGroup(
+        rows inputs: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
         let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+            // A cancellation between groups of a split round stops before
+            // this group touches row state.
+            try self.throwIfCancelRequested()
             let rowStates = inputs.map {
                 self.rowState(
                     for: $0.requestID,
@@ -1269,6 +1393,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 cache: batchedCaches.map(\.cache),
                 requireContinuationState: true
             )
+            if self.notePaddedAttentionBypass(batchedCaches, phase: "verify") {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_padded_attention_bypassed")
+            }
             let pendingByRequestID = try Dictionary(
                 uniqueKeysWithValues: self.pendingNativeMTPTransactions(
                     from: batchedCaches,
@@ -1276,6 +1403,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     rows: output.rows
                 ).map { ($0.0, $0.1) }
             )
+            try self.throwIfCancelRequested()
             self.replaceNativeMTPPendingTransactions(
                 requestIDs: inputs.map(\.requestID),
                 transactions: pendingByRequestID.mapValues { $0 }
@@ -1905,6 +2033,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
+                }
+                if notePaddedAttentionBypass(batchedCaches, phase: "decode") {
+                    // Fail closed before sampling; the rows' caches already
+                    // took this step, so they are released, not retried.
+                    storeDecodeSession(nil)
+                    for input in supportedInputs {
+                        removeRowState(for: input.requestID)
+                    }
+                    return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
                 let stepSampled = ContinuousBatchRowSampler.sample(
@@ -3223,6 +3360,157 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         )
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    /// One uncompiled shared decode window over retained rows, as
+    /// `performDecode` runs it: the batch caches are built once, `steps`
+    /// forwards run on them with each row's greedy token fed back, and rows
+    /// are synced at the window end. Returns each step's last-position logits
+    /// per row as float32 (`[step][row][vocab]`). Decode-isolation probes
+    /// compare these bits against the same rows decoded alone.
+    func sharedDecodeLogitsForTest(requestIDs: [String], tokens: [Int], steps: Int = 1) async throws -> [[[Float]]] {
+        try await container.perform { context in
+            let states = try requestIDs.map { id -> RowState in
+                guard let state = self.existingRowState(for: id), state.state == nil else {
+                    throw ContinuousBatchSchedulerError.unsupported("decode_probe_missing_row")
+                }
+                return state
+            }
+            let batchedCaches = try self.makeBatchedCaches(from: states.map(\.caches))
+            let caches = batchedCaches.map(\.cache)
+            var current = tokens
+            var perStep: [[[Float]]] = []
+            for _ in 0 ..< max(1, steps) {
+                let text = LMInput.Text(tokens: MLXArray(current.map(Int32.init)).reshaped([current.count, 1]))
+                let output = withPreparedCache(caches, lengths: text.sequenceLengths) {
+                    context.model(text, cache: caches, state: nil)
+                }
+                try batchedCaches.forEach { try $0.validateBatchState() }
+                let logits = output.logits[0..., -1, 0...].asType(.float32)
+                eval(logits)
+                let vocabulary = logits.dim(1)
+                let flat = logits.asArray(Float.self)
+                let rows = (0 ..< requestIDs.count).map { Array(flat[$0 * vocabulary ..< ($0 + 1) * vocabulary]) }
+                current = rows.map { row in row.indices.max { row[$0] < row[$1] }! }
+                perStep.append(rows)
+            }
+            batchedCaches.forEach { $0.syncRowsFromBatch() }
+            eval(states.flatMap(\.caches))
+            return perStep
+        }
+    }
+
+    /// One packed native-MTP verification forward over retained rows, as
+    /// `verifyNativeMTPPackedRound` runs it, returning each row's logits for
+    /// its real columns (`[inputCount * vocab]` float32, proposal rows then
+    /// the bonus row). Nothing is committed and no transaction is kept, so a
+    /// probe compares one verify step per prefilled state.
+    func sharedVerifyLogitsForTest(requestIDs: [String], tokenRows: [[Int]]) async throws -> [[Float]] {
+        try await container.perform { context in
+            let states = try requestIDs.map { id -> RowState in
+                guard let state = self.existingRowState(for: id), state.state == nil else {
+                    throw ContinuousBatchSchedulerError.unsupported("verify_probe_missing_row")
+                }
+                return state
+            }
+            let batchedCaches = try self.makeBatchedCaches(from: states.map(\.caches), nativeMTP: true)
+            let width = tokenRows.map(\.count).max() ?? 1
+            let tokens = MLXArray(
+                tokenRows.flatMap { $0.map(Int32.init) + Array(repeating: Int32(0), count: width - $0.count) },
+                [tokenRows.count, width]
+            )
+            let rowMaps = tokenRows.enumerated().map { index, row in
+                MTPPackedVerificationRowMap(
+                    rowIndex: index,
+                    queryOffset: states[index].caches.compactMap { $0 as? PagedKVCache }.first?.offset ?? 0,
+                    inputCount: row.count,
+                    proposalCount: row.count - 1
+                )
+            }
+            let output = try verifyMTPPackedTargets(
+                model: context.model,
+                tokens: tokens,
+                rowMaps: rowMaps,
+                cache: batchedCaches.map(\.cache)
+            )
+            let perRow = output.rows.sorted { $0.map.rowIndex < $1.map.rowIndex }.map {
+                concatenated([$0.proposalLogits, $0.bonusLogits], axis: 0).asType(.float32)
+            }
+            eval(perRow)
+            return perRow.map { $0.asArray(Float.self) }
+        }
+    }
+
+    /// One attention layer of a shared forward through the batch cache the
+    /// backend builds for it (`raggedPrefill` selects the ragged prefill
+    /// cache; `mtpPackedRowMaps` prepares packed MTP verification), with the
+    /// mask the model asks that cache for, attended through
+    /// `attentionWithCacheUpdate` as the served models do. Packed rows are
+    /// not committed; other rows' caches keep the update.
+    static func batchAttentionForTest(
+        rowCaches: [PagedKVCache],
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        scale: Float,
+        raggedPrefill: Bool = false,
+        mtpPackedRowMaps: [MTPPackedVerificationRowMap]? = nil,
+        maskOverride: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        maskWindowSize: Int? = nil
+    ) throws -> MLXArray {
+        let cache = raggedPrefill
+            ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rowCaches)
+            : PagedKVBatchLayerCache(rowCaches: rowCaches)
+        if let mtpPackedRowMaps {
+            try cache.prepareMTPPackedVerification(rowMaps: mtpPackedRowMaps)
+        }
+        let mask = maskOverride ?? cache.makeMask(n: queries.dim(2), windowSize: maskWindowSize, returnArray: false)
+        let attended = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask
+        )
+        eval(attended)
+        cache.syncRowsFromBatch()
+        cache.finalize()
+        lastBatchAttentionLeftCachePathForTest = cache.attendedOutsideCachePath
+        return attended
+    }
+
+    /// Whether the last `batchAttentionForTest` call could not isolate its
+    /// rows (the backend would fail that forward).
+    nonisolated(unsafe) static var lastBatchAttentionLeftCachePathForTest = false
+
+    /// Several consecutive decode steps through ONE shared decode batch
+    /// cache, as a lockstep window runs them (rows keep their own lengths and
+    /// the cache appends in place between steps). Returns each step's
+    /// attention output.
+    static func batchAttentionWindowForTest(
+        rowCaches: [PagedKVCache],
+        steps: [(queries: MLXArray, keys: MLXArray, values: MLXArray)],
+        scale: Float
+    ) -> [MLXArray] {
+        let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
+        let outputs = steps.map { step -> MLXArray in
+            let mask = cache.makeMask(n: step.queries.dim(2), windowSize: nil, returnArray: false)
+            let attended = attentionWithCacheUpdate(
+                queries: step.queries,
+                keys: step.keys,
+                values: step.values,
+                cache: cache,
+                scale: scale,
+                mask: mask
+            )
+            eval(attended)
+            return attended
+        }
+        cache.syncRowsFromBatch()
+        return outputs
+    }
+    #endif
+
     static func exerciseMTPPackedCacheForTest(
         rowCaches: [PagedKVCache],
         rowMaps: [MTPPackedVerificationRowMap],
@@ -3593,68 +3881,172 @@ enum PagedKVRaggedPrefillMask {
     }
 }
 
-/// The batch cache of a ragged shared prefill (SPEC-038 FR-CB2). Through the
-/// generic attention path every row would attend over keys zero-padded to the
-/// group's longest row under a per-row boolean mask. That is correct, but in
-/// the pinned MLX core the unfused SDPA that head dims 192 and 256 take for
-/// prompt chunks (every Qwen3.5/3.6 attention layer) does not give a padded
-/// row the bits it gets alone (Studio: up to 2.4e-4 apart in bfloat16). So
-/// each row attends separately here, over exactly its own `offset + L` keys
-/// with the causal mask: the call the row makes when it prefills alone, bit
-/// for bit. Every other operator of the forward stays batched.
-private final class PagedKVRaggedPrefillBatchLayerCache: PagedKVBatchLayerCache, KVCacheAttentionProtocol {
-    private var insideUpdateAndAttend = false
-    /// True when a ragged update reached this cache without
-    /// `updateAndAttend` (a model that calls SDPA itself).
-    private(set) var attendedOutsidePerRowPath = false
+/// The batch cache of a ragged shared prefill (SPEC-038 FR-CB2). Its rows
+/// attend over their own keys like every batch cache
+/// (`PagedKVBatchLayerCache.updateAndAttend`); the type marks a ragged
+/// forward so the backend can reject it when the model attended outside
+/// that path.
+private final class PagedKVRaggedPrefillBatchLayerCache: PagedKVBatchLayerCache {}
 
-    /// Per-row offsets before this call when it is a ragged prompt chunk.
-    private func raggedRowOffsets(queryTokens: Int) -> [Int]? {
-        guard queryTokens > 1, rowCaches.count > 1, preparedMTPPackedRowMaps == nil else { return nil }
-        let offsets = preUpdateOffsets
-        return Set(offsets).count > 1 ? offsets : nil
+/// One row's share of a batched attention call: its query columns, its own
+/// keys (left-aligned in the batch buffer) and the mask its lone call takes.
+struct PagedKVRowAttentionExtent: Equatable {
+    let queryTokens: Int
+    let keyTokens: Int
+}
+
+/// The vector attention route MLX core takes for a call (query length at
+/// most 8), ported from core fork `Augustas11/mlx` tag
+/// `v0.32.2-macprovider.2`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+/// vector mode at line 812 (`q_pre.shape(2) <= 8`), one vs two passes at
+/// line 875, the `_gqa` first-pass kernel at lines 469-473, the partition
+/// count at lines 486-523 (with the `MLX_SDPA_BLOCKS` override at 519).
+/// Within one route a row's result does not depend on padding: both kernels
+/// (`kernels/sdpa_vector.h`) deal key `i` to partition `i mod P`, skip
+/// masked keys, and reduce the `P` partials in a fixed order. A rebase that
+/// changes that dispatch must update this port; the route-table test and the
+/// cache-level bitwise tests fail when a boundary moves (runbook per-rebase
+/// gate). An unknown route never shares the padded call.
+enum PagedKVVectorAttentionRoute {
+    struct Route: Equatable {
+        let twoPass: Bool
+        let partitions: Int
+        let gqaKernel: Bool
     }
 
-    override func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
-        if !insideUpdateAndAttend, raggedRowOffsets(queryTokens: incomingKeys.dim(2)) != nil {
-            attendedOutsidePerRowPath = true
+    /// The Metal architecture name core reads, and its `MLX_SDPA_BLOCKS`
+    /// override (rounded up to 32 as core does).
+    static let deviceArchitecture: String = ModelRuntime.metalArchitectureForQuantizedRoutes()
+    static let partitionOverride: Int? = {
+        guard let raw = ProcessInfo.processInfo.environment["MLX_SDPA_BLOCKS"],
+              let value = Int(raw), value > 0
+        else { return nil }
+        return ((value + 31) / 32) * 32
+    }()
+
+    static func route(
+        keyTokens n: Int,
+        queryTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        hasArrayMask: Bool,
+        architecture: String,
+        partitionOverride: Int?
+    ) -> Route? {
+        guard queryTokens >= 1, queryTokens <= 8, kvHeads > 0, queryHeads % kvHeads == 0,
+              let device = architecture.last
+        else { return nil }
+        let large = device == "d" || device == "s"
+        let twoPass = (large && n >= 1024) || (kvHeads < queryHeads && n >= 4096)
+        guard twoPass else { return Route(twoPass: false, partitions: 32, gqaKernel: false) }
+        let gqaKernel = !hasArrayMask && queryTokens == 1 && queryHeads == 8 * kvHeads
+            && headDim == valueDim && (headDim == 64 || headDim == 128) && n >= 8192
+        let simdGroups = (queryHeads / kvHeads) * queryTokens
+        var partitions: Int
+        if device == "s" {
+            partitions = 64
+            if n > 1024 && simdGroups > 4 {
+                partitions = n <= 8192 ? 128 : n <= 32768 ? 256 : n <= 65536 ? 512 : 1024
+            }
+        } else if device == "d" {
+            partitions = 128
+            if simdGroups <= 2 && n > 8192 {
+                partitions = 256
+            } else if simdGroups >= 6 {
+                if n >= 16384 && n < 65536 {
+                    partitions = 512
+                } else if n >= 65536 {
+                    partitions = 1024
+                }
+            }
+        } else {
+            partitions = simdGroups >= 4 ? 64 : 32
         }
-        return super.update(keys: incomingKeys, values: incomingValues)
+        if let partitionOverride { partitions = partitionOverride }
+        return Route(twoPass: true, partitions: partitions, gqaKernel: gqaKernel)
     }
 
-    func updateAndAttend(
-        queries: MLXArray,
-        keys incomingKeys: MLXArray,
-        values incomingValues: MLXArray,
-        scale: Float,
-        mask: MLXFast.ScaledDotProductAttentionMaskMode
-    ) -> MLXArray {
-        let queryTokens = queries.dim(2)
-        let rowOffsets = raggedRowOffsets(queryTokens: queryTokens)
-        insideUpdateAndAttend = true
-        let (keys, values) = update(keys: incomingKeys, values: incomingValues)
-        insideUpdateAndAttend = false
-        guard let rowOffsets, queries.dim(0) == rowOffsets.count, keys.dim(0) == rowOffsets.count else {
-            return MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
-                scale: scale,
-                mask: mask
-            )
+    /// Rows whose lone call takes the padded call's route, so the padded call
+    /// gives them their lone bits. Empty when the call is not a vector call,
+    /// the padded call has no array mask (it would then attend padding), or
+    /// the architecture is unknown.
+    static func rowsMatchingPaddedCall(
+        extents: [PagedKVRowAttentionExtent],
+        queryTokens: Int,
+        paddedKeyTokens: Int,
+        queryHeads: Int,
+        kvHeads: Int,
+        headDim: Int,
+        valueDim: Int,
+        paddedCallHasArrayMask: Bool,
+        loneCallHasArrayMask: Bool,
+        architecture: String = deviceArchitecture,
+        partitionOverride: Int? = partitionOverride
+    ) -> Set<Int> {
+        guard paddedCallHasArrayMask,
+              let padded = route(
+                  keyTokens: paddedKeyTokens,
+                  queryTokens: queryTokens,
+                  queryHeads: queryHeads,
+                  kvHeads: kvHeads,
+                  headDim: headDim,
+                  valueDim: valueDim,
+                  hasArrayMask: true,
+                  architecture: architecture,
+                  partitionOverride: partitionOverride
+              )
+        else { return [] }
+        return Set(extents.indices.filter { row in
+            let extent = extents[row]
+            return extent.queryTokens == queryTokens
+                && route(
+                    keyTokens: extent.keyTokens,
+                    queryTokens: extent.queryTokens,
+                    queryHeads: queryHeads,
+                    kvHeads: kvHeads,
+                    headDim: headDim,
+                    valueDim: valueDim,
+                    hasArrayMask: loneCallHasArrayMask,
+                    architecture: architecture,
+                    partitionOverride: partitionOverride
+                ) == padded
+        })
+    }
+}
+
+enum PagedKVRowAttention {
+    /// Per-row extents when one batched SDPA call would not give every row
+    /// its lone bits, else nil (one call is exact). Rows whose keys or query
+    /// columns are padded to a longer neighbour need their own call:
+    /// - decode and ragged prefill: row `b` holds `offsetsBefore[b] + L` keys
+    ///   and all `L` query columns;
+    /// - packed MTP verification: row `b` holds `queryOffset + inputCount`
+    ///   keys and its first `inputCount` columns are real.
+    static func extents(
+        queryTokens: Int,
+        offsetsBefore: [Int],
+        packedRows: [(queryOffset: Int, inputCount: Int)]?
+    ) -> [PagedKVRowAttentionExtent]? {
+        guard offsetsBefore.count > 1, queryTokens > 0 else { return nil }
+        let extents: [PagedKVRowAttentionExtent]
+        if let packedRows {
+            guard packedRows.count == offsetsBefore.count,
+                  packedRows.allSatisfy({ $0.inputCount >= 1 && $0.inputCount <= queryTokens && $0.queryOffset >= 0 })
+            else { return nil }
+            extents = packedRows.map {
+                PagedKVRowAttentionExtent(queryTokens: $0.inputCount, keyTokens: $0.queryOffset + $0.inputCount)
+            }
+        } else {
+            guard offsetsBefore.allSatisfy({ $0 >= 0 }) else { return nil }
+            extents = offsetsBefore.map {
+                PagedKVRowAttentionExtent(queryTokens: queryTokens, keyTokens: $0 + queryTokens)
+            }
         }
-        // Row b's keys are left-aligned: its own history and this chunk fill
-        // `[0, offset_b + L)`; the rest is padding for longer rows.
-        return concatenated(rowOffsets.enumerated().map { row, offset in
-            let keyCount = offset + queryTokens
-            return MLXFast.scaledDotProductAttention(
-                queries: queries[row ..< row + 1, 0..., 0..., 0...],
-                keys: keys[row ..< row + 1, 0..., ..<keyCount, 0...],
-                values: values[row ..< row + 1, 0..., ..<keyCount, 0...],
-                scale: scale,
-                mask: .causal
-            )
-        }, axis: 0)
+        let padded = Set(extents.map(\.keyTokens)).count > 1
+            || extents.contains { $0.queryTokens < queryTokens }
+        return padded ? extents : nil
     }
 }
 
@@ -3688,7 +4080,7 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttentionProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int
@@ -3818,7 +4210,25 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
         packFromRows()
     }
 
+    /// Set while `updateAndAttend` runs this layer's update.
+    private var insideUpdateAndAttend = false
+    /// True once a padded update (rows of different key extents) reached
+    /// this cache without `updateAndAttend`: the model called SDPA itself
+    /// over the padded batch, so its rows' attention followed the padded
+    /// route (SPEC-038 FR-CB2). The backend fails that forward.
+    private(set) var attendedOutsideCachePath = false
+
     func update(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray) {
+        if !insideUpdateAndAttend,
+           incomingKeys.ndim == 4,
+           PagedKVRowAttention.extents(
+               queryTokens: incomingKeys.dim(2),
+               offsetsBefore: preUpdateOffsets,
+               packedRows: preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
+           ) != nil
+        {
+            attendedOutsideCachePath = true
+        }
         guard incomingKeys.ndim == 4,
               incomingValues.ndim == 4,
               incomingKeys.dim(0) == rowCaches.count,
@@ -3892,6 +4302,152 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
         rowMutationCounts = zip(countsBefore, countsAfter).allSatisfy { $0 != $1 } ? countsAfter : nil
         batchedOffset = nil
         return (mergedKeys, mergedValues)
+    }
+
+    /// SPEC-038 FR-CB2 row isolation for attention. Rows of different lengths
+    /// share one buffer, left-aligned and zero-padded to the longest row. One
+    /// SDPA call over that buffer masks the padding, so the math is per row,
+    /// but MLX core picks its kernel from the padded shape: the vector
+    /// (decode/verify) kernels choose one or two passes and the two-pass
+    /// partition count from the key length, and the unfused prompt path
+    /// (head dims 192/256) blocks its GEMMs by it. Either can change a row's
+    /// floating-point reduction order with its neighbours.
+    ///
+    /// For prompt chunks every padded row attends in its own call over exactly
+    /// its own keys. For the vector kernels a padded row keeps its lone bits
+    /// whenever its own key length selects the same route as the padded call
+    /// (`PagedKVVectorAttentionRoute`): both kernels deal key `i` to partition
+    /// `i mod P` and skip masked keys. So one batched call serves every row
+    /// whose lone route equals the padded call's, and only the others (a short
+    /// row below the two-pass switch, a row in another partition-count class,
+    /// a narrower verify row) attend in their own call.
+    ///
+    /// A split row's mask: for a plain mask this cache built (padding and
+    /// causality only), the mask its lone call takes (none for one decode
+    /// token, causal for a prompt chunk, its slice of the packed mask for
+    /// verification); for any other array mask, its own slice of that mask,
+    /// so the mask's semantics are kept. Sliding-window rows (decode only)
+    /// attend over their presented suffix. A padded call that cannot be
+    /// isolated (rows whose stored keys do not match their extents, an
+    /// unmasked multi-token call, an unsupported layout) keeps the single
+    /// call and is flagged like a model that calls SDPA itself, so the
+    /// backend fails that forward and serializes rows. Rows of one length
+    /// keep the single call. Every other operator stays batched.
+    func updateAndAttend(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        let queryTokens = queries.dim(2)
+        let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
+        let offsetsBefore = preUpdateOffsets
+        let window = presentationWindowTokens
+        let windowed = rowCaches.contains { $0.attentionWindowTokens != nil }
+        insideUpdateAndAttend = true
+        let (keys, values) = update(keys: incomingKeys, values: incomingValues)
+        insideUpdateAndAttend = false
+        func batched() -> MLXArray {
+            MLXFast.scaledDotProductAttention(queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+        }
+        // Each row's keys start at column 0 of the buffer: its whole history,
+        // or for a sliding-window row its presented suffix.
+        let extentOffsets = windowed && window != nil
+            ? offsetsBefore.map { PagedKVCache.slidingWindowPresentationPrefix(priorTokens: $0, windowSize: window) }
+            : offsetsBefore
+        guard let extents = PagedKVRowAttention.extents(
+            queryTokens: queryTokens,
+            offsetsBefore: extentOffsets,
+            packedRows: packedRows
+        ) else {
+            // No row is padded: the one call is each row's lone call.
+            return batched()
+        }
+        func notIsolatable() -> MLXArray {
+            attendedOutsideCachePath = true
+            return batched()
+        }
+        let storageMatches = packedRows == nil
+            ? rowCaches.enumerated().allSatisfy({
+                $0.element.offset == offsetsBefore[$0.offset] + queryTokens
+                    && $0.element.storedTokens == $0.element.offset
+            })
+            : mtpPackedForwardDidUpdate && rowCaches.enumerated().allSatisfy({
+                $0.element.storedTokens == offsetsBefore[$0.offset] && $0.element.offset == offsetsBefore[$0.offset]
+            })
+        guard queries.dim(0) == rowCaches.count,
+              keys.dim(0) == rowCaches.count,
+              keys.dim(2) == extents.map(\.keyTokens).max(),
+              storageMatches,
+              // Sliding windows: one window for every row, one decode token.
+              !windowed || (window != nil && packedRows == nil && queryTokens == 1)
+        else {
+            return notIsolatable()
+        }
+        // How each split row is masked.
+        let plainMask = PagedKVBatchLayerCache.maskIsPlainCacheMask(mask)
+        var suppliedArray: MLXArray?
+        if case .array(let array) = mask {
+            guard array.ndim == 4,
+                  array.dim(0) == rowCaches.count || array.dim(0) == 1,
+                  array.dim(2) == queryTokens,
+                  array.dim(3) == keys.dim(2)
+            else {
+                return notIsolatable()
+            }
+            suppliedArray = array
+        } else if packedRows != nil {
+            return notIsolatable()
+        } else if case .none = mask, queryTokens > 1 {
+            // An unmasked prompt chunk over padded keys has no per-row equal.
+            return notIsolatable()
+        }
+        let sliceSupplied = packedRows != nil || (suppliedArray != nil && !plainMask)
+        // Rows the one padded call already gives their lone bits.
+        let sharedRows = PagedKVVectorAttentionRoute.rowsMatchingPaddedCall(
+            extents: extents,
+            queryTokens: queryTokens,
+            paddedKeyTokens: keys.dim(2),
+            queryHeads: queries.dim(1),
+            kvHeads: keys.dim(1),
+            headDim: queries.dim(3),
+            valueDim: values.dim(3),
+            // Only a plain cache-built mask (decode, ragged prompt or packed
+            // verification) is known to exclude every row's padding; under
+            // any other mask every padded row splits and attends over its own
+            // keys only.
+            paddedCallHasArrayMask: suppliedArray != nil && plainMask,
+            loneCallHasArrayMask: sliceSupplied
+        )
+        let shared = sharedRows.isEmpty ? nil : batched()
+        return concatenated(extents.enumerated().map { row, extent in
+            if let shared, sharedRows.contains(row) {
+                return shared[row ..< row + 1, 0..., 0..., 0...]
+            }
+            let rowMask: MLXFast.ScaledDotProductAttentionMaskMode
+            if sliceSupplied, let suppliedArray {
+                let maskRow = suppliedArray.dim(0) == 1 ? 0 : row
+                rowMask = .array(suppliedArray[maskRow ..< maskRow + 1, 0..., ..<extent.queryTokens, ..<extent.keyTokens])
+            } else {
+                rowMask = extent.queryTokens > 1 ? .causal : .none
+            }
+            let attended = MLXFast.scaledDotProductAttention(
+                queries: queries[row ..< row + 1, 0..., ..<extent.queryTokens, 0...],
+                keys: keys[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
+                values: values[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
+                scale: scale,
+                mask: rowMask
+            )
+            let paddedColumns = queryTokens - extent.queryTokens
+            guard paddedColumns > 0 else { return attended }
+            // Padded verify columns attend nothing; one call returned zeros
+            // for them too, and their outputs are discarded.
+            return concatenated([
+                attended,
+                MLXArray.zeros([1, attended.dim(1), paddedColumns, attended.dim(3)], dtype: attended.dtype),
+            ], axis: 2)
+        }, axis: 0)
     }
 
     private func updatePackedMTPVerification(
@@ -4085,8 +4641,32 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        let (mask, plain) = buildMask(n: n, windowSize: windowSize)
+        if plain, case .array(let array) = mask {
+            Self.plainMasks.lock.lock()
+            Self.plainMasks.table.add(array)
+            Self.plainMasks.lock.unlock()
+        }
+        return mask
+    }
+
+    /// Array masks this cache type built that only mask padding and keep
+    /// causality (no sliding-window restriction), held weakly: the model
+    /// passes the full-attention cache's mask to every attention layer of the
+    /// forward. Under such a mask a split row's lone mask is equivalent.
+    private static let plainMasks = (lock: NSLock(), table: NSHashTable<MLXArray>.weakObjects())
+
+    fileprivate static func maskIsPlainCacheMask(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+        guard case .array(let array) = mask else { return false }
+        plainMasks.lock.lock()
+        defer { plainMasks.lock.unlock() }
+        return plainMasks.table.contains(array)
+    }
+
+    /// The forward's mask, and whether it is plain (see `plainMasks`).
+    private func buildMask(n: Int, windowSize: Int?) -> (MLXFast.ScaledDotProductAttentionMaskMode, Bool) {
         if let rowMaps = preparedMTPPackedRowMaps {
-            return .array(Self.makePackedMTPMask(n: n, rowMaps: rowMaps, windowSize: windowSize))
+            return (.array(Self.makePackedMTPMask(n: n, rowMaps: rowMaps, windowSize: windowSize)), windowSize == nil)
         }
         // `makeMask` runs at the start of the forward, before any layer calls
         // `update`, so these are PRE-update per-row token counts.
@@ -4105,7 +4685,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
             return overflow ? Int.max : postUpdate
         }
         let needsWindow = effectiveWindow.map { window in presentedPostUpdateLengths.contains { $0 > window } } ?? false
-        if n == 1, Set(presentedOffsets).count <= 1, !needsWindow { return .none }
+        if n == 1, Set(presentedOffsets).count <= 1, !needsWindow { return (.none, true) }
         // Ragged shared prefill: every row adds the same `n` tokens from its own
         // offset, so query column q of row b sits at `offset_b + q`. The single
         // shared causal offset below cannot express that; build the per-row
@@ -4113,11 +4693,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
         // without a presentation window (`supportsRaggedPrefillOffsets`), so key
         // column j is absolute position j.
         if n > 1, rowCaches.count > 1, Set(preUpdateOffsets).count > 1 {
-            return .array(PagedKVRaggedPrefillMask.make(
+            return (.array(PagedKVRaggedPrefillMask.make(
                 queryTokens: n,
                 rowOffsets: preUpdateOffsets,
                 windowSize: windowSize
-            ))
+            )), windowSize == nil)
         }
         // `createCausalMask` masks key position j unless `j < lengths[b]`. `lengths[b]`
         // must therefore be the count of VALID keys row b holds AFTER this forward's
@@ -4128,12 +4708,14 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sen
         // input-isolation probe catches. `offset` stays the pre-update max: it only
         // sets the query's absolute position for the causal check, which the per-row
         // `lengths` gate then restricts correctly.
-        return .array(createCausalMask(
+        // Plain when no window applies, or for one decode token whose
+        // presented suffix already lies inside the window.
+        return (.array(createCausalMask(
             n: n,
             offset: presentedOffsets.max() ?? offset,
             windowSize: effectiveWindow,
             lengths: MLXArray(presentedPostUpdateLengths.map(Int32.init))
-        ))
+        )), effectiveWindow == nil || (n == 1 && !needsWindow))
     }
 
     func prepare(lengths: [Int]?) {

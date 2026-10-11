@@ -1,0 +1,15 @@
+q27b-main 1 1 1791660023 1791660130 CLEAN samples=45 live_nonzero=0 other_busy=0 live_max=0
+q27b-main 2 1 1791660130 1791660246 CLEAN samples=49 live_nonzero=0 other_busy=0 live_max=0
+q27b-main 4 1 1791660246 1791660337 CLEAN samples=38 live_nonzero=0 other_busy=0 live_max=0
+q27b-main 8 1 1791660337 1791660511 CLEAN samples=72 live_nonzero=0 other_busy=0 live_max=0
+q27b-main 16 1 1791660512 1791660779 CLEAN samples=112 live_nonzero=0 other_busy=0 live_max=0
+q27b-after 1 1 1791660859 1791660966 CLEAN samples=44 live_nonzero=0 other_busy=0 live_max=0
+q27b-after 2 1 1791660966 1791661069 CLEAN samples=43 live_nonzero=0 other_busy=0 live_max=0
+q27b-after 4 1 1791661069 1791661169 CLEAN samples=42 live_nonzero=0 other_busy=0 live_max=0
+q27b-after 8 1 1791661169 1791661353 CLEAN samples=77 live_nonzero=0 other_busy=0 live_max=0
+q27b-after 16 1 1791661353 1791661644 CLEAN samples=121 live_nonzero=0 other_busy=0 live_max=0
+q27b-after-uncapped 16 1 1791661723 1791662000 CLEAN samples=115 live_nonzero=0 other_busy=0 live_max=0
+a3b-main-r 4 1 1791662047 1791662135 CLEAN samples=37 live_nonzero=0 other_busy=0 live_max=0
+a3b-main-r 4 1 1791662135 1791662225 CLEAN samples=38 live_nonzero=0 other_busy=0 live_max=0
+a3b-after-r 4 1 1791662271 1791662363 CLEAN samples=38 live_nonzero=0 other_busy=0 live_max=0
+a3b-after-r 4 1 1791662363 1791662454 CLEAN samples=38 live_nonzero=0 other_busy=0 live_max=0

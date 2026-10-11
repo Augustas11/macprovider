@@ -1,0 +1,13 @@
+arm q27b-main ready 19:20:22 binary=89fc69ebdac20248 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+arm q27b-after ready 19:34:19 binary=0706b09baacb1d35 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+arm q27b-after-uncapped ready 19:48:42 binary=0706b09baacb1d35 env=MACPROVIDER_LAB_DECODE_ROW_BOUND=64 cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=64
+arm a3b-main-r ready 19:54:06 binary=89fc69ebdac20248 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+arm a3b-after-r ready 19:57:50 binary=0706b09baacb1d35 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11

@@ -100,11 +100,23 @@ the call's shape:
   final chunk, so equal-length keyed rows grouped it: on build `af3144ee9`
   12 of 126 grouped 27B rows differed from their lone greedy runs, and 0 of
   126 on the fix (`audits/2026-10-10-mlx-swift-lm-332/ROUND3_FIXES.md`). Decode carries one token per row, so `M` is
-  the decode row count (at most 8). That stays below the limit on the Studio
-  (smallest limit 12) and on every Ultra and M3-or-later device, but M1/M2
-  non-Ultra devices have limit 6 for K or N above 4096, where 6-8 decode rows
-  switch to `qmm`. The grouping rule cannot cover decode; a CB tuple on such
-  a device needs its own batched-isolation evidence at 6-8 rows.
+  the decode row count. **Decode is enforced by
+  `ContinuousBatchDecodeRouteBound`** (`ContinuousBatchScheduler.swift`, a
+  port of `get_qmv_batch_limit`): a decode forward carries at most the
+  device's smallest vector limit minus one rows (Ultra 11, M1/M2 non-Ultra
+  5, M3-or-later non-Ultra 12; the K or N above 4096 branch, which every
+  served output head reaches), and more active rows decode in consecutive
+  forwards. The serve log prints
+  `event=continuous_batch_decode_row_bound max_decode_rows_per_forward=N`.
+  Packed native-MTP verification multiplies `M` by the verify width:
+  `PagedKVSharedForwardBackend.verifyNativeMTPPackedRound` verifies a round
+  in consecutive packed forwards of at most the same bound in target tokens
+  (rows x the group's widest row; one row wider than the bound verifies
+  alone). Studio, A3B, width 2: 8 rows in one forward (16 tokens) were not
+  bit-identical to their lone verification, 5 and 2 rows were. Without the
+  decode bound, 16 rows of unequal length in one forward flipped 30-38
+  greedy tokens out of 256 against their lone runs (A3B fused on/off, 27B);
+  with it, 0.
 - `GatherQMM` (`mlx/backend/metal/quantized.cpp` ~1901) takes
   `gather_qmm_rhs` for sorted gathers when `M == 1`, `B >= 16` and
   `B / E >= 4`, otherwise `gather_qmv`. MoE expert projections sort once a
@@ -155,16 +167,56 @@ the call's shape:
   row alone. With head dimension 256 and more than 8 query tokens the unfused
   path runs batched GEMMs whose tile size follows `rows x heads x L x keys`;
   tiles change the blocking, not each element's K accumulation order.
-  Ragged grouped rows (SPEC-038 v0.3.14) do not share one attention call:
-  through it each row would attend over keys zero-padded to the group's
-  longest row, and the unfused path (head dims 192/256) does not give a
-  padded row its lone bits (Studio, bfloat16: up to 2.4e-4 apart; the fused
-  steel kernel at head dim 128 did). `PagedKVRaggedPrefillBatchLayerCache`
-  attends each row over exactly its own keys with the causal mask, which
-  `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` checks bit
-  for bit at head dims 128 and 256, on both sides of the 4096-key softmax
-  switch. A model that calls SDPA itself bypasses it; the backend then stops
-  forming ragged groups (`event=continuous_batch_ragged_prefill_disabled`).
+  Rows of different lengths share one KV buffer padded to the longest row,
+  and attention routes follow the padded length. The unfused prompt path
+  (query length over 8, head dims 192/256) blocks its GEMMs by it (Studio,
+  bfloat16: up to 2.4e-4 apart), so every padded prompt row attends in its
+  own call over exactly its own keys with the causal mask. The vector
+  decode/verify kernels (query length at most 8) pick one or two passes
+  (1024 keys on Max/Ultra, 4096 with GQA elsewhere), the two-pass partition
+  count (Ultra with 6 or more simdgroups: 128 / 512 / 1024 at 16384 and
+  65536 keys) and the no-mask `_gqa` first pass from it; both kernels deal
+  key `i` to partition `i mod P` and skip masked keys, so a padded row keeps
+  its lone bits exactly when its own key length selects the padded call's
+  route. `PagedKVBatchLayerCache.updateAndAttend` keeps one padded call for
+  those rows and gives every other padded row its own call over exactly its
+  own keys and query columns, with the mask its lone call takes (none for
+  decode, its slice of the packed mask for verification); an unknown route
+  always splits. `PagedKVVectorAttentionRoute` ports the dispatch (core
+  `scaled_dot_product_attention.cpp` lines 469-473, 486-523, 812, 875 at
+  `v0.32.2-macprovider.2`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
+  pins every boundary, and `testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims`,
+  `testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep` and
+  `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check every
+  row bit for bit through the batch caches (Metal hosts only; run them on the
+  Studio at each rebase). The table tests pin the ports, not core: a core
+  change is caught by `testCoreRoutingSourcesMatchThePortedDispatch`, which
+  hashes the resolved core's `get_qmv_batch_limit`, the `sdpa_vector_2pass`
+  partition choice, the one/two-pass choice and `kernels/sdpa_vector.h`;
+  when it fails, re-derive the ports and both tables before updating the
+  digests. Split rows take their lone call's mask only under plain masks the
+  batch cache built (padding and causality, no window); under any other
+  array mask each split row attends with its own slice of that mask.
+  Sliding-window decode rows attend over their presented suffix. A padded
+  call the cache cannot isolate (stored keys not matching a row's extent,
+  an unmasked multi-token call) is treated like a model calling SDPA
+  itself. The FR-CB10 self-check result is keyed by this isolation policy
+  and the device's forward bounds (`ModelRuntime.continuousBatchingSelfCheckRuntimeBuild`). Before the fix (Studio, head dim 256, 16/2 heads)
+  rows of 600-1023 keys padded past 1024 and a 4095-key row padded to 16400
+  differed by up to 2e-3. A model that calls SDPA itself bypasses this;
+  any padded update that reaches the batch cache outside `updateAndAttend`
+  (prefill, decode or verification) fails that forward's rows before
+  sampling, and from then on the backend forms no ragged groups and decodes
+  and verifies one row per forward
+  (`event=continuous_batch_ragged_prefill_disabled reason=attention_outside_cache phase=...`).
+
+  Why provider-side and not a core-fork change: the batch cache owns each
+  row's real key extent, so it can make exactly the lone row's call. A core
+  change (fixed key partitioning in the vector kernels) would still leave the
+  pass-count, GQA-variant and unfused prompt-path differences, change every
+  serial request's numerics, and need three new fork tags and a SPEC-048 R003
+  tuple revision. The cost is the dispatch port above, re-derived at each
+  core rebase.
 - Non-transposed small-M products keep `qvm` / `qvm_split_k`. The served
   quantized linears are transposed, so serve shapes do not use them.
 - `QQMatmul` always takes the vector route. It is independent of `M`, so it
@@ -212,7 +264,7 @@ results in the evidence header.
 | Compile-state ownership | Every compiled trace declares every model array it reads; the compiled verify/decode steps stay bit-identical to the general path on a `prepare()`d model, including after weights are reloaded in place. |
 | Fused-layout eligibility and fallback | The stock A3B layout is fusable; mismatched layouts, rotated `SwitchGLU`, and adapter-backed projections fall back to the stock path. |
 | Weight-file discovery | Every `.safetensors` file the rebased mlx-swift-lm loader can consume (`safetensorWeightURLs`, index and additional files included) is inside the native-MTP observer's recursive scan (SPEC-048 MTP-2). |
-| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule`. |
+| Routing bounds | The core routing patches still apply, and the bounded exceptions above are re-derived for the new upstream, including the constants in `ContinuousBatchPrefillGroupingRule` and the `get_qmv_batch_limit` port in `ContinuousBatchDecodeRouteBound` and the `sdpa_vector` dispatch port in `PagedKVVectorAttentionRoute` (their table tests and the Metal-host bitwise attention tests pass on the Studio). |
 | Grouped short prefill | On the A3B tuple with CB on, 32-127-token prompts sent concurrently in pairs and quads behind a decoding row produce exactly their lone greedy outputs, fused MoE on and off. The same on the dense 27B tuple with keyed (`conv:`) prompts, whose generation-prompt tail chunk is below the 33-token bound. |
 
 ## Package and toolchain preflight

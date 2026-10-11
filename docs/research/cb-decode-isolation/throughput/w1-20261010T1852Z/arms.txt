@@ -1,0 +1,8 @@
+arm a3b-main ready 18:56:38 binary=89fc69ebdac20248 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+arm a3b-after ready 19:05:50 binary=0706b09baacb1d35 env= cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+arm a3b-after-uncapped ready 19:15:08 binary=0706b09baacb1d35 env=MACPROVIDER_LAB_DECODE_ROW_BOUND=64 cb_active=True paged=attached slots=16
+[paged-kv] batched-isolation model=qwen/qwen3.6-35b-a3b requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=64

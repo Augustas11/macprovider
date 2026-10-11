@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.17",
+      "version": "v0.3.18",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4774,7 +4774,13 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func servePathDecodeLockstepWindow",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:func snapshotRecurrentState",
         "phase3-binary/Sources/macprovider-cli/MSBThroughputCommand.swift:private func runHybridWindow",
-        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:static func runMoEInputIsolationProbe"
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:static func runMoEInputIsolationProbe",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:func updateAndAttend",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:enum PagedKVVectorAttentionRoute",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:enum PagedKVRowAttention",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:static func verifyGroups",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func notePaddedAttentionBypass",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchDecodeRouteBound"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -4824,7 +4830,21 @@
         "phase3-binary/Tests/macprovider-cliTests/HybridDecodeWindowExactnessTests.swift:testStopInsideAWindowCheckpointsTheRecurrentStateAtTheStopBoundary",
         "phase3-binary/Tests/macprovider-cliTests/HybridDecodeWindowExactnessTests.swift:testKeyedStopMidWindowPublishesTheWindowOneConversationCache",
         "phase3-binary/Tests/macprovider-cliTests/HybridDecodeWindowExactnessTests.swift:testRowsJoiningAndLeavingBetweenWindowsMatchWindowOne",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testMixedCacheIsolationProbeCoversLockstepWindowBeforePeerRejoin"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testMixedCacheIsolationProbeCoversLockstepWindowBeforePeerRejoin",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testVectorAttentionRouteMatchesTheCoreDispatchBoundaries",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testOnlyRowsInThePaddedCallsRouteShareIt",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRowAttentionExtentsSplitOnlyPaddedRows",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testRaggedPrefillThatBypassesPerRowAttentionFailsItsRowsAndLaterGroupsRunSerially",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testPackedVerifyGroupsStayWithinTheTokenBound",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRealQwen35PackedNativeMTPRowsVerifiedInBoundedGroupsMatchSerialOrdinaryGreedy",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testCoreRoutingSourcesMatchThePortedDispatch",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testPerRowAttentionKeepsTheSingleCallForForeignMasksAndMissingHistory",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testRaggedPromptKeepsAWindowedMaskForSplitRows",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testSlidingWindowDecodeRowsMatchTheirLoneBits",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testDecodeForwardsNeverCarryMoreRowsThanTheDecodeRouteBound"
       ],
       "journeys": [],
       "evidence": [],
@@ -4961,13 +4981,15 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:actor ContinuousBatchingSelfCheckDriver {",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchingSelfCheckRuntimeBuild"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testShippedPolicyKeepsTheStudioQwenTupleBatching",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testRolloutOffRevokesTheModelOnItsRuntimeRevisionOnly",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testResultFromAnotherDecodeWindowDoesNotQualifyThisOne"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testResultFromAnotherDecodeWindowDoesNotQualifyThisOne",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSelfCheckKeyCarriesTheRowIsolationPolicy"
       ],
       "journeys": [],
       "evidence": [],

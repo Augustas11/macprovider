@@ -1,0 +1,7 @@
+	 Executed 1 test, with 0 failures (0 unexpected) in 20.922 (20.922) seconds
+	 Executed 1 test, with 0 failures (0 unexpected) in 20.922 (20.923) seconds
+verify-isolation rows=5 width=2 row=0 keys=600 logits_bitwise=true max_abs_diff=0.0 lone_top=[18913, 2037] batched_top=[18913, 2037]
+verify-isolation rows=5 width=2 row=1 keys=901 logits_bitwise=true max_abs_diff=0.0 lone_top=[13, 290] batched_top=[13, 290]
+verify-isolation rows=5 width=2 row=2 keys=1501 logits_bitwise=true max_abs_diff=0.0 lone_top=[248046, 268] batched_top=[248046, 268]
+verify-isolation rows=5 width=2 row=3 keys=3000 logits_bitwise=true max_abs_diff=0.0 lone_top=[1513, 2040] batched_top=[1513, 2040]
+verify-isolation rows=5 width=2 row=4 keys=9000 logits_bitwise=true max_abs_diff=0.0 lone_top=[16, 565] batched_top=[16, 565]

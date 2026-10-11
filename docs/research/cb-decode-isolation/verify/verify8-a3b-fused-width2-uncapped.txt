@@ -1,0 +1,9 @@
+	 Executed 1 test, with 1 failure (0 unexpected) in 36.269 (36.270) seconds
+verify-isolation rows=8 width=2 row=0 keys=600 logits_bitwise=false max_abs_diff=0.296875 lone_top=[18913, 2037] batched_top=[18913, 2037]
+verify-isolation rows=8 width=2 row=1 keys=901 logits_bitwise=false max_abs_diff=0.59375 lone_top=[13, 290] batched_top=[13, 290]
+verify-isolation rows=8 width=2 row=2 keys=1501 logits_bitwise=false max_abs_diff=1.125 lone_top=[248046, 268] batched_top=[248046, 300]
+verify-isolation rows=8 width=2 row=3 keys=2000 logits_bitwise=false max_abs_diff=0.9248047 lone_top=[55413, 220] batched_top=[55413, 220]
+verify-isolation rows=8 width=2 row=4 keys=3000 logits_bitwise=false max_abs_diff=0.8203125 lone_top=[248046, 2111] batched_top=[248046, 2111]
+verify-isolation rows=8 width=2 row=5 keys=4500 logits_bitwise=false max_abs_diff=0.7265625 lone_top=[248046, 220] batched_top=[248046, 220]
+verify-isolation rows=8 width=2 row=6 keys=6000 logits_bitwise=false max_abs_diff=1.03125 lone_top=[220, 1081] batched_top=[220, 1081]
+verify-isolation rows=8 width=2 row=7 keys=9000 logits_bitwise=false max_abs_diff=1.0078125 lone_top=[248046, 198] batched_top=[248046, 198]
