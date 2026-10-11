@@ -51,7 +51,7 @@ Also merged: #1963 (privacy evidence scanner, #1959), the #1952 test fix
 1. **#1974 decode isolation MERGED** (7663f463d, operator-approved, SPEC-038 v0.3.18). #1960's grants above 11 are now safe on main.
 2. **Next CLI release is PARKED** until the operator resumes work. When
    resumed: freeze main, the CB session runs its isolated e2e of the exact
-   main SHA on the lab stack at `/Users/a1/lab-e2e-1953/` (two windows ≤25
+   main SHA on the lab stack at `<studio-home>/lab-e2e-1953/` (two windows ≤25
    min), then cut through
    `scripts/ops/cli-release.sh` one step at a time; Studio canary in an
    announced window. Plan and table: `docs/releases/cli-release-train.md`
