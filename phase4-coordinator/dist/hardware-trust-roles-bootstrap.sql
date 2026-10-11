@@ -27,24 +27,24 @@
 \if :{?requester_password}
 \else
   \echo 'missing required HARDWARE_TRUST_REQUESTER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'hardware-trust bootstrap refused'; END $$;
 \endif
 \if :{?approver_password}
 \else
   \echo 'missing required HARDWARE_TRUST_APPROVER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'hardware-trust bootstrap refused'; END $$;
 \endif
 SELECT NULLIF(:'requester_password', '') IS NOT NULL AS requester_password_ok \gset
 \if :requester_password_ok
 \else
   \echo 'HARDWARE_TRUST_REQUESTER_PASSWORD must be non-empty'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'hardware-trust bootstrap refused'; END $$;
 \endif
 SELECT NULLIF(:'approver_password', '') IS NOT NULL AS approver_password_ok \gset
 \if :approver_password_ok
 \else
   \echo 'HARDWARE_TRUST_APPROVER_PASSWORD must be non-empty'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'hardware-trust bootstrap refused'; END $$;
 \endif
 
 BEGIN;

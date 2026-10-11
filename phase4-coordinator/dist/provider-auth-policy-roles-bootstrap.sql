@@ -27,35 +27,35 @@
 \if :{?requester_password}
 \else
   \echo 'missing required PROVIDER_AUTH_POLICY_REQUESTER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 \if :{?approver_password}
 \else
   \echo 'missing required PROVIDER_AUTH_POLICY_APPROVER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 \if :{?cutover_password}
 \else
   \echo 'missing required PROVIDER_AUTH_POLICY_CUTOVER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 SELECT NULLIF(:'requester_password', '') IS NOT NULL AS requester_password_ok \gset
 \if :requester_password_ok
 \else
   \echo 'PROVIDER_AUTH_POLICY_REQUESTER_PASSWORD must be non-empty'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 SELECT NULLIF(:'approver_password', '') IS NOT NULL AS approver_password_ok \gset
 \if :approver_password_ok
 \else
   \echo 'PROVIDER_AUTH_POLICY_APPROVER_PASSWORD must be non-empty'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 SELECT NULLIF(:'cutover_password', '') IS NOT NULL AS cutover_password_ok \gset
 \if :cutover_password_ok
 \else
   \echo 'PROVIDER_AUTH_POLICY_CUTOVER_PASSWORD must be non-empty'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'provider-auth-policy bootstrap refused'; END $$;
 \endif
 
 BEGIN;
