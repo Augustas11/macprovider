@@ -1,0 +1,8 @@
+a3b-mixed-main 8 1 1791675317 1791675436 CLEAN samples=47 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-main 16 1 1791675436 1791675559 CLEAN samples=48 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-main 8 1 1791675559 1791675677 CLEAN samples=48 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-main 16 1 1791675677 1791675801 CLEAN samples=50 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-narrowed 8 1 1791675847 1791675964 CLEAN samples=46 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-narrowed 16 1 1791675964 1791676089 CLEAN samples=50 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-narrowed 8 1 1791676089 1791676203 CLEAN samples=46 live_nonzero=0 other_busy=0 live_max=0
+a3b-mixed-narrowed 16 1 1791676203 1791676327 CLEAN samples=50 live_nonzero=0 other_busy=0 live_max=0

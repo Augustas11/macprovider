@@ -162,3 +162,37 @@ ordinary arm):
   - `r015/samples.log`: one unreadable (-1) sample, none nonzero.
 - **Superseded:** a part-a run on `ae2b0da63`, before the audit fixes changed
   the decode/verify path, is kept in `r015-superseded-ae2b0da/`.
+
+## 6. FR-CB10 self-check composition (#1947), window 7
+
+A3B fused, 16 owner-pinned slots, lab serve without `--autotune-candidate`,
+so the self-check runs (`selfcheck/`). Live was paused 23:24:01 and resumed
+23:33:42 UTC.
+
+| Build | k checked | Conformant | Divergent rows | Decision |
+| --- | --- | --- | --- | --- |
+| this branch (decode bound 11) | 2-16 | all | none | granted 16, verified_k 16 |
+| main `2bddd66d0` (no bound) | 2-16 | all | two near-ties accepted (k=8 row 2 at token 39/48, k=14 row 13 at token 47/48, margin 0.125) | granted 16, verified_k 16 |
+
+The self-check criterion (48 greedy tokens on short prompts, near-ties up to
+1.0 logit accepted) does not catch the uncapped 16-row divergence of
+section 1. The decode row bound therefore lives in the scheduler, and the
+self-check measures the split execution above 11 rows.
+
+## 7. Mixed-length throughput, window 8
+
+A3B, prompts uniform over 300-2500 tokens per request (`build/mixed_sweep.py`),
+256 output tokens, 20 s warmup + 90 s. Rows straddle the 1024-key route
+switch, so the narrowed build splits short rows. Live was paused 23:34:31 and
+resumed 23:53:15 UTC; all 422 live samples were 0 and every cell was clean.
+
+| Concurrent | main (2 cells) | this branch (2 cells) |
+| ---: | ---: | ---: |
+| 8 | 155.5 / 138.8 | 134.0 / 135.7 |
+| 16 | 156.6 / 150.1 | 139.7 / 145.1 |
+
+Main's own repeats differ by about 11% at 8 and 4% at 16, so this shape is
+noisy. Read conservatively, the split path costs roughly 2-13% at 8
+concurrent and about 7% at 16, where the 11 + 5 cap split is included.
+This is the price of exact row isolation when short and long rows decode
+together.
