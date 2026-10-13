@@ -131,6 +131,24 @@ type scoringHarness struct {
 	cheatProbe atomic.Int64
 	cheaters   map[string]bool
 	conns      []net.Conn
+	logs       *lockedBuffer
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 const scoringModel = "model-ci"
@@ -143,11 +161,11 @@ func (h *scoringHarness) advance(d time.Duration) { h.clock.Add(int64(d)) }
 
 func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[string]bool) *scoringHarness {
 	t.Helper()
-	h := &scoringHarness{t: t, registry: pool.NewRegistry(nil), holds: &fakeHoldStore{}, cheaters: cheaters}
+	h := &scoringHarness{t: t, registry: pool.NewRegistry(nil), holds: &fakeHoldStore{}, cheaters: cheaters, logs: &lockedBuffer{}}
 	h.clock.Store(time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC).UnixNano())
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "op-key"
-	h.server = NewServer(cfg, h.registry, zerolog.Nop(), WithNow(h.now))
+	h.server = NewServer(cfg, h.registry, zerolog.New(h.logs), WithNow(h.now))
 	for id := range providers {
 		p := &pool.Provider{
 			ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel,
@@ -530,5 +548,28 @@ func TestComputeScoringOperatorStatusReleaseAndClear(t *testing.T) {
 	h.server.handleAdminComputeIntegrity(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated action code=%d", rec.Code)
+	}
+}
+
+// SPEC-036 FR-20/FR-25: no prompt, output or scorer token data reaches logs.
+func TestComputeScoringLogsCarryNoPromptsOrOutputs(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4"}
+	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
+	for i := 0; i < 120 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+		h.round(20 * time.Minute)
+	}
+	logs := h.logs.String()
+	if !strings.Contains(logs, "compute_integrity_transition") {
+		t.Fatal("expected transition logs")
+	}
+	corpus := computeintegrity.DefaultCorpus()
+	forbidden := []string{"HONEST", "CHEAP", "sum_logprob", "top1_matches", "output_text"}
+	for i := 0; i < corpus.Len(); i++ {
+		forbidden = append(forbidden, corpus.Prompt(i).User)
+	}
+	for _, f := range forbidden {
+		if strings.Contains(logs, f) {
+			t.Fatalf("logs leak %q", f)
+		}
 	}
 }

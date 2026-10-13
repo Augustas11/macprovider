@@ -145,6 +145,9 @@ type Metrics struct {
 	// PrivacyReleaseIdentityLoaded is 1 per binary version approved from
 	// signed release metadata (SPEC-049-R027) in the last load.
 	PrivacyReleaseIdentityLoaded *prometheus.GaugeVec
+
+	// computeIntegrity holds the SPEC-036 FR-25 scoring metrics.
+	computeIntegrity *computeIntegrityMetrics
 }
 
 // New registers all five metrics against reg and returns the
@@ -155,7 +158,7 @@ type Metrics struct {
 // branch).
 func New(reg prometheus.Registerer) *Metrics {
 	f := promauto.With(reg)
-	return &Metrics{
+	m := &Metrics{
 		RequestTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "stats_request_total",
@@ -408,6 +411,8 @@ func New(reg prometheus.Registerer) *Metrics {
 			[]string{"operation"},
 		),
 	}
+	m.computeIntegrity = newComputeIntegrityMetrics(f)
+	return m
 }
 
 func (m *Metrics) IncRegisterRateLimitHit(scope string) {

@@ -1263,7 +1263,7 @@ func runCoordinator() (exitCode int) {
 	}
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
-	startComputeScoring(shutdownCtx, cfg.ComputeIntegrity.Scoring, reqLogStore.DB(), wsServer, buyerServer, tokenStore, billingStore, nil, logger)
+	startComputeScoring(shutdownCtx, cfg.ComputeIntegrity.Scoring, reqLogStore.DB(), wsServer, buyerServer, tokenStore, billingStore, metricsHandle, logger)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()

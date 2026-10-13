@@ -11,6 +11,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -55,3 +56,5 @@ func startComputeScoring(
 	}
 	logger.Info().Str("event", "compute_integrity_scoring_started").Bool("enabled", cfg.Enabled).Msg("compute-integrity scoring started")
 }
+
+var _ providerws.ComputeScoringMetrics = (*statsmetrics.Metrics)(nil)
