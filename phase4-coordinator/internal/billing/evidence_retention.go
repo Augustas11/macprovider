@@ -9,6 +9,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,25 @@ const (
 	EvidenceRetentionStatusArchiveInvalid    = "refused_archive_invalid"
 	EvidenceRetentionStatusArchiveDiskLow    = "refused_archive_disk_low"
 	EvidenceRetentionStatusDeleted           = "deleted"
+	// EvidenceRetentionStatusBudgetSpent is a run whose wall-clock budget
+	// ran out before it deleted anything; a pending archive resumes next run.
+	EvidenceRetentionStatusBudgetSpent = "run_budget_spent"
+
+	// Why a run stopped (EvidenceRetentionReport.StopReason).
+	EvidenceRetentionStopDrained   = "drained"
+	EvidenceRetentionStopBudget    = "run_budget"
+	EvidenceRetentionStopScanBound = "scan_bound"
+	EvidenceRetentionStopRefused   = "refused"
+	// EvidenceRetentionStopLapComplete: the run completed a scan lap that
+	// found eligible requests. A run never starts a second lap (it would
+	// re-select requests the deletion re-check kept hot); the next run's lap
+	// shows whether the backlog drained.
+	EvidenceRetentionStopLapComplete = "lap_complete"
+
+	// evidenceRetentionDefaultRunBudget applies when no budget is set.
+	evidenceRetentionDefaultRunBudget = 30 * time.Minute
+	// evidenceRetentionBacklogTimeout bounds the end-of-run backlog count.
+	evidenceRetentionBacklogTimeout = 2 * time.Minute
 
 	evidenceRetentionScanChunk = 2000
 	evidenceRetentionMinBatch  = 1
@@ -102,6 +122,9 @@ const (
 var (
 	ErrEvidenceRetentionBusy     = errors.New("settlement evidence retention is already running")
 	ErrEvidenceRetentionDisabled = errors.New("settlement evidence retention was disabled during the run")
+	// errEvidenceRetentionBudgetSpent stops deletion at a batch boundary once
+	// the run's wall-clock budget is spent.
+	errEvidenceRetentionBudgetSpent = errors.New("settlement evidence retention run budget spent")
 )
 
 // EvidenceArchiveOffhostVerifier confirms that an archive with this SHA-256
@@ -135,15 +158,22 @@ func CommandOffhostVerifier(argv []string, timeout time.Duration) EvidenceArchiv
 
 // EvidenceRetentionOptions are the effective SPEC-022 R-15 settings.
 type EvidenceRetentionOptions struct {
-	Enabled                   bool
-	ArchiveDir                string
-	MinSettlementCycles       int
-	CadenceDays               int
-	ReconcileHorizon          time.Duration
-	BatchSize                 int
-	BatchPause                time.Duration
-	MaxRequestsPerRun         int
-	MaxScanRowsPerRun         int
+	Enabled             bool
+	ArchiveDir          string
+	MinSettlementCycles int
+	CadenceDays         int
+	ReconcileHorizon    time.Duration
+	BatchSize           int
+	BatchPause          time.Duration
+	// MaxRequestsPerArchive bounds one archive. A run writes, verifies, and
+	// deletes archive after archive until nothing eligible remains, the scan
+	// bound is reached, or RunBudget is spent.
+	MaxRequestsPerArchive int
+	// MaxScanRowsPerRun bounds the ledger credits one run walks.
+	MaxScanRowsPerRun int
+	// RunBudget is the run's wall-clock budget, checked between archives and
+	// between delete batches.
+	RunBudget                 time.Duration
 	IncrementalVacuumPages    int
 	IncrementalVacuumMaxSteps int
 	// ArchiveMinFreeBytes and ArchiveMinFreePercent are the archive
@@ -170,8 +200,9 @@ func EvidenceRetentionOptionsFromConfig(rc config.BillingRetentionConfig, sc con
 		ReconcileHorizon:          horizon,
 		BatchSize:                 rc.BatchSize,
 		BatchPause:                time.Duration(rc.BatchPauseMS) * time.Millisecond,
-		MaxRequestsPerRun:         rc.MaxRequestsPerRun,
+		MaxRequestsPerArchive:     rc.MaxRequestsPerRun,
 		MaxScanRowsPerRun:         rc.MaxScanRowsPerRun,
+		RunBudget:                 time.Duration(rc.RunBudgetMinutes) * time.Minute,
 		IncrementalVacuumPages:    rc.IncrementalVacuumPages,
 		IncrementalVacuumMaxSteps: rc.IncrementalVacuumMaxSteps,
 		ArchiveMinFreeBytes:       rc.ArchiveMinFreeBytes,
@@ -193,11 +224,14 @@ func (o EvidenceRetentionOptions) normalized() (EvidenceRetentionOptions, error)
 	if o.BatchSize < evidenceRetentionMinBatch {
 		o.BatchSize = evidenceRetentionMinBatch
 	}
-	if o.MaxRequestsPerRun < 1 {
-		o.MaxRequestsPerRun = 1
+	if o.MaxRequestsPerArchive < 1 {
+		o.MaxRequestsPerArchive = 1
 	}
 	if o.MaxScanRowsPerRun < 1 {
 		o.MaxScanRowsPerRun = 1
+	}
+	if o.RunBudget <= 0 {
+		o.RunBudget = evidenceRetentionDefaultRunBudget
 	}
 	return o, nil
 }
@@ -212,29 +246,61 @@ type EvidenceRetentionTableStats struct {
 
 // EvidenceRetentionReport is what a dry run or run reports.
 type EvidenceRetentionReport struct {
-	Status             string                                 `json:"status"`
-	DryRun             bool                                   `json:"dry_run"`
-	StartedAtUTC       string                                 `json:"started_at_utc"`
-	FinishedAtUTC      string                                 `json:"finished_at_utc,omitempty"`
-	CutoffWindowEndUTC string                                 `json:"cutoff_window_end_utc,omitempty"`
-	CreditAgeCutoffUTC string                                 `json:"credit_age_cutoff_utc,omitempty"`
-	ScanFromCreditID   int64                                  `json:"scan_from_credit_id"`
-	ScanToCreditID     int64                                  `json:"scan_to_credit_id"`
-	ScannedCredits     int64                                  `json:"scanned_credits"`
-	ScanWrapped        bool                                   `json:"scan_wrapped"`
-	EligibleRequests   int                                    `json:"eligible_requests"`
-	SkippedRequests    map[string]int                         `json:"skipped_requests"`
-	Tables             map[string]EvidenceRetentionTableStats `json:"tables"`
-	ArchiveID          int64                                  `json:"archive_id,omitempty"`
-	ArchiveFile        string                                 `json:"archive_file,omitempty"`
-	ArchiveSHA256      string                                 `json:"archive_sha256,omitempty"`
-	ArchiveBytes       int64                                  `json:"archive_bytes,omitempty"`
-	// ArchiveFreeBytes is the free space of the archive filesystem when the
-	// run started; ArchiveDiskBytes is that filesystem's size.
+	Status             string `json:"status"`
+	DryRun             bool   `json:"dry_run"`
+	StartedAtUTC       string `json:"started_at_utc"`
+	FinishedAtUTC      string `json:"finished_at_utc,omitempty"`
+	CutoffWindowEndUTC string `json:"cutoff_window_end_utc,omitempty"`
+	CreditAgeCutoffUTC string `json:"credit_age_cutoff_utc,omitempty"`
+	ScanFromCreditID   int64  `json:"scan_from_credit_id"`
+	ScanToCreditID     int64  `json:"scan_to_credit_id"`
+	ScannedCredits     int64  `json:"scanned_credits"`
+	ScanWrapped        bool   `json:"scan_wrapped"`
+	// EligibleRequests sums the requests of every archive the run wrote or
+	// resumed; a dry run reports the first archive's.
+	EligibleRequests int                                    `json:"eligible_requests"`
+	SkippedRequests  map[string]int                         `json:"skipped_requests"`
+	Tables           map[string]EvidenceRetentionTableStats `json:"tables"`
+	// ArchiveID and the other Archive* fields describe the run's last archive;
+	// Archives counts the archives it deleted.
+	ArchiveID     int64  `json:"archive_id,omitempty"`
+	ArchiveFile   string `json:"archive_file,omitempty"`
+	ArchiveSHA256 string `json:"archive_sha256,omitempty"`
+	ArchiveBytes  int64  `json:"archive_bytes,omitempty"`
+	// ArchiveFreeBytes is the free space of the archive filesystem before the
+	// run's last new archive; ArchiveDiskBytes is that filesystem's size.
 	ArchiveFreeBytes int64 `json:"archive_free_bytes,omitempty"`
 	ArchiveDiskBytes int64 `json:"archive_disk_bytes,omitempty"`
 	ResumedArchive   bool  `json:"resumed_archive,omitempty"`
 	DeletedRequests  int   `json:"deleted_requests"`
+	Archives         int   `json:"archives"`
+	// StopReason says why the run ended: drained, run_budget, scan_bound, or
+	// refused (Status names the refusal). Empty on error.
+	StopReason string `json:"stop_reason,omitempty"`
+	// BacklogDrained is true when the most recently completed scan lap,
+	// persisted across runs, found no eligible request.
+	BacklogDrained bool `json:"backlog_drained"`
+	// BacklogCandidateCredits counts settled, unarchived credits above the
+	// archived low watermark that are past both finality cutoffs, plus the
+	// held requests at or below it: an upper bound of the remaining eligible
+	// backlog. It does not reach zero after a drain: held requests and
+	// requests kept hot by design (LastLapSkippedRequests) stay in it. -1
+	// means it was not computed or did not finish.
+	BacklogCandidateCredits int64 `json:"backlog_candidate_credits"`
+	// HeldRequests is the size of the holds table: requests below the
+	// watermark that may still become eligible, re-checked every lap.
+	HeldRequests int64 `json:"held_requests"`
+	// WatermarkCreditID is the archived low watermark after the run: every
+	// credit at or below it is archived or kept hot for a permanent reason.
+	WatermarkCreditID int64 `json:"watermark_credit_id"`
+	// LapsCompleted counts completed scan laps over the database's life;
+	// LapEligibleRequests counts the current lap's eligible requests so far.
+	LapsCompleted       int64 `json:"laps_completed"`
+	LapEligibleRequests int64 `json:"lap_eligible_requests"`
+	// LastLap* describe the most recently completed lap (eligible -1: none).
+	LastLapCompletedAtUTC   string         `json:"last_lap_completed_at_utc,omitempty"`
+	LastLapEligibleRequests int64          `json:"last_lap_eligible_requests"`
+	LastLapSkippedRequests  map[string]int `json:"last_lap_skipped_requests,omitempty"`
 	// DeleteBatches counts the short delete transactions of the run.
 	DeleteBatches           int   `json:"delete_batches"`
 	RouteJournalDeletedRows int64 `json:"route_snapshot_journal_deleted_rows"`
@@ -255,6 +321,32 @@ type EvidenceRetentionVacuumReport struct {
 	FreelistAfter   int64  `json:"freelist_pages_after"`
 	Steps           int    `json:"steps"`
 	ConversionNeeds bool   `json:"needs_one_time_conversion"`
+	// Skipped says why no incremental_vacuum step ran.
+	Skipped string `json:"skipped,omitempty"`
+}
+
+// LastLapSkipSummary is the last completed lap's skip counts by reason,
+// sorted, for logs: the expected non-zero floor of a drained backlog.
+func (r EvidenceRetentionReport) LastLapSkipSummary() string {
+	reasons := make([]string, 0, len(r.LastLapSkippedRequests))
+	for reason := range r.LastLapSkippedRequests {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s:%d", reason, r.LastLapSkippedRequests[reason]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// AutoVacuumModes is the run's auto_vacuum mode per database file, for logs.
+func (r EvidenceRetentionReport) AutoVacuumModes() string {
+	parts := make([]string, 0, len(r.Vacuum))
+	for _, v := range r.Vacuum {
+		parts = append(parts, v.Database+"="+v.AutoVacuumMode)
+	}
+	return strings.Join(parts, ",")
 }
 
 type evidenceRetentionRuntime struct {
@@ -365,7 +457,47 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
     scan_cursor_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(scan_cursor_credit_id >= 0),
     updated_at_utc TEXT NOT NULL
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// #1979: the scan lap state and the archived low watermark. Added by
+	// column so databases created by the first retention release migrate.
+	add := []struct{ table, name, sql string }{
+		{"settlement_evidence_retention_state", "archived_low_watermark_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN archived_low_watermark_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(archived_low_watermark_credit_id >= 0)`},
+		{"settlement_evidence_retention_state", "lap_start_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_start_credit_id INTEGER NOT NULL DEFAULT -1`},
+		{"settlement_evidence_retention_state", "lap_hold_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_hold_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(lap_hold_credit_id >= 0)`},
+		{"settlement_evidence_retention_state", "lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_eligible_requests INTEGER NOT NULL DEFAULT 0`},
+		{"settlement_evidence_retention_state", "lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
+		{"settlement_evidence_retention_state", "laps_completed", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN laps_completed INTEGER NOT NULL DEFAULT 0`},
+		{"settlement_evidence_retention_state", "last_lap_completed_at_utc", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_completed_at_utc TEXT NOT NULL DEFAULT ''`},
+		{"settlement_evidence_retention_state", "last_lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_eligible_requests INTEGER NOT NULL DEFAULT -1`},
+		{"settlement_evidence_retention_state", "last_lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
+		{"settlement_evidence_retention_state", "lap_holds_cursor", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_holds_cursor INTEGER NOT NULL DEFAULT 0`},
+		{"settlement_evidence_archives", "min_credit_id", `ALTER TABLE settlement_evidence_archives ADD COLUMN min_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(min_credit_id >= 0)`},
+	}
+	if _, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS settlement_evidence_retention_holds (
+    request_id TEXT PRIMARY KEY,
+    credit_id INTEGER NOT NULL CHECK(credit_id > 0),
+    reason TEXT NOT NULL,
+    held_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_serh_credit ON settlement_evidence_retention_holds(credit_id);`); err != nil {
+		return err
+	}
+	for _, col := range add {
+		exists, err := s.columnExists(ctx, col.table, col.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type evidenceQueryer interface {
@@ -844,117 +976,537 @@ SELECT window_end_utc FROM ledger_settlement_windows
 	return cut, nil
 }
 
-// selectRetentionCandidates walks ledger credits by primary key from the
-// persisted cursor, bounded by MaxScanRowsPerRun, and hands each eligible
-// request bundle (at most MaxRequestsPerRun) to emit as soon as it is
-// evaluated. Bundles are never accumulated, so memory holds one request's
-// evidence at a time. It returns the number emitted and the next cursor.
-func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRetentionOptions, cut evidenceRetentionCutoffs, report *EvidenceRetentionReport, emit func(requestEvidenceBundle) error) (int, int64, error) {
-	var cursor int64
-	err := s.reader().QueryRowContext(ctx, `SELECT scan_cursor_credit_id FROM settlement_evidence_retention_state WHERE id = 1`).Scan(&cursor)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, err
+// retentionPermanentSkips are skip reasons that keep a request hot for good:
+// the watermark passes it and no hold is kept. A request misclassified as
+// permanent only stays hot; it is never deleted early.
+var retentionPermanentSkips = map[string]bool{
+	retentionSkipNoCredit:        true,
+	retentionSkipResolution:      true,
+	retentionSkipRelayBlind:      true,
+	retentionSkipFirstVerified:   true,
+	retentionSkipAlreadyArchived: true,
+}
+
+// retentionFrontierSkips are reasons a request is simply too young: it sits
+// near the end of the ledger, so it pins the watermark (the next lap re-reads
+// it) instead of taking a row in the holds table.
+var retentionFrontierSkips = map[string]bool{
+	retentionSkipWindowTooRecent: true,
+	retentionSkipInsideReconcile: true,
+}
+
+// retentionLapState is the persisted scan lap (#1979). A lap first re-checks
+// the holds table (requests below the lap start that may still become
+// eligible), then walks the ledger from the archived low watermark to its
+// end, across runs. Every credit at or below the watermark is archived, kept
+// hot for good, or named in the holds table. When a lap completes, the
+// watermark moves to the end of the lap, or to just below the lowest
+// too-young credit the lap met (the frontier pin), the lowest credit it
+// selected, or the lowest credit of a pending archive.
+type retentionLapState struct {
+	cursor    int64
+	watermark int64
+	lapStart  int64 // -1: no lap started yet
+	pin       int64 // lowest frontier credit of the lap (0: none)
+	// holdsCursor: holds with credit_id in (holdsCursor, lapStart] are still
+	// to be re-checked this lap; -1 once they all were.
+	holdsCursor        int64
+	lapEligible        int64
+	lapSkipped         map[string]int
+	lapsCompleted      int64
+	lastLapCompletedAt string
+	lastLapEligible    int64 // -1: no lap completed yet
+	lastLapSkipped     map[string]int
+}
+
+func loadRetentionLapState(ctx context.Context, q evidenceQueryer) (retentionLapState, error) {
+	st := retentionLapState{lapStart: -1, lastLapEligible: -1, lapSkipped: map[string]int{}, lastLapSkipped: map[string]int{}}
+	var lapSkipped, lastSkipped string
+	err := q.QueryRowContext(ctx, `
+SELECT scan_cursor_credit_id, archived_low_watermark_credit_id, lap_start_credit_id, lap_hold_credit_id,
+       lap_holds_cursor, lap_eligible_requests, lap_skipped_json, laps_completed, last_lap_completed_at_utc,
+       last_lap_eligible_requests, last_lap_skipped_json
+  FROM settlement_evidence_retention_state WHERE id = 1`).Scan(&st.cursor, &st.watermark, &st.lapStart, &st.pin,
+		&st.holdsCursor, &st.lapEligible, &lapSkipped, &st.lapsCompleted, &st.lastLapCompletedAt, &st.lastLapEligible, &lastSkipped)
+	if errors.Is(err, sql.ErrNoRows) {
+		return st, nil
 	}
-	report.ScanFromCreditID = cursor
+	if err != nil {
+		return st, err
+	}
+	_ = json.Unmarshal([]byte(lapSkipped), &st.lapSkipped)
+	_ = json.Unmarshal([]byte(lastSkipped), &st.lastLapSkipped)
+	if st.lapSkipped == nil {
+		st.lapSkipped = map[string]int{}
+	}
+	if st.lastLapSkipped == nil {
+		st.lastLapSkipped = map[string]int{}
+	}
+	return st, nil
+}
+
+func (s *Store) saveRetentionLapState(ctx context.Context, st retentionLapState) error {
+	lapSkipped, err := json.Marshal(st.lapSkipped)
+	if err != nil {
+		return err
+	}
+	lastSkipped, err := json.Marshal(st.lastLapSkipped)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO settlement_evidence_retention_state (
+    id, scan_cursor_credit_id, archived_low_watermark_credit_id, lap_start_credit_id, lap_hold_credit_id,
+    lap_holds_cursor, lap_eligible_requests, lap_skipped_json, laps_completed, last_lap_completed_at_utc,
+    last_lap_eligible_requests, last_lap_skipped_json, updated_at_utc
+) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    scan_cursor_credit_id = excluded.scan_cursor_credit_id,
+    archived_low_watermark_credit_id = excluded.archived_low_watermark_credit_id,
+    lap_start_credit_id = excluded.lap_start_credit_id,
+    lap_hold_credit_id = excluded.lap_hold_credit_id,
+    lap_holds_cursor = excluded.lap_holds_cursor,
+    lap_eligible_requests = excluded.lap_eligible_requests,
+    lap_skipped_json = excluded.lap_skipped_json,
+    laps_completed = excluded.laps_completed,
+    last_lap_completed_at_utc = excluded.last_lap_completed_at_utc,
+    last_lap_eligible_requests = excluded.last_lap_eligible_requests,
+    last_lap_skipped_json = excluded.last_lap_skipped_json,
+    updated_at_utc = excluded.updated_at_utc`,
+		st.cursor, st.watermark, st.lapStart, st.pin, st.holdsCursor, st.lapEligible, string(lapSkipped), st.lapsCompleted,
+		st.lastLapCompletedAt, st.lastLapEligible, string(lastSkipped), sqliteTimeText(s.nowUTC()))
+	return err
+}
+
+// evidenceExecer is a database handle or a transaction connection.
+type evidenceExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// lowerRetentionWatermark moves the watermark below creditID when an archive
+// whose requests are not otherwise tracked failed. It also pins the current
+// lap, so its completion cannot move the watermark past them again.
+func lowerRetentionWatermark(ctx context.Context, e evidenceExecer, creditID int64, stamp string) error {
+	if creditID < 1 {
+		creditID = 1
+	}
+	_, err := e.ExecContext(ctx, `
+UPDATE settlement_evidence_retention_state
+   SET lap_hold_credit_id = CASE WHEN lap_hold_credit_id = 0 OR ? < lap_hold_credit_id THEN ? ELSE lap_hold_credit_id END,
+       archived_low_watermark_credit_id = MIN(archived_low_watermark_credit_id, ?),
+       updated_at_utc = ?
+ WHERE id = 1`, creditID, creditID, creditID-1, stamp)
+	return err
+}
+
+// retentionHold is one row of the holds table: a request below the watermark
+// that may still become eligible, re-checked at the start of every lap.
+type retentionHold struct {
+	requestID string
+	creditID  int64
+	reason    string
+}
+
+// upsertRetentionHold records or refreshes a hold, keeping the lowest credit.
+func upsertRetentionHold(ctx context.Context, e evidenceExecer, h retentionHold, stamp string) error {
+	_, err := e.ExecContext(ctx, `
+INSERT INTO settlement_evidence_retention_holds (request_id, credit_id, reason, held_at_utc)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(request_id) DO UPDATE SET
+    credit_id = MIN(credit_id, excluded.credit_id),
+    reason = excluded.reason,
+    held_at_utc = excluded.held_at_utc`, h.requestID, h.creditID, h.reason, stamp)
+	return err
+}
+
+func deleteRetentionHold(ctx context.Context, e evidenceExecer, requestID string) error {
+	_, err := e.ExecContext(ctx, `DELETE FROM settlement_evidence_retention_holds WHERE request_id = ?`, requestID)
+	return err
+}
+
+func minCreditID(ids []int64) int64 {
+	var m int64
+	for _, id := range ids {
+		if m == 0 || id < m {
+			m = id
+		}
+	}
+	return m
+}
+
+// retentionScanPass is the outcome of one selection pass.
+type retentionScanPass struct {
+	selected int
+	from     int64
+	// next is where the following pass resumes, unless the pass wrapped.
+	next    int64
+	wrapped bool
+	// lastRead is the highest credit id the pass read.
+	lastRead int64
+	// minSelected is the lowest credit id of a request the ledger scan
+	// emitted (held requests re-selected from the holds table keep their
+	// hold row until deleted, so they do not count); pin is the lowest
+	// frontier credit (0: none).
+	minSelected int64
+	pin         int64
+	// holdsCursor is the holds re-check position after the pass.
+	holdsCursor int64
+	skipped     map[string]int
+	// budgetSpent: the pass stopped early at the run deadline.
+	budgetSpent bool
+}
+
+// selectRetentionCandidates selects one archive's worth of eligible
+// requests and hands each bundle to emit as soon as it is evaluated (memory
+// holds one request's evidence at a time). At a lap's start it first
+// re-checks the holds table; then it walks ledger credits by primary key
+// from the lap cursor, bounded by MaxScanRowsPerRun across the run (counted
+// in report.ScannedCredits). A pass ends at the archive cap
+// (MaxRequestsPerArchive), the scan bound, the deadline (checked per chunk;
+// zero means none), or the end of the ledger (wrapped). With persist false
+// (dry run) nothing is written.
+func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRetentionOptions, cut evidenceRetentionCutoffs, report *EvidenceRetentionReport, deadline time.Time, persist bool, emit func(requestEvidenceBundle) error) (retentionScanPass, error) {
+	st, err := loadRetentionLapState(ctx, s.reader())
+	if err != nil {
+		return retentionScanPass{}, err
+	}
+	cursor, lapStart, holdsCursor := st.cursor, st.lapStart, st.holdsCursor
+	if lapStart < 0 {
+		cursor, lapStart, holdsCursor = st.watermark, st.watermark, 0
+	}
+	pass := retentionScanPass{from: cursor, next: cursor, holdsCursor: holdsCursor, skipped: map[string]int{}}
+	stamp := sqliteTimeText(s.nowUTC())
+	var upserts []retentionHold
+	var deletes []string
+	flush := func() error {
+		if !persist || (len(upserts) == 0 && len(deletes) == 0) {
+			upserts, deletes = nil, nil
+			return nil
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, h := range upserts {
+			if err := upsertRetentionHold(ctx, tx, h, stamp); err != nil {
+				return err
+			}
+		}
+		for _, id := range deletes {
+			if err := deleteRetentionHold(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		upserts, deletes = nil, nil
+		return tx.Commit()
+	}
+	countSkip := func(reason string) {
+		report.SkippedRequests[reason]++
+		pass.skipped[reason]++
+	}
+	pinAt := func(id int64) {
+		if pass.pin == 0 || id < pass.pin {
+			pass.pin = id
+		}
+	}
+	timeUp := func() bool {
+		if !deadline.IsZero() && !s.nowUTC().Before(deadline) {
+			pass.budgetSpent = true
+			return true
+		}
+		return false
+	}
 	first := &providerFirstVerifiedVerdicts{q: s.reader(), cache: map[string]int64{}}
 	journalDB := s.routeSnapshotJournalDB.Load()
-	selected := 0
+	// evaluate collects one request and runs the R-15.2 predicate; ok means
+	// it was emitted. With precheckFinality (a hold that only the deletion
+	// re-check refused, because its settlement finality was still open) the
+	// finality is read first, so a request that would be refused again is
+	// neither re-archived nor counted as eligible.
+	evaluate := func(requestID string, precheckFinality bool) (bool, string, error) {
+		b, err := collectRequestEvidence(ctx, s.reader(), requestID)
+		if err != nil {
+			return false, "", err
+		}
+		if len(b.credits) == 0 {
+			return false, retentionSkipNoCredit, nil
+		}
+		if archivedAny, err := s.anyCreditArchived(ctx, s.reader(), b); err != nil {
+			return false, "", err
+		} else if archivedAny {
+			return false, retentionSkipAlreadyArchived, nil
+		}
+		if err := collectRouteJournal(ctx, journalDB, &b); err != nil {
+			return false, "", err
+		}
+		firstVerified, err := first.forBundle(ctx, b)
+		if err != nil {
+			return false, "", err
+		}
+		if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, true); !ok {
+			return false, reason, nil
+		}
+		if precheckFinality && persist {
+			req := archivedRequest{RequestID: requestID, Rows: map[string][]archiveRow{
+				"settlement_route_snapshots": b.evidence["settlement_route_snapshots"],
+			}}
+			if _, frozen, err := frozenRequestFinalityFunc(s, ctx, req, s.nowUTC().UnixMilli()); err != nil {
+				return false, "", err
+			} else if !frozen {
+				return false, retentionSkipFinalityOpen, nil
+			}
+		}
+		if err := emit(b); err != nil {
+			return false, "", err
+		}
+		pass.selected++
+		return true, "", nil
+	}
+
+	// Phase 1: re-check the holds at or below the lap start.
+	for pass.holdsCursor >= 0 && pass.selected < opts.MaxRequestsPerArchive {
+		if err := ctx.Err(); err != nil {
+			return retentionScanPass{}, err
+		}
+		if timeUp() {
+			break
+		}
+		holds, err := queryRetentionHolds(ctx, s.reader(), pass.holdsCursor, lapStart, evidenceRetentionScanChunk)
+		if err != nil {
+			return retentionScanPass{}, err
+		}
+		capped := false
+		for _, h := range holds {
+			if pass.selected >= opts.MaxRequestsPerArchive {
+				capped = true
+				break
+			}
+			ok, reason, err := evaluate(h.requestID, h.reason == retentionSkipFinalityOpen)
+			if err != nil {
+				return retentionScanPass{}, err
+			}
+			pass.holdsCursor = h.creditID
+			switch {
+			case ok:
+				// The hold row stays until the delete transaction removes it.
+			case retentionPermanentSkips[reason]:
+				countSkip(reason)
+				deletes = append(deletes, h.requestID)
+			default:
+				countSkip(reason)
+				if reason != h.reason {
+					upserts = append(upserts, retentionHold{requestID: h.requestID, creditID: h.creditID, reason: reason})
+				}
+			}
+		}
+		if err := flush(); err != nil {
+			return retentionScanPass{}, err
+		}
+		if !capped && len(holds) < evidenceRetentionScanChunk {
+			pass.holdsCursor = -1
+		}
+	}
+
+	// Phase 2: walk the ledger from the lap cursor.
 	seen := map[string]bool{}
 	next := cursor
-	wrapped := false
-	for report.ScannedCredits < int64(opts.MaxScanRowsPerRun) && selected < opts.MaxRequestsPerRun {
+	for pass.holdsCursor < 0 && report.ScannedCredits < int64(opts.MaxScanRowsPerRun) && pass.selected < opts.MaxRequestsPerArchive {
 		if err := ctx.Err(); err != nil {
-			return 0, 0, err
+			return retentionScanPass{}, err
+		}
+		if timeUp() {
+			break
 		}
 		limit := evidenceRetentionScanChunk
 		if remaining := int64(opts.MaxScanRowsPerRun) - report.ScannedCredits; remaining < int64(limit) {
 			limit = int(remaining)
 		}
+		// The payout window is read with the credit, so a settled credit
+		// whose window is too recent is pinned without reading its bundle;
+		// a request already held below the lap start is phase 1's.
 		rows, err := s.reader().QueryContext(ctx, `
-SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc,
-       EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = lrc.id)
+SELECT lrc.id, lrc.request_id, lrc.settled, lrc.ts_utc, COALESCE(p.window_end_utc, ''),
+       EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = lrc.id),
+       COALESCE(h.credit_id <= ?, 0), COALESCE(h.reason, '')
   FROM ledger_request_credits lrc
+  LEFT JOIN settlement_evidence_retention_holds h ON h.request_id = lrc.request_id
+  LEFT JOIN ledger_payout_ready p ON p.id = lrc.settlement_id
  WHERE lrc.id > ?
  ORDER BY lrc.id
- LIMIT ?`, next, limit)
+ LIMIT ?`, lapStart, next, limit)
 		if err != nil {
-			return 0, 0, err
+			return retentionScanPass{}, err
 		}
 		type candidate struct {
-			requestID string
-			creditID  int64
+			requestID  string
+			creditID   int64
+			holdReason string
 		}
 		var candidates []candidate
 		n := 0
 		for rows.Next() {
 			var id, settled int64
-			var requestID, ts string
-			var archived bool
-			if err := rows.Scan(&id, &requestID, &settled, &ts, &archived); err != nil {
+			var requestID, ts, windowEnd, holdReason string
+			var archived, heldBelow bool
+			if err := rows.Scan(&id, &requestID, &settled, &ts, &windowEnd, &archived, &heldBelow, &holdReason); err != nil {
 				rows.Close()
-				return 0, 0, err
+				return retentionScanPass{}, err
 			}
 			n++
 			next = id
-			if settled != 1 || archived || seen[requestID] {
+			pass.lastRead = id
+			if archived || heldBelow || seen[requestID] {
 				continue
 			}
-			if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(ts)); err != nil || !parsed.Before(cut.creditBefore) {
+			parsed, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(ts))
+			switch {
+			case perr != nil:
+				// An unreadable timestamp is not "young"; hold it rather than
+				// pin the watermark.
+				seen[requestID] = true
+				countSkip(retentionSkipInsideReconcile)
+				upserts = append(upserts, retentionHold{requestID: requestID, creditID: id, reason: retentionSkipInsideReconcile})
 				continue
+			case !parsed.Before(cut.creditBefore):
+				// Inside the reconcile horizon: the frontier.
+				pinAt(id)
+				continue
+			case settled != 1:
+				// Old and unsettled (quarantined, or a provider below the
+				// minimum payout): it may settle later, so it is held.
+				seen[requestID] = true
+				countSkip(retentionSkipUnsettled)
+				upserts = append(upserts, retentionHold{requestID: requestID, creditID: id, reason: retentionSkipUnsettled})
+				continue
+			case windowEnd != "":
+				if end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(windowEnd)); err == nil && (!cut.windowEndSet || end.After(cut.windowEnd)) {
+					countSkip(retentionSkipWindowTooRecent)
+					pinAt(id)
+					continue
+				}
 			}
 			seen[requestID] = true
-			candidates = append(candidates, candidate{requestID: requestID, creditID: id})
+			candidates = append(candidates, candidate{requestID: requestID, creditID: id, holdReason: holdReason})
 		}
 		if err := rows.Close(); err != nil {
-			return 0, 0, err
+			return retentionScanPass{}, err
 		}
 		report.ScannedCredits += int64(n)
 		capped := false
 		for _, cand := range candidates {
-			if selected >= opts.MaxRequestsPerRun {
-				// Resume the next run at the first candidate not evaluated.
+			if pass.selected >= opts.MaxRequestsPerArchive {
+				// Resume the next pass at the first candidate not evaluated.
 				next = cand.creditID - 1
 				capped = true
 				break
 			}
-			b, err := collectRequestEvidence(ctx, s.reader(), cand.requestID)
+			ok, reason, err := evaluate(cand.requestID, cand.holdReason == retentionSkipFinalityOpen)
 			if err != nil {
-				return 0, 0, err
+				return retentionScanPass{}, err
 			}
-			if archivedAny, err := s.anyCreditArchived(ctx, s.reader(), b); err != nil {
-				return 0, 0, err
-			} else if archivedAny {
-				report.SkippedRequests[retentionSkipAlreadyArchived]++
-				continue
+			switch {
+			case ok:
+				if pass.minSelected == 0 || cand.creditID < pass.minSelected {
+					pass.minSelected = cand.creditID
+				}
+			case retentionPermanentSkips[reason]:
+				countSkip(reason)
+			case retentionFrontierSkips[reason]:
+				countSkip(reason)
+				pinAt(cand.creditID)
+			default:
+				countSkip(reason)
+				upserts = append(upserts, retentionHold{requestID: cand.requestID, creditID: cand.creditID, reason: reason})
 			}
-			if err := collectRouteJournal(ctx, journalDB, &b); err != nil {
-				return 0, 0, err
-			}
-			firstVerified, err := first.forBundle(ctx, b)
-			if err != nil {
-				return 0, 0, err
-			}
-			if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, true); !ok {
-				report.SkippedRequests[reason]++
-				continue
-			}
-			if err := emit(b); err != nil {
-				return 0, 0, err
-			}
-			selected++
+		}
+		if err := flush(); err != nil {
+			return retentionScanPass{}, err
 		}
 		if capped {
 			break
 		}
 		if n < limit {
-			wrapped = true
-			next = 0
+			pass.wrapped = true
 			break
 		}
 	}
-	report.ScanToCreditID = next
-	report.ScanWrapped = wrapped
-	return selected, next, nil
+	pass.next = next
+	return pass, nil
+}
+
+// queryRetentionHolds reads up to limit holds with credit_id in (after, upTo].
+func queryRetentionHolds(ctx context.Context, q evidenceQueryer, after, upTo int64, limit int) ([]retentionHold, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT request_id, credit_id, reason FROM settlement_evidence_retention_holds
+ WHERE credit_id > ? AND credit_id <= ?
+ ORDER BY credit_id
+ LIMIT ?`, after, upTo, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []retentionHold
+	for rows.Next() {
+		var h retentionHold
+		if err := rows.Scan(&h.requestID, &h.creditID, &h.reason); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// saveRetentionPass folds one selection pass into the persisted lap. When the
+// pass reached the end of the ledger, the lap completes: the watermark moves
+// to the lap's end, kept below the frontier pin, the lowest credit the scan
+// selected, and the lowest credit of any pending archive; the next lap
+// starts there and re-checks the holds first. It returns the state after the
+// pass and whether a lap completed.
+func (s *Store) saveRetentionPass(ctx context.Context, pass retentionScanPass) (retentionLapState, bool, error) {
+	st, err := loadRetentionLapState(ctx, s.db)
+	if err != nil {
+		return st, false, err
+	}
+	if st.lapStart < 0 {
+		st.lapStart = st.watermark
+	}
+	st.holdsCursor = pass.holdsCursor
+	if pass.pin > 0 && (st.pin == 0 || pass.pin < st.pin) {
+		st.pin = pass.pin
+	}
+	st.lapEligible += int64(pass.selected)
+	for reason, n := range pass.skipped {
+		st.lapSkipped[reason] += n
+	}
+	if !pass.wrapped {
+		st.cursor = pass.next
+		return st, false, s.saveRetentionLapState(ctx, st)
+	}
+	w := max(pass.lastRead, st.cursor, st.lapStart)
+	lower := func(credit int64) {
+		if credit > 0 && credit-1 < w {
+			w = credit - 1
+		}
+	}
+	lower(st.pin)
+	lower(pass.minSelected)
+	var pendingMin sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT MIN(min_credit_id) FROM settlement_evidence_archives
+ WHERE status IN ('exported','offhost_verified') AND min_credit_id > 0`).Scan(&pendingMin); err != nil {
+		return st, false, err
+	}
+	if pendingMin.Valid {
+		lower(pendingMin.Int64)
+	}
+	st.watermark, st.cursor, st.lapStart, st.pin, st.holdsCursor = w, w, w, 0, 0
+	st.lapsCompleted++
+	st.lastLapCompletedAt = sqliteTimeText(s.nowUTC())
+	st.lastLapEligible = st.lapEligible
+	st.lastLapSkipped = st.lapSkipped
+	st.lapEligible, st.lapSkipped = 0, map[string]int{}
+	return st, true, s.saveRetentionLapState(ctx, st)
 }
 
 func (s *Store) anyCreditArchived(ctx context.Context, q evidenceQueryer, b requestEvidenceBundle) (bool, error) {
@@ -1043,8 +1595,9 @@ func newEvidenceRetentionReport(dryRun bool, now time.Time) EvidenceRetentionRep
 	return EvidenceRetentionReport{DryRun: dryRun, StartedAtUTC: sqliteTimeText(now), SkippedRequests: map[string]int{}, Tables: tables}
 }
 
-// DryRunEvidenceRetention reports what one run would archive and delete,
-// per table, without writing anything (SPEC-022 R-15.8).
+// DryRunEvidenceRetention reports what the next new archive would hold, per
+// table, without writing anything (SPEC-022 R-15.8). A pending archive, which
+// a run resumes first, is not included.
 func (s *Store) DryRunEvidenceRetention(ctx context.Context, opts EvidenceRetentionOptions) (EvidenceRetentionReport, error) {
 	opts, err := opts.normalized()
 	if err != nil {
@@ -1057,14 +1610,18 @@ func (s *Store) DryRunEvidenceRetention(ctx context.Context, opts EvidenceRetent
 		return report, err
 	}
 	fillCutoffs(&report, cut)
-	selected, _, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
+	pass, err := s.selectRetentionCandidates(ctx, opts, cut, &report, time.Time{}, false, func(b requestEvidenceBundle) error {
 		addRetentionStats(&report, b)
 		return nil
 	})
 	if err != nil {
 		return report, err
 	}
-	report.EligibleRequests = selected
+	report.ScanFromCreditID, report.ScanToCreditID, report.ScanWrapped = pass.from, pass.next, pass.wrapped
+	report.EligibleRequests = pass.selected
+	if err := s.fillRetentionLapReport(ctx, &report); err != nil {
+		return report, err
+	}
 	report.Status = EvidenceRetentionStatusDryRun
 	report.FinishedAtUTC = sqliteTimeText(s.nowUTC())
 	return report, nil
@@ -1077,9 +1634,29 @@ func fillCutoffs(report *EvidenceRetentionReport, cut evidenceRetentionCutoffs) 
 	}
 }
 
-// RunEvidenceRetention performs one bounded retention run: resume or create
-// an archive, re-verify it, confirm the off-host copy, delete in short
-// batches, then reclaim space with incremental vacuum.
+// fillRetentionLapReport copies the persisted lap state into the report.
+func (s *Store) fillRetentionLapReport(ctx context.Context, report *EvidenceRetentionReport) error {
+	st, err := loadRetentionLapState(ctx, s.reader())
+	if err != nil {
+		return err
+	}
+	report.WatermarkCreditID = st.watermark
+	report.LapsCompleted = st.lapsCompleted
+	report.LapEligibleRequests = st.lapEligible
+	report.LastLapCompletedAtUTC = st.lastLapCompletedAt
+	report.LastLapEligibleRequests = st.lastLapEligible
+	if len(st.lastLapSkipped) > 0 {
+		report.LastLapSkippedRequests = st.lastLapSkipped
+	}
+	report.BacklogDrained = st.lapsCompleted > 0 && st.lastLapEligible == 0
+	return s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM settlement_evidence_retention_holds`).Scan(&report.HeldRequests)
+}
+
+// RunEvidenceRetention drains settled evidence: it resumes or creates an
+// archive, re-verifies it, confirms the off-host copy, deletes in short
+// batches, and repeats with the next archive until a scan lap finds no
+// eligible request, the scan bound is reached, a refusal stops it, or the
+// run budget is spent. It then reclaims space with incremental vacuum.
 func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetentionOptions) (report EvidenceRetentionReport, err error) {
 	if !s.evidenceRetentionRun.TryLock() {
 		return EvidenceRetentionReport{}, ErrEvidenceRetentionBusy
@@ -1095,36 +1672,90 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 		}
 	}
 	now := s.nowUTC()
+	deadline := now.Add(opts.RunBudget)
 	report = newEvidenceRetentionReport(false, now)
+	report.BacklogCandidateCredits = -1
 	defer func() {
 		report.FinishedAtUTC = sqliteTimeText(s.nowUTC())
 		if err != nil {
 			report.Error = err.Error()
+			// Status stays as the failure left it; Archives and
+			// DeletedRequests count what the run deleted first.
+			_ = s.fillRetentionLapReport(context.WithoutCancel(ctx), &report)
 		}
 		s.setLastEvidenceRetentionReport(report)
 	}()
-	archive, resumed, err := s.pendingEvidenceArchive(ctx, opts)
-	if err != nil {
+	pr := retentionRunProgress{firstPass: true}
+	for report.StopReason == "" {
+		if !s.nowUTC().Before(deadline) {
+			report.StopReason = EvidenceRetentionStopBudget
+			break
+		}
+		// A SIGHUP that disables retention stops the run between archives.
+		if current, ok := s.evidenceRetentionOptions(); ok && !current.Enabled {
+			return report, ErrEvidenceRetentionDisabled
+		}
+		if err := s.runEvidenceRetentionPass(ctx, opts, deadline, &report, &pr); err != nil {
+			return report, err
+		}
+	}
+	switch {
+	case report.StopReason == EvidenceRetentionStopRefused:
+		// Status already names the refusal; Archives and DeletedRequests
+		// still count what the run deleted before it.
+	case report.DeletedRequests > 0 || report.Archives > 0:
+		report.Status = EvidenceRetentionStatusDeleted
+	case report.StopReason == EvidenceRetentionStopBudget:
+		report.Status = EvidenceRetentionStatusBudgetSpent
+	default:
+		report.Status = EvidenceRetentionStatusNothingEligible
+	}
+	if err := s.fillRetentionLapReport(ctx, &report); err != nil {
 		return report, err
 	}
+	report.BacklogCandidateCredits = s.countRetentionBacklogCredits(ctx, opts, report.WatermarkCreditID)
+	report.Vacuum = s.incrementalVacuumAll(ctx, opts)
+	return report, nil
+}
+
+// retentionRunProgress is one run's pass bookkeeping.
+type retentionRunProgress struct {
+	firstPass bool
+	lapDone   bool
+}
+
+// runEvidenceRetentionPass handles one archive: the pending one, or a new
+// one selected from the ledger. It sets report.StopReason when the run must
+// end.
+func (s *Store) runEvidenceRetentionPass(ctx context.Context, opts EvidenceRetentionOptions, deadline time.Time, report *EvidenceRetentionReport, pr *retentionRunProgress) error {
+	archive, resumed, err := s.pendingEvidenceArchive(ctx, opts)
+	if err != nil {
+		return err
+	}
 	if archive == nil {
+		if report.ScannedCredits >= int64(opts.MaxScanRowsPerRun) {
+			report.StopReason = EvidenceRetentionStopScanBound
+			return nil
+		}
 		// A new archive needs room: refuse below the free-space floor rather
 		// than fill the filesystem the coordinator may share.
 		free, total, err := archiveFilesystemSpaceFunc(opts.ArchiveDir)
 		if err != nil {
-			return report, err
+			return err
 		}
 		report.ArchiveFreeBytes, report.ArchiveDiskBytes = free, total
 		if reason := archiveDiskBelowFloor(free, total, opts); reason != "" {
 			report.Status = EvidenceRetentionStatusArchiveDiskLow
+			report.StopReason = EvidenceRetentionStopRefused
 			report.Error = reason
-			return report, nil
+			return nil
 		}
+		now := s.nowUTC()
 		cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, now)
 		if err != nil {
-			return report, err
+			return err
 		}
-		fillCutoffs(&report, cut)
+		fillCutoffs(report, cut)
 		// Each eligible request is written to the archive as it is selected
 		// and then dropped, so the run never holds more than one request.
 		// Free space is re-read as the archive grows, so neither the archive
@@ -1141,7 +1772,8 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 			}
 			return nil
 		}
-		selected, nextCursor, err := s.selectRetentionCandidates(ctx, opts, cut, &report, func(b requestEvidenceBundle) error {
+		scannedBefore := report.ScannedCredits
+		pass, err := s.selectRetentionCandidates(ctx, opts, cut, report, deadline, true, func(b requestEvidenceBundle) error {
 			if w == nil {
 				created, err := newEvidenceArchiveWriter(opts.ArchiveDir, now, sqliteTimeText(cut.windowEnd))
 				if err != nil {
@@ -1150,42 +1782,69 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 				created.setSpaceGuard(evidenceArchiveSpaceCheckBytes, spaceGuard)
 				w = created
 			}
-			addRetentionStats(&report, b)
+			addRetentionStats(report, b)
 			return w.writeRequest(b)
 		})
-		if err == nil {
-			err = s.saveEvidenceRetentionCursor(ctx, nextCursor)
-		}
 		if err != nil {
-			// The partial archive is removed and the scan cursor is not
-			// advanced, so the next run re-selects the same requests.
+			// The partial archive is removed and the lap state is not
+			// advanced, so the next pass re-selects the same requests.
 			w.abort()
 			if errors.Is(err, errEvidenceArchiveDiskLow) {
 				report.Status = EvidenceRetentionStatusArchiveDiskLow
+				report.StopReason = EvidenceRetentionStopRefused
 				report.Error = err.Error()
-				return report, nil
+				return nil
 			}
-			return report, err
+			return err
 		}
-		if selected == 0 {
-			report.Status = EvidenceRetentionStatusNothingEligible
-			report.Vacuum = s.incrementalVacuumAll(ctx, opts)
-			return report, nil
+		// The archive is recorded before the lap state moves past its
+		// requests: a failure here leaves the lap where it was, so the next
+		// pass re-selects them; a crash after it leaves a pending archive,
+		// which the next run resumes and which keeps the watermark below it.
+		if pass.selected > 0 {
+			report.EligibleRequests += pass.selected
+			archive, err = s.recordEvidenceArchive(ctx, w, pass.minSelected)
+			if errors.Is(err, errEvidenceArchiveDiskLow) {
+				// finish() removed the partial archive.
+				report.Status = EvidenceRetentionStatusArchiveDiskLow
+				report.StopReason = EvidenceRetentionStopRefused
+				report.Error = err.Error()
+				return nil
+			}
+			if err != nil {
+				return err
+			}
 		}
-		report.EligibleRequests = selected
-		archive, err = s.recordEvidenceArchive(ctx, w)
-		if errors.Is(err, errEvidenceArchiveDiskLow) {
-			// finish() removed the partial archive; the cursor already moved
-			// past these requests and the scan wraps back to them.
-			report.Status = EvidenceRetentionStatusArchiveDiskLow
-			report.Error = err.Error()
-			return report, nil
-		}
+		lap, lapDone, err := s.saveRetentionPass(ctx, pass)
 		if err != nil {
-			return report, err
+			return err
+		}
+		if pr.firstPass {
+			report.ScanFromCreditID = pass.from
+			pr.firstPass = false
+		}
+		report.ScanToCreditID = lap.cursor
+		report.ScanWrapped = report.ScanWrapped || lapDone
+		pr.lapDone = lapDone
+		if pass.selected == 0 {
+			switch {
+			case lapDone && lap.lastLapEligible == 0:
+				report.StopReason = EvidenceRetentionStopDrained
+			case lapDone:
+				report.StopReason = EvidenceRetentionStopLapComplete
+			case pass.budgetSpent:
+				report.StopReason = EvidenceRetentionStopBudget
+			case report.ScannedCredits >= int64(opts.MaxScanRowsPerRun):
+				report.StopReason = EvidenceRetentionStopScanBound
+			case report.ScannedCredits == scannedBefore && !pass.wrapped:
+				// Defensive: a pass that neither scanned nor wrapped cannot
+				// make progress, so the run never spins.
+				report.StopReason = EvidenceRetentionStopScanBound
+			}
+			return nil
 		}
 	}
-	report.ResumedArchive = resumed
+	report.ResumedArchive = report.ResumedArchive || resumed
 	report.ArchiveID = archive.id
 	report.ArchiveFile = archive.fileName
 	report.ArchiveSHA256 = archive.manifest.SHA256
@@ -1193,11 +1852,11 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	verified, err := verifyEvidenceArchive(filepath.Join(opts.ArchiveDir, archive.fileName), archive.manifest)
 	if err != nil {
 		report.Status = EvidenceRetentionStatusArchiveInvalid
-		_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, err.Error(), 0)
-		return report, err
+		// The failed archive's requests stay hot; a later lap re-selects them.
+		return errors.Join(err, s.failEvidenceArchive(ctx, archive, err))
 	}
 	if resumed {
-		report.EligibleRequests = verified.Manifest.RequestCount
+		report.EligibleRequests += verified.Manifest.RequestCount
 	}
 	// The local re-read above is the verification deletion requires. An
 	// off-host verification command, when configured, is one more check
@@ -1205,29 +1864,113 @@ func (s *Store) RunEvidenceRetention(ctx context.Context, opts EvidenceRetention
 	if archive.status != evidenceArchiveStatusOffhostVerified && opts.OffhostVerifier != nil {
 		if verr := opts.OffhostVerifier(ctx, verified.Path, verified.Manifest.SHA256); verr != nil {
 			report.Status = EvidenceRetentionStatusOffhostUnverified
+			report.StopReason = EvidenceRetentionStopRefused
 			report.Error = verr.Error()
 			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusExported, verr.Error(), 0)
-			return report, nil
+			return nil
 		}
 		if err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusOffhostVerified, "", 0); err != nil {
-			return report, err
+			return err
 		}
 	}
-	deleted, err := s.deleteArchivedEvidence(ctx, opts, archive.id, verified, &report)
+	deleted, err := s.deleteArchivedEvidence(ctx, opts, archive.id, verified, deadline, report)
+	report.DeletedRequests += deleted
+	if errors.Is(err, errEvidenceRetentionBudgetSpent) {
+		// The archive stays pending; the next run resumes it.
+		report.StopReason = EvidenceRetentionStopBudget
+		return nil
+	}
 	if err != nil {
 		if errors.Is(err, ErrEvidenceArchiveInvalid) {
 			report.Status = EvidenceRetentionStatusArchiveInvalid
-			_ = s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, err.Error(), 0)
+			return errors.Join(err, s.failEvidenceArchive(ctx, archive, err))
 		}
-		return report, err
+		return err
 	}
 	if err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusDeleted, "", 0); err != nil {
-		return report, err
+		return err
 	}
-	report.DeletedRequests = deleted
-	report.Status = EvidenceRetentionStatusDeleted
-	report.Vacuum = s.incrementalVacuumAll(ctx, opts)
-	return report, nil
+	report.Archives++
+	if pr.lapDone {
+		report.StopReason = EvidenceRetentionStopLapComplete
+	}
+	return nil
+}
+
+// failEvidenceArchive marks an archive failed and moves the watermark back
+// below the requests its ledger scan selected (held requests in it keep
+// their hold rows). Archives recorded before #1979 carry no credit id; the
+// first lap after the upgrade starts at credit 0 anyway.
+func (s *Store) failEvidenceArchive(ctx context.Context, archive *evidenceArchiveRecord, cause error) error {
+	// The fallback must land even when the run's context was cancelled.
+	ctx = context.WithoutCancel(ctx)
+	err := s.updateEvidenceArchiveStatus(ctx, archive.id, evidenceArchiveStatusFailed, cause.Error(), 0)
+	if archive.minCreditID > 0 {
+		err = errors.Join(err, lowerRetentionWatermark(ctx, s.db, archive.minCreditID, sqliteTimeText(s.nowUTC())))
+	}
+	return err
+}
+
+// countRetentionBacklogCredits counts the held requests at or below the
+// watermark and the settled, unarchived ledger credits above it that are past the credit-age cutoff and whose payout
+// is live with a window ending at or before the settlement-window cutoff:
+// an upper bound of the eligible backlog. It reads fixed id ranges, so no
+// statement walks far past its range, under its own timeout, and returns -1
+// when the count does not finish.
+func (s *Store) countRetentionBacklogCredits(ctx context.Context, opts EvidenceRetentionOptions, watermark int64) int64 {
+	ctx, cancel := context.WithTimeout(ctx, evidenceRetentionBacklogTimeout)
+	defer cancel()
+	cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, s.nowUTC())
+	if err != nil {
+		return -1
+	}
+	if !cut.windowEndSet {
+		return 0
+	}
+	var maxID sql.NullInt64
+	if err := s.reader().QueryRowContext(ctx, `SELECT MAX(id) FROM ledger_request_credits`).Scan(&maxID); err != nil {
+		return -1
+	}
+	// Held requests at or below the watermark are counted from the holds
+	// table, so the count never walks the archived prefix.
+	var count int64
+	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM settlement_evidence_retention_holds WHERE credit_id <= ?`, watermark).Scan(&count); err != nil {
+		return -1
+	}
+	for lo := watermark; maxID.Valid && lo < maxID.Int64; lo += evidenceRetentionScanChunk {
+		rows, err := s.reader().QueryContext(ctx, `
+SELECT lrc.ts_utc, p.window_end_utc
+  FROM ledger_request_credits lrc
+  JOIN ledger_payout_ready p ON p.id = lrc.settlement_id
+ WHERE lrc.id > ? AND lrc.id <= ?
+   AND lrc.settled = 1
+   AND p.status IN ('ready','consumed')
+   AND NOT EXISTS (SELECT 1 FROM settlement_evidence_archived_credits a WHERE a.request_credit_id = lrc.id)`,
+			lo, lo+evidenceRetentionScanChunk)
+		if err != nil {
+			return -1
+		}
+		for rows.Next() {
+			var ts, windowEnd string
+			if err := rows.Scan(&ts, &windowEnd); err != nil {
+				rows.Close()
+				return -1
+			}
+			credited, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(ts))
+			if err != nil || !credited.Before(cut.creditBefore) {
+				continue
+			}
+			end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(windowEnd))
+			if err != nil || end.After(cut.windowEnd) {
+				continue
+			}
+			count++
+		}
+		if err := rows.Close(); err != nil {
+			return -1
+		}
+	}
+	return count
 }
 
 // evidenceArchiveDirName is the default archive directory, created next to
@@ -1263,6 +2006,9 @@ type evidenceArchiveRecord struct {
 	fileName string
 	status   string
 	manifest EvidenceArchiveManifest
+	// minCreditID is the archive's lowest ledger credit id (0: recorded
+	// before #1979).
+	minCreditID int64
 }
 
 // pendingEvidenceArchive returns the oldest archive that was exported but
@@ -1272,11 +2018,11 @@ func (s *Store) pendingEvidenceArchive(ctx context.Context, opts EvidenceRetenti
 	var rec evidenceArchiveRecord
 	var countsJSON string
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, file_name, status, sha256, size_bytes, request_count, row_counts_json, cutoff_window_end_utc, created_at_utc
+SELECT id, file_name, status, sha256, size_bytes, request_count, row_counts_json, cutoff_window_end_utc, created_at_utc, min_credit_id
   FROM settlement_evidence_archives
  WHERE status IN ('exported','offhost_verified')
  ORDER BY id
- LIMIT 1`).Scan(&rec.id, &rec.fileName, &rec.status, &rec.manifest.SHA256, &rec.manifest.SizeBytes, &rec.manifest.RequestCount, &countsJSON, &rec.manifest.CutoffWindowEndUTC, &rec.manifest.CreatedAtUTC)
+ LIMIT 1`).Scan(&rec.id, &rec.fileName, &rec.status, &rec.manifest.SHA256, &rec.manifest.SizeBytes, &rec.manifest.RequestCount, &countsJSON, &rec.manifest.CutoffWindowEndUTC, &rec.manifest.CreatedAtUTC, &rec.minCreditID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -1293,7 +2039,7 @@ SELECT id, file_name, status, sha256, size_bytes, request_count, row_counts_json
 
 // recordEvidenceArchive finishes a written archive and records it as
 // exported.
-func (s *Store) recordEvidenceArchive(ctx context.Context, w *evidenceArchiveWriter) (*evidenceArchiveRecord, error) {
+func (s *Store) recordEvidenceArchive(ctx context.Context, w *evidenceArchiveWriter, minCreditID int64) (*evidenceArchiveRecord, error) {
 	manifest, path, err := w.finish()
 	if err != nil {
 		return nil, err
@@ -1306,10 +2052,10 @@ func (s *Store) recordEvidenceArchive(ctx context.Context, w *evidenceArchiveWri
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO settlement_evidence_archives (
     file_name, sha256, size_bytes, request_count, row_counts_json,
-    cutoff_window_end_utc, status, created_at_utc, updated_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, 'exported', ?, ?)`,
+    cutoff_window_end_utc, status, created_at_utc, updated_at_utc, min_credit_id
+) VALUES (?, ?, ?, ?, ?, ?, 'exported', ?, ?, ?)`,
 		manifest.ArchiveFile, manifest.SHA256, manifest.SizeBytes, manifest.RequestCount, string(countsJSON),
-		manifest.CutoffWindowEndUTC, stamp, stamp)
+		manifest.CutoffWindowEndUTC, stamp, stamp, minCreditID)
 	if err != nil {
 		// Keep the durable file: it is harmless and the next run re-selects.
 		return nil, fmt.Errorf("record archive %s: %w", filepath.Base(path), err)
@@ -1318,7 +2064,7 @@ INSERT INTO settlement_evidence_archives (
 	if err != nil {
 		return nil, err
 	}
-	return &evidenceArchiveRecord{id: id, fileName: manifest.ArchiveFile, status: evidenceArchiveStatusExported, manifest: manifest}, nil
+	return &evidenceArchiveRecord{id: id, fileName: manifest.ArchiveFile, status: evidenceArchiveStatusExported, manifest: manifest, minCreditID: minCreditID}, nil
 }
 
 func (s *Store) updateEvidenceArchiveStatus(ctx context.Context, id int64, status, lastError string, deleted int) error {
@@ -1332,15 +2078,6 @@ UPDATE settlement_evidence_archives
 	return err
 }
 
-func (s *Store) saveEvidenceRetentionCursor(ctx context.Context, cursor int64) error {
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO settlement_evidence_retention_state (id, scan_cursor_credit_id, updated_at_utc)
-VALUES (1, ?, ?)
-ON CONFLICT(id) DO UPDATE SET scan_cursor_credit_id = excluded.scan_cursor_credit_id, updated_at_utc = excluded.updated_at_utc`,
-		cursor, sqliteTimeText(s.nowUTC()))
-	return err
-}
-
 // deleteArchivedEvidence deletes, batch by batch, only rows present in the
 // verified archive. It re-reads the archive as a stream and holds one batch
 // (batch_size requests, at most evidenceRetentionBatchBytes of archived
@@ -1348,7 +2085,7 @@ ON CONFLICT(id) DO UPDATE SET scan_cursor_credit_id = excluded.scan_cursor_credi
 // verified pass, so a file changed since verification deletes nothing. Each
 // batch is one short BEGIN IMMEDIATE transaction that re-checks R-15.2 for
 // every request; the run then pauses so the hot-path writer is never starved.
-func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetentionOptions, archiveID int64, archive verifiedEvidenceArchive, report *EvidenceRetentionReport) (int, error) {
+func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetentionOptions, archiveID int64, archive verifiedEvidenceArchive, deadline time.Time, report *EvidenceRetentionReport) (int, error) {
 	now := s.nowUTC()
 	cut, err := s.evidenceRetentionCutoffsAt(ctx, opts, now)
 	if err != nil {
@@ -1357,7 +2094,6 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 	fillCutoffs(report, cut)
 	journalDB := s.routeSnapshotJournalDB.Load()
 	deleted := 0
-	processed := 0
 	var batch []archivedRequest
 	var batchBytes int64
 	runBatch := func() error {
@@ -1371,7 +2107,13 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 		if current, ok := s.evidenceRetentionOptions(); ok && !current.Enabled {
 			return ErrEvidenceRetentionDisabled
 		}
-		if processed > 0 && opts.BatchPause > 0 {
+		// The budget is checked at batch boundaries only; an archive cut
+		// short stays pending and the next run resumes it.
+		if !s.nowUTC().Before(deadline) {
+			return errEvidenceRetentionBudgetSpent
+		}
+		// Pause before every batch but the run's first, across archives too.
+		if report.DeleteBatches > 0 && opts.BatchPause > 0 {
 			timer := time.NewTimer(opts.BatchPause)
 			select {
 			case <-ctx.Done():
@@ -1398,7 +2140,7 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 		// request whose evidence changed after this read.
 		finalities := map[string][]frozenFinality{}
 		for _, req := range batch {
-			frozen, ok, err := s.frozenRequestFinality(ctx, req, s.nowUTC().UnixMilli())
+			frozen, ok, err := frozenRequestFinalityFunc(s, ctx, req, s.nowUTC().UnixMilli())
 			if err != nil {
 				return err
 			}
@@ -1412,16 +2154,38 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 		}
 		report.DeleteBatches++
 		deleted += len(done)
-		processed += len(batch)
 		batch, batchBytes = nil, 0
 		// Journal copies go after the main rows commit. Requests this archive
 		// tombstoned in an earlier, interrupted run are in cleanup too, so the
 		// journal step is retried until the archive is marked deleted.
 		return deleteArchivedRouteJournalRows(ctx, journalDB, cleanup, report)
 	}
+	// Requests this archive already tombstoned (a resumed archive) need only
+	// the journal step: they skip the delete transaction and the batch
+	// pause, so a resumed run spends its budget on new deletions.
+	var cleanupOnly []archivedRequest
+	flushCleanup := func() error {
+		if len(cleanupOnly) == 0 {
+			return nil
+		}
+		err := deleteArchivedRouteJournalRows(ctx, journalDB, cleanupOnly, report)
+		cleanupOnly = nil
+		return err
+	}
 	err = streamEvidenceArchive(archive.Path, archive.Manifest, func(req archivedRequest) error {
 		if want, ok := archive.Digests[req.RequestID]; !ok || want != req.Digest {
 			return fmt.Errorf("%w: request %q changed since verification", ErrEvidenceArchiveInvalid, req.RequestID)
+		}
+		tombstoned, err := s.requestTombstonedByArchive(ctx, archiveID, req)
+		if err != nil {
+			return err
+		}
+		if tombstoned {
+			cleanupOnly = append(cleanupOnly, req)
+			if len(cleanupOnly) >= opts.BatchSize {
+				return flushCleanup()
+			}
+			return nil
 		}
 		batch = append(batch, req)
 		batchBytes += req.Bytes
@@ -1433,7 +2197,27 @@ func (s *Store) deleteArchivedEvidence(ctx context.Context, opts EvidenceRetenti
 	if err != nil {
 		return deleted, err
 	}
+	if err := flushCleanup(); err != nil {
+		return deleted, err
+	}
 	return deleted, runBatch()
+}
+
+// requestTombstonedByArchive reports whether every ledger credit of the
+// request is the archived set and was tombstoned by this archive.
+func (s *Store) requestTombstonedByArchive(ctx context.Context, archiveID int64, req archivedRequest) (bool, error) {
+	if len(req.CreditIDs) == 0 {
+		return false, nil
+	}
+	var hot, tombstoned int
+	err := s.db.QueryRowContext(ctx, `
+SELECT (SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?),
+       (SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_id = ? AND archive_id = ?)`,
+		req.RequestID, req.RequestID, archiveID).Scan(&hot, &tombstoned)
+	if err != nil {
+		return false, err
+	}
+	return hot == len(req.CreditIDs) && tombstoned == len(req.CreditIDs), nil
 }
 
 func archivedScopes(req archivedRequest) []string {
@@ -1487,6 +2271,15 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 	var done, cleanup []archivedRequest
 	tableDeleted := map[string]int64{}
 	floorRecorded := false
+	// A request this batch keeps hot for a reason that can clear goes to the
+	// holds table, in the same transaction; a deleted one leaves it.
+	held := func(req archivedRequest, reason string) error {
+		report.SkippedRequests[reason]++
+		if retentionPermanentSkips[reason] {
+			return deleteRetentionHold(ctx, conn, req.RequestID)
+		}
+		return upsertRetentionHold(ctx, conn, retentionHold{requestID: req.RequestID, creditID: minCreditID(req.CreditIDs), reason: reason}, stamp)
+	}
 	for _, req := range batch {
 		b, err := collectRequestEvidence(ctx, conn, req.RequestID)
 		if err != nil {
@@ -1499,13 +2292,15 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 		if tombstones > 0 {
 			if byThisArchive && tombstones == len(b.credits) && sameCredits(b, req) {
 				cleanup = append(cleanup, req)
-			} else {
-				report.SkippedRequests[retentionSkipAlreadyArchived]++
+			} else if err := held(req, retentionSkipAlreadyArchived); err != nil {
+				return nil, nil, err
 			}
 			continue
 		}
 		if !journalOK[req.RequestID] {
-			report.SkippedRequests[retentionSkipRouteJournal]++
+			if err := held(req, retentionSkipRouteJournal); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 		firstVerified, err := first.forBundle(ctx, b)
@@ -1513,20 +2308,28 @@ func (s *Store) deleteArchivedBatch(ctx context.Context, archiveID int64, batch 
 			return nil, nil, err
 		}
 		if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, false); !ok {
-			report.SkippedRequests[reason]++
+			if err := held(req, reason); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 		if !sameCredits(b, req) {
-			report.SkippedRequests[retentionSkipHotRowNotArchived]++
+			if err := held(req, retentionSkipHotRowNotArchived); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 		if reason := hotRowsMatchArchive(b, req); reason != "" {
-			report.SkippedRequests[reason]++
+			if err := held(req, reason); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 		frozen, ok := finalities[req.RequestID]
 		if !ok {
-			report.SkippedRequests[retentionSkipFinalityOpen]++
+			if err := held(req, retentionSkipFinalityOpen); err != nil {
+				return nil, nil, err
+			}
 			continue
 		}
 		if !floorRecorded {
@@ -1577,6 +2380,9 @@ VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stam
 				return nil, nil, err
 			}
 		}
+		if err := deleteRetentionHold(ctx, conn, req.RequestID); err != nil {
+			return nil, nil, err
+		}
 		done = append(done, req)
 		cleanup = append(cleanup, req)
 	}
@@ -1612,6 +2418,10 @@ type frozenFinality struct {
 // not closed and complete: such a request stays hot so a held buyer
 // reservation can still resolve from live evidence. A scope with no finality
 // stores nothing; its lookup already answers not found.
+// frozenRequestFinalityFunc is the finality freeze retention uses; tests
+// replace it, as with archiveFilesystemSpaceFunc.
+var frozenRequestFinalityFunc = (*Store).frozenRequestFinality
+
 func (s *Store) frozenRequestFinality(ctx context.Context, req archivedRequest, nowUnixMS int64) ([]frozenFinality, bool, error) {
 	var out []frozenFinality
 	for _, scope := range archivedScopes(req) {
@@ -1836,12 +2646,14 @@ func (s *Store) incrementalVacuumAll(ctx context.Context, opts EvidenceRetention
 }
 
 // incrementalVacuum reclaims free pages in bounded steps. It never runs a
-// full VACUUM; a database outside INCREMENTAL mode only reports it.
+// full VACUUM; a database outside INCREMENTAL mode skips the step, says why
+// in Skipped, and (for NONE) logs that it needs the one-time conversion.
 func incrementalVacuum(ctx context.Context, db *sql.DB, name string, opts EvidenceRetentionOptions) EvidenceRetentionVacuumReport {
 	r := EvidenceRetentionVacuumReport{Database: name}
 	var mode int
 	if err := db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
 		r.AutoVacuumMode = "unknown"
+		r.Skipped = "auto_vacuum mode unreadable"
 		return r
 	}
 	switch mode {
@@ -1856,8 +2668,18 @@ func incrementalVacuum(ctx context.Context, db *sql.DB, name string, opts Eviden
 	}
 	_ = db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&r.FreelistBefore)
 	r.FreelistAfter = r.FreelistBefore
-	if mode != 2 {
-		r.ConversionNeeds = mode == 0
+	switch mode {
+	case 2:
+	case 0:
+		r.ConversionNeeds = true
+		r.Skipped = "auto_vacuum=NONE: incremental_vacuum releases no pages; freed pages are reused, and the file shrinks only after the operator's one-time conversion (no full VACUUM is run automatically)"
+		log.Printf("settlement evidence retention: database=%s auto_vacuum=none incremental_vacuum=skipped freelist_pages=%d: needs the one-time auto_vacuum=INCREMENTAL conversion; retention never runs a full VACUUM", name, r.FreelistBefore)
+		return r
+	case 1:
+		r.Skipped = "auto_vacuum=FULL reclaims pages at every commit"
+		return r
+	default:
+		r.Skipped = "auto_vacuum mode not recognized"
 		return r
 	}
 	for r.Steps < opts.IncrementalVacuumMaxSteps && opts.IncrementalVacuumPages > 0 {
@@ -1884,6 +2706,17 @@ func incrementalVacuum(ctx context.Context, db *sql.DB, name string, opts Eviden
 	return r
 }
 
+// evidenceRetentionLogLine is the nightly run's log line: progress, the
+// remaining backlog, and each database's auto_vacuum mode.
+func evidenceRetentionLogLine(report EvidenceRetentionReport) string {
+	level := "info"
+	if report.Status == EvidenceRetentionStatusArchiveDiskLow {
+		level = "warn"
+	}
+	return fmt.Sprintf("settlement evidence retention: level=%s status=%s stop_reason=%s archives=%d eligible_requests=%d deleted_requests=%d delete_batches=%d scanned_credits=%d backlog_drained=%t backlog_candidate_credits=%d held_requests=%d watermark_credit_id=%d laps_completed=%d lap_eligible_requests=%d last_lap_eligible_requests=%d last_lap_skipped=%q auto_vacuum=%s archive_bytes=%d archive_free_bytes=%d archive_disk_bytes=%d reason=%q",
+		level, report.Status, report.StopReason, report.Archives, report.EligibleRequests, report.DeletedRequests, report.DeleteBatches, report.ScannedCredits, report.BacklogDrained, report.BacklogCandidateCredits, report.HeldRequests, report.WatermarkCreditID, report.LapsCompleted, report.LapEligibleRequests, report.LastLapEligibleRequests, report.LastLapSkipSummary(), report.AutoVacuumModes(), report.ArchiveBytes, report.ArchiveFreeBytes, report.ArchiveDiskBytes, report.Error)
+}
+
 // StartEvidenceRetention runs retention daily at 03:00 UTC, away from the
 // 00:00 nightly reconcile and the Monday 00:00 weekly settlement. It reads
 // the installed options on each tick and does nothing while disabled.
@@ -1907,12 +2740,7 @@ func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRe
 				continue
 			}
 			report, err := s.RunEvidenceRetention(ctx, opts)
-			level := "info"
-			if report.Status == EvidenceRetentionStatusArchiveDiskLow {
-				level = "warn"
-			}
-			log.Printf("settlement evidence retention: level=%s status=%s archive_bytes=%d archive_free_bytes=%d archive_disk_bytes=%d delete_batches=%d deleted_requests=%d reason=%q",
-				level, report.Status, report.ArchiveBytes, report.ArchiveFreeBytes, report.ArchiveDiskBytes, report.DeleteBatches, report.DeletedRequests, report.Error)
+			log.Print(evidenceRetentionLogLine(report))
 			if logf != nil {
 				logf(report, err)
 			}

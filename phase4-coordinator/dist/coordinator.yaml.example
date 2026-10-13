@@ -313,6 +313,17 @@ autotune:
 # emit a `billing_config_flag_changed` audit row.
 billing:
   quarantine_resolution_force_void_enabled: false
+  # SPEC-022 R-15 settled-evidence retention is on by default; the defaults
+  # below apply when the block is absent. Each nightly run drains archive
+  # after archive along a scan lap that starts at the archived low watermark,
+  # within run_budget_minutes. See ops/runbooks/settlement-evidence-retention.md.
+  # retention:
+  #   enabled: true
+  #   max_requests_per_run: 20000   # requests per archive
+  #   max_scan_rows_per_run: 5000000
+  #   run_budget_minutes: 30        # wall-clock budget per run, [1, 240]
+  #   batch_size: 50
+  #   batch_pause_ms: 200
 
 tier2:
   # SPEC-008 catalog-based hash verification. Operator-controlled,

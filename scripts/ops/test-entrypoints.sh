@@ -13,7 +13,8 @@
 # refusals) and repository admission (SPEC-002-R004: exact revocation, an old
 # runtime, a live policy that differs from the applied config)
 # against a fake Pearl (tests/fake_pearl_systemctl.py); catalog-activate's
-# provider-tied gateway proof and its 24 h expiry.
+# provider-tied gateway proof and its 24 h expiry; the pearl-runtime one-time
+# auto_vacuum conversion (drain gate, downtime, lock, quick_check, restart).
 # Usage: bash scripts/ops/test-entrypoints.sh
 set -euo pipefail
 
@@ -238,6 +239,63 @@ expect_next app_attest_recorder:mutate
 case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --rotate"*) ok ;; *) bad "repair command lacks --rotate: $(next_field command)" ;; esac
 rm -f "$tmp/bin/psql"
 unset PEARL_COORDINATOR_ENV
+
+# ==== pearl-runtime: one-time auto_vacuum conversion (#1979) ==================
+# Real SQLite files stand in for Pearl's; flock is a stub (not on every host).
+mkdir -p "$tmp/vacuum"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/flock"
+chmod +x "$tmp/bin/flock"
+VDB="$tmp/vacuum/coordinator.db"
+sqlite3 "$VDB" "PRAGMA journal_mode=WAL; CREATE TABLE settlement_evidence_retention_state (id INTEGER PRIMARY KEY, laps_completed INTEGER, last_lap_eligible_requests INTEGER, last_lap_completed_at_utc TEXT); INSERT INTO settlement_evidence_retention_state VALUES (1, 3, 12, '2026-10-10T03:20:00Z'); CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(50000));" >/dev/null
+sqlite3 "$VDB.route-snapshots" "CREATE TABLE j (v BLOB); INSERT INTO j VALUES (randomblob(20000));" >/dev/null
+# sqlite3 wrapper: FAKE_QUICK_CHECK_FAIL makes quick_check report damage.
+cat > "$tmp/bin/pearl-sqlite3" <<FAKESQLITE
+#!/usr/bin/env bash
+if [ -n "\${FAKE_QUICK_CHECK_FAIL:-}" ] && [[ "\${*: -1}" == *quick_check* ]]; then echo "*** in database main ***"; exit 0; fi
+exec $(command -v sqlite3) "\$@"
+FAKESQLITE
+chmod +x "$tmp/bin/pearl-sqlite3"
+PEARL_SQLITE3="$tmp/bin/pearl-sqlite3"
+export PEARL_SQLITE3 PEARL_DEPLOY_LOCK="$tmp/vacuum/deploy.lock" PEARL_DEPLOY_OPERATION_LOCK="$tmp/vacuum/deploy-operation.lock"
+health v9.0.0 "$LIVE"
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task without a database path" scripts/ops/pearl-runtime.sh status
+expect_next vacuum_mode:blocked
+export PEARL_COORDINATOR_DB="$VDB"
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task before the drain" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+PEARL_RUNTIME_TASK=retention-vacuum-conversion MACPROVIDER_OPS_OWNER=t run_rc 3 "conversion refused before the drain" scripts/ops/pearl-runtime.sh next --run
+if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 0 ]; then ok; else bad "conversion ran before the drain"; fi
+sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET laps_completed = 4, last_lap_eligible_requests = 0" >/dev/null
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after the drain" scripts/ops/pearl-runtime.sh status
+expect_next convert:mutate
+case "$(next_field expected_downtime)" in *"coordinator stopped"*VACUUM*) ok ;; *) bad "conversion downtime: $(next_field expected_downtime)" ;; esac
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 3 "conversion needs an owner" scripts/ops/pearl-runtime.sh next --run
+# A file that fails quick_check is refused before anything changes, and the
+# coordinator is started again.
+FAKE_QUICK_CHECK_FAIL=1 PEARL_RUNTIME_TASK=retention-vacuum-conversion MACPROVIDER_OPS_OWNER=t run_rc 1 "conversion refused on a failing quick_check" scripts/ops/pearl-runtime.sh next --run
+expect_err "quick_check failed on $VDB before the conversion"
+expect_lock_free
+if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 0 ] && [ "$(tr '\n' ' ' < "$tmp/svc/unit-actions")" = "stop start " ]; then ok; else bad "refused conversion changed the file or left the unit stopped"; fi
+if find "$tmp/vacuum" -name '*.pre-incremental-*' | grep -q .; then bad "a refused conversion took a backup"; else ok; fi
+rm -f "$tmp/svc/unit-actions"
+PEARL_RUNTIME_TASK=retention-vacuum-conversion MACPROVIDER_OPS_OWNER=t run_rc 0 "conversion runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for convert" "$tmp/out"; then ok; else bad "downtime not printed before the conversion"; fi
+for l in "$PEARL_UPDATER_LOCK" "$PEARL_DEPLOY_LOCK" "$PEARL_DEPLOY_OPERATION_LOCK"; do
+  if [ "$(ls -l "$l" | cut -c1-10)" = "-rw-------" ]; then ok; else bad "lock $l is not a 0600 file: $(ls -l "$l")"; fi
+done
+if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VDB.route-snapshots" 'PRAGMA auto_vacuum;')" = 2 ]; then ok; else bad "files not converted"; fi
+if [ "$(tr '\n' ' ' < "$tmp/svc/unit-actions")" = "stop start " ]; then ok; else bad "unit actions: $(cat "$tmp/svc/unit-actions" 2>/dev/null)"; fi
+for f in "$VDB" "$VDB.route-snapshots"; do
+  b="$(find "$tmp/vacuum" -name "$(basename "$f").pre-incremental-*" | head -n 1)"
+  if [ -n "$b" ] && [ "$(sqlite3 "$b" 'PRAGMA quick_check;')" = ok ]; then ok; else bad "no fresh backup of $f"; fi
+done
+grep -q "backup: $VDB.pre-incremental-" "$tmp/err" && ok || bad "backup path not named"
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after the conversion" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+PEARL_RUNTIME_TASK=bogus run_rc 3 "unknown task refused" scripts/ops/pearl-runtime.sh status
+unset PEARL_COORDINATOR_DB PEARL_SQLITE3 PEARL_DEPLOY_LOCK PEARL_DEPLOY_OPERATION_LOCK
+rm -f "$tmp/bin/flock" "$tmp/bin/pearl-sqlite3" "$tmp/svc/unit-actions"
 
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE

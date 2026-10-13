@@ -1652,6 +1652,16 @@ func runCoordinator() (exitCode int) {
 			Str("status", report.Status).
 			Int("eligible_requests", report.EligibleRequests).
 			Int("deleted_requests", report.DeletedRequests).
+			Str("stop_reason", report.StopReason).
+			Int("archives", report.Archives).
+			Bool("backlog_drained", report.BacklogDrained).
+			Int64("backlog_candidate_credits", report.BacklogCandidateCredits).
+			Int64("held_requests", report.HeldRequests).
+			Int64("watermark_credit_id", report.WatermarkCreditID).
+			Int64("laps_completed", report.LapsCompleted).
+			Int64("last_lap_eligible_requests", report.LastLapEligibleRequests).
+			Str("last_lap_skipped", report.LastLapSkipSummary()).
+			Str("auto_vacuum", report.AutoVacuumModes()).
 			Int64("archive_id", report.ArchiveID).
 			Str("archive_sha256", report.ArchiveSHA256).
 			Msg("nightly settlement evidence retention finished")

@@ -1785,10 +1785,19 @@ type BillingRetentionConfig struct {
 	// BatchPauseMS is the pause between delete batches that yields the
 	// SQLite writer to the hot path.
 	BatchPauseMS int `yaml:"batch_pause_ms"`
-	// MaxRequestsPerRun bounds the requests one run archives.
+	// MaxRequestsPerRun bounds the requests in one archive (the key keeps
+	// its pre-#1979 name so existing configs load). A run drains: it writes,
+	// verifies, and deletes archive after archive along a scan lap that
+	// starts at the archived low watermark, until the lap completes,
+	// MaxScanRowsPerRun is reached, or RunBudgetMinutes is spent; the lap
+	// continues in the next run.
 	MaxRequestsPerRun int `yaml:"max_requests_per_run"`
-	// MaxScanRowsPerRun bounds the ledger credits one run walks.
+	// MaxScanRowsPerRun bounds the ledger credits one run walks. Default
+	// 5,000,000, so the run budget is normally the effective limit.
 	MaxScanRowsPerRun int `yaml:"max_scan_rows_per_run"`
+	// RunBudgetMinutes is one run's wall-clock budget, checked between
+	// archives and between delete batches. Default 30.
+	RunBudgetMinutes int `yaml:"run_budget_minutes"`
 	// IncrementalVacuumPages is the page budget per incremental_vacuum step;
 	// IncrementalVacuumMaxSteps bounds the steps per run.
 	IncrementalVacuumPages    int `yaml:"incremental_vacuum_pages"`
@@ -2054,7 +2063,8 @@ func Default() Config {
 				BatchSize:                   50,
 				BatchPauseMS:                200,
 				MaxRequestsPerRun:           20000,
-				MaxScanRowsPerRun:           500000,
+				MaxScanRowsPerRun:           5000000,
+				RunBudgetMinutes:            30,
 				IncrementalVacuumPages:      2048,
 				IncrementalVacuumMaxSteps:   256,
 				ArchiveMinFreeBytes:         20 << 30,
@@ -4711,6 +4721,11 @@ func (c Config) validateBillingRetention() error {
 	}
 	if r.MaxScanRowsPerRun < 1 {
 		return fmt.Errorf("billing.retention.max_scan_rows_per_run must be >= 1")
+	}
+	// The cap leaves the admin run route's 6 h timeout room for the
+	// end-of-run backlog count and incremental vacuum.
+	if r.RunBudgetMinutes < 1 || r.RunBudgetMinutes > 240 {
+		return fmt.Errorf("billing.retention.run_budget_minutes must be in [1, 240]")
 	}
 	if r.IncrementalVacuumPages < 0 || r.IncrementalVacuumMaxSteps < 0 {
 		return fmt.Errorf("billing.retention.incremental_vacuum_pages and incremental_vacuum_max_steps must be >= 0")
