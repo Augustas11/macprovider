@@ -35,7 +35,7 @@ type routeDecision struct {
 	phase routing.Phase
 	basis routing.Basis
 	// scope is where the provider came from for the operator line:
-	// ranked, pinned or slot_queue.
+	// ranked, sticky, pinned or slot_queue.
 	scope       string
 	inputTokens int
 	candidates  int
@@ -59,6 +59,18 @@ func (s *Server) applyPhaseOrder(requestID string, req chatRequest, estimatedTok
 	exploreDraw, bandDraw := rng.Float64(), rng.Float64()
 	d := routing.PhaseOrder(candidates, req.Model, phase, s.perf, s.now(), exploreDraw, bandDraw)
 	return routeDecision{phase: d.Phase, basis: d.Basis, scope: "ranked", inputTokens: estimatedTokens, candidates: d.Candidates, fresh: d.Fresh, scores: d.Scores, evidence: d.Evidence}
+}
+
+// stickyRouteDecision describes a SPEC-004 sticky hit: the objective order
+// with the sticky provider first, no phase reorder.
+func (s *Server) stickyRouteDecision(req chatRequest, estimatedTokens int, candidates []pool.Provider) routeDecision {
+	return routeDecision{
+		phase:       routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream),
+		basis:       routing.BasisFallback,
+		scope:       "sticky",
+		inputTokens: estimatedTokens,
+		candidates:  len(candidates),
+	}
 }
 
 // noteRouteTrace records the SPEC-002-R007 operator line and counter for the

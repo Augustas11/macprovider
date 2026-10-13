@@ -1686,6 +1686,17 @@ func engineProfileChipClass(s string) bool {
 	}
 }
 
+// engineProfileRAMClassFor is the SPEC-001-R006 class for a reported ram_gb.
+func engineProfileRAMClassFor(ramGB int) int {
+	class := 8
+	for _, c := range []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512} {
+		if c <= ramGB {
+			class = c
+		}
+	}
+	return class
+}
+
 func engineProfileRAMClass(gb int) bool {
 	switch gb {
 	case 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512:
@@ -1973,6 +1984,10 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	}
 	if v, ok := raw["engine_profile"]; ok {
 		hb.EngineProfile = parseEngineProfile(v)
+		// The profile must agree with the heartbeat it rides on.
+		if p := hb.EngineProfile; p != nil && (p.MaxStableContextTokens != hb.MaxContextTokens || p.RAMClassGB != engineProfileRAMClassFor(hb.RAMGB)) {
+			hb.EngineProfile = nil
+		}
 	}
 	if field, err := parseRelayBlindKeyRecords(raw, &hb.RelayBlindKeyRecords); err != nil {
 		return Heartbeat{}, presence, field, err

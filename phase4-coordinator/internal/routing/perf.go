@@ -8,17 +8,18 @@ import (
 
 // SPEC-002-R005 measured-performance store constants.
 const (
-	PerfEWMAWeight          = 0.2
-	PerfFreshMinSamples     = 3
-	PerfFreshMaxAge         = 15 * time.Minute
-	PerfStoreMaxEntries     = 65536
-	PerfMinPrefillTokens    = 64
-	PerfMinDecodeTokens     = 8
-	PerfMaxTTFTMs           = 600_000
-	PerfMaxPrefillTPS       = 50_000
-	PerfMaxDecodeTPS        = 2_000
-	PerfPriorWeightSamples  = 2
-	PerfPriorCapOverMeasure = 1.25
+	PerfEWMAWeight           = 0.2
+	PerfFreshMinSamples      = 3
+	PerfFreshMaxAge          = 15 * time.Minute
+	PerfStoreMaxEntries      = 65536
+	PerfMaxModelsPerProvider = 64
+	PerfMinPrefillTokens     = 64
+	PerfMinDecodeTokens      = 8
+	PerfMaxTTFTMs            = 600_000
+	PerfMaxPrefillTPS        = 50_000
+	PerfMaxDecodeTPS         = 2_000
+	PerfPriorWeightSamples   = 2
+	PerfPriorCapOverMeasure  = 1.25
 )
 
 // PerfObservation is one coordinator-timed served attempt. Durations come
@@ -75,13 +76,15 @@ type perfKey struct {
 // PerfStore is the in-memory SPEC-002-R005 store keyed by provider and
 // requested model. It is not persisted.
 type PerfStore struct {
-	mu      sync.RWMutex
-	entries map[perfKey]*PerfEvidence
-	max     int
+	mu          sync.RWMutex
+	entries     map[perfKey]*PerfEvidence
+	perProvider map[string]int
+	max         int
+	maxPerProv  int
 }
 
 func NewPerfStore() *PerfStore {
-	return &PerfStore{entries: make(map[perfKey]*PerfEvidence), max: PerfStoreMaxEntries}
+	return &PerfStore{entries: make(map[perfKey]*PerfEvidence), perProvider: make(map[string]int), max: PerfStoreMaxEntries, maxPerProv: PerfMaxModelsPerProvider}
 }
 
 func clampFloat(v, lo, hi float64) float64 {
@@ -119,11 +122,17 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	defer s.mu.Unlock()
 	e, ok := s.entries[key]
 	if !ok {
+		// A provider at its model budget replaces its own least recently
+		// observed record, so it can never displace another provider's.
+		if s.perProvider[o.ProviderID] >= s.maxPerProv {
+			s.evictProviderOldestLocked(o.ProviderID)
+		}
 		if len(s.entries) >= s.max {
 			s.evictLocked(o.At)
 		}
 		e = &PerfEvidence{}
 		s.entries[key] = e
+		s.perProvider[o.ProviderID]++
 	}
 	e.TTFTMs = ewma(e.TTFTMs, e.TTFTSamples, ttft)
 	e.TTFTSamples = saturatingInc(e.TTFTSamples)
@@ -149,12 +158,35 @@ func saturatingInc(n int) int {
 	return n + 1
 }
 
+func (s *PerfStore) deleteLocked(k perfKey) {
+	delete(s.entries, k)
+	if s.perProvider[k.providerID] <= 1 {
+		delete(s.perProvider, k.providerID)
+	} else {
+		s.perProvider[k.providerID]--
+	}
+}
+
+func (s *PerfStore) evictProviderOldestLocked(providerID string) {
+	var oldestKey perfKey
+	var oldest time.Time
+	found := false
+	for k, e := range s.entries {
+		if k.providerID == providerID && (!found || e.LastObserved.Before(oldest)) {
+			oldestKey, oldest, found = k, e.LastObserved, true
+		}
+	}
+	if found {
+		s.deleteLocked(oldestKey)
+	}
+}
+
 // evictLocked frees room: records that are not fresh go first, then the
 // least recently observed one.
 func (s *PerfStore) evictLocked(now time.Time) {
 	for k, e := range s.entries {
 		if !e.Fresh(now) {
-			delete(s.entries, k)
+			s.deleteLocked(k)
 		}
 	}
 	if len(s.entries) < s.max {
@@ -168,7 +200,7 @@ func (s *PerfStore) evictLocked(now time.Time) {
 			oldestKey, oldest, first = k, e.LastObserved, false
 		}
 	}
-	delete(s.entries, oldestKey)
+	s.deleteLocked(oldestKey)
 }
 
 // Lookup returns a copy of the record for providerID and model.

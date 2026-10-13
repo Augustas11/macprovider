@@ -227,3 +227,25 @@ func TestValidateChatRequestCapturesMaxTokens(t *testing.T) {
 		t.Fatalf("absent: status=%d maxTokens=%d", status, req.maxTokens)
 	}
 }
+
+// SPEC-004 sticky affinity is judged against the objective order: a sticky
+// hit keeps its provider even when phase evidence prefers another.
+func TestStickyHitSkipsPhaseReorder(t *testing.T) {
+	s, _ := phaseTestServer(t)
+	s.stickyEnabled = true
+	warmProvider(s, "slow", 800, 2000)
+	warmProvider(s, "fast", 40, 1000)
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer gateway-secret")
+	headers.Set("X-MacProvider-Account", "acct-1")
+	headers.Set("X-MacProvider-Internal-Conv", "conv:phase-sticky")
+	s.stickyMap.Update("conv:phase-sticky", "acct-1", "slow", "model-a")
+	state := &forwardState{}
+	p, routeErr := s.selectProviderExcluding(context.Background(), "rid-s", streamChatReq(), headers, nil, "2026-10-13", state)
+	if routeErr != nil || p.ProviderID != "slow" {
+		t.Fatalf("provider=%q err=%+v", p.ProviderID, routeErr)
+	}
+	if state.stickyResult != "hit" || state.routeDecision == nil || state.routeDecision.scope != "sticky" || state.routeDecision.basis != routing.BasisFallback {
+		t.Fatalf("sticky=%q decision=%+v", state.stickyResult, state.routeDecision)
+	}
+}

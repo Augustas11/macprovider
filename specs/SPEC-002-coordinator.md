@@ -5314,7 +5314,9 @@ recorded.
 
 The first-token time is when the first delivered event carrying generated
 content or a tool call reaches the buyer side of the coordinator; an opening
-role-only event does not count. Every quantity is the coordinator's own; no
+role-only event does not count. Only incrementally relayed streams carry a
+first-token time: a stream the coordinator buffers or renders from a whole
+JSON response delivers everything at once and yields no sample. Every quantity is the coordinator's own; no
 provider usage count enters a rate:
 
 - `ttft_ms`, provider dispatch done to first token, clamped to 1..600000;
@@ -5339,7 +5341,9 @@ The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior worth 2 samples and capped at 1.25 times the measured decode
 average, so a self-report never outranks measurements. The SPEC-001-R006
 engine profile MUST NOT be read as a measurement. The store holds at most
-65536 records; when full it evicts records that are not fresh first, then the
+65536 records and at most 64 per provider; a provider at its budget replaces
+its own least recently observed record, so it never displaces another
+provider's, and a full store evicts records that are not fresh first, then the
 least recently observed. It is not persisted: after a coordinator restart every
 provider is unmeasured until traffic rebuilds it. The store never changes
 eligibility, admission, trust tier, pricing or settlement.
@@ -5388,10 +5392,11 @@ run unchanged. Basis `fallback`. A coordinator with no evidence therefore
 selects exactly as before this requirement.
 
 Both draws are derived from the request ID and the daily key, as for the
-SPEC-004 tiebreak, so a decision is reproducible within the day. Sticky
-affinity still applies after the reorder. When the basis is `measured` or
-`explore`, the random tiebreak step is skipped, because the band draw already
-spreads load. The score's influence is bounded: it only orders eligible
+SPEC-004 tiebreak, so a decision is reproducible within the day. SPEC-004
+sticky affinity is judged against the objective order before this step: a
+sticky hit keeps its provider first and the phase reorder is skipped (basis
+`fallback`). When the basis is `measured` or `explore`, the random tiebreak
+step is skipped, because the band draw already spreads load. The score's influence is bounded: it only orders eligible
 candidates, the load term halves a full provider's score, the band shares
 traffic among near-equal providers, and exploration reserves 10% of decisions
 for unmeasured providers whenever any exist.
@@ -5401,7 +5406,7 @@ for unmeasured providers whenever any exist.
 For every successful plaintext selection, the coordinator MUST write one
 operator log line `event=route_trace` with `request_id`, `provider_id`,
 `model`, `phase`, `basis` (`measured`, `explore`, `fallback` or `pinned`),
-`scope` (`ranked`, `pinned` or `slot_queue`), `candidates`, `fresh`, the
+`scope` (`ranked`, `sticky`, `pinned` or `slot_queue`), `candidates`, `fresh`, the
 chosen provider's `samples`, `evidence_age_s` (or `-1`), `score` (or `-1` when
 not scored), `engine`, `latency` and `privacy_mode` (the gateway's
 SPEC-006-R019 effective mode, or `unset`), and increment

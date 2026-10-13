@@ -9,7 +9,7 @@ import (
 
 const engineProfileHeartbeatBase = `{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":5,"slots_free":5,"slots_total":5,"throughput_tps_estimate":10.0,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0`
 
-const validEngineProfile = `{"version":"engine-profile-v1","engine_family":"continuous_batching","cb_granted_slots":4,"native_mtp_active":false,"chip_class":"m2_max","ram_class_gb":96,"max_stable_context_tokens":32768}`
+const validEngineProfile = `{"version":"engine-profile-v1","engine_family":"continuous_batching","cb_granted_slots":4,"native_mtp_active":false,"chip_class":"m2_max","ram_class_gb":16,"max_stable_context_tokens":4096}`
 
 // SPEC-001-R006: a valid closed profile is recorded.
 func TestParseHeartbeatAcceptsEngineProfile(t *testing.T) {
@@ -17,7 +17,7 @@ func TestParseHeartbeatAcceptsEngineProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	want := pool.EngineProfile{Version: "engine-profile-v1", EngineFamily: "continuous_batching", CBGrantedSlots: 4, ChipClass: "m2_max", RAMClassGB: 96, MaxStableContextTokens: 32768}
+	want := pool.EngineProfile{Version: "engine-profile-v1", EngineFamily: "continuous_batching", CBGrantedSlots: 4, ChipClass: "m2_max", RAMClassGB: 16, MaxStableContextTokens: 4096}
 	if hb.EngineProfile == nil || *hb.EngineProfile != want {
 		t.Fatalf("engine_profile = %+v", hb.EngineProfile)
 	}
@@ -35,10 +35,12 @@ func TestParseHeartbeatDropsInvalidEngineProfileWithoutRejecting(t *testing.T) {
 		"unknown version":  strings.Replace(validEngineProfile, `engine-profile-v1`, `engine-profile-v2`, 1),
 		"unknown family":   strings.Replace(validEngineProfile, `continuous_batching`, `lily`, 1),
 		"slots range":      strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":257`, 1),
-		"negative ctx":     strings.Replace(validEngineProfile, `32768`, `-1`, 1),
+		"negative ctx":     strings.Replace(validEngineProfile, `4096`, `-1`, 1),
 		"chip class":       strings.Replace(validEngineProfile, `m2_max`, `m2_maxi`, 1),
 		"chip gen":         strings.Replace(validEngineProfile, `m2_max`, `m0`, 1),
-		"ram class":        strings.Replace(validEngineProfile, `"ram_class_gb":96`, `"ram_class_gb":97`, 1),
+		"ram class":        strings.Replace(validEngineProfile, `"ram_class_gb":16`, `"ram_class_gb":17`, 1),
+		"ram mismatch":     strings.Replace(validEngineProfile, `"ram_class_gb":16`, `"ram_class_gb":32`, 1),
+		"ctx mismatch":     strings.Replace(validEngineProfile, `4096`, `8192`, 1),
 		"fractional":       strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":4.5`, 1),
 		"wrong type":       `"engine-profile-v1"`,
 		"null":             `null`,

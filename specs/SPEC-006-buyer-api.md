@@ -2168,7 +2168,9 @@ whatever the buyer requested. The strings MUST be exactly:
 They never claim hardware isolation, attestation, end-to-end encryption that
 excludes the provider, or that the buyer owns the serving Mac. The SPEC-049
 `usage.macprovider.privacy` disclosure remains the authoritative statement for
-privacy-class responses. Upstream values of either header are dropped.
+privacy-class responses. Upstream values of either header are dropped. The
+`invalid_privacy_mode` and `privacy_mode_unsatisfied` refusals carry neither
+header, because no mode was served.
 
 **Operator visibility.** For a plaintext route the gateway sends the effective
 mode upstream as `X-MacProvider-Internal-Privacy-Mode` under the gateway

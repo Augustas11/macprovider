@@ -114,3 +114,26 @@ func TestPerfStoreEvictsStaleThenOldest(t *testing.T) {
 		t.Fatal("fresh records must survive while stale ones exist")
 	}
 }
+
+// One provider at its model budget replaces only its own records.
+func TestPerfStorePerProviderBudget(t *testing.T) {
+	s := NewPerfStore()
+	s.max, s.maxPerProv = 8, 2
+	for i := 0; i < 3; i++ {
+		observe(s, "peer-"+string(rune('a'+i)), 100, 20, 10, 100, perfNow)
+	}
+	for i := 0; i < 10; i++ {
+		s.Observe(PerfObservation{ProviderID: "rotator", Model: "m" + string(rune('a'+i)), PromptTokens: 100, CompletionTokens: 20, TTFTMs: 10, DecodeMs: 100, At: perfNow.Add(time.Duration(i) * time.Second)})
+	}
+	if s.Len() != 5 || s.perProvider["rotator"] != 2 {
+		t.Fatalf("len=%d rotator=%d", s.Len(), s.perProvider["rotator"])
+	}
+	for i := 0; i < 3; i++ {
+		if _, ok := s.Lookup("peer-"+string(rune('a'+i)), "m"); !ok {
+			t.Fatal("a rotating provider displaced a peer record")
+		}
+	}
+	if _, ok := s.Lookup("rotator", "mj"); !ok {
+		t.Fatal("the newest rotator record should be kept")
+	}
+}

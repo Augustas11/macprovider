@@ -4435,7 +4435,9 @@ out-of-range member, an unknown `version`, or an object larger than 512 bytes
 makes the coordinator drop the profile for that heartbeat (treated as absent),
 never reject the frame. A profile whose `engine_family` is `native_mtp` while
 `native_mtp_active` is false (or the reverse), or whose `engine_family` is
-`general_mlx` with a non-zero `cb_granted_slots`, is dropped the same way. A
+`general_mlx` with a non-zero `cb_granted_slots`, or whose
+`max_stable_context_tokens` or `ram_class_gb` disagrees with the same
+heartbeat's `max_context_tokens` or `ram_gb`, is dropped the same way. A
 provider that predates this requirement sends no
 profile, and the coordinator routes it exactly as a provider without evidence
 (SPEC-002-R006 fallback).

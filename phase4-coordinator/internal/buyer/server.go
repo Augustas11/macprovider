@@ -7982,9 +7982,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// logRoutingDecisionFullWithCache) finds the same value the
 	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
 	balancedCache := s.sortCandidates(candidates, objective)
-	// SPEC-002-R006: reorder by request phase; only the order changes.
-	phaseDecision := s.applyPhaseOrder(requestID, req, estimatedTokens, candidates, dailyKey)
+	// SPEC-004 sticky affinity is judged against the objective order. A
+	// sticky hit keeps its provider first and skips the SPEC-002-R006 phase
+	// reorder; otherwise the phase step reorders (only the order changes).
 	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
+	var phaseDecision routeDecision
+	if stickyResult == "hit" {
+		phaseDecision = s.stickyRouteDecision(req, estimatedTokens, candidates)
+	} else {
+		phaseDecision = s.applyPhaseOrder(requestID, req, estimatedTokens, candidates, dailyKey)
+	}
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
 		if phaseDecision.basis == routing.BasisFallback {
