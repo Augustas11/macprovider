@@ -68,7 +68,7 @@ jobs:
   coordinator:
     name: phase4-coordinator (go vet + test)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     # `make test-dist` runs ONLY in the dedicated `dist-tooling` job, which
     # also owns the sealed Tier-2 verifier toolchain and full-history checkout
     # that suite needs; duplicating it here doubled a 5+ minute suite (and its

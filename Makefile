@@ -37,8 +37,11 @@ test-byom-discovery-journey:
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify
 
+# -race (#1996): the detector instruments the pure-Go SQLite driver, so the
+# SQLite-heavy packages (billing, requestlog, buyer) run ~15x slower than
+# without it; -timeout lifts go test's 10m per-package default.
 test-coordinator:
-	cd phase4-coordinator && go test ./...
+	cd phase4-coordinator && go test -race -timeout 60m ./...
 
 # SPEC-017 Step 1 and provider-onboarding Postgres integration tests.
 # Tagged with `integration` so
