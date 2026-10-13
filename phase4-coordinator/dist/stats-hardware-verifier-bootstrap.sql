@@ -9,11 +9,13 @@
 -- The password is intentionally supplied at execution time, not committed or
 -- passed through process arguments.
 
+\set ON_ERROR_STOP on
+
 \getenv verifier_password STATS_HARDWARE_VERIFIER_PASSWORD
 \if :{?verifier_password}
 \else
   \echo 'missing required STATS_HARDWARE_VERIFIER_PASSWORD environment variable'
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'stats-hardware-verifier bootstrap refused'; END $$;
 \endif
 
 ALTER ROLE stats_hardware_verifier LOGIN PASSWORD :'verifier_password';

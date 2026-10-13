@@ -897,4 +897,17 @@ if LC_ALL=C grep -q $'\r' "$APP_ATTEST_BOOTSTRAP" "$APP_ATTEST_PROVISION"; then
   fail "recorder provisioning files contain CRLF line endings"
 fi
 
+# Issue #1972: bootstrap SQL refusals must raise an exception (DO $$ BEGIN RAISE
+# EXCEPTION ... END $$) so psql exits non-zero under ON_ERROR_STOP. \quit ignores
+# its argument and exits 0, so a refused bootstrap looks successful.
+STATS_VERIFIER_BOOTSTRAP="$DIST_DIR/stats-hardware-verifier-bootstrap.sql"
+[ -f "$STATS_VERIFIER_BOOTSTRAP" ] || fail "missing stats-hardware-verifier bootstrap"
+grep -qF '\set ON_ERROR_STOP on' "$STATS_VERIFIER_BOOTSTRAP" ||
+  fail "stats-hardware-verifier bootstrap must fail fast on SQL errors"
+for b in "$HARDWARE_TRUST_BOOTSTRAP" "$AUTH_POLICY_BOOTSTRAP" "$STATS_VERIFIER_BOOTSTRAP"; do
+  if grep -qE '^[[:space:]]*\\quit' "$b"; then
+    fail "bootstrap refusals must raise, \\quit exits 0: $b"
+  fi
+done
+
 echo "ok: stats inventory sidecar deploy wiring"
