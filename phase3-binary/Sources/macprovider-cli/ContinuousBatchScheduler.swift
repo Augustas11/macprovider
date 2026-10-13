@@ -547,6 +547,14 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// self-check rows; self-check rows may use every scheduler row. Excluded
     /// from the idempotency fingerprint.
     let selfCheckProbe: Bool
+    /// Runtime-only (SPEC-038 FR-CB10 exactness probe): how many self-check
+    /// rows were submitted together, 0 for every other row. Such rows do not
+    /// decode while another row of the probe is still waiting or prefilling,
+    /// and none is admitted before all of them are queued, so all of them
+    /// decode in the same forwards (split by the decode row
+    /// bound exactly as served), and each result counts the decode tokens it
+    /// generated while that many rows were decoding.
+    let selfCheckCohort: Int
 
     init(
         id: String,
@@ -574,7 +582,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
-        selfCheckProbe: Bool = false
+        selfCheckProbe: Bool = false,
+        selfCheckCohort: Int = 0
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -602,6 +611,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
         self.selfCheckProbe = selfCheckProbe
+        self.selfCheckCohort = selfCheckProbe ? max(0, selfCheckCohort) : 0
     }
 
     enum CodingKeys: String, CodingKey {
@@ -702,6 +712,9 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// format, delivered to the settlement owner like `retainedCache`.
     var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     var nativeMTPCounters: NativeMTPSelfTestCounters? = nil
+    /// Exactness-probe rows only (`selfCheckCohort` > 0): decode tokens this
+    /// row generated while its whole cohort was decoding.
+    var selfCheckCohortDecodeTokens: Int? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -723,7 +736,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
-            nativeMTPCounters: nativeMTPCounters
+            nativeMTPCounters: nativeMTPCounters,
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
         )
     }
 
@@ -745,7 +759,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: serialConversationCache,
-            nativeMTPCounters: nativeMTPCounters
+            nativeMTPCounters: nativeMTPCounters,
+            selfCheckCohortDecodeTokens: selfCheckCohortDecodeTokens
         )
     }
 
@@ -765,6 +780,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             && lhs.stopCause == rhs.stopCause
             && lhs.serialToolStopTokenCount == rhs.serialToolStopTokenCount
             && lhs.nativeMTPCounters == rhs.nativeMTPCounters
+            && lhs.selfCheckCohortDecodeTokens == rhs.selfCheckCohortDecodeTokens
             && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
     }
 }
@@ -2040,6 +2056,11 @@ actor ContinuousBatchScheduler {
         var nativeMTPTupleFence: NativeMTPTupleFence?
         var nativeMTPCounters: NativeMTPSelfTestCounters?
         var nativeMTPFixtureProposalsConsumed = false
+        /// Exactness-probe cohort accounting (`selfCheckCohort`): decode
+        /// tokens counted so far at full cohort width, and the generated
+        /// count when the current full-width run began.
+        var selfCheckCohortDecodeTokens = 0
+        var selfCheckCohortRunStart: Int?
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -2099,6 +2120,12 @@ actor ContinuousBatchScheduler {
     /// Most requests that may wait for a row at once (SPEC-038 FR-CB3); a
     /// submit beyond it is refused with `.backpressure`.
     nonisolated var queueLimit: Int { configuration.queueLimit }
+    /// Per-request token cap and paged-KV pool size, which bound the FR-CB10
+    /// exactness probe's shape.
+    nonisolated var maxRequestTokens: Int { configuration.maxRequestTokens }
+    nonisolated var poolTokens: Int {
+        configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
+    }
     private let allocator: PagedKVBlockAllocator
     private let backend: any ContinuousBatchSchedulerBackend
     private let replayAuthority: any ContinuousBatchSchedulerReplayAuthority
@@ -2956,6 +2983,10 @@ actor ContinuousBatchScheduler {
                 ensurePump()
             }
         }
+        // An exactness-probe cohort decodes only once every row of it is in
+        // decode. The hold lasts only while admission or prefill progresses,
+        // so a row that cannot be admitted never stalls the others.
+        var admissionOrPrefillProgressed = true
         while true {
             if backendCancellationPending { break }
             if cleanupFailedClosed {
@@ -2966,7 +2997,9 @@ actor ContinuousBatchScheduler {
             await processCancellations()
             if await failClosedIfNeeded() { break }
             var madeProgress = false
-            if !activeDecode.isEmpty {
+            let holdCohortDecode = admissionOrPrefillProgressed && selfCheckCohortDecodeHeld
+            admissionOrPrefillProgressed = false
+            if !activeDecode.isEmpty && !holdCohortDecode {
                 await runDecodeStep()
                 madeProgress = true
                 if backendCancellationPending { break }
@@ -2976,14 +3009,55 @@ actor ContinuousBatchScheduler {
             }
             if await admitWaitingRows() {
                 madeProgress = true
+                admissionOrPrefillProgressed = true
             }
             if await failClosedIfNeeded() { break }
             if await runPrefillStep() {
                 madeProgress = true
+                admissionOrPrefillProgressed = true
             }
             if await failClosedIfNeeded() { break }
-            guard madeProgress else { break }
+            // A held decode with no other progress runs on the next pass.
+            guard madeProgress || holdCohortDecode else { break }
         }
+    }
+
+    /// Every decoding row belongs to an exactness-probe cohort and another
+    /// row of a cohort is still waiting, being admitted or prefilling.
+    private var selfCheckCohortDecodeHeld: Bool {
+        guard !activeDecode.isEmpty,
+              activeDecode.values.allSatisfy({ $0.request.selfCheckCohort > 0 })
+        else { return false }
+        return waiting.contains { $0.selfCheckCohort > 0 }
+            || admittingRequests.values.contains { $0.selfCheckCohort > 0 }
+            || activePrompt.values.contains { $0.request.selfCheckCohort > 0 }
+    }
+
+    /// Opens or closes each cohort row's full-width run before a decode
+    /// step: a run is open while at least `selfCheckCohort` rows, all of
+    /// them probe rows, decode together.
+    private func noteSelfCheckCohortDecodeStep(rows: [Row]) {
+        guard rows.contains(where: { $0.request.selfCheckCohort > 0 }) else { return }
+        let allProbe = rows.allSatisfy { $0.request.selfCheckProbe }
+        for row in rows where row.request.selfCheckCohort > 0 {
+            guard var active = activeDecode[row.request.id] else { continue }
+            let fullWidth = allProbe && rows.count >= active.request.selfCheckCohort
+            if fullWidth {
+                if active.selfCheckCohortRunStart == nil {
+                    active.selfCheckCohortRunStart = active.generatedTokens.count
+                }
+            } else if let start = active.selfCheckCohortRunStart {
+                active.selfCheckCohortDecodeTokens += max(0, active.generatedTokens.count - start)
+                active.selfCheckCohortRunStart = nil
+            }
+            activeDecode[row.request.id] = active
+        }
+    }
+
+    private static func selfCheckCohortDecodeTokens(of row: Row) -> Int? {
+        guard row.request.selfCheckCohort > 0 else { return nil }
+        let open = row.selfCheckCohortRunStart.map { max(0, row.generatedTokens.count - $0) } ?? 0
+        return row.selfCheckCohortDecodeTokens + open
     }
 
     private func startBackendCancellation() {
@@ -4343,6 +4417,7 @@ actor ContinuousBatchScheduler {
     private func runDecodeStep() async {
         await fenceDisabledActiveNativeMTPRows()
         guard !cleanupFailedClosed else { return }
+        noteSelfCheckCohortDecodeStep(rows: Array(activeDecode.values))
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
@@ -5513,7 +5588,8 @@ actor ContinuousBatchScheduler {
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
             serialConversationCache: isSuccessful ? serialConversationCache : nil,
-            nativeMTPCounters: row.nativeMTPCounters
+            nativeMTPCounters: row.nativeMTPCounters,
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -5546,7 +5622,8 @@ actor ContinuousBatchScheduler {
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
-            nativeMTPCounters: row.nativeMTPCounters
+            nativeMTPCounters: row.nativeMTPCounters,
+            selfCheckCohortDecodeTokens: Self.selfCheckCohortDecodeTokens(of: row)
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -5767,6 +5844,13 @@ actor ContinuousBatchScheduler {
             + activeDecode.values.filter(\.request.selfCheckProbe).count
     }
 
+    private var selfCheckCohortRowsPresent: Int {
+        waiting.filter { $0.selfCheckCohort > 0 }.count
+            + admittingRequests.values.filter { $0.selfCheckCohort > 0 }.count
+            + activePrompt.values.filter { $0.request.selfCheckCohort > 0 }.count
+            + activeDecode.values.filter { $0.request.selfCheckCohort > 0 }.count
+    }
+
     func setBuyerRowLimit(_ limit: Int) {
         buyerRowLimit = min(max(1, limit), configuration.maxActiveRows)
         if !waiting.isEmpty { ensurePump() }
@@ -5779,7 +5863,13 @@ actor ContinuousBatchScheduler {
     /// Whether the FCFS head may take a row now.
     private func headMayTakeRow(_ request: ContinuousBatchSchedulerRequest) -> Bool {
         guard occupiedSlots < configuration.maxActiveRows else { return false }
-        if request.selfCheckProbe { return true }
+        if request.selfCheckProbe {
+            // An exactness-probe cohort is admitted only once every row of it
+            // has been submitted, so none starts decoding ahead of the rest.
+            // A row that never arrives leaves the others to the queue wait
+            // timeout.
+            return request.selfCheckCohort <= 1 || selfCheckCohortRowsPresent >= request.selfCheckCohort
+        }
         let probeRows = selfCheckRowsOccupied
         guard probeRows == 0 else { return false }
         return occupiedSlots < (buyerRowLimit ?? configuration.maxActiveRows)
