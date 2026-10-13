@@ -10,3 +10,13 @@ All round-3 findings are fixed in the commit after this file. No fourth audit ro
 - SPEC said every width up to the scheduler rows is checked (architecture MEDIUM): FR-CB10 item 2 now says up to the ladder bound, including the probe shape bound.
 - Grants were not capped by the queue limit (security MEDIUM): `grantableRows` is now min(scheduler rows, queue limit, probe shape bound). Test: `testProbeShapeBoundCapsTheLadderOnSmallPools`.
 - Decision list without `single_row`, and the change log's crossing-row wording (architecture LOW): both fixed.
+
+## Closure check (Codex, after e838fce56)
+
+Verdict: 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW. Every round-3 finding is
+CLOSED with file:line evidence and a covering test: the cohort timeout maps to
+`probe_shape_unmet`; the shape-unavailable re-measure clears its markers; a
+first-width divergence precedes the serial-baseline guard; SPEC-038 FR-CB10
+names the ladder bound; and grants are capped by scheduler rows, queue limit
+and probe shape on every grant path. e838fce56 introduced no new
+finding. Prompt: `PROMPT_CLOSURE.md`.
