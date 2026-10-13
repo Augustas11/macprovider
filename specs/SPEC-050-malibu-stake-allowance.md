@@ -112,8 +112,7 @@ Coordinator `coordinator.yaml`, section `stake_allowance`:
 | `min_stake_age_hours` | int 1..720 | `24` | A lock earns only from the first refresh at least this long after it. |
 | `unlock_cooldown_hours` | int 24..2160 | `168` | Time between an unlock and the release of its MALIBU. |
 | `refresh_check_interval_seconds` | int 10..3600 | `60` | How often the refresh job checks whether today's run is done. |
-| `reservation_claim_timeout_seconds` | int 30..3600 | `120` | An allowance reservation the coordinator never sees is released after this. |
-| `reservation_max_age_seconds` | int 600..86400 | `7200` | A claimed reservation still open after this is closed by the reaper. |
+| `reservation_max_age_seconds` | int 600..86400 | `7200` | An allowance hold still open after this (for example after a coordinator crash) is closed by the reaper. |
 
 When `daily_budget_credits > 0`, `credits_per_malibu` and
 `per_account_daily_cap_credits` MUST both be positive or the configuration
@@ -194,18 +193,25 @@ allowance code.
 
 ### SPEC-050-R007 - Allowance-first spend ordering and the overage setting
 
-Before reserving paid quota for an API-key plaintext or relay-blind request,
-the gateway MUST ask the coordinator to admit the request against the
-allowance. The coordinator MUST reserve the request's credit bound from the
-account's remaining allowance (grant minus closed spend minus active holds) in
-one transaction when it fits, and answer `allowance`. When it does not fit, it
-MUST answer `paid` if the account's overage setting is on, and `refused` if it
-is off. Overage defaults to on. An `allowance` request MUST NOT count against
-the paid quota; a `paid` request reserves paid quota exactly as before; a
-`refused` request MUST be answered `429 rate_limit_exceeded /
-allowance_exhausted` with `X-RateLimit-Reset` at the next 00:00 UTC, before
-any coordinator dispatch. A request is funded by one source at admission;
-allowance and paid quota are not combined inside one request.
+For an API-key plaintext or relay-blind request, the gateway MUST send the
+request's model, input token upper bound, and maximum output tokens to the
+coordinator on the chat hop in gateway-only internal headers. Before any
+provider is dispatched, the coordinator MUST reserve the request's credit
+bound from the account's remaining allowance (grant minus closed spend minus
+active holds) in one transaction when it fits, and fund the request from the
+allowance. When it does not fit, the request is funded from the paid quota if
+the account's overage setting is on, and refused with `429
+rate_limit_exceeded / allowance_exhausted` and `X-RateLimit-Reset` at the next
+00:00 UTC if it is off. Overage defaults to on. The coordinator MUST tell the
+gateway the funding and whether the account has an allowance today; the
+gateway MUST then keep an allowance-funded request off the paid daily quota,
+both its hold and its usage. When the paid quota cannot take a request, the
+gateway MAY forward it only for an account the coordinator reported an
+allowance for that UTC day, marked so that only the allowance may fund it; the
+coordinator MUST refuse it with `429 quota_exhausted` when the allowance
+cannot cover it. A refusal happens before dispatch and the gateway refunds its
+reservation. A request is funded by one source; allowance and paid quota are
+not combined inside one request.
 
 ### SPEC-050-R008 - Per-request split and allowance balance
 
@@ -214,7 +220,8 @@ SPEC-005 ledger rows of all its attempts, measured at ledger insert. The
 coordinator MUST record one split row per ledger row of every request that
 went through allowance admission, carrying `allowance_credits` and
 `paid_credits` (one of them zero) and whether the row was rewards-excluded.
-A request with no split row was funded from the paid quota. Allowance-funded
+For an account with no allowance that day no split row is written, and its
+requests are funded from the paid quota. Allowance-funded
 requests MUST be excluded from SPEC-005 D1a wholesale statements. The
 allowance balance MUST NOT be withdrawable, transferable between accounts, or
 convertible to MALIBU or USDC. A closed request may spend more than its hold
@@ -280,15 +287,14 @@ billing database.
 
 ### SPEC-050-R014 - Version skew and coordinator failure
 
-A gateway that gets `404` from the admission endpoint MUST treat the request as
-`paid`. On a transport error or `5xx`, the gateway MUST treat it as `paid`
-unless its last answer for the account (at most 24 hours old) showed overage
-off, in which case it MUST answer `503 api_error / allowance_unavailable`
-without reserving paid quota. The gateway MAY cache a `paid` answer for an
-account without an allowance whose overage is on for at most 60 seconds and
-MUST drop that entry when the account changes its overage setting. An
-allowance reservation that the coordinator chat handler has not claimed within
-`reservation_claim_timeout_seconds` MUST be released.
+A coordinator that does not know the allowance headers ignores them, and the
+request is paid as before; a gateway that does not send them gets no
+allowance admission. A gateway MUST NOT forward a paid-quota-exhausted request
+as allowance-only unless the coordinator reported an allowance for the account
+that UTC day. If the coordinator cannot record the admission, it MUST refuse an
+allowance-only request with `503 allowance_unavailable` and otherwise serve the
+request from the paid quota. The gateway MUST strip the internal allowance
+headers from buyer requests and from responses to buyers.
 
 ## 6. Implementation, tests, and journeys
 
@@ -299,7 +305,9 @@ The machine-readable mapping is in `CONFORMANCE.json`.
 - Allowance store, refresh, admission, splits, self-dealing:
   `phase4-coordinator/internal/billing/allowance*.go`.
 - Coordinator internal API: `phase4-coordinator/internal/stakeallowance/`.
-- Gateway admission, quota exclusion, and `/v1/stake` proxy:
+- Coordinator chat-hop admission and close:
+  `phase4-coordinator/internal/buyer/allowance_hook.go`.
+- Gateway allowance headers, quota exclusion, and `/v1/stake` proxy:
   `phase5-gateway/internal/router/stake_allowance.go` and the SQLite store.
 - Integration journey: `test/integration/stake_allowance_integration_test.go`.
 
@@ -319,7 +327,10 @@ through the Malibu gateway) is the live slice of issue #1062.
 - A request with several attempts spends the gross credits of every attempt,
   because the operator funds each provider leg.
 - The credit bound for a pool-model request uses the global rate card; the
-  spend uses the ledger row actually written.
+  spend uses the ledger row actually written. The bound rounds up and applies
+  no usage validation, so it is never below the gross of the same tokens.
+- Split rows are written for every request of an account that has an
+  allowance that day; a request with no split row was paid from the quota.
 
 ## 9. Changelog
 

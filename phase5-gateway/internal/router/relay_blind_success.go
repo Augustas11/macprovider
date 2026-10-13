@@ -263,7 +263,15 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		walletDecision, err = s.admitWalletSessionInference(r, sessionAuth, raw, env.Model, env.ReservationTokenCap, daily, window, now, now.Add(time.Duration(s.cfg.Quotas.ReservationMaxAgeHours)*time.Hour))
 		decision = walletDecision.AccountQuota
 	} else {
-		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{AccountID: account, RequestID: requestID(r), WindowDate: window, RequestedTokens: env.ReservationTokenCap, DailyQuota: daily, CreatedAt: now, ExpiresAt: now.Add(time.Duration(s.cfg.Quotas.ReservationMaxAgeHours) * time.Hour), RelayBlind: relayBlindMetadataFor(r)})
+		quotaReq := storage.ReservationRequest{AccountID: account, RequestID: requestID(r), WindowDate: window, RequestedTokens: env.ReservationTokenCap, DailyQuota: daily, CreatedAt: now, ExpiresAt: now.Add(time.Duration(s.cfg.Quotas.ReservationMaxAgeHours) * time.Hour), RelayBlind: relayBlindMetadataFor(r)}
+		decision, err = s.store.ReserveQuota(r.Context(), quotaReq)
+		if errors.Is(err, storage.ErrQuotaExceeded) {
+			// SPEC-050-R007: relay-blind and privacy-class requests are
+			// funded from the allowance alone once the paid quota is spent.
+			if allowanceDecision, allowanceErr, tried := s.reserveAllowanceOnly(r.Context(), &subject, quotaReq); tried {
+				decision, err = allowanceDecision, allowanceErr
+			}
+		}
 	}
 	if err != nil {
 		if decision.Admitted {
@@ -312,6 +320,9 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	// capability, set together; subject.AccountID is account.
 	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
 	advertiseCapacityShed429(up.Header)
+	if sessionAuth == nil {
+		setAllowanceRequestHeaders(up.Header, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, subject.AllowanceRequired)
+	}
 	up.Header.Set(relayBlindExecutionHeader, consumed.ExecutionAuthorization)
 	// Chat is not built by relayBlindUpstream. Stamp the trusted marker on
 	// this empty header set; buyer-supplied copies never reach it.
@@ -347,6 +358,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
+	s.noteAllowanceResponse(r, &subject, resp.Header)
 	s.recordRelayBlindSettlementDispatch(subject, r, resp.Header)
 	validationValues := nonemptyHeaderValues(resp.Header.Values(relayBlindValidatedHeader))
 	inputValues := nonemptyHeaderValues(resp.Header.Values("X-MacProvider-Relay-Blind-Input-Tokens"))

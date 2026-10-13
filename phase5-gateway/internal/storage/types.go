@@ -214,7 +214,17 @@ type ReservationRequest struct {
 	ExpiresAt       time.Time
 	CreatedAt       time.Time
 	RelayBlind      *RelayBlindMetadata
+	// FundingSource is "" or FundingSourceQuota for the paid daily quota and
+	// FundingSourceAllowance for a request the coordinator admitted against
+	// the account's SPEC-050 allowance. An allowance reservation is recorded
+	// for settlement but never counts against the daily quota.
+	FundingSource string
 }
+
+const (
+	FundingSourceQuota     = "quota"
+	FundingSourceAllowance = "allowance"
+)
 
 type ActiveReservation struct {
 	AccountID       string

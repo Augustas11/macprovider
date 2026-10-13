@@ -25,6 +25,9 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 		OwnedProviderIDs:    stakeallowance.OwnedProviderLookup(coordinatorDB),
 		Logger:              logger,
 	}
+	if billingStore != nil {
+		deps.Allowance = billingStore
+	}
 	var source billing.AllowanceStakeSource
 	if rewardsDB != nil {
 		ledger, err := rewards.NewStakeLedger(rewardsDB,
@@ -41,7 +44,8 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 	}
 	if billingStore != nil {
 		startAllowanceRefresher(ctx, billingStore, source, allowancePolicy(cfg.StakeAllowance),
-			time.Duration(cfg.StakeAllowance.RefreshCheckIntervalSeconds)*time.Second, logger)
+			time.Duration(cfg.StakeAllowance.RefreshCheckIntervalSeconds)*time.Second,
+			time.Duration(cfg.StakeAllowance.ReservationMaxAgeSeconds)*time.Second, logger)
 	}
 	return stakeallowance.NewHandler(deps)
 }
@@ -76,9 +80,10 @@ func (a stakeSourceAdapter) EarningStakes(ctx context.Context, dayStart time.Tim
 }
 
 // startAllowanceRefresher records each UTC day's allowance at the first check
-// after 00:00 UTC (SPEC-050-R005). A run that fails is retried at the next
-// check; a day already recorded is left unchanged.
-func startAllowanceRefresher(ctx context.Context, store *billing.Store, source billing.AllowanceStakeSource, policy billing.AllowancePolicy, interval time.Duration, logger zerolog.Logger) {
+// after 00:00 UTC (SPEC-050-R005) and reaps stale allowance holds
+// (SPEC-050-R008). A run that fails is retried at the next check; a day
+// already recorded is left unchanged.
+func startAllowanceRefresher(ctx context.Context, store *billing.Store, source billing.AllowanceStakeSource, policy billing.AllowancePolicy, interval, maxAge time.Duration, logger zerolog.Logger) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
@@ -86,6 +91,11 @@ func startAllowanceRefresher(ctx context.Context, store *billing.Store, source b
 		tick := func() {
 			tickCtx, cancel := context.WithTimeout(ctx, interval)
 			defer cancel()
+			if closed, err := store.ReapAllowanceReservations(tickCtx, time.Now().UTC(), maxAge); err != nil {
+				logger.Warn().Err(err).Msg("allowance reservation reaper failed")
+			} else if closed > 0 {
+				logger.Info().Int64("closed", closed).Msg("stale allowance holds closed")
+			}
 			created, totals, err := store.RefreshAllowanceDay(tickCtx, time.Now().UTC(), source, policy)
 			switch {
 			case errors.Is(err, billing.ErrAllowanceStakeSourceUnavailable):

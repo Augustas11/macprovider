@@ -94,7 +94,7 @@ func (s *Store) ensureAllowanceTables(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, allowanceSchema); err != nil {
 		return fmt.Errorf("allowance schema: %w", err)
 	}
-	return nil
+	return s.ensureAllowanceSpendTables(ctx)
 }
 
 // allowanceDay is the UTC calendar day of t as YYYY-MM-DD.

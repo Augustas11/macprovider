@@ -86,6 +86,12 @@ var spec018RetryableByCode = map[string]bool{
 	// succeed once a provider upgrades and reconnects.
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// SPEC-050-R007/R014 allowance admission. Exhaustion lasts until the
+	// next 00:00 UTC refresh (X-RateLimit-Reset); an unavailable admission
+	// store is transient.
+	"allowance_exhausted":   false,
+	"quota_exhausted":       false,
+	"allowance_unavailable": true,
 	// BYOM admission states below settlement_capable are intentionally
 	// terminal for the current request: retrying the same paid route must not
 	// imply earning or catalog-priced settlement.
@@ -2525,6 +2531,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// recorder so mark() reads the live billing state at write time; outermost
 	// so it covers every downstream write path.
 	w = &noPriorDispatchResponseWriter{ResponseWriter: w, rec: rec}
+	// SPEC-050: admit the request against the account's allowance before any
+	// attempt is dispatched (a refusal carries the no-prior-dispatch marker,
+	// so the gateway refunds), and close the hold after the last attempt.
+	if !s.admitAllowance(w, r, rec, accountID, externalRequestID, hasAuthenticatedAccount) {
+		return
+	}
+	defer s.closeAllowance(rec, accountID, externalRequestID)
 	if strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader)) != "" {
 		s.handleRelayBlindChat(w, r, rec, originalRequestID)
 		return

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/rs/zerolog"
 )
@@ -44,12 +45,22 @@ type StakeLedger interface {
 	Position(ctx context.Context, accountID string, ownedProviderIDs []string) (rewards.StakePosition, error)
 }
 
+// AllowanceStore is the billing surface for the overage setting and the
+// account view (SPEC-050-R007/R008/R011).
+type AllowanceStore interface {
+	SetAllowanceOverage(ctx context.Context, accountID string, enabled bool, now time.Time) error
+	AllowanceStatusFor(ctx context.Context, accountID string, now time.Time) (billing.AllowanceStatus, error)
+}
+
 // Deps wires the handler. A nil Ledger answers stake calls with
-// 503 stake_source_unavailable (no rewards database configured).
+// 503 stake_source_unavailable (no rewards database configured). A nil
+// Allowance answers allowance calls with 503.
 type Deps struct {
 	GatewayServiceToken string
 	Ledger              StakeLedger
 	OwnedProviderIDs    func(ctx context.Context, githubUserID int64) ([]string, error)
+	Allowance           AllowanceStore
+	Now                 func() time.Time
 	Logger              zerolog.Logger
 }
 
@@ -128,7 +139,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStake(w, r, p, true)
 	case route == "unlock" && r.Method == http.MethodPost:
 		h.handleStake(w, r, p, false)
-	case route == "lock" || route == "unlock":
+	case route == "overage" && r.Method == http.MethodPost:
+		h.handleOverage(w, r, p)
+	case route == "lock" || route == "unlock" || route == "overage":
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 	default:
@@ -254,4 +267,34 @@ func (h *handler) writeStakeError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "stake_source_unavailable", "Staking is not available right now")
 	}
 	return true
+}
+
+func (h *handler) now() time.Time {
+	if h.deps.Now != nil {
+		return h.deps.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+type overageBody struct {
+	Enabled *bool `json:"enabled"`
+}
+
+// handleOverage sets whether a request the allowance cannot cover may use
+// the paid quota (SPEC-050-R007).
+func (h *handler) handleOverage(w http.ResponseWriter, r *http.Request, p principal) {
+	if h.deps.Allowance == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
+		return
+	}
+	var body overageBody
+	if err := decodeBody(r, w, &body); err != nil || body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_body", "Body must be {\"enabled\": true|false}")
+		return
+	}
+	if err := h.deps.Allowance.SetAllowanceOverage(r.Context(), p.AccountID, *body.Enabled, h.now()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "allowance_overage", "overage_enabled": *body.Enabled, "disclosure": Disclosure})
 }

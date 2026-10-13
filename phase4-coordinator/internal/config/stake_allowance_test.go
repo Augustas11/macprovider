@@ -26,7 +26,6 @@ func TestStakeAllowanceValidation(t *testing.T) {
 		"budget without cap":          func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = 10; s.CreditsPerMALIBU = 5 },
 		"cooldown too short":          func(s *StakeAllowanceConfig) { s.UnlockCooldownHours = 23 },
 		"min age zero":                func(s *StakeAllowanceConfig) { s.MinStakeAgeHours = 0 },
-		"claim timeout too short":     func(s *StakeAllowanceConfig) { s.ReservationClaimTimeoutSeconds = 5 },
 		"reservation max age too big": func(s *StakeAllowanceConfig) { s.ReservationMaxAgeSeconds = 86401 },
 		"refresh interval too short":  func(s *StakeAllowanceConfig) { s.RefreshCheckIntervalSeconds = 1 },
 	} {

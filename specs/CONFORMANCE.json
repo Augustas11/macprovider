@@ -12564,8 +12564,26 @@
       "requirement_id": "SPEC-050-R007",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:AdmitAllowance",
+        "phase4-coordinator/internal/billing/allowance_spend.go:AllowanceCreditBound",
+        "phase4-coordinator/internal/buyer/allowance_hook.go:admitAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:setAllowanceRequestHeaders",
+        "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:MarkReservationAllowanceFunded",
+        "phase5-gateway/internal/storage/sqlite/store.go:dailyUsageTx",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAdmitAllowanceSpendOrderingAndOverage",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestConcurrentAdmissionsNeverOverholdTheGrant",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAllowanceCreditBoundCoversTheLedgerGross",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceFundedChatLeavesPaidQuotaUntouched",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceFundedReservationDoesNotDrawPaidQuota"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12579,8 +12597,18 @@
       "requirement_id": "SPEC-050-R008",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:CloseAllowanceReservation",
+        "phase4-coordinator/internal/billing/allowance_spend.go:closeAllowanceReservationTx",
+        "phase4-coordinator/internal/billing/allowance_spend.go:ReapAllowanceReservations",
+        "phase4-coordinator/internal/billing/wholesale_generation.go:wholesaleLineTotals",
+        "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesStaleHolds",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12594,8 +12622,13 @@
       "requirement_id": "SPEC-050-R009",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:closeAllowanceReservationTx"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12624,8 +12657,12 @@
       "requirement_id": "SPEC-050-R011",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase5-gateway/internal/router/stake_allowance.go:handleStakeProxy"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12675,8 +12712,15 @@
       "requirement_id": "SPEC-050-R014",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/allowance_hook.go:admitAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceFundedChatLeavesPaidQuotaUntouched"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

@@ -7,24 +7,22 @@ import "fmt"
 // are SPEC-005 credits (1 credit = 1 micro-USD). Values apply at coordinator
 // start.
 type StakeAllowanceConfig struct {
-	DailyBudgetCredits             int64 `yaml:"daily_budget_credits"`
-	CreditsPerMALIBU               int64 `yaml:"credits_per_malibu"`
-	PerAccountDailyCapCredits      int64 `yaml:"per_account_daily_cap_credits"`
-	MinStakeAgeHours               int   `yaml:"min_stake_age_hours"`
-	UnlockCooldownHours            int   `yaml:"unlock_cooldown_hours"`
-	RefreshCheckIntervalSeconds    int   `yaml:"refresh_check_interval_seconds"`
-	ReservationClaimTimeoutSeconds int   `yaml:"reservation_claim_timeout_seconds"`
-	ReservationMaxAgeSeconds       int   `yaml:"reservation_max_age_seconds"`
+	DailyBudgetCredits          int64 `yaml:"daily_budget_credits"`
+	CreditsPerMALIBU            int64 `yaml:"credits_per_malibu"`
+	PerAccountDailyCapCredits   int64 `yaml:"per_account_daily_cap_credits"`
+	MinStakeAgeHours            int   `yaml:"min_stake_age_hours"`
+	UnlockCooldownHours         int   `yaml:"unlock_cooldown_hours"`
+	RefreshCheckIntervalSeconds int   `yaml:"refresh_check_interval_seconds"`
+	ReservationMaxAgeSeconds    int   `yaml:"reservation_max_age_seconds"`
 }
 
 // DefaultStakeAllowanceConfig is the SPEC-050 §4 default: on, zero budget.
 func DefaultStakeAllowanceConfig() StakeAllowanceConfig {
 	return StakeAllowanceConfig{
-		MinStakeAgeHours:               24,
-		UnlockCooldownHours:            168,
-		RefreshCheckIntervalSeconds:    60,
-		ReservationClaimTimeoutSeconds: 120,
-		ReservationMaxAgeSeconds:       7200,
+		MinStakeAgeHours:            24,
+		UnlockCooldownHours:         168,
+		RefreshCheckIntervalSeconds: 60,
+		ReservationMaxAgeSeconds:    7200,
 	}
 }
 
@@ -44,9 +42,6 @@ func (c Config) validateStakeAllowance() error {
 	}
 	if s.RefreshCheckIntervalSeconds < 10 || s.RefreshCheckIntervalSeconds > 3600 {
 		return fmt.Errorf("stake_allowance.refresh_check_interval_seconds must be in [10, 3600]")
-	}
-	if s.ReservationClaimTimeoutSeconds < 30 || s.ReservationClaimTimeoutSeconds > 3600 {
-		return fmt.Errorf("stake_allowance.reservation_claim_timeout_seconds must be in [30, 3600]")
 	}
 	if s.ReservationMaxAgeSeconds < 600 || s.ReservationMaxAgeSeconds > 86400 {
 		return fmt.Errorf("stake_allowance.reservation_max_age_seconds must be in [600, 86400]")

@@ -72,6 +72,12 @@ type usageSubject struct {
 	DemoTokenHash        string
 	WalletSessionID      string
 	ReservationCreatedAt time.Time
+	// AllowanceFunded marks a request the coordinator admitted against the
+	// account's SPEC-050 allowance; its quota reservation does not draw on
+	// the paid daily quota. AllowanceRequired marks one whose paid quota was
+	// exhausted, so only the allowance may fund it.
+	AllowanceFunded   bool
+	AllowanceRequired bool
 }
 
 const (
@@ -551,11 +557,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, subject.ReservationCreatedAt, s.now().Add(reservationMaxAge))
 		decision = sessionDecision.AccountQuota
 	} else {
-		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
+		quotaReq := storage.ReservationRequest{
 			AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
 			RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
 			CreatedAt: subject.ReservationCreatedAt, ExpiresAt: s.now().Add(reservationMaxAge),
-		})
+		}
+		decision, err = s.store.ReserveQuota(r.Context(), quotaReq)
+		if errors.Is(err, storage.ErrQuotaExceeded) && !authn.Demo {
+			// SPEC-050-R007: the paid quota is spent, but an account with an
+			// allowance today may still be funded from the allowance alone.
+			if allowanceDecision, allowanceErr, tried := s.reserveAllowanceOnly(r.Context(), &subject, quotaReq); tried {
+				decision, err = allowanceDecision, allowanceErr
+			}
+		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
@@ -725,6 +739,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			// SPEC-050-R007: API-key requests are admitted against the
+			// account's allowance on the coordinator before dispatch.
+			if !authn.Demo && authn.WalletSession == nil {
+				setAllowanceRequestHeaders(upReq.Header, model, promptReservation, maxTokens, subject.AllowanceRequired)
+			}
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
 			// budget as authenticated dispatch metadata instead, so an omitted
@@ -837,6 +856,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	s.noteAllowanceResponse(r, &subject, resp.Header)
 	if priorProviderDispatch {
 		if resp.Header == nil {
 			resp.Header = http.Header{}
