@@ -371,3 +371,30 @@ func TestAllowanceAdmissionDayAcrossMidnight(t *testing.T) {
 		t.Fatalf("retry hold not on day one: %+v", one)
 	}
 }
+
+// A gateway retry of a hold that is still active, arriving at a new
+// process after the old one died, moves the hold to the new process, so the
+// reaper does not close it while the retry runs.
+func TestRetriedActiveHoldMovesToTheServingProcess(t *testing.T) {
+	_, oldProcess := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	newProcess, err := NewStore(oldProcess.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantAllowance(t, oldProcess, AllowanceStake{AccountID: "acct", Units: malibu(100)})
+	admit(t, oldProcess, "acct", "ext-adopt", 50_000, false)
+	if err := newProcess.RenewAllowanceProcessLease(ctx, allowanceTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if d := admit(t, newProcess, "acct", "ext-adopt", 50_000, false); d.Funding != AllowanceFundingAllowance {
+		t.Fatalf("retry %+v", d)
+	}
+	if closed, err := newProcess.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Minute), 3*time.Minute); err != nil || closed != 0 {
+		t.Fatalf("hold adopted by the serving process was reaped: %d %v", closed, err)
+	}
+	status, _ := newProcess.AllowanceStatusFor(ctx, "acct", allowanceTestNow)
+	if status.HeldCredits != 50_000 {
+		t.Fatalf("status %+v", status)
+	}
+}

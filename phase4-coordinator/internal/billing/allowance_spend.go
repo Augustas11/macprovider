@@ -257,6 +257,14 @@ UPDATE allowance_reservations SET status = 'active', bound_credits = ?, closed_a
 				if err != nil {
 					return err
 				}
+			} else if existingStatus == "active" {
+				// The retry now runs in this process: take the hold over so
+				// the reaper never closes it for a process that is gone.
+				if _, err := conn.ExecContext(ctx, `
+UPDATE allowance_reservations SET process_epoch = ?
+ WHERE account_id = ? AND request_id = ? AND status = 'active'`, s.allowanceProcess.epoch(), in.AccountID, in.RequestID); err != nil {
+					return fmt.Errorf("allowance: adopt reservation: %w", err)
+				}
 			}
 			decision.RemainingCredits = remainingAllowance(granted, spent, held)
 			return nil

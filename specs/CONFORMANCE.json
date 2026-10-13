@@ -12626,7 +12626,8 @@
         "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource",
         "phase5-gateway/internal/router/stake_allowance.go:persistFundingSource",
         "phase5-gateway/internal/router/settlement_journal_recovery.go:redriveSettlementEffect",
-        "phase4-coordinator/internal/billing/allowance_spend.go:RenewAllowanceProcessLease"
+        "phase4-coordinator/internal/billing/allowance_spend.go:RenewAllowanceProcessLease",
+        "phase5-gateway/internal/router/stake_allowance.go:markFundingWithRetry"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
@@ -12635,7 +12636,11 @@
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
         "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestSettlementWritesConfirmedFunding",
-        "phase5-gateway/internal/router/stake_allowance_test.go:TestJournalRecoveryKeepsAllowanceFunding"
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestJournalRecoveryKeepsAllowanceFunding",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestAllowanceFundingMarkIsRetried",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestLiveFallbackDefersWhenFundingIsNotDurable",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestJournalRecoveryRetriesUntilFundingIsDurable",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestRetriedActiveHoldMovesToTheServingProcess"
       ],
       "journeys": [],
       "evidence": [],
@@ -12786,7 +12791,8 @@
         "phase5-gateway/internal/router/stake_allowance_test.go:TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota",
         "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates",
         "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceDayLookupIsNotBlockedByANegativeAnswer",
-        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceOnlyReservationStaysPaidUntilConfirmed"
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceOnlyReservationStaysPaidUntilConfirmed",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestPositiveAllowanceDayIsCachedOnlyAfterItIsStored"
       ],
       "journeys": [],
       "evidence": [],

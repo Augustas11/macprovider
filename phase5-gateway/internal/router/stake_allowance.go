@@ -193,15 +193,12 @@ func (s *Server) noteAllowanceResponse(r *http.Request, subject *usageSubject, h
 	if active == "1" || active == "0" {
 		s.noteAllowanceDay(subject.AccountID, day, active == "1")
 	}
-	store, _ := s.store.(allowanceStore)
 	if subject.AllowanceRequired && funding != allowanceFundingAllowance {
 		s.noteAllowanceDay(subject.AccountID, day, false)
 		subject.AllowanceFunded = false
-		if store != nil {
-			if err := store.MarkReservationFundingSource(context.Background(), subject.AccountID, requestID(r), storage.FundingSourceQuota); err != nil {
-				slog.Error("allowance-only request not funded by the coordinator; settlement charges the paid quota",
-					"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
-			}
+		if err := s.markFundingWithRetry(subject.AccountID, requestID(r), storage.FundingSourceQuota); err != nil {
+			slog.Error("allowance-only request not funded by the coordinator; its reservation stays on the paid quota",
+				"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
 		}
 		return
 	}
@@ -209,12 +206,36 @@ func (s *Server) noteAllowanceResponse(r *http.Request, subject *usageSubject, h
 		return
 	}
 	subject.AllowanceFunded = true
-	if store != nil {
-		if err := store.MarkReservationFundingSource(context.Background(), subject.AccountID, requestID(r), storage.FundingSourceAllowance); err != nil {
-			slog.Warn("allowance funding mark failed; the settlement records it",
-				"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
+	// The mark is retried because recovery paths that settle without this
+	// request's context (relay-blind finality and status reconciliation)
+	// read the funding from the reservation row.
+	if err := s.markFundingWithRetry(subject.AccountID, requestID(r), storage.FundingSourceAllowance); err != nil {
+		slog.Error("allowance funding mark failed after retries; this request's own settlement and its journal still record the allowance, but a settlement recovered without them would bill the paid quota",
+			"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
+	}
+}
+
+// markFundingRetryDelays spaces the funding-mark retries.
+var markFundingRetryDelays = []time.Duration{0, 25 * time.Millisecond, 100 * time.Millisecond}
+
+// markFundingWithRetry writes the funding onto the reservation, retrying a
+// transient failure. A missing reservation is not retried.
+func (s *Server) markFundingWithRetry(account, reqID, source string) error {
+	store, ok := s.store.(allowanceStore)
+	if !ok {
+		return nil
+	}
+	var err error
+	for _, delay := range markFundingRetryDelays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		err = store.MarkReservationFundingSource(context.Background(), account, reqID, source)
+		if err == nil || errors.Is(err, storage.ErrReservationNotFound) {
+			return nil
 		}
 	}
+	return err
 }
 
 // settlementFundingSource is the funding a settlement writes onto the
