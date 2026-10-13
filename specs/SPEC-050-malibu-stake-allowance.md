@@ -209,8 +209,11 @@ allowance code.
 ### SPEC-050-R007 - Allowance-first spend ordering and the overage setting
 
 For an API-key plaintext or relay-blind request, the gateway MUST send the
-request's model, input token upper bound, and maximum output tokens to the
-coordinator on the chat hop in gateway-only internal headers. Before any
+request's model, input token upper bound, maximum output tokens, and the UTC
+day of its quota reservation to the coordinator on the chat hop in
+gateway-only internal headers. The coordinator accounts the request to that
+day when it is today or yesterday by its own clock, and to today otherwise; a
+retry is accounted to the day the request was first admitted. Before any
 provider is dispatched, the coordinator MUST reserve the request's credit
 bound from the account's remaining allowance (grant minus closed spend minus
 active holds) in one transaction when it fits, and fund the request from the
@@ -250,8 +253,10 @@ when the handler ends; holds created before the current coordinator process
 started belong to handlers that died with it and are closed by the refresh
 job from the ledger. Closing is re-entrant, so a later close adds any attempt
 recorded after an earlier one. The gateway settlement writes the confirmed
-funding onto its reservation in the same transaction, so a failed earlier
-update never leaves allowance usage on the paid quota.
+funding onto its reservation in the same transaction, and the settlement
+fallback and the settlement-journal recovery (which journals the funding)
+write it too, so a failed earlier update or a crash never leaves allowance
+usage on the paid quota.
 
 ### SPEC-050-R009 - Providers are paid unchanged
 
@@ -289,8 +294,9 @@ account view MUST return the staked and unlocking MALIBU, the next unlock
 release time, MALIBU available to stake, today's allowance, spent, held and
 remaining credits, the next refresh time, the overage setting, the payout
 addresses of the account's owned providers (`linked_wallets`), and the
-disclosure text of SPEC-050-R012. The gateway account page MUST show these
-fields.
+disclosure text of SPEC-050-R012. A configured stake source that cannot
+answer MUST make the view `503 stake_source_unavailable`, never a zero stake.
+The gateway account page MUST show these fields.
 
 ### SPEC-050-R012 - Disclosure without yield language
 
@@ -319,7 +325,8 @@ A coordinator that does not know the allowance headers ignores them, and the
 request is paid as before; a gateway that does not send them gets no
 allowance admission. A gateway MUST NOT forward a paid-quota-exhausted request
 as allowance-only unless the coordinator reported an allowance for the account
-that UTC day; it keeps that answer across restarts. If the coordinator cannot
+that UTC day; it keeps that answer in a table shared across restarts and
+gateway instances and caches only positive answers in memory. If the coordinator cannot
 run admission for an allowance-only request (missing or invalid headers, no
 account context, no billing store, a store error), it MUST refuse it with
 `503 allowance_unavailable` before dispatch, and otherwise serve the request

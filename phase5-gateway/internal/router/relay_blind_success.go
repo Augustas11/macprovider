@@ -321,7 +321,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
 	advertiseCapacityShed429(up.Header)
 	if sessionAuth == nil {
-		setAllowanceRequestHeaders(up.Header, env.Model, env.InputTokenUpperBound, env.MaxOutputTokens, subject.AllowanceRequired)
+		setAllowanceRequestHeaders(up.Header, env.Model, window, env.InputTokenUpperBound, env.MaxOutputTokens, subject.AllowanceRequired)
 	}
 	up.Header.Set(relayBlindExecutionHeader, consumed.ExecutionAuthorization)
 	// Chat is not built by relayBlindUpstream. Stamp the trusted marker on

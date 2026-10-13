@@ -208,6 +208,7 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		TokenSource:      rec.TokenSource,
 		Outcome:          rec.Outcome,
 		SettledAt:        s.now(),
+		FundingSource:    rec.FundingSource,
 	}
 	var settleErr error
 	if rec.DemoIdentity != "" {
@@ -250,6 +251,9 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 	// fallback rung either completes the equivalent §17.7 outcome or fails
 	// too, leaving the effect unsealed for the next tick.
 
+	// SPEC-050-R008: the idempotent rung keeps the journaled funding on the
+	// reservation too.
+	s.persistFundingSource(rec.AccountID, rec.RequestID, rec.FundingSource)
 	ev := storage.UsageEvent{
 		RelayBlind:       rec.RelayBlind,
 		RequestID:        rec.RequestID,

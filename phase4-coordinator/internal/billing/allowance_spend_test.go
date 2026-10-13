@@ -307,3 +307,57 @@ func TestOverageRecordsOnlyChangesAndIsBounded(t *testing.T) {
 		t.Fatalf("events %d", n)
 	}
 }
+
+// A request started before 00:00 UTC is accounted to the gateway's
+// reservation day, and a retry after midnight stays on the day it was first
+// admitted.
+func TestAllowanceAdmissionDayAcrossMidnight(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	dayOne := time.Date(2026, 10, 13, 23, 59, 0, 0, time.UTC)
+	dayTwo := dayOne.Add(2 * time.Minute)
+	policy := testAllowancePolicy()
+	if _, _, err := store.RefreshAllowanceDay(ctx, dayOne, &fakeAllowanceSource{stakes: []AllowanceStake{{AccountID: "acct", Units: malibu(100)}}}, policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RefreshAllowanceDay(ctx, dayTwo, &fakeAllowanceSource{stakes: []AllowanceStake{{AccountID: "acct", Units: malibu(100)}}}, policy); err != nil {
+		t.Fatal(err)
+	}
+	admitAt := func(id string, now time.Time, day string) AllowanceDecision {
+		t.Helper()
+		d, err := store.AdmitAllowance(ctx, AllowanceAdmission{AccountID: "acct", RequestID: id, Model: "m", BoundCredits: 60_000, Now: now, Day: day})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	// Gateway reserved on day one; the coordinator sees it after midnight.
+	if d := admitAt("late", dayTwo, "2026-10-13"); d.Funding != AllowanceFundingAllowance {
+		t.Fatalf("late %+v", d)
+	}
+	one, _ := store.AllowanceStatusFor(ctx, "acct", dayOne)
+	two, _ := store.AllowanceStatusFor(ctx, "acct", dayTwo)
+	if one.HeldCredits != 60_000 || two.HeldCredits != 0 {
+		t.Fatalf("held day one %d day two %d, want the hold on the gateway's day", one.HeldCredits, two.HeldCredits)
+	}
+	// A day the gateway cannot honestly claim falls back to the clock's.
+	if d := admitAt("bogus", dayTwo, "2026-09-01"); d.Funding != AllowanceFundingAllowance {
+		t.Fatalf("bogus day %+v", d)
+	}
+	if two, _ = store.AllowanceStatusFor(ctx, "acct", dayTwo); two.HeldCredits != 60_000 {
+		t.Fatalf("bogus-day hold not on today: %+v", two)
+	}
+	// Close day one's request, then retry it after midnight: it is held
+	// again on day one, not day two.
+	writeAllowanceAttempt(t, reqStore, store, "acct", "late", "coord-late", 0, "provider-a")
+	if err := store.CloseAllowanceReservation(ctx, "acct", "late", dayTwo); err != nil {
+		t.Fatal(err)
+	}
+	if d := admitAt("late", dayTwo.Add(time.Hour), "2026-10-14"); d.Funding != AllowanceFundingAllowance {
+		t.Fatalf("retry %+v", d)
+	}
+	one, _ = store.AllowanceStatusFor(ctx, "acct", dayOne)
+	if one.HeldCredits <= 60_000 {
+		t.Fatalf("retry hold not on day one: %+v", one)
+	}
+}

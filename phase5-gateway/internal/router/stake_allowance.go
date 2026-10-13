@@ -39,40 +39,43 @@ const (
 	allowanceInputTokensHeader  = "X-MacProvider-Internal-Allowance-Input-Tokens"
 	allowanceOutputTokensHeader = "X-MacProvider-Internal-Allowance-Output-Tokens"
 	allowanceRequiredHeader     = "X-MacProvider-Internal-Allowance-Required"
+	allowanceDayHeader          = "X-MacProvider-Internal-Allowance-Day"
 	allowanceFundingHeader      = "X-MacProvider-Internal-Allowance-Funding"
 	allowanceActiveHeader       = "X-MacProvider-Internal-Allowance-Active"
 
 	allowanceCacheMaxEntries = 100_000
 )
 
-// allowanceCache remembers, per account and UTC day, that the coordinator
-// reported an allowance. Only such an account may be forwarded once its paid
-// quota is exhausted, so the coordinator can fund it from the allowance alone.
-// The in-memory map is a front for the allowance_active_days table, which
-// keeps the answer across gateway restarts and instances.
+// allowanceCache remembers, per account, the UTC day the coordinator last
+// reported an allowance for. Only such an account may be forwarded once its
+// paid quota is exhausted, so the coordinator can fund it from the allowance
+// alone. Only positive answers are cached in memory; the
+// allowance_active_days table is the shared source across restarts and
+// gateway instances, so a miss always consults it.
 type allowanceCache struct {
 	mu      sync.Mutex
 	entries map[string]string // account -> UTC day with an allowance
 }
 
-func (c *allowanceCache) get(account string) (string, bool) {
+func (c *allowanceCache) has(account, day string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	day, ok := c.entries[account]
-	return day, ok
+	return c.entries[account] == day
 }
 
 func (c *allowanceCache) set(account, day string, active bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !active {
+		if c.entries[account] == day {
+			delete(c.entries, account)
+		}
+		return
+	}
 	if c.entries == nil || len(c.entries) >= allowanceCacheMaxEntries {
 		c.entries = map[string]string{}
 	}
-	if active {
-		c.entries[account] = day
-	} else {
-		c.entries[account] = ""
-	}
+	c.entries[account] = day
 }
 
 // allowanceStore is implemented by the SQLite store.
@@ -83,8 +86,8 @@ type allowanceStore interface {
 }
 
 func (s *Server) allowanceActive(ctx context.Context, account, day string) bool {
-	if cached, ok := s.allowance.get(account); ok {
-		return cached == day
+	if s.allowance.has(account, day) {
+		return true
 	}
 	store, ok := s.store.(allowanceStore)
 	if !ok {
@@ -99,10 +102,10 @@ func (s *Server) allowanceActive(ctx context.Context, account, day string) bool 
 	return active
 }
 
-// noteAllowanceDay records the coordinator's answer, writing the table only
-// when the remembered answer changes.
+// noteAllowanceDay records the coordinator's answer. A positive answer
+// already cached for the day writes nothing.
 func (s *Server) noteAllowanceDay(account, day string, active bool) {
-	if cached, ok := s.allowance.get(account); ok && (cached == day) == active {
+	if active && s.allowance.has(account, day) {
 		return
 	}
 	s.allowance.set(account, day, active)
@@ -113,11 +116,30 @@ func (s *Server) noteAllowanceDay(account, day string, active bool) {
 	}
 }
 
+// persistFundingSource writes a confirmed funding onto the reservation
+// outside the normal settlement transaction (settlement fallback, journal
+// recovery). Empty does nothing.
+func (s *Server) persistFundingSource(account, reqID, source string) {
+	if source == "" || account == "" {
+		return
+	}
+	store, ok := s.store.(allowanceStore)
+	if !ok {
+		return
+	}
+	if err := store.MarkReservationFundingSource(context.Background(), account, reqID, source); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		slog.Error("allowance funding persist failed", "request_id", reqID, "account_id", account, "source", source, "error", err)
+	}
+}
+
 // setAllowanceRequestHeaders asks the coordinator to admit this request
-// against the account's allowance. required marks a request whose paid quota
-// is exhausted: only the allowance may fund it.
-func setAllowanceRequestHeaders(h http.Header, model string, inputUpperBound, maxOutputTokens int64, required bool) {
+// against the account's allowance for day, the UTC day of the gateway's
+// quota reservation, so both sides account the request to the same day.
+// required marks a request whose paid quota is exhausted: only the allowance
+// may fund it.
+func setAllowanceRequestHeaders(h http.Header, model, day string, inputUpperBound, maxOutputTokens int64, required bool) {
 	h.Set(allowanceModelHeader, model)
+	h.Set(allowanceDayHeader, day)
 	h.Set(allowanceInputTokensHeader, strconv.FormatInt(inputUpperBound, 10))
 	h.Set(allowanceOutputTokensHeader, strconv.FormatInt(maxOutputTokens, 10))
 	if required {

@@ -276,3 +276,67 @@ func TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota(t *testing.T) {
 		t.Fatalf("after an unfunded allowance-only request: status %d hops %d -> %d; want a local 429", resp.Code, before, len(hops()))
 	}
 }
+
+// SPEC-050-R008: a journaled settlement re-driven after a crash keeps the
+// coordinator-confirmed allowance funding, on both recovery rungs, so the
+// allowance usage never lands on the paid quota.
+func TestJournalRecoveryKeepsAllowanceFunding(t *testing.T) {
+	for _, refunded := range []bool{false, true} {
+		srv, store, _, jnl, _ := newJournalHarness(t, nil)
+		account := "acct_journal_allow"
+		if refunded {
+			account += "_refunded"
+		}
+		seedJournalReservation(t, store, account, "req-allow", 100)
+		if refunded {
+			if err := store.RefundReservation(context.Background(), account, "req-allow", fixedNow().Unix()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rec := journalSettleEffect(account, "req-allow")
+		rec.FundingSource = storage.FundingSourceAllowance
+		if err := jnl.WriteEffect(rec); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := srv.RecoverSettlementJournal(context.Background(), 0); err != nil {
+			t.Fatal(err)
+		}
+		used, reserved, err := store.DailyUsage(context.Background(), account, journalTestWindow)
+		if err != nil || used != 0 || reserved != 0 {
+			t.Fatalf("refunded=%v used=%d reserved=%d err=%v: recovered allowance usage must leave the paid quota", refunded, used, reserved, err)
+		}
+	}
+}
+
+// A negative in-memory answer never hides an allowance another gateway
+// instance (or a later response) recorded in the shared table.
+func TestAllowanceDayLookupIsNotBlockedByANegativeAnswer(t *testing.T) {
+	reservation := promptCapTokens([]byte(chatBody(false))) + 20
+	client, hops := allowanceCoordinator(t, func(n int, r *http.Request) (int, http.Header, string) {
+		if n == 1 {
+			return http.StatusOK, allowanceOKHeaders("paid", "0"), retryChatSuccessBody
+		}
+		if r.Header.Get(allowanceRequiredHeader) != "1" || r.Header.Get(allowanceDayHeader) == "" {
+			t.Errorf("hop %d headers %v", n, r.Header)
+		}
+		return http.StatusOK, allowanceOKHeaders("allowance", "1"), retryChatSuccessBody
+	})
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Quotas.AccountDailyTokens = reservation + 3
+		cfg.Retry503.Enabled = false
+	})
+	key := createAccountAndKey(t, store, cfg, "acct_shared_day")
+	if resp := postChat(t, h, key, chatBody(false), map[string]string{"X-Request-ID": "00000000-0000-4000-8000-000000000201"}); resp.Code != http.StatusOK {
+		t.Fatalf("first status %d", resp.Code)
+	}
+	// Another gateway instance learned of today's allowance.
+	if err := store.NoteAllowanceDay(context.Background(), "acct_shared_day", fixedNow().UTC().Format("2006-01-02"), true, fixedNow()); err != nil {
+		t.Fatal(err)
+	}
+	if resp := postChat(t, h, key, chatBody(false), map[string]string{"X-Request-ID": "00000000-0000-4000-8000-000000000202"}); resp.Code != http.StatusOK {
+		t.Fatalf("allowance-only status %d body %s", resp.Code, resp.Body.String())
+	}
+	if len(hops()) != 2 {
+		t.Fatalf("hops %d", len(hops()))
+	}
+}

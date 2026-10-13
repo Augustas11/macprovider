@@ -742,7 +742,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-050-R007: API-key requests are admitted against the
 			// account's allowance on the coordinator before dispatch.
 			if !authn.Demo && authn.WalletSession == nil {
-				setAllowanceRequestHeaders(upReq.Header, model, promptReservation, maxTokens, subject.AllowanceRequired)
+				setAllowanceRequestHeaders(upReq.Header, model, window, promptReservation, maxTokens, subject.AllowanceRequired)
 			}
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
@@ -3284,6 +3284,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		Outcome:          outcome,
 		DemoIdentity:     subject.DemoIdentity,
 		DemoTokenHash:    subject.DemoTokenHash,
+		FundingSource:    settlementFundingSource(subject),
 		WalletSessionID:  subject.WalletSessionID,
 	}); journalErr != nil {
 		// FAIL-OPEN, deliberately. The buyer already has the bytes; refusing
@@ -3339,6 +3340,9 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			Outcome:          outcome,
 			CreatedAt:        s.now(),
 		}
+		// SPEC-050-R008: keep the confirmed funding on the reservation even
+		// though the settlement transaction that normally writes it failed.
+		s.persistFundingSource(subject.AccountID, requestID(r), settlementFundingSource(subject))
 		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
 			// Both the normal settle path and the idempotent fallback
 			// failed. Could be a genuine DB pathology OR (per #196 PK

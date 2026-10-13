@@ -20,6 +20,7 @@ const (
 	allowanceInputTokensHeader  = "X-MacProvider-Internal-Allowance-Input-Tokens"
 	allowanceOutputTokensHeader = "X-MacProvider-Internal-Allowance-Output-Tokens"
 	allowanceRequiredHeader     = "X-MacProvider-Internal-Allowance-Required"
+	allowanceDayHeader          = "X-MacProvider-Internal-Allowance-Day"
 	allowanceFundingHeader      = "X-MacProvider-Internal-Allowance-Funding"
 	allowanceActiveHeader       = "X-MacProvider-Internal-Allowance-Active"
 
@@ -77,6 +78,7 @@ func (s *Server) admitAllowance(w http.ResponseWriter, r *http.Request, rec *bil
 	decision, err := billingStore.AdmitAllowance(ctx, billing.AllowanceAdmission{
 		AccountID: accountID, RequestID: externalRequestID, Model: model,
 		BoundCredits: s.AllowanceCreditBound(model, input, output), Required: required, Now: s.now(),
+		Day: strings.TrimSpace(r.Header.Get(allowanceDayHeader)),
 	})
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", externalRequestID).Msg("allowance admission failed")

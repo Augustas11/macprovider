@@ -372,15 +372,18 @@ func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, p princi
 	if h.deps.Ledger != nil {
 		pos, err := h.deps.Ledger.Position(r.Context(), p.AccountID, owned)
 		if err != nil {
+			// A configured stake source that cannot answer is reported as
+			// unavailable, never as a zero stake.
 			h.deps.Logger.Warn().Err(err).Msg("stake: position failed")
-		} else {
-			view["stake_source"] = "ledger_malibu_v1"
-			view["staked_malibu"] = rewards.FormatMALIBUUnits(pos.StakedUnits)
-			view["unlocking_malibu"] = rewards.FormatMALIBUUnits(pos.UnlockingUnits)
-			view["available_to_stake_malibu"] = rewards.FormatMALIBUUnits(pos.AvailableUnits)
-			if pos.NextReleaseAt != nil {
-				view["next_unlock_release_at"] = pos.NextReleaseAt.UTC().Format(time.RFC3339)
-			}
+			writeError(w, http.StatusServiceUnavailable, "api_error", "stake_source_unavailable", "Staking is not available right now")
+			return
+		}
+		view["stake_source"] = "ledger_malibu_v1"
+		view["staked_malibu"] = rewards.FormatMALIBUUnits(pos.StakedUnits)
+		view["unlocking_malibu"] = rewards.FormatMALIBUUnits(pos.UnlockingUnits)
+		view["available_to_stake_malibu"] = rewards.FormatMALIBUUnits(pos.AvailableUnits)
+		if pos.NextReleaseAt != nil {
+			view["next_unlock_release_at"] = pos.NextReleaseAt.UTC().Format(time.RFC3339)
 		}
 	}
 	writeJSON(w, http.StatusOK, view)

@@ -12587,7 +12587,8 @@
         "phase5-gateway/internal/storage/sqlite/store.go:dailyUsageTx",
         "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage",
         "phase4-coordinator/internal/billing/allowance_spend.go:allowanceOverage",
-        "phase4-coordinator/internal/billing/allowance_spend.go:SetAllowanceOverage"
+        "phase4-coordinator/internal/billing/allowance_spend.go:SetAllowanceOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:admissionDay"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAdmitAllowanceSpendOrderingAndOverage",
@@ -12600,7 +12601,8 @@
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestRetriedAllowanceRequestIsHeldAgain",
-        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestOverageRecordsOnlyChangesAndIsBounded"
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestOverageRecordsOnlyChangesAndIsBounded",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAllowanceAdmissionDayAcrossMidnight"
       ],
       "journeys": [],
       "evidence": [],
@@ -12621,7 +12623,9 @@
         "phase4-coordinator/internal/billing/allowance_spend.go:ReapAllowanceReservations",
         "phase4-coordinator/internal/billing/wholesale_generation.go:wholesaleLineTotals",
         "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance",
-        "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource"
+        "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource",
+        "phase5-gateway/internal/router/stake_allowance.go:persistFundingSource",
+        "phase5-gateway/internal/router/settlement_journal_recovery.go:redriveSettlementEffect"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
@@ -12629,7 +12633,8 @@
         "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
-        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestSettlementWritesConfirmedFunding"
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestSettlementWritesConfirmedFunding",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestJournalRecoveryKeepsAllowanceFunding"
       ],
       "journeys": [],
       "evidence": [],
@@ -12701,7 +12706,8 @@
         "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal",
         "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerAccountViewAndOverage",
         "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure",
-        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst"
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewReportsUnavailableLedger"
       ],
       "journeys": [],
       "evidence": [],
@@ -12776,7 +12782,8 @@
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
         "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOnlyRequestFailsClosed",
         "phase5-gateway/internal/router/stake_allowance_test.go:TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota",
-        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates"
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceDayLookupIsNotBlockedByANegativeAnswer"
       ],
       "journeys": [],
       "evidence": [],

@@ -21,6 +21,7 @@ const testServiceToken = "svc-token-for-stake-tests-0123456789abcdef"
 type fakeLedger struct {
 	lockReq, unlockReq rewards.StakeRequest
 	err                error
+	positionErr        error
 }
 
 func (f *fakeLedger) Lock(_ context.Context, req rewards.StakeRequest) (rewards.StakeResult, error) {
@@ -41,6 +42,9 @@ func (f *fakeLedger) Unlock(_ context.Context, req rewards.StakeRequest) (reward
 }
 
 func (f *fakeLedger) Position(_ context.Context, _ string, owned []string) (rewards.StakePosition, error) {
+	if f.positionErr != nil {
+		return rewards.StakePosition{}, f.positionErr
+	}
 	release := time.Date(2026, 10, 20, 6, 0, 0, 0, time.UTC)
 	return rewards.StakePosition{StakedUnits: 150_000_000, UnlockingUnits: 50_000_000, AvailableUnits: int64(len(owned)) * 100_000_000, NextReleaseAt: &release}, nil
 }
@@ -294,5 +298,23 @@ func TestStakeHandlerUnlockNeedsNoGitHubIdentity(t *testing.T) {
 	rec := stakeCall(newTestHandler(ledger), "unlock", `{"amount_malibu":"1"}`, headers)
 	if rec.Code != http.StatusOK || ledger.unlockReq.AccountID != "acct_1" || ledger.unlockReq.GitHubUserID != 0 {
 		t.Fatalf("unlock without identity status %d body %s req %+v", rec.Code, rec.Body.String(), ledger.unlockReq)
+	}
+}
+
+func TestStakeAccountViewReportsUnavailableLedger(t *testing.T) {
+	h := NewHandler(Deps{
+		GatewayServiceToken: testServiceToken,
+		Ledger:              &fakeLedger{positionErr: context.DeadlineExceeded},
+		Allowance:           &fakeAllowance{},
+		Logger:              zerolog.Nop(),
+	})
+	req := httptest.NewRequest(http.MethodGet, Prefix+"account", nil)
+	for k, v := range principalHeaders() {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || errorCode(t, rec) != "stake_source_unavailable" {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }

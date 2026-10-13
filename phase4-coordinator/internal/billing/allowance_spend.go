@@ -94,6 +94,11 @@ type AllowanceAdmission struct {
 	BoundCredits int64
 	Required     bool
 	Now          time.Time
+	// Day is the UTC day (YYYY-MM-DD) of the gateway's quota reservation.
+	// It is used when it is the day of Now or the day before, so a request
+	// started before 00:00 UTC and admitted after it is accounted to the same
+	// day on both sides; otherwise the day of Now is used.
+	Day string
 }
 
 // AllowanceDecision answers AllowanceAdmission.
@@ -160,6 +165,16 @@ func remainingAllowance(granted, spent, held int64) int64 {
 	return 0
 }
 
+// admissionDay is the gateway's reservation day when it is the day of Now or
+// the day before, and the day of Now otherwise.
+func admissionDay(in AllowanceAdmission) string {
+	today := allowanceDay(in.Now)
+	if in.Day == today || in.Day == allowanceDay(in.Now.Add(-24*time.Hour)) {
+		return in.Day
+	}
+	return today
+}
+
 // AdmitAllowance decides how one request is funded (SPEC-050-R007), in one
 // BEGIN IMMEDIATE transaction so two concurrent requests cannot both hold the
 // same allowance. A repeated request id (a gateway retry) returns its first
@@ -171,17 +186,28 @@ func (s *Store) AdmitAllowance(ctx context.Context, in AllowanceAdmission) (Allo
 	if in.Now.IsZero() {
 		in.Now = time.Now().UTC()
 	}
-	day := allowanceDay(in.Now)
+	day := admissionDay(in)
 	decision := AllowanceDecision{ResetAt: NextAllowanceRefresh(in.Now)}
-	// Fast path, read-only: an account without an allowance today takes no
-	// write lock. Grants are append-only and fixed for the day, so the
-	// answer cannot change under a concurrent writer.
+	// A retry of an admitted request is accounted to the day it was first
+	// admitted, whatever the clock says now.
+	var existingDay string
+	switch err := s.db.QueryRowContext(ctx, `SELECT day FROM allowance_reservations WHERE account_id = ? AND request_id = ?`,
+		in.AccountID, in.RequestID).Scan(&existingDay); {
+	case err == nil:
+		day = existingDay
+	case !errors.Is(err, sql.ErrNoRows):
+		return AllowanceDecision{}, fmt.Errorf("allowance: reservation lookup: %w", err)
+	}
+	// Fast path, read-only: an account without an allowance that day and
+	// no existing reservation takes no write lock. Grants are append-only
+	// and fixed for the day, so the answer cannot change under a concurrent
+	// writer.
 	var granted int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT granted_credits FROM allowance_grants WHERE account_id = ? AND day = ?), 0)`,
 		in.AccountID, day).Scan(&granted); err != nil {
 		return AllowanceDecision{}, fmt.Errorf("allowance: grant: %w", err)
 	}
-	if granted <= 0 {
+	if granted <= 0 && existingDay == "" {
 		overage, err := allowanceOverage(ctx, s.db, in.AccountID)
 		if err != nil {
 			return AllowanceDecision{}, err

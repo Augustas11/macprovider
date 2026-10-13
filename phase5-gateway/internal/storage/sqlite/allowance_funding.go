@@ -67,10 +67,12 @@ func normalizeFundingSource(source string) (string, error) {
 	return "", fmt.Errorf("unknown funding source %q", source)
 }
 
-// MarkReservationFundingSource sets the SPEC-050 funding of an active
-// reservation after the coordinator answered: "allowance" takes it off the
-// paid daily quota; "quota" puts an allowance-only reservation the
-// coordinator did not fund back on it.
+// MarkReservationFundingSource sets the SPEC-050 funding of a reservation
+// after the coordinator answered: "allowance" takes it off the paid daily
+// quota; "quota" puts an allowance-only reservation the coordinator did not
+// fund back on it. It applies whatever the reservation's status, so the
+// settlement fallback and journal recovery can record it after a failed
+// settlement.
 func (s *Store) MarkReservationFundingSource(ctx context.Context, accountID, requestID, source string) error {
 	source, err := normalizeFundingSource(source)
 	if err != nil {
@@ -78,7 +80,7 @@ func (s *Store) MarkReservationFundingSource(ctx context.Context, accountID, req
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE quota_reservations SET funding_source = ?
-		WHERE account_id = ? AND request_id = ? AND status = 'active'`, source, accountID, requestID)
+		WHERE account_id = ? AND request_id = ?`, source, accountID, requestID)
 	if err != nil {
 		return err
 	}
