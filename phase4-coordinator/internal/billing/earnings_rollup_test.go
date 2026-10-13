@@ -390,16 +390,25 @@ SELECT id, 'force_credit', 'op', 'x', '2026-09-15T07:00:00.000000000Z', '2026-09
 		{"insert a new hour", `INSERT INTO ledger_request_credits (request_id, attempt_n, provider_id, ts_utc, model, status, stream, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits, created_at_utc)
 VALUES ('late', 0, 'p-a', '2026-09-16T23:59:59.999999999Z', 'model-late', 200, 0, 'provider_reported', 1, 1, 1, 5, 9000, 5, '2026-09-16T23:59:59.999999999Z')`},
 	}
+	// Under -race each view comparison costs ~0.3s of SQLite planning, so
+	// the per-mutation checks use only the 2026-09-16 window set (every
+	// window shape, and its ranges still cover the 09-14 rows). The checks
+	// above and the final one use both sets.
+	mutationWins := wins
+	if raceEnabled {
+		mutationWins = wins[:len(wins)/2]
+	}
 	for _, m := range mutations {
 		t.Run(m.name, func(t *testing.T) {
 			if _, err := store.db.Exec(m.sql); err != nil {
 				t.Fatal(err)
 			}
-			checkRollupMatchesView(t, store, providers, wins)
+			checkRollupMatchesView(t, store, providers, mutationWins)
 			drainRollup(t, store)
-			checkRollupMatchesView(t, store, providers, wins)
+			checkRollupMatchesView(t, store, providers, mutationWins)
 		})
 	}
+	checkRollupMatchesView(t, store, providers, wins)
 }
 
 // Settlement stamps settled/settlement_id on every row of a window; that
@@ -1140,8 +1149,20 @@ func TestProviderEarningsRollupMaturityDuringReadIsCoherent(t *testing.T) {
 // A reset between a recompute's read and its publish must not let the old
 // figures become trusted under the new epoch (generation ABA).
 func TestProviderEarningsRollupResetBetweenReadAndPublishIsRejected(t *testing.T) {
-	reqStore, store := newRequestAndBillingStores(t)
+	_, store := newRequestAndBillingStores(t)
 	insertRollupCredit(t, store.db, rollupCredit{requestID: "r", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+	// The reset runs inside the bucket's slice. Start the bucket at the
+	// maximum slice (as after two overruns, not deferred) so a slow -race
+	// runner still reaches the publish instead of overrunning.
+	var hour string
+	if err := store.db.QueryRow(`SELECT bucket_hour FROM provider_earnings_rollup_buckets WHERE provider_id = 'p'`).Scan(&hour); err != nil {
+		t.Fatal(err)
+	}
+	key := earningsBucketKey{provider: "p", hour: hour}
+	store.earningsRollupSched.backoff = map[earningsBucketKey]earningsRollupBackoff{key: {failures: 2}}
+	if got := store.earningsRollupSched.slice(key); got != earningsRollupBucketSliceMax {
+		t.Fatalf("bucket slice=%s want %s", got, earningsRollupBucketSliceMax)
+	}
 	fired := false
 	store.earningsRollupAfterRead = func(string, string) {
 		if fired {
@@ -1151,7 +1172,11 @@ func TestProviderEarningsRollupResetBetweenReadAndPublishIsRejected(t *testing.T
 		if _, err := store.db.Exec(`UPDATE provider_earnings_rollup_state SET fingerprint = 'other'`); err != nil {
 			t.Error(err)
 		}
-		if _, err := NewStore(reqStore.DB()); err != nil {
+		// The startup reset itself, not a whole NewStore: the hook runs
+		// inside the bucket's time slice, and rerunning every billing
+		// migration there overran it under -race (SlowOrFailed, not a
+		// conflict).
+		if err := store.ensureProviderEarningsRollup(context.Background()); err != nil {
 			t.Error(err)
 		}
 	}
