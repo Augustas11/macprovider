@@ -2109,7 +2109,9 @@ traffic by headers, frame fields, sampling parameters, or timing class:
 - Sampling parameters come from a closed profile mix that mirrors buyer
   traffic: greedy (`temperature: 0`), `temperature: 0.7` with `top_p: 0.95`,
   and `temperature: 1.0` with `top_p: 1.0`. `max_tokens` is drawn from
-  `{96, 160, 256}`.
+  `{96, 160, 256}`. An escalation request (FR-23 `suspect` or `recovering`)
+  uses the greedy profile while the sampled tolerance key of its model is
+  cold (FR-22), because the cold sampled prior is too loose to decide.
 - Each request uses a fresh pseudonymous account id, so its SPEC-015
   `account_scope` is unique to the request and never constant across
   probes. It carries a random auto-prefix conversation-cache key in the shape
@@ -2125,8 +2127,9 @@ Money:
 - The verified provider is credited and settled exactly like any other paid
   request: same ledger row, same receipt, same SPEC-022 verification, same
   payout path. A verification request is paid work.
-- Verification accounts carry the reserved prefix `cip_` and are excluded
-  from buyer-facing statistics and intake.
+- Verification accounts carry the reserved prefix `cip_`. They name catalog
+  models only, so they never feed unmatched-model intake, and buyer usage
+  statistics are recorded by the gateway, which they never pass through.
 
 Rate bounds:
 
@@ -2229,10 +2232,10 @@ Sampling class: `greedy` when the request's temperature is 0, otherwise
 
 Honest-pair distribution. Each tolerance key keeps a rolling window of the
 last 256 accepted measurements. A measurement is accepted into the window when
-it was in band, or when the window is still cold, and the verified provider
-was in `unverified` or `passing`. Each operator contributes at most 16 entries;
-its oldest entry is evicted first. The window is in memory and rebuilds from
-traffic after a restart.
+every scorer put it in band (prior band while cold, learned band while warm)
+and the verified provider was in `unverified` or `passing`. Each verified
+operator contributes at most 16 entries; its oldest entry is evicted first.
+The window is in memory and rebuilds from traffic after a restart.
 
 Band. A tolerance key is **warm** when its window holds at least 32 entries
 from at least 3 distinct verified operators. For a warm key:
@@ -2241,15 +2244,15 @@ from at least 3 distinct verified operators. For a warm key:
 - `top1_rate` floor (greedy only) = `median − max(6 × MAD, 0.05)`.
 
 MAD is the median absolute deviation of the window. A measurement is in band
-when every applicable metric is at or above its floor.
+when every applicable metric is at or above its floor. A learned floor never
+drops below a hard floor (greedy: `top1_rate` 0.50, `mean_logprob` −3.0;
+sampled: `mean_logprob` −6.0), which bounds how far a window can be dragged
+down.
 
 Cold start. A cold key uses a fixed prior:
 
 - greedy: `top1_rate ≥ 0.85` and `mean_logprob ≥ −1.0`;
 - sampled: `mean_logprob ≥ −4.0`.
-
-A learned floor never exceeds the prior band for its class. This keeps a
-tight early window from failing honest providers.
 
 Rationale for the prior: teacher-forced scoring conditions every position on
 the same prefix, so cross-chip numerical differences change the arg-max only
@@ -2315,9 +2318,9 @@ its stored state for the model.
   not affect its own serving or verification.
 - Known-sequence checks: the coordinator keeps in memory, per tolerance key,
   up to 8 recent measurements that two scorers both scored in band with
-  `mean_logprob` within 0.25 of each other. Every 25th scoring job is sent
-  instead as one of these known sequences to a scorer that did not score it
-  originally. An answer more than 0.5 below the recorded `mean_logprob`, or
+  `mean_logprob` within 0.25 of each other. After every 25th scoring job the
+  coordinator also sends one of these known sequences to a random eligible
+  scorer that did not score it originally. An answer more than 0.5 below the recorded `mean_logprob`, or
   with `top1_rate` more than 0.1 below it, counts as a split answer for that
   scorer.
 - A scorer that does not answer within the deadline counts as

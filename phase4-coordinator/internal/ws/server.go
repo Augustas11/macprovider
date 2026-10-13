@@ -313,6 +313,9 @@ type Server struct {
 	// modelAdmissionOperatorLimiter rate-limits operator decision requests
 	// per credential and source address, never drawing on a provider window.
 	modelAdmissionOperatorLimiter operatorRateLimiter
+
+	// computeScoring is the SPEC-036 §5A engine, set by StartComputeScoring.
+	computeScoring atomic.Pointer[computeScoringEngine]
 }
 
 // liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
@@ -2970,6 +2973,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.TrustedPoolV1 = initial.Tier2Capabilities.TrustedPoolV1
 	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
 	entry.RelayBlindSettlementReceiptV1 = initial.Tier2Capabilities.RelayBlindSettlementReceiptV1
+	entry.ComputeScoreV1 = initial.Tier2Capabilities.ComputeScoreV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
@@ -4940,6 +4944,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleNativeMTPCanaryResult(providerID, assignedID, payload)
 	case losslessnessResultType, losslessnessEncryptedResultType:
 		s.handleLosslessnessProbeResult(providerID, assignedID, payload)
+	case computeScoreResultType:
+		s.handleComputeScoreResult(providerID, assignedID, payload)
 	default:
 		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
 		// is provider-controlled and reaches structured logs only on

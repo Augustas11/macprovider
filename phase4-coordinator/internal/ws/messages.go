@@ -168,6 +168,8 @@ type Tier2Caps struct {
 	// RelayBlindSettlementReceiptV1 is the SPEC-001-R005 advertise-only
 	// capability for the SPEC-015 §N.13 relay-blind settlement receipt.
 	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
+	// ComputeScoreV1 is the SPEC-036 FR-21 scorer capability.
+	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
 }
 
 type AuthChallenge struct {

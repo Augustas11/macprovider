@@ -1,0 +1,197 @@
+{
+  "version": "generic-v1",
+  "prompts": [
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Explain how a refrigerator keeps food cold."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Write a short poem about autumn leaves."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "What are three tips for staying focused while studying?"
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Summarize the water cycle in a few sentences."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Give me a simple recipe for pancakes."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "What is the difference between weather and climate?"
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Write a haiku about the ocean."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "How do vaccines help the immune system?"
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Describe the rules of chess for a beginner."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Write a Python function that reverses a string."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "What causes the seasons on Earth?"
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Suggest a name for a small coffee shop and explain why."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Explain what a binary search does."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "List five common houseplants that are easy to care for."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "How does compound interest work? Give an example."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Write a short story opening about a lighthouse keeper."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "What is photosynthesis?"
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Translate 'Good morning, how are you?' into French and Spanish."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Explain the difference between a list and a tuple in Python."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "What should I pack for a weekend hiking trip?"
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Describe how a bill becomes a law in general terms."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Write an email asking a colleague to reschedule a meeting."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Why is the sky blue?"
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Give three arguments for and against working from home."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Explain recursion with a simple example."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "What are the main parts of a cell?"
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Write a limerick about a cat who loves boxes."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "How do airplanes stay in the air?"
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Explain what an API is to a non-programmer."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Plan a simple three-day itinerary for a city break."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "What is the Pythagorean theorem and how is it used?"
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Write a SQL query that counts orders per customer."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Describe the taste of a lemon to someone who has never had one."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "What are good habits for a healthy night's sleep?"
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Explain how a hash table works."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Write a motivational message for someone starting a new job."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "What is the difference between a virus and bacteria?"
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Explain supply and demand with an everyday example."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Write a JavaScript function that checks if a number is prime."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "How do tides work?"
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "Give a short overview of the history of the printing press."
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "What are the benefits of regular exercise?"
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Explain the difference between RAM and storage."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Write a product description for a reusable water bottle."
+    },
+    {
+      "system": "You are a helpful assistant.",
+      "user": "How does a rainbow form?"
+    },
+    {
+      "system": "You are a concise assistant. Answer clearly.",
+      "user": "Describe a good way to learn a new language."
+    },
+    {
+      "system": "You are a friendly assistant that explains things simply.",
+      "user": "Explain what machine learning is in two paragraphs."
+    },
+    {
+      "system": "You are an expert assistant. Be accurate and direct.",
+      "user": "Write a thank-you note to a teacher."
+    }
+  ]
+}
