@@ -63,12 +63,35 @@ one of these is true:
 | `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
-| `max_requests_per_run` | `20000` | Requests archived per run. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests; a batch is also flushed once it reaches 16 MiB of archived payload, so it can exceed 16 MiB by at most one request). |
-| `max_scan_rows_per_run` | `500000` | Ledger credits scanned per run. The scan resumes from a persisted cursor and wraps. |
+| `max_requests_per_run` | `20000` | Requests per archive (the key keeps its old name so existing configs load). A run drains: it writes, verifies, and deletes archive after archive along a scan lap (below) until the lap completes, `max_scan_rows_per_run` is reached, or `run_budget_minutes` is spent. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests; a batch is also flushed once it reaches 16 MiB of archived payload, so it can exceed 16 MiB by at most one request). |
+| `max_scan_rows_per_run` | `5000000` | Ledger credits scanned per run, a backstop: the run budget is normally the limit. Laps start at the archived low watermark, so a run does not re-walk archived credits; a lap that hits this bound continues in the next run. |
+| `run_budget_minutes` | `30` | Wall-clock budget of one run, in `[1, 240]`. Checked between scan chunks, between archives, and between delete batches; an archive cut short stays pending and the next run resumes it, skipping the requests it already deleted. |
 | `incremental_vacuum_pages` | `2048` | Pages released per `PRAGMA incremental_vacuum` step. |
 | `incremental_vacuum_max_steps` | `256` | Steps per run, per database file. |
 | `offhost_verify_command` | empty | Optional. Absolute argv. The job appends `<archive_path> <sha256_hex>`. Exit 0 means that checksum is confirmed at an off-host destination. When set, it is an extra check before deletion; when empty, nothing is skipped. |
 | `offhost_verify_timeout_seconds` | `300` | Limit for one verify command. |
+
+### Scan laps, the watermark, and the holds table
+
+A lap walks the ledger from the archived low watermark to its end, across as
+many runs as it takes. Every credit at or below the watermark is archived,
+kept hot for good (`provider_first_verified_verdict`, `relay_blind_attempt`,
+`credit_quarantine_resolution`, `already_archived`), or named in the holds
+table (`settlement_evidence_retention_holds`). The holds table takes requests
+that may still become eligible but can stay that way for a long time: old
+unsettled credits (an unresolved quarantine, a provider below the minimum
+payout), an open verdict, an undelivered outbox row, a deletion re-check
+refusal, and so on. Each lap starts by re-checking every hold below the lap
+start: a hold that now qualifies is archived, a permanent one is dropped.
+Only too-young credits (inside the reconcile horizon, or settled into a
+window less than `min_settlement_cycles` old) pin the watermark; they sit at
+the end of the ledger.
+
+When a lap completes, the watermark moves up and the run stops:
+`stop_reason` is `drained` when that lap found no eligible request, else
+`lap_complete`. The next run's lap shows whether the backlog drained.
+`backlog_drained` is persisted: it is true while the last completed lap
+found nothing eligible.
 
 ### Optional off-host verify command contract
 
@@ -104,10 +127,28 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
    `settlement_evidence_retention_state`. It also rebuilds the payable view
    with the archived-credit branch and records billing compatibility floor 4
    (section 6: from here on, roll forward only).
-3. The first nightly run after the deploy archives and deletes at most
-   `max_requests_per_run` requests, `batch_size` requests per short
-   transaction with `batch_pause_ms` between batches. A large backlog drains
-   over several nights; it never holds the writer for long. To hold
+3. Each nightly run drains for up to `run_budget_minutes`: archives of at
+   most `max_requests_per_run` requests, deleted `batch_size` requests per
+   short transaction with `batch_pause_ms` between batches. A backlog larger
+   than one budget drains over several nights; it never holds the writer
+   for long. The run's log line reports:
+   - `stop_reason`: `drained`, `lap_complete`, `run_budget`, `scan_bound`,
+     or `refused` (`status` names the refusal; `archives` and
+     `deleted_requests` still count what the run deleted before it);
+   - `backlog_drained`, `laps_completed`, `lap_eligible_requests`,
+     `last_lap_eligible_requests`, `watermark_credit_id`, and
+     `held_requests` (the holds table);
+   - `last_lap_skipped`: the last completed lap's skip counts by reason;
+   - `backlog_candidate_credits`: the held requests plus the settled,
+     unarchived credits above the watermark past both cutoffs, an upper
+     bound of the remaining eligible backlog (`-1` if not computed);
+   - `auto_vacuum` per database file.
+
+   A drained backlog does not bring `backlog_candidate_credits` to zero:
+   its floor is the held requests and the too-young credits, and
+   `last_lap_skipped` names them by reason. `backlog_drained=true` is
+   the drain signal. A watermark that climbs and a
+   `last_lap_eligible_requests` that falls night over night mean draining. To hold
    retention off for this deploy, set `billing.retention.enabled: false`
    in `coordinator.yaml` before the runtime train step.
 
@@ -122,7 +163,9 @@ The report has:
 
 - `cutoff_window_end_utc`: the settlement-window finality point;
 - `credit_age_cutoff_utc`: the reconcile horizon;
-- `eligible_requests`;
+- `eligible_requests`: what the next new archive would hold (at most
+  `max_requests_per_run`; the run itself drains further, and resumes a
+  pending archive first);
 - `tables.<table>.rows` and `tables.<table>.payload_bytes`: the summed column
   lengths, an estimate of what leaves;
 - `skipped_requests` counts by reason.
@@ -130,7 +173,7 @@ The report has:
 `cutoff_window_end_utc` is empty until three or more weekly settlements have
 completed. Use the dry run to preview what the next nightly run moves. A dry
 run scans at most `max_scan_rows_per_run` credits from the
-persisted cursor and writes nothing.
+lap cursor and writes nothing.
 
 ## 3. Watching the first live run
 
@@ -200,25 +243,44 @@ mirror keep working on archived requests:
 Deleted pages go to the freelist. `PRAGMA incremental_vacuum` returns them to
 the filesystem only when the database is in `auto_vacuum = INCREMENTAL` mode.
 The `vacuum` entries in the report show `auto_vacuum_mode`, the freelist
-before and after, and `needs_one_time_conversion`. The job never runs a full
-`VACUUM`. Free pages are reused by new writes either way, so the file stops
+before and after, `needs_one_time_conversion`, and `skipped` with the reason
+no step ran. On an `auto_vacuum = NONE` database the step is skipped and the
+coordinator logs `auto_vacuum=none incremental_vacuum=skipped` for that
+file. The job never runs a full `VACUUM`. Free pages are reused by new writes either way, so the file stops
 growing even without the conversion.
 
 The one-time conversion rewrites the whole file and needs the coordinator
-stopped. Do it only after retention has shrunk the live data. The rewrite
-takes about as long as the backup step measured in
-`ops/runbooks/pearl-release-updater.md`, in proportion to the remaining size.
-State that downtime to the operator first and follow
-`docs/runbooks/pearl-coordinator-rollout.md` for the stop and start:
+stopped, so it waits for the drain (`backlog_drained=true`). It runs through
+the ops entry point, never by hand. The entry point reads both files'
+`auto_vacuum` mode and the last retention lap read-only. It refuses until
+the drain signal holds, states the downtime first, and takes the live-ops
+lock and the three Pearl locks (updater, deploy, deploy-operation). It
+checks free space on the database filesystem for three times the files'
+size (a backup copy, VACUUM's temporary copy, which it keeps there with
+`SQLITE_TMPDIR`, and the WAL), then stops the coordinator. It runs `PRAGMA quick_check` on the
+coordinator database and its `.route-snapshots` journal and refuses, starting
+the coordinator again, if either fails. It then takes a fresh
+`VACUUM INTO` backup next to each file (`<file>.pre-incremental-<UTC stamp>`,
+named in the output). It runs `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` on
+each file with the SQLite 3.53.2 CLI from `ops/pearl-updater`, runs
+`quick_check` again, and starts the coordinator. If `quick_check` fails after
+the VACUUM, it leaves the coordinator stopped and names the backup to
+restore. Remove the backups once the coordinator has run cleanly on the
+converted files. Read
+`docs/runbooks/pearl-coordinator-rollout.md` and state the downtime to the
+operator before the run step:
 
 ```bash
-sqlite3 <db-path> 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA quick_check;'
-sqlite3 <db-path>.route-snapshots 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM; PRAGMA quick_check;'
+PEARL_RUNTIME_TASK=retention-vacuum-conversion PEARL_COORDINATOR_DB=<db-path> \
+  scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=retention-vacuum-conversion PEARL_COORDINATOR_DB=<db-path> \
+  MACPROVIDER_OPS_OWNER=<label> scripts/ops/pearl-runtime.sh next --run
 ```
 
-Use the SQLite 3.53.2 CLI named in `ops/pearl-updater` (see
-`ops/runbooks/pearl-release-updater.md`). After the conversion, the next
-report shows `auto_vacuum_mode: incremental`.
+The downtime is about as long as the backup step measured in
+`ops/runbooks/pearl-release-updater.md`, in proportion to the remaining
+size. After the conversion, `status` reports the task done and the next
+retention report shows `auto_vacuum_mode: incremental`.
 
 ## 5. Restore and rederive
 

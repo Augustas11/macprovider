@@ -1,11 +1,34 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.2
+Version: v0.4.3
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.3
+
+Issue #1979: retention drains instead of stopping at a fixed request count.
+R-15.5 now bounds each archive by `max_requests_per_run` requests (the key
+keeps its name so existing configurations load) and each run by a
+wall-clock budget (`run_budget_minutes`, default 30) and the scan bound
+(default raised to 5,000,000 credits). Selection walks the ledger in laps
+that start at a persisted archived low watermark, so a run spends its budget
+above the archived prefix instead of re-walking it. A request skipped for a
+reason that can clear goes to a persisted holds table that every lap
+re-checks; only too-young credits keep the watermark below them. Whether the backlog
+drained (`backlog_drained`) is derived from the last completed lap and
+persisted across runs. Each run reports why it stopped, the lap state, the
+last lap's skip counts by reason, an upper bound of the remaining backlog
+above the watermark, and each database's `auto_vacuum` mode. A database in
+`auto_vacuum = NONE` skips the incremental-vacuum step and says so. The
+one-time conversion to `INCREMENTAL` is an operator step through the ops
+entry point, gated on the drain; retention never runs a full `VACUUM`. The
+conformance state of `SPEC-022-R015` does not change. This version follows
+v0.4.2: a journal or outbox row that R-15.10 prunes between export and
+deletion makes the deletion re-check refuse the request, which is held and
+re-archived by a later lap.
 
 ### v0.4.2
 
@@ -27,7 +50,7 @@ coordinator databases several times over. R-15.10:
 
 No settlement, payability, or archive rule changes. Retention (R-15.2,
 R-15.4) checks the outbox and journal rows that still exist. Old rows stay
-valid as written. This version follows v0.4.1.
+valid as written. This version follows v0.4.0.
 
 ### v0.4.0
 
@@ -2074,16 +2097,58 @@ filesystem. It re-reads free space as the archive grows and stops the export,
 removing the partial archive and deleting nothing, if the floor is reached. Each run reports the archive's byte size and the filesystem's
 free and total bytes. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is
-never starved. The number of requests per run and the ledger rows scanned
-per run are bounded by configuration. Memory is bounded independently of the
-number of requests per run: selection, dry run, and export hold one request's
+never starved. A run drains: it writes, verifies, and deletes one archive
+after another along a scan lap until the lap completes, the ledger rows
+scanned per run reach their configured bound, a refusal stops it, or its
+wall-clock budget (`run_budget_minutes`, default 30) is spent. Each archive
+holds at most `max_requests_per_run` requests. The budget is checked
+between scan chunks, between archives, and between delete batches. An
+archive whose deletion the budget cut short stays pending; the next run
+resumes it and skips the requests it already deleted.
+
+A lap walks the ledger from a persisted archived low watermark to its end,
+across runs. Every credit at or below the watermark MUST be archived, kept
+hot for a reason that never clears (the provider's first verified verdict,
+relay-blind settlement, a quarantine resolution, or an archived credit of the
+same request), or named in a persisted holds table. A request skipped or
+refused for a reason that can clear, other than being too young, MUST be
+written to the holds table, and every lap MUST first re-check the holds
+below its start. A hold that only the deletion re-check refused because its
+settlement finality was open MUST have its finality read before it is
+archived again, so it is neither re-archived nor counted as eligible while
+the finality stays open. A too-young credit (inside the reconcile horizon, or in a
+settlement window fewer than `min_settlement_cycles` cycles old), a request
+the lap selected, and a request in a pending or failed archive keep the
+watermark below them. When a lap completes, the watermark moves to the
+lap's end or below the lowest such credit, and the run stops. A request
+wrongly treated as kept hot for good only stays hot; nothing is deleted
+early.
+
+Each run reports:
+
+- why it stopped (`stop_reason`);
+- whether the last completed lap found no eligible request
+  (`backlog_drained`, persisted across runs);
+- the watermark, the lap counters, and the last lap's skip counts by reason,
+  which are the expected non-zero floor of a drained backlog;
+- the held requests plus the settled, unarchived credits above the
+  watermark that are past both finality cutoffs
+  (`backlog_candidate_credits`, an upper bound of the remaining eligible
+  backlog).
+
+Memory is bounded independently of the number of requests per
+archive and per run: selection, dry run, and export hold one request's
 evidence at a time, verification keeps only a digest per request, and deletion
 re-reads the archive as a stream holding one batch, capped by the batch size
 and a fixed payload budget. Each re-read request MUST match its digest from
 the verified pass, or deletion stops. Retention reclaims space only through
 `PRAGMA incremental_vacuum` in bounded page steps. It MUST NOT run a full
-`VACUUM`. A database that is not in `auto_vacuum = INCREMENTAL` mode reports
-that fact and needs the operator's one-time conversion.
+`VACUUM`. Each run reports every database's `auto_vacuum` mode. A database
+in `auto_vacuum = NONE` skips the incremental-vacuum step, logs that it was
+skipped, and needs the operator's one-time conversion. That conversion runs
+only through the ops entry point, after the drain. The entry point states
+the downtime, refuses unless `quick_check` passes first, takes a fresh
+backup copy of each file, and runs `quick_check` again afterwards.
 
 R-15.6. Archived state stays visible. In the delete transaction, retention
 records:
@@ -2506,10 +2571,14 @@ hot nor a mismatch at deletion.
 - **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
   compatibility floor 4 at open and in every delete transaction, so a
   coordinator below contract 4 refuses to open the database.
-- **AC-022-75 (v0.4.0):** Retention is enabled by default with the default
-  archive directory next to the database. A run archives at most
-  `max_requests_per_run` requests and deletes them `batch_size` requests per
-  transaction. A run that would write a new archive below the archive
+- **AC-022-75 (v0.4.3):** Retention is enabled by default with the default
+  archive directory next to the database. A run drains the eligible backlog
+  along a scan lap that starts at the archived low watermark, in archives of
+  at most `max_requests_per_run` requests deleted `batch_size` requests per
+  transaction. It stops when the lap completes or its `run_budget_minutes`
+  budget is spent, and reports whether the last completed lap drained the
+  backlog. A request that can still become eligible stays in a holds table
+  that every lap re-checks, or, when too young, below the watermark. A run that would write a new archive below the archive
   filesystem's free-space floor exports and deletes nothing.
 
 ## Implementation sequencing

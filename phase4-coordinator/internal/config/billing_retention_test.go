@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestBillingRetentionDefaultsAreOnAndValid(t *testing.T) {
@@ -14,8 +16,29 @@ func TestBillingRetentionDefaultsAreOnAndValid(t *testing.T) {
 	if r.ArchiveMinFreeBytes != 20<<30 || r.ArchiveMinFreePercent != 10 {
 		t.Fatalf("archive free-space floor defaults=%+v", r)
 	}
+	if r.RunBudgetMinutes != 30 || r.MaxRequestsPerRun != 20000 {
+		t.Fatalf("run budget defaults=%+v", r)
+	}
 	if err := cfg.validateBillingRetention(); err != nil {
 		t.Fatalf("default retention invalid: %v", err)
+	}
+}
+
+// A pre-#1979 retention block (max_requests_per_run set, no
+// run_budget_minutes) still loads: the old key now bounds one archive and
+// the run budget takes its default.
+func TestBillingRetentionLegacyRunCapStillLoads(t *testing.T) {
+	cfg := Default()
+	legacy := []byte("billing:\n  retention:\n    max_requests_per_run: 5000\n    max_scan_rows_per_run: 100000\n")
+	if err := yaml.Unmarshal(legacy, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Billing.Retention
+	if r.MaxRequestsPerRun != 5000 || r.RunBudgetMinutes != 30 || !r.Enabled {
+		t.Fatalf("legacy retention=%+v", r)
+	}
+	if err := cfg.validateBillingRetention(); err != nil {
+		t.Fatalf("legacy retention invalid: %v", err)
 	}
 }
 
@@ -32,6 +55,8 @@ func TestBillingRetentionValidation(t *testing.T) {
 		"relative verify cmd":   {func(r *BillingRetentionConfig) { r.OffhostVerifyCommand = []string{"verify.sh"} }, "offhost_verify_command[0]"},
 		"empty verify argument": {func(r *BillingRetentionConfig) { r.OffhostVerifyCommand = []string{"/usr/bin/true", " "} }, "empty arguments"},
 		"zero verify timeout":   {func(r *BillingRetentionConfig) { r.OffhostVerifyTimeoutSeconds = 0 }, "offhost_verify_timeout_seconds"},
+		"zero run budget":       {func(r *BillingRetentionConfig) { r.RunBudgetMinutes = 0 }, "run_budget_minutes"},
+		"run budget too long":   {func(r *BillingRetentionConfig) { r.RunBudgetMinutes = 241 }, "run_budget_minutes"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -9,7 +9,7 @@ not add steps of its own:
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
-| `pearl-runtime.sh` | coordinator and gateway runtime release | `docs/runbooks/pearl-coordinator-rollout.md` |
+| `pearl-runtime.sh` | coordinator and gateway runtime release; one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
