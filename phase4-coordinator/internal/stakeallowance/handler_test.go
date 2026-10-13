@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/rs/zerolog"
 )
@@ -37,8 +40,30 @@ func (f *fakeLedger) Unlock(_ context.Context, req rewards.StakeRequest) (reward
 	return rewards.StakeResult{Events: []rewards.StakeEvent{{ProviderID: "p1", EventType: "unlock", AmountUnits: req.AmountUnits, CreatedAt: time.Unix(0, 0), ReleaseAt: &release}}}, nil
 }
 
-func (f *fakeLedger) Position(context.Context, string, []string) (rewards.StakePosition, error) {
-	return rewards.StakePosition{}, nil
+func (f *fakeLedger) Position(_ context.Context, _ string, owned []string) (rewards.StakePosition, error) {
+	release := time.Date(2026, 10, 20, 6, 0, 0, 0, time.UTC)
+	return rewards.StakePosition{StakedUnits: 150_000_000, UnlockingUnits: 50_000_000, AvailableUnits: int64(len(owned)) * 100_000_000, NextReleaseAt: &release}, nil
+}
+
+type fakeAllowance struct {
+	overage map[string]bool
+}
+
+func (f *fakeAllowance) SetAllowanceOverage(_ context.Context, account string, enabled bool, _ time.Time) error {
+	if f.overage == nil {
+		f.overage = map[string]bool{}
+	}
+	f.overage[account] = enabled
+	return nil
+}
+
+func (f *fakeAllowance) AllowanceStatusFor(_ context.Context, account string, now time.Time) (billing.AllowanceStatus, error) {
+	overage := true
+	if v, ok := f.overage[account]; ok {
+		overage = v
+	}
+	return billing.AllowanceStatus{Day: now.Format("2006-01-02"), GrantedCredits: 250_000, SpentCredits: 1_000, HeldCredits: 500,
+		RemainingCredits: 248_500, OverageEnabled: overage, NextRefreshAt: billing.NextAllowanceRefresh(now)}, nil
 }
 
 func newTestHandler(ledger StakeLedger) http.Handler {
@@ -162,5 +187,98 @@ func TestStakeHandlerRefusals(t *testing.T) {
 				t.Fatalf("status %d body %s, want %d %s", rec.Code, rec.Body.String(), tc.status, tc.code)
 			}
 		})
+	}
+}
+
+func TestStakeHandlerAccountViewAndOverage(t *testing.T) {
+	allowance := &fakeAllowance{}
+	h := NewHandler(Deps{
+		GatewayServiceToken: testServiceToken,
+		Ledger:              &fakeLedger{},
+		Allowance:           allowance,
+		OwnedProviderIDs: func(_ context.Context, gh int64) ([]string, error) {
+			return []string{"p1", "p2"}, nil
+		},
+		PayoutAddresses: func(context.Context, []string) ([]string, error) {
+			return []string{"0x00000000000000000000000000000000000000aa"}, nil
+		},
+		Now:    func() time.Time { return time.Date(2026, 10, 13, 15, 0, 0, 0, time.UTC) },
+		Logger: zerolog.Nop(),
+	})
+	get := func(headers map[string]string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, Prefix+"account", nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("account status %d body %s", rec.Code, rec.Body.String())
+		}
+		var view map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	view := get(principalHeaders())
+	want := map[string]any{
+		"staked_malibu": "1.50000000", "unlocking_malibu": "0.50000000", "available_to_stake_malibu": "2.00000000",
+		"next_unlock_release_at": "2026-10-20T06:00:00Z", "allowance_day": "2026-10-13", "next_refresh_at": "2026-10-14T00:00:00Z",
+		"overage_enabled": true, "github_linked": true, "stake_source": "ledger_malibu_v1", "disclosure": Disclosure,
+	}
+	for k, v := range want {
+		if view[k] != v {
+			t.Fatalf("%s = %v want %v (view %v)", k, view[k], v, view)
+		}
+	}
+	for k, v := range map[string]float64{"allowance_credits": 250_000, "allowance_spent_credits": 1_000, "allowance_held_credits": 500, "allowance_remaining_credits": 248_500} {
+		if view[k] != v {
+			t.Fatalf("%s = %v want %v", k, view[k], v)
+		}
+	}
+	if wallets, _ := view["linked_wallets"].([]any); len(wallets) != 1 {
+		t.Fatalf("linked_wallets %v", view["linked_wallets"])
+	}
+	rec := stakeCall(h, "overage", `{"enabled":false}`, principalHeaders())
+	if rec.Code != http.StatusOK || allowance.overage["acct_1"] {
+		t.Fatalf("overage status %d body %s", rec.Code, rec.Body.String())
+	}
+	if view := get(principalHeaders()); view["overage_enabled"] != false {
+		t.Fatalf("overage not reflected: %v", view["overage_enabled"])
+	}
+	if rec := stakeCall(h, "overage", `{}`, principalHeaders()); rec.Code != http.StatusBadRequest {
+		t.Fatalf("overage without enabled status %d", rec.Code)
+	}
+	noGitHub := principalHeaders()
+	delete(noGitHub, GitHubUserIDHeader)
+	if view := get(noGitHub); view["github_linked"] != false || view["available_to_stake_malibu"] != "0.00000000" {
+		t.Fatalf("no-identity view %v", view)
+	}
+}
+
+// SPEC-050-R012: no yield language on any stake or allowance surface.
+func TestStakeSurfacesCarryNoYieldLanguage(t *testing.T) {
+	for _, banned := range []string{"apy", "apr", "yield", "interest", "dividend", "return on"} {
+		if strings.Contains(strings.ToLower(Disclosure), banned) {
+			t.Fatalf("disclosure uses %q", banned)
+		}
+	}
+	for _, needed := range []string{"cannot be withdrawn, transferred, or sold", "expires at 00:00 UTC", "unlock cooldown"} {
+		if !strings.Contains(Disclosure, needed) {
+			t.Fatalf("disclosure missing %q", needed)
+		}
+	}
+}
+
+func TestDisclosureMatchesSpec(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "specs", "SPEC-050-malibu-stake-allowance.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := strings.Join(strings.Fields(string(raw)), " ")
+	if !strings.Contains(spec, `"`+Disclosure+`"`) {
+		t.Fatal("coordinator stake disclosure drifted from SPEC-050-R012")
 	}
 }

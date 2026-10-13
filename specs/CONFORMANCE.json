@@ -12668,10 +12668,15 @@
       "spec_id": "SPEC-050",
       "state": "pending",
       "implementation": [
-        "phase5-gateway/internal/router/stake_allowance.go:handleStakeProxy"
+        "phase5-gateway/internal/router/stake_allowance.go:handleStakeProxy",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleAccount",
+        "phase4-coordinator/internal/stakeallowance/ownership.go:PayoutAddressLookup",
+        "phase5-gateway/internal/router/pages.go:handleAccount"
       ],
       "tests": [
-        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal"
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerAccountViewAndOverage",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure"
       ],
       "journeys": [],
       "evidence": [],
@@ -12686,8 +12691,17 @@
       "requirement_id": "SPEC-050-R012",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/stakeallowance/handler.go:Disclosure",
+        "phase5-gateway/internal/router/pages.go:stakeAllowanceDisclosure"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeSurfacesCarryNoYieldLanguage",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestDisclosureMatchesSpec",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestStakeDisclosureMatchesSpec",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure",
+        "phase4-coordinator/internal/config/stake_allowance_test.go:TestCoordinatorYAMLExamplesCarryConservativeStakeAllowance"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12707,7 +12721,8 @@
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLedgerIsAppendOnlyAndRoleBounded",
-        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRequiresServiceTokenAndPrincipal"
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRequiresServiceTokenAndPrincipal",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal"
       ],
       "journeys": [],
       "evidence": [],

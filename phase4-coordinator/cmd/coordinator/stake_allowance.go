@@ -23,6 +23,7 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 	deps := stakeallowance.Deps{
 		GatewayServiceToken: cfg.Auth.GatewayServiceToken,
 		OwnedProviderIDs:    stakeallowance.OwnedProviderLookup(coordinatorDB),
+		PayoutAddresses:     stakeallowance.PayoutAddressLookup(coordinatorDB),
 		Logger:              logger,
 	}
 	if billingStore != nil {

@@ -60,8 +60,11 @@ type Deps struct {
 	Ledger              StakeLedger
 	OwnedProviderIDs    func(ctx context.Context, githubUserID int64) ([]string, error)
 	Allowance           AllowanceStore
-	Now                 func() time.Time
-	Logger              zerolog.Logger
+	// PayoutAddresses lists the payout addresses of the given providers
+	// (the account's linked wallets).
+	PayoutAddresses func(ctx context.Context, providerIDs []string) ([]string, error)
+	Now             func() time.Time
+	Logger          zerolog.Logger
 }
 
 type handler struct {
@@ -141,6 +144,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStake(w, r, p, false)
 	case route == "overage" && r.Method == http.MethodPost:
 		h.handleOverage(w, r, p)
+	case route == "account" && r.Method == http.MethodGet:
+		h.handleAccount(w, r, p)
+	case route == "account":
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 	case route == "lock" || route == "unlock" || route == "overage":
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
@@ -297,4 +305,70 @@ func (h *handler) handleOverage(w http.ResponseWriter, r *http.Request, p princi
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "allowance_overage", "overage_enabled": *body.Enabled, "disclosure": Disclosure})
+}
+
+// handleAccount is the SPEC-050-R011 account view: stake, today's allowance,
+// the next refresh, the overage setting, and the linked wallets.
+func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, p principal) {
+	if h.deps.Allowance == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
+		return
+	}
+	now := h.now()
+	status, err := h.deps.Allowance.AllowanceStatusFor(r.Context(), p.AccountID, now)
+	if err != nil {
+		h.deps.Logger.Warn().Err(err).Msg("allowance status failed")
+		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
+		return
+	}
+	view := map[string]any{
+		"object":                      "stake_allowance",
+		"github_linked":               p.GitHubUserID > 0,
+		"stake_source":                "unavailable",
+		"staked_malibu":               nil,
+		"unlocking_malibu":            nil,
+		"next_unlock_release_at":      nil,
+		"available_to_stake_malibu":   nil,
+		"allowance_day":               status.Day,
+		"allowance_credits":           status.GrantedCredits,
+		"allowance_spent_credits":     status.SpentCredits,
+		"allowance_held_credits":      status.HeldCredits,
+		"allowance_remaining_credits": status.RemainingCredits,
+		"next_refresh_at":             status.NextRefreshAt.UTC().Format(time.RFC3339),
+		"overage_enabled":             status.OverageEnabled,
+		"linked_wallets":              []string{},
+		"disclosure":                  Disclosure,
+	}
+	var owned []string
+	if p.GitHubUserID > 0 && h.deps.OwnedProviderIDs != nil {
+		owned, err = h.deps.OwnedProviderIDs(r.Context(), p.GitHubUserID)
+		if err != nil {
+			h.deps.Logger.Warn().Err(err).Msg("stake: owned provider lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "api_error", "stake_source_unavailable", "Staking is not available right now")
+			return
+		}
+	}
+	if len(owned) > 0 && h.deps.PayoutAddresses != nil {
+		wallets, err := h.deps.PayoutAddresses(r.Context(), owned)
+		if err != nil {
+			h.deps.Logger.Warn().Err(err).Msg("stake: payout address lookup failed")
+		} else if wallets != nil {
+			view["linked_wallets"] = wallets
+		}
+	}
+	if h.deps.Ledger != nil {
+		pos, err := h.deps.Ledger.Position(r.Context(), p.AccountID, owned)
+		if err != nil {
+			h.deps.Logger.Warn().Err(err).Msg("stake: position failed")
+		} else {
+			view["stake_source"] = "ledger_malibu_v1"
+			view["staked_malibu"] = rewards.FormatMALIBUUnits(pos.StakedUnits)
+			view["unlocking_malibu"] = rewards.FormatMALIBUUnits(pos.UnlockingUnits)
+			view["available_to_stake_malibu"] = rewards.FormatMALIBUUnits(pos.AvailableUnits)
+			if pos.NextReleaseAt != nil {
+				view["next_unlock_release_at"] = pos.NextReleaseAt.UTC().Format(time.RFC3339)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, view)
 }
