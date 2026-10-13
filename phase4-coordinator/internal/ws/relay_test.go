@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -296,6 +297,11 @@ func TestActiveRelayLivenessSuppressionEndsWhenRequestContextExpires(t *testing.
 	}
 	for time.Now().Before(until) {
 		if err := providerConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			// The server closed the socket between reads: the outcome this
+			// test waits for, observed on a slow (-race) runner (#1996).
+			if errors.Is(err, io.ErrClosedPipe) {
+				return
+			}
 			t.Fatalf("set provider read deadline: %v", err)
 		}
 		if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
