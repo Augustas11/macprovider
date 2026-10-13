@@ -34,6 +34,12 @@ type Store struct {
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
+
+	// routeSnapshotJournalPruneCursor is the journal id the R-15.10 prune
+	// walk resumes after; the mutex serializes prune runs.
+	routeSnapshotJournalPruneMu     sync.Mutex
+	routeSnapshotJournalPruneCursor int64
+
 	// poolAttestation is the SPEC-022-R012 durable pool authority (nil when
 	// trusted pools are disabled: pool_operator_attested is never derived).
 	poolAttestationMu sync.RWMutex

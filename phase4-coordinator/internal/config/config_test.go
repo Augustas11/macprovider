@@ -2125,3 +2125,14 @@ func TestStorageDrainedOutboxRetentionDefaultAndValidation(t *testing.T) {
 		t.Fatalf("drained outbox retention=1 should pass: %v", err)
 	}
 }
+
+func TestStorageRouteSnapshotJournalGraceDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.RouteSnapshotJournalMirroredGraceMinutes; got != 60 {
+		t.Fatalf("route snapshot journal grace default=%d want 60", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.RouteSnapshotJournalMirroredGraceMinutes = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "route_snapshot_journal_mirrored_grace_minutes") {
+		t.Fatalf("route snapshot journal grace=0 should fail; err=%v", err)
+	}
+}

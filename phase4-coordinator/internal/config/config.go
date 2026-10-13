@@ -1438,6 +1438,10 @@ type StorageConfig struct {
 	// rows are never pruned. Independent of audit_log_retention_days, which
 	// governs the audit database itself.
 	SettlementReceiptAuditOutboxDrainedRetentionHours int `yaml:"settlement_receipt_audit_outbox_drained_retention_hours"`
+	// SPEC-022 R-15.10: a route-snapshot journal row leaves this many
+	// minutes after it was mirrored, once its primary row is verified to
+	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
+	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -2001,6 +2005,7 @@ func Default() Config {
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
 			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
+			RouteSnapshotJournalMirroredGraceMinutes:          60,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -3257,6 +3262,9 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours < 1 {
 		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be >= 1")
+	}
+	if c.Storage.RouteSnapshotJournalMirroredGraceMinutes < 1 {
+		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be >= 1")
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")

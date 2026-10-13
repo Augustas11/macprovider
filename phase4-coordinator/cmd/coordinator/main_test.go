@@ -3084,3 +3084,31 @@ func TestWithProviderAppAttestMountsBothRoutes(t *testing.T) {
 		}
 	}
 }
+
+type routeSnapshotJournalPrunerStub struct {
+	calls chan billing.RouteSnapshotJournalPruneOptions
+}
+
+func (s *routeSnapshotJournalPrunerStub) PruneMirroredRouteSnapshotJournal(_ context.Context, opts billing.RouteSnapshotJournalPruneOptions) (billing.RouteSnapshotJournalPruneResult, error) {
+	s.calls <- opts
+	return billing.RouteSnapshotJournalPruneResult{Deleted: 1}, nil
+}
+
+// SPEC-022 R-15.10: the journal pruner runs on its interval with the
+// configured grace and bounded batches.
+func TestRouteSnapshotJournalPrunerRunsWithGrace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stub := &routeSnapshotJournalPrunerStub{calls: make(chan billing.RouteSnapshotJournalPruneOptions, 4)}
+	cfg := defaultRouteSnapshotJournalPrunerConfig()
+	cfg.Interval = 10 * time.Millisecond
+	startRouteSnapshotJournalPrunerWithConfig(ctx, stub, fixedIdleTracker{idleFor: time.Hour}, time.Hour, zerolog.Nop(), cfg)
+	select {
+	case opts := <-stub.calls:
+		if opts.Grace != time.Hour || opts.BatchSize != cfg.Batch || opts.MaxBatches != cfg.MaxBatches || opts.BatchPause != cfg.BatchPause {
+			t.Fatalf("prune options=%+v", opts)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("journal pruner did not run")
+	}
+}

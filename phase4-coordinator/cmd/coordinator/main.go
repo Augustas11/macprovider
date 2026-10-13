@@ -1639,6 +1639,7 @@ func runCoordinator() (exitCode int) {
 	errs := make(chan error, 2)
 
 	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, moneySQLiteActivity, logger)
+	startRouteSnapshotJournalPruner(shutdownCtx, billingStore, moneySQLiteActivity, time.Duration(cfg.Storage.RouteSnapshotJournalMirroredGraceMinutes)*time.Minute, logger)
 	startSettlementAttemptOutputJournalMaterializer(shutdownCtx, billingStore, metricsHandle, cfg.Storage.AuditLogRetentionDays, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
@@ -1995,6 +1996,23 @@ type routeSnapshotJournalMirror interface {
 	MirrorPendingRouteSnapshots(context.Context, int) (int, error)
 }
 
+type routeSnapshotJournalPruner interface {
+	PruneMirroredRouteSnapshotJournal(context.Context, billing.RouteSnapshotJournalPruneOptions) (billing.RouteSnapshotJournalPruneResult, error)
+}
+
+// routeSnapshotJournalPrunerConfig bounds the SPEC-022 R-15.10 journal
+// pruner: one bounded run per Interval, yielding to buyer traffic like the
+// mirror, with short journal transactions and a pause between batches.
+type routeSnapshotJournalPrunerConfig struct {
+	Interval    time.Duration
+	Timeout     time.Duration
+	Batch       int
+	BatchPause  time.Duration
+	MaxBatches  int
+	MinIdle     time.Duration
+	MaxDeferral time.Duration
+}
+
 type settlementAttemptOutputJournalMaterializer interface {
 	MaterializePendingSettlementAttemptOutputs(context.Context, int) (billing.SettlementAttemptOutputMaterializationResult, error)
 	SettlementAttemptOutputJournalStats(context.Context) (billing.SettlementAttemptOutputJournalStats, error)
@@ -2083,6 +2101,18 @@ func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig 
 		Timeout:     routeSnapshotJournalMirrorTimeout,
 		Batch:       routeSnapshotJournalMirrorBatch,
 		MaxBatches:  5,
+		MinIdle:     moneySQLiteMaintenanceMinIdle,
+		MaxDeferral: moneySQLiteMaintenanceMaxDeferral,
+	}
+}
+
+func defaultRouteSnapshotJournalPrunerConfig() routeSnapshotJournalPrunerConfig {
+	return routeSnapshotJournalPrunerConfig{
+		Interval:    time.Minute,
+		Timeout:     2 * time.Minute,
+		Batch:       200,
+		BatchPause:  50 * time.Millisecond,
+		MaxBatches:  100,
 		MinIdle:     moneySQLiteMaintenanceMinIdle,
 		MaxDeferral: moneySQLiteMaintenanceMaxDeferral,
 	}
@@ -2470,6 +2500,54 @@ func startRouteSnapshotJournalMirrorWithConfig(ctx context.Context, mirror route
 				return
 			case <-ticker.C:
 				flushIfIdle(ctx)
+			}
+		}
+	}()
+}
+
+func startRouteSnapshotJournalPruner(ctx context.Context, pruner routeSnapshotJournalPruner, idle moneySQLiteIdleTracker, grace time.Duration, logger zerolog.Logger) {
+	startRouteSnapshotJournalPrunerWithConfig(ctx, pruner, idle, grace, logger, defaultRouteSnapshotJournalPrunerConfig())
+}
+
+func startRouteSnapshotJournalPrunerWithConfig(ctx context.Context, pruner routeSnapshotJournalPruner, idle moneySQLiteIdleTracker, grace time.Duration, logger zerolog.Logger, cfg routeSnapshotJournalPrunerConfig) {
+	if pruner == nil || grace <= 0 {
+		return
+	}
+	if cfg.Interval <= 0 || cfg.Timeout <= 0 || cfg.Batch <= 0 || cfg.MaxBatches <= 0 {
+		return
+	}
+	attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
+	run := func(runCtx context.Context) {
+		if shouldYieldMoneySQLiteMaintenance(idle, cfg.MinIdle, attempts, cfg.MaxDeferral, time.Now()) {
+			return
+		}
+		attempts.MarkAttempt(time.Now())
+		pruneCtx, cancel := context.WithTimeout(runCtx, cfg.Timeout)
+		defer cancel()
+		result, err := pruner.PruneMirroredRouteSnapshotJournal(pruneCtx, billing.RouteSnapshotJournalPruneOptions{
+			Grace:      grace,
+			BatchSize:  cfg.Batch,
+			BatchPause: cfg.BatchPause,
+			MaxBatches: cfg.MaxBatches,
+		})
+		if err != nil {
+			logger.Warn().Err(err).Int64("deleted_rows", result.Deleted).Msg("route snapshot journal prune failed")
+			return
+		}
+		if result.Deleted > 0 || result.Kept > 0 {
+			logger.Info().Int64("deleted_rows", result.Deleted).Int64("kept_rows", result.Kept).Int64("scanned_rows", result.Scanned).
+				Msg("route snapshot journal pruned mirrored rows")
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(cfg.Interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run(ctx)
 			}
 		}
 	}()
