@@ -693,6 +693,80 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(store.record(for: after)?.probeAloneOutputs, [[1, 2], [3, 4]])
     }
 
+    /// A crash before any width or serial baseline exists (the first probe,
+    /// or a re-measure that reset the baseline) is a correctness result, so
+    /// it does not keep a prior grant as a throughput result would.
+    func testCrashBeforeAnySerialBaselineRevokesAPriorGrant() {
+        let crashed = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [], crashedAt: 2)
+        XCTAssertEqual(crashed, .init(slots: 1, reason: "crashed_at_2", verifiedSlots: 1))
+        let reconciled = ContinuousBatchingSelfCheck.reconcile(
+            fresh: crashed, priorGrant: 16, serialTPS: 0, measurements: [], previousStreak: 0
+        )
+        XCTAssertEqual(reconciled.decision.slots, 1)
+        let unmet = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [], probeShapeUnmetAt: 2)
+        XCTAssertEqual(unmet.reason, "probe_shape_unmet_at_2")
+    }
+
+    /// Stored lone outputs are reused only for the prompt they were generated
+    /// from, at the probe's completion length.
+    func testStoredProbeLoneOutputsAreReusedOnlyForTheirOwnPrompts() {
+        let prompts = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        let digests = prompts.map(ContinuousBatchingSelfCheck.promptSHA256)
+        XCTAssertEqual(Set(digests).count, 3)
+        let outputs = [[10, 11], [12, 13], [14, 15]]
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: prompts, outputTokens: 2),
+            outputs
+        )
+        var changed = prompts
+        changed[1] = [4, 5, 7]
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: changed, outputTokens: 2),
+            [[10, 11]]
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: digests, prompts: prompts, outputTokens: 3), []
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs(outputs, digests: [], prompts: prompts, outputTokens: 2), []
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reusableLoneOutputs([[10, -1]], digests: digests, prompts: prompts, outputTokens: 2), []
+        )
+    }
+
+    /// A Mac that could not hold two probe rows re-runs once its bound grows.
+    func testProbeShapeUnavailableRerunsWhenTheShapeFits() {
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: .init(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"),
+            decision: .init(slots: 1, reason: "probe_shape_unavailable", verifiedSlots: 1), serialTPS: 0,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+        )
+        record.ladderBound = 1
+        XCTAssertFalse(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 1))
+        XCTAssertTrue(ContinuousBatchingSelfCheck.ladderBoundGrew(record: record, currentBound: 2))
+    }
+
+    /// The store is owner-only: a file other users can read is ignored.
+    func testStoreIgnoresAFileReadableByOtherUsers() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-mode-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName)
+        let store = ContinuousBatchingSelfCheckStore(url: url)
+        let key = ContinuousBatchingSelfCheckKey(
+            modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o"
+        )
+        try store.store(.init(
+            key: key, decision: .init(slots: 4, reason: "granted", verifiedSlots: 4), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: nil
+        ))
+        XCTAssertNotNil(store.record(for: key))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        XCTAssertNil(store.record(for: key))
+    }
+
     // MARK: - Revocation
 
     func testRevokedTupleIsNeitherCoveredNorSelfChecked() {

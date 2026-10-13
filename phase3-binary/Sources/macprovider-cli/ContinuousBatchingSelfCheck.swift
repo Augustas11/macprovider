@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -235,6 +236,7 @@ enum ContinuousBatchingSelfCheck {
     /// cohort decodes (at least one serve window).
     static let minimumCohortDecodeTokens = 16
 
+    /// max(16, serve window), the window counted up to 4096.
     static func requiredCohortDecodeTokens(decodeWindow: Int) -> Int {
         max(minimumCohortDecodeTokens, min(decodeWindow, 4_096))
     }
@@ -363,6 +365,33 @@ enum ContinuousBatchingSelfCheck {
         return Array(tokens.prefix(length - tail)) + Array(tokens.suffix(tail))
     }
 
+    static func promptSHA256(_ tokens: [Int]) -> String {
+        let bytes = tokens.flatMap { token -> [UInt8] in
+            withUnsafeBytes(of: Int64(token).littleEndian) { Array($0) }
+        }
+        return SHA256.hash(data: Data(bytes)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The prefix of stored lone outputs that still belongs to `prompts`:
+    /// each generated from the prompt with the same SHA-256, of exactly
+    /// `outputTokens` non-negative tokens.
+    static func reusableLoneOutputs(
+        _ outputs: [[Int]],
+        digests: [String],
+        prompts: [[Int]],
+        outputTokens: Int
+    ) -> [[Int]] {
+        var reusable: [[Int]] = []
+        for (index, output) in outputs.enumerated() {
+            guard index < digests.count, index < prompts.count,
+                  digests[index] == promptSHA256(prompts[index]),
+                  output.count == outputTokens, output.allSatisfy({ $0 >= 0 })
+            else { break }
+            reusable.append(output)
+        }
+        return reusable
+    }
+
     /// SPEC-038 FR-CB10: whether a batched row's first divergence from its
     /// lone run is excused, judged against the stock serial logits of the
     /// shared prefix with the load-time isolation probe's rule
@@ -481,16 +510,21 @@ enum ContinuousBatchingSelfCheck {
     ) -> ContinuousBatchingSelfCheckDecision {
         let exactPrefix = Array(measurements.prefix { $0.conformant })
         let verified = exactPrefix.last?.slots ?? 1
-        if let probeShapeUnmetAt, exactPrefix.isEmpty {
-            return .init(slots: 1, reason: "probe_shape_unmet_at_\(probeShapeUnmetAt)", verifiedSlots: 1)
+        // With nothing verified, a crash or an unmet probe shape is the
+        // result even before a serial baseline exists, so it is never read
+        // as a throughput result that keeps a prior grant.
+        if exactPrefix.isEmpty, measurements.isEmpty {
+            if let crashedAt {
+                return .init(slots: 1, reason: "crashed_at_\(crashedAt)", verifiedSlots: 1)
+            }
+            if let probeShapeUnmetAt {
+                return .init(slots: 1, reason: "probe_shape_unmet_at_\(probeShapeUnmetAt)", verifiedSlots: 1)
+            }
         }
         guard serialTPS > 0, serialTPS.isFinite else {
             return .init(slots: 1, reason: "serial_baseline_unavailable", verifiedSlots: verified)
         }
         guard !exactPrefix.isEmpty else {
-            if let crashedAt, measurements.isEmpty {
-                return .init(slots: 1, reason: "crashed_at_\(crashedAt)", verifiedSlots: 1)
-            }
             let first = measurements.first?.slots ?? 2
             return .init(slots: 1, reason: "row_divergence_at_\(first)", verifiedSlots: 1)
         }
@@ -720,8 +754,11 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         /// The ladder bound the decision was measured under
         /// (`ContinuousBatchingSelfCheck.ladderUpperBound`).
         var ladderBound: Int?
-        /// Each exactness-probe prompt's tokens when run alone (v0.3.19).
+        /// Each exactness-probe prompt's tokens when run alone (v0.3.19), and
+        /// the SHA-256 of the prompt each was generated from: a stored lone
+        /// output is reused only for the same prompt.
         var probeAloneOutputs: [[Int]]?
+        var probePromptSHA256s: [String]?
 
         enum CodingKeys: String, CodingKey {
             case key
@@ -737,6 +774,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case remeasureInProgress = "remeasure_in_progress"
             case ladderBound = "ladder_bound"
             case probeAloneOutputs = "probe_alone_outputs"
+            case probePromptSHA256s = "probe_prompt_sha256s"
         }
     }
 
@@ -797,7 +835,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         guard fstat(fd, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFREG,
               st.st_uid == getuid(),
-              (st.st_mode & 0o022) == 0,
+              (st.st_mode & 0o077) == 0,
               st.st_size <= Self.maxFileBytes,
               let data = try? handle.readToEnd(),
               let document = try? JSONDecoder().decode(Document.self, from: data),
@@ -1066,9 +1104,12 @@ actor ContinuousBatchingSelfCheckDriver {
                 try save(record)
                 // Exactness probe: rows of unequal key lengths across the route
                 // boundary, all decoding together for the required tokens.
-                // Stored lone outputs are reused only in their probe shape.
-                var probeAlone = record.probeAloneOutputs ?? []
-                if probeAlone.contains(where: { $0.count != probeTokens }) { probeAlone = [] }
+                // Stored lone outputs are reused only for the same prompt and
+                // completion length.
+                var probeAlone = ContinuousBatchingSelfCheck.reusableLoneOutputs(
+                    record.probeAloneOutputs ?? [], digests: record.probePromptSHA256s ?? [],
+                    prompts: probePrompts, outputTokens: probeTokens
+                )
                 while probeAlone.count < slots {
                     let index = probeAlone.count
                     let row = try await yieldingToRequests {
@@ -1079,6 +1120,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     }
                     probeAlone.append(row.outputs[0])
                     record.probeAloneOutputs = probeAlone
+                    record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
                 }
                 let probe = try await yieldingToRequests {
                     try await runtime.runContinuousBatchingSelfCheckBatch(
@@ -1097,6 +1139,7 @@ actor ContinuousBatchingSelfCheckDriver {
                     log("event=cb_self_check action=probe_shape_unmet slots=\(slots) cohort_decode_tokens=\(cohortTokens) required=\(requiredCohortTokens)")
                     throw StepError.probeShapeUnmet(slots: slots)
                 }
+                if record.aloneOutputs.contains(where: { $0.count != tokens }) { record.aloneOutputs = [] }
                 while conformant, record.aloneOutputs.count < slots {
                     let index = record.aloneOutputs.count
                     let row = try await yieldingToRequests {
@@ -1251,7 +1294,10 @@ actor ContinuousBatchingSelfCheckDriver {
             count: count, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
         )
         let full = try await runtime.continuousBatchingSelfCheckPrompts(ContinuousBatchingSelfCheck.exactnessTexts(lengths: lengths))
-        let tail = full.count >= 2 ? ContinuousBatchingSelfCheck.commonSuffixLength(full[0], full[1]) : 0
+        guard full.count == lengths.count, full.count >= 2 else {
+            throw StepError.probeShapeUnmet(slots: max(2, min(full.count, lengths.count) + 1))
+        }
+        let tail = ContinuousBatchingSelfCheck.commonSuffixLength(full[0], full[1])
         return try zip(full, lengths).enumerated().map { index, pair in
             guard let prompt = ContinuousBatchingSelfCheck.fitPrompt(pair.0, tail: tail, length: pair.1) else {
                 throw StepError.probeShapeUnmet(slots: max(2, index + 1))

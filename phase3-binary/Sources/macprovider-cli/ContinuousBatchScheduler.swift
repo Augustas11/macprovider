@@ -3071,7 +3071,10 @@ actor ContinuousBatchScheduler {
 
     /// Opens or closes each cohort row's full-width run before a decode
     /// step: a run is open while the step decodes every row of its cohort
-    /// and no other row.
+    /// and no other row. Counted per scheduler step, i.e. over the forwards
+    /// the FR-CB2 split makes of the cohort: that split is how a grant of k
+    /// rows decodes when it serves (a backend that serializes rows serves
+    /// them serially too).
     private func noteSelfCheckCohortDecodeStep(rows: [Row]) {
         guard rows.contains(where: { $0.request.selfCheckCohort != nil }) else { return }
         for row in rows {
