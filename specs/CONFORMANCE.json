@@ -12209,8 +12209,17 @@
       "requirement_id": "SPEC-001-R006",
       "spec_id": "SPEC-001",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/EngineProfile.swift:EngineProfile",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testEngineFamilyPrefersNativeMTPThenContinuousBatching",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testChipClassIsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testRAMClassAndBounds",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testWireObjectIsClosedAndVersioned",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatDisabledModeOmitsBothFields"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

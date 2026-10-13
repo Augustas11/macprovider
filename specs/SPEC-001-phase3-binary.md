@@ -4420,7 +4420,9 @@ these members, all required:
 | `ram_class_gb` | integer | The largest of 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512 not above the reported `ram_gb`; 8 when `ram_gb` is below 8. |
 | `max_stable_context_tokens` | integer | The context length the provider serves for this model, equal to the heartbeat `max_context_tokens`. Range 0..10000000. |
 
-The object is a self-report. It MUST NOT carry measured timings; prefill rate,
+A provider serving through an external loopback runtime (SPEC-046-R002
+`runtime_source`) omits the object, because its runtime class is already
+recorded at auth. The object is a self-report. It MUST NOT carry measured timings; prefill rate,
 decode rate and time to first token are measured by the coordinator from
 served traffic (SPEC-002-R005). It never confers a trust tier, admission,
 attestation, catalog or settlement authority, and the provider MUST NOT rely
