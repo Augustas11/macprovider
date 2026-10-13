@@ -36,3 +36,14 @@ func awaitStartupSnapshots(t testing.TB, s *Server) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// wireRewardsTrust sets the rewards-trust store after NewServer has returned,
+// so the server never starts its 30s trust revalidation loop. Test servers are
+// never stopped: a loop started through WithProviderRewardsTrustTierStore
+// would keep reading the package-level rewardsTrust* timeouts that
+// TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders
+// overrides, which is a race (#1996). Tests call the sweep directly.
+func wireRewardsTrust(s *Server, store ProviderRewardsTrustTierStore) *Server {
+	s.rewardsTrust = store
+	return s
+}
