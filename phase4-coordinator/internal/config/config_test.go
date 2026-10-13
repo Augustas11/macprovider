@@ -2107,3 +2107,21 @@ func TestTrustedPoolsPoolModelPricingBoundsClosedDecodeAndOverflow(t *testing.T)
 		t.Fatal("bounds under an unrepresentable multiplier validated")
 	}
 }
+
+// SPEC-022 R-15.10: the drained outbox window is its own key, independent of
+// audit_log_retention_days.
+func TestStorageDrainedOutboxRetentionDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; got != 24 {
+		t.Fatalf("drained outbox retention default=%d want 24", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "settlement_receipt_audit_outbox_drained_retention_hours") {
+		t.Fatalf("drained outbox retention=0 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours = 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("drained outbox retention=1 should pass: %v", err)
+	}
+}

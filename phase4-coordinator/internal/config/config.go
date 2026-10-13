@@ -1432,6 +1432,12 @@ type StorageConfig struct {
 	// operator_model_swap audit_log table (and any future audit event
 	// types). Default 90 days mirrors request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
+	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
+	// already copied into the audit database, so it leaves the money
+	// database this many hours after delivery. Poisoned and undelivered
+	// rows are never pruned. Independent of audit_log_retention_days, which
+	// governs the audit database itself.
+	SettlementReceiptAuditOutboxDrainedRetentionHours int `yaml:"settlement_receipt_audit_outbox_drained_retention_hours"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -1994,6 +2000,7 @@ func Default() Config {
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
+			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -3247,6 +3254,9 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
 		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
+	}
+	if c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours < 1 {
+		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be >= 1")
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")

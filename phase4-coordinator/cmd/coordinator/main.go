@@ -1655,7 +1655,7 @@ func runCoordinator() (exitCode int) {
 			Str("archive_sha256", report.ArchiveSHA256).
 			Msg("nightly settlement evidence retention finished")
 	})
-	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, moneySQLiteActivity, logger)
+	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, time.Duration(cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours)*time.Hour, metricsHandle, moneySQLiteActivity, logger)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
@@ -2563,11 +2563,11 @@ func startSettlementAttemptOutputJournalMaterializerWithConfig(ctx context.Conte
 	}()
 }
 
-func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger) func(context.Context) {
-	return startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, sink, retentionDays, observer, idle, logger, defaultSettlementReceiptAuditOutboxDrainerConfig())
+func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, drainedRetention time.Duration, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger) func(context.Context) {
+	return startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, sink, drainedRetention, observer, idle, logger, defaultSettlementReceiptAuditOutboxDrainerConfig())
 }
 
-func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger, cfg settlementReceiptAuditOutboxDrainerConfig) func(context.Context) {
+func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, drainedRetention time.Duration, observer settlementReceiptAuditOutboxObserver, idle moneySQLiteIdleTracker, logger zerolog.Logger, cfg settlementReceiptAuditOutboxDrainerConfig) func(context.Context) {
 	if store == nil || sink == nil {
 		return func(context.Context) {}
 	}
@@ -2631,8 +2631,10 @@ func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, sto
 		return result, err
 	}
 	finishRun := func(runCtx context.Context) {
-		if retentionDays > 0 {
-			cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+		// SPEC-022 R-15.10: a drained row is already in the audit
+		// database; poisoned and undelivered rows are never pruned.
+		if drainedRetention > 0 {
+			cutoff := time.Now().UTC().Add(-drainedRetention)
 			pruneCtx, cancel := context.WithTimeout(runCtx, cfg.DrainTimeout)
 			defer cancel()
 			pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, cfg.PruneLimit)
