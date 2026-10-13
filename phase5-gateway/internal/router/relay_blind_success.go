@@ -113,13 +113,25 @@ func readRelayBlindUpstream(resp *http.Response) ([]byte, error) {
 	}
 	return b, nil
 }
-func writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.Response, body []byte) {
+
+// writeRelayBlindUpstreamError writes a fresh buyer error for a coordinator
+// refusal. For a privacy-class request it first records the SPEC-049-R030
+// reason at phase.
+func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.Response, body []byte, privacy bool, phase string) {
 	var wire struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(body, &wire) == nil && privacyClassKnown(wire.Error.Code) {
+	decoded := json.Unmarshal(body, &wire) == nil
+	if privacy {
+		code := "unknown"
+		if decoded && (privacyClassKnown(wire.Error.Code) || strings.HasPrefix(wire.Error.Code, "relay_blind_")) && len(wire.Error.Code) <= 64 {
+			code = wire.Error.Code
+		}
+		s.notePrivacyUpstreamRejection(resp, phase, code)
+	}
+	if decoded && privacyClassKnown(wire.Error.Code) {
 		writePrivacyClassError(w, wire.Error.Code, "")
 		return
 	}
@@ -162,7 +174,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if resp.StatusCode != 200 {
-		writeRelayBlindUpstreamError(w, resp, data)
+		s.writeRelayBlindUpstreamError(w, resp, data, privacy, relayblind.PrivacyRejectPhaseReservation)
 		return
 	}
 	reservation, err := relayblind.ParseReservationResponse(data)
@@ -225,7 +237,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if resp.StatusCode != 200 {
-		writeRelayBlindUpstreamError(w, resp, data)
+		s.writeRelayBlindUpstreamError(w, resp, data, privacy, relayblind.PrivacyRejectPhaseConsume)
 		return
 	}
 	consumed, err := relayblind.ParseConsumeResponse(data)
@@ -366,7 +378,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		if e != nil {
 			b = nil
 		}
-		writeRelayBlindUpstreamError(w, resp, b)
+		s.writeRelayBlindUpstreamError(w, resp, b, privacy, relayblind.PrivacyRejectPhaseDispatch)
 		return
 	}
 	if sessionAuth != nil {
@@ -385,7 +397,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 			writeError(w, 500, "api_error", "relay_blind_committed_failed", "Relay-blind execution failed after provider validation; do not resubmit")
 			return
 		}
-		writeRelayBlindUpstreamError(w, resp, b)
+		s.writeRelayBlindUpstreamError(w, resp, b, privacy, relayblind.PrivacyRejectPhaseDispatch)
 		return
 	}
 	if !validationAccepted {
@@ -412,6 +424,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	resp.Header.Del("X-Provider-Id")
 	resp.Header.Del("X-MacProvider-Receipt")
 	resp.Header.Del(privacyPostureVerifiedAtHeader)
+	resp.Header.Del(relayblind.PrivacyRejectReasonHeader)
 	timing.observeCoordinatorResponse(resp.Header, s.now())
 	if env.Stream {
 		s.forwardStreamingChat(w, r, resp, subject, validatedInput, env.ReservationTokenCap, env.MaxOutputTokens, env.Model, "", false, true, deadlines, false, window, timing)

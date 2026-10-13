@@ -519,33 +519,41 @@ func relayBlindSessionLostCode(privacy bool) (string, bool) {
 
 // relayBlindPredispatchFailure re-runs the non-capacity predispatch checks
 // for a reservation whose slot wait failed. It returns "" when only
-// capacity is missing. The bool reports a privacy-class error code.
-func (s *Server) relayBlindPredispatchFailure(ctx context.Context, reservation relayblind.Reservation) (string, bool) {
+// capacity is missing. The bool reports a privacy-class error code, and the
+// last value is its SPEC-049-R030 reason.
+func (s *Server) relayBlindPredispatchFailure(ctx context.Context, reservation relayblind.Reservation) (string, bool, string) {
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(ctx, reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
-	sessionLost := reservation.ExpiresAtUnix <= s.now().Unix() || !live || provider.AssignedID != reservation.AssignedSession || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != ""
+	expired := reservation.ExpiresAtUnix <= s.now().Unix()
+	sessionLost := expired || !live || provider.AssignedID != reservation.AssignedSession || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != ""
 	if reservation.PrivacyClass {
-		if s.privacyDisabledNow(ctx) {
-			return privacyClassDisabled, true
+		if reason := s.privacyDisabledReason(ctx); reason != "" {
+			return privacyClassDisabled, true, reason
 		}
-		if !s.relayBlindAvailable() || sessionLost {
-			return privacyClassStale, true
+		if !s.relayBlindAvailable() {
+			return privacyClassStale, true, relayblind.PrivacyRejectRelayBlindUnavailable
 		}
-		if _, code := s.privacyGate(ctx, provider, reservation.KeyRecordDigest); code != "" {
-			return privacyObservedCode(code, false), true
+		if expired {
+			return privacyClassStale, true, relayblind.PrivacyRejectReservationExpired
 		}
-		return "", false
+		if sessionLost {
+			return privacyClassStale, true, relayblind.PrivacyRejectSessionLost
+		}
+		if _, code, reason := s.privacyGate(ctx, provider, reservation.KeyRecordDigest); code != "" {
+			return privacyObservedCode(code, false), true, reason
+		}
+		return "", false, ""
 	}
 	if !s.relayBlind.cfg.Enabled {
-		return "relay_blind_disabled", false
+		return "relay_blind_disabled", false, ""
 	}
 	if !s.relayBlindAvailable() {
-		return "relay_blind_required_unavailable", false
+		return "relay_blind_required_unavailable", false, ""
 	}
 	if sessionLost {
-		return "relay_blind_key_expired", false
+		return "relay_blind_key_expired", false, ""
 	}
-	return "", false
+	return "", false, ""
 }
 
 type relayBlindSlotOutcome int
@@ -798,7 +806,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		if errors.Is(err, relayblind.ErrReplay) && heldErr == nil && held.AccountID == account.ID() && held.WalletSession == walletSession {
 			if code := privacyInvalidatedCode(held, s.now()); code != "" {
-				writePrivacyClassError(w, code, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, code, relayblind.PrivacyRejectReservationRejected)
 				return
 			}
 		}
@@ -819,10 +827,10 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	}
 	if reservation.PrivacyClass {
 		provider, _ := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
-		if _, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
+		if _, code, reason := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest); code != "" {
 			observed := privacyObservedCode(code, false)
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
-			writePrivacyClassError(w, observed, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, observed, reason)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -928,12 +936,14 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	reservation, err := s.relayBlind.store.LookupConsumedAuthorization(r.Context(), account.ID(), walletSession, authorization, s.now())
 	if err != nil || subtle.ConstantTimeCompare([]byte(reservation.EnvelopeDigest), []byte(digest)) != 1 || reservation.RequestID != envelope.RequestID {
 		if errors.Is(err, relayblind.ErrReplay) {
-			if peeked, peekErr := s.relayBlind.store.PeekAuthorization(r.Context(), account.ID(), walletSession, authorization); peekErr == nil && peeked.PrivacyClass && s.privacyDisabledNow(r.Context()) {
-				writePrivacyClassError(w, privacyClassDisabled, "")
-				return
+			if peeked, peekErr := s.relayBlind.store.PeekAuthorization(r.Context(), account.ID(), walletSession, authorization); peekErr == nil && peeked.PrivacyClass {
+				if reason := s.privacyDisabledReason(r.Context()); reason != "" {
+					s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDisabled, reason)
+					return
+				}
 			}
 			if code := s.privacyInvalidatedAuthorization(r.Context(), account.ID(), walletSession, authorization); code != "" {
-				writePrivacyClassError(w, code, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, relayblind.PrivacyRejectReservationRejected)
 				return
 			}
 		}
@@ -947,14 +957,23 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
 	if reservation.PrivacyClass {
-		if s.privacyDisabledNow(r.Context()) {
+		if reason := s.privacyDisabledReason(r.Context()); reason != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassDisabled, s.now())
-			writePrivacyClassError(w, privacyClassDisabled, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDisabled, reason)
 			return
 		}
 		if !s.relayBlindAvailable() || !live || !relayBlindSessionUsable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
-			writePrivacyClassError(w, privacyClassStale, "")
+			reason := relayblind.PrivacyRejectSessionLost
+			switch {
+			case !s.relayBlindAvailable():
+				reason = relayblind.PrivacyRejectRelayBlindUnavailable
+			case live && s.relayBlindSettlementPrerequisite(provider) != "":
+				reason = relayblind.PrivacyRejectSettlementPrerequisite
+			case keyErr != nil && live && relayBlindSessionUsable(provider):
+				reason = relayblind.PrivacyRejectKeyStaleOrRevoked
+			}
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, reason)
 			return
 		}
 	} else {
@@ -1013,15 +1032,19 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		// A wait can outlive the posture, the kill switch, or the key. Those
 		// keep their own codes; only a pure capacity miss is a capacity code.
 		checkCtx, cancelCheck := durableCtx()
-		code, privacyCode := s.relayBlindPredispatchFailure(checkCtx, reservation)
+		code, privacyCode, reason := s.relayBlindPredispatchFailure(checkCtx, reservation)
 		cancelCheck()
 		if code == "" {
-			code, privacyCode = "relay_blind_provider_unsupported", false
+			code, privacyCode, reason = "relay_blind_provider_unsupported", false, relayblind.PrivacyRejectSlotUnavailable
 			if slotOutcome == relayBlindSlotSessionLost {
 				code, privacyCode = relayBlindSessionLostCode(reservation.PrivacyClass)
+				reason = relayblind.PrivacyRejectSessionLost
 			}
 		}
 		burn(code)
+		if reservation.PrivacyClass {
+			s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, code, reason)
+		}
 		if privacyCode {
 			writePrivacyClassError(w, code, "")
 			return
@@ -1042,6 +1065,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	// that expired during the wait keeps its class-specific code.
 	if r.Context().Err() != nil {
 		burn("relay_blind_provider_unsupported")
+		if reservation.PrivacyClass {
+			s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, "relay_blind_provider_unsupported", relayblind.PrivacyRejectBuyerCancelled)
+		}
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider capacity is unavailable")
 		return
 	}
@@ -1049,7 +1075,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		code, privacyCode := relayBlindSessionLostCode(reservation.PrivacyClass)
 		burn(code)
 		if privacyCode {
-			writePrivacyClassError(w, code, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, relayblind.PrivacyRejectReservationExpired)
 			return
 		}
 		writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
@@ -1059,6 +1085,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	if s.admission != nil {
 		if !s.admission.TryReserveRequest(provider) {
 			burn("relay_blind_provider_unsupported")
+			if reservation.PrivacyClass {
+				s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, "relay_blind_provider_unsupported", relayblind.PrivacyRejectProviderQuotaUnavailable)
+			}
 			writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider quota is unavailable")
 			return
 		}
@@ -1075,7 +1104,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if errors.Is(err, relayblind.ErrReplay) {
 			if code := s.privacyInvalidatedAuthorization(r.Context(), account.ID(), walletSession, authorization); code != "" {
-				writePrivacyClassError(w, code, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, relayblind.PrivacyRejectReservationRejected)
 				return
 			}
 		}
@@ -1086,7 +1115,14 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			code, privacyCode := relayBlindSessionLostCode(heldPrivacy)
 			burn(code)
 			if privacyCode {
-				writePrivacyClassError(w, code, "")
+				reason := relayblind.PrivacyRejectSessionLost
+				switch {
+				case errors.Is(err, relayblind.ErrReservationExpired):
+					reason = relayblind.PrivacyRejectReservationExpired
+				case errors.Is(err, relayblind.ErrKeyRevoked):
+					reason = relayblind.PrivacyRejectKeyStaleOrRevoked
+				}
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, reason)
 				return
 			}
 			writeRelayBlindError(w, code, "Relay-blind provider session or key expired")
@@ -1097,7 +1133,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			// fail closed rather than report a replay.
 			if heldPrivacy {
 				burn(privacyClassStale)
-				writePrivacyClassError(w, privacyClassStale, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, relayblind.PrivacyRejectStoreUnavailable)
 				return
 			}
 			burn("relay_blind_required_unavailable")
@@ -1125,7 +1161,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 				s.admission.RefundRequest(provider)
 			}
 			if reservation.PrivacyClass {
-				writePrivacyClassError(w, privacyClassStale, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, relayblind.PrivacyRejectSettlementSnapshotFailed)
 				return
 			}
 			writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind settlement could not be recorded before dispatch")
@@ -1151,14 +1187,14 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	var privacyVerifiedAt time.Time
 	if reservation.PrivacyClass {
 		relayContext.PrivacyClass = relayblind.PrivacyClassV1
-		verifiedAt, code := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest)
+		verifiedAt, code, reason := s.privacyGate(r.Context(), provider, reservation.KeyRecordDigest)
 		if code != "" {
 			observed := privacyObservedCode(code, false)
 			s.rejectArmedDurably(r, reservation.ProviderBinding, observed)
 			if quotaMetered {
 				s.admission.RefundRequest(provider)
 			}
-			writePrivacyClassError(w, observed, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, observed, reason)
 			return
 		}
 		privacyVerifiedAt = verifiedAt
@@ -1167,6 +1203,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		s.rejectArmedDurably(r, reservation.ProviderBinding, "relay_blind_provider_unsupported")
 		if quotaMetered {
 			s.admission.RefundRequest(provider)
+		}
+		if reservation.PrivacyClass {
+			s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, "relay_blind_provider_unsupported", relayblind.PrivacyRejectBuyerCancelled)
 		}
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider capacity is unavailable")
 		return
@@ -1181,6 +1220,9 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			s.admission.RefundRequest(provider)
 		}
 		_ = rec.logProviderRowWithEstimateAndOutput(provider, http.StatusServiceUnavailable, nil, nil, err.Error(), "relay_blind_provider_unsupported", 0, nil, nil)
+		if reservation.PrivacyClass {
+			s.notePrivacyRouteRejection(w, r, relayblind.PrivacyRejectPhaseDispatch, "relay_blind_provider_unsupported", relayblind.PrivacyRejectDispatchUnavailable)
+		}
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "Relay-blind provider dispatch was unavailable")
 		return
 	}

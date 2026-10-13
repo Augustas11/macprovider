@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11772,6 +11772,42 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1911",
         "rationale": "SPEC-049 v0.2.6 slot-aware private selection and pinned-lane fair share (#1911) are implemented with unit and integration tests. They are not deployed yet; the coordinator change ships in a later Pearl runtime train, after which a live probe must show more than one enrolled provider serving private traffic. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R030",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:EligibilityReason",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:AdvertisementRejection",
+        "phase4-coordinator/internal/buyer/privacy_reject.go:notePrivacyRouteRejection",
+        "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
+        "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyRouteRejection",
+        "phase5-gateway/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
+        "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_reject_test.go:TestPrivacyRejectReasonsAreClosed",
+        "phase4-coordinator/internal/relayblind/privacy_route_reason_test.go:TestPrivacyEligibilityReasonSplitsNotEnrolled",
+        "phase4-coordinator/internal/relayblind/privacy_route_reason_test.go:TestPrivacyAdvertisementRejectionIsRemembered",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyReservationRecordsRealRejectReason",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyConsumeRecordsRealRejectReason",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyDispatchCapacityRecordsSlotUnavailable",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyDispatchPostureLapseRecordsRealReason",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyRejectReasonHeaderOnlyForGateway",
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestPrivacyRouteRejectionMetrics",
+        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsUpstreamRejectReason",
+        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsConsumePhase"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.2.7 real privacy reject reasons (#1911) are implemented in the coordinator and gateway with unit tests. They ship in a later runtime train; the requirement stays pending until deployed and observed live."
       }
     },
     {

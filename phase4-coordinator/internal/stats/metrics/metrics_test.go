@@ -472,3 +472,25 @@ func TestPrivacyPostureMetrics(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-049-R030: phase and reason labels come only from their closed sets.
+func TestPrivacyRouteRejectionMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.IncPrivacyRouteRejection("reservation", "posture_expired")
+	m.IncPrivacyRouteRejection("reservation", "posture_expired")
+	m.IncPrivacyRouteRejection("dispatch", "provider-123")
+	m.IncPrivacyRouteRejection("attacker-phase", "slot_unavailable")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMetricValue(t, families, "relayblind_privacy_route_rejections_total", map[string]string{"phase": "reservation", "reason": "posture_expired"}, 2)
+	assertMetricValue(t, families, "relayblind_privacy_route_rejections_total", map[string]string{"phase": "dispatch", "reason": "other"}, 1)
+	assertMetricValue(t, families, "relayblind_privacy_route_rejections_total", map[string]string{"phase": "other", "reason": "slot_unavailable"}, 1)
+	for _, labels := range []map[string]string{{"phase": "dispatch", "reason": "provider-123"}, {"phase": "attacker-phase", "reason": "slot_unavailable"}} {
+		if metricExists(families, "relayblind_privacy_route_rejections_total", labels) {
+			t.Fatalf("unvetted label became a value: %v", labels)
+		}
+	}
+}

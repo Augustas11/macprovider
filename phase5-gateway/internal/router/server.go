@@ -65,6 +65,7 @@ type Server struct {
 	routingMeta              routingMetaCache
 	retry503Metrics          *retry503Metrics
 	adminMetrics             *adminStateWriteMetrics
+	privacyRejectMetrics     *privacyRejectMetrics
 	chatStartLimits          *requestRateLimiter
 	relayBlindMetadataLimits *requestRateLimiter
 	publicStatsLimits        *publicStatsRateLimiter
@@ -197,6 +198,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		version:                  "dev",
 		retry503Metrics:          newRetry503Metrics(),
 		adminMetrics:             newAdminStateWriteMetrics(),
+		privacyRejectMetrics:     newPrivacyRejectMetrics(),
 		chatStartLimits:          newRequestRateLimiter(),
 		relayBlindMetadataLimits: newRequestRateLimiter(),
 		publicStatsLimits:        newPublicStatsRateLimiter(),
@@ -301,6 +303,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
 	_, _ = w.Write([]byte(s.adminMetrics.prometheus()))
+	_, _ = w.Write([]byte(s.privacyRejectMetrics.prometheus()))
 	_, _ = w.Write([]byte(s.idlessDedupe.prometheus()))
 	_, _ = w.Write([]byte(s.journal.MetricsSnapshot().Prometheus()))
 }

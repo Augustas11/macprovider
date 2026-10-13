@@ -70,6 +70,10 @@
 //   - `relayblind_privacy_posture_rejections_total{reason}` uses the closed
 //     SPEC-049 rejection reason set in relayblind; anything else is "other".
 //
+//   - `relayblind_privacy_route_rejections_total{phase,reason}` uses the
+//     closed SPEC-049-R030 phase and reason sets in relayblind; a value
+//     outside them is "other".
+//
 //   - `relayblind_privacy_release_identity_loaded{binary_version}` carries
 //     only X.Y.Z versions from signature-verified release metadata files,
 //     bounded by the 256-file load limit.
@@ -81,6 +85,8 @@ package metrics
 import (
 	"regexp"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -133,6 +139,9 @@ type Metrics struct {
 	// and posture rejections; reason="posture_unapproved_code_identity" is a
 	// release whose code identity Pearl does not approve.
 	PrivacyPostureRejectionsTotal *prometheus.CounterVec
+	// PrivacyRouteRejectionsTotal counts SPEC-049-R030 privacy-class
+	// requests refused at reservation, consume, or dispatch, by reason.
+	PrivacyRouteRejectionsTotal *prometheus.CounterVec
 	// PrivacyReleaseIdentityLoaded is 1 per binary version approved from
 	// signed release metadata (SPEC-049-R027) in the last load.
 	PrivacyReleaseIdentityLoaded *prometheus.GaugeVec
@@ -235,6 +244,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of privacy-class key advertisement and posture rejections, by SPEC-049 reason.",
 			},
 			[]string{"reason"},
+		),
+		PrivacyRouteRejectionsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "relayblind_privacy_route_rejections_total",
+				Help: "Count of privacy-class requests refused at reservation, consume, or dispatch, by SPEC-049-R030 phase and reason.",
+			},
+			[]string{"phase", "reason"},
 		),
 		PrivacyReleaseIdentityLoaded: f.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -484,6 +500,18 @@ func (m *Metrics) IncPrivacyPostureRejection(reason string) {
 		reason = "other"
 	}
 	m.PrivacyPostureRejectionsTotal.WithLabelValues(reason).Inc()
+}
+
+// IncPrivacyRouteRejection records one SPEC-049-R030 request-level privacy
+// rejection. Values outside the closed sets are folded into "other".
+func (m *Metrics) IncPrivacyRouteRejection(phase, reason string) {
+	if m == nil || m.PrivacyRouteRejectionsTotal == nil {
+		return
+	}
+	if !relayblind.PrivacyRejectPhaseKnown(phase) {
+		phase = "other"
+	}
+	m.PrivacyRouteRejectionsTotal.WithLabelValues(phase, relayblind.NormalizePrivacyRejectReason(reason)).Inc()
 }
 
 // SetPrivacyReleaseIdentityVersions replaces the loaded release-identity
