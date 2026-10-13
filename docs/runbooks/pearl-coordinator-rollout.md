@@ -137,6 +137,35 @@ ssh pearl 'systemd-run --unit=mp-update-<ver> -p Environment=PYTHONDONTWRITEBYTE
   live DB for diagnostics either: it restarts on every write and never
   finishes.
 
+## Stats migrations
+
+The signed updater never runs `coordinator stats-migrate`
+(`ops/runbooks/pearl-release-updater.md`); only the full deploy does. A stats
+migration that ships in a runtime release therefore stays pending until
+someone applies it. `scripts/ops/pearl-runtime.sh` shows this as step
+`stats_migrate`. It runs `stats-migrate --check` on Pearl with the installed
+coordinator binary and is pending when any line of the output ends in
+`pending`. A binary knows only the migrations it embeds, so the step is
+checked at two points:
+
+- **Before `app_attest_recorder`, while no apply has run.** The installed
+  binary may carry migrations an earlier release shipped and nobody applied.
+- **After `wait_updater`, before health is reported done.** The new binary is
+  live and its own migrations are now known. A release is not done while they
+  are pending.
+
+Between the apply and the end of the updater unit the check is skipped, because
+the binary is being replaced.
+
+`next --run` takes the live-ops lock, then on Pearl, as root, runs
+`stats-migrate` and re-runs `stats-migrate --check`; it fails if any migration
+is still pending. The admin DSN is read from `COORDINATOR_PARTNER_KEYS_ADMIN_DSN`
+in `/etc/macprovider/coordinator.env` as data (the file is not sourced), handed
+to the coordinator in its environment, never passed in argv, and redacted from
+the output along with any `postgres://` URL and `password=` pair; control
+characters are stripped. If `PEARL_SSH` is unset or the check fails, the step
+is blocked, and a live release is not reported done. Expected downtime: none; the coordinator is not restarted.
+
 ## Catalog activation (full deploy)
 
 The updater cannot activate a catalog: runtime releases carry `catalog: null`.

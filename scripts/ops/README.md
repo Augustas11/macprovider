@@ -9,7 +9,7 @@ not add steps of its own:
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
-| `pearl-runtime.sh` | coordinator and gateway runtime release; one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md` |
+| `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md` |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
@@ -160,6 +160,8 @@ PEARL_RUNTIME_VERSION=v<x.y.z>                   # pearl-runtime.sh target tag
 PEARL_COORDINATOR_CONFIG=/opt/macprovider/coordinator.yaml
 PEARL_COORDINATOR_OVERLAY=/etc/macprovider/coordinator.pearl-overlays.yaml
 PEARL_COORDINATOR_UNIT=macprovider-coordinator
+PEARL_COORDINATOR_ENV=/etc/macprovider/coordinator.env     # pearl-runtime.sh recorder and stats_migrate
+PEARL_COORDINATOR_BIN=/opt/macprovider/coordinator         # pearl-runtime.sh stats_migrate
 PEARL_COORDINATOR_METRICS_URL=http://127.0.0.1:8444/metrics
 PEARL_RELEASE_IDENTITY_OWNER=root PEARL_RELEASE_IDENTITY_GROUP=macprovider
 PEARL_INSTALL_ROOT=/opt/macprovider PEARL_BACKUP_ROOT=/root/macprovider-backups
