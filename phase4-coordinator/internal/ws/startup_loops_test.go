@@ -3,6 +3,9 @@ package ws
 import (
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/rs/zerolog"
 )
 
 // awaitStartupSnapshots blocks until the snapshot loops NewServer starts have
@@ -46,4 +49,17 @@ func awaitStartupSnapshots(t testing.TB, s *Server) {
 func wireRewardsTrust(s *Server, store ProviderRewardsTrustTierStore) *Server {
 	s.rewardsTrust = store
 	return s
+}
+
+// TestWithProviderRewardsTrustTierStoreWiresStore keeps the option covered now
+// that the rewards-trust tests wire the store through wireRewardsTrust. A nil
+// registry keeps NewServer from starting the trust revalidation loop, so
+// no goroutine is leaked that would read the package-level timeouts.
+func TestWithProviderRewardsTrustTierStoreWiresStore(t *testing.T) {
+	store := fakeRewardsTrustStore{tiers: map[string]string{"provider-a": "trusted"}}
+	s := NewServer(config.Default(), nil, zerolog.Nop(), WithProviderRewardsTrustTierStore(store))
+	got, ok := s.rewardsTrust.(fakeRewardsTrustStore)
+	if !ok || got.tiers["provider-a"] != "trusted" {
+		t.Fatalf("rewardsTrust = %#v, want the store passed to WithProviderRewardsTrustTierStore", s.rewardsTrust)
+	}
 }
