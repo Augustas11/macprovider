@@ -1626,6 +1626,12 @@ func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth response = %+v", response)
 	}
+	// The auth response precedes the hello_ack that lifts the handshake-ack
+	// routing hold, so wait for the hold to clear before asserting eligibility.
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
+		return ok && !p.HandshakeAckPending
+	})
 	provider, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
 	if !ok {
 		t.Fatal("provider not registered")
