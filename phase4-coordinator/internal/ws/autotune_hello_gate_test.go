@@ -626,6 +626,12 @@ func TestAutotuneHelloGateBearerSandboxClearsOnGateDisable(t *testing.T) {
 	if token, _ := ack["assigned_provider_token"].(string); token != "" {
 		t.Fatalf("bearer sandbox minted assigned_provider_token=%q", token)
 	}
+	// The hello_ack is read before the registry lifts the handshake-ack
+	// routing hold, so wait for the hold to clear before asserting eligibility.
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve(providerID, assignedID)
+		return ok && !p.HandshakeAckPending
+	})
 	provider, ok := h.Registry.Resolve(providerID, assignedID)
 	if !ok {
 		t.Fatal("provider not registered")
