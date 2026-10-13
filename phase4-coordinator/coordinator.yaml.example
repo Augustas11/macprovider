@@ -297,6 +297,23 @@ settlement:
 billing:
   quarantine_resolution_force_void_enabled: false
 
+
+# SPEC-050 MALIBU stake allowance (#1062). Always on; the budget sets its size.
+# An account locks MALIBU its providers hold and gets a daily inference
+# allowance: min(stake * credits_per_malibu, per_account_daily_cap_credits),
+# scaled down pro rata when the sum exceeds daily_budget_credits. Credits are
+# SPEC-005 credits (1 credit = 1 micro-USD). daily_budget_credits: 0 grants
+# nothing. These are conservative example values (USD 5/day network-wide,
+# USD 0.25/day per account); the operator sets production values. Changes
+# apply at coordinator start.
+stake_allowance:
+  daily_budget_credits: 5000000
+  credits_per_malibu: 1000
+  per_account_daily_cap_credits: 250000
+  min_stake_age_hours: 24
+  unlock_cooldown_hours: 168
+  refresh_check_interval_seconds: 60
+
 endpoints:
   provider_earnings:
     rate_limit_per_minute: 60

@@ -21,10 +21,14 @@ type RewardsConfig = config.RewardsConfig
 type SettlementConfig = config.SettlementConfig
 
 type Store struct {
-	db           *sql.DB
-	readDB       atomic.Pointer[sql.DB]
-	now          func() time.Time
-	sqliteMetric SQLiteMetrics
+	// selfDealMemo briefly caches SPEC-050-R010 self-dealing answers.
+	selfDealMemo selfDealMemo
+	// allowanceProcess is this process's SPEC-050 allowance-hold epoch.
+	allowanceProcess allowanceProcessState
+	db               *sql.DB
+	readDB           atomic.Pointer[sql.DB]
+	now              func() time.Time
+	sqliteMetric     SQLiteMetrics
 	// routeSnapshotDB is an optional same-file SQLite handle reserved for
 	// durable pre-dispatch route snapshots. It avoids queueing those writes
 	// behind request_log pool users while SQLite still serializes the writer
@@ -696,6 +700,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureWholesaleStatementTables(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureAllowanceTables(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {

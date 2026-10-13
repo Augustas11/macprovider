@@ -157,6 +157,11 @@ type Record struct {
 	DemoTokenHash    string                      `json:"demo_token_hash,omitempty"`
 	WalletSessionID  string                      `json:"wallet_session_id,omitempty"`
 	RelayBlind       *storage.RelayBlindMetadata `json:"relay_blind,omitempty"`
+	// FundingSource is the SPEC-050 funding the coordinator confirmed
+	// ("allowance", or "quota" for an unfunded allowance-only request); the
+	// re-driven settlement writes it onto the reservation. Empty keeps the
+	// reservation's own.
+	FundingSource string `json:"funding_source,omitempty"`
 
 	// Seal payload (kind == KindSeal): SealSettled or SealUsageEvent.
 	Result string `json:"result,omitempty"`

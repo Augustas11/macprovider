@@ -942,6 +942,7 @@ func TestRetryableByCodeClassification(t *testing.T) {
 // write-site sweep (autotune_feeds.go, route_snapshot.go, and every code
 // path in server.go), matching spec018RetryableByCode key-for-key.
 var coordinatorEmittedErrorCodes = []string{
+	"allowance_exhausted", "allowance_unavailable", "quota_exhausted",
 	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
 	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
 	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",

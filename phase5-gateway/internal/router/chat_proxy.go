@@ -72,6 +72,12 @@ type usageSubject struct {
 	DemoTokenHash        string
 	WalletSessionID      string
 	ReservationCreatedAt time.Time
+	// AllowanceFunded marks a request the coordinator admitted against the
+	// account's SPEC-050 allowance; its quota reservation does not draw on
+	// the paid daily quota. AllowanceRequired marks one whose paid quota was
+	// exhausted, so only the allowance may fund it.
+	AllowanceFunded   bool
+	AllowanceRequired bool
 }
 
 const (
@@ -551,11 +557,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, subject.ReservationCreatedAt, s.now().Add(reservationMaxAge))
 		decision = sessionDecision.AccountQuota
 	} else {
-		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
+		quotaReq := storage.ReservationRequest{
 			AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
 			RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
 			CreatedAt: subject.ReservationCreatedAt, ExpiresAt: s.now().Add(reservationMaxAge),
-		})
+		}
+		decision, err = s.store.ReserveQuota(r.Context(), quotaReq)
+		if errors.Is(err, storage.ErrQuotaExceeded) && !authn.Demo {
+			// SPEC-050-R007: the paid quota is spent, but an account with an
+			// allowance today may still be funded from the allowance alone.
+			if allowanceDecision, allowanceErr, tried := s.reserveAllowanceOnly(r.Context(), &subject, quotaReq); tried {
+				decision, err = allowanceDecision, allowanceErr
+			}
+		}
 	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
@@ -725,6 +739,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			// SPEC-050-R007: API-key requests are admitted against the
+			// account's allowance on the coordinator before dispatch.
+			if !authn.Demo && authn.WalletSession == nil {
+				setAllowanceRequestHeaders(upReq.Header, model, window, promptReservation, maxTokens, subject.AllowanceRequired)
+			}
 			// The request body remains buyer-authored because max_tokens is part
 			// of the receipt prompt hash. Carry the gateway's reserved output
 			// budget as authenticated dispatch metadata instead, so an omitted
@@ -837,6 +856,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	s.noteAllowanceResponse(r, &subject, resp.Header)
 	if priorProviderDispatch {
 		if resp.Header == nil {
 			resp.Header = http.Header{}
@@ -3264,6 +3284,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		Outcome:          outcome,
 		DemoIdentity:     subject.DemoIdentity,
 		DemoTokenHash:    subject.DemoTokenHash,
+		FundingSource:    settlementFundingSource(subject),
 		WalletSessionID:  subject.WalletSessionID,
 	}); journalErr != nil {
 		// FAIL-OPEN, deliberately. The buyer already has the bytes; refusing
@@ -3318,6 +3339,17 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			TokenSource:      source,
 			Outcome:          outcome,
 			CreatedAt:        s.now(),
+		}
+		// SPEC-050-R008: keep the confirmed funding on the reservation even
+		// though the settlement transaction that normally writes it failed.
+		// If that cannot be made durable and the journal holds the effect,
+		// leave the reservation and the effect for the journal recovery,
+		// which settles with the funding atomically, rather than bill the
+		// usage against the wrong quota now.
+		if fundingErr := s.persistFundingSource(subject.AccountID, requestID(r), settlementFundingSource(subject)); fundingErr != nil && armed {
+			slog.Error("gateway SPEC-006 § 17.7 fallback deferred to the settlement journal: allowance funding not durable",
+				"request_id", requestID(r), "account_id", subject.AccountID, "error", fundingErr)
+			return
 		}
 		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
 			// Both the normal settle path and the idempotent fallback
@@ -3598,6 +3630,7 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 		RelayBlind: relayBlindMetadataFor(r),
 		AccountID:  subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
 		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
+		FundingSource: settlementFundingSource(subject),
 	}
 	var err error
 	if subject.DemoIdentity != "" {
