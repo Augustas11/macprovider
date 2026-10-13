@@ -4714,105 +4714,171 @@
       "requirement_id": "SPEC-036-R019",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/scoring_scorers.go:func SelectScorers",
+        "phase4-coordinator/internal/auth/tokens.go:func (s *Store) ProviderOperatorKey",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) sweep"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/auth/provider_operator_key_test.go:TestProviderOperatorKey",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersRules"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R020",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/compute_integrity_probe.go:func (s *Server) DispatchComputeIntegrityProbe",
+        "phase4-coordinator/internal/computeintegrity/scoring_corpus.go:func DrawProbe",
+        "phase4-coordinator/internal/computeintegrity/scoring_corpus.go:func ParseCorpus",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) considerProvider",
+        "phase4-coordinator/internal/config/compute_integrity.go:func DefaultComputeIntegrityConfig"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/compute_integrity_probe_test.go:TestComputeIntegrityProbeUsesOrdinaryPaidDispatch",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestDefaultCorpusAndProbeBody",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringNeedsScorerOfAnotherOperator",
+        "test/integration/compute_integrity_scoring_integration_test.go:TestComputeIntegrityScoringHonestPassesSubstitutedFails"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-20. Covert verification requests through the ordinary paid dispatch path. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-20. Covert verification requests through the ordinary paid dispatch path. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R021",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/ComputeScoreProtocol.swift:public static func decodeRequest",
+        "phase3-binary/Sources/macprovider-cli/ComputeScoreRuntime.swift:static func teacherForced",
+        "phase3-binary/Sources/macprovider-cli/ComputeScoreRuntime.swift:func runComputeScore",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func ParseComputeScoreResult",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) scoreAll"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/ComputeScoreProtocolTests.swift:testOverBoundInputIsTooLongNotInvalid",
+        "phase3-binary/Tests/macprovider-cliTests/ComputeScoreRuntimeTests.swift:testOwnGreedyOutputAgreesAndMatchesOneShotForward",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreRequestRunsExecutorAndReturnsAggregate",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestParseComputeScoreResultIsStrict",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoreResultFromWrongSessionIsIgnored"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-21. Teacher-forced scoring job and scorer selection. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-21. Teacher-forced scoring job and scorer selection. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R022",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/scoring.go:func (t *Tolerance) Band",
+        "phase4-coordinator/internal/computeintegrity/scoring.go:func (t *Tolerance) Accept",
+        "phase4-coordinator/internal/computeintegrity/scoring.go:func PriorBand"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestPriorBandSeparatesHonestFromSubstituted",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestToleranceWarmsWithOperatorDiversityAndLearnsBand",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestToleranceHardFloorsBoundPoisoning"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-22. Agreement metrics and the learned honest-pair tolerance band. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-22. Agreement metrics and the learned honest-pair tolerance band. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R023",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Apply",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Tick",
+        "phase4-coordinator/internal/computeintegrity/scoring_store.go:func (s *ScoringStore) UpsertKeyState",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineFailureNeedsTwoScorerOperators",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineRecoveryReleasesRecoveryHold",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineRecoveryFailureKeepsHold",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPersistedFailureSuspendsOnStart"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-23. Verification decision state machine. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-23. Verification decision state machine. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R024",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/scoring_scorers.go:func (t *ScorerTracker) RecordPair",
+        "phase4-coordinator/internal/computeintegrity/scoring_scorers.go:func KnownCheckPassed",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) knownSequenceCheck"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScorerTrackerExcludesPersistentDisagreer",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestKnownSequencesOfferPickAndCheck"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-24. Scorer integrity: double scoring, known sequences, scorer exclusion. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-24. Scorer integrity: double scoring, known sequences, scorer exclusion. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
       "requirement_id": "SPEC-036-R025",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetComputeIntegritySuspended",
+        "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (s *Server) handleAdminComputeIntegrityAction",
+        "phase4-coordinator/internal/ws/compute_integrity_status.go:func (s *Server) computeIntegrityStatuses",
+        "phase4-coordinator/internal/stats/metrics/compute_integrity.go:func (m *Metrics) IncComputeIntegrityVerification"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeIntegritySuspensionIsPerModel",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorStatusReleaseAndClear",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLogsCarryNoPromptsOrOutputs",
+        "phase4-coordinator/internal/stats/metrics/compute_integrity_test.go:TestComputeIntegrityMetricsUseClosedLabels"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-036 v0.2.0 FR-25. Routing suspension, provider/operator status and closed-label telemetry. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-036 v0.2.0 FR-25. Routing suspension, provider/operator status and closed-label telemetry. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
@@ -12083,15 +12149,27 @@
       "requirement_id": "SPEC-022-R016",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldExclusionSQL",
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func (s *Store) OpenComputeIntegrityHold",
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func (s *Store) ReleaseComputeIntegrityHold",
+        "phase4-coordinator/internal/billing/compute_integrity_holds.go:func computeIntegrityHoldRollupTriggers",
+        "phase4-coordinator/internal/billing/store.go:func (s *Store) rebuildSpec022PayableRequestCreditsView",
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldWithholdsAndReleases",
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryHoldCloseAndRelease",
+        "phase4-coordinator/internal/billing/earnings_rollup_test.go:TestProviderEarningsRollupMatchesViewOnSeededData",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHoldWriteFailureDefersFailure"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
-        "rationale": "SPEC-022 v0.4.4 R-16 compute-integrity earnings hold. Pending: implementation in the #1644 campaign PR and live rollout."
+        "rationale": "SPEC-022 v0.4.4 R-16 compute-integrity earnings hold. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
       }
     },
     {
