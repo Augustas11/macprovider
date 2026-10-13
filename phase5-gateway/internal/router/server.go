@@ -312,6 +312,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w = &scrubProviderIdentityWriter{ResponseWriter: w}
 		requestID := r.Header.Get("X-Request-ID")
 		requestIDClass := retry503RequestIDClassClientSupplied
 		if !isUUIDLike(requestID) {
@@ -1743,7 +1744,7 @@ func copyCleanHeadersFiltered(dst, src http.Header, allowReceipt bool, allowPool
 			}
 			continue
 		}
-		if isMacProviderHeader(key) {
+		if isMacProviderHeader(key) || isProviderIdentityHeader(key) {
 			continue
 		}
 		// Issue #190: the gateway is authoritative for rate-limit
@@ -1862,6 +1863,67 @@ func stripInternalMacProviderHeaders(header http.Header) []string {
 	sort.Strings(stripped)
 	return stripped
 }
+
+// isProviderIdentityHeader reports a header that names or fingerprints the
+// serving provider or its routing session. Buyers never receive provider
+// identity (SPEC-006, SPEC-049 disclosure); the coordinator may emit these on
+// the internal hop, the gateway never forwards them.
+func isProviderIdentityHeader(key string) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "x-macprovider-provider", "x-macprovider-route", "x-macprovider-session":
+		return true
+	}
+	return strings.HasPrefix(lower, "x-provider-") || lower == "x-route-provider"
+}
+
+// scrubProviderIdentityWriter deletes provider-identifying headers at the
+// buyer boundary immediately before the status line is written, so no
+// handler path (success, stream, error, relay-blind, replay) can leak one.
+type scrubProviderIdentityWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *scrubProviderIdentityWriter) scrub() {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.deleteIdentity()
+}
+
+func (w *scrubProviderIdentityWriter) deleteIdentity() {
+	h := w.Header()
+	for key := range h {
+		if isProviderIdentityHeader(key) {
+			delete(h, key)
+		}
+	}
+}
+
+func (w *scrubProviderIdentityWriter) WriteHeader(status int) {
+	if status >= 200 {
+		w.scrub()
+	} else {
+		w.deleteIdentity()
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *scrubProviderIdentityWriter) Write(p []byte) (int, error) {
+	w.scrub()
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *scrubProviderIdentityWriter) Flush() {
+	w.scrub()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *scrubProviderIdentityWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func isMacProviderHeader(key string) bool {
 	return strings.HasPrefix(strings.ToLower(key), "x-macprovider-")

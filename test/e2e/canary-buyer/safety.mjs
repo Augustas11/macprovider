@@ -510,6 +510,9 @@ export function findBaseline(entries, model, provider, hardwareTier, {
 
 export function responseIdentityReasons(result, requestedModel, expectedFleet, {
   expectedProviderID = '',
+  // Buyers never receive provider identity from the gateway (SPEC-006 §5.4),
+  // so only the direct isolated-provider endpoint can attribute a response.
+  requireProvider = true,
 } = {}) {
   const reasons = [];
   if (result?.responseModel !== requestedModel) {
@@ -518,7 +521,8 @@ export function responseIdentityReasons(result, requestedModel, expectedFleet, {
   const matching = expectedFleet.filter((row) => row.model_id === requestedModel);
   const expectedProviders = expectedProviderID ? [expectedProviderID] : matching.map((row) => row.provider_id);
   if (!expectedProviders.length) reasons.push(`${requestedModel}:expected_provider_mapping_missing`);
-  if (!expectedProviders.includes(result?.provider || '')) {
+  if (!requireProvider && result?.provider) reasons.push(`${requestedModel}:buyer_response_leaked_provider_identity`);
+  if (requireProvider && !expectedProviders.includes(result?.provider || '')) {
     const expectedProvider = expectedProviderID || (expectedProviders.length ? expectedProviders.join('|') : 'unresolved');
     reasons.push(`${requestedModel}:response_provider_${result?.provider || 'missing'}_ne_${expectedProvider || 'unresolved'}`);
   }

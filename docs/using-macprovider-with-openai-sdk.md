@@ -188,14 +188,7 @@ Provider IDs are visible on the pool dashboard at [console.malibu.tech](https://
 
 ## Which provider served this request?
 
-Every response carries `X-MacProvider-Provider` identifying which provider actually served it — useful for logging, debugging, or feeding a subsequent pin.
-
-```python
-resp = client.chat.completions.create(...)
-served_by = resp.response.headers.get("X-MacProvider-Provider")
-```
-
-(Extracting response headers from `openai-python` requires the `raw_response` accessor — see the [OpenAI SDK docs](https://github.com/openai/openai-python#accessing-raw-response-data-eg-headers) for the exact pattern.)
+You cannot tell, by design. Responses carry no provider identity headers: the gateway removes `X-Provider-Id`, `X-MacProvider-Provider`, and similar from every buyer response. A signed receipt, where present, includes the provider's receipt public key so you can verify it. Use `X-Request-ID` to correlate a request with support or its receipt.
 
 ## Signed inference receipts
 
@@ -261,7 +254,6 @@ raw = client.chat.completions.with_raw_response.create(
 )
 resp = raw.parse()
 
-print("served by:  ", raw.headers.get("X-MacProvider-Provider"))
 print("cached toks:", resp.usage.cached_prompt_tokens if hasattr(resp.usage, "cached_prompt_tokens") else 0)
 print("receipt:    ", raw.headers.get("X-MacProvider-Receipt")[:60], "...")
 print("payload:    ", json.loads(resp.choices[0].message.content))
@@ -386,7 +378,6 @@ The trace explains the routing choice. It never names the provider, and it is no
 | `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `lmstudio_loopback`, `mlxlm_loopback`, `ollama_loopback`, `omlx_loopback`) | SPEC-006-R016 |
 | `X-MacProvider-Model-Disclosure` | Response | `pool_attested_unverified` on a pool-only model route | SPEC-006-R018 |
 | `X-MacProvider-Pool-Manifest-Core-Digest` | Response | Digest of the signed pool policy that authorized a pool-only model route | SPEC-006-R018 |
-| `X-MacProvider-Provider` | Response | Which provider actually served this | SPEC-002 |
 | `X-MacProvider-Receipt` | Response | ed25519-signed inference receipt | SPEC-015 v0.3 |
 
 ## Usage object reference

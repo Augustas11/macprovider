@@ -6326,10 +6326,7 @@ class Updater:
                 with opener.open(request, timeout=self.config.request_timeout_s) as response:
                     if response.status != 200 or response.geturl() != url:
                         raise UpdateError("gateway buyer proof request did not return an exact HTTP 200")
-                    provider_header = response.headers.get("X-Provider-Id", "")
                     response_request_id = response.headers.get("X-Request-Id", "")
-                    if provider_header != provider_id:
-                        raise UpdateError("gateway buyer proof response X-Provider-Id mismatches canary provider")
                     if not response_request_id:
                         raise UpdateError("gateway buyer proof response omitted X-Request-Id")
                     if response_request_id != request_id:
@@ -6392,6 +6389,46 @@ class Updater:
             "model": model_id,
         }
 
+    def verify_buyer_proof_served_by_canary(
+        self,
+        response_request_id: str,
+        assigned_id: str,
+    ) -> None:
+        # Buyers never receive provider identity (SPEC-006 §5.4), so the
+        # operator proves who served the buyer proof from the coordinator's own
+        # request_log, keyed by the gateway-echoed request id.
+        try:
+            request_uuid = str(uuid.UUID(response_request_id))
+        except ValueError as exc:
+            raise UpdateError("gateway buyer proof response request id is not a UUID") from exc
+        if not self.databases or len(self.databases) < 2:
+            raise UpdateError("effective coordinator database path was not captured")
+        coordinator_db = self.databases[1]
+        deadline = time.monotonic() + 30
+        while True:
+            result = self.run_command(
+                [
+                    "sqlite3",
+                    "-readonly",
+                    "-bail",
+                    str(coordinator_db),
+                    "SELECT provider_assigned_id FROM request_log "
+                    f"WHERE external_request_id = '{request_uuid}' ORDER BY id DESC LIMIT 1;",
+                ],
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise UpdateError("could not read the coordinator request_log for the buyer proof")
+            served_by = result.stdout.strip()
+            if served_by:
+                if served_by != assigned_id:
+                    raise UpdateError("gateway buyer proof was not served by the canary provider session")
+                return
+            if time.monotonic() >= deadline:
+                raise UpdateError("coordinator request_log has no row for the gateway buyer proof")
+            self.sleep(1)
+
     def _prove_release_buyer_journey(
         self,
         release: Release,
@@ -6409,6 +6446,10 @@ class Updater:
                 cycle=cycle,
                 provider_id=provider_id,
                 model_id=model_id,
+            )
+            self.verify_buyer_proof_served_by_canary(
+                buyer_proof["response_request_id"],
+                provider_evidence.assigned_id,
             )
             if self.verify_exact_provider_canary(release) != provider_evidence:
                 raise UpdateError("catalog canary identity changed during the buyer journey proof")

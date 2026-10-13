@@ -1929,6 +1929,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
         legacyRollbackProviders,
       ), {
         expectedProviderID: CONFIG.mode === 'qualification' ? CONFIG.isolatedProviderID : '',
+        requireProvider: CONFIG.mode === 'qualification',
       });
       if (identityReasons.length) {
         fail(CONFIG.mode === 'qualification' ? 'isolation_unproven' : 'response_identity_unproven',

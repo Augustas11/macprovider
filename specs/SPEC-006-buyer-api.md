@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.51 (2026-10-13, buyer privacy mode and route trace)
+**Version:** 0.9.52 (2026-10-13, buyers never receive provider identity)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.52 (2026-10-13, issue #1991 — buyers never receive provider identity):**
+- §5.4: no buyer-facing response on any path (success, stream, error, relay-blind, id-less retry replay) carries `X-Provider-Id`, `X-Provider-Assigned-Id`, `X-Provider-Fingerprint`, `X-Route-Provider`, `X-MacProvider-Provider`, `X-MacProvider-Route`, `X-MacProvider-Session`, or any equivalent provider or assigned-session identifier in a response header. The gateway deletes them at the buyer boundary, which supersedes the earlier gateway-emitted `X-Provider-Id` attribution header. Operators attribute a request to a provider from the coordinator `request_log` (keyed by the echoed `X-Request-ID`) and logs, never from the buyer response. No wire field is added.
 
 **Change log v0.9.51 (2026-10-13, issue #1355 — buyer privacy mode and route trace):**
 - §5.4.4: registers `SPEC-006-R019`. `X-MacProvider-Privacy-Mode` takes `pool` (default), `relay_blind_required` (the SPEC-041 envelope, fail closed: plaintext or a pool selection is 400 `privacy_mode_unsatisfied`) or `owned_provider` (an authorized Trusted Pool selection is required). Invalid values are 400 `invalid_privacy_mode`. Responses carry the effective mode and a fixed disclosure string that never overclaims. Pool-scoped privacy stays undefined (#1985) and fails closed.
@@ -1861,7 +1864,13 @@ The gateway MUST strip these upstream coordinator response headers before return
 
 - `X-MacProvider-Provider`
 - `X-MacProvider-Route`
+- `X-MacProvider-Session`
+- `X-Provider-Id`, `X-Provider-Assigned-Id`, `X-Provider-Fingerprint`, `X-Route-Provider`, and any other response header starting with `X-Provider-`
 - any response header starting with `X-MacProvider-` that is not on a documented response-pass-through allowlist
+
+Buyers never receive provider identity. The gateway MUST NOT emit any of these under a different name, MUST delete them from every buyer response (including error, relay-blind, and id-less retry replay responses) immediately before the response head is written, and MUST NOT replay a stored provider identifier. The buyer-facing nginx vhost SHOULD also hide them (`proxy_hide_header`) as defense in depth. Provider identity remains available to operators in coordinator logs and `request_log`.
+
+Exception: verification and encryption material that another SPEC requires the buyer to hold stays buyer-visible: the SPEC-015 receipt tuple's `provider_pubkey`, the `/v1/receipts` `provider_receipt_key_fingerprint`, and the SPEC-041/SPEC-049 reservation `kid`, `key_record` and `provider_binding`. These are pseudonymous and are not provider identifiers; nothing else identifies a provider or session to a buyer.
 
 The documented response-pass-through allowlist is:
 

@@ -177,7 +177,7 @@ class PearlUpdaterTests(unittest.TestCase):
             url: str = "https://api.malibu.tech/v1/chat/completions",
             lines: list[bytes] | None = None,
         ):
-            self.headers = {"X-Provider-Id": provider_id, "X-Request-Id": request_id}
+            self.headers = {"X-Request-Id": request_id}
             self.status = status
             self._url = url
             self._lines = lines if lines is not None else [
@@ -3700,13 +3700,6 @@ class PearlUpdaterTests(unittest.TestCase):
         token = self.root / "buyer-token"
         token.write_text("buyer-token-value\n")
         token.chmod(0o600)
-        wrong_provider_opener, wrong_provider_patch = self.buyer_proof_opener(
-            lambda request: self.BuyerProofResponse(
-                request_id=request.get_header("X-request-id"),
-                provider_id="other-provider",
-                lines=[],
-            )
-        )
         missing_done_opener, missing_done_patch = self.buyer_proof_opener(
             lambda request: self.BuyerProofResponse(
                 request_id=request.get_header("X-request-id"),
@@ -3718,16 +3711,6 @@ class PearlUpdaterTests(unittest.TestCase):
 
         with (
             mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
-            wrong_provider_patch,
-        ):
-            with self.assertRaisesRegex(updater_module.UpdateError, "X-Provider-Id"):
-                self.updater.prove_gateway_buyer_stream(
-                    cycle=1,
-                    provider_id="catalog-canary",
-                    model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
-                )
-        with (
-            mock.patch.object(updater_module, "CANARY_BUYER_TOKEN", token),
             missing_done_patch,
         ):
             with self.assertRaisesRegex(updater_module.UpdateError, "did not terminate"):
@@ -3736,8 +3719,33 @@ class PearlUpdaterTests(unittest.TestCase):
                     provider_id="catalog-canary",
                     model_id="mlx-community/Llama-3.2-3B-Instruct-4bit",
                 )
-        self.assertEqual(len(wrong_provider_opener.requests), 1)
         self.assertEqual(len(missing_done_opener.requests), 1)
+
+    def test_buyer_proof_served_by_canary_reads_coordinator_request_log(self):
+        request_id = str(uuid.uuid4())
+        self.updater.databases = (Path("/gateway.db"), Path("/coordinator.db"))
+        self.updater.sleep = lambda _seconds: None
+        outputs = iter(["", "session-canary\n"])
+        queries = []
+
+        def fake_run(argv, **_kwargs):
+            queries.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout=next(outputs), stderr="")
+
+        with mock.patch.object(self.updater, "run_command", side_effect=fake_run):
+            self.updater.verify_buyer_proof_served_by_canary(request_id, "session-canary")
+        self.assertEqual(len(queries), 2)
+        self.assertIn("/coordinator.db", queries[0])
+        self.assertIn(request_id, queries[0][-1])
+        with mock.patch.object(
+            self.updater,
+            "run_command",
+            return_value=subprocess.CompletedProcess([], 0, stdout="other-session\n", stderr=""),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "not served by the canary"):
+                self.updater.verify_buyer_proof_served_by_canary(request_id, "session-canary")
+        with self.assertRaisesRegex(updater_module.UpdateError, "not a UUID"):
+            self.updater.verify_buyer_proof_served_by_canary("x'; DROP TABLE request_log;--", "session-canary")
 
     def test_gateway_buyer_stream_rejects_mismatched_request_id(self):
         token = self.root / "buyer-token"
@@ -6425,6 +6433,7 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater.verify_live_runtime_binding = mock.Mock()
         self.updater.verify_live_sighup_binding = mock.Mock()
+        self.updater.verify_buyer_proof_served_by_canary = mock.Mock()
         self.updater.prove_gateway_buyer_stream = mock.Mock(
             side_effect=[
                 {

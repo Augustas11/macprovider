@@ -322,6 +322,9 @@ test('response attribution requires exact provider and model in both canary mode
     { provider_id: 'provider-b', model_id: 'model-a' },
   ];
   assert.deepEqual(responseIdentityReasons({ provider: 'provider-b', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), []);
+  // Gateway modes never see provider identity; model identity is still enforced.
+  assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-a' }, 'model-a', fleet, { requireProvider: false }), []);
+  assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-b' }, 'model-a', fleet, { requireProvider: false }), ['model-a:response_model_model-b_ne_model-a']);
   assert.deepEqual(responseIdentityReasons({ provider: 'provider-c', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), [
     'model-a:response_provider_provider-c_ne_provider-a|provider-b',
   ]);
