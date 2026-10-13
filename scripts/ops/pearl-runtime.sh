@@ -98,7 +98,64 @@ pearl_sqlite_read() {
 # binary swap, so that window is skipped. The probe reads live state, so it is
 # idempotent and needs no completion marker.
 STATS_RECORDED=0
-redact_dsn() { sed -E 's#postgres(ql)?://[^[:space:]]*#postgres://REDACTED#g'; }
+# Case-insensitive postgres(ql):// URLs and libpq password=... pairs.
+read -r -d '' REDACT_SED <<'SED' || true
+s#[Pp][Oo][Ss][Tt][Gg][Rr][Ee][Ss]([Qq][Ll])?://[^[:space:]]*#postgres://REDACTED#g;s#([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Ww][Dd])[[:space:]]*=[[:space:]]*("[^"]*"|'[^']*'|[^[:space:]]+)#\1=REDACTED#g
+SED
+# Redacted, printable-only copy of remote output (no terminal control bytes).
+safe_remote_output() { sed -E "$REDACT_SED" | LC_ALL=C tr -cd '\11\12\40-\176'; }
+
+# The script run as root on Pearl (`bash -s -- ENV_FILE BIN check|apply`). It
+# reads COORDINATOR_PARTNER_KEYS_ADMIN_DSN from the env file as data (never
+# sourced, like deploy-pearl-vps.sh read_env_value), exports it for the
+# coordinator to resolve (never argv), and redacts and strips control bytes
+# from everything it prints.
+stats_migrate_remote_script() {
+  local head tail
+  read -r -d '' head <<'REMOTE_HEAD' || true
+set -euo pipefail
+env="$1"; bin="$2"; mode="$3"
+read -r -d '' py <<'PYCODE' || true
+import os, shlex, sys
+found = None
+try:
+    for raw in open(os.environ["ENV_FILE"], encoding="utf-8"):
+        line = raw.rstrip("\n").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != "COORDINATOR_PARTNER_KEYS_ADMIN_DSN":
+            continue
+        parts = shlex.split(value.strip(), comments=False, posix=True)
+        if len(parts) != 1 or any(c in parts[0] for c in "\r\n\0"):
+            sys.exit(2)
+        found = parts[0]
+except (OSError, ValueError):
+    sys.exit(2)
+if not found:
+    sys.exit(1)
+print(found, end="")
+PYCODE
+dsn="$(ENV_FILE="$env" python3 -I -c "$py")" || { echo "cannot read COORDINATOR_PARTNER_KEYS_ADMIN_DSN from the env file" >&2; exit 1; }
+export COORDINATOR_PARTNER_KEYS_ADMIN_DSN="$dsn"
+REMOTE_HEAD
+  read -r -d '' tail <<'REMOTE_TAIL' || true
+clean() { local t; t="$(cat)"; t="${t//"$dsn"/REDACTED}"; printf '%s\n' "$t" | sed -E "$sedx" | LC_ALL=C tr -cd '\11\12\40-\176'; }
+case "$mode" in
+  check) "$bin" stats-migrate --check 2>&1 </dev/null | clean ;;
+  apply)
+    "$bin" stats-migrate 2>&1 </dev/null | clean
+    chk="$("$bin" stats-migrate --check 2>&1 </dev/null)" || { printf '%s\n' "$chk" | clean >&2; exit 1; }
+    printf '%s\n' "$chk" | clean
+    if printf '%s\n' "$chk" | grep -Eq '[[:space:]]pending$'; then
+      echo "stats migrations still pending after the apply" >&2
+      exit 1
+    fi ;;
+  *) echo "bad mode" >&2; exit 2 ;;
+esac
+REMOTE_TAIL
+  printf '%s\nread -r -d %s sedx <<%s || true\n%s\nSED\n%s\n' "$head" "''" "'SED'" "$REDACT_SED" "$tail"
+}
 
 stats_migrate_step() {
   [ "$STATS_RECORDED" = 0 ] || return 0
@@ -107,18 +164,19 @@ stats_migrate_step() {
   [[ "$env" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_ENV must be an absolute path"
   [[ "$bin" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_BIN must be an absolute path"
   if [ -z "${PEARL_SSH:-}" ]; then
-    step stats_migrate pending "PEARL_SSH is unset"
+    # Unknown is not "nothing pending": never let the train go on or finish.
+    step stats_migrate blocked "PEARL_SSH is unset"
+    set_next stats_migrate blocked "Check pending stats migrations on Pearl" "" "PEARL_SSH is unset"
     return
   fi
-  # The admin DSN stays in the remote environment (the coordinator reads
-  # COORDINATOR_PARTNER_KEYS_ADMIN_DSN itself), never in argv or output.
-  local out rc=0 pending
-  out="$(ssh "$PEARL_SSH" "sudo bash -c 'set -a; . $env; set +a; $bin stats-migrate --check'" 2>&1)" || rc=$?
-  out="$(printf '%s\n' "$out" | redact_dsn)"
+  local body out rc=0 pending
+  body="$(stats_migrate_remote_script)"
+  out="$(printf '%s\n' "$body" | ssh "$PEARL_SSH" "sudo bash -s -- $env $bin check" 2>&1)" || rc=$?
+  out="$(printf '%s\n' "$out" | safe_remote_output)"
   if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | grep -q '^stats-migrate check'; then
     step stats_migrate blocked "cannot read the stats migration state on Pearl (rc=$rc)"
     set_next stats_migrate blocked "Check pending stats migrations on Pearl" "" \
-      "stats-migrate --check over ssh failed (rc=$rc): $(printf '%s' "$out" | tail -n 1 | tr -cd '[:print:]' | cut -c1-200)"
+      "stats-migrate --check over ssh failed (rc=$rc): $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
     return
   fi
   pending="$(printf '%s\n' "$out" | sed -nE 's/^[[:space:]]*([^[:space:]]+)[[:space:]]+pending$/\1/p' | tr -cd 'A-Za-z0-9_\n' | tr '\n' ' ')"
@@ -130,23 +188,8 @@ stats_migrate_step() {
   fi
   step stats_migrate pending "pending: $pending"
   [ -z "$NEXT_ID" ] || return 0
-  local body
-  body="$(cat <<'REMOTE_BODY'
-set -euo pipefail
-env="$1"; bin="$2"
-set -a; . "$env"; set +a
-redact() { sed -E 's#postgres(ql)?://[^[:space:]]*#postgres://REDACTED#g'; }
-"$bin" stats-migrate 2>&1 | redact
-chk="$("$bin" stats-migrate --check 2>&1)" || { printf '%s\n' "$chk" | redact >&2; exit 1; }
-printf '%s\n' "$chk" | redact
-if printf '%s\n' "$chk" | grep -Eq '[[:space:]]pending$'; then
-  echo "stats migrations still pending after the apply" >&2
-  exit 1
-fi
-REMOTE_BODY
-)"
   set_next stats_migrate mutate "Apply pending stats migrations on Pearl: $pending (no downtime)" \
-"ssh \"\$PEARL_SSH\" 'sudo bash -s -- $env $bin' <<'REMOTE'
+"ssh \"\$PEARL_SSH\" 'sudo bash -s -- $env $bin apply' <<'REMOTE'
 $body
 REMOTE" "the installed coordinator binary reports pending stats migrations; the signed updater does not apply them"
   next_meta stats_migrate "$ROLLOUT_DOC#stats-migrations" "$STATS_MIGRATE_DOWNTIME"
@@ -415,6 +458,17 @@ git push origin refs/tags/$T"
     fi
   fi
 
+  # A recorded apply whose updater unit failed while the live version stayed
+  # behind was rolled back by the updater: forget the marker so the apply is
+  # offered again (step 6 resets the failed transient unit, which blocks
+  # systemd-run). Done first so every later step sees the true apply state.
+  local apply_rolled_back=false
+  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
+    ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
+    apply_rolled_back=true
+    rm -f "$(marker_path "$OPS_SCOPE" apply)"
+  fi
+
   # 3-4. dispatch and approval.
   local rel_assets
   rel_assets="$(gh release view "$T" -R "$(gh_repo)" --json assets --jq '[.assets[].name] | join(" ")' 2>/dev/null || true)"
@@ -512,15 +566,7 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
     fi
   fi
 
-  # 6. apply. A recorded apply whose updater unit failed while the live
-  # version stayed behind was rolled back by the updater: offer it again
-  # (after resetting the failed transient unit, which blocks systemd-run).
-  local apply_rolled_back=false
-  if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
-    ssh "$PEARL_SSH" "systemctl is-failed --quiet mp-update-${T#v}" 2>/dev/null; then
-    apply_rolled_back=true
-    rm -f "$(marker_path "$OPS_SCOPE" apply)"
-  fi
+  # 6. apply (a rolled-back apply was detected above, before the pre-apply stats check).
   if marker_done "$OPS_SCOPE" apply; then
     step apply "done" "$(marker_field "$OPS_SCOPE" apply 'd.get("recorded_at")')"
   else

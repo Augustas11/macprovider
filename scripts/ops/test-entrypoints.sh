@@ -131,6 +131,7 @@ if [ "${1:-}" = --check ]; then
   exit 0
 fi
 echo "applying with ${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-unset}"
+[ -z "${FAKE_STATS_NOISE:-}" ] || printf 'POSTGRESQL://u:leakpw1@h/db host=h password='"'"'sec ret'"'"' PWD=leakpw2 \033[31mred\033[0m\n'
 [ -z "${FAKE_STATS_APPLY_FAIL:-}" ] || { echo "stats-migrate: apply failed" >&2; exit 1; }
 sed -i.bak 's/ pending$/ applied/' "$state"
 echo "stats-migrate ok"
@@ -294,7 +295,12 @@ PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats migrations 
 expect_lock_free
 if grep -q ' pending$' "$tmp/pearl/stats-state"; then bad "a migration is still pending"; else ok; fi
 if grep -qF adminpw "$tmp/out" "$tmp/err"; then bad "the stats apply printed the DSN"; else ok; fi
-if grep -q 'postgres://REDACTED' "$tmp/out"; then ok; else bad "the DSN was not redacted in the apply output"; fi
+if grep -q 'applying with REDACTED' "$tmp/out"; then ok; else bad "the DSN was not redacted in the apply output"; fi
+# Uppercase-scheme and key=value DSNs are redacted, control bytes stripped.
+pending_state
+FAKE_STATS_NOISE=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats apply with noisy output" scripts/ops/pearl-runtime.sh next --run
+if grep -Eq 'leakpw|sec ret' "$tmp/out" "$tmp/err"; then bad "noisy DSN leaked"; else ok; fi
+if grep -q 'password=REDACTED' "$tmp/out" && ! grep -q "$(printf '\033')" "$tmp/out"; then ok; else bad "noisy output not cleaned"; fi
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status after the stats apply" scripts/ops/pearl-runtime.sh status
 if [ "$(state_of stats_migrate)" = done ]; then ok; else bad "stats_migrate state after apply: $(state_of stats_migrate)"; fi
 expect_next app_attest_recorder:mutate
@@ -313,6 +319,9 @@ expect_next stats_migrate:mutate
 applied_state
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live" scripts/ops/pearl-runtime.sh status
 expect_next done:done
+# Unknown is not "nothing pending": without ssh the live release is not done.
+PEARL_SSH= PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and no ssh" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:blocked
 rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
 health v9.0.0 $LIVE
 

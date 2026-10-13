@@ -157,12 +157,14 @@ checked at two points:
 Between the apply and the end of the updater unit the check is skipped, because
 the binary is being replaced.
 
-`next --run` takes the live-ops lock, then on Pearl, as root, loads
-`/etc/macprovider/coordinator.env`, runs `stats-migrate`, and re-runs
-`stats-migrate --check`; it fails if any migration is still pending. The admin
-DSN is resolved by the coordinator from `COORDINATOR_PARTNER_KEYS_ADMIN_DSN` in
-its environment, never passed in argv, and every `postgres://` URL in the
-output is redacted. Expected downtime: none; the coordinator is not restarted.
+`next --run` takes the live-ops lock, then on Pearl, as root, runs
+`stats-migrate` and re-runs `stats-migrate --check`; it fails if any migration
+is still pending. The admin DSN is read from `COORDINATOR_PARTNER_KEYS_ADMIN_DSN`
+in `/etc/macprovider/coordinator.env` as data (the file is not sourced), handed
+to the coordinator in its environment, never passed in argv, and redacted from
+the output along with any `postgres://` URL and `password=` pair; control
+characters are stripped. If `PEARL_SSH` is unset or the check fails, the step
+is blocked, and a live release is not reported done. Expected downtime: none; the coordinator is not restarted.
 
 ## Catalog activation (full deploy)
 
