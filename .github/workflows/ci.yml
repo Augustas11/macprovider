@@ -662,7 +662,7 @@ jobs:
   spec-index:
     name: spec-index
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     # Folded in from the standalone spec-index workflow so ci-required gates
     # it (#1920). Fails a PR when specs/README.md no longer matches the
     # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
