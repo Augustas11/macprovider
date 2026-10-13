@@ -9225,7 +9225,14 @@ func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
 		case <-time.After(time.Second):
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		// Free the slot only once the retry is parked in the queue: a fixed
+		// sleep let a slow (-race) runner reach the queue after the slot
+		// freed, recording queue_wait_ms=0 (#1996).
+		deadline := time.Now().Add(5 * time.Second)
+		for !server.SlotQueueHasWaitersForTest("queued") && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(10 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
 	}()
