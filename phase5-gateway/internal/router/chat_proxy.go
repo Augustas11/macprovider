@@ -291,6 +291,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	// SPEC-006-R019: the privacy mode is resolved before the relay-blind gate.
+	requestedPrivacy, privacyOK := gatePrivacyModeBeforeRelayBlind(w, r, body)
+	if !privacyOK {
+		return
+	}
 	if s.rejectRelayBlindEnvelopeIfRequired(w, r, body, subject.AccountID, authn.WalletSession) {
 		return
 	}
@@ -359,6 +364,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// SPEC-006-R016: resolve a buyer engine selection after the pool, before
 	// quota reservation. A non-native engine without a pool is refused here.
+	effectivePrivacy, privacyOK := effectivePrivacyModeForPlaintext(w, requestedPrivacy, poolID)
+	if !privacyOK {
+		demand.markGatewayFailure(http.StatusBadRequest, privacyModeUnsatisfied)
+		return
+	}
 	engineClass, engineErr := resolveEngineSelection(r.Header, poolID)
 	if engineErr != nil {
 		demand.markGatewayFailure(engineErr.status, engineErr.code)
@@ -737,6 +747,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if engineClass != "" {
 				upReq.Header.Set(engineEmitHeader, engineClass)
 			}
+			// SPEC-006-R019: the effective mode labels the coordinator's
+			// route_trace line; it never changes coordinator routing.
+			upReq.Header.Set(internalPrivacyModeEmitHeader, effectivePrivacy)
 		}
 		if internalConversation != "" {
 			// Authorization + X-MacProvider-Account are set

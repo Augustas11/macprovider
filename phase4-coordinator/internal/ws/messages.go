@@ -344,6 +344,7 @@ type Heartbeat struct {
 	HardwareSummary         *HardwareSummary                   `json:"hardware_summary,omitempty"`
 	SafetyTelemetry         *pool.ProviderSafetyTelemetry      `json:"safety_telemetry,omitempty"`
 	CBSelfCheck             *pool.ProviderCBSelfCheck          `json:"cb_self_check,omitempty"`
+	EngineProfile           *pool.EngineProfile                `json:"engine_profile,omitempty"`
 	RelayBlindKeyRecords    []relayblind.KeyRecord             `json:"relay_blind_key_records,omitempty"`
 	PrivacyKeyRecords       []relayblind.PrivacyKeyRecord      `json:"privacy_key_records,omitempty"`
 	PrivacyEnrollment       *relayblind.PrivacyEnrollmentClaim `json:"privacy_enrollment,omitempty"`
@@ -1615,6 +1616,96 @@ func parseCBSelfCheck(v json.RawMessage) (*pool.ProviderCBSelfCheck, error) {
 	return &selfCheck, nil
 }
 
+// parseEngineProfile validates the optional SPEC-001-R006 heartbeat object.
+// Any violation drops the profile (nil) and never rejects the heartbeat; the
+// profile is a routing prior only.
+func parseEngineProfile(v json.RawMessage) *pool.EngineProfile {
+	if len(v) == 0 || len(v) > 512 || string(v) == "null" {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(v))
+	dec.DisallowUnknownFields()
+	var wire struct {
+		Version                *string `json:"version"`
+		EngineFamily           *string `json:"engine_family"`
+		CBGrantedSlots         *int    `json:"cb_granted_slots"`
+		NativeMTPActive        *bool   `json:"native_mtp_active"`
+		ChipClass              *string `json:"chip_class"`
+		RAMClassGB             *int    `json:"ram_class_gb"`
+		MaxStableContextTokens *int    `json:"max_stable_context_tokens"`
+	}
+	if err := dec.Decode(&wire); err != nil || dec.More() {
+		return nil
+	}
+	if wire.Version == nil || wire.EngineFamily == nil || wire.CBGrantedSlots == nil || wire.NativeMTPActive == nil ||
+		wire.ChipClass == nil || wire.RAMClassGB == nil || wire.MaxStableContextTokens == nil {
+		return nil
+	}
+	if *wire.Version != "engine-profile-v1" {
+		return nil
+	}
+	switch *wire.EngineFamily {
+	case "general_mlx", "continuous_batching", "native_mtp":
+	default:
+		return nil
+	}
+	// Cross-field invariants: the family is native_mtp exactly when native
+	// MTP is active, and plain MLX grants no continuous-batching slots.
+	if (*wire.EngineFamily == "native_mtp") != *wire.NativeMTPActive || (*wire.EngineFamily == "general_mlx" && *wire.CBGrantedSlots != 0) {
+		return nil
+	}
+	if *wire.CBGrantedSlots < 0 || *wire.CBGrantedSlots > 256 || *wire.MaxStableContextTokens < 0 || *wire.MaxStableContextTokens > 10_000_000 {
+		return nil
+	}
+	if !engineProfileChipClass(*wire.ChipClass) || !engineProfileRAMClass(*wire.RAMClassGB) {
+		return nil
+	}
+	return &pool.EngineProfile{
+		Version:                *wire.Version,
+		EngineFamily:           *wire.EngineFamily,
+		CBGrantedSlots:         *wire.CBGrantedSlots,
+		NativeMTPActive:        *wire.NativeMTPActive,
+		ChipClass:              *wire.ChipClass,
+		RAMClassGB:             *wire.RAMClassGB,
+		MaxStableContextTokens: *wire.MaxStableContextTokens,
+	}
+}
+
+func engineProfileChipClass(s string) bool {
+	if s == "unknown" {
+		return true
+	}
+	if len(s) < 2 || s[0] != 'm' || s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	switch s[2:] {
+	case "", "_pro", "_max", "_ultra":
+		return true
+	default:
+		return false
+	}
+}
+
+// engineProfileRAMClassFor is the SPEC-001-R006 class for a reported ram_gb.
+func engineProfileRAMClassFor(ramGB int) int {
+	class := 8
+	for _, c := range []int{8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512} {
+		if c <= ramGB {
+			class = c
+		}
+	}
+	return class
+}
+
+func engineProfileRAMClass(gb int) bool {
+	switch gb {
+	case 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512:
+		return true
+	default:
+		return false
+	}
+}
+
 func isPrintableASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] > 0x7e {
@@ -1890,6 +1981,13 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "cb_self_check", err
 		}
 		hb.CBSelfCheck = selfCheck
+	}
+	if v, ok := raw["engine_profile"]; ok {
+		hb.EngineProfile = parseEngineProfile(v)
+		// The profile must agree with the heartbeat it rides on.
+		if p := hb.EngineProfile; p != nil && (p.MaxStableContextTokens != hb.MaxContextTokens || p.RAMClassGB != engineProfileRAMClassFor(hb.RAMGB)) {
+			hb.EngineProfile = nil
+		}
 	}
 	if field, err := parseRelayBlindKeyRecords(raw, &hb.RelayBlindKeyRecords); err != nil {
 		return Heartbeat{}, presence, field, err

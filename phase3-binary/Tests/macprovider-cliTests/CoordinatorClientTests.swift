@@ -4666,6 +4666,16 @@ final class CoordinatorClientTests: XCTestCase {
         )
         var heartbeatWithoutHardware = heartbeat
         heartbeatWithoutHardware.removeValue(forKey: "hardware_summary")
+        // SPEC-001-R006: the engine profile rides every MLX heartbeat; its
+        // chip and RAM classes depend on the host, so they are checked here.
+        let engineProfile = try XCTUnwrap(heartbeatWithoutHardware.removeValue(forKey: "engine_profile") as? [String: Any])
+        XCTAssertEqual(engineProfile["version"] as? String, "engine-profile-v1")
+        XCTAssertEqual(engineProfile["engine_family"] as? String, "general_mlx")
+        XCTAssertEqual(engineProfile["cb_granted_slots"] as? Int, 0)
+        XCTAssertEqual(engineProfile["native_mtp_active"] as? Bool, false)
+        XCTAssertEqual(engineProfile["max_stable_context_tokens"] as? Int, 20_000)
+        XCTAssertEqual(engineProfile["ram_class_gb"] as? Int, EngineProfile.ramClass(capacity.ramGB))
+        XCTAssertEqual(Set(engineProfile.keys), ["version", "engine_family", "cb_granted_slots", "native_mtp_active", "chip_class", "ram_class_gb", "max_stable_context_tokens"])
         let safetyTelemetry = try XCTUnwrap(heartbeatWithoutHardware.removeValue(forKey: "safety_telemetry") as? [String: Any])
         XCTAssertEqual(safetyTelemetry["schema_version"] as? Int, 1)
         XCTAssertEqual(safetyTelemetry["provider_id"] as? String, "provider-test")

@@ -244,6 +244,10 @@ type Server struct {
 	defaultObjective  string
 	tiebreakRandomize bool
 	tiebreakEpsilon   float64
+	// perf is the SPEC-002-R005 measured-performance store; routeMetrics
+	// counts SPEC-002-R007 selections (nil = not wired).
+	perf         *routing.PerfStore
+	routeMetrics RouteSelectionMetrics
 	// routingMu guards defaultObjective, modelClasses, and
 	// minProviderThroughput, which are hot-swapped on SIGHUP when routing
 	// config changes (issue #266 T1 + min_provider_throughput_tps).
@@ -873,6 +877,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		failoverEnabled:          true,
 		failoverTimeout:          5 * time.Second,
 		defaultObjective:         "default",
+		perf:                     routing.NewPerfStore(),
 		retryPerAttemptTimeout:   60 * time.Second,
 		stickyTTL:                30 * time.Minute,
 		stickyMaxEntries:         10000,
@@ -2440,6 +2445,9 @@ type chatRequest struct {
 	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
 	// selection, which keeps selection byte-identical.
 	engineClass string
+	// maxTokens is the body's validated max_tokens (0 = absent), read by the
+	// SPEC-002-R006 phase classifier.
+	maxTokens int
 	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
 	// or non-empty assistant tool_calls) so class selection can drop
 	// members without a multi-turn prompt profile.
@@ -2776,6 +2784,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.routingDone = s.now()
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
+	// SPEC-002-R007: trace the first selection for operators and the buyer.
+	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.estimatedTokens))
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
@@ -4202,6 +4212,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	// acct is the attempt's single source of delivered bytes, usage, and
 	// settlement evidence (deliveredSSEAccounting).
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
@@ -4986,6 +4997,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// settlement evidence (deliveredSSEAccounting). streamProbe sees every
 	// block first, only to validate it.
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamProbe := newSettlementStreamOutputTracker()
 	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
@@ -6489,6 +6501,9 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
 	}
+	if v, ok := raw["max_tokens"]; ok {
+		_ = json.Unmarshal(v, &req.maxTokens)
+	}
 	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
 		return req, status, code, msg, ""
 	} else if normalized {
@@ -7967,10 +7982,23 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// logRoutingDecisionFullWithCache) finds the same value the
 	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
 	balancedCache := s.sortCandidates(candidates, objective)
+	// SPEC-004 sticky affinity is judged against the objective order. A
+	// sticky hit keeps its provider first and skips the SPEC-002-R006 phase
+	// reorder; otherwise the phase step reorders (only the order changes).
 	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
+	var phaseDecision routeDecision
+	if stickyResult == "hit" {
+		phaseDecision = s.stickyRouteDecision(req, estimatedTokens, candidates)
+	} else {
+		phaseDecision = s.applyPhaseOrder(requestID, req, estimatedTokens, candidates, dailyKey)
+	}
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
-		candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		if phaseDecision.basis == routing.BasisFallback {
+			candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		} else {
+			reason = "phase_" + string(phaseDecision.basis)
+		}
 	}
 	// Thread real pre-filter pool size + per-reason rejection counts
 	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
@@ -7986,6 +8014,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
 		if routeErr == nil {
 			if state != nil {
+				state.routeDecision = &phaseDecision
 				checker.rememberSelectedProvider(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
@@ -9015,6 +9044,8 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.queuedSlotProviderID = provider.ProviderID
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
+				// SPEC-002-R007: the slot queue keeps its own order.
+				state.routeDecision = &routeDecision{basis: routing.BasisFallback, scope: "slot_queue", inputTokens: estimatedTokens, candidates: len(candidates)}
 				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
 				return selected, nil, true
 			case queuedProviderTerminal:

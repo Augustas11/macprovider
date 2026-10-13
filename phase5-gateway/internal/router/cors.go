@@ -4,7 +4,7 @@ import "net/http"
 
 const corsMaxAge = "3600"
 
-var corsAllowedHeaders = "Accept, Anthropic-Beta, Anthropic-Version, Authorization, Content-Type, Idempotency-Key, X-Api-Key, X-Demo-Token, X-MacProvider-Pool-Select, X-MacProvider-Session-Signature, X-MacProvider-Session-Timestamp, X-Request-ID"
+var corsAllowedHeaders = "Accept, Anthropic-Beta, Anthropic-Version, Authorization, Content-Type, Idempotency-Key, X-Api-Key, X-Demo-Token, X-MacProvider-Pool-Select, X-MacProvider-Privacy-Mode, X-MacProvider-Session-Signature, X-MacProvider-Session-Timestamp, X-Request-ID"
 
 func (s *Server) withCORS(method string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +44,6 @@ func (s *Server) corsOriginAllowed(origin string) bool {
 func setCORSHeaders(h http.Header, origin string) {
 	h.Set("Access-Control-Allow-Origin", origin)
 	h.Set("Access-Control-Allow-Credentials", "false")
-	h.Set("Access-Control-Expose-Headers", "X-Request-ID")
+	h.Set("Access-Control-Expose-Headers", "X-Request-ID, X-MacProvider-Privacy-Mode, X-MacProvider-Privacy-Mode-Disclosure, X-MacProvider-Route-Trace")
 	h.Add("Vary", "Origin")
 }

@@ -142,6 +142,9 @@ type Metrics struct {
 	// PrivacyRouteRejectionsTotal counts SPEC-049-R030 privacy-class
 	// requests refused at reservation, consume, or dispatch, by reason.
 	PrivacyRouteRejectionsTotal *prometheus.CounterVec
+	// RouteSelectionsTotal counts SPEC-002-R007 plaintext selections by
+	// request phase and selection basis.
+	RouteSelectionsTotal *prometheus.CounterVec
 	// PrivacyReleaseIdentityLoaded is 1 per binary version approved from
 	// signed release metadata (SPEC-049-R027) in the last load.
 	PrivacyReleaseIdentityLoaded *prometheus.GaugeVec
@@ -244,6 +247,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of privacy-class key advertisement and posture rejections, by SPEC-049 reason.",
 			},
 			[]string{"reason"},
+		),
+		RouteSelectionsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "coordinator_route_selections_total",
+				Help: "Count of plaintext provider selections, by SPEC-002-R006 request phase and selection basis.",
+			},
+			[]string{"phase", "basis"},
 		),
 		PrivacyRouteRejectionsTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
@@ -513,6 +523,25 @@ func (m *Metrics) IncPrivacyRouteRejection(phase, reason string) {
 		phase = "other"
 	}
 	m.PrivacyRouteRejectionsTotal.WithLabelValues(phase, relayblind.NormalizePrivacyRejectReason(reason)).Inc()
+}
+
+// IncRouteSelection records one SPEC-002-R007 selection. Values outside the
+// closed sets are folded into "other".
+func (m *Metrics) IncRouteSelection(phase, basis string) {
+	if m == nil || m.RouteSelectionsTotal == nil {
+		return
+	}
+	switch phase {
+	case "interactive", "long_input", "throughput":
+	default:
+		phase = "other"
+	}
+	switch basis {
+	case "measured", "explore", "fallback", "pinned":
+	default:
+		basis = "other"
+	}
+	m.RouteSelectionsTotal.WithLabelValues(phase, basis).Inc()
 }
 
 // SetPrivacyReleaseIdentityVersions replaces the loaded release-identity

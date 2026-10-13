@@ -1569,6 +1569,9 @@ var gatewayPermanentCodes = map[string]bool{
 	// SPEC-006-R016 buyer engine selection: the named engine cannot serve the
 	// same request on this route later, and a bad selector is a client error.
 	"engine_unavailable": true, "invalid_engine_selection": true,
+	// SPEC-006-R019 buyer privacy mode: the request as sent can never satisfy
+	// the stated boundary, so retrying it unchanged cannot succeed.
+	"invalid_privacy_mode": true, "privacy_mode_unsatisfied": true,
 }
 
 func gatewayRetryable(code string) bool {
@@ -1709,6 +1712,17 @@ func copyCleanHeadersFiltered(dst, src http.Header, allowReceipt bool, allowPool
 		}
 		// SPEC-006-R016 / §8.3: the served runtime class survives the strip,
 		// but only as one exact value of the closed vocabulary.
+		// SPEC-006-R020: the coordinator route trace survives the strip only
+		// as an exact SPEC-002-R007 value.
+		if strings.EqualFold(key, routeTraceResponseHeader) {
+			for _, value := range values {
+				if trace := buyerVisibleRouteTraceHeader(value); trace != "" {
+					dst.Set(routeTraceResponseHeader, trace)
+					break
+				}
+			}
+			continue
+		}
 		if isEngineResponseHeader(key) {
 			for _, value := range values {
 				if class := buyerVisibleEngineHeader(value); class != "" {

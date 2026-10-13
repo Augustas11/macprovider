@@ -237,6 +237,10 @@ type forwardState struct {
 	stickyResult     string
 	stickyMissReason string
 
+	// routeDecision is the SPEC-002-R006 phase decision of the latest ranked
+	// selection; nil for pinned and slot-queue selections.
+	routeDecision *routeDecision
+
 	// conversationCacheOnly is true when the request carried
 	// X-MacProvider-Internal-Conv-Cache and no sticky
 	// X-MacProvider-Internal-Conv key. ConversationCache hits on that

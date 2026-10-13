@@ -29,6 +29,10 @@ type requestPhaseTiming struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	// providerFirstToken is the first delivered chunk that carries generated
+	// content or a tool call (SPEC-002-R005). A role-only opening chunk is a
+	// first byte but not a first token.
+	providerFirstToken time.Time
 }
 
 func (t *requestPhaseTiming) init(start time.Time) {
@@ -50,7 +54,16 @@ func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAss
 	t.providerDispatchDone = time.Time{}
 	t.providerFirstByte = time.Time{}
 	t.providerDone = time.Time{}
+	t.providerFirstToken = time.Time{}
 	t.providerAssignedID = providerAssignedID
+}
+
+func (t *requestPhaseTiming) markProviderFirstToken(at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.providerFirstToken.IsZero() {
+		t.providerFirstToken = at
+	}
 }
 
 func (t *requestPhaseTiming) markProviderDispatchDone(at time.Time) {
@@ -86,6 +99,7 @@ func (t *requestPhaseTiming) snapshot() requestPhaseTimingSnapshot {
 		providerFirstByte:     t.providerFirstByte,
 		providerDone:          t.providerDone,
 		providerAssignedID:    t.providerAssignedID,
+		providerFirstToken:    t.providerFirstToken,
 	}
 }
 
@@ -97,6 +111,7 @@ type requestPhaseTimingSnapshot struct {
 	providerFirstByte     time.Time
 	providerDone          time.Time
 	providerAssignedID    string
+	providerFirstToken    time.Time
 }
 
 type phaseTimingResponseWriter struct {
@@ -345,6 +360,20 @@ func (snap requestPhaseTimingSnapshot) requestLogTTFTMs() *float64 {
 
 func (snap requestPhaseTimingSnapshot) requestLogDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstByte, snap.providerDone)
+}
+
+// routingTTFTMs and routingDecodeMs are the SPEC-002-R005 measurements:
+// dispatch done to the first generated token, and that token to done.
+func (snap requestPhaseTimingSnapshot) routingTTFTMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerFirstToken)
+}
+
+func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerDone)
+}
+
+func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
 }
 
 func (snap requestPhaseTimingSnapshot) matchesProviderAssignedID(providerAssignedID string) bool {
