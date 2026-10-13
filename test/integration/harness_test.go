@@ -1468,8 +1468,21 @@ func (s *scenario) rewriteGatewayRelayBlindEnabled(enabled bool) {
 	}
 }
 
+// childLogDir, when set before a scenario starts, sends child-process output
+// to <dir>/<tag>.log instead of the test log. Long load runs (loadharness tag)
+// set it so a day of coordinator output is not held in the test logger.
+var childLogDir string
+
 func (s *scenario) streamLogs(cmd *exec.Cmd, tag string) {
 	s.t.Helper()
+	if childLogDir != "" {
+		f, err := os.OpenFile(filepath.Join(childLogDir, tag+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			s.t.Fatalf("open %s log: %v", tag, err)
+		}
+		cmd.Stdout, cmd.Stderr = f, f
+		return
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.t.Fatalf("stdout pipe: %v", err)
