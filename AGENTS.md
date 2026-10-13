@@ -110,7 +110,7 @@ cd phase4-coordinator && go build ./...
 cd phase5-gateway && go build ./...
 ```
 
-Go modules currently target Go `1.26.6`; the Swift package targets macOS 14+
+Go modules currently target Go `1.26.9`; the Swift package targets macOS 14+
 with Swift tools 5.9.
 
 ## Testing And Checks
