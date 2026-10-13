@@ -323,6 +323,10 @@ func (h *handler) handleOverage(w http.ResponseWriter, r *http.Request, p princi
 // handleAccount is the SPEC-050-R011 account view: stake, today's allowance,
 // the next refresh, the overage setting, and the linked wallets.
 func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, p principal) {
+	if h.deps.Ledger == nil {
+		writeError(w, http.StatusServiceUnavailable, "api_error", "stake_source_unavailable", "Staking is not available right now")
+		return
+	}
 	if h.deps.Allowance == nil {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
 		return
@@ -369,7 +373,7 @@ func (h *handler) handleAccount(w http.ResponseWriter, r *http.Request, p princi
 			view["linked_wallets"] = wallets
 		}
 	}
-	if h.deps.Ledger != nil {
+	{
 		pos, err := h.deps.Ledger.Position(r.Context(), p.AccountID, owned)
 		if err != nil {
 			// A configured stake source that cannot answer is reported as

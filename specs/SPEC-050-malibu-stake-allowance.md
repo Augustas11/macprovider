@@ -249,9 +249,11 @@ allowance balance MUST NOT be withdrawable, transferable between accounts, or
 convertible to MALIBU or USDC. A closed request may spend more than its hold
 when the provider's real usage exceeds the bound; the overshoot is recorded
 and the remainder floors at zero. A hold is closed by its own chat handler
-when the handler ends; holds created before the current coordinator process
-started belong to handlers that died with it and are closed by the refresh
-job from the ledger. Closing is re-entrant, so a later close adds any attempt
+when the handler ends. Each hold records the coordinator process that owns
+it, and each process renews a lease at every refresh check; a hold of
+another process whose lease missed three renewals belongs to a handler that
+died with it and is closed by the refresh job from the ledger. A process never
+reaps its own holds or those of a process still renewing. Closing is re-entrant, so a later close adds any attempt
 recorded after an earlier one. The gateway settlement writes the confirmed
 funding onto its reservation in the same transaction, and the settlement
 fallback and the settlement-journal recovery (which journals the funding)
@@ -294,8 +296,9 @@ account view MUST return the staked and unlocking MALIBU, the next unlock
 release time, MALIBU available to stake, today's allowance, spent, held and
 remaining credits, the next refresh time, the overage setting, the payout
 addresses of the account's owned providers (`linked_wallets`), and the
-disclosure text of SPEC-050-R012. A configured stake source that cannot
-answer MUST make the view `503 stake_source_unavailable`, never a zero stake.
+disclosure text of SPEC-050-R012. A stake source that is not configured
+or cannot answer MUST make the view `503 stake_source_unavailable`, never a
+zero stake.
 The gateway account page MUST show these fields.
 
 ### SPEC-050-R012 - Disclosure without yield language
@@ -330,10 +333,14 @@ gateway instances and caches only positive answers in memory. If the coordinator
 run admission for an allowance-only request (missing or invalid headers, no
 account context, no billing store, a store error), it MUST refuse it with
 `503 allowance_unavailable` before dispatch, and otherwise serve the request
-from the paid quota. If an allowance-only request comes back without an
-allowance funding answer (a coordinator without SPEC-050, or one rolled back),
-the gateway MUST charge it to the paid quota, even past its limit, and MUST
-stop forwarding allowance-only requests for that account that day. The gateway
+from the paid quota. An allowance-only reservation is admitted past the paid
+quota's limit but stays on the paid quota until the coordinator confirms
+allowance funding. If the answer never comes (a lost response, a crash, a
+coordinator without SPEC-050 or one rolled back), the request is charged to
+the paid quota, even past its limit, on every settlement and recovery path,
+and the gateway stops forwarding allowance-only requests for that account that
+day. If a confirmed funding cannot be made durable after a failed settlement,
+the gateway leaves the journaled effect for recovery instead of billing it. The gateway
 SQLite schema is version 19, which an older gateway refuses. The gateway MUST
 strip the internal allowance headers from buyer requests and from responses
 to buyers.

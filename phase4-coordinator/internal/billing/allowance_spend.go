@@ -2,10 +2,13 @@ package billing
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 )
 
@@ -48,11 +51,16 @@ CREATE TABLE IF NOT EXISTS allowance_reservations (
     spent_credits INTEGER NOT NULL DEFAULT 0 CHECK(spent_credits >= 0),
     created_at_utc TEXT NOT NULL,
     closed_at_utc TEXT NULL,
+    process_epoch TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(account_id, request_id),
     CHECK(funding = 'allowance' OR (bound_credits = 0 AND spent_credits = 0))
 );
 CREATE INDEX IF NOT EXISTS idx_allowance_reservations_day ON allowance_reservations(account_id, day, status);
 CREATE INDEX IF NOT EXISTS idx_allowance_reservations_status ON allowance_reservations(status, created_at_utc);
+CREATE TABLE IF NOT EXISTS allowance_process_leases (
+    process_epoch TEXT PRIMARY KEY,
+    heartbeat_at_utc TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS allowance_request_splits (
     request_id TEXT NOT NULL,
     attempt_n INTEGER NOT NULL,
@@ -241,8 +249,8 @@ func (s *Store) AdmitAllowance(ctx context.Context, in AllowanceAdmission) (Allo
 			decision.Funding = existing
 			if existing == AllowanceFundingAllowance && existingStatus == "closed" {
 				if _, err := conn.ExecContext(ctx, `
-UPDATE allowance_reservations SET status = 'active', bound_credits = ?, closed_at_utc = NULL
- WHERE account_id = ? AND request_id = ? AND status = 'closed'`, in.BoundCredits, in.AccountID, in.RequestID); err != nil {
+UPDATE allowance_reservations SET status = 'active', bound_credits = ?, closed_at_utc = NULL, process_epoch = ?
+ WHERE account_id = ? AND request_id = ? AND status = 'closed'`, in.BoundCredits, s.allowanceProcess.epoch(), in.AccountID, in.RequestID); err != nil {
 					return fmt.Errorf("allowance: reopen reservation: %w", err)
 				}
 				granted, spent, held, err = allowanceBalance(ctx, conn, in.AccountID, day)
@@ -276,8 +284,8 @@ UPDATE allowance_reservations SET status = 'active', bound_credits = ?, closed_a
 			decision.RemainingCredits = remaining - bound
 		}
 		_, err = conn.ExecContext(ctx, `
-INSERT INTO allowance_reservations (account_id, request_id, day, funding, model, bound_credits, status, created_at_utc)
-VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`, in.AccountID, in.RequestID, day, funding, in.Model, bound, in.Now.UTC().Format(time.RFC3339Nano))
+INSERT INTO allowance_reservations (account_id, request_id, day, funding, model, bound_credits, status, created_at_utc, process_epoch)
+VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`, in.AccountID, in.RequestID, day, funding, in.Model, bound, in.Now.UTC().Format(time.RFC3339Nano), s.allowanceProcess.epoch())
 		if err != nil {
 			return fmt.Errorf("allowance: insert reservation: %w", err)
 		}
@@ -372,17 +380,49 @@ UPDATE allowance_reservations SET status = 'closed', spent_credits = ?, closed_a
 	return nil
 }
 
-// ReapAllowanceReservations closes holds created before startedAt, the start
-// of this coordinator process. Every such hold belongs to a chat handler that
-// died with an earlier process (a crash between admission and the handler's
-// deferred close); a hold created by this process is always closed by its own
-// handler, so a live request is never reaped. Closing is re-entrant, so a
-// late close by a handler still records every attempt (SPEC-050-R008).
-func (s *Store) ReapAllowanceReservations(ctx context.Context, now, startedAt time.Time) (int64, error) {
+// allowanceProcessState names this coordinator process for allowance holds:
+// every hold records the epoch of the process whose chat handler owns it, and
+// the process renews a lease while it runs.
+type allowanceProcessState struct {
+	mu    sync.Mutex
+	value string
+}
+
+func (p *allowanceProcessState) epoch() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.value == "" {
+		var b [16]byte
+		_, _ = rand.Read(b[:])
+		p.value = hex.EncodeToString(b[:])
+	}
+	return p.value
+}
+
+// RenewAllowanceProcessLease records that this process is alive at now.
+func (s *Store) RenewAllowanceProcessLease(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO allowance_process_leases (process_epoch, heartbeat_at_utc) VALUES (?, ?)
+ON CONFLICT(process_epoch) DO UPDATE SET heartbeat_at_utc = excluded.heartbeat_at_utc`,
+		s.allowanceProcess.epoch(), now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// ReapAllowanceReservations closes holds whose owning process is gone: holds
+// of another process epoch whose lease was not renewed within leaseTTL (or
+// never recorded). A hold of this process, or of a still-running overlapping
+// process, is closed by its own handler and never reaped (SPEC-050-R008).
+// Closing is re-entrant, so a late close by a handler still records every
+// attempt. Leases older than a day are pruned.
+func (s *Store) ReapAllowanceReservations(ctx context.Context, now time.Time, leaseTTL time.Duration) (int64, error) {
+	current := s.allowanceProcess.epoch()
+	staleBefore := now.Add(-leaseTTL).UTC().Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT account_id, request_id FROM allowance_reservations
- WHERE status = 'active' AND created_at_utc < ?
- LIMIT 500`, startedAt.UTC().Format(time.RFC3339Nano))
+SELECT r.account_id, r.request_id FROM allowance_reservations r
+  LEFT JOIN allowance_process_leases l ON l.process_epoch = r.process_epoch
+ WHERE r.status = 'active' AND r.process_epoch <> ?
+   AND (l.process_epoch IS NULL OR l.heartbeat_at_utc < ?)
+ LIMIT 500`, current, staleBefore)
 	if err != nil {
 		return 0, fmt.Errorf("allowance: reap: %w", err)
 	}
@@ -407,6 +447,10 @@ SELECT account_id, request_id FROM allowance_reservations
 			return closed, err
 		}
 		closed++
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM allowance_process_leases WHERE heartbeat_at_utc < ? AND process_epoch <> ?`,
+		now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano), current); err != nil {
+		return closed, fmt.Errorf("allowance: lease prune: %w", err)
 	}
 	return closed, nil
 }

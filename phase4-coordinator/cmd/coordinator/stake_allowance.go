@@ -45,7 +45,7 @@ func setupStakeAllowance(ctx context.Context, cfg *config.Config, coordinatorDB,
 	}
 	if billingStore != nil {
 		startAllowanceRefresher(ctx, billingStore, source, allowancePolicy(cfg.StakeAllowance),
-			time.Duration(cfg.StakeAllowance.RefreshCheckIntervalSeconds)*time.Second, time.Now().UTC(), logger)
+			time.Duration(cfg.StakeAllowance.RefreshCheckIntervalSeconds)*time.Second, logger)
 	}
 	return stakeallowance.NewHandler(deps)
 }
@@ -80,10 +80,10 @@ func (a stakeSourceAdapter) EarningStakes(ctx context.Context, dayStart time.Tim
 }
 
 // startAllowanceRefresher records each UTC day's allowance at the first check
-// after 00:00 UTC (SPEC-050-R005) and closes allowance holds left by an
-// earlier coordinator process (SPEC-050-R008). A run that fails is retried at the next check; a day
+// after 00:00 UTC (SPEC-050-R005), renews this process's allowance lease,
+// and closes allowance holds whose process stopped renewing (SPEC-050-R008). A run that fails is retried at the next check; a day
 // already recorded is left unchanged.
-func startAllowanceRefresher(ctx context.Context, store *billing.Store, source billing.AllowanceStakeSource, policy billing.AllowancePolicy, interval time.Duration, processStart time.Time, logger zerolog.Logger) {
+func startAllowanceRefresher(ctx context.Context, store *billing.Store, source billing.AllowanceStakeSource, policy billing.AllowancePolicy, interval time.Duration, logger zerolog.Logger) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
@@ -91,7 +91,12 @@ func startAllowanceRefresher(ctx context.Context, store *billing.Store, source b
 		tick := func() {
 			tickCtx, cancel := context.WithTimeout(ctx, interval)
 			defer cancel()
-			if closed, err := store.ReapAllowanceReservations(tickCtx, time.Now().UTC(), processStart); err != nil {
+			if err := store.RenewAllowanceProcessLease(tickCtx, time.Now().UTC()); err != nil {
+				logger.Warn().Err(err).Msg("allowance process lease renewal failed")
+			}
+			// A hold is reaped only when its process missed three lease
+			// renewals, so an overlapping process is never reaped.
+			if closed, err := store.ReapAllowanceReservations(tickCtx, time.Now().UTC(), 3*interval); err != nil {
 				logger.Warn().Err(err).Msg("allowance reservation reaper failed")
 			} else if closed > 0 {
 				logger.Info().Int64("closed", closed).Msg("stale allowance holds closed")

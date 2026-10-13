@@ -3342,7 +3342,15 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		}
 		// SPEC-050-R008: keep the confirmed funding on the reservation even
 		// though the settlement transaction that normally writes it failed.
-		s.persistFundingSource(subject.AccountID, requestID(r), settlementFundingSource(subject))
+		// If that cannot be made durable and the journal holds the effect,
+		// leave the reservation and the effect for the journal recovery,
+		// which settles with the funding atomically, rather than bill the
+		// usage against the wrong quota now.
+		if fundingErr := s.persistFundingSource(subject.AccountID, requestID(r), settlementFundingSource(subject)); fundingErr != nil && armed {
+			slog.Error("gateway SPEC-006 § 17.7 fallback deferred to the settlement journal: allowance funding not durable",
+				"request_id", requestID(r), "account_id", subject.AccountID, "error", fundingErr)
+			return
+		}
 		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
 			// Both the normal settle path and the idempotent fallback
 			// failed. Could be a genuine DB pathology OR (per #196 PK

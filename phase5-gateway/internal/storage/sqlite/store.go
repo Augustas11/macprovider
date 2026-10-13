@@ -1739,7 +1739,7 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	allowanceFunded := fundingSource == storage.FundingSourceAllowance
 	// SPEC-050-R007: an allowance-funded request does not draw on the paid
 	// daily quota, so it is admitted whatever the quota's remainder.
-	if !allowanceFunded && req.RequestedTokens > remaining {
+	if !allowanceFunded && !req.AllowanceOnly && req.RequestedTokens > remaining {
 		tx.Rollback() // read-only path; rollback is equivalent to commit here
 		return decision, storage.ErrQuotaExceeded
 	}

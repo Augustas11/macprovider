@@ -219,6 +219,10 @@ type ReservationRequest struct {
 	// the account's SPEC-050 allowance. An allowance reservation is recorded
 	// for settlement but never counts against the daily quota.
 	FundingSource string
+	// AllowanceOnly admits a paid-quota reservation past the quota's limit
+	// for a request only the SPEC-050 allowance may fund. It stays on the
+	// paid quota until the coordinator confirms the allowance funding.
+	AllowanceOnly bool
 }
 
 const (

@@ -12625,11 +12625,12 @@
         "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance",
         "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource",
         "phase5-gateway/internal/router/stake_allowance.go:persistFundingSource",
-        "phase5-gateway/internal/router/settlement_journal_recovery.go:redriveSettlementEffect"
+        "phase5-gateway/internal/router/settlement_journal_recovery.go:redriveSettlementEffect",
+        "phase4-coordinator/internal/billing/allowance_spend.go:RenewAllowanceProcessLease"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
-        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesOnlyHoldsFromEarlierProcesses",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesOnlyHoldsOfDeadProcesses",
         "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
@@ -12707,7 +12708,8 @@
         "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerAccountViewAndOverage",
         "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
-        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewReportsUnavailableLedger"
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewReportsUnavailableLedger",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewWithoutLedgerIsUnavailable"
       ],
       "journeys": [],
       "evidence": [],
@@ -12783,7 +12785,8 @@
         "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOnlyRequestFailsClosed",
         "phase5-gateway/internal/router/stake_allowance_test.go:TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota",
         "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates",
-        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceDayLookupIsNotBlockedByANegativeAnswer"
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceDayLookupIsNotBlockedByANegativeAnswer",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceOnlyReservationStaysPaidUntilConfirmed"
       ],
       "journeys": [],
       "evidence": [],

@@ -128,3 +128,33 @@ func TestAllowanceActiveDaysPersistAndSchemaV19Gates(t *testing.T) {
 		t.Fatal("a v18 gateway accepted a database carrying SPEC-050 funding sources")
 	}
 }
+
+// SPEC-050-R014: an allowance-only reservation is admitted past the paid
+// quota's limit but stays on the paid quota until the coordinator's
+// allowance funding is confirmed, so an unconfirmed one is charged there.
+func TestAllowanceOnlyReservationStaysPaidUntilConfirmed(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_only")
+	reserve := func(id string) {
+		t.Helper()
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_only", RequestID: id, WindowDate: "2026-10-13",
+			RequestedTokens: 500, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+			AllowanceOnly: true,
+		}); err != nil {
+			t.Fatalf("allowance-only reservation %s: %v", id, err)
+		}
+	}
+	reserve("req_unconfirmed")
+	if _, reserved, _ := store.DailyUsage(ctx, "acct_only", "2026-10-13"); reserved != 500 {
+		t.Fatalf("unconfirmed allowance-only hold reserved=%d, want 500 on the paid quota", reserved)
+	}
+	reserve("req_confirmed")
+	if err := store.MarkReservationFundingSource(ctx, "acct_only", "req_confirmed", storage.FundingSourceAllowance); err != nil {
+		t.Fatal(err)
+	}
+	if _, reserved, _ := store.DailyUsage(ctx, "acct_only", "2026-10-13"); reserved != 500 {
+		t.Fatalf("confirmed hold still on the paid quota: reserved=%d", reserved)
+	}
+}

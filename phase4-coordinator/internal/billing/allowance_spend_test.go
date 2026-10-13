@@ -202,25 +202,35 @@ func TestCloseAllowanceRecordsSplitsFromTheLedger(t *testing.T) {
 	}
 }
 
-func TestReapAllowanceClosesOnlyHoldsFromEarlierProcesses(t *testing.T) {
-	reqStore, store := newRequestAndBillingStores(t)
+func TestReapAllowanceClosesOnlyHoldsOfDeadProcesses(t *testing.T) {
+	reqStore, oldProcess := newRequestAndBillingStores(t)
 	ctx := context.Background()
-	grantAllowance(t, store, AllowanceStake{AccountID: "acct", Units: malibu(100)})
-	admit(t, store, "acct", "ext-crash", 50_000, false)
-	gross := writeAllowanceAttempt(t, reqStore, store, "acct", "ext-crash", "coord-9", 0, "provider-a")
-	// A hold created by this process (after startedAt) is never reaped,
-	// however old: its own handler closes it.
-	closed, err := store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(48*time.Hour), allowanceTestNow.Add(-time.Minute))
-	if err != nil || closed != 0 {
-		t.Fatalf("live hold reaped: %d %v", closed, err)
+	// A second store over the same database is a second coordinator process.
+	newProcess, err := NewStore(oldProcess.db)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// After a restart every earlier hold is orphaned and closed from the
+	grantAllowance(t, oldProcess, AllowanceStake{AccountID: "acct", Units: malibu(100)})
+	if err := oldProcess.RenewAllowanceProcessLease(ctx, allowanceTestNow); err != nil {
+		t.Fatal(err)
+	}
+	admit(t, oldProcess, "acct", "ext-old", 50_000, false)
+	gross := writeAllowanceAttempt(t, reqStore, oldProcess, "acct", "ext-old", "coord-9", 0, "provider-a")
+	// The old process still renews its lease (an overlapping restart): its
+	// live hold is not reaped, however old.
+	if closed, err := newProcess.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Minute), 3*time.Minute); err != nil || closed != 0 {
+		t.Fatalf("live hold of an overlapping process reaped: %d %v", closed, err)
+	}
+	// A process never reaps its own holds.
+	if closed, err := oldProcess.ReapAllowanceReservations(ctx, allowanceTestNow.Add(48*time.Hour), 3*time.Minute); err != nil || closed != 0 {
+		t.Fatalf("own hold reaped: %d %v", closed, err)
+	}
+	// Once the old process stops renewing, its hold is closed from the
 	// ledger.
-	closed, err = store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Hour), allowanceTestNow.Add(time.Minute))
-	if err != nil || closed != 1 {
-		t.Fatalf("orphaned hold not reaped: %d %v", closed, err)
+	if closed, err := newProcess.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Hour), 3*time.Minute); err != nil || closed != 1 {
+		t.Fatalf("dead process hold not reaped: %d %v", closed, err)
 	}
-	status, _ := store.AllowanceStatusFor(ctx, "acct", allowanceTestNow)
+	status, _ := newProcess.AllowanceStatusFor(ctx, "acct", allowanceTestNow)
 	if status.HeldCredits != 0 || status.SpentCredits != gross {
 		t.Fatalf("status %+v", status)
 	}

@@ -102,34 +102,40 @@ func (s *Server) allowanceActive(ctx context.Context, account, day string) bool 
 	return active
 }
 
-// noteAllowanceDay records the coordinator's answer. A positive answer
-// already cached for the day writes nothing.
+// noteAllowanceDay records the coordinator's answer. A positive answer is
+// cached in memory only after the shared table holds it, so a failed write is
+// retried on the next answer instead of living in one process only.
 func (s *Server) noteAllowanceDay(account, day string, active bool) {
 	if active && s.allowance.has(account, day) {
 		return
 	}
-	s.allowance.set(account, day, active)
 	if store, ok := s.store.(allowanceStore); ok {
 		if err := store.NoteAllowanceDay(context.Background(), account, day, active, s.now()); err != nil {
 			slog.Warn("allowance day record failed", "account_id", account, "error", err)
+			if active {
+				return
+			}
 		}
 	}
+	s.allowance.set(account, day, active)
 }
 
 // persistFundingSource writes a confirmed funding onto the reservation
 // outside the normal settlement transaction (settlement fallback, journal
-// recovery). Empty does nothing.
-func (s *Server) persistFundingSource(account, reqID, source string) {
+// recovery). Empty does nothing; a missing reservation is not an error.
+func (s *Server) persistFundingSource(account, reqID, source string) error {
 	if source == "" || account == "" {
-		return
+		return nil
 	}
 	store, ok := s.store.(allowanceStore)
 	if !ok {
-		return
+		return nil
 	}
 	if err := store.MarkReservationFundingSource(context.Background(), account, reqID, source); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 		slog.Error("allowance funding persist failed", "request_id", reqID, "account_id", account, "source", source, "error", err)
+		return err
 	}
+	return nil
 }
 
 // setAllowanceRequestHeaders asks the coordinator to admit this request
@@ -148,16 +154,18 @@ func setAllowanceRequestHeaders(h http.Header, model, day string, inputUpperBoun
 }
 
 // reserveAllowanceOnly is the paid-quota-exhausted path: when the account
-// had an allowance today, reserve outside the paid quota and require the
-// coordinator to fund the request from the allowance (SPEC-050-R007).
+// had an allowance today, reserve past the paid quota's limit and require the
+// coordinator to fund the request from the allowance (SPEC-050-R007). The
+// reservation stays on the paid quota until the coordinator confirms the
+// allowance funding, so a lost answer, a crash, or a coordinator without
+// SPEC-050 leaves it charged to the paid quota (SPEC-050-R014).
 func (s *Server) reserveAllowanceOnly(ctx context.Context, subject *usageSubject, req storage.ReservationRequest) (storage.QuotaDecision, error, bool) {
 	if !s.allowanceActive(ctx, subject.AccountID, req.WindowDate) {
 		return storage.QuotaDecision{}, nil, false
 	}
-	req.FundingSource = storage.FundingSourceAllowance
+	req.AllowanceOnly = true
 	decision, err := s.store.ReserveQuota(ctx, req)
 	if err == nil {
-		subject.AllowanceFunded = true
 		subject.AllowanceRequired = true
 	}
 	return decision, err, true

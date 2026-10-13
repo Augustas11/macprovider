@@ -23,10 +23,12 @@ type SettlementConfig = config.SettlementConfig
 type Store struct {
 	// selfDealMemo briefly caches SPEC-050-R010 self-dealing answers.
 	selfDealMemo selfDealMemo
-	db           *sql.DB
-	readDB       atomic.Pointer[sql.DB]
-	now          func() time.Time
-	sqliteMetric SQLiteMetrics
+	// allowanceProcess is this process's SPEC-050 allowance-hold epoch.
+	allowanceProcess allowanceProcessState
+	db               *sql.DB
+	readDB           atomic.Pointer[sql.DB]
+	now              func() time.Time
+	sqliteMetric     SQLiteMetrics
 	// routeSnapshotDB is an optional same-file SQLite handle reserved for
 	// durable pre-dispatch route snapshots. It avoids queueing those writes
 	// behind request_log pool users while SQLite still serializes the writer

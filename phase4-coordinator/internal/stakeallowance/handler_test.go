@@ -318,3 +318,16 @@ func TestStakeAccountViewReportsUnavailableLedger(t *testing.T) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestStakeAccountViewWithoutLedgerIsUnavailable(t *testing.T) {
+	h := NewHandler(Deps{GatewayServiceToken: testServiceToken, Allowance: &fakeAllowance{}, Logger: zerolog.Nop()})
+	req := httptest.NewRequest(http.MethodGet, Prefix+"account", nil)
+	for k, v := range principalHeaders() {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || errorCode(t, rec) != "stake_source_unavailable" {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
