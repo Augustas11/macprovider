@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.3",
+      "version": "v0.4.4",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1072,7 +1072,7 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.1.2",
+      "version": "v0.2.0",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4708,6 +4708,111 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
         "rationale": "The compute-integrity forced-native-path adapter and inconclusive mismatch boundary are specified but not implemented or evidenced."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R019",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-19. Cross-provider scoring keys and operator identity. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R020",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-20. Covert verification requests through the ordinary paid dispatch path. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R021",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-21. Teacher-forced scoring job and scorer selection. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R022",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-22. Agreement metrics and the learned honest-pair tolerance band. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R023",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-23. Verification decision state machine. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R024",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-24. Scorer integrity: double scoring, known sequences, scorer exclusion. Pending: implementation in the #1644 campaign PR and live rollout."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R025",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.2.0 FR-25. Routing suspension, provider/operator status and closed-label telemetry. Pending: implementation in the #1644 campaign PR and live rollout."
       }
     },
     {
@@ -11972,6 +12077,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1816",
         "rationale": "#1816 (campaign branch, unshipped): route snapshots carry the pool_manifest expected-identity source, pool_model_id, entry rates, bounds digest, manifest generation and member-account provenance; global v1 digests stay byte-identical (golden test), and insert, recovery and native and loopback pool settlement are tested. Pool provenance rides only in route_snapshot_v2 (spec022-route-snapshot-v2, R-13.2 option B, SPEC-015 0.4.12 §N.2), receipt model_id is the pool_model_id, and the standalone phase7-verify verifier reproduces the v2 preimage against shared golden vectors and verifies a signed pool-model receipt end to end. Still missing: signed journey evidence from a deployed build. Pending until it exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R016",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-022 v0.4.4 R-16 compute-integrity earnings hold. Pending: implementation in the #1644 campaign PR and live rollout."
       }
     },
     {
