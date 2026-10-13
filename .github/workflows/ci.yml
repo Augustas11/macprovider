@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     # internal/billing (the money path) under the race detector, in parallel
     # with the coordinator job, which runs it at native speed (#1996).
-    timeout-minutes: 30
+    timeout-minutes: 26
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -557,7 +557,7 @@ jobs:
     name: phase3-binary (Malibu app tests, recovery)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 26
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
