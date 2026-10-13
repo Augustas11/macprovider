@@ -110,6 +110,35 @@ printf '#!/usr/bin/env bash\ncat %q %q 2>/dev/null || true\n' "$tmp/svc/boot.txt
 # shellcheck disable=SC2016  # the fake's own "$@" must stay literal
 printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = --validate-config ] && v=1; done\n[ -n "${v:-}" ] || exit 2\nwhile [ $# -gt 0 ]; do [ "$1" = --config ] && c="$2"; shift; done\n! grep -q INVALID "$c"\n' > "$tmp/bin/fake-coordinator"
 chmod +x "$tmp/bin/gh" "$tmp/bin/ssh" "$tmp/bin/systemctl" "$tmp/bin/journalctl" "$tmp/bin/fake-coordinator"
+# Pearl's sudo (the ssh stub already runs as the test user) and the installed
+# coordinator binary for stats-migrate: state in $tmp/pearl/stats-state
+# ("<migration> pending|applied" lines); apply marks all applied.
+printf '#!/usr/bin/env bash\nexec "$@"\n' > "$tmp/bin/sudo"
+chmod +x "$tmp/bin/sudo"
+mkdir -p "$tmp/pearl/etc"
+printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"
+export PEARL_COORDINATOR_BIN="$tmp/pearl/coordinator"
+cat > "$PEARL_COORDINATOR_BIN" <<'FAKECOORD'
+#!/usr/bin/env bash
+state="$FAKE_PEARL/pearl/stats-state"
+echo "$* | dsn=${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-unset}" >> "$FAKE_PEARL/pearl/stats-calls"
+[ "${1:-}" = stats-migrate ] || exit 2
+shift
+if [ "${1:-}" = --check ]; then
+  [ -z "${FAKE_STATS_CHECK_FAIL:-}" ] || { echo "stats-migrate: dial ${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-?}: refused" >&2; exit 1; }
+  echo "stats-migrate check (env): 2 embedded, $(grep -c applied "$state") applied"
+  sed 's/^/  /' "$state"
+  exit 0
+fi
+echo "applying with ${COORDINATOR_PARTNER_KEYS_ADMIN_DSN:-unset}"
+[ -z "${FAKE_STATS_APPLY_FAIL:-}" ] || { echo "stats-migrate: apply failed" >&2; exit 1; }
+sed -i.bak 's/ pending$/ applied/' "$state"
+echo "stats-migrate ok"
+FAKECOORD
+chmod +x "$PEARL_COORDINATOR_BIN"
+export PEARL_COORDINATOR_ENV="$tmp/pearl/etc/coordinator.env"
+printf 'COORDINATOR_PARTNER_KEYS_ADMIN_DSN=postgres://admin:adminpw@127.0.0.1:5432/stats\n' > "$PEARL_COORDINATOR_ENV"
+chmod 600 "$PEARL_COORDINATOR_ENV"
 python3 "$OPS_SRC/tests/fake_services.py" "$tmp/svc" &
 server_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/svc/port" ] && break; sleep 0.3; done
@@ -238,7 +267,54 @@ FAKE_PSQL_VERIFY=f PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a failing 
 expect_next app_attest_recorder:mutate
 case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --rotate"*) ok ;; *) bad "repair command lacks --rotate: $(next_field command)" ;; esac
 rm -f "$tmp/bin/psql"
-unset PEARL_COORDINATOR_ENV
+
+# stats_migrate (#1984): the signed updater never applies stats migrations, so a
+# pending one under the installed binary is applied before app_attest_recorder,
+# and one of the new binary is applied before health is reported done.
+pending_state() { printf '000_base applied\n031_attested_hardware pending\n' > "$tmp/pearl/stats-state"; }
+applied_state() { printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"; }
+: > "$tmp/pearl/stats-calls"
+pending_state
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a pending stats migration" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:mutate
+if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate state: $(state_of stats_migrate)"; fi
+if [ "$(fact_of stats_migrations_pending)" = 031_attested_hardware ]; then ok; else bad "pending fact: $(fact_of stats_migrations_pending)"; fi
+case "$(next_field expected_downtime)" in none*) ok ;; *) bad "stats downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in *pearl-coordinator-rollout.md#stats-migrations) ok ;; *) bad "stats runbook: $(next_field runbook)" ;; esac
+case "$(next_field command)" in *adminpw*|*postgres://admin*) bad "stats command carries a DSN" ;; *) ok ;; esac
+if grep -q 'admin-dsn' "$tmp/pearl/stats-calls"; then bad "the DSN was passed in argv"; else ok; fi
+# A read failure blocks and never echoes the DSN.
+FAKE_STATS_CHECK_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unreadable stats state" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:blocked
+case "$(next_field reason)" in *adminpw*) bad "check failure leaked the DSN" ;; *REDACTED*) ok ;; *) bad "check failure reason: $(next_field reason)" ;; esac
+# A failed apply leaves the step pending and hands the lock back.
+FAKE_STATS_APPLY_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 1 "failed stats apply" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats migrations apply" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q ' pending$' "$tmp/pearl/stats-state"; then bad "a migration is still pending"; else ok; fi
+if grep -qF adminpw "$tmp/out" "$tmp/err"; then bad "the stats apply printed the DSN"; else ok; fi
+if grep -q 'postgres://REDACTED' "$tmp/out"; then ok; else bad "the DSN was not redacted in the apply output"; fi
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status after the stats apply" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of stats_migrate)" = done ]; then ok; else bad "stats_migrate state after apply: $(state_of stats_migrate)"; fi
+expect_next app_attest_recorder:mutate
+# Between the apply and the end of the updater unit the check is skipped (the
+# binary is being swapped).
+pending_state
+mkdir -p "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+printf '{"step":"apply","recorded_at":"2026-10-09T00:00:00Z"}\n' > "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1/apply.json"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status while the updater runs" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate while the updater runs: $(state_of stats_migrate)"; fi
+case "$(next_field id)" in stats_migrate) bad "stats migrate offered during the apply window" ;; *) ok ;; esac
+# New binary live (v9.0.1) with a pending migration: not done until applied.
+health v9.0.1 $LIVE
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and a pending migration" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:mutate
+applied_state
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+health v9.0.0 $LIVE
 
 # ==== pearl-runtime: one-time auto_vacuum conversion (#1979) ==================
 # Real SQLite files stand in for Pearl's; flock is a stub (not on every host).
