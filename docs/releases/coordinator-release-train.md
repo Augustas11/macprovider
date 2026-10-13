@@ -200,7 +200,9 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.236 | `bb17a3ab4` | #1919 repository admission (exact revocations), #1934 release-identity automation, #1937 attested-hardware auto-trust — **live** |
+| v1.8.241 | `6e6b24211` | #1982 retention drain (watermark laps, run budget), #1981 per-request footprint (SPEC-022 R-15.10), #1967 privacy slot-aware selection, #1968 App Attest verifier + challenge/submit, #1962 native-MTP canary visibility, #1975 bootstrap SQL refusals — **live** 2026-10-13 08:31Z, about 3.5 min of coordinator 502 during the apply |
+| v1.8.239 | — | #1909 settlement-evidence retention, #1950 pool-proven rollup, #1944 expiry removal |
+| v1.8.236 | `bb17a3ab4` | #1919 repository admission (exact revocations), #1934 release-identity automation, #1937 attested-hardware auto-trust |
 | v1.8.235 | `74e6f3684` | #1935 per-provider earnings rollup (#1925) |
 | v1.8.234 | `702c33788` | #1910 |
 | v1.8.233 | `06713f727` | #1926 provider read timeouts (#1925) |
@@ -308,7 +310,18 @@ around 2026-10-23. The fix took effect at the next renewal. The scheduled
 renewal has since been retired (#1938); a restamp is on demand
 (`scripts/renew-autotune-static-feed.sh`).
 
-## Next coordinator release — tag unassigned, net changes vs v1.8.236
+## v1.8.241 rollout notes — 2026-10-13
+
+- One-time steps before the apply: the two `location = /v1/providers/app-attest…` nginx blocks (vhost backup kept), stats migration `031_hardware_trust_app_attest_auto` (shipped in v1.8.239 but never applied, because the runtime updater does not run `stats-migrate`; tooling gap #1984), then the `app_attest_recorder` step.
+- After the apply: `/v1/providers/app-attest/challenge` answers 401 without a provider token; three `hash_required_provider_excluded` lines at reconnect (pre-existing, none after 08:33Z).
+- Pending live checks: the first nightly retention run on the drain code (03:00 UTC), then the one-time `retention-vacuum-conversion` task once a run reports `backlog_drained=true`; >1 enrolled provider serving private traffic (#1967).
+
+## Next coordinator release — tag unassigned, net changes vs v1.8.241
+
+Merged, waiting for this train:
+- [ ] #1983 privacy reject reasons (SPEC-049-R030) and in-band identity key rotation (R031), coordinator and gateway side.
+
+## Earlier plan: net changes vs v1.8.236 (shipped in v1.8.237 / v1.8.239 / v1.8.241)
 
 One runtime train, applied **after** the next CLI release (#1944's deploy order puts the CLI first). Expected downtime: one signed-updater apply (15–20 min worst case, about 3 min with the short-quiesce updater).
 
