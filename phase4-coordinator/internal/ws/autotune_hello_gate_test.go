@@ -337,6 +337,12 @@ func TestProofOfWeightsReloadSandboxesExistingUnverifiedSession(t *testing.T) {
 		t.Fatalf("ack json: %v", err)
 	}
 	assignedID := ack["assigned_id"].(string)
+	// The hello_ack is read before the registry lifts the handshake-ack
+	// routing hold, so wait for the hold to clear before asserting eligibility.
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && !p.HandshakeAckPending
+	})
 	before, ok := h.Registry.Resolve("m4-anon", assignedID)
 	if !ok || !before.RoutingEligible() {
 		t.Fatalf("gate-off provider should start routable: %+v ok=%v", before, ok)
@@ -1574,6 +1580,12 @@ func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
 	if ack["type"] != "hello_ack" {
 		t.Fatalf("ack type = %v", ack["type"])
 	}
+	// The hello_ack is read before the registry lifts the handshake-ack
+	// routing hold, so wait for the hold to clear before asserting eligibility.
+	eventually(t, func() bool {
+		p, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+		return ok && !p.HandshakeAckPending
+	})
 	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
 	if !ok {
 		t.Fatal("provider not registered")
@@ -1704,6 +1716,12 @@ func TestAutotuneCatalogAdmissionLegacyBridgeIsExplicitlyEnforced(t *testing.T) 
 			if err := json.Unmarshal(payload, &ack); err != nil {
 				t.Fatalf("ack json: %v", err)
 			}
+			// The hello_ack is read before the registry lifts the handshake-ack
+			// routing hold, so wait for the hold to clear before asserting eligibility.
+			eventually(t, func() bool {
+				p, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+				return ok && !p.HandshakeAckPending
+			})
 			provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
 			if !ok {
 				t.Fatal("metadata-free provider not registered")
