@@ -714,9 +714,11 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshot_journal (
     mirrored_at_utc TEXT NULL,
     UNIQUE(account_scope, request_id, attempt_n, provider_id)
 );
-CREATE INDEX IF NOT EXISTS idx_srsj_request ON settlement_route_snapshot_journal(account_scope, request_id, attempt_n);
-CREATE INDEX IF NOT EXISTS idx_srsj_provider ON settlement_route_snapshot_journal(provider_id, created_at_utc);
-CREATE INDEX IF NOT EXISTS idx_srsj_digest ON settlement_route_snapshot_journal(route_snapshot_digest);
+-- SPEC-022 R-15.10: the unique key serves request lookups; no query reads
+-- the provider or digest indexes an earlier release created.
+DROP INDEX IF EXISTS idx_srsj_request;
+DROP INDEX IF EXISTS idx_srsj_provider;
+DROP INDEX IF EXISTS idx_srsj_digest;
 CREATE INDEX IF NOT EXISTS idx_srsj_pending ON settlement_route_snapshot_journal(id)
     WHERE mirrored_at_utc IS NULL;
 CREATE TRIGGER IF NOT EXISTS trg_srsj_immutable
