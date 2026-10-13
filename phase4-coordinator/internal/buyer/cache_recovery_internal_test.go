@@ -198,10 +198,10 @@ func TestCachedPromptTokensNotCreditedWhenConversationKeyWithheld(t *testing.T) 
 		{stickyResult: "miss", conversationCacheOnly: true, conversationKeyWithheld: true},
 	} {
 		if billed, observed := buyerCachedPair(&cached, &prompt, state, 0); billed != 0 || observed != 0 {
-			t.Fatalf("state=%+v billed/observed=%d/%d, want 0/0", *state, billed, observed)
+			t.Fatalf("sticky=%q cacheOnly=%v billed/observed=%d/%d, want 0/0", state.stickyResult, state.conversationCacheOnly, billed, observed)
 		}
 		if got, reason := requestLogCacheRecoveryFields(&cached, &prompt, state, 0); got != nil || reason != "ambiguous_cache" {
-			t.Fatalf("state=%+v recovery=%v/%q, want nil/ambiguous_cache", *state, got, reason)
+			t.Fatalf("sticky=%q cacheOnly=%v recovery=%v/%q, want nil/ambiguous_cache", state.stickyResult, state.conversationCacheOnly, got, reason)
 		}
 	}
 	if billed, _ := buyerCachedPair(&cached, &prompt, &forwardState{stickyResult: "miss", conversationCacheOnly: true}, 0); billed != 4 {
