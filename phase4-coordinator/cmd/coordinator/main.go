@@ -1633,7 +1633,7 @@ func runCoordinator() (exitCode int) {
 			Msg("provider referral status endpoint mounted; mutation routes remain feature-gated")
 	}
 	buyerHandler = withReferralAdvocacy(buyerHandler, referralStatus, referralChallenge, referralVerify)
-	buyerHandler = withStakeAllowance(buyerHandler, setupStakeAllowance(&cfg, reqLogStore.DB(), rewardsDB, logger))
+	buyerHandler = withStakeAllowance(buyerHandler, setupStakeAllowance(shutdownCtx, &cfg, reqLogStore.DB(), rewardsDB, billingStore, logger))
 	buyerHandler = withMoneySQLiteActivity(buyerHandler, moneySQLiteActivity)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)

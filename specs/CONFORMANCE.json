@@ -12427,7 +12427,9 @@
         "phase4-coordinator/internal/rewards/stake.go:NewStakeLedger",
         "phase4-coordinator/internal/rewards/stake.go:Lock",
         "phase4-coordinator/internal/rewards/stake.go:providerWithdrawableUnits",
-        "phase4-coordinator/internal/stakeallowance/handler.go:handleStake"
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleStake",
+        "phase4-coordinator/internal/billing/allowance.go:AllowanceStakeSource",
+        "phase4-coordinator/cmd/coordinator/stake_allowance.go:stakeSourceAdapter"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
@@ -12518,8 +12520,16 @@
       "requirement_id": "SPEC-050-R005",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance.go:ComputeAllowanceGrants",
+        "phase4-coordinator/internal/billing/allowance.go:RefreshAllowanceDay",
+        "phase4-coordinator/cmd/coordinator/stake_allowance.go:startAllowanceRefresher"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestComputeAllowanceGrantsRateCapAndProRata",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayIsIdempotentPerAccountDay",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayRecordsNothingWhenSourceFails"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12533,8 +12543,14 @@
       "requirement_id": "SPEC-050-R006",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance.go:RefreshAllowanceDay",
+        "phase4-coordinator/internal/billing/allowance.go:ensureAllowanceTables"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestAllowanceAuditTablesAreAppendOnly",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayIsIdempotentPerAccountDay"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

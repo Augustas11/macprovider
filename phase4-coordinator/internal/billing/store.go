@@ -698,6 +698,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureWholesaleStatementTables(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureAllowanceTables(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureCeilingRestatementTablesAndMarker(ctx); err != nil {
 		return err
 	}
