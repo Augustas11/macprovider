@@ -806,6 +806,67 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertTrue(keyless.allSatisfy { $0 is RotatingKVCache })
     }
 
+    /// #1998 — a keyed (or cold-eligible) serial request allocates KVCacheSimple, and
+    /// mlx-swift-lm 3.32.3 validates an explicit cache against the legacy `maxKVSize`
+    /// capacity. `serveIteratorParameters` must drop the cap whenever the cache is
+    /// forced simple or reused, and keep it for keyless traffic. Headless: the
+    /// capacity check below is the same `validateKVCacheCompatibility` the iterator runs.
+    func testKeyedServeIteratorParametersMatchTheExplicitCache() throws {
+        let model = FakeDimensionModel(layers: 3)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+        let keyedCache = try ModelRuntime.serveCache(
+            model: model, baseParameters: base,
+            forceSimpleKV: ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: "conv:auto.prefix.k"))
+
+        // The capped capacity the pre-fix iterator received rejects every layer,
+        // with the exact production error string.
+        XCTAssertThrowsError(try validateKVCacheCompatibility(
+            keyedCache, configuration: KVCacheConfiguration(capacity: try .init(maxTokens: 4096)))
+        ) { error in
+            XCTAssertEqual("\(error)", "incompatibleCapacity(expected: 4096, count: 3)")
+        }
+
+        XCTAssertNil(ModelRuntime.serveIteratorParameters(base, forceSimpleKV: true, reusedCache: false).maxKVSize)
+        XCTAssertNil(ModelRuntime.serveIteratorParameters(base, forceSimpleKV: false, reusedCache: true).maxKVSize)
+        XCTAssertEqual(ModelRuntime.serveIteratorParameters(base, forceSimpleKV: false, reusedCache: false).maxKVSize, 4096)
+    }
+
+    /// #1998 end to end through the real TokenIterator: the capped serve parameters
+    /// throw `incompatibleCapacity` before prefill on a keyed cache, and the
+    /// `serveIteratorParameters` shape reaches prefill. Gated on KV_ENABLE_MLX_TESTS
+    /// because building the prompt MLXArray needs the Metal library.
+    func testKeyedServeTokenIteratorPassesCapacityValidationMLX() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
+                          "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
+        let model = PrefillSentinelModel(layers: 3)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+        let input = LMInput(tokens: MLXArray([Int32(1), 2, 3]))
+        let keyedCache = try ModelRuntime.serveCache(
+            model: model, baseParameters: base,
+            forceSimpleKV: ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: "conv:auto.prefix.k"))
+
+        XCTAssertThrowsError(try TokenIterator(input: input, model: model, cache: keyedCache, parameters: base)) { error in
+            XCTAssertEqual("\(error)", "incompatibleCapacity(expected: 4096, count: 3)")
+        }
+        XCTAssertThrowsError(try TokenIterator(
+            input: input, model: model, cache: keyedCache,
+            parameters: ModelRuntime.serveIteratorParameters(base, forceSimpleKV: true, reusedCache: false))
+        ) { error in
+            XCTAssertTrue(error is PrefillSentinelModel.Reached, "validation must pass and reach prefill, got \(error)")
+        }
+        let keylessCache = try ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: false)
+        XCTAssertThrowsError(try TokenIterator(
+            input: input, model: model, cache: keylessCache,
+            parameters: ModelRuntime.serveIteratorParameters(base, forceSimpleKV: false, reusedCache: false))
+        ) { error in
+            XCTAssertTrue(error is PrefillSentinelModel.Reached, "got \(error)")
+        }
+    }
+
     /// SPEC-024-R001 fail-safe: a genuine sliding-window model still returns
     /// RotatingKVCache after maxKVSize is dropped. ConversationCache must miss.
     func testConversationKeyedWindowedModelDoesNotReuseRotatingCache() async {
@@ -1023,6 +1084,22 @@ final class KVConversationColdTierTests: XCTestCase {
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
             fatalError("prepare is not exercised by the newCache cache-class invariant test")
+        }
+    }
+
+    /// Stock-`newCache` model whose prefill throws a sentinel, so a test can tell a
+    /// TokenIterator that passed cache validation from one that failed it.
+    private final class PrefillSentinelModel: Module, LanguageModel, KVCacheDimensionProvider {
+        struct Reached: Error {}
+        let kvHeads: [Int]
+        init(layers: Int) {
+            self.kvHeads = Array(repeating: 1, count: layers)
+            super.init()
+        }
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            throw Reached()
         }
     }
 
