@@ -494,13 +494,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					capture := adapter.dedupeCapture()
 					if capture != nil {
 						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							w.Header().Get("Content-Type"),
 							capture, s.now())
 						return
 					}
 					if adapter.dedupeDeliveredButUncacheable() {
 						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							w.Header().Get("Content-Type"),
 							nil, s.now())
 						return
 					}
@@ -509,7 +509,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				if adapter == nil && sw.dedupePublishable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						w.Header().Get("Content-Type"),
 						sw.dedupeCapture(), s.now())
 					return
 				}
@@ -523,7 +523,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				// drop, because those retries MUST re-dispatch.
 				if sw.dedupeDeliveredButUncacheable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
-						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						w.Header().Get("Content-Type"),
 						nil, s.now())
 					return
 				}
@@ -1217,7 +1217,6 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !settleWithFinality(usage.PromptTokens, usage.CompletionTokens, tokenSource, "ok") {
 		return
 	}
-	emitProviderAttribution(w.Header(), resp.Header)
 	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
 		copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	} else {
@@ -1227,32 +1226,6 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	maybeSetPrivacySuccessHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
-}
-
-// emitProviderAttribution surfaces the provider peer id under a public
-// buyer-facing header name (X-Provider-Id) on the gateway response.
-//
-// Required by harness B5/B6 verdicts (slot utilization, per-provider
-// earnings) and any downstream buyer that wants per-request provider
-// attribution. The internal `X-MacProvider-Provider` header carrying
-// the peer id is stripped by copyCleanHeaders /
-// copyReceiptEligibleHeaders via isMacProviderHeader, so this MUST
-// run BEFORE the copy/strip — and emit under a different prefix so it
-// survives the strip.
-//
-// Only the peer id is surfaced. The companion `X-MacProvider-Route`
-// header on coord responses carries a session-assigned routing token
-// (auth-shaped, not a pure identifier) and is deliberately NOT
-// emitted to buyers.
-//
-// Empty source values produce no output header (avoids leaking
-// "X-Provider-Id: " sentinels on coord paths that don't carry
-// provider attribution — coordinator policy errors, cold-start 503s
-// without a peer selected, etc.).
-func emitProviderAttribution(dst, src http.Header) {
-	if v := src.Get("X-MacProvider-Provider"); v != "" {
-		dst.Set("X-Provider-Id", v)
-	}
 }
 
 func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model, poolID string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
@@ -1328,7 +1301,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if timing != nil {
 		defer timing.observeCoordinatorTrailers(resp.Trailer)
 	}
-	emitProviderAttribution(w.Header(), resp.Header)
 	if poolModelDisclosureAllowed(poolID, model, resp.Header) {
 		copyCleanHeaders(w.Header(), resp.Header)
 	} else {
@@ -2319,15 +2291,6 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	if demand := demandTelemetryFromContext(r.Context()); demand != nil {
 		demand.markProviderFailure(promptEstimate, 0, resp.StatusCode, openAIErrorCode(body))
 	}
-	// PR #250 R1 code MEDIUM: this path serves provider-SELECTED
-	// errors (null-usage 5xx, etc.) where the coord did pick a
-	// provider before the failure (server.go:1886, :1909 set
-	// X-MacProvider-Provider on selected-provider non-200 responses).
-	// Without emitting attribution here, B5/B6 benchmark verdicts
-	// would still mis-attribute provider-side failures as anonymous.
-	// passThroughNoProviderCoordinatorError stays unchanged because
-	// no provider was selected on its callers' paths.
-	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeadersWithoutPoolModelDisclosure(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))

@@ -804,7 +804,9 @@ Each prompt carries a fresh uuid (the gateway dedupe cache answers repeats
 without routing).
 
 Expected headers on both 200s: `X-MacProvider-Engine: llamacpp_loopback`,
-`X-Request-ID: <rid>`, `X-Provider-Id: <M1_PROVIDER_ID>`. Stream ends with a
+`X-Request-ID: <rid>`; the response carries no provider identity header
+(buyers never receive one), so confirm the serving provider in the coordinator
+`request_log` row for `<rid>`. Stream ends with a
 `finish_reason` chunk and `[DONE]`.
 
 Negative controls in the same session (each must be 503, 0 route snapshots,

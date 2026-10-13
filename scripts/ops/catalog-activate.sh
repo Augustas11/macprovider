@@ -419,11 +419,12 @@ proof_moved() {
 # One bounded buyer request through the gateway, tied to the target provider:
 # its native_mtp.mtp_forwards (or, with continuous batching active, its
 # continuous_batching.scheduler.shared_forward_calls) must increase across the request, the response must carry
-# a request id, and the gateway's X-Provider-Id (phase5-gateway
-# internal/router/chat_proxy.go emitProviderAttribution) must equal the
-# provider_id the canary reports in /v1/status, so other traffic on the
-# provider cannot satisfy the proof. Prints status, request id and counter
-# deltas only; the provider id itself is never printed.
+# a request id, and the coordinator request_log row for that request id (read
+# on Pearl, read-only) must name the coordinator session the canary reports in
+# /v1/status, so other traffic on the provider cannot satisfy the proof. Buyers
+# never receive provider identity (SPEC-006 5.4, #1991), so the gateway
+# response carries no attribution. Prints status, request id and counter
+# deltas only; the session id itself is never printed.
 gateway_proof() {
   local gw model token_file
   gw="$(gateway_url)"
@@ -439,9 +440,15 @@ gateway_proof() {
   read_provider_status "$OPS_TMP_DIR/before.json"
   before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total or continuous_batching.scheduler.shared_forward_calls"
   read -r b_mtp b_req b_cb b_shared <<< "$before"
-  local canary_pid
-  canary_pid="$(json_field "$OPS_TMP_DIR/before.json" 'd["provider_id"]')"
-  [ -n "$canary_pid" ] || refuse "provider /v1/status reports no provider_id; cannot tie the proof to it"
+  local canary_sid pdb psqlite
+  canary_sid="$(json_field "$OPS_TMP_DIR/before.json" 'd["safety_telemetry"]["coordinator_session_id"]')"
+  [ -n "$canary_sid" ] || refuse "provider /v1/status reports no safety_telemetry.coordinator_session_id; cannot tie the proof to it"
+  pdb="${PEARL_COORDINATOR_DB:-}"
+  psqlite="${PEARL_SQLITE3:-/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3}"
+  [ -n "$pdb" ] || refuse "PEARL_COORDINATOR_DB must name the coordinator database on Pearl to attribute the proof request"
+  [[ "$pdb" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$psqlite" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    refuse "PEARL_COORDINATOR_DB and PEARL_SQLITE3 must be absolute plain paths"
+  require_pearl_ssh
 
   local body="$OPS_TMP_DIR/proof.json" headers="$OPS_TMP_DIR/proof.headers" code sent_rid payload
   sent_rid="ops-proof-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
@@ -455,10 +462,17 @@ gateway_proof() {
   rid="$(awk -F': ' 'tolower($1)=="x-request-id"{gsub("\r","",$2); print $2}' "$headers" | head -n1)"
   [ "$code" = "200" ] || die "gateway returned HTTP $code for $model (request id ${rid:-none})"
   [ -n "$rid" ] || die "gateway response carries no X-Request-ID"
-  local served_pid
-  served_pid="$(awk -F': ' 'tolower($1)=="x-provider-id"{gsub("\r","",$2); print $2}' "$headers" | head -n1)"
-  [ -n "$served_pid" ] || die "gateway response carries no X-Provider-Id (request $rid)"
-  [ "$served_pid" = "$canary_pid" ] || die "request $rid was served by another provider, not the canary"
+  [[ "$rid" =~ ^[A-Za-z0-9._-]+$ ]] || die "gateway request id has unexpected characters"
+  local served_sid="" k
+  for k in 1 2 3 4 5 6; do
+    served_sid="$(pearl_ssh "'$psqlite' -readonly '$pdb' \"SELECT provider_assigned_id FROM request_log WHERE external_request_id = '$rid' ORDER BY id DESC LIMIT 1;\"" 2>/dev/null)" ||
+      die "request_log read failed over PEARL_SSH (request $rid)"
+    served_sid="$(printf '%s' "$served_sid" | tr -d '\r\n')"
+    [ -n "$served_sid" ] && break
+    [ "$k" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
+  done
+  [ -n "$served_sid" ] || die "coordinator request_log has no row for request $rid"
+  [ "$served_sid" = "$canary_sid" ] || die "request $rid was served by another provider, not the canary"
   [ -n "$(json_field "$body" 'd["choices"][0]["message"]["content"]')" ] || die "gateway 200 without completion content"
 
   local i
@@ -474,7 +488,7 @@ gateway_proof() {
   local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
-    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "served_by_canary": True, "provider_id_sha256": hashlib.sha256(sys.argv[6].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$served_pid")"
+    "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[6].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$served_sid")"
 }
 
 internal() {

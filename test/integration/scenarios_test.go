@@ -39,6 +39,13 @@ func TestHappyPathChatCompletion(t *testing.T) {
 	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
 		t.Fatalf("pre-v1.6 fake provider response exposed receipt header %q", got)
 	}
+	// Buyers never receive provider identity (#1991, SPEC-006 5.4).
+	for name := range headers {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-provider-") || lower == "x-macprovider-provider" || lower == "x-macprovider-route" || lower == "x-macprovider-session" {
+			t.Fatalf("buyer response exposed provider identity header %s=%q", name, headers.Get(name))
+		}
+	}
 	var chat map[string]any
 	if err := json.Unmarshal(body, &chat); err != nil {
 		t.Fatalf("decode body: %v body=%s", err, string(body))

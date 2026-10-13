@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.3.0
+**Version:** 0.3.1
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -827,6 +827,8 @@ remains open; R023 promotion is not required for operation.
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json` and its bundle: the reviewed redacted evidence (#1864).
 
 ## 10. Changelog and history
+
+- 0.3.1 - #1991. Buyer disclosure never includes provider identity: no buyer response, privacy-class or otherwise, carries `X-Provider-Id` or any equivalent stable provider or assigned-session identifier (SPEC-006 §5.4). The gateway deletes them at the buyer boundary. Operator-only route traces keep identity in logs.
 
 - 0.3.0 - #1911 hardening item "in-band signed key rotation". New §4.12 and SPEC-049-R031: an enrolled provider rotates its relay-blind identity key without an operator step. The enrolled identity key, the enrolled Secure Enclave key, and the new identity key each sign one rotation statement over a single-use coordinator nonce, and the statement binds a full posture by digest. The coordinator swaps the enrollment, revokes the provider's privacy key records, and rejects its held predispatch reservations in one transaction. An invalid or mismatched rotation quarantines; any other refusal leaves the enrollment unchanged. The retired identity is refused without quarantine; every other key change still quarantines. The Secure Enclave key does not rotate in band. SPEC-049-R017 and SPEC-049-R026 point to R031, and §2.6 states what rotation trusts. The messages are optional in both directions. No trust tier, assurance label, disclosure string, or §4.9 error code changes. Audit round 1 adds: one rotation per provider per 24 hours, checked in the store transaction (R031 item 11); at most four rotated identities per provider in the directory; a provider retry path for a lost result (item 12); sequence regression judged against the sequence at nonce issue, with an overtaken rotation answered `rotation_stale`; an identity key ever enrolled by another provider is never enrolled (R025) and never un-revoked in the directory (R028); the internal terminal code `privacy_key_rotated`; and R030 reasons `marker_mismatch`, `pool_scoped_request`, and `provider_rejected`, with the gateway counters limited to loopback or the operator bearer.
 

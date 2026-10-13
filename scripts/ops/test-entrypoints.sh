@@ -489,7 +489,7 @@ case " $(step_ids) " in
 esac
 status_doc() {
   local version="$1" connected="$2" cb_active="${3:-true}" cb_authorized="${4:-true}" cb_load="${5:-live_verified}" cb_proof="${6:-passed}" cb_paged="${7:-attached}" cb_self_check="${8:-null}"
-  printf '{"binary_version":"%s","provider_id":"canary-test-id","compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","self_check":%s,"policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s","emergency_off_override":false},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_self_check" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
+  printf '{"binary_version":"%s","provider_id":"canary-test-id","safety_telemetry":{"coordinator_session_id":"canary-test-session"},"compatibility_set_id":"test/repo:v'"$CAND"'@%s","coordinator":{"connected":%s},"native_mtp":{"mtp_forwards":5},"requests_total":7,"continuous_batching":{"active":%s,"paged_kv_decision":"%s","self_check":%s,"policy":{"load_status":"%s","authorized":%s,"local_proof_result":"%s","emergency_off_override":false},"scheduler":{"shared_forward_calls":11}}}'     "$version" "$B" "$connected" "$cb_active" "$cb_paged" "$cb_self_check" "$cb_load" "$cb_authorized" "$cb_proof" > "$tmp/svc/status.json"
 }
 
 run_rc 0 "cli status" scripts/ops/cli-release.sh status
@@ -519,6 +519,9 @@ rm -f "$SCOPE/canary_smoke.json"
 printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 printf 'canary-test-id' > "$tmp/svc/provider_id"
+printf 'canary-test-session' > "$tmp/svc/assigned_id"
+sqlite3 "$tmp/svc/request_log.db" "CREATE TABLE request_log (id INTEGER PRIMARY KEY, external_request_id TEXT, provider_assigned_id TEXT);"
+export PEARL_COORDINATOR_DB="$tmp/svc/request_log.db" PEARL_SQLITE3="$(command -v sqlite3)"
 printf 'move' > "$tmp/svc/mode"
 rm -f "$tmp/svc/served"
 # #1947: CB is authorized by the on-device self-check; the signed policy is revocation-only.
@@ -1038,7 +1041,6 @@ printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
 status_doc $CAND true
-printf 'canary-test-id' > "$tmp/svc/provider_id"
 mkdir -p "$tmp/state/catalog-$R"
 printf '{"step":"gateway_proof","evidence":"legacy generic proof","request_id":"ops-proof-old","mtp_forwards_delta":1,"requests_total_delta":1,"served_by_canary":true}
 ' > "$tmp/state/catalog-$R/gateway_proof.json"
@@ -1051,16 +1053,15 @@ expect_err "did not move the target provider"
 printf 'no-request-id' > "$tmp/svc/mode"
 run_rc 1 "proof refused without a response request id" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "carries no X-Request-ID"
-printf 'canary-test-id' > "$tmp/svc/provider_id"
-printf 'no-provider-id' > "$tmp/svc/mode"
-run_rc 1 "proof refused without X-Provider-Id" scripts/ops/catalog-activate.sh _gateway-proof
-expect_err "carries no X-Provider-Id"
+printf 'no-log-row' > "$tmp/svc/mode"
+run_rc 1 "proof refused without a coordinator request_log row" scripts/ops/catalog-activate.sh _gateway-proof
+expect_err "has no row for request"
 printf 'other-provider' > "$tmp/svc/mode"
 run_rc 1 "proof refused when another provider served it (counters still moved)" scripts/ops/catalog-activate.sh _gateway-proof
 expect_err "served by another provider"
-python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("provider_id"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("safety_telemetry"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
 printf 'move' > "$tmp/svc/mode"
-run_rc 3 "proof refused when the canary reports no provider_id" scripts/ops/catalog-activate.sh _gateway-proof
+run_rc 3 "proof refused when the canary reports no coordinator session" scripts/ops/catalog-activate.sh _gateway-proof
 status_doc $CAND true
 printf 'stuck' > "$tmp/svc/mode"
 run_rc 1 "right provider but counters stuck is still refused" scripts/ops/catalog-activate.sh _gateway-proof
