@@ -94,6 +94,30 @@ jobs:
       - name: make test-coordinator
         run: make test-coordinator
 
+  coordinator-billing-race:
+    name: phase4-coordinator billing (go test -race)
+    runs-on: ubuntu-latest
+    # internal/billing (the money path) under the race detector, in parallel
+    # with the coordinator job, which runs it at native speed (#1996).
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: make test-coordinator-billing-race
+        run: make test-coordinator-billing-race
+
   gateway:
     name: phase5-gateway (go vet + test)
     runs-on: ubuntu-latest
@@ -712,6 +736,7 @@ jobs:
     needs:
       - changes
       - coordinator
+      - coordinator-billing-race
       - coordinator-lint
       - coordinator-stats-integration
       - coordinator-nginx-integration
@@ -734,6 +759,7 @@ jobs:
           SWIFT_GATE: ${{ needs.changes.outputs.swift }}
           CODE_GATE: ${{ needs.changes.outputs.code }}
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          COORDINATOR_BILLING_RACE_RESULT: ${{ needs.coordinator-billing-race.result }}
           COORDINATOR_LINT_RESULT: ${{ needs.coordinator-lint.result }}
           COORDINATOR_STATS_INTEGRATION_RESULT: ${{ needs.coordinator-stats-integration.result }}
           NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
@@ -787,6 +813,7 @@ jobs:
 
           require_success "detect changed paths" "$CHANGES_RESULT"
           require_success "phase4-coordinator (go vet + test)" "$COORDINATOR_RESULT"
+          require_success "phase4-coordinator billing (go test -race)" "$COORDINATOR_BILLING_RACE_RESULT"
           require_success "phase4-coordinator (golangci-lint depguard AC-16)" "$COORDINATOR_LINT_RESULT"
           require_success "phase4-coordinator (stats Postgres AC-9/10/19/20)" "$COORDINATOR_STATS_INTEGRATION_RESULT"
           require_success "phase4-coordinator (nginx Step 4.B behavior smoke)" "$NGINX_INTEGRATION_RESULT"
