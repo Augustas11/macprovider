@@ -22,13 +22,17 @@ type RecoverInput struct {
 }
 
 const (
-	recoverLedgerBatchRows   = 128
-	recoverLedgerBatchBudget = 2 * time.Second
-	recoverLedgerLeaseTTL    = 15 * time.Second
+	recoverLedgerBatchRows = 128
+	recoverLedgerLeaseTTL  = 15 * time.Second
 )
 
 var (
 	ErrRecoveryInProgress = errors.New("ledger recovery already in progress")
+
+	// recoverLedgerBatchBudget bounds each claim and batch transaction. It
+	// is a var only so race-instrumented test builds can widen it; it must
+	// stay below recoverLedgerLeaseTTL.
+	recoverLedgerBatchBudget = 2 * time.Second
 
 	recoverLedgerAfterClaimForTest func()
 	recoverLedgerAfterBatchForTest func(phase string, rows int, cursor int64) error
