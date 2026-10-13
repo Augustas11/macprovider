@@ -3051,7 +3051,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                     group.addTask {
                         let result = try await scheduler.submit(.init(
                             id: "probe-\(bound)-\(seed)", conversationKey: "", promptTokens: [seed],
-                            maxOutputTokens: outputTokens, temperature: 0, selfCheckProbe: true, selfCheckCohort: rows
+                            maxOutputTokens: outputTokens, temperature: 0, selfCheckProbe: true,
+                            selfCheckCohort: ContinuousBatchSelfCheckCohort(id: "probe-\(bound)", size: rows)
                         ))
                         return (seed, result)
                     }
@@ -3073,7 +3074,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             var flips = 0
             for (index, result) in batched.enumerated() {
                 let seed = index + 1
-                guard let step = zip(result.generatedTokens, alone[index]).firstIndex(where: { $0.0 != $0.1 }) else {
+                guard let step = Array(zip(result.generatedTokens, alone[index])).firstIndex(where: { $0.0 != $0.1 }) else {
                     XCTAssertEqual(result.generatedTokens, alone[index])
                     continue
                 }
@@ -3107,41 +3108,47 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     /// An exactness-probe cohort is not admitted until every row of it is
-    /// queued. A cohort that never fills runs nothing and its rows end with
-    /// the bounded queue wait, so the self-check step fails instead of
-    /// verifying a width whose rows did not decode together (fail closed).
+    /// queued. A cohort that never fills runs nothing, does not hold up a
+    /// buyer row queued behind it, and its rows end with the bounded queue
+    /// wait, so the self-check step fails instead of verifying a width whose
+    /// rows did not decode together (fail closed).
     func testExactnessProbeCohortThatNeverFillsRunsNothingAndTimesOut() async throws {
         let backend = KernelRouteBackend(vectorLimit: 12)
         let scheduler = try await makeScheduler(
             descriptor: Self.descriptor(maxPhysicalBlocks: 256),
             maxActiveRows: 4,
-            queueWaitTimeoutNanoseconds: 200_000_000,
+            queueWaitTimeoutNanoseconds: 500_000_000,
             maxDecodeLockstepWindow: 16,
             backend: backend,
             allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 256)
         )
-        let outcomes = await withTaskGroup(of: Bool.self) { group in
-            for seed in 1 ... 3 {
-                group.addTask {
-                    let result = try? await scheduler.submit(.init(
-                        id: "short-cohort-\(seed)", conversationKey: "", promptTokens: [seed],
-                        maxOutputTokens: 17, temperature: 0, selfCheckProbe: true, selfCheckCohort: 4
-                    ))
-                    return result?.terminalStatus == .stop || result?.terminalStatus == .length
+        let cohort = ContinuousBatchSelfCheckCohort(id: "short-cohort", size: 4)
+        let probes = Task {
+            await withTaskGroup(of: Bool.self) { group in
+                for seed in 1 ... 3 {
+                    group.addTask {
+                        let result = try? await scheduler.submit(.init(
+                            id: "short-cohort-\(seed)", conversationKey: "", promptTokens: [seed],
+                            maxOutputTokens: 17, temperature: 0, selfCheckProbe: true, selfCheckCohort: cohort
+                        ))
+                        return result?.terminalStatus == .stop || result?.terminalStatus == .length
+                    }
                 }
+                var completed: [Bool] = []
+                for await value in group { completed.append(value) }
+                return completed
             }
-            var completed: [Bool] = []
-            for await value in group { completed.append(value) }
-            return completed
         }
+        try await eventually { await scheduler.metrics().waitingCount == 3 }
+        let buyer = try await scheduler.submit(.init(
+            id: "buyer", conversationKey: "", promptTokens: [9], maxOutputTokens: 2
+        ))
+        XCTAssertEqual(buyer.generatedTokens.count, 2, "a buyer behind an incomplete cohort is served")
+        XCTAssertNil(buyer.selfCheckCohortDecodeTokens, "rows outside a cohort carry no cohort count")
+        let outcomes = await probes.value
         XCTAssertEqual(outcomes, [false, false, false])
         let forwards = await backend.decodeForwardRows()
-        XCTAssertEqual(forwards, [], "no row of an incomplete cohort decodes")
-        let plain = try await scheduler.submit(.init(
-            id: "plain", conversationKey: "", promptTokens: [9], maxOutputTokens: 2, selfCheckProbe: true
-        ))
-        XCTAssertEqual(plain.generatedTokens.count, 2)
-        XCTAssertNil(plain.selfCheckCohortDecodeTokens, "rows outside a cohort carry no cohort count")
+        XCTAssertTrue(forwards.allSatisfy { $0 == 1 }, "no row of an incomplete cohort decodes: \(forwards)")
     }
 
     /// More active rows than the decode row bound decode in consecutive

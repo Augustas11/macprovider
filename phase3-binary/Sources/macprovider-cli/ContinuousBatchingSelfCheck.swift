@@ -97,6 +97,16 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// paged-KV pool: the exactness probe's rows must fit both, all at once.
     var maxRequestTokens: Int = .max
     var poolTokens: Int = .max
+    /// The pool's block size: each probe row reserves whole blocks.
+    var blockSizeTokens: Int = 16
+
+    /// The most slots any grant may serve on this target: the scheduler rows,
+    /// capped by the widest exactness-probe shape it holds
+    /// (`ContinuousBatchingSelfCheck.exactnessProbeBound`). A stored, prior or
+    /// provisional grant above it is served only up to it.
+    var grantableRows: Int {
+        min(maxRows, ContinuousBatchingSelfCheck.exactnessProbeBound(target: self, maxCount: maxRows))
+    }
 }
 
 struct ContinuousBatchingSelfCheckMeasurement: Sendable, Equatable, Codable {
@@ -226,7 +236,7 @@ enum ContinuousBatchingSelfCheck {
     static let minimumCohortDecodeTokens = 16
 
     static func requiredCohortDecodeTokens(decodeWindow: Int) -> Int {
-        max(minimumCohortDecodeTokens, decodeWindow)
+        max(minimumCohortDecodeTokens, min(decodeWindow, 4_096))
     }
 
     /// Exactness-probe completion length: the first token comes from
@@ -283,10 +293,18 @@ enum ContinuousBatchingSelfCheck {
         }
     }
 
-    /// Pool tokens one probe row may take: its prompt and completion, the
-    /// scheduler's decode headroom and one block of rounding.
-    static func exactnessRowCost(promptTokens: Int, outputTokens: Int) -> Int {
-        promptTokens + outputTokens + ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens + 16
+    /// Pool tokens one probe row may take: its prompt, completion and the
+    /// scheduler's decode headroom, rounded up to whole blocks. Nil on
+    /// overflow.
+    static func exactnessRowCost(promptTokens: Int, outputTokens: Int, blockSizeTokens: Int = 16) -> Int? {
+        let block = max(1, blockSizeTokens)
+        let (withOutput, outputOverflow) = promptTokens.addingReportingOverflow(outputTokens)
+        let (tokens, headroomOverflow) = withOutput.addingReportingOverflow(
+            ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens
+        )
+        guard !outputOverflow, !headroomOverflow, tokens >= 0 else { return nil }
+        let (blocks, blocksOverflow) = (tokens / block + (tokens % block == 0 ? 0 : 1)).multipliedReportingOverflow(by: block)
+        return blocksOverflow ? nil : blocks
     }
 
     /// The widest k (at most `maxCount`) whose full exactness-probe shape fits
@@ -301,10 +319,13 @@ enum ContinuousBatchingSelfCheck {
             count: maxCount, keyBoundary: target.probeKeyBoundary, outputTokens: outputTokens
         ) {
             let (rowTokens, rowOverflow) = length.addingReportingOverflow(outputTokens)
-            let (sum, sumOverflow) = total.addingReportingOverflow(
-                exactnessRowCost(promptTokens: length, outputTokens: outputTokens)
-            )
-            guard !rowOverflow, !sumOverflow, rowTokens <= target.maxRequestTokens, sum <= target.poolTokens else { break }
+            guard !rowOverflow, rowTokens <= target.maxRequestTokens,
+                  let cost = exactnessRowCost(
+                      promptTokens: length, outputTokens: outputTokens, blockSizeTokens: target.blockSizeTokens
+                  )
+            else { break }
+            let (sum, sumOverflow) = total.addingReportingOverflow(cost)
+            guard !sumOverflow, sum <= target.poolTokens else { break }
             total = sum
             bound += 1
         }
@@ -636,7 +657,7 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
         let record = store.record(for: target.key)
         if let decision = record?.decision, record?.inProgressSlots == nil {
             let slots = ContinuousBatchingSelfCheck.servedSlots(
-                decision: decision, ownerPinned: ownerPinned, maxRows: target.maxRows
+                decision: decision, ownerPinned: ownerPinned, maxRows: target.grantableRows
             )
             return .init(
                 state: decision.state,
@@ -651,7 +672,7 @@ struct ContinuousBatchingSelfCheckResolution: Sendable, Equatable {
         guard let prior = [provisionalSlots, storedSlots].compactMap({ $0 }).filter({ $0 > 1 }).max() else {
             return nil
         }
-        let slots = min(prior, target.maxRows)
+        let slots = min(prior, target.grantableRows)
         return .init(
             state: .granted(slots: slots),
             servedSlots: slots,
@@ -1045,7 +1066,9 @@ actor ContinuousBatchingSelfCheckDriver {
                 try save(record)
                 // Exactness probe: rows of unequal key lengths across the route
                 // boundary, all decoding together for the required tokens.
+                // Stored lone outputs are reused only in their probe shape.
                 var probeAlone = record.probeAloneOutputs ?? []
+                if probeAlone.contains(where: { $0.count != probeTokens }) { probeAlone = [] }
                 while probeAlone.count < slots {
                     let index = probeAlone.count
                     let row = try await yieldingToRequests {
@@ -1152,7 +1175,11 @@ actor ContinuousBatchingSelfCheckDriver {
             try? save(record)
             let previousRefusal = backpressureRefusal.flatMap { $0.target == target ? $0.slots : nil }
             backpressureRefusal = nil
-            if case StepError.probeShapeUnmet(let slots) = error {
+            // A buyer request during the step can take rows from the cohort;
+            // that is a yield, not a probe result.
+            if case StepError.probeShapeUnmet(let slots) = error,
+               await providerStatus.snapshot().requestsInFlight == 0,
+               await providerStatus.secondsSinceLastRealActivity() >= Date().timeIntervalSince(stepStartedAt) {
                 // Fail closed: decide on the widths verified below it, and
                 // run the full ladder again later.
                 let resume = ContinuousBatchingSelfCheck.backpressureResumeSeconds
@@ -1344,7 +1371,7 @@ actor ContinuousBatchingSelfCheckDriver {
         source: String
     ) async {
         let slots = ContinuousBatchingSelfCheck.servedSlots(
-            decision: decision, ownerPinned: ownerPinnedSlots, maxRows: target.maxRows
+            decision: decision, ownerPinned: ownerPinnedSlots, maxRows: target.grantableRows
         )
         // Fenced on the swap generation: state, report, gates and advertised
         // capacity move together or not at all.

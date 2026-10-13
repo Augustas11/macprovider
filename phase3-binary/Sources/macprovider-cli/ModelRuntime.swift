@@ -4520,7 +4520,8 @@ actor ModelRuntime: ModelRuntimeServing {
             generation: selfCheckGeneration,
             probeKeyBoundary: ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
             maxRequestTokens: scheduler.maxRequestTokens,
-            poolTokens: scheduler.poolTokens
+            poolTokens: scheduler.poolTokens,
+            blockSizeTokens: scheduler.blockSizeTokens
         )
     }
 
@@ -4639,7 +4640,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             temperature: 0,
                             topP: 1,
                             selfCheckProbe: true,
-                            selfCheckCohort: cohort ? prompts.count : 0
+                            selfCheckCohort: cohort ? ContinuousBatchSelfCheckCohort(id: idPrefix, size: prompts.count) : nil
                         ))
                         return (index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0)
                     }
@@ -5133,7 +5134,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The runtime identity the FR-CB10 self-check result is stored under:
     /// the MLX pin plus this build's row-isolation policy (SPEC-038 FR-CB2
     /// v0.3.17: per-row attention routes and the decode and verify forward
-    /// bounds of this device) and the FR-CB10 probe version (v0.3.19). A
+    /// bounds of this device) and the FR-CB10 probe version and route
+    /// boundary (v0.3.19; with the decode window they fix the probe prompts
+    /// and completion length, so stored lone outputs always match them). A
     /// result measured before the policy, at other bounds or by an older
     /// probe matches no live key, so the check re-runs; an earlier grant
     /// carries the Mac through the re-run as for an MLX pin change.
@@ -5141,9 +5144,12 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
     }
 
-    static func continuousBatchingSelfCheckRuntimeBuild(forwardBound bound: Int) -> String {
+    static func continuousBatchingSelfCheckRuntimeBuild(
+        forwardBound bound: Int,
+        routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary
+    ) -> String {
         "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
-            + "+\(ContinuousBatchingSelfCheck.probeVersion)"
+            + "+\(ContinuousBatchingSelfCheck.probeVersion)/route\(routeKeyBoundary)"
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

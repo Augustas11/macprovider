@@ -22,9 +22,10 @@ max(16, serve window) tokens beside the whole cohort, and must equal its lone
 run token for token. A first difference is excused only at an exact tie
 (stock serial top two within 1/1024 logit), and is counted. A width whose
 rows did not all decode together, or a Mac whose pool or served context
-cannot hold the probe at a width, verifies no width at or above it. The
-stored key gains the probe version, so results re-run once; a stored grant
-keeps serving during the re-run.
+cannot hold the probe at a width, verifies no width at or above it, and that
+shape bound also caps stored, prior and provisional grants. The stored key
+gains the probe version and route boundary, so results re-run once; a
+stored grant keeps serving during the re-run.
 
 **Change log v0.3.19 (2026-10-14, #1570 — relay preflight before the opening chunk):** The coordinator commits a buyer's streaming response on the provider's first chunk, and the relay sent its opening role chunk before tokenizing the prompt. A prompt over the served context therefore failed after commit, as a mid-stream `provider_error`, although v0.3.5 specifies a pre-commit 413. The relay now runs the runtime's full preflight (tokenization, the `context_length_exceeded` check and the paged-KV attach check) before the opening chunk, as the direct HTTP path already did, so that rejection ends as `error_context_exceeded` with `chunks_sent: 0` (coordinator 413 `context_exceeds_capacity`, not retried, not breaker-qualifying). A relay-blind request, already tokenized and context-checked by its relay-blind preparation on the same handle, keeps the paged-KV attach check only. A `cancel_request` that arrives during preflight ends the request before the opening chunk with the usual `cancelled` end frame. Rejections that only the scheduler can make (a prompt that leaves no room for one output token, pool capacity, queue-wait timeout) still happen after the opening chunk; making them pre-commit needs an admission signal from the scheduler to the relay and is not in this version.
 
@@ -1300,12 +1301,15 @@ from 2 runs an exactness probe through the production scheduler:
    own route (Studio, with the row bound: 256/256 bitwise at 300-16,380
    keys), and a 16k prompt per row is more prefill and KV than an 8 GB Mac
    holds at its row count.
-2. Cohort. The k rows are one cohort. No row is admitted until all k are
-   queued, and no row decodes while another is still waiting or prefilling.
-   The hold lasts only while admission or prefill makes progress. All k
-   therefore decode in the same forwards, split by the FR-CB2 decode row
-   bound as served. Each row counts the decode tokens it generated while the
-   whole cohort was decoding. Each row generates max(48, R + 1) tokens,
+2. Cohort. The k rows are one cohort, identified by an id the self-check
+   assigns. No row is admitted until all k are queued, and none beside a
+   buyer row. A cohort still being submitted never holds up rows queued
+   behind it. No cohort row decodes while another row of its cohort is
+   still waiting or prefilling. The hold lasts only while a row reaches
+   prefill or decode or a prefill chunk runs, so a pool-capacity bounce
+   lets decode run. All k therefore decode in the same forwards, split by
+   the FR-CB2 decode row bound as served. Each row counts the decode tokens
+   it generated in steps that decoded its whole cohort and no other row. Each row generates max(48, R + 1) tokens,
    where R = max(16, serve window) is the decode tokens every row MUST reach
    at full cohort width.
 3. Comparison. Every row is compared with the same prompt run alone on the
@@ -1316,17 +1320,26 @@ from 2 runs an exactness probe through the production scheduler:
    logits of 16-32. 1/1024 is below one bfloat16 step at any logit of
    magnitude 0.25 or more. Excused ties are counted (`near_tie_rows`).
 4. Fail closed. A width is probed only if all k rows fit the scheduler's
-   per-request cap and, together (prompt, completion, decode headroom and
-   one block each), its paged-KV pool. The ladder stops at the widest k that
-   fits (`probe_shape_unavailable` when two rows do not). A width whose rows
-   did not all reach R tokens at full cohort width, or whose prompts cannot
-   be cut to their lengths, ends the ladder with no correctness result. The
-   decision then uses the widths verified below it
+   per-request cap and, together, its paged-KV pool (each row's prompt,
+   completion and decode headroom rounded up to whole blocks). The ladder
+   stops at the widest k that fits (`probe_shape_unavailable` when two rows
+   do not). Like the scheduler rows, this shape bound also caps every grant
+   the Mac serves, stored, prior or provisional, so a smaller pool or
+   context never keeps a wider grant. A conformant width whose rows did not
+   all reach R tokens at full cohort width, or whose prompts cannot be cut
+   to their lengths, ends the ladder with no correctness result, unless a
+   buyer request was in flight or started during the step (then it is a
+   yield). The decision then uses the widths verified below it
    (`probe_shape_unmet_at_<k>` when none), lowers a wider prior grant to
-   them, and the full ladder is re-measured after 1 h.
-5. Key. The stored key carries the probe version (`cb-probe-v2`). A result
-   measured by an older probe re-runs, and its grant carries the Mac through
-   the re-run under the item 2 continuation rule.
+   them, and the full ladder is re-measured after 1 h. A row divergence is
+   a correctness result even when the cohort shape was not met: the rows
+   differed from their lone runs in the served path at a width at most k.
+5. Key. The stored key carries the probe version and the route boundary
+   (`cb-probe-v2/route<B>`). With the decode window already in the key,
+   they fix the probe prompts and completion length, so stored lone outputs
+   always belong to the current probe. A result measured by an older probe
+   re-runs, and its grant carries the Mac through the re-run under the
+   item 2 continuation rule, within item 4's shape bound.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 

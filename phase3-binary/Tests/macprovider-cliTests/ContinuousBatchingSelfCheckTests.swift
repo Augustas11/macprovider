@@ -541,7 +541,7 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
 
     /// Fail closed: the ladder never goes past the widest probe shape the
     /// Mac's pool and per-request cap hold, so no wider width is verified.
-    func testProbeShapeBoundCapsTheLadderOnSmallPools() {
+    func testProbeShapeBoundCapsTheLadderOnSmallPools() throws {
         let key = ContinuousBatchingSelfCheckKey(
             modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", decodeWindow: 16
         )
@@ -557,12 +557,43 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertLessThan(small, 16)
         let output = ContinuousBatchingSelfCheck.exactnessOutputTokens(decodeWindow: 16)
         let cost = ContinuousBatchingSelfCheck.exactnessPromptLengths(count: small + 1, keyBoundary: 4096, outputTokens: output)
-            .map { ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: $0, outputTokens: output) }
+            .compactMap { ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: $0, outputTokens: output) }
         XCTAssertLessThanOrEqual(cost.prefix(small).reduce(0, +), 16_384)
         XCTAssertGreaterThan(cost.reduce(0, +), 16_384)
+        // Rows reserve whole blocks: a larger block size fits fewer rows.
+        var coarse = target
+        coarse.blockSizeTokens = 1024
+        XCTAssertLessThan(ContinuousBatchingSelfCheck.ladderUpperBound(target: coarse, ownerPinned: nil, crashedSlots: nil), small)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: 1000, outputTokens: 48, blockSizeTokens: 16), 1184)
+        XCTAssertEqual(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: 1000, outputTokens: 48, blockSizeTokens: 1024), 2048)
+        XCTAssertNil(ContinuousBatchingSelfCheck.exactnessRowCost(promptTokens: .max, outputTokens: 48))
+        // A stored grant wider than the shape the Mac holds now is served only
+        // up to it, like one above the scheduler rows.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-probe-shape-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(configPath: directory.appendingPathComponent("config.yaml").path)
+        try store.store(.init(
+            key: key, decision: .init(slots: 16, reason: "granted", verifiedSlots: 16), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-13T00:00:00Z"
+        ))
+        XCTAssertEqual(target.grantableRows, small)
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil)?
+                .servedSlots,
+            small
+        )
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheckResolution.resolve(
+                store: store, target: target, ownerPinned: nil,
+                provisional: .init(modelSHA256: "other", slots: 16)
+            )?.servedSlots,
+            small
+        )
         // A served context too short for a row past the boundary verifies nothing.
         target.maxRequestTokens = 4096
         XCTAssertEqual(ContinuousBatchingSelfCheck.ladderUpperBound(target: target, ownerPinned: nil, crashedSlots: nil), 1)
+        XCTAssertEqual(target.grantableRows, 1)
         // The configured bounds still apply below the shape bound.
         target.maxRequestTokens = .max
         target.poolTokens = .max
@@ -622,8 +653,9 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
     /// a stored refusal re-runs, and a stored grant keeps the Mac serving
     /// through the re-run.
     func testProbeVersionBumpRerunsTheCheckAndKeepsAStoredGrantMeanwhile() throws {
-        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11)
-        XCTAssertTrue(live.hasSuffix("+\(ContinuousBatchingSelfCheck.probeVersion)"), live)
+        let live = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
+        XCTAssertTrue(live.hasSuffix("+\(ContinuousBatchingSelfCheck.probeVersion)/route1024"), live)
+        XCTAssertNotEqual(live, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 4096))
         XCTAssertEqual(ContinuousBatchingSelfCheck.probeVersion, "cb-probe-v2")
         let v1 = "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode11/verify11"
         XCTAssertNotEqual(live, v1)

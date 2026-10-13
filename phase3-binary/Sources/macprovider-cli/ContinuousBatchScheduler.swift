@@ -488,6 +488,13 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     static let maximumQueueWaitTimeoutNanoseconds = UInt64(maximumQueueWaitTimeoutMS) * 1_000_000
 }
 
+/// An FR-CB10 exactness-probe cohort: `size` self-check rows submitted
+/// together under one `id` (`ContinuousBatchSchedulerRequest.selfCheckCohort`).
+struct ContinuousBatchSelfCheckCohort: Sendable, Equatable {
+    let id: String
+    let size: Int
+}
+
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let id: String
     let conversationKey: String
@@ -547,14 +554,14 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// self-check rows; self-check rows may use every scheduler row. Excluded
     /// from the idempotency fingerprint.
     let selfCheckProbe: Bool
-    /// Runtime-only (SPEC-038 FR-CB10 exactness probe): how many self-check
-    /// rows were submitted together, 0 for every other row. Such rows do not
-    /// decode while another row of the probe is still waiting or prefilling,
-    /// and none is admitted before all of them are queued, so all of them
-    /// decode in the same forwards (split by the decode row
-    /// bound exactly as served), and each result counts the decode tokens it
-    /// generated while that many rows were decoding.
-    let selfCheckCohort: Int
+    /// Runtime-only (SPEC-038 FR-CB10 exactness probe): the self-check rows
+    /// submitted together, nil for every other row. No row of a cohort is
+    /// admitted before all of them are queued, or beside a buyer row, and
+    /// none decodes while another is still waiting or prefilling, so all of
+    /// them decode in the same forwards (split by the decode row bound
+    /// exactly as served). Each result counts the decode tokens the row
+    /// generated while its whole cohort, and nothing else, was decoding.
+    let selfCheckCohort: ContinuousBatchSelfCheckCohort?
 
     init(
         id: String,
@@ -583,7 +590,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
         selfCheckProbe: Bool = false,
-        selfCheckCohort: Int = 0
+        selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -611,7 +618,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
         self.selfCheckProbe = selfCheckProbe
-        self.selfCheckCohort = selfCheckProbe ? max(0, selfCheckCohort) : 0
+        self.selfCheckCohort = selfCheckProbe ? selfCheckCohort : nil
     }
 
     enum CodingKeys: String, CodingKey {
@@ -712,8 +719,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// format, delivered to the settlement owner like `retainedCache`.
     var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     var nativeMTPCounters: NativeMTPSelfTestCounters? = nil
-    /// Exactness-probe rows only (`selfCheckCohort` > 0): decode tokens this
-    /// row generated while its whole cohort was decoding.
+    /// Exactness-probe rows only (`selfCheckCohort` set): decode tokens this
+    /// row generated while its whole cohort, and nothing else, was decoding.
     var selfCheckCohortDecodeTokens: Int? = nil
 
     func withSettlementDisposition(
@@ -2123,6 +2130,7 @@ actor ContinuousBatchScheduler {
     /// Per-request token cap and paged-KV pool size, which bound the FR-CB10
     /// exactness probe's shape.
     nonisolated var maxRequestTokens: Int { configuration.maxRequestTokens }
+    nonisolated var blockSizeTokens: Int { configuration.descriptor.blockSizeTokens }
     nonisolated var poolTokens: Int {
         configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
     }
@@ -2857,6 +2865,8 @@ actor ContinuousBatchScheduler {
             waiter.delivery.finish()
             waiter.continuation.resume(throwing: ContinuousBatchSchedulerError.queueWaitTimedOut)
         }
+        // The expired request may have held up admissible rows behind it.
+        if !waiting.isEmpty { ensurePump() }
     }
 
     private func cancelWaiter(requestID: String, waiterID: UUID) async {
@@ -3007,8 +3017,14 @@ actor ContinuousBatchScheduler {
                 await processCancellations()
                 if await failClosedIfNeeded() { break }
             }
+            // Progress for the hold: a row reached prefill or decode, or a
+            // prefill chunk ran. A pool-capacity bounce back to the queue is
+            // not progress, so held decode then runs and frees blocks.
+            let rowsBeforeAdmission = activePrompt.count + activeDecode.count
             if await admitWaitingRows() {
                 madeProgress = true
+            }
+            if activePrompt.count + activeDecode.count > rowsBeforeAdmission {
                 admissionOrPrefillProgressed = true
             }
             if await failClosedIfNeeded() { break }
@@ -3023,25 +3039,45 @@ actor ContinuousBatchScheduler {
     }
 
     /// Every decoding row belongs to an exactness-probe cohort and another
-    /// row of a cohort is still waiting, being admitted or prefilling.
+    /// row of one of those cohorts is still waiting, being admitted or
+    /// prefilling.
     private var selfCheckCohortDecodeHeld: Bool {
-        guard !activeDecode.isEmpty,
-              activeDecode.values.allSatisfy({ $0.request.selfCheckCohort > 0 })
-        else { return false }
-        return waiting.contains { $0.selfCheckCohort > 0 }
-            || admittingRequests.values.contains { $0.selfCheckCohort > 0 }
-            || activePrompt.values.contains { $0.request.selfCheckCohort > 0 }
+        guard !activeDecode.isEmpty else { return false }
+        var decoding: Set<String> = []
+        for row in activeDecode.values {
+            guard let cohort = row.request.selfCheckCohort else { return false }
+            decoding.insert(cohort.id)
+        }
+        func pending(_ request: ContinuousBatchSchedulerRequest) -> Bool {
+            request.selfCheckCohort.map { decoding.contains($0.id) } ?? false
+        }
+        return waiting.contains(where: pending)
+            || admittingRequests.values.contains(where: pending)
+            || activePrompt.values.contains { pending($0.request) }
+    }
+
+    /// Rows of cohort `id` queued, being admitted, prefilling or decoding.
+    private func selfCheckCohortRowsPresent(_ id: String) -> Int {
+        waiting.filter { $0.selfCheckCohort?.id == id }.count
+            + admittingRequests.values.filter { $0.selfCheckCohort?.id == id }.count
+            + activePrompt.values.filter { $0.request.selfCheckCohort?.id == id }.count
+            + activeDecode.values.filter { $0.request.selfCheckCohort?.id == id }.count
+    }
+
+    private func selfCheckCohortComplete(_ request: ContinuousBatchSchedulerRequest) -> Bool {
+        guard let cohort = request.selfCheckCohort else { return true }
+        return selfCheckCohortRowsPresent(cohort.id) >= cohort.size
     }
 
     /// Opens or closes each cohort row's full-width run before a decode
-    /// step: a run is open while at least `selfCheckCohort` rows, all of
-    /// them probe rows, decode together.
+    /// step: a run is open while the step decodes every row of its cohort
+    /// and no other row.
     private func noteSelfCheckCohortDecodeStep(rows: [Row]) {
-        guard rows.contains(where: { $0.request.selfCheckCohort > 0 }) else { return }
-        let allProbe = rows.allSatisfy { $0.request.selfCheckProbe }
-        for row in rows where row.request.selfCheckCohort > 0 {
-            guard var active = activeDecode[row.request.id] else { continue }
-            let fullWidth = allProbe && rows.count >= active.request.selfCheckCohort
+        guard rows.contains(where: { $0.request.selfCheckCohort != nil }) else { return }
+        for row in rows {
+            guard let cohort = row.request.selfCheckCohort, var active = activeDecode[row.request.id] else { continue }
+            let fullWidth = rows.count >= cohort.size
+                && rows.allSatisfy { $0.request.selfCheckProbe && $0.request.selfCheckCohort?.id == cohort.id }
             if fullWidth {
                 if active.selfCheckCohortRunStart == nil {
                     active.selfCheckCohortRunStart = active.generatedTokens.count
@@ -3055,7 +3091,7 @@ actor ContinuousBatchScheduler {
     }
 
     private static func selfCheckCohortDecodeTokens(of row: Row) -> Int? {
-        guard row.request.selfCheckCohort > 0 else { return nil }
+        guard row.request.selfCheckCohort != nil else { return nil }
         let open = row.selfCheckCohortRunStart.map { max(0, row.generatedTokens.count - $0) } ?? 0
         return row.selfCheckCohortDecodeTokens + open
     }
@@ -5013,6 +5049,12 @@ actor ContinuousBatchScheduler {
         while attempts < configuration.maxPrefillRowsPerIteration,
               occupiedSlots < configuration.maxActiveRows,
               !waiting.isEmpty {
+            // An exactness-probe cohort still being submitted never holds up
+            // the rows queued behind it.
+            if !selfCheckCohortComplete(waiting[0]),
+               let ready = waiting.firstIndex(where: { selfCheckCohortComplete($0) }) {
+                waiting.insert(waiting.remove(at: ready), at: 0)
+            }
             // A buyer head waits (in the bounded queue, with its own timeout)
             // while the served limit is full or self-check rows are active.
             if !headMayTakeRow(waiting[0]),
@@ -5844,13 +5886,6 @@ actor ContinuousBatchScheduler {
             + activeDecode.values.filter(\.request.selfCheckProbe).count
     }
 
-    private var selfCheckCohortRowsPresent: Int {
-        waiting.filter { $0.selfCheckCohort > 0 }.count
-            + admittingRequests.values.filter { $0.selfCheckCohort > 0 }.count
-            + activePrompt.values.filter { $0.request.selfCheckCohort > 0 }.count
-            + activeDecode.values.filter { $0.request.selfCheckCohort > 0 }.count
-    }
-
     func setBuyerRowLimit(_ limit: Int) {
         buyerRowLimit = min(max(1, limit), configuration.maxActiveRows)
         if !waiting.isEmpty { ensurePump() }
@@ -5865,10 +5900,11 @@ actor ContinuousBatchScheduler {
         guard occupiedSlots < configuration.maxActiveRows else { return false }
         if request.selfCheckProbe {
             // An exactness-probe cohort is admitted only once every row of it
-            // has been submitted, so none starts decoding ahead of the rest.
-            // A row that never arrives leaves the others to the queue wait
-            // timeout.
-            return request.selfCheckCohort <= 1 || selfCheckCohortRowsPresent >= request.selfCheckCohort
+            // has been submitted, and never beside a buyer row, so none starts
+            // decoding ahead of the rest. A row that never arrives leaves the
+            // others to the queue wait timeout.
+            guard request.selfCheckCohort != nil else { return true }
+            return selfCheckCohortComplete(request) && occupiedSlots == selfCheckRowsOccupied
         }
         let probeRows = selfCheckRowsOccupied
         guard probeRows == 0 else { return false }

@@ -5022,7 +5022,12 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func divergenceVerdict",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let nearTieLogitTolerance",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private var selfCheckCohortDecodeHeld",
-        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func noteSelfCheckCohortDecodeStep"
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func noteSelfCheckCohortDecodeStep",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:var grantableRows: Int",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:struct ContinuousBatchSelfCheckCohort",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func selfCheckCohortComplete",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func runContinuousBatchingSelfCheckBatch",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func continuousBatchingSelfCheckTarget"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
