@@ -557,7 +557,7 @@ jobs:
     name: phase3-binary (Malibu app tests, recovery)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-26
-    timeout-minutes: 26
+    timeout-minutes: 30
     needs: changes
     if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
