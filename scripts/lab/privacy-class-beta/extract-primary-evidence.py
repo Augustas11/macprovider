@@ -43,6 +43,7 @@ import secrets
 import shutil
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 SCHEMA = "macprovider.privacy-class-beta-primary.v1"
@@ -298,6 +299,36 @@ def export_cell(column: str, value, redactor: Redactor):
     return redactor.text(text)
 
 
+def _jcs(value) -> str:
+    """RFC 8785 canonical JSON as the coordinator's internal/jcs writes it:
+    UTF-16 key order, NFC-normalized string values, integers verbatim."""
+    if value is None or isinstance(value, bool):
+        return json.dumps(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(unicodedata.normalize("NFC", value), ensure_ascii=False)
+    if isinstance(value, dict):
+        keys = sorted(value, key=lambda key: key.encode("utf-16-be"))
+        return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + _jcs(value[key]) for key in keys) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_jcs(item) for item in value) + "]"
+    raise ValueError(f"unsupported route snapshot value {type(value).__name__}")
+
+
+def route_snapshot_canonical(record: dict) -> str:
+    """SPEC-022 R-15.10: a row that stores route_snapshot_canonical_json empty
+    carries its preimage in route_snapshot_json. Recompute it, and keep it only
+    when it hashes to the stored digest (otherwise the validator sees the gap)."""
+    try:
+        text = _jcs(json.loads(record["route_snapshot_json"]))
+    except (TypeError, ValueError):
+        return ""
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.get("route_snapshot_digest"):
+        return ""
+    return text
+
+
 def export_table(db: sqlite3.Connection, table: str, redactor: Redactor) -> dict:
     cursor = db.execute(f'SELECT * FROM "{table}" LIMIT {MAX_ROWS + 1}')
     columns = [item[0] for item in cursor.description]
@@ -306,6 +337,8 @@ def export_table(db: sqlite3.Connection, table: str, redactor: Redactor) -> dict
     rows = []
     for raw in cursor.fetchall():
         record = dict(zip(columns, raw))
+        if record.get("route_snapshot_canonical_json") == "" and isinstance(record.get("route_snapshot_json"), str):
+            record["route_snapshot_canonical_json"] = route_snapshot_canonical(record)
         rows.append({column: export_cell(column, record[column], redactor) for column in kept})
     truncated = len(rows) > MAX_ROWS
     return {"table": table, "columns": kept, "dropped_columns": dropped, "row_count": len(rows[:MAX_ROWS]), "truncated": truncated, "rows": rows[:MAX_ROWS]}

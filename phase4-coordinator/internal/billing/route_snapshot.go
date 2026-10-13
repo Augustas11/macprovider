@@ -547,6 +547,9 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	if err != nil {
 		return "", err
 	}
+	// SPEC-022 R-15.10: the preimage is stored only when it does not
+	// recompute byte for byte from the rendered JSON.
+	canonical = []byte(routeSnapshotStoredCanonical(canonical, string(rendered)))
 	if journalDB := s.routeSnapshotJournalDB.Load(); journalDB != nil {
 		if err := s.insertRouteSnapshotRow(ctx, journalDB, "route_snapshot_journal", "settlement_route_snapshot_journal", snapshot, digest, string(rendered), string(canonical), true); err != nil {
 			return "", err

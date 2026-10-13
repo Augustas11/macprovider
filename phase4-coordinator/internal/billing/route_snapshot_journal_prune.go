@@ -73,6 +73,17 @@ func canonicalRouteSnapshotFromRendered(rendered string) ([]byte, error) {
 	return CanonicalJSON(value)
 }
 
+// routeSnapshotStoredCanonical is the value stored in
+// route_snapshot_canonical_json for a new row: empty when the preimage
+// recomputes byte for byte from the rendered JSON, the preimage otherwise.
+func routeSnapshotStoredCanonical(canonical []byte, rendered string) string {
+	recomputed, err := canonicalRouteSnapshotFromRendered(rendered)
+	if err != nil || string(recomputed) != string(canonical) {
+		return string(canonical)
+	}
+	return ""
+}
+
 // PruneMirroredRouteSnapshotJournal deletes route-snapshot journal rows that
 // were mirrored at least opts.Grace ago and whose primary
 // settlement_route_snapshots row carries the same digest and JSON, with the
