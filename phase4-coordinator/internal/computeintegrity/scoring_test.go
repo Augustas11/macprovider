@@ -456,3 +456,101 @@ func TestScoringStoreRoundTrip(t *testing.T) {
 		t.Fatal("an unknown persisted state must fail the load")
 	}
 }
+
+// FR-24: failed known checks count as split answers but never enter the
+// double-scored window, so on their own they cannot exclude a scorer.
+func TestScorerTrackerKnownChecksDoNotDiluteOrForgePairWindow(t *testing.T) {
+	tr := NewScorerTracker(nil)
+	for i := 0; i < 10; i++ {
+		if tr.RecordKnownCheck("s", false) {
+			t.Fatal("known-check failures alone must not exclude")
+		}
+	}
+	// Agreeing pairs keep the window clean even after many split answers.
+	for i := 0; i < 8; i++ {
+		tr.RecordPair("s", "peer", true)
+	}
+	if tr.Excluded("s") {
+		t.Fatal("a scorer agreeing on every pair must not be excluded")
+	}
+	// Now a disagreeing majority in the pair window excludes it.
+	for i := 0; i < 5; i++ {
+		tr.RecordPair("s", "peer", false)
+	}
+	if !tr.Excluded("s") {
+		t.Fatal("majority pair disagreement with enough splits must exclude")
+	}
+}
+
+// FR-24 availability back-off: a persistently silent scorer rests, then
+// returns; any valid answer resets the count.
+func TestScorerTrackerAvailabilityBackOff(t *testing.T) {
+	tr := NewScorerTracker(nil)
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < scorerSilentLimit-1; i++ {
+		tr.RecordNoAnswer("s", now)
+	}
+	tr.RecordAnswer("s")
+	for i := 0; i < scorerSilentLimit-1; i++ {
+		tr.RecordNoAnswer("s", now)
+	}
+	if !tr.Available("s", now) {
+		t.Fatal("an answer resets the silence count")
+	}
+	tr.RecordNoAnswer("s", now)
+	if tr.Available("s", now.Add(time.Minute)) {
+		t.Fatal("a persistently silent scorer must rest")
+	}
+	if !tr.Available("s", now.Add(scorerRest)) {
+		t.Fatal("a rested scorer returns")
+	}
+}
+
+func TestScoringStorePruneAndRecentRequests(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ci.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	store, err := NewScoringStore(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	if n, err := store.RecentVerificationRequests(ctx, t0); err != nil || n != 0 {
+		t.Fatalf("no request log: n=%d err=%v", n, err)
+	}
+	old := NewKeyState("idle", "m", t0)
+	failed := failKey(t, t0)
+	if err := store.UpsertKeyState(ctx, old, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertKeyState(ctx, failed, t0); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := store.PruneStaleKeyStates(ctx, t0.Add(time.Hour)); err != nil || n != 1 {
+		t.Fatalf("prune removed %d rows, err=%v; want only the idle unverified row", n, err)
+	}
+	left, _ := store.LoadKeyStates(ctx)
+	if len(left) != 1 || left[0].State != VerificationFailed {
+		t.Fatalf("adverse state must survive pruning: %+v", left)
+	}
+	if _, err := db.Exec(`CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range [][2]string{
+		{"2026-10-13T00:30:00.000000000Z", "cip_aa"},
+		{"2026-10-13T00:40:00.000000000Z", "cip_bb"},
+		{"2026-10-13T00:45:00.000000000Z", "acct_buyer"},
+		{"2026-10-12T22:00:00.000000000Z", "cip_old"},
+		{"2026-10-13T00:50:00.000000000Z", "cipXnotreserved"},
+	} {
+		if _, err := db.Exec(`INSERT INTO request_log VALUES (?, ?)`, row[0], row[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := store.RecentVerificationRequests(ctx, t0); err != nil || n != 2 {
+		t.Fatalf("recent verification requests=%d err=%v, want 2", n, err)
+	}
+}

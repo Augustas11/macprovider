@@ -122,6 +122,39 @@ ON CONFLICT(provider_id, model_id) DO UPDATE SET
 	return err
 }
 
+// PruneStaleKeyStates deletes durable unverified and passing rows not
+// updated since cutoff. Adverse states are never pruned.
+func (s *ScoringStore) PruneStaleKeyStates(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errScoringStoreClosed
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM compute_integrity_scoring_keys
+ WHERE state IN ('unverified', 'passing') AND updated_at_utc < ?`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RecentVerificationRequests counts FR-20 verification requests (reserved
+// cip_ accounts in the coordinator request log) since since, so the hourly
+// bound survives a restart. A database without the request log counts zero.
+func (s *ScoringStore) RecentVerificationRequests(ctx context.Context, since time.Time) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, errScoringStoreClosed
+	}
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'`).Scan(&present); err != nil || present == 0 {
+		return 0, err
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_utc >= ?`,
+		since.UTC().Format("2006-01-02T15:04:05.000000000Z")).Scan(&n)
+	return n, err
+}
+
 // LoadScorerExclusions returns every FR-24 scorer-excluded provider.
 func (s *ScoringStore) LoadScorerExclusions(ctx context.Context) ([]string, error) {
 	if s == nil || s.db == nil {

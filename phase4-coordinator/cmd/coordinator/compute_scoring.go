@@ -34,16 +34,23 @@ func startComputeScoring(
 	logger zerolog.Logger,
 ) {
 	corpus := computeintegrity.DefaultCorpus()
-	if cfg.CorpusPath != "" {
+	switch {
+	case !cfg.Enabled:
+	case cfg.CorpusPath != "":
+		// A bad private corpus stops scheduling only; state still loads so
+		// failed keys stay out of routing, and the coordinator serves.
 		raw, err := os.ReadFile(cfg.CorpusPath)
+		if err == nil {
+			corpus, err = computeintegrity.ParseCorpus(raw)
+		}
 		if err != nil {
-			logger.Fatal().Err(err).Str("event", "compute_integrity_corpus_unreadable").Msg("compute-integrity private corpus unreadable")
+			logger.Error().Err(err).Str("event", "compute_integrity_corpus_invalid").Msg("compute-integrity private corpus unusable; verification scheduling stays off")
+			cfg.Enabled = false
+			corpus = computeintegrity.DefaultCorpus()
+		} else {
+			logger.Info().Str("event", "compute_integrity_corpus_loaded").Int("prompts", corpus.Len()).Str("version", corpus.Version()).Msg("compute-integrity private corpus loaded")
 		}
-		if corpus, err = computeintegrity.ParseCorpus(raw); err != nil {
-			logger.Fatal().Err(err).Str("event", "compute_integrity_corpus_invalid").Msg("compute-integrity private corpus invalid")
-		}
-		logger.Info().Str("event", "compute_integrity_corpus_loaded").Int("prompts", corpus.Len()).Str("version", corpus.Version()).Msg("compute-integrity private corpus loaded")
-	} else {
+	default:
 		logger.Warn().Str("event", "compute_integrity_public_corpus").Msg("compute-integrity scoring uses the public checked-in corpus; configure compute_integrity.scoring.corpus_path")
 	}
 	store, err := computeintegrity.NewScoringStore(ctx, db)

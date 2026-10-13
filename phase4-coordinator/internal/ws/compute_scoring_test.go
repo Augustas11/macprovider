@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
@@ -644,7 +645,8 @@ func TestComputeScoringPartialEscalationIsInconclusive(t *testing.T) {
 		t.Fatal("setup: expected suspect")
 	}
 	h.silent.Store("scorer-b", true)
-	for i := 0; i < 20; i++ {
+	// Fewer silent jobs than the FR-24 availability back-off limit.
+	for i := 0; i < 6; i++ {
 		h.round(20 * time.Minute)
 	}
 	h.engine.mu.Lock()
@@ -733,5 +735,51 @@ func TestComputeScoringFirstRequestUsesJitteredCadence(t *testing.T) {
 		if d := due.Sub(start); d < interval/2 || d >= interval*3/2 {
 			t.Fatalf("%v first due after %v, want within [0.5, 1.5) x %v", key, d, interval)
 		}
+	}
+}
+
+// FR-20: the hourly bound survives a restart, counted from the verification
+// requests already in the request log.
+func TestComputeScoringHourlyBoundSurvivesRestart(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1"}, nil)
+	if _, err := h.db.Exec(`CREATE TABLE request_log (ts_utc TEXT NOT NULL, account_id TEXT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	recent := h.now().Add(-10 * time.Minute).UTC().Format("2006-01-02T15:04:05.000000000Z")
+	for i := 0; i < 5; i++ {
+		if _, err := h.db.Exec(`INSERT INTO request_log VALUES (?, ?)`, recent, fmt.Sprintf("cip_%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e, err := h.server.newComputeScoringEngine(context.Background(), h.engine.deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.hourCount != 5 {
+		t.Fatalf("restarted engine hour count=%d want 5", e.hourCount)
+	}
+}
+
+// A failed operator-key lookup is cached briefly and pushes the key to its
+// next cadence slot, so an identity-store outage is not retried every sweep.
+func TestComputeScoringOperatorLookupFailureBacksOff(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	var lookups atomic.Int64
+	h.engine.deps.OperatorKey = func(context.Context, string) (string, error) {
+		lookups.Add(1)
+		return "", errors.New("identity store down")
+	}
+	h.round(2 * time.Hour) // schedules first requests
+	h.round(2 * time.Hour) // due: lookups fail
+	after := lookups.Load()
+	if after == 0 {
+		t.Fatal("setup: no lookup attempted")
+	}
+	h.round(10 * time.Second)
+	if lookups.Load() != after {
+		t.Fatalf("lookups repeated within the negative cache: %d -> %d", after, lookups.Load())
+	}
+	if h.dispatched.Load() != 0 {
+		t.Fatal("no verification request without an operator identity")
 	}
 }

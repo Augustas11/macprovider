@@ -85,10 +85,22 @@ const (
 )
 
 type scorerRecord struct {
-	recent   []bool // true = disagreed
-	splits   int
+	recent   []bool // double-scored measurements only; true = disagreed
+	splits   int    // split answers: pair disagreements and failed known checks
 	excluded bool
+	// silent counts consecutive jobs without a valid answer; restUntil is the
+	// availability back-off it triggers (FR-24).
+	silent    int
+	restUntil time.Time
 }
+
+// FR-24 availability back-off: a scorer that leaves this many consecutive
+// jobs unanswered is not chosen for scorerRest, so verification moves on to
+// other scorers instead of stalling.
+const (
+	scorerSilentLimit = 8
+	scorerRest        = time.Hour
+)
 
 // ScorerTracker tracks FR-24 scorer agreement. Safe for concurrent use.
 type ScorerTracker struct {
@@ -133,12 +145,51 @@ func (t *ScorerTracker) RecordPair(a, b string, agree bool) []string {
 }
 
 // RecordKnownCheck records a known-sequence check answer. A failed check
-// counts as a split answer for that scorer. It reports whether the scorer
-// became excluded.
+// counts as a split answer for that scorer; it does not enter the
+// double-scored window, which holds pair measurements only. It reports
+// whether the scorer became excluded.
 func (t *ScorerTracker) RecordKnownCheck(providerID string, passed bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.observe(providerID, !passed)
+	r := t.record(providerID)
+	if r.excluded {
+		return false
+	}
+	if !passed {
+		r.splits++
+	}
+	return t.evaluate(r)
+}
+
+// RecordAnswer resets a scorer's silence after a valid answer.
+func (t *ScorerTracker) RecordAnswer(providerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.record(providerID)
+	r.silent = 0
+	r.restUntil = time.Time{}
+}
+
+// RecordNoAnswer counts a job without a valid answer and starts the
+// availability back-off at the limit.
+func (t *ScorerTracker) RecordNoAnswer(providerID string, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.record(providerID)
+	r.silent++
+	if r.silent >= scorerSilentLimit {
+		r.silent = 0
+		r.restUntil = now.Add(scorerRest)
+	}
+}
+
+// Available reports whether a scorer may be chosen now: not excluded and
+// not resting after persistent silence.
+func (t *ScorerTracker) Available(providerID string, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.scorers[providerID]
+	return r == nil || (!r.excluded && !now.Before(r.restUntil))
 }
 
 func (t *ScorerTracker) observe(providerID string, disagreed bool) bool {
@@ -153,6 +204,10 @@ func (t *ScorerTracker) observe(providerID string, disagreed bool) bool {
 	if disagreed {
 		r.splits++
 	}
+	return t.evaluate(r)
+}
+
+func (t *ScorerTracker) evaluate(r *scorerRecord) bool {
 	disagreements := 0
 	for _, d := range r.recent {
 		if d {

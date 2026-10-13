@@ -4748,7 +4748,9 @@
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestDefaultCorpusAndProbeBody",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringNeedsScorerOfAnotherOperator",
         "test/integration/compute_integrity_scoring_integration_test.go:TestComputeIntegrityScoringHonestPassesSubstitutedFails",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringFirstRequestUsesJitteredCadence"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringFirstRequestUsesJitteredCadence",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHourlyBoundSurvivesRestart",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorLookupFailureBacksOff"
       ],
       "journeys": [],
       "evidence": [],
@@ -4849,7 +4851,9 @@
       ],
       "tests": [
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScorerTrackerExcludesPersistentDisagreer",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestKnownSequencesOfferPickAndCheck"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestKnownSequencesOfferPickAndCheck",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScorerTrackerKnownChecksDoNotDiluteOrForgePairWindow",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScorerTrackerAvailabilityBackOff"
       ],
       "journeys": [],
       "evidence": [],
@@ -4877,7 +4881,8 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLogsCarryNoPromptsOrOutputs",
         "phase4-coordinator/internal/stats/metrics/compute_integrity_test.go:TestComputeIntegrityMetricsUseClosedLabels",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringOperatorClearFailureRestoresState",
-        "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestRelayBlindBindableExcludesComputeIntegritySuspended"
+        "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestRelayBlindBindableExcludesComputeIntegritySuspended",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStorePruneAndRecentRequests"
       ],
       "journeys": [],
       "evidence": [],

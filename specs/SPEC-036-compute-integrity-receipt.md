@@ -2082,7 +2082,8 @@ provider's output is under the claimed model.
 mode, needs no FR-5 trusted reference and no FR-8 calibration record, and is
 not reached through the §6 migration ladder. It is on by default. The kill
 switch `compute_integrity.scoring.enabled=false` stops scheduling new
-verification requests; it does not clear existing states or holds.
+verification requests; it does not clear existing states or holds. An
+unusable private corpus also stops scheduling (logged), never serving.
 
 ### FR-19 Scope and keys (SPEC-036-R019)
 
@@ -2150,7 +2151,10 @@ Rate bounds:
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start per hour
-  coordinator-wide.
+  coordinator-wide. The count survives a restart: the coordinator counts the
+  `cip_` requests of the last hour in its request log at start.
+- A key whose operator identity cannot be resolved waits for its next cadence
+  slot; a failed lookup is cached for one minute.
 - A verification request is sent only when an eligible scorer exists for the
   key (FR-21), so no provider work is spent on a request that cannot be scored.
 
@@ -2330,8 +2334,9 @@ Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
 `short_output`, `scorer_invalid`) change no state.
 
 A transition commits its SPEC-022 R-16 hold change and the new state in one
-database transaction, and only then publishes the routing suspension. If the
-commit fails, nothing changes and the next measurement or tick retries.
+database transaction (bounded at 5 s), and only then publishes the routing
+suspension. If the commit fails, nothing changes and the next measurement or
+tick retries.
 
 States persist across coordinator restarts. A coordinator that cannot load
 them does not start, and it loads them even with the kill switch off, so a
@@ -2344,11 +2349,14 @@ state for the model.
   control a scorer of a different operator for the same model and also be
   drawn for every escalation measurement.
 - No failure is confirmed on one scorer operator's word (FR-23).
-- Scorer agreement is tracked per scorer provider. A scorer is
-  **scorer-excluded** when it has at least 4 split answers and disagrees with
-  its co-scorer in more than half of its last 8 double-scored measurements.
-  It is never chosen as a scorer until an operator clears it. Exclusion does
-  not affect its own serving or verification.
+- Scorer agreement is tracked per scorer provider. Split answers are pair
+  disagreements and failed known-sequence checks; the double-scored window
+  holds pair measurements only. A scorer is **scorer-excluded** when it has at
+  least 4 split answers and disagrees with its co-scorer in more than half of
+  its last 8 double-scored measurements. It is never chosen as a scorer until
+  an operator clears it; a failed exclusion write keeps the exclusion in
+  memory and is retried every sweep until durable. Exclusion does not affect
+  its own serving or verification.
 - Known-sequence checks: the coordinator keeps in memory, per tolerance key,
   up to 8 recent measurements that two scorers both scored in band with
   `mean_logprob` within 0.25 of each other. After every 25th scoring job the
@@ -2359,7 +2367,9 @@ state for the model.
   `mean_logprob`, or with `top1_rate` more than 0.1 below it, counts as a split
   answer for that scorer.
 - A scorer that does not answer within the deadline counts as
-  `scorer_timeout` and is not penalised beyond that.
+  `scorer_timeout`. After 8 consecutive jobs without a valid answer it rests
+  for one hour (not chosen), so verification moves on to other scorers; any
+  valid answer resets the count. Silence is not otherwise penalised.
 
 ### FR-25 Consequences, visibility and telemetry (SPEC-036-R025)
 
@@ -2416,9 +2426,11 @@ appear as metric labels.
 
 Memory: tolerance windows and known sequences of a (model, manifest) unseen
 for 7 days are dropped, and so are in-memory states of providers absent for
-7 days in `unverified` or `passing` (their durable rows stay). `suspect`,
-`failed` and `recovering` keys are never pruned. Logs MAY name provider and model ids on state
-transitions; they MUST NOT contain prompts, outputs, or scorer token data.
+7 days in `unverified` or `passing`. Durable `unverified` and `passing`
+rows not updated for 30 days are deleted. `suspect`, `failed` and
+`recovering` keys are never pruned. Logs MAY name provider and model ids on
+state transitions; they MUST NOT contain prompts, outputs, or scorer token
+data.
 
 ## 6. Migration
 

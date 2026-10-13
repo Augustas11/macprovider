@@ -47,6 +47,14 @@ const (
 	// and so are in-memory states of absent providers in unverified or
 	// passing (their durable rows stay). Adverse states are never pruned.
 	computeScoreRetention = 7 * 24 * time.Hour
+	// computeScoreDurableRetention bounds durable unverified/passing rows.
+	computeScoreDurableRetention = 30 * 24 * time.Hour
+	// computeScoreNegativeTTL caches a failed operator-key lookup briefly so
+	// an identity-store outage is not amplified by every sweep.
+	computeScoreNegativeTTL = time.Minute
+	// computeScoreCommitTimeout bounds one transition commit, which runs
+	// under the engine lock.
+	computeScoreCommitTimeout = 5 * time.Second
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -229,6 +237,10 @@ type computeScoringEngine struct {
 
 	// lastSeen records when each provider was last in the pool, for pruning.
 	lastSeen map[string]time.Time
+	// pendingExclusions are FR-24 exclusions not yet persisted; every sweep
+	// retries them.
+	pendingExclusions map[string]time.Time
+	lastDurablePrune  time.Time
 
 	tolerance *computeintegrity.Tolerance
 	scorers   *computeintegrity.ScorerTracker
@@ -300,6 +312,15 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		pending:      map[string]*pendingComputeScore{},
 		operatorKeys: map[string]cachedOperatorKey{},
 		lastSeen:     map[string]time.Time{},
+
+		pendingExclusions: map[string]time.Time{},
+	}
+	// The hourly bound survives a restart: count the verification requests
+	// already sent in the last hour.
+	startedAt := s.now()
+	if n, err := deps.Store.RecentVerificationRequests(ctx, startedAt.Add(-time.Hour)); err == nil {
+		e.hourStart = startedAt
+		e.hourCount = n
 	}
 	for _, st := range states {
 		st.RecoveryCooldown = e.recoveryCooldown()
@@ -349,11 +370,17 @@ func (e *computeScoringEngine) operatorKey(ctx context.Context, providerID strin
 	e.mu.Lock()
 	cached, ok := e.operatorKeys[providerID]
 	e.mu.Unlock()
-	if ok && now.Sub(cached.fetched) < computeScoreOperatorTTL {
+	if ok && cached.key != "" && now.Sub(cached.fetched) < computeScoreOperatorTTL {
 		return cached.key
+	}
+	if ok && cached.key == "" && now.Sub(cached.fetched) < computeScoreNegativeTTL {
+		return ""
 	}
 	key, err := e.deps.OperatorKey(ctx, providerID)
 	if err != nil || key == "" {
+		e.mu.Lock()
+		e.operatorKeys[providerID] = cachedOperatorKey{fetched: now}
+		e.mu.Unlock()
 		return ""
 	}
 	e.mu.Lock()
@@ -400,6 +427,8 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 		present[p.ProviderID] = struct{}{}
 	}
 	e.prune(present, now)
+	e.retryExclusions(ctx, now)
+	e.pruneDurable(ctx, now)
 	if !e.deps.Config.Enabled {
 		e.publishGauges(ctx)
 		return
@@ -516,6 +545,11 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		OperatorKey:    e.operatorKey(ctx, p.ProviderID, now),
 	}
 	if verified.OperatorKey == "" {
+		// Back off until the next cadence slot instead of retrying the
+		// identity lookup every sweep.
+		e.mu.Lock()
+		e.nextDue[key] = now.Add(e.jitter(e.interval(state)))
+		e.mu.Unlock()
 		return
 	}
 	n := 1
@@ -531,7 +565,9 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		scorerPool = append(scorerPool, c)
 	}
 	e.mu.Lock()
-	scorers := computeintegrity.SelectScorers(e.rng, verified, scorerPool, n, e.scorerEligibleLocked)
+	scorers := computeintegrity.SelectScorers(e.rng, verified, scorerPool, n, func(c computeintegrity.ScorerCandidate) bool {
+		return e.scorerEligibleLocked(c, now)
+	})
 	if len(scorers) == 0 {
 		e.nextDue[key] = now.Add(e.jitter(e.interval(state)))
 		e.mu.Unlock()
@@ -545,9 +581,10 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	go e.runProbe(ctx, verified, scorers)
 }
 
-// scorerEligibleLocked applies FR-21 rule 4. Caller holds mu.
-func (e *computeScoringEngine) scorerEligibleLocked(c computeintegrity.ScorerCandidate) bool {
-	if e.scorers.Excluded(c.ProviderID) {
+// scorerEligibleLocked applies FR-21 rule 4 and the FR-24 availability
+// back-off. Caller holds mu.
+func (e *computeScoringEngine) scorerEligibleLocked(c computeintegrity.ScorerCandidate, now time.Time) bool {
+	if !e.scorers.Available(c.ProviderID, now) {
 		return false
 	}
 	if st := e.states[computeScoringKey{c.ProviderID, c.ModelID}]; st != nil {
@@ -656,6 +693,11 @@ func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computein
 	reason := ""
 	for range scorers {
 		a := <-answers
+		if a.ok && a.result.Status == "ok" {
+			e.scorers.RecordAnswer(a.scorer.ProviderID)
+		} else {
+			e.scorers.RecordNoAnswer(a.scorer.ProviderID, e.s.now())
+		}
 		switch {
 		case !a.ok:
 			if reason == "" {
@@ -837,6 +879,8 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 			Msg("compute-integrity transition deferred: commit failed")
 		return false
 	}
+	ctx, cancel := context.WithTimeout(ctx, computeScoreCommitTimeout)
+	defer cancel()
 	tx, err := e.deps.Store.BeginTx(ctx)
 	if err != nil {
 		return fail(err)
@@ -868,12 +912,47 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 	return true
 }
 
+// persistExclusion writes an FR-24 exclusion. The in-memory exclusion holds
+// meanwhile (the conservative side); a failed write is retried every sweep
+// until it is durable.
 func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID string, now time.Time) {
 	if err := e.deps.Store.ExcludeScorer(ctx, providerID, now); err != nil {
-		e.s.log.Warn().Str("event", "compute_integrity_scorer_exclusion_persist_failed").Str("provider_id", providerID).Msg("scorer exclusion not persisted")
+		e.mu.Lock()
+		e.pendingExclusions[providerID] = now
+		e.mu.Unlock()
+		e.s.log.Warn().Str("event", "compute_integrity_scorer_exclusion_persist_failed").Str("provider_id", providerID).Msg("scorer exclusion not persisted; will retry")
 		return
 	}
 	e.s.log.Warn().Str("event", "compute_integrity_scorer_excluded").Str("provider_id", providerID).Msg("compute-integrity scorer excluded")
+}
+
+func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time) {
+	e.mu.Lock()
+	pending := make([]string, 0, len(e.pendingExclusions))
+	for id := range e.pendingExclusions {
+		pending = append(pending, id)
+	}
+	e.mu.Unlock()
+	for _, id := range pending {
+		if err := e.deps.Store.ExcludeScorer(ctx, id, now); err != nil {
+			continue
+		}
+		e.mu.Lock()
+		delete(e.pendingExclusions, id)
+		e.mu.Unlock()
+	}
+}
+
+// pruneDurable bounds the durable key table hourly: unverified and passing
+// rows idle for computeScoreDurableRetention go; adverse rows stay.
+func (e *computeScoringEngine) pruneDurable(ctx context.Context, now time.Time) {
+	if now.Sub(e.lastDurablePrune) < time.Hour {
+		return
+	}
+	e.lastDurablePrune = now
+	if _, err := e.deps.Store.PruneStaleKeyStates(ctx, now.Add(-computeScoreDurableRetention)); err != nil {
+		e.s.log.Warn().Str("event", "compute_integrity_state_prune_failed").Msg("compute-integrity state prune failed")
+	}
 }
 
 // knownSequenceCheck sends one FR-24 known sequence of the model to a random
@@ -901,7 +980,7 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 	var seq computeintegrity.KnownSequence
 	found := false
 	for _, c := range candidates {
-		if !e.scorerEligibleLocked(c) {
+		if !e.scorerEligibleLocked(c, now) {
 			continue
 		}
 		for _, class := range []computeintegrity.SamplingClass{computeintegrity.SamplingGreedy, computeintegrity.SamplingSampled} {
