@@ -86,6 +86,31 @@ var SamplingProfiles = []SamplingProfile{
 // ProbeMaxTokens is the closed FR-20 max_tokens set.
 var ProbeMaxTokens = []int{96, 160, 256}
 
+// probeStyles vary every drawn prompt the way buyers phrase requests, so a
+// verification request never repeats a corpus entry verbatim.
+var probeStyles = []string{
+	"",
+	"Keep it brief.",
+	"Use plain language.",
+	"Give one concrete example.",
+	"Answer in about %d sentences.",
+	"Use a short list if it helps.",
+	"Explain it as you would to a friend.",
+	"Be precise.",
+	"Start with a one-line summary.",
+	"Avoid jargon.",
+	"Answer in about %d short paragraphs.",
+	"Include a practical tip.",
+}
+
+func drawStyle(rng *rand.Rand) string {
+	style := probeStyles[rng.Intn(len(probeStyles))]
+	if strings.Contains(style, "%d") {
+		style = fmt.Sprintf(style, 2+rng.Intn(5))
+	}
+	return style
+}
+
 // ProbeRequest is one drawn verification request.
 type ProbeRequest struct {
 	ModelID   string
@@ -104,6 +129,9 @@ func DrawProbe(rng *rand.Rand, corpus Corpus, modelID string, greedyOnly bool) (
 		return ProbeRequest{}, fmt.Errorf("compute-integrity corpus is empty")
 	}
 	prompt := corpus.Prompt(rng.Intn(corpus.Len()))
+	if style := drawStyle(rng); style != "" {
+		prompt.User = prompt.User + " " + style
+	}
 	profile := SamplingProfiles[0]
 	if !greedyOnly {
 		profile = SamplingProfiles[rng.Intn(len(SamplingProfiles))]

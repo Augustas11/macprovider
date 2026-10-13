@@ -4815,7 +4815,7 @@
       "implementation": [
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Apply",
         "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) Tick",
-        "phase4-coordinator/internal/computeintegrity/scoring_store.go:func (s *ScoringStore) UpsertKeyState",
+        "phase4-coordinator/internal/computeintegrity/scoring_store.go:func upsertKeyStateExec",
         "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) decide"
       ],
       "tests": [
@@ -4823,7 +4823,9 @@
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineRecoveryReleasesRecoveryHold",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineRecoveryFailureKeepsHold",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPersistedFailureSuspendsOnStart"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPersistedFailureSuspendsOnStart",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPartialEscalationIsInconclusive",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringTransitionIsAtomic"
       ],
       "journeys": [],
       "evidence": [],
@@ -12161,7 +12163,8 @@
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldWithholdsAndReleases",
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryHoldCloseAndRelease",
         "phase4-coordinator/internal/billing/earnings_rollup_test.go:TestProviderEarningsRollupMatchesViewOnSeededData",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHoldWriteFailureDefersFailure"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringHoldWriteFailureDefersFailure",
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor"
       ],
       "journeys": [],
       "evidence": [],

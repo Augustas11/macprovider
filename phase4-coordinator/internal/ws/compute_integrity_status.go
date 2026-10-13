@@ -48,7 +48,7 @@ func (s *Server) handleAdminComputeIntegrity(w http.ResponseWriter, r *http.Requ
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID)
+	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID, false)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "compute-integrity status lookup failed", "code": "compute_integrity_status_error"}})
 		return
@@ -110,7 +110,7 @@ func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "provider bearer token required", "code": "unauthorized"}})
 		return
 	}
-	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID)
+	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID, true)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "compute-integrity status lookup failed", "code": "compute_integrity_status_error"}})
 		return
@@ -139,7 +139,7 @@ func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.R
 
 // computeIntegrityStatuses reads the SPEC-036 FR-15 statuses (when that
 // source is wired) and the §5A scoring section (when the engine runs).
-func (s *Server) computeIntegrityStatuses(ctx context.Context, providerID string) ([]computeintegrity.StatusSnapshot, *ComputeScoringStatus, error) {
+func (s *Server) computeIntegrityStatuses(ctx context.Context, providerID string, forProvider bool) ([]computeintegrity.StatusSnapshot, *ComputeScoringStatus, error) {
 	statuses := []computeintegrity.StatusSnapshot{}
 	if s.computeIntegrityStatus != nil {
 		got, err := s.computeIntegrityStatus.ComputeIntegrityStatus(ctx, providerID)
@@ -148,7 +148,7 @@ func (s *Server) computeIntegrityStatuses(ctx context.Context, providerID string
 		}
 		statuses = got
 	}
-	scoring, err := s.computeScoringStatusFor(ctx, providerID)
+	scoring, err := s.computeScoringStatusFor(ctx, providerID, forProvider)
 	if err != nil {
 		return nil, nil, err
 	}

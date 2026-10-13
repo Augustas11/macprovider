@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -35,7 +36,9 @@ type ComputeScoringStatus struct {
 	Scorer  map[string]bool                 `json:"scorer"`
 }
 
-func (e *computeScoringEngine) providerStatus(ctx context.Context, providerID string) (ComputeScoringStatus, error) {
+// providerStatus builds the FR-25 status. forProvider projects holds to the
+// provider-visible fields: who released a hold and why stays operator-only.
+func (e *computeScoringEngine) providerStatus(ctx context.Context, providerID string, forProvider bool) (ComputeScoringStatus, error) {
 	out := ComputeScoringStatus{Enabled: e.deps.Config.Enabled, Models: []ComputeScoringKeyStatus{}, Holds: []computeintegrity.EarningsHold{}}
 	e.mu.Lock()
 	for key, st := range e.states {
@@ -54,8 +57,12 @@ func (e *computeScoringEngine) providerStatus(ctx context.Context, providerID st
 	if err != nil {
 		return out, err
 	}
-	if holds != nil {
-		out.Holds = holds
+	for _, h := range holds {
+		if forProvider {
+			h.ReleasedBy = ""
+			h.ReleaseReason = ""
+		}
+		out.Holds = append(out.Holds, h)
 	}
 	return out, nil
 }
@@ -79,9 +86,14 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 	return true, nil
 }
 
+// clearScorer removes the durable exclusion first, so memory never runs
+// ahead of what a restart would load.
 func (e *computeScoringEngine) clearScorer(ctx context.Context, providerID string) error {
+	if err := e.deps.Store.ClearScorerExclusion(ctx, providerID); err != nil {
+		return err
+	}
 	e.scorers.Clear(providerID)
-	return e.deps.Store.ClearScorerExclusion(ctx, providerID)
+	return nil
 }
 
 type computeIntegrityOperatorAction struct {
@@ -90,9 +102,24 @@ type computeIntegrityOperatorAction struct {
 	Reason     string `json:"reason"`
 }
 
-func validOperatorText(value string, max int) bool {
-	value = strings.TrimSpace(value)
-	return value != "" && len(value) <= max && !containsControlChar(value)
+// validOperatorID accepts a short ASCII label. operator_id is an
+// operator-asserted label under the shared operator credential, as for
+// SPEC-022 quarantine resolutions; the credential itself is the
+// authentication.
+func validOperatorID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' || r == '@') {
+			return false
+		}
+	}
+	return true
+}
+
+func validOperatorReason(value string) bool {
+	return strings.TrimSpace(value) != "" && len(value) <= 512 && utf8.ValidString(value) && !containsControlChar(value)
 }
 
 // handleAdminComputeIntegrityAction serves
@@ -117,7 +144,7 @@ func (s *Server) handleAdminComputeIntegrityAction(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid request body", "code": "invalid_request"}})
 		return
 	}
-	if !validOperatorText(action.OperatorID, 128) || !validOperatorText(action.Reason, 512) {
+	if !validOperatorID(action.OperatorID) || !validOperatorReason(action.Reason) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"message": "operator_id and reason are required", "code": "invalid_operator_action"}})
 		return
 	}
@@ -185,12 +212,12 @@ func (s *Server) handleAdminComputeIntegrityAction(w http.ResponseWriter, r *htt
 
 // computeScoringStatusFor returns the scoring section, or nil when the
 // engine is not running.
-func (s *Server) computeScoringStatusFor(ctx context.Context, providerID string) (*ComputeScoringStatus, error) {
+func (s *Server) computeScoringStatusFor(ctx context.Context, providerID string, forProvider bool) (*ComputeScoringStatus, error) {
 	e := s.computeScoring.Load()
 	if e == nil {
 		return nil, nil
 	}
-	status, err := e.providerStatus(ctx, providerID)
+	status, err := e.providerStatus(ctx, providerID, forProvider)
 	if err != nil {
 		return nil, err
 	}

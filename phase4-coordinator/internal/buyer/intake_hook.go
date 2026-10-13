@@ -75,7 +75,9 @@ func (s *Server) observeUnmatchedModel(rawModel, accountID string, authenticated
 		}
 	}()
 	accountID = strings.TrimSpace(accountID)
-	if accountID == "" || strings.HasPrefix(accountID, demoAccountPrefix) {
+	// SPEC-036 FR-20 verification accounts are coordinator-originated and
+	// never buyer intake.
+	if accountID == "" || strings.HasPrefix(accountID, demoAccountPrefix) || strings.HasPrefix(accountID, ComputeIntegrityAccountPrefix) {
 		return
 	}
 	if _, excluded := s.intakeExcluded[accountID]; excluded {

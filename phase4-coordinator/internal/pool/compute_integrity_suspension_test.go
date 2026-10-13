@@ -18,6 +18,11 @@ func TestComputeIntegritySuspensionIsPerModel(t *testing.T) {
 	if !got.ComputeIntegritySuspended || got.RoutingEligible() {
 		t.Fatal("suspended model must leave routing")
 	}
+	busy := got
+	busy.SlotsFree = 0
+	if busy.SlotQueueEligible() {
+		t.Fatal("suspended model must leave the slot queue too")
+	}
 
 	// The same provider serving another model is routable.
 	other := quarantineTestProvider()

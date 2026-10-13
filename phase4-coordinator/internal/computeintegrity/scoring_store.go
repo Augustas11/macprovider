@@ -75,11 +75,37 @@ func (s *ScoringStore) LoadKeyStates(ctx context.Context) ([]*KeyState, error) {
 	return out, rows.Err()
 }
 
+// BeginTx opens a transaction on the store's database. A state transition
+// writes its SPEC-022 R-16 hold change and the new state in one transaction
+// (the hold table lives in the same database).
+func (s *ScoringStore) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	if s == nil || s.db == nil {
+		return nil, errScoringStoreClosed
+	}
+	return s.db.BeginTx(ctx, nil)
+}
+
+type scoringExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // UpsertKeyState persists one key state.
 func (s *ScoringStore) UpsertKeyState(ctx context.Context, k *KeyState, now time.Time) error {
 	if s == nil || s.db == nil {
 		return errScoringStoreClosed
 	}
+	return upsertKeyStateExec(ctx, s.db, k, now)
+}
+
+// UpsertKeyStateTx persists one key state inside tx.
+func (s *ScoringStore) UpsertKeyStateTx(ctx context.Context, tx *sql.Tx, k *KeyState, now time.Time) error {
+	if s == nil || tx == nil {
+		return errScoringStoreClosed
+	}
+	return upsertKeyStateExec(ctx, tx, k, now)
+}
+
+func upsertKeyStateExec(ctx context.Context, db scoringExecutor, k *KeyState, now time.Time) error {
 	if k == nil || !k.State.Known() {
 		return fmt.Errorf("compute-integrity key state is invalid")
 	}
@@ -87,7 +113,7 @@ func (s *ScoringStore) UpsertKeyState(ctx context.Context, k *KeyState, now time
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 INSERT INTO compute_integrity_scoring_keys (provider_id, model_id, state, state_json, updated_at_utc)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(provider_id, model_id) DO UPDATE SET

@@ -2286,19 +2286,18 @@ reason, and a status (`held` or `released`). SPEC-036 FR-23 creates it: a
 `failure` hold for the affected window when a key enters `failed`, and a
 `recovery` hold with an open end when a key enters `recovering`.
 
-R-16.2. While a hold is `held`, every `ledger_request_credits` row with the
-same `provider_id`, `model` equal to the hold's `model_id`, and `ts_utc` inside
-the window (start inclusive, end inclusive when set) is excluded from
-`spec022_payable_request_credits` and from the weekly settlement selection,
-which applies the same predicate. It therefore stays out of
-`ledger_payout_ready`, the provider earnings endpoint and its rollup cache,
-and payable totals. The row itself is not modified: its outcome, quarantine
-flag and receipt verdict stay as they are.
+R-16.2. While a hold is `held`, every unsettled (`settled = 0`)
+`ledger_request_credits` row with the same `provider_id`, `model` equal to the
+hold's `model_id`, and `ts_utc` inside the window (start inclusive, end
+inclusive when set) is excluded from `spec022_payable_request_credits` and
+from the weekly settlement selection, which applies the same predicate. It
+therefore stays out of `ledger_payout_ready`, the provider earnings endpoint
+and its rollup cache, and payable totals. The row itself is not modified: its
+outcome, quarantine flag and receipt verdict stay as they are.
 
-R-16.3. A hold never claws back a completed payout. A `ready` payout that
-still contains a newly held credit fails its existing claim-time
-revalidation and is rebuilt without it, so held credits never leave before
-release.
+R-16.3. Credits already settled into a payout (`settled = 1`) are never
+withheld, so a hold can neither claw back a payout nor invalidate or strand a
+`ready` one.
 
 R-16.4. A hold is never burned and has no expiry. It is released only by:
 (a) SPEC-036 FR-23 `recovering` → `passing`, which closes and releases the
@@ -2312,8 +2311,14 @@ R-16 exclusion and cannot make a credit payable that R-7 would not otherwise
 admit.
 
 R-16.6. Every hold write and release bumps the provider earnings rollup
-generation for each credit the hold covers, in the writer's transaction, so
+generation for each credit the hold covers, in the writer's transaction, and
+a change of `settled` on a credit a held hold covers bumps its bucket, so
 cached earnings never serve a figure that disagrees with the view.
+
+R-16.8. The transaction that writes the first hold raises the billing
+compatibility floor to contract 5. A coordinator that predates R-16 would pay
+held credits, so it refuses the database from then on; a rollback stays
+possible until the first hold exists.
 
 R-16.7. The provider sees its holds (window, kind, status, reason, held
 provider credits) on the SPEC-036 FR-25 provider status surface.

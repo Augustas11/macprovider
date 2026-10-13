@@ -61,15 +61,16 @@ func TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable(t *testin
 }
 
 // A database recorded under a newer billing contract is refused at open, and
-// a fresh open records this binary's floor.
+// a fresh open records the open floor (contract 4; contract 5 is recorded
+// with the first SPEC-022 R-16 hold).
 func TestBillingCompatFloorRefusesNewerDatabase(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	var floor int64
 	if err := store.db.QueryRow(`SELECT contract FROM billing_compat_floor WHERE id = 1`).Scan(&floor); err != nil {
 		t.Fatal(err)
 	}
-	if floor != billingCompatContract {
-		t.Fatalf("recorded floor=%d, want %d", floor, billingCompatContract)
+	if floor != billingCompatContractEvidenceRetention {
+		t.Fatalf("recorded floor=%d, want %d", floor, billingCompatContractEvidenceRetention)
 	}
 	if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = ? WHERE id = 1`, billingCompatContract+1); err != nil {
 		t.Fatal(err)
@@ -86,7 +87,7 @@ func TestBillingCompatFloorRefusesNewerDatabase(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT contract FROM billing_compat_floor WHERE id = 1`).Scan(&floor); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal(err)
 	}
-	if floor != billingCompatContract {
-		t.Fatalf("floor after re-open=%d, want raised to %d", floor, billingCompatContract)
+	if floor != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor after re-open=%d, want raised to %d", floor, billingCompatContractEvidenceRetention)
 	}
 }

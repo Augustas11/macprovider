@@ -20,6 +20,10 @@ type ComputeIntegrityScoringConfig struct {
 	RecoveryCooldownSeconds   int  `yaml:"recovery_cooldown_seconds"`
 	ScoreDeadlineSeconds      int  `yaml:"score_deadline_seconds"`
 	SweepIntervalSeconds      int  `yaml:"sweep_interval_seconds"`
+	// CorpusPath names a private, coordinator-only prompt corpus (SPEC-036
+	// FR-20). Empty uses the checked-in public corpus, which is a fallback:
+	// a provider can read it.
+	CorpusPath string `yaml:"corpus_path"`
 }
 
 // DefaultComputeIntegrityConfig returns the SPEC-036 FR-20/FR-23 defaults.

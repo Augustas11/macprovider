@@ -68,7 +68,7 @@ func (m *Metrics) IncComputeIntegrityVerification(outcome string) {
 		return
 	}
 	switch outcome {
-	case "in_band", "out_of_band", "inconclusive":
+	case "in_band", "out_of_band", "split", "inconclusive":
 		c.verifications.WithLabelValues(outcome).Inc()
 	}
 }
@@ -80,7 +80,7 @@ func (m *Metrics) IncComputeIntegrityInconclusive(reason string) {
 		return
 	}
 	switch reason {
-	case "dispatch", "no_scorer", "scorer_timeout", "short_output", "scorer_invalid", "scorer_split":
+	case "dispatch", "no_scorer", "scorer_timeout", "short_output", "scorer_invalid":
 		c.inconclusive.WithLabelValues(reason).Inc()
 	}
 }

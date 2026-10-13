@@ -138,3 +138,37 @@ func TestComputeIntegrityHoldRejectsBadWindows(t *testing.T) {
 		t.Fatal("missing provider must be refused")
 	}
 }
+
+// SPEC-022 R-16.3: a credit already settled into a payout is never withheld,
+// so a hold cannot invalidate or strand a ready payout; the first hold raises
+// the billing compatibility floor to contract 5 so an older coordinator that
+// would pay held credits cannot open the database.
+func TestComputeIntegrityHoldLeavesSettledCreditsAndRaisesCompatFloor(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	windowStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	insertCreditWithOperator(t, store.db, "settled", "p-a", windowStart.Add(time.Hour), 700)
+	if err := store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowStart.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status = 'ready'`); got != 1 {
+		t.Fatalf("ready payouts=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor before any hold=%d", got)
+	}
+	end := windowStart.Add(2 * time.Hour)
+	if _, err := store.OpenComputeIntegrityHold(ctx, "p-a", "model-a", computeintegrity.HoldKindFailure, windowStart, &end, "confirmed_failure", end); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractComputeIntegrityHold {
+		t.Fatalf("floor after first hold=%d want %d", got, billingCompatContractComputeIntegrityHold)
+	}
+	if got := scalar(t, store.db, `SELECT COALESCE(SUM(provider_credits), 0) FROM spec022_payable_request_credits`); got != 700 {
+		t.Fatalf("settled credit must stay payable under a hold, got %d", got)
+	}
+	holds, _ := store.ComputeIntegrityHolds(ctx, "p-a")
+	if len(holds) != 1 || holds[0].HeldCredits != 0 {
+		t.Fatalf("a hold over settled credits withholds nothing: %+v", holds)
+	}
+}

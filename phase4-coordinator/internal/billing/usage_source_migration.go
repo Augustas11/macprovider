@@ -50,7 +50,15 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // evidence; archived credits are payable only through the archived-credit
 // tombstones, which a contract-3 binary does not read. Recorded at open,
 // before any retention run, and again in every deletion transaction.
-const billingCompatContract = billingCompatContractEvidenceRetention
+// 5 = SPEC-022 v0.4.4 (R-16): compute-integrity earnings holds withhold
+// credits from the payable view and settlement, which a contract-4 binary
+// would pay. Recorded in the transaction that writes the first hold, so a
+// rollback stays possible until a hold exists and fails closed after.
+const billingCompatContract = billingCompatContractComputeIntegrityHold
+
+// billingCompatContractComputeIntegrityHold is contract 5, the floor the
+// first SPEC-022 R-16 hold records.
+const billingCompatContractComputeIntegrityHold = 5
 
 // billingCompatContractRelayBlind is contract 3, the floor the relay-blind
 // outcome widening records.

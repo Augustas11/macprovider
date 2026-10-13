@@ -12,9 +12,11 @@ package ws
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -33,6 +35,12 @@ const (
 	maxComputeScoreResultBytes  = 4 * 1024
 	computeScoreOperatorTTL     = 10 * time.Minute
 	computeScoreDispatchTimeout = 5 * time.Minute
+
+	// FR-21 bounds, enforced on both sides of the wire.
+	computeScoreMaxPromptTokens = 4096
+	computeScoreMaxScoredTokens = 512
+	computeScoreMaxOutputBytes  = 32 * 1024
+	computeScoreLogprobFloor    = 100.0
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -73,53 +81,69 @@ var computeScoreResultFields = map[string]struct{}{
 	"top1_matches": {}, "sum_logprob": {},
 }
 
-// ParseComputeScoreResult strictly decodes an FR-21 result frame.
+// errComputeScoreResultInvalid is the only error ParseComputeScoreResult
+// returns: callers log the closed field category, never scorer-controlled
+// text.
+var errComputeScoreResultInvalid = errors.New("invalid compute score result")
+
+// ParseComputeScoreResult strictly decodes an FR-21 result frame and enforces
+// the FR-21 bounds coordinator-side. The returned field is a closed category.
 func ParseComputeScoreResult(payload []byte) (ComputeScoreResult, string, error) {
 	if len(payload) > maxComputeScoreResultBytes {
-		return ComputeScoreResult{}, "payload", fmt.Errorf("%s exceeds %d bytes", computeScoreResultType, maxComputeScoreResultBytes)
+		return ComputeScoreResult{}, "payload", errComputeScoreResultInvalid
 	}
-	if field, err := rejectDuplicateJSONFields(payload); err != nil {
-		return ComputeScoreResult{}, field, err
+	if _, err := rejectDuplicateJSONFields(payload); err != nil {
+		return ComputeScoreResult{}, "json", errComputeScoreResultInvalid
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return ComputeScoreResult{}, "json", err
+		return ComputeScoreResult{}, "json", errComputeScoreResultInvalid
 	}
 	if field := rejectUnknownFields(raw, computeScoreResultFields); field != "" {
-		return ComputeScoreResult{}, field, fmt.Errorf("unknown field %s", field)
+		return ComputeScoreResult{}, "unknown_field", errComputeScoreResultInvalid
 	}
 	var result ComputeScoreResult
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&result); err != nil {
-		return ComputeScoreResult{}, "json", err
+		return ComputeScoreResult{}, "json", errComputeScoreResultInvalid
 	}
 	switch {
 	case result.Type != computeScoreResultType:
-		return ComputeScoreResult{}, "type", fmt.Errorf("unexpected type %q", result.Type)
+		return ComputeScoreResult{}, "type", errComputeScoreResultInvalid
 	case result.Version != 1:
-		return ComputeScoreResult{}, "version", fmt.Errorf("unsupported version %d", result.Version)
+		return ComputeScoreResult{}, "version", errComputeScoreResultInvalid
 	case !boundedPrintable(result.ScoreID, 1, 128):
-		return ComputeScoreResult{}, "score_id", errors.New("invalid score_id")
+		return ComputeScoreResult{}, "score_id", errComputeScoreResultInvalid
 	case !boundedPrintable(result.ProviderID, 1, 256), !boundedPrintable(result.AssignedID, 1, 256), !boundedPrintable(result.ModelID, 1, 256):
-		return ComputeScoreResult{}, "identity", errors.New("invalid identity")
+		return ComputeScoreResult{}, "identity", errComputeScoreResultInvalid
 	case !isLowerHex64(result.WeightsManifestSHA256):
-		return ComputeScoreResult{}, "weights_manifest_sha256", errors.New("invalid manifest hash")
+		return ComputeScoreResult{}, "weights_manifest_sha256", errComputeScoreResultInvalid
 	}
 	switch result.Status {
-	case "ok", "unavailable", "invalid", "too_long":
+	case "ok":
+		if result.PromptTokens < 0 || result.PromptTokens > computeScoreMaxPromptTokens ||
+			result.ScoredTokens < 0 || result.ScoredTokens > computeScoreMaxScoredTokens ||
+			result.Top1Matches < 0 || result.Top1Matches > result.ScoredTokens ||
+			math.IsNaN(result.SumLogprob) || math.IsInf(result.SumLogprob, 0) ||
+			result.SumLogprob > 0 || result.SumLogprob < -computeScoreLogprobFloor*float64(result.ScoredTokens) {
+			return ComputeScoreResult{}, "counts", errComputeScoreResultInvalid
+		}
+	case "unavailable", "invalid", "too_long":
+		if result.PromptTokens != 0 || result.ScoredTokens != 0 || result.Top1Matches != 0 || result.SumLogprob != 0 {
+			return ComputeScoreResult{}, "counts", errComputeScoreResultInvalid
+		}
 	default:
-		return ComputeScoreResult{}, "status", fmt.Errorf("unknown status %q", result.Status)
-	}
-	if result.PromptTokens < 0 || result.ScoredTokens < 0 || result.Top1Matches < 0 || result.Top1Matches > result.ScoredTokens {
-		return ComputeScoreResult{}, "counts", errors.New("invalid counts")
+		return ComputeScoreResult{}, "status", errComputeScoreResultInvalid
 	}
 	return result, "", nil
 }
 
-// ComputeIntegrityProbeDispatch is one FR-20 verification request.
+// ComputeIntegrityProbeDispatch is one FR-20 verification request, pinned to
+// one provider session.
 type ComputeIntegrityProbeDispatch struct {
 	ProviderID string
+	AssignedID string
 	ModelID    string
 	Body       []byte
 	MaxTokens  int
@@ -134,13 +158,14 @@ type ComputeIntegrityProbeResponse struct {
 }
 
 // ComputeIntegrityProbeDispatcher sends a verification request through the
-// ordinary buyer dispatch path, pinned to one provider.
+// ordinary buyer dispatch path, pinned to one provider session.
 type ComputeIntegrityProbeDispatcher func(context.Context, ComputeIntegrityProbeDispatch) (ComputeIntegrityProbeResponse, error)
 
-// ComputeIntegrityHoldStore is the SPEC-022 R-16 hold writer.
+// ComputeIntegrityHoldStore is the SPEC-022 R-16 hold store. Hold actions run
+// inside the transaction that persists the FR-23 state, which must be on the
+// same database.
 type ComputeIntegrityHoldStore interface {
-	OpenComputeIntegrityHold(ctx context.Context, providerID, modelID string, kind computeintegrity.HoldKind, start time.Time, end *time.Time, reason string, now time.Time) (int64, error)
-	CloseComputeIntegrityRecoveryHold(ctx context.Context, providerID, modelID string, end time.Time, release bool, now time.Time) error
+	ApplyComputeIntegrityHoldAction(ctx context.Context, tx *sql.Tx, providerID, modelID string, action computeintegrity.HoldAction, reason string, now time.Time) error
 	ComputeIntegrityHolds(ctx context.Context, providerID string) ([]computeintegrity.EarningsHold, error)
 	ReleaseComputeIntegrityHold(ctx context.Context, holdID int64, operatorID, reason string, now time.Time) (computeintegrity.EarningsHold, error)
 	CountHeldComputeIntegrityHolds(ctx context.Context) (int, error)
@@ -178,12 +203,18 @@ type pendingComputeScore struct {
 	assignedID string
 	modelID    string
 	manifest   string
+	deadline   time.Time
 	ch         chan ComputeScoreResult
 }
 
 type cachedOperatorKey struct {
 	key     string
 	fetched time.Time
+}
+
+type scorerPoolKey struct {
+	modelID  string
+	manifest string
 }
 
 type computeScoringEngine struct {
@@ -217,7 +248,8 @@ const (
 )
 
 // StartComputeScoring loads persisted state, applies routing suspensions, and
-// starts the FR-20 scheduler. It runs until ctx is done.
+// starts the FR-20 scheduler. It runs until ctx is done. It always loads
+// state, even with scoring disabled, so a failed key stays out of routing.
 func (s *Server) StartComputeScoring(ctx context.Context, deps ComputeScoringDeps) error {
 	e, err := s.newComputeScoringEngine(ctx, deps)
 	if err != nil {
@@ -324,6 +356,11 @@ func providerScoringReady(p pool.Provider) bool {
 	return p.State == pool.StateReady || p.State == pool.StateBusy
 }
 
+// providerVerifiable is FR-19: a catalog-verified model with a manifest hash.
+func providerVerifiable(p pool.Provider) bool {
+	return p.ModelID != "" && isLowerHex64(p.WeightsManifestSHA256) && p.HashStatus == pool.HashStatusVerified && providerScoringReady(p)
+}
+
 // stateLocked returns the key state, creating an unverified one. Caller
 // holds mu.
 func (e *computeScoringEngine) stateLocked(key computeScoringKey, now time.Time) *computeintegrity.KeyState {
@@ -336,40 +373,76 @@ func (e *computeScoringEngine) stateLocked(key computeScoringKey, now time.Time)
 	return st
 }
 
+func cloneKeyState(st *computeintegrity.KeyState) computeintegrity.KeyState {
+	c := *st
+	c.Escalations = append([]computeintegrity.EscalationEntry(nil), st.Escalations...)
+	c.StreakScorerOps = append([]string(nil), st.StreakScorerOps...)
+	return c
+}
+
 func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
-	if !e.deps.Config.Enabled || e.s.pool == nil {
+	if e.s.pool == nil {
 		return
 	}
 	providers := e.s.pool.Snapshot()
-	candidates := make([]computeintegrity.ScorerCandidate, 0, len(providers))
+	present := make(map[string]struct{}, len(providers))
 	for _, p := range providers {
-		if p.ModelID == "" || p.WeightsManifestSHA256 == "" {
+		present[p.ProviderID] = struct{}{}
+	}
+	e.prune(present)
+	if !e.deps.Config.Enabled {
+		e.publishGauges(ctx)
+		return
+	}
+	// One scorer index per sweep, keyed by (model, manifest), so selection
+	// costs the size of one model's pool rather than the whole fleet.
+	index := map[scorerPoolKey][]computeintegrity.ScorerCandidate{}
+	for _, p := range providers {
+		if !providerVerifiable(p) {
 			continue
 		}
-		candidates = append(candidates, computeintegrity.ScorerCandidate{
+		k := scorerPoolKey{p.ModelID, p.WeightsManifestSHA256}
+		index[k] = append(index[k], computeintegrity.ScorerCandidate{
 			ProviderID:     p.ProviderID,
 			AssignedID:     p.AssignedID,
 			ModelID:        p.ModelID,
 			ManifestSHA256: p.WeightsManifestSHA256,
 			OperatorKey:    e.operatorKey(ctx, p.ProviderID, now),
 			Capable:        p.ComputeScoreV1,
-			Ready:          providerScoringReady(p),
+			Ready:          true,
 		})
 	}
 	for _, p := range providers {
-		if p.ModelID == "" || p.WeightsManifestSHA256 == "" || !providerScoringReady(p) {
+		if !providerVerifiable(p) {
 			continue
 		}
-		e.considerProvider(ctx, p, candidates, now)
+		e.considerProvider(ctx, p, index[scorerPoolKey{p.ModelID, p.WeightsManifestSHA256}], now)
 	}
 	e.publishGauges(ctx)
+}
+
+// prune drops schedule and cache entries of providers that left the pool.
+// Key states stay: a failed key must survive a disconnect.
+func (e *computeScoringEngine) prune(present map[string]struct{}) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for key := range e.nextDue {
+		if _, ok := present[key.providerID]; !ok && !e.inFlight[key] {
+			delete(e.nextDue, key)
+		}
+	}
+	for id := range e.operatorKeys {
+		if _, ok := present[id]; !ok {
+			delete(e.operatorKeys, id)
+		}
+	}
 }
 
 func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now time.Time) {
 	key := computeScoringKey{p.ProviderID, p.ModelID}
 	e.mu.Lock()
 	st := e.stateLocked(key, now)
-	before := *st
+	before := cloneKeyState(st)
 	if tr := st.Tick(now); tr != nil {
 		if !e.applyTransitionLocked(ctx, st, tr, now) {
 			*st = before
@@ -406,6 +479,7 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 
 	verified := computeintegrity.ScorerCandidate{
 		ProviderID:     p.ProviderID,
+		AssignedID:     p.AssignedID,
 		ModelID:        p.ModelID,
 		ManifestSHA256: p.WeightsManifestSHA256,
 		OperatorKey:    e.operatorKey(ctx, p.ProviderID, now),
@@ -429,7 +503,7 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	e.inFlightCount++
 	e.hourCount++
 	e.mu.Unlock()
-	go e.runProbe(ctx, p, verified, scorers)
+	go e.runProbe(ctx, verified, scorers)
 }
 
 // scorerEligibleLocked applies FR-21 rule 4. Caller holds mu.
@@ -471,16 +545,23 @@ type scoredMeasurement struct {
 	measurement computeintegrity.Measurement
 }
 
-func (e *computeScoringEngine) runProbe(ctx context.Context, p pool.Provider, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate) {
-	key := computeScoringKey{p.ProviderID, p.ModelID}
+// sessionUnchanged reports whether the verified session still serves the
+// same model and manifest it was selected with (FR-20 output binding).
+func (e *computeScoringEngine) sessionUnchanged(verified computeintegrity.ScorerCandidate) bool {
+	p, ok := e.s.pool.Resolve(verified.ProviderID, verified.AssignedID)
+	return ok && p.ModelID == verified.ModelID && p.WeightsManifestSHA256 == verified.ManifestSHA256
+}
+
+func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeintegrity.ScorerCandidate, scorers []computeintegrity.ScorerCandidate) {
+	key := computeScoringKey{verified.ProviderID, verified.ModelID}
 	defer e.finishProbe(key)
-	sampledKey := computeintegrity.ToleranceKey{ModelID: p.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: computeintegrity.SamplingSampled}
+	sampledKey := computeintegrity.ToleranceKey{ModelID: verified.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: computeintegrity.SamplingSampled}
 	e.mu.Lock()
 	greedyOnly := false
 	if st := e.states[key]; st != nil && st.State.Escalating() {
 		greedyOnly = !e.tolerance.Band(sampledKey).Warm
 	}
-	probe, err := computeintegrity.DrawProbe(e.rng, e.deps.Corpus, p.ModelID, greedyOnly)
+	probe, err := computeintegrity.DrawProbe(e.rng, e.deps.Corpus, verified.ModelID, greedyOnly)
 	e.mu.Unlock()
 	if err != nil {
 		e.inconclusive(ciInconclusiveDispatch)
@@ -489,21 +570,26 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, p pool.Provider, ve
 	dctx, cancel := context.WithTimeout(ctx, computeScoreDispatchTimeout)
 	defer cancel()
 	resp, err := e.deps.Dispatch(dctx, ComputeIntegrityProbeDispatch{
-		ProviderID: p.ProviderID,
-		ModelID:    p.ModelID,
+		ProviderID: verified.ProviderID,
+		AssignedID: verified.AssignedID,
+		ModelID:    verified.ModelID,
 		Body:       probe.Body,
 		MaxTokens:  probe.MaxTokens,
 	})
-	if err != nil || !resp.Complete || strings.TrimSpace(resp.OutputText+resp.ReasoningText) == "" {
+	if err != nil || !resp.Complete || strings.TrimSpace(resp.OutputText+resp.ReasoningText) == "" ||
+		len(resp.OutputText)+len(resp.ReasoningText) > computeScoreMaxOutputBytes ||
+		!e.sessionUnchanged(verified) {
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
-	measurements, reason := e.scoreAll(ctx, scorers, verified, probe.Body, resp.OutputText, resp.ReasoningText)
-	if len(measurements) == 0 {
+	measurements, reason, complete := e.scoreAll(ctx, scorers, verified, probe.Body, resp.OutputText, resp.ReasoningText)
+	if !complete {
+		// FR-23: a measurement counts only when every selected scorer gave a
+		// valid answer; anything less changes no state.
 		e.inconclusive(reason)
 		return
 	}
-	tkey := computeintegrity.ToleranceKey{ModelID: p.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: probe.Class}
+	tkey := computeintegrity.ToleranceKey{ModelID: verified.ModelID, ManifestSHA256: verified.ManifestSHA256, Class: probe.Class}
 	e.decide(ctx, key, verified, tkey, measurements, computeintegrity.KnownSequence{
 		Body:          probe.Body,
 		OutputText:    resp.OutputText,
@@ -512,9 +598,9 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, p pool.Provider, ve
 }
 
 // scoreAll sends one scoring job per scorer and waits for every answer up to
-// the FR-21 deadline. It returns the valid measurements, or the inconclusive
-// reason when there are none.
-func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computeintegrity.ScorerCandidate, verified computeintegrity.ScorerCandidate, body []byte, output, reasoning string) ([]scoredMeasurement, string) {
+// the FR-21 deadline. complete is true only when every scorer answered with a
+// valid measurement; otherwise reason names the first failure class.
+func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computeintegrity.ScorerCandidate, verified computeintegrity.ScorerCandidate, body []byte, output, reasoning string) ([]scoredMeasurement, string, bool) {
 	type answer struct {
 		scorer computeintegrity.ScorerCandidate
 		result ComputeScoreResult
@@ -523,33 +609,40 @@ func (e *computeScoringEngine) scoreAll(ctx context.Context, scorers []computein
 	answers := make(chan answer, len(scorers))
 	for _, sc := range scorers {
 		go func(sc computeintegrity.ScorerCandidate) {
-			result, ok := e.score(ctx, sc, verified.ManifestSHA256, body, output, reasoning)
+			result, ok := e.score(ctx, sc, verified.ManifestSHA256, body, output, reasoning, true)
 			answers <- answer{scorer: sc, result: result, ok: ok}
 		}(sc)
 	}
 	var out []scoredMeasurement
-	reason := ciInconclusiveScorerTimeout
+	reason := ""
 	for range scorers {
 		a := <-answers
-		if !a.ok {
-			continue
+		switch {
+		case !a.ok:
+			if reason == "" {
+				reason = ciInconclusiveScorerTimeout
+			}
+		case a.result.Status != "ok":
+			if reason == "" {
+				reason = ciInconclusiveScorerInvalid
+			}
+		default:
+			m := computeintegrity.Measurement{ScoredTokens: a.result.ScoredTokens, Top1Matches: a.result.Top1Matches, SumLogprob: a.result.SumLogprob}
+			if !m.Valid() {
+				if reason == "" {
+					reason = ciInconclusiveShortOutput
+				}
+				continue
+			}
+			out = append(out, scoredMeasurement{scorer: a.scorer, measurement: m})
 		}
-		if a.result.Status != "ok" {
-			reason = ciInconclusiveScorerInvalid
-			continue
-		}
-		m := computeintegrity.Measurement{ScoredTokens: a.result.ScoredTokens, Top1Matches: a.result.Top1Matches, SumLogprob: a.result.SumLogprob}
-		if !m.Valid() {
-			reason = ciInconclusiveShortOutput
-			continue
-		}
-		out = append(out, scoredMeasurement{scorer: a.scorer, measurement: m})
 	}
-	return out, reason
+	return out, reason, len(out) == len(scorers) && len(out) > 0
 }
 
-// score runs one FR-21 job on one scorer.
-func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrity.ScorerCandidate, manifest string, body []byte, output, reasoning string) (ComputeScoreResult, bool) {
+// score runs one FR-21 job on one scorer. countJob marks an ordinary scoring
+// job, which advances the FR-24 known-sequence cadence.
+func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrity.ScorerCandidate, manifest string, body []byte, output, reasoning string, countJob bool) (ComputeScoreResult, bool) {
 	session, ok := e.s.storedSessionFor(scorer.ProviderID, scorer.AssignedID)
 	if !ok {
 		e.scoringJobMetric("timeout")
@@ -576,16 +669,26 @@ func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrit
 	if err != nil {
 		return ComputeScoreResult{}, false
 	}
-	pending := &pendingComputeScore{scorerID: scorer.ProviderID, assignedID: scorer.AssignedID, modelID: scorer.ModelID, manifest: manifest, ch: make(chan ComputeScoreResult, 1)}
+	pending := &pendingComputeScore{
+		scorerID: scorer.ProviderID, assignedID: scorer.AssignedID, modelID: scorer.ModelID,
+		manifest: manifest, deadline: now.Add(deadline), ch: make(chan ComputeScoreResult, 1),
+	}
+	checkKnown := false
 	e.mu.Lock()
 	e.pending[scoreID] = pending
-	e.scoringJobs++
+	if countJob {
+		e.scoringJobs++
+		checkKnown = e.scoringJobs%computeintegrity.KnownSequenceCheckEvery == 0
+	}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
 		delete(e.pending, scoreID)
 		e.mu.Unlock()
 	}()
+	if checkKnown {
+		go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: manifest})
+	}
 	if err := session.send(raw); err != nil {
 		e.scoringJobMetric("timeout")
 		return ComputeScoreResult{}, false
@@ -647,16 +750,14 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 	if allIn && st.State.AcceptsHonestSamples() {
 		e.tolerance.Accept(tkey, verified.OperatorKey, ms[0].measurement)
 	}
-	before := *st
-	before.Escalations = append([]computeintegrity.EscalationEntry(nil), st.Escalations...)
+	before := cloneKeyState(st)
 	if tr := st.Apply(outcome); tr != nil {
 		if !e.applyTransitionLocked(ctx, st, tr, now) {
 			*st = before
 		}
 	} else if err := e.deps.Store.UpsertKeyState(ctx, st, now); err != nil {
-		e.s.log.Warn().Err(err).Str("event", "compute_integrity_state_persist_failed").Msg("compute-integrity state not persisted")
+		e.s.log.Warn().Str("event", "compute_integrity_state_persist_failed").Msg("compute-integrity state not persisted")
 	}
-	jobs := e.scoringJobs
 	e.mu.Unlock()
 
 	if e.deps.Metrics != nil {
@@ -666,34 +767,43 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 		case allOut:
 			e.deps.Metrics.IncComputeIntegrityVerification("out_of_band")
 		default:
-			e.deps.Metrics.IncComputeIntegrityVerification("inconclusive")
-			e.deps.Metrics.IncComputeIntegrityInconclusive("scorer_split")
+			e.deps.Metrics.IncComputeIntegrityVerification("split")
 		}
-	}
-	if jobs/computeintegrity.KnownSequenceCheckEvery != (jobs-len(ms))/computeintegrity.KnownSequenceCheckEvery {
-		go e.knownSequenceCheck(ctx, tkey)
 	}
 }
 
-// applyTransitionLocked writes the hold change, then the routing suspension,
-// then persists the state. A failed hold write leaves the transition
-// unapplied so the next measurement retries it; it returns false then.
-// Caller holds mu.
+// applyTransitionLocked commits the hold change and the new state in one
+// transaction, then publishes the routing suspension. On any failure the
+// transaction rolls back, nothing is published, and it returns false so the
+// caller restores the previous in-memory state; the next measurement or tick
+// retries. Caller holds mu.
 func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *computeintegrity.KeyState, tr *computeintegrity.Transition, now time.Time) bool {
-	if err := e.applyHold(ctx, st, tr, now); err != nil {
-		e.s.log.Error().Err(err).
-			Str("event", "compute_integrity_hold_write_failed").
+	fail := func(err error) bool {
+		e.s.log.Error().
+			Str("event", "compute_integrity_transition_deferred").
 			Str("provider_id", st.ProviderID).
 			Str("model_id", st.ModelID).
 			Str("to", string(tr.To)).
-			Msg("compute-integrity transition deferred: hold write failed")
+			Str("error_class", fmt.Sprintf("%T", err)).
+			Msg("compute-integrity transition deferred: commit failed")
 		return false
+	}
+	tx, err := e.deps.Store.BeginTx(ctx)
+	if err != nil {
+		return fail(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := e.deps.Holds.ApplyComputeIntegrityHoldAction(ctx, tx, st.ProviderID, st.ModelID, tr.Hold, string(tr.Reason), now); err != nil {
+		return fail(err)
+	}
+	if err := e.deps.Store.UpsertKeyStateTx(ctx, tx, st, now); err != nil {
+		return fail(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(err)
 	}
 	if e.s.pool != nil {
 		e.s.pool.SetComputeIntegritySuspended(st.ProviderID, st.ModelID, tr.To.RoutingSuspended())
-	}
-	if err := e.deps.Store.UpsertKeyState(ctx, st, now); err != nil {
-		e.s.log.Warn().Err(err).Str("event", "compute_integrity_state_persist_failed").Msg("compute-integrity state not persisted")
 	}
 	if e.deps.Metrics != nil {
 		e.deps.Metrics.IncComputeIntegrityTransition(string(tr.From), string(tr.To))
@@ -709,62 +819,51 @@ func (e *computeScoringEngine) applyTransitionLocked(ctx context.Context, st *co
 	return true
 }
 
-func (e *computeScoringEngine) applyHold(ctx context.Context, st *computeintegrity.KeyState, tr *computeintegrity.Transition, now time.Time) error {
-	holds := e.deps.Holds
-	switch tr.Hold.Kind {
-	case computeintegrity.HoldActionNone:
-		return nil
-	case computeintegrity.HoldActionOpenFailure:
-		end := tr.Hold.End
-		_, err := holds.OpenComputeIntegrityHold(ctx, st.ProviderID, st.ModelID, computeintegrity.HoldKindFailure, tr.Hold.Start, &end, string(tr.Reason), now)
-		return err
-	case computeintegrity.HoldActionOpenRecovery:
-		_, err := holds.OpenComputeIntegrityHold(ctx, st.ProviderID, st.ModelID, computeintegrity.HoldKindRecovery, tr.Hold.Start, nil, string(tr.Reason), now)
-		return err
-	case computeintegrity.HoldActionReleaseRecovery:
-		return holds.CloseComputeIntegrityRecoveryHold(ctx, st.ProviderID, st.ModelID, tr.Hold.End, true, now)
-	case computeintegrity.HoldActionCloseRecovery:
-		return holds.CloseComputeIntegrityRecoveryHold(ctx, st.ProviderID, st.ModelID, tr.Hold.End, false, now)
-	}
-	return fmt.Errorf("unknown hold action %q", tr.Hold.Kind)
-}
-
 func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID string, now time.Time) {
 	if err := e.deps.Store.ExcludeScorer(ctx, providerID, now); err != nil {
-		e.s.log.Warn().Err(err).Str("event", "compute_integrity_scorer_exclusion_persist_failed").Msg("scorer exclusion not persisted")
+		e.s.log.Warn().Str("event", "compute_integrity_scorer_exclusion_persist_failed").Str("provider_id", providerID).Msg("scorer exclusion not persisted")
 		return
 	}
 	e.s.log.Warn().Str("event", "compute_integrity_scorer_excluded").Str("provider_id", providerID).Msg("compute-integrity scorer excluded")
 }
 
-// knownSequenceCheck sends one FR-24 known sequence to a random eligible
-// scorer that did not score it originally.
+// knownSequenceCheck sends one FR-24 known sequence of the model to a random
+// eligible scorer that did not score it originally. tkey names the model and
+// manifest; every sampling class is eligible.
 func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey computeintegrity.ToleranceKey) {
 	var candidates []computeintegrity.ScorerCandidate
 	for _, p := range e.s.pool.Snapshot() {
-		if !p.ComputeScoreV1 || !providerScoringReady(p) || p.ModelID != tkey.ModelID || p.WeightsManifestSHA256 != tkey.ManifestSHA256 {
+		if !p.ComputeScoreV1 || !providerVerifiable(p) || p.ModelID != tkey.ModelID || p.WeightsManifestSHA256 != tkey.ManifestSHA256 {
 			continue
 		}
 		candidates = append(candidates, computeintegrity.ScorerCandidate{ProviderID: p.ProviderID, AssignedID: p.AssignedID, ModelID: p.ModelID, ManifestSHA256: p.WeightsManifestSHA256})
 	}
 	e.mu.Lock()
-	var eligible []computeintegrity.ScorerCandidate
+	e.rng.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
+	var scorer computeintegrity.ScorerCandidate
+	var seq computeintegrity.KnownSequence
+	found := false
 	for _, c := range candidates {
-		if e.scorerEligibleLocked(c) {
-			eligible = append(eligible, c)
+		if !e.scorerEligibleLocked(c) {
+			continue
+		}
+		for _, class := range []computeintegrity.SamplingClass{computeintegrity.SamplingGreedy, computeintegrity.SamplingSampled} {
+			k := tkey
+			k.Class = class
+			if s, ok := e.known.Pick(e.rng, k, c.ProviderID); ok {
+				scorer, seq, found = c, s, true
+				break
+			}
+		}
+		if found {
+			break
 		}
 	}
-	if len(eligible) == 0 {
-		e.mu.Unlock()
-		return
-	}
-	scorer := eligible[e.rng.Intn(len(eligible))]
-	seq, ok := e.known.Pick(e.rng, tkey, scorer.ProviderID)
 	e.mu.Unlock()
-	if !ok {
+	if !found {
 		return
 	}
-	result, answered := e.score(ctx, scorer, tkey.ManifestSHA256, seq.Body, seq.OutputText, seq.ReasoningText)
+	result, answered := e.score(ctx, scorer, tkey.ManifestSHA256, seq.Body, seq.OutputText, seq.ReasoningText, false)
 	if !answered || result.Status != "ok" {
 		return
 	}
@@ -802,17 +901,20 @@ func (s *Server) handleComputeScoreResult(providerID, assignedID string, payload
 	}
 	result, field, err := ParseComputeScoreResult(payload)
 	if err != nil {
-		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid compute score result")
+		// field is a closed category; scorer-controlled text is never logged.
+		s.log.Warn().Str("event", "compute_integrity_score_result_invalid").Str("field", field).Str("provider_id", providerID).Msg("invalid compute score result")
 		return
 	}
+	now := s.now()
 	e.mu.Lock()
 	pending := e.pending[result.ScoreID]
 	if pending == nil ||
 		pending.scorerID != providerID || pending.assignedID != assignedID ||
 		result.ProviderID != providerID || result.AssignedID != assignedID ||
-		result.ModelID != pending.modelID || result.WeightsManifestSHA256 != pending.manifest {
+		result.ModelID != pending.modelID || result.WeightsManifestSHA256 != pending.manifest ||
+		now.After(pending.deadline) {
 		e.mu.Unlock()
-		s.log.Warn().Str("provider_id", providerID).Msg("compute score result rejected: no matching request")
+		s.log.Warn().Str("event", "compute_integrity_score_result_rejected").Str("provider_id", providerID).Msg("compute score result rejected: no matching live request")
 		return
 	}
 	delete(e.pending, result.ScoreID)

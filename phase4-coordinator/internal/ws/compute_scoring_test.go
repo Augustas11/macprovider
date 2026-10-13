@@ -37,6 +37,37 @@ type fakeHoldStore struct {
 	attempts atomic.Int64
 }
 
+func (f *fakeHoldStore) ApplyComputeIntegrityHoldAction(ctx context.Context, tx *sql.Tx, providerID, modelID string, action computeintegrity.HoldAction, reason string, now time.Time) error {
+	if tx == nil {
+		return errors.New("hold action outside a transaction")
+	}
+	if action.Kind == computeintegrity.HoldActionNone {
+		return nil
+	}
+	// The durable side of the fake lives in the transaction, so a rolled-back
+	// transition leaves no hold row behind.
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS fake_hold_log (provider_id TEXT, action TEXT)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO fake_hold_log VALUES (?, ?)`, providerID, string(action.Kind)); err != nil {
+		return err
+	}
+	switch action.Kind {
+	case computeintegrity.HoldActionOpenFailure:
+		end := action.End
+		_, err := f.OpenComputeIntegrityHold(ctx, providerID, modelID, computeintegrity.HoldKindFailure, action.Start, &end, reason, now)
+		return err
+	case computeintegrity.HoldActionOpenRecovery:
+		_, err := f.OpenComputeIntegrityHold(ctx, providerID, modelID, computeintegrity.HoldKindRecovery, action.Start, nil, reason, now)
+		return err
+	case computeintegrity.HoldActionReleaseRecovery:
+		return f.CloseComputeIntegrityRecoveryHold(ctx, providerID, modelID, action.End, true, now)
+	case computeintegrity.HoldActionCloseRecovery:
+		return f.CloseComputeIntegrityRecoveryHold(ctx, providerID, modelID, action.End, false, now)
+	}
+	return errors.New("unknown hold action")
+}
+
 func (f *fakeHoldStore) OpenComputeIntegrityHold(_ context.Context, providerID, modelID string, kind computeintegrity.HoldKind, start time.Time, end *time.Time, reason string, now time.Time) (int64, error) {
 	f.attempts.Add(1)
 	if f.fail.Load() {
@@ -132,6 +163,8 @@ type scoringHarness struct {
 	cheaters   map[string]bool
 	conns      []net.Conn
 	logs       *lockedBuffer
+	db         *sql.DB
+	silent     sync.Map
 }
 
 type lockedBuffer struct {
@@ -171,6 +204,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 			ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel,
 			WeightsManifestSHA256: scoringManifest, State: pool.StateReady,
 			SlotsFree: 4, SlotsTotal: 4, MaxContextTokens: 8192, ComputeScoreV1: true,
+			HashStatus: pool.HashStatusVerified,
 		}
 		client, server := net.Pipe()
 		h.conns = append(h.conns, client, server)
@@ -190,6 +224,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	h.db = db
 	store, err := computeintegrity.NewScoringStore(context.Background(), db)
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +269,9 @@ func (h *scoringHarness) fakeScorer(providerID, assignedID string, conn net.Conn
 		}
 		var req ComputeScoreRequest
 		if json.Unmarshal(raw, &req) != nil || req.Type != computeScoreRequestType {
+			continue
+		}
+		if _, quiet := h.silent.Load(providerID); quiet {
 			continue
 		}
 		result := ComputeScoreResult{
@@ -401,7 +439,7 @@ func TestComputeScoringPersistedFailureSuspendsOnStart(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
-	registry.Register(&pool.Provider{ProviderID: "cheat", AssignedID: "as-2", ModelID: scoringModel, WeightsManifestSHA256: scoringManifest, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1}, server)
+	registry.Register(&pool.Provider{ProviderID: "cheat", AssignedID: "as-2", ModelID: scoringModel, WeightsManifestSHA256: scoringManifest, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, HashStatus: pool.HashStatusVerified}, server)
 	s2 := NewServer(config.Default(), registry, zerolog.Nop(), WithNow(h.now))
 	if _, err := s2.newComputeScoringEngine(context.Background(), ComputeScoringDeps{
 		Config: h.engine.deps.Config, Store: h.engine.deps.Store, Dispatch: h.engine.deps.Dispatch,
@@ -447,7 +485,9 @@ func TestComputeScoreResultFromWrongSessionIsIgnored(t *testing.T) {
 	h := newScoringHarness(t, providers, nil)
 	ch := make(chan ComputeScoreResult, 1)
 	h.engine.mu.Lock()
-	h.engine.pending["score-1"] = &pendingComputeScore{scorerID: "x", assignedID: "as-x", modelID: scoringModel, manifest: scoringManifest, ch: ch}
+	h.engine.pending["score-1"] = &pendingComputeScore{scorerID: "x", assignedID: "as-x", modelID: scoringModel, manifest: scoringManifest, deadline: h.now().Add(time.Minute), ch: ch}
+	expired := make(chan ComputeScoreResult, 1)
+	h.engine.pending["score-old"] = &pendingComputeScore{scorerID: "x", assignedID: "as-x", modelID: scoringModel, manifest: scoringManifest, deadline: h.now().Add(-time.Second), ch: expired}
 	h.engine.mu.Unlock()
 	result := ComputeScoreResult{
 		Type: computeScoreResultType, Version: 1, ScoreID: "score-1", ProviderID: "x", AssignedID: "as-other", ModelID: scoringModel,
@@ -470,6 +510,14 @@ func TestComputeScoreResultFromWrongSessionIsIgnored(t *testing.T) {
 		}
 	default:
 		t.Fatal("matching result must be delivered")
+	}
+	result.ScoreID = "score-old"
+	raw, _ = json.Marshal(result)
+	h.server.handleComputeScoreResult("x", "as-x", raw)
+	select {
+	case <-expired:
+		t.Fatal("a result after its deadline must not be delivered")
+	default:
 	}
 }
 
@@ -571,5 +619,71 @@ func TestComputeScoringLogsCarryNoPromptsOrOutputs(t *testing.T) {
 		if strings.Contains(logs, f) {
 			t.Fatalf("logs leak %q", f)
 		}
+	}
+}
+
+// FR-23: during escalation both selected scorers must answer; one silent
+// scorer makes every escalation measurement inconclusive, so it can neither
+// fail nor clear the key.
+func TestComputeScoringPartialEscalationIsInconclusive(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4"}
+	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
+	h.engine.deps.Config.ScoreDeadlineSeconds = 1
+	for i := 0; i < 120 && h.state("cheat") != computeintegrity.VerificationSuspect; i++ {
+		h.round(20 * time.Minute)
+	}
+	if h.state("cheat") != computeintegrity.VerificationSuspect {
+		t.Fatal("setup: expected suspect")
+	}
+	h.silent.Store("scorer-b", true)
+	for i := 0; i < 20; i++ {
+		h.round(20 * time.Minute)
+	}
+	h.engine.mu.Lock()
+	st := h.engine.states[computeScoringKey{"cheat", scoringModel}]
+	escalations := st.EscalationCount
+	h.engine.mu.Unlock()
+	if got := h.state("cheat"); got != computeintegrity.VerificationSuspect || escalations != 0 {
+		t.Fatalf("partial answers must change no state: state=%s escalations=%d", got, escalations)
+	}
+}
+
+// FR-23/FR-25: the hold and the state commit together. When the state write
+// fails, the hold write rolls back with it and nothing is suspended.
+func TestComputeScoringTransitionIsAtomic(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4"}
+	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
+	for i := 0; i < 120 && h.state("cheat") != computeintegrity.VerificationSuspect; i++ {
+		h.round(20 * time.Minute)
+	}
+	if h.state("cheat") != computeintegrity.VerificationSuspect {
+		t.Fatal("setup: expected suspect")
+	}
+	if _, err := h.db.Exec(`ALTER TABLE compute_integrity_scoring_keys RENAME TO compute_integrity_scoring_keys_off`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40 && h.holds.attempts.Load() == 0; i++ {
+		h.round(20 * time.Minute)
+	}
+	if h.holds.attempts.Load() == 0 {
+		t.Fatal("setup: the failure transition was never attempted")
+	}
+	if got := h.state("cheat"); got == computeintegrity.VerificationFailed {
+		t.Fatal("a transition whose state cannot persist must not apply")
+	}
+	if p, _ := h.registry.Resolve("cheat", "as-cheat"); p.ComputeIntegritySuspended {
+		t.Fatal("no suspension without a committed transition")
+	}
+	var rows int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'fake_hold_log'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		if err := h.db.QueryRow(`SELECT COUNT(*) FROM fake_hold_log`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows != 0 {
+		t.Fatalf("the hold write must roll back with the state write, %d rows remain", rows)
 	}
 }

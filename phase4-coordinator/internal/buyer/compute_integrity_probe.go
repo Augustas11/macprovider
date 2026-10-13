@@ -8,7 +8,9 @@ package buyer
 // is pinned to the verified provider with X-MacProvider-Provider, which the
 // provider never sees. No buyer is debited (buyer debit happens only in the
 // gateway); the provider is credited and settled exactly as for buyer
-// traffic.
+// traffic. The request is pinned to the verified provider session with
+// X-MacProvider-Session, which the provider never sees, so the output scored
+// is the output of the session that was selected.
 
 import (
 	"bytes"
@@ -72,13 +74,13 @@ func randomToken(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// DispatchComputeIntegrityProbe sends one verification request to
-// providerID through the ordinary chat-completions handler.
-func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, providerID string, body []byte, maxTokens int) (ComputeIntegrityProbeResult, error) {
+// DispatchComputeIntegrityProbe sends one verification request to one
+// provider session through the ordinary chat-completions handler.
+func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, assignedID string, body []byte, maxTokens int) (ComputeIntegrityProbeResult, error) {
 	if strings.TrimSpace(s.gatewayServiceToken) == "" {
 		return ComputeIntegrityProbeResult{}, errors.New("compute-integrity probe: gateway service token is not configured")
 	}
-	if providerID == "" || len(body) == 0 || maxTokens <= 0 {
+	if assignedID == "" || len(body) == 0 || maxTokens <= 0 {
 		return ComputeIntegrityProbeResult{}, errors.New("compute-integrity probe: invalid request")
 	}
 	accountSuffix, err := randomToken(16)
@@ -103,7 +105,7 @@ func (s *Server) DispatchComputeIntegrityProbe(ctx context.Context, providerID s
 	req.Header.Set(capacityShed429CapabilityHeader, "1")
 	req.Header.Set(effectiveMaxOutputTokensHeader, strconv.Itoa(maxTokens))
 	req.Header.Set("X-MacProvider-Internal-Conv-Cache", "conv:"+base64.RawURLEncoding.EncodeToString(convKey))
-	req.Header.Set("X-MacProvider-Provider", providerID)
+	req.Header.Set("X-MacProvider-Session", assignedID)
 
 	w := &probeResponseWriter{header: http.Header{}}
 	s.Handler().ServeHTTP(w, req)

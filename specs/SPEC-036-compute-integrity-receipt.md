@@ -2091,8 +2091,9 @@ provider is claimed in `provider_ownership`, and `provider:<provider_id>`
 otherwise. Two providers have different operators when their operator keys
 differ.
 
-A provider is **verifiable** for its served model when it reports a
-non-empty manifest hash and is routing-eligible for that model. A
+A provider is **verifiable** for its served model when its model hash is
+catalog-verified, it reports a manifest hash, and it is routing-eligible for
+that model. A
 provider is a **scorer candidate** when it advertised
 `tier2_capabilities.compute_score_v1: true` in its current session.
 
@@ -2100,12 +2101,15 @@ provider is a **scorer candidate** when it advertised
 
 The coordinator injects verification requests through the ordinary buyer
 dispatch path: the coordinator's own `/v1/chat/completions` handler with
-gateway context, pinned to the verified provider. The provider receives an
+gateway context, pinned to the verified provider session with the internal
+`X-MacProvider-Session` header (never forwarded to the provider). The provider receives an
 ordinary `inference_request` frame and MUST NOT be able to tell it from buyer
 traffic by headers, frame fields, sampling parameters, or timing class:
 
 - The body is an OpenAI chat completion with `stream: false`. Its messages come
-  from the prompt corpus (FR-20 corpus rules), with a system message.
+  from the prompt corpus (FR-20 corpus rules), with a system message. Each
+  request appends a randomly drawn phrasing instruction to the user message,
+  so a request never repeats a corpus entry verbatim.
 - Sampling parameters come from a closed profile mix that mirrors buyer
   traffic: greedy (`temperature: 0`), `temperature: 0.7` with `top_p: 0.95`,
   and `temperature: 1.0` with `top_p: 1.0`. `max_tokens` is drawn from
@@ -2127,9 +2131,9 @@ Money:
 - The verified provider is credited and settled exactly like any other paid
   request: same ledger row, same receipt, same SPEC-022 verification, same
   payout path. A verification request is paid work.
-- Verification accounts carry the reserved prefix `cip_`. They name catalog
-  models only, so they never feed unmatched-model intake, and buyer usage
-  statistics are recorded by the gateway, which they never pass through.
+- Verification accounts carry the reserved prefix `cip_`. Unmatched-model
+  intake ignores them, and buyer usage statistics are recorded by the
+  gateway, which they never pass through.
 
 Rate bounds:
 
@@ -2145,14 +2149,20 @@ Rate bounds:
   key (FR-21), so no provider work is spent on a request that cannot be scored.
 
 Prompt corpus: the coordinator reads prompts through a replaceable corpus
-interface. The first corpus is a checked-in rotating set of generic prompts
-(no buyer data). Each request draws a prompt uniformly at random. A corpus
-entry is a system message plus a user message, each at most 2 KiB.
+interface. A deployment configures a private, coordinator-only corpus file
+with `compute_integrity.scoring.corpus_path` and rotates it out of band. The
+checked-in generic corpus (no buyer data) is a fallback only: the repository
+is public, so a provider can read it, and the coordinator logs
+`compute_integrity_public_corpus` at startup while it is in use. Each request
+draws a prompt uniformly at random. A corpus entry is a system message plus a
+user message, each at most 2 KiB.
 
 Output capture: the coordinator keeps the response content (and any separate
 reasoning text) in memory only for scoring, then discards it. It MUST NOT
 persist or log prompts, outputs, or scorer token data. A response that is not
-a complete `stop` or `length` completion is `inconclusive:dispatch`.
+a complete `stop` or `length` completion, exceeds the FR-21 32 KiB output
+bound, or arrives after the verified session changed model, manifest hash or
+session is `inconclusive:dispatch`.
 
 ### FR-21 Teacher-forced scoring job (SPEC-036-R021)
 
@@ -2209,17 +2219,24 @@ Scoring:
   output is truncated to its first 512 tokens). Over-bound input returns
   `too_long` without running the model.
 - The job is deterministic for a given model, runtime and input. It is not a
-  buyer request: it is not billed, is not routed, and runs under the
-  runtime's serial inference permit.
+  buyer request: it is not billed and is not routed. It runs as one serial
+  request: it holds one slot of the runtime's serial inference permit, exactly
+  like a serial buyer request, and a provider runs at most one scoring job at
+  a time.
 - The scorer MUST NOT retain or log `body`, the output, or per-token data. It
   MAY log the score id, status, and token counts.
 - A scorer whose session, model, or manifest hash no longer matches the
   request answers `unavailable`.
 
-The coordinator rejects a result whose `provider_id`, `assigned_id`,
-`score_id`, `model_id` or manifest hash does not match the outstanding
-request, or that arrives after `expires_at` (default deadline 60 s).
-`scored_tokens` below 16 makes the measurement `inconclusive:short_output`.
+The coordinator treats scorer results as untrusted input. It rejects a
+result whose `provider_id`, `assigned_id`, `score_id`, `model_id` or manifest
+hash does not match the outstanding request, that arrives after `expires_at`
+(default deadline 60 s), that exceeds the FR-21 bounds (`prompt_tokens` above
+4,096, `scored_tokens` above 512, `top1_matches` above `scored_tokens`,
+`sum_logprob` above 0 or below −100 × `scored_tokens`), or that carries
+non-zero aggregates with a status other than `ok`. It logs only a closed
+category for a rejected result, never scorer-supplied text. `scored_tokens`
+below 16 makes the measurement `inconclusive:short_output`.
 
 ### FR-22 Agreement metrics and tolerance (SPEC-036-R022)
 
@@ -2276,14 +2293,17 @@ Each verification key is in exactly one state:
 
 Transitions:
 
-- `unverified` → `passing` after 3 consecutive in-band measurements.
+- `unverified` → `passing` with reason `in_band_streak` after 3 consecutive
+  in-band measurements.
 - `unverified` or `passing` → `suspect` on one out-of-band measurement. The
   **affected window** opens at the last in-band measurement before it (or at
   the first measurement for the key when there is none).
-- In `suspect`, each escalation request is scored by two scorers of different
-  operators when two exist. An escalation measurement is **out** when every
-  scorer that answered put it out of band, and **in** when every scorer put it
-  in band. Split answers count as neither and are recorded for FR-24.
+- In `suspect` and `recovering`, each escalation request is scored by two
+  scorers of different operators when two exist. A measurement counts only
+  when every selected scorer returned a valid answer; otherwise it is
+  inconclusive. An escalation measurement is **out** when every scorer put it
+  out of band, and **in** when every scorer put it in band. Split answers count
+  as neither and are recorded for FR-24.
 - `suspect` → `failed` when at least 3 of the last 5 escalation measurements
   are out and those outs were scored by at least 2 distinct scorer operators.
 - `suspect` → `passing` after 3 consecutive in escalation measurements.
@@ -2302,8 +2322,14 @@ Transitions:
 Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
 `short_output`, `scorer_invalid`) change no state.
 
-States persist across coordinator restarts. A reconnecting provider resumes
-its stored state for the model.
+A transition commits its SPEC-022 R-16 hold change and the new state in one
+database transaction, and only then publishes the routing suspension. If the
+commit fails, nothing changes and the next measurement or tick retries.
+
+States persist across coordinator restarts. A coordinator that cannot load
+them does not start, and it loads them even with the kill switch off, so a
+failed key stays out of routing. A reconnecting provider resumes its stored
+state for the model.
 
 ### FR-24 Scorer integrity (SPEC-036-R024)
 
@@ -2320,9 +2346,10 @@ its stored state for the model.
   up to 8 recent measurements that two scorers both scored in band with
   `mean_logprob` within 0.25 of each other. After every 25th scoring job the
   coordinator also sends one of these known sequences to a random eligible
-  scorer that did not score it originally. An answer more than 0.5 below the recorded `mean_logprob`, or
-  with `top1_rate` more than 0.1 below it, counts as a split answer for that
-  scorer.
+  scorer that did not score it originally. The cadence counts every scoring
+  job sent, answered or not. An answer more than 0.5 below the recorded
+  `mean_logprob`, or with `top1_rate` more than 0.1 below it, counts as a split
+  answer for that scorer.
 - A scorer that does not answer within the deadline counts as
   `scorer_timeout` and is not penalised beyond that.
 
@@ -2350,16 +2377,21 @@ Visibility:
   `POST /admin/compute-integrity/<provider_id>/clear-scorer` and
   `POST /admin/compute-integrity/holds/<hold_id>/release`, each with an
   `operator_id` and a reason, and each audit-logged.
-- Reasons are a closed set: `out_of_band_top1`, `out_of_band_logprob`,
-  `confirmed_failure`, `recovery_passed`, `escalation_passed`,
-  `escalation_inconclusive`, `operator_clear`, `cooldown_elapsed`.
+- Reasons are a closed set: `in_band_streak`, `out_of_band_top1`,
+  `out_of_band_logprob`, `confirmed_failure`, `recovery_passed`,
+  `escalation_passed`, `escalation_inconclusive`, `operator_clear`,
+  `cooldown_elapsed`.
+- The provider's view of a hold omits who released it and why; operators see
+  both. `operator_id` is an operator-asserted label (at most 64 characters of
+  `[A-Za-z0-9._@-]`) under the shared operator credential, as for SPEC-022
+  quarantine resolutions.
 - `next_step` is a closed set: `none`, `escalation_running`,
   `cooldown_until:<RFC 3339>`, `requalification_running`.
 
 Telemetry:
 
 - Counter `compute_integrity_verifications_total{outcome}` with outcome in
-  `in_band`, `out_of_band`, `inconclusive`.
+  `in_band`, `out_of_band`, `split`, `inconclusive`.
 - Counter `compute_integrity_inconclusive_total{reason}` with the FR-23
   inconclusive reasons.
 - Counter `compute_integrity_transitions_total{from,to}` over FR-23 states.

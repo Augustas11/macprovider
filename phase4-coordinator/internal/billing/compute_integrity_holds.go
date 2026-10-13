@@ -46,15 +46,17 @@ CREATE TABLE IF NOT EXISTS compute_integrity_earnings_holds (
     CHECK((status = 'held') = (released_at_utc IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_cieh_provider_model ON compute_integrity_earnings_holds(provider_id, model_id, status);
+CREATE INDEX IF NOT EXISTS idx_lrc_provider_model_ts ON ledger_request_credits(provider_id, model, ts_utc);
 `)
 	return err
 }
 
 // computeIntegrityHoldExclusionSQL is the SPEC-022 R-16.2 predicate over a
 // ledger_request_credits alias. The payable view and the weekly settlement
-// selection share it.
+// selection share it. A credit already settled into a payout is never
+// withheld (R-16.3), so a hold cannot invalidate or strand a payout.
 func computeIntegrityHoldExclusionSQL(alias string) string {
-	return `NOT EXISTS (
+	return `(` + alias + `.settled = 1 OR NOT EXISTS (
        SELECT 1
          FROM compute_integrity_earnings_holds cieh
         WHERE cieh.status = 'held'
@@ -62,7 +64,7 @@ func computeIntegrityHoldExclusionSQL(alias string) string {
           AND cieh.model_id = ` + alias + `.model
           AND ` + alias + `.ts_utc >= cieh.window_start_utc
           AND (cieh.window_end_utc IS NULL OR ` + alias + `.ts_utc <= cieh.window_end_utc)
-   )`
+   ))`
 }
 
 func computeIntegrityHoldCreditMatchSQL(row string) string {
@@ -92,7 +94,48 @@ END`},
 BEGIN
     ` + mark("OLD") + `
 END`},
+		// The hold predicate reads settled, which the credit triggers do not
+		// watch: a held credit whose settled flag changes changes the view,
+		// so bump its bucket when a held hold covers it.
+		{"trg_per_cieh_lrc_settled", `CREATE TRIGGER trg_per_cieh_lrc_settled AFTER UPDATE OF settled ON ledger_request_credits
+WHEN OLD.settled IS NOT NEW.settled AND EXISTS (
+    SELECT 1 FROM compute_integrity_earnings_holds cieh
+     WHERE cieh.status = 'held' AND cieh.provider_id = NEW.provider_id AND cieh.model_id = NEW.model
+       AND NEW.ts_utc >= cieh.window_start_utc
+       AND (cieh.window_end_utc IS NULL OR NEW.ts_utc <= cieh.window_end_utc))
+BEGIN
+    ` + earningsMarkBucketSQL("NEW.provider_id", "NEW.ts_utc") + `
+END`},
 	}
+}
+
+type holdExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// ApplyComputeIntegrityHoldAction applies one SPEC-036 FR-23 hold action
+// inside tx, so the hold and the verification state commit together. tx must
+// be on this store's database.
+func (s *Store) ApplyComputeIntegrityHoldAction(ctx context.Context, tx *sql.Tx, providerID, modelID string, action computeintegrity.HoldAction, reason string, now time.Time) error {
+	if s == nil || tx == nil {
+		return errors.New("compute-integrity hold: store and transaction are required")
+	}
+	switch action.Kind {
+	case computeintegrity.HoldActionNone:
+		return nil
+	case computeintegrity.HoldActionOpenFailure:
+		end := action.End
+		_, err := openComputeIntegrityHoldExec(ctx, tx, providerID, modelID, computeintegrity.HoldKindFailure, action.Start, &end, reason, now)
+		return err
+	case computeintegrity.HoldActionOpenRecovery:
+		_, err := openComputeIntegrityHoldExec(ctx, tx, providerID, modelID, computeintegrity.HoldKindRecovery, action.Start, nil, reason, now)
+		return err
+	case computeintegrity.HoldActionReleaseRecovery:
+		return closeComputeIntegrityRecoveryHoldExec(ctx, tx, providerID, modelID, action.End, true, now)
+	case computeintegrity.HoldActionCloseRecovery:
+		return closeComputeIntegrityRecoveryHoldExec(ctx, tx, providerID, modelID, action.End, false, now)
+	}
+	return fmt.Errorf("compute-integrity hold: unknown action %q", action.Kind)
 }
 
 // OpenComputeIntegrityHold creates a held hold. end nil leaves the window
@@ -101,6 +144,22 @@ func (s *Store) OpenComputeIntegrityHold(ctx context.Context, providerID, modelI
 	if s == nil {
 		return 0, errors.New("billing store is nil")
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	id, err := openComputeIntegrityHoldExec(ctx, tx, providerID, modelID, kind, start, end, reason, now)
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+// openComputeIntegrityHoldExec writes a held hold and raises the billing
+// compatibility floor to contract 5 in the same transaction, so no binary
+// that would pay held credits can open the database afterwards.
+func openComputeIntegrityHoldExec(ctx context.Context, db holdExecutor, providerID, modelID string, kind computeintegrity.HoldKind, start time.Time, end *time.Time, reason string, now time.Time) (int64, error) {
 	if providerID == "" || modelID == "" || start.IsZero() {
 		return 0, errors.New("compute-integrity hold: provider, model and window start are required")
 	}
@@ -114,7 +173,10 @@ func (s *Store) OpenComputeIntegrityHold(ctx context.Context, providerID, modelI
 		}
 		endText = sqliteTimeText(*end)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	if err := recordBillingCompatFloorExec(ctx, db, billingCompatContractComputeIntegrityHold); err != nil {
+		return 0, err
+	}
+	res, err := db.ExecContext(ctx, `
 INSERT INTO compute_integrity_earnings_holds (provider_id, model_id, kind, window_start_utc, window_end_utc, reason, status, created_at_utc)
 VALUES (?, ?, ?, ?, ?, ?, 'held', ?)`,
 		providerID, modelID, string(kind), sqliteTimeText(start), endText, reason, sqliteTimeText(now))
@@ -130,9 +192,13 @@ func (s *Store) CloseComputeIntegrityRecoveryHold(ctx context.Context, providerI
 	if s == nil {
 		return errors.New("billing store is nil")
 	}
+	return closeComputeIntegrityRecoveryHoldExec(ctx, s.db, providerID, modelID, end, release, now)
+}
+
+func closeComputeIntegrityRecoveryHoldExec(ctx context.Context, db holdExecutor, providerID, modelID string, end time.Time, release bool, now time.Time) error {
 	endText := sqliteTimeText(end)
 	if release {
-		_, err := s.db.ExecContext(ctx, `
+		_, err := db.ExecContext(ctx, `
 UPDATE compute_integrity_earnings_holds
    SET window_end_utc = MAX(?, window_start_utc), status = 'released', released_at_utc = ?,
        released_by = 'compute_integrity_recovery', release_reason = 'recovery_passed'
@@ -140,7 +206,7 @@ UPDATE compute_integrity_earnings_holds
 			endText, sqliteTimeText(now), providerID, modelID)
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 UPDATE compute_integrity_earnings_holds
    SET window_end_utc = MAX(?, window_start_utc)
  WHERE provider_id = ? AND model_id = ? AND kind = 'recovery' AND window_end_utc IS NULL AND status = 'held'`,

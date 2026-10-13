@@ -34,7 +34,7 @@ func TestComputeIntegrityProbeUsesOrdinaryPaidDispatch(t *testing.T) {
 	})
 	body := []byte(`{"model":"model-a","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Why is the sky blue?"}],"max_tokens":96,"temperature":0,"top_p":1,"stream":false}`)
 	for i := 0; i < 2; i++ {
-		got, err := h.server.DispatchComputeIntegrityProbe(h.ctx, "p1", body, 96)
+		got, err := h.server.DispatchComputeIntegrityProbe(h.ctx, "session-1", body, 96)
 		if err != nil {
 			t.Fatalf("probe %d: %v", i, err)
 		}
@@ -85,7 +85,7 @@ func TestComputeIntegrityProbeRejectsUnknownProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(h.ctx, 5*time.Second)
 	defer cancel()
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"max_tokens":96,"stream":false}`)
-	if _, err := h.server.DispatchComputeIntegrityProbe(ctx, "nobody", body, 96); err == nil {
-		t.Fatal("a probe pinned to a provider that is not connected must fail")
+	if _, err := h.server.DispatchComputeIntegrityProbe(ctx, "no-such-session", body, 96); err == nil {
+		t.Fatal("a probe pinned to a session that is not connected must fail")
 	}
 }

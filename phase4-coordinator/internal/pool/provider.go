@@ -795,6 +795,11 @@ func (p Provider) CapacityEligible() bool {
 // SlotQueueEligible reports a serving provider that may regain a seat while
 // buyers wait. A safety hold prevents routing, not waiting for recovery.
 func (p Provider) SlotQueueEligible() bool {
+	// SPEC-036 FR-25: a suspended model serves no buyer path, including the
+	// slot queue.
+	if p.ComputeIntegritySuspended {
+		return false
+	}
 	return p.ServingCapable() && p.SlotsTotal > 0 && (p.SlotsFree == 0 || p.capacitySafetyHold)
 }
 
