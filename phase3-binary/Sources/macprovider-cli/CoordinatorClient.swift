@@ -2646,6 +2646,11 @@ actor CoordinatorClient {
         switch type {
         case "hello_ack":
             try await acceptCoordinatorSession(dict, reason: "coordinator hello_ack received")
+            // SPEC-049-R031 item 12: offer a staged identity key once the
+            // session is accepted. Best effort; a revoked session never asks.
+            if coordinatorRevocationNotice == nil {
+                try? await sendPrivacyKeyRotationRequestIfDue()
+            }
         case "ownership_event":
             try await handleOwnershipEvent(dict)
         case "ownership_status":
@@ -2695,6 +2700,10 @@ actor CoordinatorClient {
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         case "se_liveness_challenge":
             try await handleSELivenessChallenge(dict)
+        case "privacy_key_rotation_challenge":
+            try await handlePrivacyKeyRotationChallenge(dict)
+        case "privacy_key_rotation_result":
+            try await handlePrivacyKeyRotationResult(dict)
         case "privacy_posture_challenge":
             try await handlePrivacyPostureChallenge(dict)
         case "native_mtp_canary_request_v1":
@@ -7279,6 +7288,7 @@ actor CoordinatorClient {
             payload["status"] = ProviderHealthState.unavailable.rawValue
         }
         try await send(payload)
+        try await sendPrivacyKeyRotationRequestIfDue()
     }
 
     /// Test seam: runs inside sendHeartbeat after the payload is built and
@@ -8035,6 +8045,55 @@ actor CoordinatorClient {
         }
         guard let response else { return }
         try await send(response)
+        try await sendPrivacyKeyRotationRequestIfDue()
+    }
+
+    /// SPEC-049-R031: offers a staged identity key after session accept, a
+    /// posture, or a heartbeat, at most once per rotation interval, until a
+    /// rotation is promoted. A coordinator without rotation ignores it.
+    private func sendPrivacyKeyRotationRequestIfDue() async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder, coordinatorSessionAccepted,
+              let request = privacyPostureResponder.rotationRequest() else {
+            return
+        }
+        try await send(request)
+    }
+
+    private func handlePrivacyKeyRotationChallenge(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder,
+              coordinatorSessionAccepted,
+              let assigned = acceptedAssignedProviderID,
+              !assigned.isEmpty else {
+            return
+        }
+        let message: [String: Any]?
+        do {
+            message = try privacyPostureResponder.respondToRotation(challenge: dict, assignedSession: assigned)
+        } catch {
+            return
+        }
+        guard let message else { return }
+        try await send(message)
+    }
+
+    private func handlePrivacyKeyRotationResult(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder else { return }
+        let promoted: Bool
+        do {
+            promoted = try privacyPostureResponder.applyRotationResult(dict)
+        } catch {
+            FileHandle.standardError.write(Data("privacy_class identity_rotation_failed\n".utf8))
+            return
+        }
+        let reason = (dict["reason"] as? String).map { String($0.filter { $0.isASCII && ($0.isLetter || $0 == "_") }.prefix(48)) } ?? ""
+        guard promoted else {
+            FileHandle.standardError.write(Data("privacy_class identity_rotation_not_accepted reason=\(reason)\n".utf8))
+            return
+        }
+        FileHandle.standardError.write(Data("privacy_class identity_rotated\n".utf8))
+        // Re-advertise under the new identity now; the coordinator challenges
+        // the changed key set immediately (SPEC-049-R005).
+        try await sendHeartbeatBounded(resetWindow: false)
     }
 
     /// Runs the injected refresher at most once per minimum interval and stages

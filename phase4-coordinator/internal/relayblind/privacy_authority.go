@@ -77,7 +77,26 @@ type PrivacyMetrics interface {
 	SetPrivacyReleaseIdentityVersions(versions []string)
 }
 
+// PrivacyRouteMetrics is optionally implemented by PrivacyMetrics to count
+// SPEC-049-R030 request-level routing rejections by closed phase and reason.
+type PrivacyRouteMetrics interface {
+	IncPrivacyRouteRejection(phase, reason string)
+}
+
 type privacyMetricsRef struct{ m PrivacyMetrics }
+
+// ObserveRouteRejection counts one request-level privacy routing rejection.
+// phase and reason are normalized to their closed sets first.
+func (a *PrivacyAuthority) ObserveRouteRejection(phase, reason string) {
+	if a == nil {
+		return
+	}
+	route, ok := a.observer().(PrivacyRouteMetrics)
+	if !ok || !PrivacyRejectPhaseKnown(phase) {
+		return
+	}
+	route.IncPrivacyRouteRejection(phase, NormalizePrivacyRejectReason(reason))
+}
 
 // UseMetrics wires m and publishes the release-derived versions loaded so far.
 func (a *PrivacyAuthority) UseMetrics(m PrivacyMetrics) {
@@ -143,6 +162,19 @@ type privacySession struct {
 	hasNonce     bool
 	attestations map[string]string
 	claim        *PrivacyEnrollmentClaim
+	// advertReject is the SPEC-049-R030 reason the session's last key
+	// advertisement was refused for, empty after an accepted one.
+	advertReject string
+	// SPEC-049-R031 rotation state: the outstanding single-use rotation
+	// nonce, the last time one was issued, and the identity key a rotation
+	// accepted on this session retired.
+	rotationNonce         string
+	rotationIssued        int64
+	hasRotationNonce      bool
+	lastRotationChallenge time.Time
+	retiredIdentity       ed25519.PublicKey
+	rotationSeq           uint64
+	hasRotationSeq        bool
 }
 
 type postureSnapshot struct {
@@ -156,6 +188,9 @@ type postureSnapshot struct {
 	attestations map[string]string
 	claim        *PrivacyEnrollmentClaim
 	issuedAt     int64
+	// rotation only: the session's sequence now, beside seq at nonce issue.
+	currentSeq    uint64
+	hasCurrentSeq bool
 }
 
 func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPins map[string]string, maxRecords int, replayRetention time.Duration) (*PrivacyAuthority, error) {
@@ -323,6 +358,14 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 	if a == nil || a.store == nil {
 		return ErrStoreUnavailable
 	}
+	err := a.acceptPrivacyKeysWithClaim(ctx, providerID, session, recs, claim, now)
+	if providerID != "" && session != "" {
+		a.noteAdvertisement(privacySessionID{providerID: providerID, session: session}, advertisementRejectReason(err))
+	}
+	return err
+}
+
+func (a *PrivacyAuthority) acceptPrivacyKeysWithClaim(ctx context.Context, providerID, session string, recs []PrivacyKeyRecord, claim *PrivacyEnrollmentClaim, now time.Time) error {
 	ctx = privacyCtx(ctx)
 	id := privacySessionID{providerID: providerID, session: session}
 	if len(recs) == 0 {
@@ -349,6 +392,10 @@ func (a *PrivacyAuthority) AcceptPrivacyKeysWithClaim(ctx context.Context, provi
 	}
 	if changed {
 		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
+	}
+	if keys.retiredClaim {
+		a.forgetAdvertisement(id)
+		return a.reject(privacyKeyRotationPendingReason)
 	}
 	// Before enrollment the claim is this session's only key source, so it
 	// must not change mid-session: records verified under an earlier claim
@@ -443,6 +490,9 @@ type resolvedPrivacyKeys struct {
 	identityPinned bool
 	sePinned       bool
 	enrolled       bool
+	// retiredClaim is a claim naming the identity key an accepted rotation
+	// retired (SPEC-049-R031 item 7): refused without quarantine.
+	retiredClaim bool
 }
 
 // needsEnrollment is SPEC-049-R025: no active enrollment and at least one key
@@ -474,12 +524,16 @@ func (a *PrivacyAuthority) resolveKeys(ctx context.Context, providerID string, c
 		keys.enrolled = true
 		changed := false
 		if claim != nil {
-			if !keys.identityPinned && claim.IdentityPublicKey != enrollment.IdentityPublicKey {
-				changed = true
+			identityChanged := !keys.identityPinned && claim.IdentityPublicKey != enrollment.IdentityPublicKey
+			seChanged := !keys.sePinned && claim.SEPublicKey != enrollment.SEPublicKey
+			if identityChanged && !seChanged && enrollment.PreviousIdentityFingerprint != "" {
+				if decoded, err := decodeBase64URLFixed(claim.IdentityPublicKey, ed25519.PublicKeySize); err == nil &&
+					PublicKeyFingerprint(decoded) == enrollment.PreviousIdentityFingerprint {
+					keys.retiredClaim = true
+					identityChanged = false
+				}
 			}
-			if !keys.sePinned && claim.SEPublicKey != enrollment.SEPublicKey {
-				changed = true
-			}
+			changed = identityChanged || seChanged
 		}
 		if !keys.identityPinned {
 			decoded, err := decodeBase64URLFixed(enrollment.IdentityPublicKey, ed25519.PublicKeySize)
@@ -600,11 +654,21 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if changed {
 		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
 	}
+	if keys.retiredClaim {
+		a.NoteChallengeTimeout(providerID, session)
+		return a.reject(privacyKeyRotationPendingReason)
+	}
 	sePin, idPub := keys.se, keys.identity
 	if sePin == nil || idPub == nil {
 		return a.reject("posture_pin_missing")
 	}
 	if !verifySEPosture(sePin, framing, response.SESignature) || !verifyIdentityPosture(idPub, framing, response.IdentitySignature) {
+		// SPEC-049-R031 item 7: a posture this session signed with the key a
+		// rotation just retired is refused, not quarantined.
+		if retired := a.retiredIdentity(id); retired != nil && verifySEPosture(sePin, framing, response.SESignature) && verifyIdentityPosture(retired, framing, response.IdentitySignature) {
+			a.NoteChallengeTimeout(providerID, session)
+			return a.reject(privacyKeyRotationPendingReason)
+		}
 		return a.failQuarantine(ctx, providerID, now, "posture_signature_failure")
 	}
 	// A consumed challenge that fails without quarantine also clears the
@@ -699,60 +763,101 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 }
 
 func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now time.Time) (time.Time, bool) {
-	verifiedAt, reason := a.EligibilityReason(providerID, session, keyDigest, now)
+	verifiedAt, reason := a.eligibilityReason(providerID, session, keyDigest, now, false)
 	return verifiedAt, reason == ""
 }
 
 // EligibilityReason evaluates the same fail-closed gate and returns only a
-// fixed diagnostic category. No provider identity, key, or request data is
-// included; callers must not expose the category as buyer trust metadata.
+// SPEC-049-R030 reason. No provider identity, key, or request data is
+// included; callers must not expose the reason to the buyer.
 func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
-	if a == nil || a.store == nil || keyDigest == "" {
-		return time.Time{}, "authority_or_key_unavailable"
+	return a.eligibilityReason(providerID, session, keyDigest, now, true)
+}
+
+// QuickEligibilityReason is EligibilityReason without the store lookup that
+// splits an unverified session: it reports posture_unverified for both.
+// Selection uses it per candidate and explains once with UnverifiedReason.
+func (a *PrivacyAuthority) QuickEligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
+	return a.eligibilityReason(providerID, session, keyDigest, now, false)
+}
+
+// eligibilityReason is the gate. explain adds the store lookup that splits an
+// unverified session into not enrolled and posture unverified.
+func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest string, now time.Time, explain bool) (time.Time, string) {
+	if a == nil || a.store == nil {
+		return time.Time{}, PrivacyRejectClassNotConfigured
+	}
+	if keyDigest == "" {
+		return time.Time{}, PrivacyRejectKeyNotInPosture
 	}
 	id := privacySessionID{providerID: providerID, session: session}
 	a.mu.Lock()
 	entry := a.sessions[id]
 	if entry == nil || !entry.verified {
 		a.mu.Unlock()
-		return time.Time{}, "posture_unverified"
+		if !explain {
+			return time.Time{}, PrivacyRejectPostureUnverified
+		}
+		return time.Time{}, a.UnverifiedReason(providerID)
 	}
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
 	_, listed := entry.digests[keyDigest]
 	a.mu.Unlock()
 	if !listed {
-		return time.Time{}, "key_not_in_posture"
+		return time.Time{}, PrivacyRejectKeyNotInPosture
 	}
 	if now.Sub(verifiedAt) > time.Duration(a.maxAge)*time.Second {
-		return time.Time{}, "posture_expired"
+		return time.Time{}, PrivacyRejectPostureExpired
 	}
 	if !a.identityMatches(teamID, signingID, cdhash, binary, now) {
-		return time.Time{}, "code_identity_unapproved"
+		return time.Time{}, PrivacyRejectCodeIdentityUnapproved
 	}
 	ctx := context.Background()
 	disabled, err := a.store.PrivacyDisabled(ctx)
 	if err != nil {
-		return time.Time{}, "kill_switch_store_error"
+		return time.Time{}, PrivacyRejectStoreUnavailable
 	}
 	if disabled {
-		return time.Time{}, "kill_switch_disabled"
+		return time.Time{}, PrivacyRejectKillSwitch
 	}
 	quarantined, err := a.isQuarantined(ctx, providerID, now)
 	if err != nil {
-		return time.Time{}, "quarantine_store_error"
+		return time.Time{}, PrivacyRejectStoreUnavailable
 	}
 	if quarantined {
-		return time.Time{}, "provider_quarantined"
+		return time.Time{}, PrivacyRejectProviderQuarantined
 	}
 	fresh, err := a.store.PrivacyKeyFresh(ctx, providerID, session, keyDigest, now)
 	if err != nil {
-		return time.Time{}, "key_freshness_store_error"
+		return time.Time{}, PrivacyRejectStoreUnavailable
 	}
 	if !fresh {
-		return time.Time{}, "key_stale_or_revoked"
+		return time.Time{}, PrivacyRejectKeyStaleOrRevoked
 	}
 	return verifiedAt, ""
+}
+
+// UnverifiedReason splits a session without a verified posture into a
+// provider whose keys do not resolve yet (no pins and no enrollment) and an
+// enrolled one whose posture is missing or was cleared.
+func (a *PrivacyAuthority) UnverifiedReason(providerID string) string {
+	if a == nil || a.store == nil {
+		return PrivacyRejectClassNotConfigured
+	}
+	_, identityPinned := a.identity[providerID]
+	_, sePinned := a.sePins[providerID]
+	if identityPinned && sePinned {
+		return PrivacyRejectPostureUnverified
+	}
+	_, enrolled, err := a.store.ActivePrivacyEnrollment(context.Background(), providerID)
+	switch {
+	case err != nil:
+		return PrivacyRejectStoreUnavailable
+	case !enrolled:
+		return PrivacyRejectProviderNotEnrolled
+	}
+	return PrivacyRejectPostureUnverified
 }
 
 func (a *PrivacyAuthority) identityMatches(teamID, signingID, cdhash, binary string, now time.Time) bool {
@@ -891,7 +996,7 @@ func (a *PrivacyAuthority) failQuarantine(ctx context.Context, providerID string
 	if err := a.recordQuarantine(ctx, providerID, now, reason); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: %s", ErrPrivacyQuarantined, reason)
+	return &privacyRejection{base: ErrPrivacyQuarantined, reason: reason}
 }
 
 func (a *PrivacyAuthority) recordQuarantine(ctx context.Context, providerID string, now time.Time, reason string) error {
@@ -1053,6 +1158,15 @@ func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapsh
 	return true
 }
 
+func (a *PrivacyAuthority) retiredIdentity(id privacySessionID) ed25519.PublicKey {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if entry := a.sessions[id]; entry != nil && len(entry.retiredIdentity) == ed25519.PublicKeySize {
+		return entry.retiredIdentity
+	}
+	return nil
+}
+
 func (a *PrivacyAuthority) verifiedCDHash(id privacySessionID) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1087,6 +1201,34 @@ func (a *PrivacyAuthority) storeAdvertisement(id privacySessionID, attestations 
 	} else {
 		entry.claim = nil
 	}
+}
+
+// noteAdvertisement records the routing reason of the session's last key
+// advertisement. It never creates state for an accepted advertisement.
+func (a *PrivacyAuthority) noteAdvertisement(id privacySessionID, reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if reason == "" {
+		if entry := a.sessions[id]; entry != nil {
+			entry.advertReject = ""
+		}
+		return
+	}
+	a.ensureLocked(id).advertReject = reason
+}
+
+// AdvertisementRejection returns the SPEC-049-R030 reason the session's last
+// privacy key advertisement was refused for, or "" when none was refused.
+func (a *PrivacyAuthority) AdvertisementRejection(providerID, session string) string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if entry := a.sessions[privacySessionID{providerID: providerID, session: session}]; entry != nil {
+		return entry.advertReject
+	}
+	return ""
 }
 
 func (a *PrivacyAuthority) forgetAdvertisement(id privacySessionID) {
@@ -1190,7 +1332,47 @@ func verifyIdentityPosture(publicKey ed25519.PublicKey, framing []byte, signatur
 }
 
 func privacyReject(reason string) error {
-	return fmt.Errorf("%w: %s", ErrPrivacyRejected, reason)
+	return &privacyRejection{base: ErrPrivacyRejected, reason: reason}
+}
+
+// privacyRejection is a rejection or quarantine with its fixed reason code.
+// Error() keeps the "<sentinel>: <reason>" form.
+type privacyRejection struct {
+	base   error
+	reason string
+}
+
+func (e *privacyRejection) Error() string { return e.base.Error() + ": " + e.reason }
+func (e *privacyRejection) Unwrap() error { return e.base }
+
+// advertisementRejectReason maps a key advertisement failure to the
+// SPEC-049-R030 routing reason it leaves behind for selection.
+func advertisementRejectReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ErrPrivacyQuarantined) {
+		return PrivacyRejectProviderQuarantined
+	}
+	var rejection *privacyRejection
+	if errors.As(err, &rejection) {
+		switch rejection.reason {
+		case "posture_unapproved_code_identity":
+			return PrivacyRejectCodeIdentityUnapproved
+		case "privacy_enrollment_claim_changed", "privacy_enrollment_key_in_use", "privacy_key_rotation_pending":
+			return PrivacyRejectProviderNotEnrolled
+		}
+		return PrivacyRejectOther
+	}
+	switch {
+	case errors.Is(err, ErrStoreUnavailable):
+		return PrivacyRejectStoreUnavailable
+	case errors.Is(err, ErrInvalidPin):
+		return PrivacyRejectProviderNotEnrolled
+	case errors.Is(err, ErrCapacity), errors.Is(err, ErrKeyRevoked), errors.Is(err, ErrReservationMismatch):
+		return PrivacyRejectOther
+	}
+	return PrivacyRejectKeyAttestationMismatch
 }
 
 func privacyCtx(ctx context.Context) context.Context {

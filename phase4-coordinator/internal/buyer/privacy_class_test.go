@@ -60,7 +60,7 @@ func TestPrivacyGateLogsBoundedReasonsWithoutIdentifiers(t *testing.T) {
 			var logs bytes.Buffer
 			h.server.log = zerolog.New(&logs)
 			tc.mutate(t, h)
-			_, code := h.server.privacyGate(context.Background(), h.provider, h.privacyKey.KeyRecordDigest)
+			_, code, _ := h.server.privacyGate(context.Background(), h.provider, h.privacyKey.KeyRecordDigest)
 			if code != tc.code {
 				t.Fatalf("code=%q want=%q", code, tc.code)
 			}
@@ -109,6 +109,7 @@ type privacyHarness struct {
 	provider       pool.Provider
 	admission      *providerws.AdmissionManager
 	requestLog     *requestlog.Store
+	identity       ed25519.PrivateKey
 }
 
 type privacyHarnessConfig struct {
@@ -148,7 +149,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	seRaw := make([]byte, 64)
 	seKey.X.FillBytes(seRaw[:32])
 	seKey.Y.FillBytes(seRaw[32:])
-	h := &privacyHarness{store: store, clock: clock}
+	h := &privacyHarness{store: store, clock: clock, identity: identityPrivate}
 	if cfg.privacyKey || cfg.privacyEnabled {
 		if cfg.privacyKey {
 			h.privacyPrivate, h.privacyKey = privacyTestKey(t, identityPrivate, now)

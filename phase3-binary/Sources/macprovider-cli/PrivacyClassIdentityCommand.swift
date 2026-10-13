@@ -6,8 +6,54 @@ struct PrivacyClassCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "privacy-class",
         abstract: "Inspect the operator-constrained privacy class identity.",
-        subcommands: [PrivacyClassIdentityCommand.self]
+        subcommands: [PrivacyClassIdentityCommand.self, PrivacyClassRotateIdentityCommand.self]
     )
+}
+
+/// SPEC-049-R031: stages a new relay-blind identity key beside the enrolled
+/// one. The running provider offers it to the coordinator in a signed
+/// rotation and switches only after the coordinator accepts it.
+struct PrivacyClassRotateIdentityCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rotate-identity",
+        abstract: "Stage a new relay-blind identity key for in-band rotation. Prints public keys only."
+    )
+
+    @Option(name: .customLong("state-dir"), help: "Absolute relay-blind state directory. Defaults to relay_blind_state_directory from config, else the automatic-mode default.")
+    var stateDir: String?
+
+    @Option(name: .customLong("config"), help: "YAML config path. Used when --state-dir is omitted.")
+    var config: String?
+
+    func run() throws {
+        let directory: String
+        if let stateDir {
+            directory = stateDir
+        } else {
+            guard let loaded = try? ConfigLoader.load(cli: CLIOverrides(configPath: config)) else {
+                try Self.fail("config_invalid")
+            }
+            directory = PrivacyAutoEnrollment.withStateDirectory(loaded).relayBlindStateDirectory ?? ""
+        }
+        let trimmed = directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 1, trimmed.hasPrefix("/") else { try Self.fail("state_directory_missing") }
+        let keys: (current: String, next: String)
+        do {
+            keys = try RelayBlindKeyManager.stageNextIdentity(directory: URL(fileURLWithPath: trimmed, isDirectory: true))
+        } catch {
+            try Self.fail("relay_blind_identity")
+        }
+        FileHandle.standardOutput.write(try PrivacyClassIdentityReport.encode([
+            "relay_blind_identity_public_key": keys.current,
+            "staged_relay_blind_identity_public_key": keys.next,
+        ]))
+    }
+
+    private static func fail(_ reason: String) throws -> Never {
+        FileHandle.standardError.write(Data("FATAL privacy_class_rotate_identity_failed reason=\(reason)\n".utf8))
+        try? FileHandle.standardError.synchronize()
+        throw ExitCode(1)
+    }
 }
 
 struct PrivacyClassIdentityCommand: ParsableCommand {

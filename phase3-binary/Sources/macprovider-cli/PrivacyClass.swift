@@ -13,6 +13,10 @@ enum PrivacyClassConstants {
     static let keyAttestationVersion = "privacy-key-attestation-v1"
     static let enrollmentVersion = "privacy-enrollment-v1"
     static let keyAttestationDomain = "macprovider/spec049/key-attestation/v1"
+    static let keyRotationVersion = "privacy-key-rotation-v1"
+    static let keyRotationDomain = "macprovider/spec049/key-rotation/v1"
+    /// SPEC-049 §4.12 cap on one encoded `privacy_key_rotation` message.
+    static let maxKeyRotationBytes = 16384
     static let responseKeyLabel = "macprovider/spec049/response/aead/v1"
     static let responseNoncePrefixLabel = "macprovider/spec049/response/nonce-prefix/v1"
     static let frameObject = "macprovider.privacy_frame"
@@ -251,6 +255,75 @@ struct PrivacyPostureStatement: Sendable, Equatable {
               visiblePrivacyASCII(signingIdentifier, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
               seKeyBackend == PrivacyClassConstants.seBackendFile || seKeyBackend == PrivacyClassConstants.seBackendKeychain,
               validPrivacyDigestSet(privacyKeyRecordDigests) else {
+            throw PrivacyClassError.invalidMaterial
+        }
+    }
+}
+
+extension PrivacyPostureStatement {
+    /// SPEC-049 §4.12 `posture_digest`: base64url SHA-256 of the posture framing.
+    func digest() throws -> String {
+        RelayBlindBase64URL.encode(Data(SHA256.hash(data: try framing())))
+    }
+}
+
+/// SPEC-049 §4.12 `privacy-key-rotation-v1` statement. The enrolled Secure
+/// Enclave key, the enrolled identity key, and the new identity key each sign
+/// its framing; the framing binds the full posture through `postureDigest`.
+struct PrivacyKeyRotationStatement: Sendable, Equatable {
+    let version: String
+    let privacyClass: String
+    let providerID: String
+    let assignedSession: String
+    let nonce: String
+    let issuedAtUnix: Int64
+    let previousIdentityPublicKey: String
+    let identityPublicKey: String
+    let sePublicKey: String
+    let postureDigest: String
+
+    var wireObject: [String: Any] {
+        [
+            "version": version,
+            "privacy_class": privacyClass,
+            "provider_id": providerID,
+            "assigned_session": assignedSession,
+            "nonce": nonce,
+            "issued_at_unix": issuedAtUnix,
+            "previous_identity_public_key": previousIdentityPublicKey,
+            "identity_public_key": identityPublicKey,
+            "se_public_key": sePublicKey,
+            "posture_digest": postureDigest,
+        ]
+    }
+
+    func framing() throws -> Data {
+        try validate()
+        let nonceBytes = try decodePrivacyFixed(nonce, count: 32)
+        var framed = Data()
+        for value in [PrivacyClassConstants.keyRotationDomain, version, privacyClass, providerID, assignedSession] {
+            framed.appendFramed(Data(value.utf8))
+        }
+        framed.appendFramed(nonceBytes)
+        framed.appendSigned64(issuedAtUnix)
+        for value in [previousIdentityPublicKey, identityPublicKey, sePublicKey, postureDigest] {
+            framed.appendFramed(Data(value.utf8))
+        }
+        return framed
+    }
+
+    private func validate() throws {
+        guard version == PrivacyClassConstants.keyRotationVersion,
+              privacyClass == PrivacyClassConstants.v1,
+              visiblePrivacyASCII(providerID, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
+              visiblePrivacyASCII(assignedSession, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
+              (try? decodePrivacyFixed(nonce, count: 32)) != nil,
+              (try? decodePrivacyFixed(previousIdentityPublicKey, count: 32)) != nil,
+              (try? decodePrivacyFixed(identityPublicKey, count: 32)) != nil,
+              previousIdentityPublicKey != identityPublicKey,
+              Data(base64Encoded: sePublicKey)?.count == 64,
+              Data(base64Encoded: sePublicKey)?.base64EncodedString() == sePublicKey,
+              (try? decodePrivacyFixed(postureDigest, count: 32)) != nil else {
             throw PrivacyClassError.invalidMaterial
         }
     }
