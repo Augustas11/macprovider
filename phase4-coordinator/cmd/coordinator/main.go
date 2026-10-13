@@ -2059,7 +2059,7 @@ type settlementReceiptAuditOutboxDrainerConfig struct {
 	CatchupBatches      int
 	PruneLimit          int
 	PruneMaxBatches     int
-	PruneTimeout        time.Duration
+	PruneTimeout        time.Duration // wall-clock budget for one tick's prune batches
 	PruneBatchPause     time.Duration
 	DrainInterval       time.Duration
 	MaintenanceInterval time.Duration
@@ -2186,7 +2186,7 @@ func defaultSettlementReceiptAuditOutboxDrainerConfig() settlementReceiptAuditOu
 		// 20 batches of 500 every 30s is about 330 rows/s, well above the
 		// receipt-event arrival rate the drain is paced for.
 		PruneMaxBatches:     20,
-		PruneTimeout:        2 * time.Second,
+		PruneTimeout:        time.Second,
 		PruneBatchPause:     10 * time.Millisecond,
 		DrainInterval:       250 * time.Millisecond,
 		MaintenanceInterval: 30 * time.Second,
@@ -2733,8 +2733,13 @@ func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, sto
 		// keeps up with the drain rate at the 24h window.
 		if drainedRetention > 0 {
 			cutoff := time.Now().UTC().Add(-drainedRetention)
+			// A wall-clock budget bounds how long one tick holds up delivery.
+			budgetEnd := time.Now().Add(pruneTimeout)
 			var total int64
 			for batch := 0; batch < pruneMaxBatches; batch++ {
+				if batch > 0 && !time.Now().Before(budgetEnd) {
+					break
+				}
 				if batch > 0 {
 					select {
 					case <-runCtx.Done():
@@ -2744,7 +2749,7 @@ func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, sto
 				if runCtx.Err() != nil {
 					break
 				}
-				pruneCtx, cancel := context.WithTimeout(runCtx, pruneTimeout)
+				pruneCtx, cancel := context.WithTimeout(runCtx, cfg.DrainTimeout)
 				pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, cfg.PruneLimit)
 				cancel()
 				total += pruned

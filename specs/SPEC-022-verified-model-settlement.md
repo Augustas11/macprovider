@@ -2153,15 +2153,17 @@ holds:
    `settlement_receipt_audit_outbox` row. Such a row that is not poisoned
    MAY be deleted once
    `storage.settlement_receipt_audit_outbox_drained_retention_hours`
-   (default 24, minimum 1) have passed since its `drained_at_utc`. This key
+   (default 24, minimum 1, at most 24 times `audit_log_retention_days`)
+   have passed since its `drained_at_utc`. This key
    is separate from `storage.audit_log_retention_days`, which governs the
    audit database. A poisoned or undelivered row MUST NOT be deleted by this
-   rule. Each prune run deletes bounded batches until a batch comes back
-   short, so pruning keeps pace with delivery.
+   rule. Each prune run deletes bounded batches, within a short time
+   budget, until a batch comes back short, so pruning keeps pace with
+   delivery.
 2. Mirrored route-snapshot journal rows. A journal row MAY be deleted once
    its `mirrored_at_utc` is at least
    `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60,
-   minimum 1) old, and only while the primary `settlement_route_snapshots`
+   minimum 1, at most 10080) old, and only while the primary `settlement_route_snapshots`
    row of the same attempt has the same `route_snapshot_digest`,
    `route_snapshot_json`, compute-integrity capture columns, and
    `relay_blind_provider_binding_digest`, and that digest is the SHA-256 of
