@@ -3,6 +3,7 @@ package router
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -54,6 +55,24 @@ func (m *privacyRejectMetrics) prometheus() string {
 	}
 	m.mu.Unlock()
 	return b.String()
+}
+
+// privacyMetricsAllowed limits the SPEC-049-R030 privacy reject counters on
+// /metrics to a direct loopback scraper or the operator bearer. A request
+// relayed by a proxy (forwarding headers present) is not loopback.
+func (s *Server) privacyMetricsAllowed(r *http.Request) bool {
+	if operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey) {
+		return true
+	}
+	if r.Header.Get("X-Real-IP") != "" || r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("Forwarded") != "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 // upstreamPrivacyRejectReason reads the coordinator's internal reason

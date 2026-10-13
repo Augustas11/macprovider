@@ -26,7 +26,14 @@ var (
 	// ErrEnrollmentKeyReused means a rotation names an identity key that has
 	// appeared in an enrollment before (SPEC-049-R031).
 	ErrEnrollmentKeyReused = errors.New("relayblind: privacy identity key was enrolled before")
+	// ErrRotationTooSoon means the active enrollment is younger than
+	// MinRotationInterval (SPEC-049-R031 item 11).
+	ErrRotationTooSoon = errors.New("relayblind: privacy identity rotated too recently")
 )
+
+// MinRotationInterval is the minimum age of the active enrollment before an
+// identity key rotation may replace it (SPEC-049-R031 item 11).
+const MinRotationInterval = 24 * time.Hour
 
 // PrivacyKeyRotatedTerminalCode marks a held privacy reservation rejected by
 // an accepted identity key rotation (SPEC-049-R031). The buyer sees the
@@ -170,8 +177,11 @@ func (s *Store) enrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment, 
 	case !errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
+	// An identity key that any other provider has ever enrolled, active or
+	// revoked, is never enrolled again; a Secure Enclave key is refused while
+	// active for another provider.
 	var inUse int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM privacy_class_enrollment WHERE revoked_at_unix IS NULL AND provider_id<>? AND (identity_fingerprint=? OR se_fingerprint=?)`, e.ProviderID, e.IdentityFingerprint, e.SEFingerprint).Scan(&inUse); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM privacy_class_enrollment WHERE provider_id<>? AND (identity_fingerprint=? OR (revoked_at_unix IS NULL AND se_fingerprint=?))`, e.ProviderID, e.IdentityFingerprint, e.SEFingerprint).Scan(&inUse); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	if inUse > 0 {
@@ -185,19 +195,6 @@ func (s *Store) enrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment, 
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	return nil
-}
-
-// IdentityKeyEnrolledBefore reports whether identityFingerprint appears in any
-// enrollment row, active or revoked, of any provider.
-func (s *Store) IdentityKeyEnrolledBefore(ctx context.Context, identityFingerprint string) (bool, error) {
-	if s == nil || s.db == nil {
-		return false, ErrStoreUnavailable
-	}
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM privacy_class_enrollment WHERE identity_fingerprint=?`, identityFingerprint).Scan(&count); err != nil {
-		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
-	}
-	return count > 0, nil
 }
 
 // RotatePrivacyIdentity is the SPEC-049-R031 atomic swap. In one transaction
@@ -229,6 +226,9 @@ func (s *Store) RotatePrivacyIdentity(ctx context.Context, previous, next Privac
 	}
 	if active.IdentityPublicKey != previous.IdentityPublicKey || active.SEPublicKey != previous.SEPublicKey {
 		return ErrEnrollmentKeyChanged
+	}
+	if now.Unix()-active.EnrolledAtUnix < int64(MinRotationInterval/time.Second) {
+		return ErrRotationTooSoon
 	}
 	var quarantinedUntil int64
 	err = tx.QueryRowContext(ctx, `SELECT expires_at_unix FROM privacy_class_quarantine WHERE provider_id=?`, previous.ProviderID).Scan(&quarantinedUntil)

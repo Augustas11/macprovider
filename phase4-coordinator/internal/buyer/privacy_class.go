@@ -137,6 +137,13 @@ func privacyObservedCode(code string, beforeConsume bool) string {
 // does not select a different provider. It returns the verification time, the
 // §4.9 code, and the SPEC-049-R030 reason of a failure.
 func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest string) (time.Time, string, string) {
+	return s.privacyGateExplain(ctx, provider, keyDigest, true)
+}
+
+// privacyGateExplain is privacyGate; explain false skips the store lookup
+// that splits an unverified posture into not enrolled, for per-candidate
+// selection, which explains once after it fails.
+func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider, keyDigest string, explain bool) (time.Time, string, string) {
 	reject := func(reason, code string) (time.Time, string, string) {
 		s.logPrivacyGateRejection(reason)
 		return time.Time{}, code, reason
@@ -163,7 +170,11 @@ func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDig
 	if quarantined {
 		return reject(relayblind.PrivacyRejectProviderQuarantined, privacyClassUnavailable)
 	}
-	verifiedAt, reason := s.privacyAuthority.EligibilityReason(current.ProviderID, current.AssignedID, keyDigest, s.now())
+	eligibility := s.privacyAuthority.QuickEligibilityReason
+	if explain {
+		eligibility = s.privacyAuthority.EligibilityReason
+	}
+	verifiedAt, reason := eligibility(current.ProviderID, current.AssignedID, keyDigest, s.now())
 	if reason != "" {
 		return reject(reason, privacyClassUnavailable)
 	}
@@ -196,6 +207,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	var providers []pool.Provider
 	var selections []privacySelection
 	var keyless []pool.Provider
+	var unverified []string
 	closest := relayblind.PrivacyRejectModelNotServed
 	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
@@ -214,8 +226,11 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 			continue
 		}
 		for _, record := range records {
-			verifiedAt, code, reason := s.privacyGate(ctx, provider, record.KeyRecordDigest)
+			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, false)
 			if code != "" {
+				if reason == relayblind.PrivacyRejectPostureUnverified {
+					unverified = append(unverified, provider.ProviderID)
+				}
 				closest = closerPrivacyReject(closest, reason)
 				continue
 			}
@@ -233,8 +248,16 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	if order := s.orderRelayBlindCandidates(accountID, providers); len(order) > 0 {
 		return selections[order[0]], "", ""
 	}
-	if closest == relayblind.PrivacyRejectModelNotPrivateCapable {
+	switch closest {
+	case relayblind.PrivacyRejectModelNotPrivateCapable:
 		closest = s.keylessPrivacyReason(ctx, keyless)
+	case relayblind.PrivacyRejectPostureUnverified:
+		// Explained once, after selection failed: posture_unverified when
+		// any such candidate is enrolled, else provider_not_enrolled.
+		closest = relayblind.PrivacyRejectProviderNotEnrolled
+		for _, providerID := range unverified {
+			closest = closerPrivacyReject(closest, s.privacyAuthority.UnverifiedReason(providerID))
+		}
 	}
 	return privacySelection{}, privacyClassUnavailable, closest
 }
@@ -246,7 +269,13 @@ func (s *Server) keylessPrivacyReason(ctx context.Context, keyless []pool.Provid
 	closest := relayblind.PrivacyRejectModelNotPrivateCapable
 	for _, provider := range keyless {
 		reason := s.privacyAuthority.AdvertisementRejection(provider.ProviderID, provider.AssignedID)
-		if reason == "" || reason == relayblind.PrivacyRejectOther {
+		switch reason {
+		case relayblind.PrivacyRejectCodeIdentityUnapproved, relayblind.PrivacyRejectProviderNotEnrolled, relayblind.PrivacyRejectProviderQuarantined:
+		default:
+			// Only the three SPEC-049-R030 item 1 refinements name a cause.
+			reason = ""
+		}
+		if reason == "" {
 			quarantined, err := s.relayBlind.store.IsQuarantined(ctx, provider.ProviderID, s.now())
 			switch {
 			case err != nil:

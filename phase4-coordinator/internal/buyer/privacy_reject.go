@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
@@ -64,6 +65,24 @@ func (s *Server) notePrivacyRouteRejection(w http.ResponseWriter, r *http.Reques
 // writePrivacyRouteError records the rejection and writes the unchanged
 // SPEC-049 §4.9 error.
 func (s *Server) writePrivacyRouteError(w http.ResponseWriter, r *http.Request, phase, code, reason string) {
+	s.writePrivacyRouteErrorMessage(w, r, phase, code, reason, "")
+}
+
+// writePrivacyRouteErrorMessage is writePrivacyRouteError with the existing
+// buyer message of that site.
+func (s *Server) writePrivacyRouteErrorMessage(w http.ResponseWriter, r *http.Request, phase, code, reason, message string) {
 	s.notePrivacyRouteRejection(w, r, phase, code, reason)
-	writePrivacyClassError(w, code, "")
+	writePrivacyClassError(w, code, message)
+}
+
+// privacyConflictReason is the SPEC-049-R030 reason of a privacyClassConflict
+// code: a marker mismatch, or the cause of the disabled class.
+func (s *Server) privacyConflictReason(ctx context.Context, code string) string {
+	if code == privacyClassDisabled {
+		if reason := s.privacyDisabledReason(ctx); reason != "" {
+			return reason
+		}
+		return relayblind.PrivacyRejectKillSwitch
+	}
+	return relayblind.PrivacyRejectMarkerMismatch
 }

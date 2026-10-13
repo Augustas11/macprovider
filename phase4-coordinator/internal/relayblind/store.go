@@ -290,7 +290,7 @@ WHERE ((keys.revoked_at_unix IS NOT NULL AND COALESCE(keys.revocation_retained_u
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	} else {
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>? AND key_class=?`, providerID, now.Unix(), class).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>? AND key_class=? AND revoked_at_unix IS NULL`, providerID, now.Unix(), class).Scan(&count); err != nil {
 			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 		}
 		if maxRecords > 0 && count >= maxRecords {

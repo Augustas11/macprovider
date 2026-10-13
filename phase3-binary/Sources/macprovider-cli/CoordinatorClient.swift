@@ -4562,6 +4562,7 @@ actor CoordinatorClient {
         if coordinatorRevocationNotice == nil {
             startAdmissionPendingReadinessWatch()
         }
+        try await sendPrivacyKeyRotationRequestIfDue()
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
@@ -7283,6 +7284,7 @@ actor CoordinatorClient {
             payload["status"] = ProviderHealthState.unavailable.rawValue
         }
         try await send(payload)
+        try await sendPrivacyKeyRotationRequestIfDue()
     }
 
     /// Test seam: runs inside sendHeartbeat after the payload is built and
@@ -8039,11 +8041,18 @@ actor CoordinatorClient {
         }
         guard let response else { return }
         try await send(response)
-        // SPEC-049-R031: a staged identity key is offered after a posture,
-        // at most once per rotation interval.
-        if let request = privacyPostureResponder.rotationRequest() {
-            try await send(request)
+        try await sendPrivacyKeyRotationRequestIfDue()
+    }
+
+    /// SPEC-049-R031: offers a staged identity key after session accept, a
+    /// posture, or a heartbeat, at most once per rotation interval, until a
+    /// rotation is promoted. A coordinator without rotation ignores it.
+    private func sendPrivacyKeyRotationRequestIfDue() async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder, coordinatorSessionAccepted,
+              let request = privacyPostureResponder.rotationRequest() else {
+            return
         }
+        try await send(request)
     }
 
     private func handlePrivacyKeyRotationChallenge(_ dict: [String: Any]) async throws {

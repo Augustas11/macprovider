@@ -173,6 +173,8 @@ type privacySession struct {
 	hasRotationNonce      bool
 	lastRotationChallenge time.Time
 	retiredIdentity       ed25519.PublicKey
+	rotationSeq           uint64
+	hasRotationSeq        bool
 }
 
 type postureSnapshot struct {
@@ -186,6 +188,9 @@ type postureSnapshot struct {
 	attestations map[string]string
 	claim        *PrivacyEnrollmentClaim
 	issuedAt     int64
+	// rotation only: the session's sequence now, beside seq at nonce issue.
+	currentSeq    uint64
+	hasCurrentSeq bool
 }
 
 func NewPrivacyAuthority(store *Store, cfg config.PrivacyClassConfig, identityPins map[string]string, maxRecords int, replayRetention time.Duration) (*PrivacyAuthority, error) {
@@ -769,6 +774,13 @@ func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest stri
 	return a.eligibilityReason(providerID, session, keyDigest, now, true)
 }
 
+// QuickEligibilityReason is EligibilityReason without the store lookup that
+// splits an unverified session: it reports posture_unverified for both.
+// Selection uses it per candidate and explains once with UnverifiedReason.
+func (a *PrivacyAuthority) QuickEligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
+	return a.eligibilityReason(providerID, session, keyDigest, now, false)
+}
+
 // eligibilityReason is the gate. explain adds the store lookup that splits an
 // unverified session into not enrolled and posture unverified.
 func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest string, now time.Time, explain bool) (time.Time, string) {
@@ -786,7 +798,7 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 		if !explain {
 			return time.Time{}, PrivacyRejectPostureUnverified
 		}
-		return time.Time{}, a.unverifiedReason(providerID)
+		return time.Time{}, a.UnverifiedReason(providerID)
 	}
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
@@ -826,10 +838,13 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 	return verifiedAt, ""
 }
 
-// unverifiedReason splits a session without a verified posture into a
+// UnverifiedReason splits a session without a verified posture into a
 // provider whose keys do not resolve yet (no pins and no enrollment) and an
 // enrolled one whose posture is missing or was cleared.
-func (a *PrivacyAuthority) unverifiedReason(providerID string) string {
+func (a *PrivacyAuthority) UnverifiedReason(providerID string) string {
+	if a == nil || a.store == nil {
+		return PrivacyRejectClassNotConfigured
+	}
 	_, identityPinned := a.identity[providerID]
 	_, sePinned := a.sePins[providerID]
 	if identityPinned && sePinned {
@@ -1354,6 +1369,8 @@ func advertisementRejectReason(err error) string {
 		return PrivacyRejectStoreUnavailable
 	case errors.Is(err, ErrInvalidPin):
 		return PrivacyRejectProviderNotEnrolled
+	case errors.Is(err, ErrCapacity), errors.Is(err, ErrKeyRevoked), errors.Is(err, ErrReservationMismatch):
+		return PrivacyRejectOther
 	}
 	return PrivacyRejectKeyAttestationMismatch
 }

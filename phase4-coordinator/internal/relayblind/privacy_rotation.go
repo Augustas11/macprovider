@@ -172,6 +172,18 @@ func (a *PrivacyAuthority) BeginRotationChallenge(ctx context.Context, providerI
 		return "", 0, RotationUnavailable
 	}
 	ctx = privacyCtx(ctx)
+	id := privacySessionID{providerID: providerID, session: session}
+	interval := time.Duration(a.interval) * time.Second
+	a.mu.Lock()
+	entry := a.ensureLocked(id)
+	limited := entry.hasRotationNonce || (!entry.lastRotationChallenge.IsZero() && now.Sub(entry.lastRotationChallenge) < interval)
+	if !limited {
+		entry.lastRotationChallenge = now
+	}
+	a.mu.Unlock()
+	if limited {
+		return "", 0, RotationUnavailable
+	}
 	if disabled, err := a.store.PrivacyDisabled(ctx); err != nil {
 		return "", 0, RotationStoreUnavailable
 	} else if disabled {
@@ -195,18 +207,19 @@ func (a *PrivacyAuthority) BeginRotationChallenge(ctx context.Context, providerI
 		return "", 0, RotationUnavailable
 	}
 	nonce := encodeBase64URL(buf)
-	id := privacySessionID{providerID: providerID, session: session}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	entry := a.ensureLocked(id)
-	interval := time.Duration(a.interval) * time.Second
-	if entry.hasRotationNonce || (!entry.lastRotationChallenge.IsZero() && now.Sub(entry.lastRotationChallenge) < interval) {
+	entry = a.ensureLocked(id)
+	if entry.hasRotationNonce {
 		return "", 0, RotationUnavailable
 	}
 	entry.rotationNonce = nonce
 	entry.rotationIssued = now.Unix()
 	entry.hasRotationNonce = true
-	entry.lastRotationChallenge = now
+	// item 2: the sequence accepted when the nonce was issued. A rotation
+	// posture at or below it is a regression; one above it that a posture
+	// verified meanwhile overtook is only stale.
+	entry.rotationSeq, entry.hasRotationSeq = entry.seq, entry.hasSeq
 	return nonce, now.Unix(), ""
 }
 
@@ -232,8 +245,9 @@ func (a *PrivacyAuthority) consumeRotationChallenge(id privacySessionID, nonce s
 	}
 	snap := postureSnapshot{
 		generation: entry.generation, boundGen: entry.boundGen, epoch: entry.epoch,
-		seq: entry.seq, hasSeq: entry.hasSeq, cdhash: entry.cdhash, hasCDHash: entry.hasCDHash,
+		seq: entry.rotationSeq, hasSeq: entry.hasRotationSeq, cdhash: entry.cdhash, hasCDHash: entry.hasCDHash,
 		attestations: copyAttestations(entry.attestations), issuedAt: entry.rotationIssued,
+		currentSeq: entry.seq, hasCurrentSeq: entry.hasSeq,
 	}
 	entry.hasRotationNonce = false
 	entry.rotationNonce = ""
@@ -326,6 +340,10 @@ func (a *PrivacyAuthority) VerifyRotation(ctx context.Context, providerID, sessi
 		}
 		return a.rotationReject(RotationUnapprovedCodeIdentity)
 	}
+	if snap.hasCurrentSeq && posture.Sequence <= snap.currentSeq {
+		// A posture verified after the nonce was issued overtook this one.
+		return a.rotationReject(RotationStale)
+	}
 	if !a.backendAllowed(posture.SEKeyBackend) {
 		return a.rotationReject(RotationInvalid)
 	}
@@ -359,6 +377,8 @@ func (a *PrivacyAuthority) VerifyRotation(ctx context.Context, providerID, sessi
 			return a.rotationReject(RotationStale)
 		case errors.Is(err, ErrEnrollmentKeyReused):
 			return a.rotationReject(RotationKeyInUse)
+		case errors.Is(err, ErrRotationTooSoon):
+			return a.rotationReject(RotationUnavailable)
 		case errors.Is(err, ErrPrivacyQuarantined):
 			return a.rotationReject(RotationQuarantined)
 		case err != nil:

@@ -663,8 +663,8 @@ final class RelayBlindKeyManager: @unchecked Sendable {
 
     /// Makes the staged key the identity key after the coordinator accepted a
     /// rotation to `expectedPublicKey`: the identity file is replaced
-    /// atomically, then the staged file is removed, then the in-memory key
-    /// switches. A crash between the two file steps is repaired at init.
+    /// atomically and the in-memory key switches; removing the staged copy
+    /// is best effort, and a leftover copy is repaired at init.
     func promoteStagedIdentity(expectedPublicKey: String) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -673,9 +673,11 @@ final class RelayBlindKeyManager: @unchecked Sendable {
             throw RelayBlindProviderError.invalidConfiguration("staged identity does not match the accepted rotation")
         }
         try RelayBlindSecureFiles.replaceSecret(secureDirectory, name: Self.identityFileName, data: staged.rawRepresentation)
-        try secureDirectory.remove(Self.stagedIdentityFileName)
-        try secureDirectory.synchronize()
+        // The identity file now holds the new key, so memory follows it at
+        // once. A staged copy left behind equals it and is removed at start.
         identityKey = staged
+        try? secureDirectory.remove(Self.stagedIdentityFileName)
+        try? secureDirectory.synchronize()
     }
 
     private func stagedIdentityLocked() throws -> Curve25519.Signing.PrivateKey? {

@@ -42,6 +42,9 @@ const (
 	PrivacyRejectBuyerCancelled           = "buyer_cancelled"
 	PrivacyRejectSettlementSnapshotFailed = "settlement_snapshot_failed"
 	PrivacyRejectDispatchUnavailable      = "dispatch_unavailable"
+	PrivacyRejectMarkerMismatch           = "marker_mismatch"
+	PrivacyRejectPoolScopedRequest        = "pool_scoped_request"
+	PrivacyRejectProviderRejected         = "provider_rejected"
 	PrivacyRejectOther                    = "other"
 )
 
@@ -54,6 +57,7 @@ var privacyRejectReasons = map[string]struct{}{
 	PrivacyRejectKeyAttestationMismatch: {}, PrivacyRejectReservationRejected: {}, PrivacyRejectReservationExpired: {},
 	PrivacyRejectSessionLost: {}, PrivacyRejectSlotUnavailable: {}, PrivacyRejectProviderQuotaUnavailable: {},
 	PrivacyRejectBuyerCancelled: {}, PrivacyRejectSettlementSnapshotFailed: {}, PrivacyRejectDispatchUnavailable: {},
+	PrivacyRejectMarkerMismatch: {}, PrivacyRejectPoolScopedRequest: {}, PrivacyRejectProviderRejected: {},
 	PrivacyRejectOther: {},
 }
 

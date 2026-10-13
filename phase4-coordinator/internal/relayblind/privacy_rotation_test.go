@@ -43,6 +43,11 @@ func enrolledRotationFixture(t *testing.T, mutate func(*config.PrivacyClassConfi
 	return f
 }
 
+// age moves the fixture past the SPEC-049-R031 minimum enrollment age.
+func (f *privacyFixture) age() {
+	f.now = f.now.Add(MinRotationInterval + time.Hour)
+}
+
 func rotationKey(seed byte) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 }
@@ -141,6 +146,7 @@ func TestRotationSwapsEnrollmentWithoutOperator(t *testing.T) {
 	old := f.identity
 	oldRecord := f.record
 	held := mustReserve(t, f.store, oldRecord.KeyRecord, "acct-held", true, f.now)
+	f.age()
 	next := rotationKey(0x42)
 	reason, err := f.rotate(2, f.signers(next), nil)
 	if err != nil || reason != RotationAccepted {
@@ -243,6 +249,8 @@ func TestRotationUnsignedOrMismatchedQuarantines(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := enrolledRotationFixture(t, nil)
+			f.age()
+			f.age()
 			before, _ := activeEnrollment(t, f)
 			var mutate func(*KeyRotationStatement, *PostureStatement)
 			if tc.mutate != nil {
@@ -268,6 +276,7 @@ func TestRotationUnsignedOrMismatchedQuarantines(t *testing.T) {
 func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	t.Run("unapproved code identity", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		// The running release's approval is withdrawn after enrollment.
 		f.auth.identities = []config.ApprovedCodeIdentity{approvedIdentity(secondFixtureCDHash)}
 		reason, err := f.rotate(2, f.signers(rotationKey(0x42)), nil)
@@ -277,6 +286,7 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	})
 	t.Run("binding to another session", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		reason, err := f.rotate(2, f.signers(rotationKey(0x42)), func(s *KeyRotationStatement, _ *PostureStatement) { s.AssignedSession = "session-b" })
 		if reason != RotationInvalid || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
 			t.Fatalf("rotation = %q, %v", reason, err)
@@ -284,6 +294,7 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	})
 	t.Run("posture digest mismatch", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		reason, err := f.rotate(2, f.signers(rotationKey(0x42)), func(s *KeyRotationStatement, _ *PostureStatement) {
 			s.PostureDigest = encodeBase64URL(make([]byte, 32))
 		})
@@ -293,6 +304,7 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	})
 	t.Run("stale clock", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		reason, err := f.rotate(2, f.signers(rotationKey(0x42)), func(s *KeyRotationStatement, _ *PostureStatement) { s.IssuedAtUnix -= 120 })
 		if reason != RotationStale || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
 			t.Fatalf("rotation = %q, %v", reason, err)
@@ -300,13 +312,14 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	})
 	t.Run("rotating back to a used key", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		first := f.identity
 		next := rotationKey(0x42)
 		if reason, err := f.rotate(2, f.signers(next), nil); reason != RotationAccepted {
 			t.Fatalf("first rotation = %q, %v", reason, err)
 		}
 		f.identity = next
-		f.now = f.now.Add(61 * time.Second)
+		f.age()
 		reason, err := f.rotate(3, f.signers(first), nil)
 		if reason != RotationKeyInUse || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
 			t.Fatalf("rotation back = %q, %v", reason, err)
@@ -326,6 +339,7 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 	})
 	t.Run("quarantined", func(t *testing.T) {
 		f := enrolledRotationFixture(t, nil)
+		f.age()
 		if err := f.store.Quarantine(context.Background(), f.providerID, "review", f.now, time.Hour); err != nil {
 			t.Fatal(err)
 		}
@@ -339,6 +353,7 @@ func TestRotationRejectsWithoutQuarantine(t *testing.T) {
 // captured rotation cannot be replayed.
 func TestRotationReplayIsRejected(t *testing.T) {
 	f := enrolledRotationFixture(t, nil)
+	f.age()
 	next := rotationKey(0x42)
 	nonce, _, reason := f.auth.BeginRotationChallenge(context.Background(), f.providerID, f.session, f.now)
 	if reason != "" {
@@ -367,6 +382,7 @@ func TestRotationReplayIsRejected(t *testing.T) {
 // told it was accepted, without a second store change.
 func TestRotationRetryIsIdempotent(t *testing.T) {
 	f := enrolledRotationFixture(t, nil)
+	f.age()
 	next := rotationKey(0x42)
 	if reason, err := f.rotate(2, f.signers(next), nil); reason != RotationAccepted {
 		t.Fatalf("rotation = %q, %v", reason, err)
@@ -389,6 +405,7 @@ func TestRotationRetryIsIdempotent(t *testing.T) {
 // is refused without quarantine.
 func TestRotationRetiredKeyPostureIsNotQuarantined(t *testing.T) {
 	f := enrolledRotationFixture(t, nil)
+	f.age()
 	if reason, err := f.rotate(2, f.signers(rotationKey(0x42)), nil); reason != RotationAccepted {
 		t.Fatalf("rotation = %q, %v", reason, err)
 	}
@@ -401,6 +418,7 @@ func TestRotationRetiredKeyPostureIsNotQuarantined(t *testing.T) {
 
 func TestKeyRotationStatementIsClosed(t *testing.T) {
 	f := enrolledRotationFixture(t, nil)
+	f.age()
 	nonce, _, _ := f.auth.BeginRotationChallenge(context.Background(), f.providerID, f.session, f.now)
 	raw := f.rotationMessage(nonce, 2, f.signers(rotationKey(0x42)), nil)
 	var wire map[string]any
@@ -424,3 +442,127 @@ func TestKeyRotationStatementIsClosed(t *testing.T) {
 }
 
 func f256() elliptic.Curve { return elliptic.P256() }
+
+// SPEC-049-R031 item 11: one rotation per provider per MinRotationInterval,
+// checked inside the transaction; a refusal changes nothing.
+func TestRotationTooSoonIsRefused(t *testing.T) {
+	f := enrolledRotationFixture(t, nil)
+	before, _ := activeEnrollment(t, f)
+	reason, err := f.rotate(2, f.signers(rotationKey(0x42)), nil)
+	if reason != RotationUnavailable || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
+		t.Fatalf("rotation of a fresh enrollment = %q, %v", reason, err)
+	}
+	if after, _ := activeEnrollment(t, f); after != before {
+		t.Fatalf("refusal changed the enrollment: %+v", after)
+	}
+	f.age()
+	if reason, err := f.rotate(3, f.signers(rotationKey(0x42)), nil); reason != RotationAccepted {
+		t.Fatalf("rotation after the interval = %q, %v", reason, err)
+	}
+	f.identity = rotationKey(0x42)
+	f.now = f.now.Add(2 * time.Hour)
+	if reason, _ := f.rotate(4, f.signers(rotationKey(0x43)), nil); reason != RotationUnavailable {
+		t.Fatalf("second rotation inside the interval = %q", reason)
+	}
+}
+
+// A posture verified after the rotation nonce was issued overtakes the
+// rotation's posture: that is stale, not a sequence regression.
+func TestRotationOvertakenByPostureIsStale(t *testing.T) {
+	f := enrolledRotationFixture(t, nil)
+	f.age()
+	nonce, _, reason := f.auth.BeginRotationChallenge(context.Background(), f.providerID, f.session, f.now)
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	rotation := f.rotationMessage(nonce, 2, f.signers(rotationKey(0x42)), nil)
+	f.record = PrivacyKeyRecord{}
+	f.useIdentity(f.identity, 0x51)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(5); err != nil {
+		t.Fatalf("interleaved posture: %v", err)
+	}
+	got, err := f.auth.VerifyRotation(context.Background(), f.providerID, f.session, nonce, rotation, nil, f.now)
+	if got != RotationStale || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
+		t.Fatalf("overtaken rotation = %q, %v", got, err)
+	}
+	// At or below the sequence accepted when the nonce was issued is still
+	// a regression and quarantines.
+	f.now = f.now.Add(61 * time.Second)
+	nonce, _, reason = f.auth.BeginRotationChallenge(context.Background(), f.providerID, f.session, f.now)
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	got, err = f.auth.VerifyRotation(context.Background(), f.providerID, f.session, nonce, f.rotationMessage(nonce, 5, f.signers(rotationKey(0x42)), nil), nil, f.now)
+	if got != RotationInvalid || !errors.Is(err, ErrPrivacyQuarantined) {
+		t.Fatalf("regressed rotation = %q, %v", got, err)
+	}
+}
+
+// The directory keeps at most four rotated identities per provider and never
+// fails for a provider that rotated many times.
+func TestDirectoryCapsRotatedEntries(t *testing.T) {
+	f := enrolledRotationFixture(t, nil)
+	for i := byte(0); i < 7; i++ {
+		f.age()
+		next := rotationKey(0x60 + i)
+		if reason, err := f.rotate(uint64(10+2*int(i)), f.signers(next), nil); reason != RotationAccepted {
+			t.Fatalf("rotation %d = %q, %v", i, reason, err)
+		}
+		f.identity = next
+	}
+	directory, err := f.auth.BuildIdentityDirectory(context.Background(), f.now, 300*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, active := 0, 0
+	for _, entry := range directory.Entries {
+		if entry.Revoked {
+			revoked++
+		} else {
+			active++
+		}
+	}
+	if active != 1 || revoked != maxRotatedDirectoryEntriesPerProvider {
+		t.Fatalf("directory active=%d revoked=%d", active, revoked)
+	}
+}
+
+// An identity key that another provider ever enrolled, even after that
+// enrollment was revoked, is never enrolled for a second provider, and the
+// directory keeps that fingerprint revoked.
+func TestEnrollmentRefusesIdentityRevokedForAnotherProvider(t *testing.T) {
+	f := newEnrollmentFixture(t, nil)
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.posture(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.ReenrollPrivacyProvider(context.Background(), f.providerID, "operator", f.now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	f.providerID, f.session = "provider-b", "session-b"
+	if err := f.acceptClaim(); err != nil {
+		t.Fatal(err)
+	}
+	mustReject(t, f.posture(1), "privacy_enrollment_key_in_use")
+	if _, ok := activeEnrollment(t, f); ok {
+		t.Fatal("a revoked identity enrolled a second provider")
+	}
+	// Even a row written around the store check never un-revokes it.
+	if _, err := f.store.db.Exec(`INSERT INTO privacy_class_enrollment(provider_id,identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix) SELECT 'provider-z',identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix FROM privacy_class_enrollment WHERE provider_id='provider-a'`); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := f.auth.BuildIdentityDirectory(context.Background(), f.now, 300*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range directory.Entries {
+		if entry.Fingerprint == PublicKeyFingerprint(f.identity.Public().(ed25519.PublicKey)) && !entry.Revoked {
+			t.Fatal("another provider's row un-revoked the fingerprint")
+		}
+	}
+}

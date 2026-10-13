@@ -87,11 +87,32 @@ func TestPrivacyGatewayRecordsUpstreamRejectReason(t *testing.T) {
 			if strings.Contains(logs.String(), "provider-123") || strings.Contains(logs.String(), key) {
 				t.Fatalf("log carries an unvetted value: %s", logs.String())
 			}
-			metrics := httptest.NewRecorder()
-			h.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			line := `gateway_privacy_route_rejections_total{phase="reservation",reason="` + tc.want + `"} 1`
+			loopback := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			loopback.RemoteAddr = "127.0.0.1:9100"
+			metrics := httptest.NewRecorder()
+			h.ServeHTTP(metrics, loopback)
 			if !strings.Contains(metrics.Body.String(), line) {
 				t.Fatalf("metric %q missing from %s", line, metrics.Body.String())
+			}
+			operator := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			operator.Header.Set("Authorization", "Bearer operator-key")
+			metrics = httptest.NewRecorder()
+			h.ServeHTTP(metrics, operator)
+			if !strings.Contains(metrics.Body.String(), line) {
+				t.Fatal("operator bearer did not see the privacy counters")
+			}
+			for _, outside := range []func(*http.Request){
+				func(r *http.Request) {},
+				func(r *http.Request) { r.RemoteAddr = "127.0.0.1:9100"; r.Header.Set("X-Forwarded-For", "203.0.113.9") },
+			} {
+				public := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+				outside(public)
+				metrics = httptest.NewRecorder()
+				h.ServeHTTP(metrics, public)
+				if strings.Contains(metrics.Body.String(), "gateway_privacy_route_rejections_total") {
+					t.Fatal("privacy counters served to a non-loopback, unauthenticated scraper")
+				}
 			}
 		})
 	}

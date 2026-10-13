@@ -167,9 +167,6 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         if let lastRotationRequest, now.timeIntervalSince(lastRotationRequest) < Self.rotationRequestInterval {
             return nil
         }
-        // An exchange that never got a result is abandoned; a late result
-        // for its nonce no longer matches.
-        pendingRotation = nil
         lastRotationRequest = now
         return ["type": "privacy_key_rotation_request", "version": 1]
     }
@@ -253,14 +250,12 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         }
         lock.lock()
         defer { lock.unlock() }
-        guard let pending = pendingRotation else { return false }
-        if status != "accepted" {
-            if nonce.isEmpty || nonce == pending.nonce { pendingRotation = nil }
-            return false
-        }
-        guard nonce == pending.nonce else { return false }
-        pendingRotation = nil
+        // The pending rotation stays until a promotion succeeds; a lost or
+        // rejected result is retried by the next request, and the
+        // coordinator acknowledges a retry of an accepted rotation.
+        guard let pending = pendingRotation, status == "accepted", nonce == pending.nonce else { return false }
         try relayBlindRuntime.promoteStagedIdentity(expectedPublicKey: pending.identityPublicKey)
+        pendingRotation = nil
         return true
     }
 

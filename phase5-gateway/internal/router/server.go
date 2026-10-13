@@ -303,7 +303,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
 	_, _ = w.Write([]byte(s.adminMetrics.prometheus()))
-	_, _ = w.Write([]byte(s.privacyRejectMetrics.prometheus()))
+	if s.privacyMetricsAllowed(r) {
+		_, _ = w.Write([]byte(s.privacyRejectMetrics.prometheus()))
+	}
 	_, _ = w.Write([]byte(s.idlessDedupe.prometheus()))
 	_, _ = w.Write([]byte(s.journal.MetricsSnapshot().Prometheus()))
 }

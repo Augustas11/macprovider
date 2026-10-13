@@ -76,9 +76,19 @@ func (s *IdentityDirectoryService) Envelope(ctx context.Context, now time.Time) 
 }
 
 type directoryCandidate struct {
-	entry  IdentityDirectoryEntry
-	active bool
+	entry      IdentityDirectoryEntry
+	active     bool
+	providerID string
 }
+
+// maxRotatedDirectoryEntriesPerProvider bounds the revoked entries that
+// identity key rotations leave per provider (SPEC-049-R031 item 11). Older
+// rotated identities drop out of the directory; a buyer pinned to a dropped
+// identity fails before encryption as for a revoked one.
+const maxRotatedDirectoryEntriesPerProvider = 4
+
+// rotatedDroppedMarker flags, in memory only, a rotated row over the cap.
+const rotatedDroppedMarker = "\x00rotated-dropped"
 
 // BuildIdentityDirectory lists every provider whose two keys resolve from
 // configuration pins or an active enrollment, revoked while quarantined, and
@@ -98,13 +108,18 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 		return IdentityDirectory{}, err
 	}
 	candidates := make(map[string]directoryCandidate)
-	add := func(entry IdentityDirectoryEntry, active bool) {
+	add := func(providerID string, entry IdentityDirectoryEntry, active bool) {
 		existing, ok := candidates[entry.Fingerprint]
 		switch {
 		case !ok:
-			candidates[entry.Fingerprint] = directoryCandidate{entry: entry, active: active}
+			candidates[entry.Fingerprint] = directoryCandidate{entry: entry, active: active, providerID: providerID}
+		case active && !existing.active && existing.providerID != providerID:
+			// Another provider's row never un-revokes a fingerprint.
+		case !active && existing.active && existing.providerID != providerID:
+			existing.entry.Revoked = true
+			candidates[entry.Fingerprint] = existing
 		case active && !existing.active:
-			candidates[entry.Fingerprint] = directoryCandidate{entry: entry, active: true}
+			candidates[entry.Fingerprint] = directoryCandidate{entry: entry, active: true, providerID: providerID}
 		case active && existing.active:
 			// One identity resolving for two providers is ambiguous, so it is
 			// published as revoked rather than trusted for either.
@@ -118,7 +133,7 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 			continue
 		}
 		_, isQuarantined := quarantined[providerID]
-		add(IdentityDirectoryEntry{
+		add(providerID, IdentityDirectoryEntry{
 			IdentityPublicKey:      encodeBase64URL(identity),
 			Fingerprint:            PublicKeyFingerprint(identity),
 			SEPublicKeyFingerprint: PublicKeyFingerprint(se),
@@ -126,9 +141,24 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 			Revoked:                isQuarantined,
 		}, true)
 	}
+	rotatedKept := make(map[string]int)
+	for i := len(enrollments) - 1; i >= 0; i-- {
+		// Newest first per provider: keep only the most recent rotated rows.
+		enrollment := enrollments[i]
+		if enrollment.RevokedAtUnix == 0 || enrollment.RevokedReason != enrollmentRotatedReason {
+			continue
+		}
+		rotatedKept[enrollment.ProviderID]++
+		if rotatedKept[enrollment.ProviderID] > maxRotatedDirectoryEntriesPerProvider {
+			enrollments[i].RevokedReason = rotatedDroppedMarker
+		}
+	}
 	for _, enrollment := range enrollments {
+		if enrollment.RevokedReason == rotatedDroppedMarker {
+			continue
+		}
 		if enrollment.RevokedAtUnix != 0 {
-			add(IdentityDirectoryEntry{
+			add(enrollment.ProviderID, IdentityDirectoryEntry{
 				IdentityPublicKey:      enrollment.IdentityPublicKey,
 				Fingerprint:            enrollment.IdentityFingerprint,
 				SEPublicKeyFingerprint: enrollment.SEFingerprint,
@@ -152,7 +182,7 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 			return IdentityDirectory{}, fmt.Errorf("%w: stored enrollment identity", ErrStoreUnavailable)
 		}
 		_, isQuarantined := quarantined[enrollment.ProviderID]
-		add(IdentityDirectoryEntry{
+		add(enrollment.ProviderID, IdentityDirectoryEntry{
 			IdentityPublicKey:      identityKey,
 			Fingerprint:            PublicKeyFingerprint(identity),
 			SEPublicKeyFingerprint: enrollment.SEFingerprint,

@@ -408,7 +408,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if present && relayBlindPoolIntent(r) {
-		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseReservation, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
 		return
 	}
 	if relayBlindPoolIntent(r) {
@@ -416,7 +416,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if present && !valid {
-		writePrivacyClassError(w, privacyClassDowngrade, "")
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseReservation, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
 		return
 	}
 	if present {
@@ -746,7 +746,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if present && relayBlindPoolIntent(r) {
-		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
 		return
 	}
 	if relayBlindPoolIntent(r) {
@@ -756,10 +756,10 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	if s.relayBlind == nil || s.relayBlind.store == nil {
 		if present {
 			if !valid {
-				writePrivacyClassError(w, privacyClassDowngrade, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
 				return
 			}
-			writePrivacyClassError(w, privacyClassDisabled, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDisabled, relayblind.PrivacyRejectClassNotConfigured)
 			return
 		}
 		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind requests are disabled")
@@ -778,11 +778,11 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	// envelope, is a downgrade. An invalid header on a valid envelope still
 	// reaches privacyClassConflict below, which also burns the reservation.
 	if present && !relayBlindEnvelopeNamespace(body) {
-		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
+		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch, "Privacy class marker is not valid for a plaintext request")
 		return
 	}
 	if present && !valid && !envelopeValid {
-		writePrivacyClassError(w, privacyClassDowngrade, "")
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
 		return
 	}
 	if !envelopeValid {
@@ -799,7 +799,7 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		if reject {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, code, s.now())
 		}
-		writePrivacyClassError(w, code, "")
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, code, s.privacyConflictReason(r.Context(), code))
 		return
 	}
 	response, err := s.relayBlind.store.Consume(r.Context(), relayblind.ConsumeInput{AccountID: account.ID(), WalletSession: walletSession, Envelope: envelope, EnvelopeDigest: digest, Now: s.now()})
@@ -876,7 +876,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	if present && relayBlindPoolIntent(r) {
-		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class does not accept pool-scoped requests")
+		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
 		return
 	}
 	if relayBlindPoolIntent(r) {
@@ -886,10 +886,10 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	if s.relayBlind == nil || s.relayBlind.store == nil {
 		if present {
 			if !valid {
-				writePrivacyClassError(w, privacyClassDowngrade, "")
+				s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
 				return
 			}
-			writePrivacyClassError(w, privacyClassDisabled, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDisabled, relayblind.PrivacyRejectClassNotConfigured)
 			return
 		}
 		writeRelayBlindError(w, "relay_blind_disabled", "Relay-blind execution is disabled")
@@ -908,11 +908,11 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 	// body outside the relay-blind envelope namespace, is a downgrade. A
 	// genuine envelope that fails Validate stays relay_blind_envelope_invalid.
 	if present && !valid {
-		writePrivacyClassError(w, privacyClassDowngrade, "")
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
 		return
 	}
 	if present && !relayBlindEnvelopeNamespace(body) {
-		writePrivacyClassError(w, privacyClassDowngrade, "Privacy class marker is not valid for a plaintext request")
+		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch, "Privacy class marker is not valid for a plaintext request")
 		return
 	}
 	envelope, err := relayblind.ParseEnvelope(body)
@@ -930,7 +930,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		if reject {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, code, s.now())
 		}
-		writePrivacyClassError(w, code, "")
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, s.privacyConflictReason(r.Context(), code))
 		return
 	}
 	reservation, err := s.relayBlind.store.LookupConsumedAuthorization(r.Context(), account.ID(), walletSession, authorization, s.now())
@@ -1256,7 +1256,7 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		zero := int64(0)
 		_ = rec.logProviderRowWithEstimateAndOutput(provider, status, &zero, &zero, code, code, 0, nil, nil)
 		if code == privacyClassDowngrade || code == privacyClassStale {
-			writePrivacyClassError(w, code, "")
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, relayblind.PrivacyRejectProviderRejected)
 			return
 		}
 		writeRelayBlindError(w, code, "Provider rejected the relay-blind ciphertext before generation")

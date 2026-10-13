@@ -55,6 +55,9 @@ final class PrivacyKeyRotationTests: XCTestCase {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         XCTAssertEqual(responder.rotationRequest(now: start)?["type"] as? String, "privacy_key_rotation_request")
         XCTAssertNil(responder.rotationRequest(now: start.addingTimeInterval(60)), "requests are spaced by the rotation interval")
+        // A lost exchange does not block the next request once the interval passed.
+        _ = try XCTUnwrap(responder.respondToRotation(challenge: rotationChallenge(nonce: Data(repeating: 0x21, count: 32)), assignedSession: "session-1"))
+        XCTAssertNotNil(responder.rotationRequest(now: start.addingTimeInterval(PrivacyPostureResponder.rotationRequestInterval + 1)))
 
         var malformed = rotationChallenge()
         malformed["extra"] = true
