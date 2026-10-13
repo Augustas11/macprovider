@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.32 (2026-10-08, pool-only GGUF startup count)
+**Version:** 1.9.33 (2026-10-13, engine profile heartbeat object)
+
+**Change log v1.9.33 (2026-10-13, engine profile heartbeat object, #1355):**
+Adds `SPEC-001-R006` (§6.15.2.1): the optional closed `engine_profile`
+heartbeat object (`engine-profile-v1`: engine family, continuous-batching
+granted slots, native MTP active, chip class, RAM class, max stable context).
+It is a self-report and a routing prior only; the coordinator measures
+performance from served traffic (SPEC-002-R005) and drops a malformed profile
+without rejecting the heartbeat. Old coordinators ignore the key.
 
 **Change log v1.9.32 (2026-10-08, pool-only GGUF startup count):**
 Scopes v1.9.31's independent startup recount to runtimes with an expected
@@ -4394,6 +4402,38 @@ warm-swap is disabled" invariant does **not** hold once these v1.7 fields are
 present; the byte-identical claim is scoped to the SPEC-011 `model_hash` /
 `loading` additions only, not to `hardware_summary` / spec-decode /
 `last_autoupdate_event`.
+
+#### 6.15.2.1. Engine profile (NEW in v1.9.33, #1355)
+
+**SPEC-001-R006 — Engine profile heartbeat object.** A provider MUST send the
+optional heartbeat member `engine_profile` as one closed, versioned JSON object
+describing how the session's loaded model is served. The object has exactly
+these members, all required:
+
+| Member | Type | Rule |
+|---|---|---|
+| `version` | string | Exactly `engine-profile-v1`. |
+| `engine_family` | string | `native_mtp` when native MTP is active for the session's model (SPEC-048 status mode `active`); else `continuous_batching` when continuous batching is active (SPEC-038); else `general_mlx`. |
+| `cb_granted_slots` | integer | Slots the continuous-batching scheduler currently grants, 0 when it is not active. Range 0..256. |
+| `native_mtp_active` | boolean | `true` exactly when the SPEC-048 status mode is `active`. |
+| `chip_class` | string | `mN`, `mN_pro`, `mN_max` or `mN_ultra` for an Apple M-series chip with generation N in 1..9, derived from the local chip name; `unknown` otherwise. |
+| `ram_class_gb` | integer | The largest of 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512 not above the reported `ram_gb`; 8 when `ram_gb` is below 8. |
+| `max_stable_context_tokens` | integer | The context length the provider serves for this model, equal to the heartbeat `max_context_tokens`. Range 0..10000000. |
+
+The object is a self-report. It MUST NOT carry measured timings; prefill rate,
+decode rate and time to first token are measured by the coordinator from
+served traffic (SPEC-002-R005). It never confers a trust tier, admission,
+attestation, catalog or settlement authority, and the provider MUST NOT rely
+on the coordinator acting on it.
+
+Compatibility: a coordinator that predates this requirement ignores the
+unknown heartbeat key. A coordinator that implements it MUST accept the
+heartbeat whatever the object holds: a member outside the table, a missing or
+out-of-range member, an unknown `version`, or an object larger than 512 bytes
+makes the coordinator drop the profile for that heartbeat (treated as absent),
+never reject the frame. A provider that predates this requirement sends no
+profile, and the coordinator routes it exactly as a provider without evidence
+(SPEC-002-R006 fallback).
 
 #### 6.15.3. New inbound (coordinator server-push) frames
 

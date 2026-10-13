@@ -1,6 +1,18 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.15 (2026-10-13, audit-log indexes)
+**Version:** 1.6.16 (2026-10-13, phase-aware selection)
+
+**Change log v1.6.16 (2026-10-13, issue #1355):** Adds SPEC-002-R005
+(measured-performance store built only from coordinator-observed timings of
+served requests), SPEC-002-R006 (phase-aware ranking of the eligible
+plaintext candidates by request shape, with load and fairness terms, a bounded
+exploration share for unmeasured providers, and fallback to the SPEC-004
+objective order when evidence is missing or stale) and SPEC-002-R007 (route
+trace: an operator log line and counter with the selection reason, and a
+buyer-visible `X-MacProvider-Route-Trace` header carrying only non-identifying
+classes). Filters, pinned routes, relay-blind and privacy-class selection,
+admission, pricing and settlement are unchanged. The SPEC-001-R006 engine
+profile is a recorded self-report, never a measurement.
 
 **Change log v1.6.15 (2026-10-13, issue #1793):** R-7.10.1 and AC-K.17 keep
 one `audit_log` index, `idx_audit_log_ts_utc`, which the retention prune
@@ -5288,3 +5300,116 @@ A rejected v2 initial auth request MUST receive an `auth_response` rejection
 with a stable reason code and an actionable message before the close. The
 provider MUST preserve that rejection when waiting for `auth_challenge`,
 rather than replacing it with a protocol-shape error.
+
+## SPEC-002-R005 — Measured-performance store
+
+The coordinator MUST keep an in-memory performance record per
+(`provider_id`, requested model) built only from requests it served and timed
+itself. An observation is recorded once per provider attempt, when the attempt
+completed with a 2xx status, names its provider, carries a provider-reported
+`completion_tokens` (not the coordinator estimate), and has a coordinator
+TTFT measured for that same attempt (SPEC-006 phase timing: provider dispatch
+done to first provider byte). Relay-blind and privacy-class attempts MUST NOT
+be recorded, because their token counts are upper bounds.
+
+From one observation the coordinator derives, using only its own wall clock
+for every duration:
+
+- `ttft_ms`, clamped to 1..600000;
+- a prefill rate, uncached prompt tokens divided by TTFT, only when at least 64
+  uncached prompt tokens were sent, clamped to at most 50000 tokens/s;
+- a decode rate, `completion_tokens - 1` divided by the first-byte-to-done
+  time, only when `completion_tokens` is at least 8 and that time is positive,
+  clamped to at most 2000 tokens/s.
+
+Each metric is an exponentially weighted moving average with weight 0.2 for
+the new sample, with its own sample count and the time of the last
+observation. A record is **fresh** when it has at least 3 TTFT samples and its
+last observation is at most 15 minutes old; anything else is **unmeasured**.
+The token counts are the provider's usage, the same counts billing settles on;
+the clamps bound what an inflated count can do to a rate.
+
+The only self-reported input is the heartbeat `throughput_tps_estimate`, used
+as a decode prior worth 2 samples and capped at 1.25 times the measured decode
+average, so a self-report never outranks measurements. The SPEC-001-R006
+engine profile MUST NOT be read as a measurement. The store holds at most
+65536 records; when full it evicts records that are not fresh first, then the
+least recently observed. It is not persisted: after a coordinator restart every
+provider is unmeasured until traffic rebuilds it. The store never changes
+eligibility, admission, trust tier, pricing or settlement.
+
+## SPEC-002-R006 — Phase-aware selection
+
+After the existing filters and the SPEC-004 objective sort have produced the
+eligible candidate list for a plaintext route (global, Trusted Pool, pool
+model, external runtime, continuous-batching and native-MTP sessions alike),
+the coordinator MUST reorder that list by the request's phase. It MUST NOT add
+or remove candidates. Pinned routes (`X-MacProvider-Session`,
+`X-MacProvider-Provider`), the busy-provider slot queue, and relay-blind and
+privacy-class selection (SPEC-041, SPEC-049) keep their own ordering.
+
+**Phase.** `max_out` is the request body's `max_tokens`, else 512. The input
+estimate is the coordinator's existing token estimate of the request body.
+
+- `long_input`: input estimate at least 2048 and at least 4 times `max_out`;
+- `interactive`: otherwise, when `stream` is true;
+- `throughput`: otherwise.
+
+**Score.** Only fresh candidates (SPEC-002-R005) are scored. With values
+normalized by the best value among fresh candidates (so each term is in 0..1),
+and `free_share` the provider's free slots over its total slots:
+
+- `interactive`: 0.5 × (lowest TTFT / TTFT) + 0.5 × (decode / highest decode),
+  times (0.5 + 0.5 × `free_share`);
+- `long_input`: 0.8 × (prefill / highest prefill) + 0.2 × (decode / highest
+  decode), times (0.5 + 0.5 × `free_share`); a candidate without a prefill
+  average contributes 0 to the prefill term;
+- `throughput`: (free slots × decode) / highest (free slots × decode).
+
+**Order.** With two or more fresh candidates, the fresh candidates whose score
+is at least 0.85 of the best score form the band; one band member chosen by a
+per-request draw goes first, then the other fresh candidates by score, then
+the unmeasured candidates in objective order. Basis `measured`.
+
+**Exploration.** When at least one candidate is unmeasured and at least one is
+fresh, a per-request draw below 0.10 puts the unmeasured candidates first, in
+objective order, followed by the fresh ones by score. Basis `explore`. So a
+new or idle provider keeps receiving traffic until it is measured.
+
+**Fallback.** With fewer than two fresh candidates (and no exploration draw),
+the objective order is kept and the existing sticky and random tiebreak steps
+run unchanged. Basis `fallback`. A coordinator with no evidence therefore
+selects exactly as before this requirement.
+
+Both draws are derived from the request ID and the daily key, as for the
+SPEC-004 tiebreak, so a decision is reproducible within the day. Sticky
+affinity still applies after the reorder. When the basis is `measured` or
+`explore`, the random tiebreak step is skipped, because the band draw already
+spreads load. The score's influence is bounded: it only orders eligible
+candidates, the load term halves a full provider's score, the band shares
+traffic among near-equal providers, and exploration reserves 10% of decisions
+for unmeasured providers whenever any exist.
+
+## SPEC-002-R007 — Route trace
+
+For every successful plaintext selection, the coordinator MUST write one
+operator log line `event=route_trace` with `request_id`, `provider_id`,
+`model`, `phase`, `basis` (`measured`, `explore`, `fallback` or `pinned`),
+`candidates`, `fresh`, the chosen provider's `samples`, `evidence_age_s`
+(or `-1`), `score`, `engine` and `latency`, and increment
+`coordinator_route_selections_total{phase,basis}`.
+
+The response MUST carry `X-MacProvider-Route-Trace` with exactly this grammar
+and member order, and no provider identity:
+
+`v=1; phase=<interactive|long_input|throughput>; basis=<measured|explore|fallback|pinned>; evidence=<fresh|none>; engine=<general_mlx|continuous_batching|native_mtp|unknown>; latency=<low|medium|high|unknown>`
+
+`evidence` is `fresh` when the chosen provider's record is fresh. `engine` is
+the chosen provider's SPEC-001-R006 `engine_family`, or `unknown` without a
+valid profile. `latency` is the expected time to first token for the chosen
+provider: uncached input over the prefill average for `long_input` when one
+exists, else the TTFT average; `low` below 0.5 s, `medium` below 2 s, `high`
+otherwise, `unknown` when the record is not fresh. The header describes the
+first selection of the request; a failover does not rewrite it. Relay-blind
+and privacy-class responses MUST NOT carry it. The gateway forwards it under
+SPEC-006-R020.

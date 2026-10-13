@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.50 (2026-10-11, pinned slot-queue lane)
+**Version:** 0.9.51 (2026-10-13, buyer privacy mode and route trace)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.51 (2026-10-13, issue #1355 — buyer privacy mode and route trace):**
+- §5.4.4: registers `SPEC-006-R019`. `X-MacProvider-Privacy-Mode` takes `pool` (default), `relay_blind_required` (the SPEC-041 envelope, fail closed: plaintext or a pool selection is 400 `privacy_mode_unsatisfied`) or `owned_provider` (an authorized Trusted Pool selection is required). Invalid values are 400 `invalid_privacy_mode`. Responses carry the effective mode and a fixed disclosure string that never overclaims. Pool-scoped privacy stays undefined (#1985) and fails closed.
+- §5.4.4: registers `SPEC-006-R020`. The gateway forwards `X-MacProvider-Route-Trace` (SPEC-002-R007) only as an exact match of its closed grammar.
 
 **Change log v0.9.50 (2026-10-11, issue #1911 — pinned slot-queue lane):**
 - §7.8: the per-provider slot queue is FIFO within each of two lanes. Plaintext requests use one lane with the existing cap. Relay-blind and privacy-class chats waiting on their reserved session use a pinned lane governed by SPEC-049-R029, capped at half the plaintext cap. While both lanes wait, queue grants alternate. Plaintext deadlines, admission, direct dispatch and the capacity shed are unchanged.
@@ -359,7 +363,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.43 registers `SPEC-006-R001`..`SPEC-006-R018` in
+SPEC-006 v0.9.51 registers `SPEC-006-R001`..`SPEC-006-R020` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -407,6 +411,11 @@ changing them:
   `/v1/models` view, creator-signed price disclosure, and response disclosure
   headers for SPEC-042-R015 entries (§5.4.3, v0.9.43; SPEC-005-R015,
   SPEC-043-R014).
+- `SPEC-006-R019` — Buyer privacy mode: `X-MacProvider-Privacy-Mode` closed
+  vocabulary mapped onto existing relay-blind and Trusted Pool paths, fail-closed
+  codes, and the effective-mode disclosure headers (§5.4.4, v0.9.51).
+- `SPEC-006-R020` — Route trace forwarding: the gateway forwards only an exact
+  SPEC-002-R007 `X-MacProvider-Route-Trace` value (§5.4.4, v0.9.51).
 
 `requirement_id_migration` is `complete`. R004–R018 are not promoted from
 this close. Signed journey-result evidence is still required before any of
@@ -2114,6 +2123,66 @@ retry/failover, `/v1/models`, pool approval and acceptance finality remain
 separate source obligations. No protected acceptance integration or conformance
 promotion follows from a producer signature alone; SPEC-006-R018 stays pending
 until the complete joined, released and signed journey passes.
+
+#### 5.4.4 Buyer privacy mode (v0.9.51, SPEC-006-R019, #1355)
+
+**SPEC-006-R019 — Buyer privacy mode.** A buyer MAY state the privacy boundary
+a chat request requires with the request header `X-MacProvider-Privacy-Mode`.
+It applies to `POST /v1/chat/completions` and to the `/v1/responses` and
+`/v1/messages` facades that share its dispatch path. Like the engine and pool
+selectors it is a control-plane header, never a body field. The mode maps
+onto existing paths only; it adds no new privacy mechanism.
+
+The vocabulary is closed. After trimming surrounding ASCII whitespace, the
+value MUST byte-exactly equal one of the modes below. An unknown value, another
+case, an empty value, or more than one value MUST be rejected before quota
+reservation and dispatch with HTTP 400, `type: "invalid_request_error"`,
+`code: "invalid_privacy_mode"`.
+
+| Mode | Maps onto | Unsatisfied request |
+|---|---|---|
+| `pool` (default when absent) | Today's routing, unchanged. | Never. |
+| `relay_blind_required` | The SPEC-041 relay-blind envelope in `required` mode, and through it the SPEC-049 privacy class when that class is also requested. Every SPEC-041/SPEC-049 rule and failure still applies; no-provider outcomes stay fail closed. | A plaintext body, or any Trusted Pool selection: 400 `privacy_mode_unsatisfied`. The request is never served as plaintext. |
+| `owned_provider` | The authorized Trusted Pool selection of SPEC-042-R002/R010 (`X-MacProvider-Pool-Select`), routed only to that pool's members with no spill to the network. | No pool selection: 400 `privacy_mode_unsatisfied`. An unauthorized or unknown pool keeps the existing generic `pool_unavailable`. |
+
+Both new codes are `retryable: false`. The mode is resolved before the
+relay-blind gate, and the pool selection is still resolved before any pool
+error, so `privacy_mode_unsatisfied` reveals nothing about any pool.
+Pool-scoped relay-blind privacy is not defined by this version (#1985); a
+later version may extend the vocabulary or lift the `relay_blind_required` pool
+refusal, and until then that combination fails closed.
+
+**Disclosure.** A response the gateway writes after the mode is resolved
+carries `X-MacProvider-Privacy-Mode` set to the effective mode and
+`X-MacProvider-Privacy-Mode-Disclosure` set to that mode's fixed string. The
+effective mode is `relay_blind_required` for a relay-blind envelope,
+`owned_provider` for a resolved Trusted Pool selection, and `pool` otherwise,
+whatever the buyer requested. The strings MUST be exactly:
+
+| Effective mode | `X-MacProvider-Privacy-Mode-Disclosure` |
+|---|---|
+| `pool` | `content_visible_to_serving_provider_and_network_relays; no_confidentiality_claim` |
+| `relay_blind_required` | `content_hidden_from_network_relays; serving_provider_runtime_reads_plaintext; metadata_visible_to_relays` |
+| `owned_provider` | `served_only_by_selected_trusted_pool_members; content_visible_to_serving_member_and_network_relays` |
+
+They never claim hardware isolation, attestation, end-to-end encryption that
+excludes the provider, or that the buyer owns the serving Mac. The SPEC-049
+`usage.macprovider.privacy` disclosure remains the authoritative statement for
+privacy-class responses. Upstream values of either header are dropped.
+
+**Operator visibility.** For a plaintext route the gateway sends the effective
+mode upstream as `X-MacProvider-Internal-Privacy-Mode` under the gateway
+service-token bearer (existing internal-header rule). The coordinator accepts
+only the three values, ignores any other, and records it as `privacy_mode` on
+the SPEC-002-R007 `route_trace` line. It never changes coordinator routing.
+
+**SPEC-006-R020 — Route trace forwarding.** The gateway MUST forward the
+coordinator's `X-MacProvider-Route-Trace` header (SPEC-002-R007) to the buyer
+only when its value byte-exactly matches the SPEC-002-R007 grammar, and drop
+any other value. The header carries classes only (phase, basis, evidence
+freshness, engine family, latency class); it never names a provider, session,
+host or measured number. Buyer docs MUST describe it as an explanation of the
+routing choice, not a performance guarantee.
 
 ### 5.5 `GET /v1/usage`
 
