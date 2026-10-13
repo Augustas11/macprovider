@@ -4517,7 +4517,10 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             maxRows: maxBatch,
             queueLimit: scheduler.queueLimit,
-            generation: selfCheckGeneration
+            generation: selfCheckGeneration,
+            probeKeyBoundary: ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
+            maxRequestTokens: scheduler.maxRequestTokens,
+            poolTokens: scheduler.poolTokens
         )
     }
 
@@ -4583,12 +4586,11 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// SPEC-038 FR-CB10: whether a batched row's first divergence from the
-    /// same prompt run alone is a numerical near-tie, judged with the load-time
-    /// isolation probe's own rule (`PagedKVRuntimeParityProbe
-    /// .batchedTokenIsConformant`, 1.0-logit runner-up bound, other-row leak
-    /// guard) against the stock serial logits of the shared prefix, and with
-    /// the alone token also in that top two. Returns the logit margin between
-    /// the two tokens for the evidence log.
+    /// same prompt run alone is an exact tie
+    /// (`ContinuousBatchingSelfCheck.divergenceVerdict` at
+    /// `nearTieLogitTolerance`), against the stock serial logits of the
+    /// shared prefix. Returns the logit margin between the two tokens for the
+    /// evidence log.
     func continuousBatchingSelfCheckDivergence(
         prompt: [Int],
         sharedPrefix: [Int],
@@ -4600,40 +4602,31 @@ actor ModelRuntime: ModelRuntimeServing {
         let reference = try await container.perform { context in
             try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
         }
-        let logits = reference.logits
-        let margin: Float? = logits.indices.contains(aloneToken) && logits.indices.contains(batchedToken)
-            ? abs(logits[aloneToken] - logits[batchedToken])
-            : nil
-        let tolerance = PagedKVRuntimeParityProbe.batchedArgmaxLogitTolerance
-        let leaked = batchedToken != reference.top1 && otherRowsAloneTokens.contains(batchedToken)
-        let batchedConformant = !leaked && PagedKVRuntimeParityProbe.batchedTokenIsConformant(
-            decoded: batchedToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
+        return ContinuousBatchingSelfCheck.divergenceVerdict(
+            reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
+            otherRowsAloneTokens: otherRowsAloneTokens
         )
-        let aloneConformant = PagedKVRuntimeParityProbe.batchedTokenIsConformant(
-            decoded: aloneToken, own: reference, otherRowSerialTop1: nil, tolerance: tolerance
-        )
-        if leaked { return (false, margin, "other_row_token") }
-        if !batchedConformant { return (false, margin, "batched_outside_serial_top2") }
-        if !aloneConformant { return (false, margin, "alone_outside_serial_top2") }
-        guard let margin, margin <= tolerance else { return (false, margin, "margin_above_tolerance") }
-        return (true, margin, "near_tie")
     }
 
     /// Runs `prompts` together on the attached scheduler at temperature 0 and
     /// returns each row's tokens and the wall time. Cancelling the calling
-    /// task cancels every row.
+    /// task cancels every row. With `cohort`, the rows decode only once all
+    /// of them are in decode (`ContinuousBatchSchedulerRequest
+    /// .selfCheckCohort`), and each row's decode tokens generated beside the
+    /// whole cohort are returned (0 otherwise).
     func runContinuousBatchingSelfCheckBatch(
         prompts: [[Int]],
         maxOutputTokens: Int,
-        idPrefix: String
-    ) async throws -> (outputs: [[Int]], seconds: Double) {
+        idPrefix: String,
+        cohort: Bool = false
+    ) async throws -> (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int]) {
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: (Int, [Int]).self) { group in
+            try await withThrowingTaskGroup(of: (Int, [Int], Int).self) { group in
                 for (index, prompt) in prompts.enumerated() {
                     let id = ids[index]
                     group.addTask {
@@ -4645,19 +4638,24 @@ actor ModelRuntime: ModelRuntimeServing {
                             samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
                             temperature: 0,
                             topP: 1,
-                            selfCheckProbe: true
+                            selfCheckProbe: true,
+                            selfCheckCohort: cohort ? prompts.count : 0
                         ))
-                        return (index, result.generatedTokens)
+                        return (index, result.generatedTokens, result.selfCheckCohortDecodeTokens ?? 0)
                     }
                 }
                 var rows = Array(repeating: [Int](), count: prompts.count)
-                for try await (index, tokens) in group { rows[index] = tokens }
-                return rows
+                var cohortTokens = Array(repeating: 0, count: prompts.count)
+                for try await (index, tokens, decodeTokens) in group {
+                    rows[index] = tokens
+                    cohortTokens[index] = decodeTokens
+                }
+                return (rows, cohortTokens)
             }
         } onCancel: {
             Task { for id in ids { await scheduler.cancel(requestID: id) } }
         }
-        return (outputs, Date().timeIntervalSince(start))
+        return (outputs.0, Date().timeIntervalSince(start), outputs.1)
     }
 
     func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
@@ -5135,15 +5133,17 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The runtime identity the FR-CB10 self-check result is stored under:
     /// the MLX pin plus this build's row-isolation policy (SPEC-038 FR-CB2
     /// v0.3.17: per-row attention routes and the decode and verify forward
-    /// bounds of this device). A result measured before the policy, or at
-    /// other bounds, matches no live key, so the check re-runs; an earlier
-    /// grant carries the Mac through the re-run as for an MLX pin change.
+    /// bounds of this device) and the FR-CB10 probe version (v0.3.19). A
+    /// result measured before the policy, at other bounds or by an older
+    /// probe matches no live key, so the check re-runs; an earlier grant
+    /// carries the Mac through the re-run as for an MLX pin change.
     static var continuousBatchingSelfCheckRuntimeBuild: String {
         continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
     }
 
     static func continuousBatchingSelfCheckRuntimeBuild(forwardBound bound: Int) -> String {
         "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
+            + "+\(ContinuousBatchingSelfCheck.probeVersion)"
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`
