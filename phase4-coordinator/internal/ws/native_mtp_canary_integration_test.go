@@ -116,6 +116,7 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 		WithNow(func() time.Time { return now }),
 		WithNativeMTPCanaryJitter(func(base time.Duration) time.Duration { return base }),
 	)
+	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
 	server.nativeMTPCanaryBank = &bank
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)
@@ -405,6 +406,7 @@ func newNativeMTPCanaryIntegrationHarness(t *testing.T) *nativeMTPCanaryIntegrat
 		WithNow(func() time.Time { return now }),
 		WithNativeMTPCanaryJitter(func(base time.Duration) time.Duration { return base }),
 	)
+	awaitStartupSnapshots(t, server)
 	server.cfg.Pool.NativeMTPCanary.Enabled = true
 	server.nativeMTPCanaryBank = &bank
 	session := newProviderSession(provider.ProviderID, provider.AssignedID, serverConn, 16, time.Second)

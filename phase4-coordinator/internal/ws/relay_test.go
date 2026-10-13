@@ -2812,6 +2812,7 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 	registry := pool.NewRegistry(nil)
 	registry.Register(provider, serverConn)
 	s := NewServer(cfg, registry, logger)
+	awaitStartupSnapshots(t, s)
 	session := newProviderSession("p1", "s1", serverConn, 4)
 	session.useTier2Session(tier2Session)
 	session.onWriteFailure = s.handleProviderWriteFailure
