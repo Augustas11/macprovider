@@ -87,9 +87,6 @@ type directoryCandidate struct {
 // identity fails before encryption as for a revoked one.
 const maxRotatedDirectoryEntriesPerProvider = 4
 
-// rotatedDroppedMarker flags, in memory only, a rotated row over the cap.
-const rotatedDroppedMarker = "\x00rotated-dropped"
-
 // BuildIdentityDirectory lists every provider whose two keys resolve from
 // configuration pins or an active enrollment, revoked while quarantined, and
 // every enrollment revoked within EnrollmentRevocationRetention as revoked.
@@ -142,6 +139,7 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 		}, true)
 	}
 	rotatedKept := make(map[string]int)
+	skip := make(map[int]bool)
 	for i := len(enrollments) - 1; i >= 0; i-- {
 		// Newest first per provider: keep only the most recent rotated rows.
 		enrollment := enrollments[i]
@@ -150,11 +148,11 @@ func (a *PrivacyAuthority) BuildIdentityDirectory(ctx context.Context, now time.
 		}
 		rotatedKept[enrollment.ProviderID]++
 		if rotatedKept[enrollment.ProviderID] > maxRotatedDirectoryEntriesPerProvider {
-			enrollments[i].RevokedReason = rotatedDroppedMarker
+			skip[i] = true
 		}
 	}
-	for _, enrollment := range enrollments {
-		if enrollment.RevokedReason == rotatedDroppedMarker {
+	for i, enrollment := range enrollments {
+		if skip[i] {
 			continue
 		}
 		if enrollment.RevokedAtUnix != 0 {

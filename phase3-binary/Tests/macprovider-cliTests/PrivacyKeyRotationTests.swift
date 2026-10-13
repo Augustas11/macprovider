@@ -123,6 +123,30 @@ final class PrivacyKeyRotationTests: XCTestCase {
         XCTAssertFalse(try responder.applyRotationResult(accepted), "a replayed result does nothing")
     }
 
+    /// A permanent refusal (pinned identity or a key already enrolled) drops
+    /// the staged key so the provider stops asking.
+    func testPermanentRefusalDiscardsStagedKey() throws {
+        let root = try makeRotationStateRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (responder, runtime) = try makeRotationResponder(root: root, signer: try SELivenessTestSigning.generate())
+        let original = runtime.identityPublicKeyBase64URL()
+        _ = try RelayBlindKeyManager.stageNextIdentity(directory: root)
+        let nonce = Data(repeating: 0x55, count: 32)
+        _ = try XCTUnwrap(responder.respondToRotation(challenge: rotationChallenge(nonce: nonce), assignedSession: "session-1"))
+        XCTAssertFalse(try responder.applyRotationResult(rotationResult(nonce: RelayBlindBase64URL.encode(nonce), status: "rejected", reason: "rotation_key_in_use")))
+        XCTAssertNil(try runtime.stagedIdentity())
+        XCTAssertEqual(runtime.identityPublicKeyBase64URL(), original)
+        XCTAssertNil(responder.rotationRequest(now: Date(timeIntervalSince1970: 1_800_000_000)))
+
+        _ = try RelayBlindKeyManager.stageNextIdentity(directory: root)
+        XCTAssertFalse(try responder.applyRotationResult(rotationResult(nonce: "", status: "rejected", reason: "rotation_identity_pinned")))
+        XCTAssertNil(try runtime.stagedIdentity())
+
+        _ = try RelayBlindKeyManager.stageNextIdentity(directory: root)
+        XCTAssertFalse(try responder.applyRotationResult(rotationResult(nonce: "", status: "rejected", reason: "rotation_unavailable")))
+        XCTAssertNotNil(try runtime.stagedIdentity(), "a transient refusal keeps the staged key")
+    }
+
     /// A promotion that replaced the identity file but stopped before removing
     /// the staged copy is repaired on the next start.
     func testInterruptedPromotionIsRepairedAtStart() throws {

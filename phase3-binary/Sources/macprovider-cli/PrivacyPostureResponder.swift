@@ -162,11 +162,11 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         defer { lock.unlock() }
         noteDecryptRecheckLocked()
         guard !advertisingDisabled else { return nil }
-        let staged = try? relayBlindRuntime.stagedIdentity()
-        guard staged != nil else { return nil }
         if let lastRotationRequest, now.timeIntervalSince(lastRotationRequest) < Self.rotationRequestInterval {
             return nil
         }
+        let staged = try? relayBlindRuntime.stagedIdentity()
+        guard staged != nil else { return nil }
         lastRotationRequest = now
         return ["type": "privacy_key_rotation_request", "version": 1]
     }
@@ -250,6 +250,16 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         }
         lock.lock()
         defer { lock.unlock() }
+        // A staged key the coordinator can never accept (pinned identity, or
+        // a key already enrolled somewhere) is discarded instead of retried.
+        if status == "rejected",
+           let reason = result["reason"] as? String,
+           reason == "rotation_key_in_use" || reason == "rotation_identity_pinned",
+           nonce.isEmpty || nonce == pendingRotation?.nonce {
+            pendingRotation = nil
+            try relayBlindRuntime.discardStagedIdentity()
+            return false
+        }
         // The pending rotation stays until a promotion succeeds; a lost or
         // rejected result is retried by the next request, and the
         // coordinator acknowledges a retry of an accepted rotation.

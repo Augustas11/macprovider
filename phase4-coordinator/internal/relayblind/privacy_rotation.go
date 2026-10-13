@@ -197,10 +197,16 @@ func (a *PrivacyAuthority) BeginRotationChallenge(ctx context.Context, providerI
 	if _, pinned := a.identity[providerID]; pinned {
 		return "", 0, RotationIdentityPinned
 	}
-	if _, enrolled, err := a.store.ActivePrivacyEnrollment(ctx, providerID); err != nil {
+	enrollment, enrolled, err := a.store.ActivePrivacyEnrollment(ctx, providerID)
+	switch {
+	case err != nil:
 		return "", 0, RotationStoreUnavailable
-	} else if !enrolled {
+	case !enrolled:
 		return "", 0, RotationNotEnrolled
+	case enrollment.PreviousIdentityFingerprint == "" && now.Unix()-enrollment.EnrolledAtUnix < int64(MinRotationInterval/time.Second):
+		// item 11, checked early: a first enrollment cannot be a retry
+		// target, so a rotation inside the interval would only be refused.
+		return "", 0, RotationUnavailable
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {

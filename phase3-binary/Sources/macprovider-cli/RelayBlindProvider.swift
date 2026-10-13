@@ -408,6 +408,10 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         try keyManager.promoteStagedIdentity(expectedPublicKey: expectedPublicKey)
     }
 
+    func discardStagedIdentity() throws {
+        try keyManager.discardStagedIdentity()
+    }
+
     func open(
         envelopeBody: String,
         outerRequestID: String,
@@ -678,6 +682,15 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         identityKey = staged
         try? secureDirectory.remove(Self.stagedIdentityFileName)
         try? secureDirectory.synchronize()
+    }
+
+    /// Removes the staged key after a permanent rotation refusal.
+    func discardStagedIdentity() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard secureDirectory.exists(Self.stagedIdentityFileName) else { return }
+        try secureDirectory.remove(Self.stagedIdentityFileName)
+        try secureDirectory.synchronize()
     }
 
     private func stagedIdentityLocked() throws -> Curve25519.Signing.PrivateKey? {

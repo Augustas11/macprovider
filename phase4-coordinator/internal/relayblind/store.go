@@ -289,11 +289,14 @@ WHERE ((keys.revoked_at_unix IS NOT NULL AND COALESCE(keys.revocation_retained_u
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	} else {
-		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>? AND key_class=? AND revoked_at_unix IS NULL`, providerID, now.Unix(), class).Scan(&count); err != nil {
+		// Active records are capped at maxRecords. Revoked records that have
+		// not expired still count toward a 2*maxRecords bound, so cycling
+		// kids cannot grow the table without limit.
+		var active, total int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN revoked_at_unix IS NULL THEN 1 ELSE 0 END),0), COUNT(*) FROM relay_blind_key_records WHERE provider_id=? AND expires_at_unix>? AND key_class=?`, providerID, now.Unix(), class).Scan(&active, &total); err != nil {
 			return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 		}
-		if maxRecords > 0 && count >= maxRecords {
+		if maxRecords > 0 && (active >= maxRecords || total >= 2*maxRecords) {
 			return ErrCapacity
 		}
 	}

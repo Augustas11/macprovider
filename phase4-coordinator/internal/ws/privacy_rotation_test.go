@@ -258,3 +258,19 @@ func wsRotationMessageFor(t *testing.T, m wsPrivacyMaterial, session string, nex
 	}
 	return raw
 }
+
+// §4.12: a request with any other field or type starts no exchange.
+func TestPrivacyKeyRotationRequestIsClosed(t *testing.T) {
+	rig := newRotationRig(t)
+	rig.connect(t, "session-a")
+	for _, raw := range []string{
+		`{"type":"privacy_key_rotation_request","version":1,"extra":true}`,
+		`{"type":"privacy_key_rotation_request","version":2}`,
+		`{"type":"privacy_key_rotation_request"}`,
+	} {
+		rig.s.handlePrivacyKeyRotationRequest("provider-a", "session-a", []byte(raw))
+		if _, inFlight := rig.s.privacyRotationInFlight.Load("provider-a/session-a"); inFlight {
+			t.Fatalf("request %s started an exchange", raw)
+		}
+	}
+}

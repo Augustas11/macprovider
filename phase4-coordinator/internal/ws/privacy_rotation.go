@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"time"
@@ -34,11 +35,14 @@ func (s *Server) handlePrivacyKeyRotationRequest(providerID, assignedID string, 
 	if s == nil || s.privacyAuthority == nil {
 		return
 	}
+	// §4.12: the request is closed, exactly type and version 1.
 	var request struct {
 		Type    string `json:"type"`
 		Version int    `json:"version"`
 	}
-	if err := json.Unmarshal(payload, &request); err != nil || request.Version != 1 {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&request); err != nil || dec.More() || request.Type != "privacy_key_rotation_request" || request.Version != 1 {
 		return
 	}
 	provider, ok := s.pool.Resolve(providerID, assignedID)

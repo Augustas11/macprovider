@@ -208,6 +208,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	var selections []privacySelection
 	var keyless []pool.Provider
 	var unverified []string
+	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
 	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
@@ -228,7 +229,8 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 		for _, record := range records {
 			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, false)
 			if code != "" {
-				if reason == relayblind.PrivacyRejectPostureUnverified {
+				if reason == relayblind.PrivacyRejectPostureUnverified && !unverifiedSeen[provider.ProviderID] {
+					unverifiedSeen[provider.ProviderID] = true
 					unverified = append(unverified, provider.ProviderID)
 				}
 				closest = closerPrivacyReject(closest, reason)

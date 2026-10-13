@@ -2646,6 +2646,11 @@ actor CoordinatorClient {
         switch type {
         case "hello_ack":
             try await acceptCoordinatorSession(dict, reason: "coordinator hello_ack received")
+            // SPEC-049-R031 item 12: offer a staged identity key once the
+            // session is accepted. Best effort; a revoked session never asks.
+            if coordinatorRevocationNotice == nil {
+                try? await sendPrivacyKeyRotationRequestIfDue()
+            }
         case "ownership_event":
             try await handleOwnershipEvent(dict)
         case "ownership_status":
@@ -4562,7 +4567,6 @@ actor CoordinatorClient {
         if coordinatorRevocationNotice == nil {
             startAdmissionPendingReadinessWatch()
         }
-        try await sendPrivacyKeyRotationRequestIfDue()
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {

@@ -448,10 +448,11 @@ func f256() elliptic.Curve { return elliptic.P256() }
 func TestRotationTooSoonIsRefused(t *testing.T) {
 	f := enrolledRotationFixture(t, nil)
 	before, _ := activeEnrollment(t, f)
-	reason, err := f.rotate(2, f.signers(rotationKey(0x42)), nil)
-	if reason != RotationUnavailable || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
-		t.Fatalf("rotation of a fresh enrollment = %q, %v", reason, err)
+	// A first enrollment is refused already at challenge time.
+	if _, _, reason := f.auth.BeginRotationChallenge(context.Background(), f.providerID, f.session, f.now); reason != RotationUnavailable || quarantinedNow(t, f) {
+		t.Fatalf("challenge for a fresh enrollment = %q", reason)
 	}
+	f.now = f.now.Add(61 * time.Second)
 	if after, _ := activeEnrollment(t, f); after != before {
 		t.Fatalf("refusal changed the enrollment: %+v", after)
 	}
@@ -461,8 +462,11 @@ func TestRotationTooSoonIsRefused(t *testing.T) {
 	}
 	f.identity = rotationKey(0x42)
 	f.now = f.now.Add(2 * time.Hour)
-	if reason, _ := f.rotate(4, f.signers(rotationKey(0x43)), nil); reason != RotationUnavailable {
-		t.Fatalf("second rotation inside the interval = %q", reason)
+	// A rotated enrollment is challenged (a retry may follow) and the
+	// transaction refuses a new rotation inside the interval.
+	reason, err := f.rotate(4, f.signers(rotationKey(0x43)), nil)
+	if reason != RotationUnavailable || !errors.Is(err, ErrPrivacyRejected) || quarantinedNow(t, f) {
+		t.Fatalf("second rotation inside the interval = %q, %v", reason, err)
 	}
 }
 
