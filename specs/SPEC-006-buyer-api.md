@@ -1870,7 +1870,7 @@ The gateway MUST strip these upstream coordinator response headers before return
 
 Buyers never receive provider identity. The gateway MUST NOT emit any of these under a different name, MUST delete them from every buyer response (including error, relay-blind, and id-less retry replay responses) immediately before the response head is written, and MUST NOT replay a stored provider identifier. The buyer-facing nginx vhost SHOULD also hide them (`proxy_hide_header`) as defense in depth. Provider identity remains available to operators in coordinator logs and `request_log`.
 
-Exception: verification and encryption material that another SPEC requires the buyer to hold stays buyer-visible: the SPEC-015 receipt tuple's `provider_pubkey`, the `/v1/receipts` `provider_receipt_key_fingerprint`, and the SPEC-041/SPEC-049 reservation `kid`, `key_record` and `provider_binding`. These are pseudonymous and are not provider identifiers; nothing else identifies a provider or session to a buyer.
+Exception: verification and encryption material that another SPEC requires the buyer to hold stays buyer-visible: the SPEC-015 receipt tuple's `provider_pubkey`, the `/v1/receipts` `provider_receipt_key_fingerprint`, and the SPEC-041/SPEC-049 reservation `kid`, `key_record` and `provider_binding`. The receipt key is the stable pseudonymous signing key that SPEC-015 verification requires; it is not a provider identifier. Nothing else identifies a provider or session to a buyer.
 
 The documented response-pass-through allowlist is:
 

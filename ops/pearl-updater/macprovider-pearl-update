@@ -193,8 +193,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "malibu-domain-migration-r1"
-CANARY_AUTHORITY_COMMIT = "9c78c9880a615725eb1da5b42b1193f1372da7f7"
+CANARY_AUTHORITY_VERSION = "no-buyer-provider-id-r1"
+CANARY_AUTHORITY_COMMIT = "9bfc1bc422e474f7f7040a20bfc9d42ef896d02e"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -221,8 +221,8 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "2edaa6bf1b0030360f6992c2ca9f94545e7e077fbe84dc0e43af61af6c33c641",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "75f814d5d9582528ce5218b4e7c0aead78d5b1cc04ef798427d9bf4e172bb800",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "7fd56b8b5994d9f01a551d0c662f445d986f7c81eabd718e39fc5edea728c356",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "60deebafa925139f957049590b03f7d5123d6c55262ccee13f2d2759af85b9bb",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6bb54915e805a240614ec414648dcb01fbff25a348e4fed517828ddcd9c6e340",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "3506731e8b68ea40a03a94815f2138239b1950019bdd6637dc7e39a79acbbcbe",
     Path("/etc/systemd/system/canary-buyer.service"): "3c8298aa53a7ffa57d93738d8173894c8e7ae2736a1b594da23ee97b78d92e6f",
@@ -6408,10 +6408,9 @@ class Updater:
         while True:
             result = self.run_command(
                 [
-                    "sqlite3",
-                    "-readonly",
+                    self.sqlite_binary(),
                     "-bail",
-                    str(coordinator_db),
+                    f"file:{coordinator_db}?mode=ro",
                     "SELECT provider_assigned_id FROM request_log "
                     f"WHERE external_request_id = '{request_uuid}' ORDER BY id DESC LIMIT 1;",
                 ],

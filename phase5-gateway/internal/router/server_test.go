@@ -3409,6 +3409,9 @@ func TestBuyerResponsesNeverCarryProviderIdentity(t *testing.T) {
 		fullKey := createAccountAndKey(t, store, cfg, "acct_noid_replay")
 		first := postChat(t, handler, fullKey, idlessDedupeBody, nil)
 		second := postChat(t, handler, fullKey, idlessDedupeBody, nil)
+		if got := second.Header().Get(idlessDedupeHeader); got != idlessDedupeHeaderValue {
+			t.Fatalf("second request was not a dedupe replay: %s=%q", idlessDedupeHeader, got)
+		}
 		assertNone(t, first)
 		assertNone(t, second)
 	})

@@ -465,7 +465,9 @@ gateway_proof() {
   [[ "$rid" =~ ^[A-Za-z0-9._-]+$ ]] || die "gateway request id has unexpected characters"
   local served_sid="" k
   for k in 1 2 3 4 5 6; do
-    served_sid="$(pearl_ssh "'$psqlite' -readonly '$pdb' \"SELECT provider_assigned_id FROM request_log WHERE external_request_id = '$rid' ORDER BY id DESC LIMIT 1;\"" 2>/dev/null | tr -d '\r\n' || true)"
+    served_sid="$(pearl_ssh "'$psqlite' -readonly '$pdb' \"SELECT provider_assigned_id FROM request_log WHERE external_request_id = '$rid' ORDER BY id DESC LIMIT 1;\"" 2>/dev/null)" ||
+      die "request_log read failed over PEARL_SSH (request $rid)"
+    served_sid="$(printf '%s' "$served_sid" | tr -d '\r\n')"
     [ -n "$served_sid" ] && break
     [ "$k" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
   done

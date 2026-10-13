@@ -3725,6 +3725,7 @@ class PearlUpdaterTests(unittest.TestCase):
         request_id = str(uuid.uuid4())
         self.updater.databases = (Path("/gateway.db"), Path("/coordinator.db"))
         self.updater.sleep = lambda _seconds: None
+        self.updater.sqlite_binary = lambda: "/sqlite3"
         outputs = iter(["", "session-canary\n"])
         queries = []
 
@@ -3735,7 +3736,8 @@ class PearlUpdaterTests(unittest.TestCase):
         with mock.patch.object(self.updater, "run_command", side_effect=fake_run):
             self.updater.verify_buyer_proof_served_by_canary(request_id, "session-canary")
         self.assertEqual(len(queries), 2)
-        self.assertIn("/coordinator.db", queries[0])
+        self.assertEqual(queries[0][0], "/sqlite3")
+        self.assertIn("file:/coordinator.db?mode=ro", queries[0])
         self.assertIn(request_id, queries[0][-1])
         with mock.patch.object(
             self.updater,
@@ -4994,10 +4996,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "malibu-domain-migration-r1")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "no-buyer-provider-id-r1")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "9c78c9880a615725eb1da5b42b1193f1372da7f7",
+            "9bfc1bc422e474f7f7040a20bfc9d42ef896d02e",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
@@ -5163,7 +5165,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "malibu-domain-migration-r1",
+                "authority": "no-buyer-provider-id-r1",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [

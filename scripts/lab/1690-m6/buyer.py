@@ -44,7 +44,6 @@ def one(i, a):
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
             out["status"] = resp.status
-            out["provider"] = resp.headers.get("X-Provider-Id")
             out["engine"] = resp.headers.get("X-MacProvider-Engine")
             raw = resp.read()
     except urllib.error.HTTPError as err:

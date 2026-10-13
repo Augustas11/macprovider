@@ -322,7 +322,9 @@ test('response attribution requires exact provider and model in both canary mode
     { provider_id: 'provider-b', model_id: 'model-a' },
   ];
   assert.deepEqual(responseIdentityReasons({ provider: 'provider-b', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), []);
-  // Gateway modes never see provider identity; model identity is still enforced.
+  // Gateway modes never see provider identity; a leaked one is itself a failure.
+  assert.deepEqual(responseIdentityReasons({ provider: 'provider-a', responseModel: 'model-a' }, 'model-a', fleet, { requireProvider: false }), ['model-a:buyer_response_leaked_provider_identity']);
+  // Model identity is still enforced.
   assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-a' }, 'model-a', fleet, { requireProvider: false }), []);
   assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-b' }, 'model-a', fleet, { requireProvider: false }), ['model-a:response_model_model-b_ne_model-a']);
   assert.deepEqual(responseIdentityReasons({ provider: 'provider-c', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), [
