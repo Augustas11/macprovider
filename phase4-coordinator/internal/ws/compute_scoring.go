@@ -271,14 +271,14 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 }
 
 func (e *computeScoringEngine) recoveryCooldown() time.Duration {
-	return time.Duration(e.deps.Config.RecoveryCooldownMinutes) * time.Minute
+	return time.Duration(e.deps.Config.RecoveryCooldownSeconds) * time.Second
 }
 
 func (e *computeScoringEngine) interval(state computeintegrity.VerificationState) time.Duration {
 	if state.Escalating() {
-		return time.Duration(e.deps.Config.EscalationIntervalMinutes) * time.Minute
+		return time.Duration(e.deps.Config.EscalationIntervalSeconds) * time.Second
 	}
-	return time.Duration(e.deps.Config.BaseIntervalMinutes) * time.Minute
+	return time.Duration(e.deps.Config.BaseIntervalSeconds) * time.Second
 }
 
 // jitter returns d scaled by a uniform factor in [0.5, 1.5). Caller holds mu.

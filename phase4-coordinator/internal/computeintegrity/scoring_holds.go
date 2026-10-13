@@ -1,6 +1,15 @@
 package computeintegrity
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrHoldNotFound is returned when a release names no hold.
+var ErrHoldNotFound = errors.New("compute-integrity hold not found")
+
+// ErrHoldAlreadyReleased is returned when a release names a released hold.
+var ErrHoldAlreadyReleased = errors.New("compute-integrity hold already released")
 
 // HoldStatus is the SPEC-022 R-16 hold status.
 type HoldStatus string

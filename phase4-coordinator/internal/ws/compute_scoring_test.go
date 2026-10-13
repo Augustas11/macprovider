@@ -1,12 +1,15 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,7 +31,7 @@ type fakeHold struct {
 }
 
 type fakeHoldStore struct {
-	mu    sync.Mutex
+	mu       sync.Mutex
 	holds    []*fakeHold
 	fail     atomic.Bool
 	attempts atomic.Int64
@@ -82,6 +85,9 @@ func (f *fakeHoldStore) ReleaseComputeIntegrityHold(_ context.Context, holdID in
 	defer f.mu.Unlock()
 	for _, h := range f.holds {
 		if h.ID == holdID {
+			if h.Status != computeintegrity.HoldHeld {
+				return h.EarningsHold, computeintegrity.ErrHoldAlreadyReleased
+			}
 			h.Status = computeintegrity.HoldReleased
 			h.ReleasedBy = operatorID
 			h.ReleaseReason = reason
@@ -89,7 +95,7 @@ func (f *fakeHoldStore) ReleaseComputeIntegrityHold(_ context.Context, holdID in
 			return h.EarningsHold, nil
 		}
 	}
-	return computeintegrity.EarningsHold{}, errors.New("not found")
+	return computeintegrity.EarningsHold{}, computeintegrity.ErrHoldNotFound
 }
 
 func (f *fakeHoldStore) CountHeldComputeIntegrityHolds(context.Context) (int, error) {
@@ -140,6 +146,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 	h := &scoringHarness{t: t, registry: pool.NewRegistry(nil), holds: &fakeHoldStore{}, cheaters: cheaters}
 	h.clock.Store(time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC).UnixNano())
 	cfg := config.Default()
+	cfg.Auth.OperatorKey = "op-key"
 	h.server = NewServer(cfg, h.registry, zerolog.Nop(), WithNow(h.now))
 	for id := range providers {
 		p := &pool.Provider{
@@ -170,8 +177,8 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 		t.Fatal(err)
 	}
 	scfg := config.DefaultComputeIntegrityConfig().Scoring
-	scfg.BaseIntervalMinutes = 60
-	scfg.EscalationIntervalMinutes = 10
+	scfg.BaseIntervalSeconds = 3600
+	scfg.EscalationIntervalSeconds = 600
 	scfg.MaxInFlight = 16
 	scfg.ScoreDeadlineSeconds = 5
 	h.engine, err = h.server.newComputeScoringEngine(context.Background(), ComputeScoringDeps{
@@ -445,5 +452,83 @@ func TestComputeScoreResultFromWrongSessionIsIgnored(t *testing.T) {
 		}
 	default:
 		t.Fatal("matching result must be delivered")
+	}
+}
+
+func (h *scoringHarness) admin(method, path string, body string) (int, map[string]any) {
+	h.t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer op-key")
+	rec := httptest.NewRecorder()
+	h.server.handleAdminComputeIntegrity(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+// SPEC-036 FR-25: operators see state and holds, release a hold, and clear a
+// failed key, which lifts its routing suspension; every action needs an
+// operator id and a reason.
+func TestComputeScoringOperatorStatusReleaseAndClear(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4"}
+	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
+	for i := 0; i < 120 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+		h.round(20 * time.Minute)
+	}
+	if h.state("cheat") != computeintegrity.VerificationFailed {
+		t.Fatal("setup: expected failure")
+	}
+	code, body := h.admin(http.MethodGet, "/admin/compute-integrity/cheat", "")
+	if code != http.StatusOK {
+		t.Fatalf("status GET code=%d body=%v", code, body)
+	}
+	scoring := body["scoring"].(map[string]any)
+	models := scoring["models"].([]any)
+	model := models[0].(map[string]any)
+	if model["state"] != "failed" || model["reason"] != "confirmed_failure" || !strings.HasPrefix(model["next_step"].(string), "cooldown_until:") {
+		t.Fatalf("unexpected model status %v", model)
+	}
+	holds := scoring["holds"].([]any)
+	if len(holds) != 1 || holds[0].(map[string]any)["status"] != "held" {
+		t.Fatalf("expected one held hold, got %v", holds)
+	}
+	raw, _ := json.Marshal(body)
+	if strings.Contains(string(raw), "HONEST") || strings.Contains(string(raw), "CHEAP") {
+		t.Fatal("status must never carry probe outputs")
+	}
+
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/holds/1/release", `{"operator_id":"op","reason":""}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("release without reason code=%d", code)
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/holds/1/release", `{"operator_id":"op","reason":"reviewed","extra":1}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field code=%d", code)
+	}
+	if code, out := h.admin(http.MethodPost, "/admin/compute-integrity/holds/1/release", `{"operator_id":"op","reason":"reviewed"}`); code != http.StatusOK {
+		t.Fatalf("release code=%d body=%v", code, out)
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/holds/1/release", `{"operator_id":"op","reason":"again"}`); code != http.StatusConflict {
+		t.Fatalf("double release code=%d", code)
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/holds/77/release", `{"operator_id":"op","reason":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("missing hold code=%d", code)
+	}
+
+	if code, out := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/clear", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"runtime fixed"}`); code != http.StatusOK {
+		t.Fatalf("clear code=%d body=%v", code, out)
+	}
+	if got := h.state("cheat"); got != computeintegrity.VerificationUnverified {
+		t.Fatalf("cleared state=%s", got)
+	}
+	if p, _ := h.registry.Resolve("cheat", "as-cheat"); p.ComputeIntegritySuspended || !p.RoutingEligible() {
+		t.Fatal("clear must lift the routing suspension")
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/clear", `{"model_id":"other","operator_id":"op","reason":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("clear of unknown key code=%d", code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/compute-integrity/cheat/clear", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	h.server.handleAdminComputeIntegrity(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated action code=%d", rec.Code)
 	}
 }

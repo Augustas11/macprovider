@@ -140,6 +140,8 @@ SELECT lrc.id, lrc.provider_id
            )
        )
    )
+   -- SPEC-022 R-16: held compute-integrity holds stay out of settlement.
+   AND `+computeIntegrityHoldExclusionSQL("lrc")+`
    AND NOT EXISTS (
        SELECT 1
          FROM ledger_payout_ready lpr

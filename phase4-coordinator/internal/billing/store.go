@@ -689,6 +689,10 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.recordBillingCompatFloorAt(ctx, billingCompatContractEvidenceRetention); err != nil {
 		return err
 	}
+	// SPEC-022 R-16: the hold table exists before the payable view names it.
+	if err := s.ensureComputeIntegrityHolds(ctx); err != nil {
+		return err
+	}
 	if err := s.rebuildSpec022PayableRequestCreditsView(ctx); err != nil {
 		return err
 	}
@@ -1527,7 +1531,10 @@ SELECT lrc.*
                   AND sao.overlapping_or_duplicate = 0
            )
        )
-   );
+   )
+   -- SPEC-022 R-16: a held compute-integrity hold withholds the provider's
+   -- credits for that model inside its window.
+   AND `+computeIntegrityHoldExclusionSQL("lrc")+`;
 `)
 	return err
 }

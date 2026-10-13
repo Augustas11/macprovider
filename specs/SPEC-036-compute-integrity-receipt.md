@@ -2340,14 +2340,16 @@ Consequences of `failed`:
 Visibility:
 
 - The provider sees `GET /v1/provider/compute-integrity` (provider bearer)
-  with, per model: `state`, `reason`, `since`, `next_step`, the counts of
-  in-band and out-of-band measurements, and its holds (window, status, held
-  provider credits).
+  with a `scoring` section listing, per model, `state`, `reason`, `since`,
+  `next_step` and the counts of in-band and out-of-band measurements, plus
+  its holds (window, kind, status, reason, held credits) and whether it is
+  scorer-excluded.
 - Operators see the same at `GET /admin/compute-integrity/<provider_id>`, and
-  can clear a key or release a hold at
-  `POST /admin/compute-integrity/<provider_id>/clear` and
+  can clear a key, lift a scorer exclusion, or release a hold at
+  `POST /admin/compute-integrity/<provider_id>/clear` (with `model_id`),
+  `POST /admin/compute-integrity/<provider_id>/clear-scorer` and
   `POST /admin/compute-integrity/holds/<hold_id>/release`, each with an
-  `operator_id` and a reason.
+  `operator_id` and a reason, and each audit-logged.
 - Reasons are a closed set: `out_of_band_top1`, `out_of_band_logprob`,
   `confirmed_failure`, `recovery_passed`, `escalation_passed`,
   `escalation_inconclusive`, `operator_clear`, `cooldown_elapsed`.

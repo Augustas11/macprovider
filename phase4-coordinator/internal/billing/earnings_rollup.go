@@ -205,6 +205,9 @@ END`},
 	// SPEC-022 R-15.6 retention tombstones keep an archived credit payable
 	// after its evidence rows leave; the table is append-only (its own
 	// triggers abort UPDATE and DELETE), so an insert is its only write.
+	// SPEC-022 R-16.6: a hold write changes the payable view for every
+	// credit in its window.
+	out = append(out, computeIntegrityHoldRollupTriggers()...)
 	out = append(out, earningsRollupTrigger{"trg_per_seac_insert", `CREATE TRIGGER trg_per_seac_insert AFTER INSERT ON settlement_evidence_archived_credits
 BEGIN
     ` + earningsMarkSQL("ledger_request_credits c", "c.id = NEW.request_credit_id") + `
