@@ -7324,7 +7324,12 @@
         "phase4-coordinator/internal/billing/recovery.go:func creditEvidenceArchivedTx",
         "phase4-coordinator/internal/config/config.go:func (c Config) validateBillingRetention",
         "phase4-coordinator/internal/billing/evidence_retention_endpoint.go:func (h *handler) evidenceRetentionHandler",
-        "phase4-coordinator/cmd/coordinator-cli/settlement_evidence_archive.go:func settlementEvidenceArchive"
+        "phase4-coordinator/cmd/coordinator-cli/settlement_evidence_archive.go:func settlementEvidenceArchive",
+        "phase4-coordinator/internal/billing/route_snapshot_journal_prune.go:func (s *Store) PruneMirroredRouteSnapshotJournal",
+        "phase4-coordinator/internal/billing/route_snapshot_journal_prune.go:func RouteSnapshotCanonicalJSON",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) PruneSettlementReceiptAuditOutbox",
+        "phase4-coordinator/internal/billing/store.go:func (s *Store) dropRedundantEvidenceIndexes",
+        "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
@@ -7347,7 +7352,16 @@
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityLookupStraddlingDeletion",
         "phase4-coordinator/internal/stats/billingmirror/mirror_test.go:TestFetchRequestCreditsVerifiedFromArchivedEvidenceTombstone",
         "phase4-coordinator/internal/rewards/unlock_internal_test.go:TestCountVerifiedReceiptsIncludesArchivedVerdicts",
-        "phase4-coordinator/internal/billing/evidence_retention_endpoint_test.go:TestEvidenceRetentionAdminRouteIsOperatorOnlyAndGatedByEnabled"
+        "phase4-coordinator/internal/billing/evidence_retention_endpoint_test.go:TestEvidenceRetentionAdminRouteIsOperatorOnlyAndGatedByEnabled",
+        "phase4-coordinator/internal/billing/settlement_receipt_audit_outbox_prune_test.go:TestSettlementReceiptAuditOutboxPruneKeepsPoisonedAndUndeliveredRows",
+        "phase4-coordinator/internal/billing/settlement_receipt_audit_outbox_prune_test.go:TestEvidenceRetentionAfterDrainedOutboxPrune",
+        "phase4-coordinator/internal/billing/route_snapshot_journal_prune_test.go:TestPruneMirroredRouteSnapshotJournalDeletesOnlyVerifiedMirroredRows",
+        "phase4-coordinator/internal/billing/route_snapshot_journal_prune_test.go:TestPruneMirroredRouteSnapshotJournalResumesAcrossBoundedRuns",
+        "phase4-coordinator/internal/billing/route_snapshot_journal_prune_test.go:TestEvidenceRetentionAfterRouteJournalPrune",
+        "phase4-coordinator/internal/billing/route_snapshot_canonical_test.go:TestInsertRouteSnapshotStoresRecomputableCanonicalEmpty",
+        "phase4-coordinator/internal/billing/settlement_verdict_diagnostics_test.go:TestSettlementVerdictStoresEmptyDiagnosticsAndKeepsFacts",
+        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestMigrateDropsRedundantEvidenceIndexes",
+        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes"
       ],
       "journeys": [],
       "evidence": [],

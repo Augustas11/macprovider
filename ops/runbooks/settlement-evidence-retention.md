@@ -284,6 +284,31 @@ restore into a scratch copy of the database, never into the live one.
 - Tombstones (`settlement_evidence_archived_credits`) are permanent: a trigger
   refuses updates and deletes.
 
+## 7. Hot footprint (SPEC-022 R-15.10)
+
+These run without the nightly job and need no operator step:
+
+- Drained, unpoisoned audit-outbox rows leave the money database
+  `storage.settlement_receipt_audit_outbox_drained_retention_hours` (default
+  24) after delivery. The audit database keeps its copy for
+  `storage.audit_log_retention_days`.
+- Route-snapshot journal rows leave
+  `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60) after
+  mirroring, once the primary row is verified to hold the same digest and
+  JSON. Rows that stay behind (unmirrored, or primary missing or different)
+  are counted as `kept_rows` in the `route snapshot journal pruned mirrored
+  rows` log line. The first runs after the deploy drain the existing backlog
+  in bounded batches.
+- New route snapshots store `route_snapshot_canonical_json` empty when it
+  recomputes from `route_snapshot_json`; new verdicts store `{}` in
+  `verifier_diagnostics_json`.
+- The first startup on this release drops ten unused indexes
+  (`DROP INDEX IF EXISTS`) in the money database, the journal, and the audit
+  database. It runs once, inside the updater's startup window; it frees
+  pages to the freelist and does not rebuild anything. A later rollback to a
+  release from before this change recreates the indexes at its startup, which
+  takes longer on a large database.
+
 ## Done criteria
 
 Issue #1793 counts as done when both of these hold:
