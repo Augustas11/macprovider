@@ -263,6 +263,13 @@ func TestCatalogRowContinuitySessionsAreRecheckedOnPublication(t *testing.T) {
 				t.Fatalf("row-continuity admission = %+v ok=%v", provider, ok)
 			}
 
+			// The hello_ack is read before the registry lifts the handshake-ack
+			// routing hold, so wait for the hold to clear before asserting eligibility.
+			eventually(t, func() bool {
+				p, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+				return ok && !p.HandshakeAckPending
+			})
+
 			next := rowContinuityCatalog(t, current, "published-2026-09-24-next-v1", tc.edit)
 			next.RowContinuityOnly = false
 			h.Provider.SetAutotuneCatalog(next, current, baked)
