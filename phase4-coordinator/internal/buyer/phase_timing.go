@@ -368,6 +368,10 @@ func (snap requestPhaseTimingSnapshot) routingTTFTMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerFirstToken)
 }
 
+func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerDone)
+}
+
 func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
 }

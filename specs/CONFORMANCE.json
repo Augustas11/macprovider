@@ -12248,7 +12248,9 @@
         "phase4-coordinator/internal/buyer/phase_routing.go:markFirstTokenOnContent",
         "phase4-coordinator/internal/buyer/phase_timing.go:routingTTFTMs",
         "phase4-coordinator/internal/buyer/delivered_sse_accounting.go:notifyFirstContent",
-        "phase4-coordinator/internal/routing/perf.go:evictProviderOldestLocked"
+        "phase4-coordinator/internal/routing/perf.go:evictProviderOldestLocked",
+        "phase4-coordinator/internal/routing/perf.go:LookupMany",
+        "phase4-coordinator/internal/buyer/phase_timing.go:routingServiceMs"
       ],
       "tests": [
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
@@ -12258,7 +12260,8 @@
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation",
         "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestFirstTokenMarkedOnFirstContent",
-        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStorePerProviderBudget"
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStorePerProviderBudget",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfPrefillUsesServiceTime"
       ],
       "journeys": [],
       "evidence": [],

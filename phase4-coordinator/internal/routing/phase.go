@@ -68,9 +68,14 @@ func PhaseOrder(candidates []pool.Provider, model string, phase Phase, store *Pe
 	if len(candidates) == 0 || store == nil {
 		return decision
 	}
+	ids := make([]string, len(candidates))
+	for i, p := range candidates {
+		ids[i] = p.ProviderID
+	}
+	records := store.LookupMany(model, ids)
 	var fresh, unmeasured []pool.Provider
 	for _, p := range candidates {
-		if e, ok := store.Lookup(p.ProviderID, model); ok && e.Fresh(now) {
+		if e, ok := records[p.ProviderID]; ok && e.Fresh(now) {
 			fresh = append(fresh, p)
 			decision.Evidence[p.SortKey()] = e
 			continue

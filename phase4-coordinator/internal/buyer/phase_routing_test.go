@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -176,7 +177,8 @@ func TestServedPerformanceObservation(t *testing.T) {
 	}
 	record(ok)
 	e, found := s.perf.Lookup("fast", "model-a")
-	if !found || e.TTFTMs != 50 || e.PrefillTPS != 10000 || e.DecodeTPS != 100 || e.TTFTSamples != 1 {
+	// Prefill: 500 estimated input tokens over the 1050 ms service time.
+	if !found || e.TTFTMs != 50 || math.Abs(e.PrefillTPS-500/1.05) > 1e-9 || e.DecodeTPS != 100 || e.TTFTSamples != 1 {
 		t.Fatalf("evidence = %+v found=%v", e, found)
 	}
 	// A reported cached prefix withholds the prefill sample only.

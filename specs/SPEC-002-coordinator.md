@@ -5321,9 +5321,12 @@ provider usage count enters a rate:
 
 - `ttft_ms`, provider dispatch done to first token, clamped to 1..600000;
 - a prefill rate, the coordinator's token estimate of the request body divided
-  by TTFT, only when that estimate is at least 64 tokens and the provider
-  reported no cached prompt prefix (a cache hit is not a prefill measurement),
-  clamped to at most 50000 tokens/s;
+  by the whole service time (provider dispatch done to done), only on
+  prefill-dominated attempts: the estimate is at least 64 tokens and at least
+  4 times the delivered completion estimate, and the provider reported no
+  cached prompt prefix (a cache hit is not a prefill measurement); clamped to
+  at most 50000 tokens/s. Using the service time, not TTFT, means an early
+  content token cannot inflate it;
 - a decode rate, the coordinator's delivered-bytes completion estimate minus 1
   divided by the first-token-to-done time, only when that estimate is at least
   8 and the time is positive, clamped to at most 2000 tokens/s.
@@ -5332,10 +5335,10 @@ Each metric is an exponentially weighted moving average with weight 0.2 for
 the new sample, with its own sample count and the time of the last
 observation. A record is **fresh** when it has at least 3 TTFT samples and its
 last observation is at most 15 minutes old; anything else is **unmeasured**.
-A provider can still shape its own timing, for example by emitting an early
+A provider can still shape its own TTFT, for example by emitting an early
 content token; that moves time from TTFT into decode, which the interactive
-score also weighs, and the bounds in SPEC-002-R006 limit what any score can
-win.
+score weighs equally, it cannot change the prefill rate, and the bounds in
+SPEC-002-R006 limit what any score can win.
 
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior worth 2 samples and capped at 1.25 times the measured decode

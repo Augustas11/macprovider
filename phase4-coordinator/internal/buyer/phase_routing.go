@@ -157,8 +157,8 @@ func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *fo
 
 // observeServedPerformance feeds one streamed, cleanly completed, plaintext
 // attempt into the SPEC-002-R005 store. Every quantity is the coordinator's
-// own: its clock for TTFT and decode time, its token estimate of the request
-// body for prefill, and its delivered-bytes estimate for decode. Provider
+// own: its clock for TTFT, decode and service time, its token estimate of the
+// request body for prefill, and its delivered-bytes estimate for decode. Provider
 // usage only withholds a prefill sample when it reports a cached prefix.
 func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok, estimatedCompTokens *int64, errMsg, errCode, faultFlag string) {
 	s := b.server
@@ -195,9 +195,12 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if estimatedCompTokens != nil && *estimatedCompTokens > 0 {
 		completion = *estimatedCompTokens
 	}
-	var decodeMs float64
+	var decodeMs, serviceMs float64
 	if decode != nil {
 		decodeMs = *decode
+	}
+	if service := timing.routingServiceMs(); service != nil {
+		serviceMs = *service
 	}
 	s.perf.Observe(routing.PerfObservation{
 		ProviderID:       providerID,
@@ -206,6 +209,7 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 		CompletionTokens: completion,
 		TTFTMs:           *ttft,
 		DecodeMs:         decodeMs,
+		ServiceMs:        serviceMs,
 		At:               s.now(),
 	})
 }

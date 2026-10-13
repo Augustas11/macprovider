@@ -15,11 +15,13 @@ func phaseProvider(id string, free, total int) pool.Provider {
 // warm gives provider id a fresh record with the given TTFT, prefill and
 // decode rates.
 func warm(s *PerfStore, id string, ttftMs, prefillTPS, decodeTPS float64) {
-	prompt := int64(prefillTPS * ttftMs / 1000)
 	decodeMs := 1000.0
+	serviceMs := ttftMs + decodeMs
+	// Prefill is input over service time; prompts here are prefill-dominated.
+	prompt := int64(prefillTPS * serviceMs / 1000)
 	completion := int64(decodeTPS) + 1
 	for i := 0; i < PerfFreshMinSamples; i++ {
-		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: prompt, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, At: perfNow})
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: prompt, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: serviceMs, At: perfNow})
 	}
 }
 

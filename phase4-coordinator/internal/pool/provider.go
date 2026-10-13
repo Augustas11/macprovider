@@ -306,7 +306,8 @@ type Provider struct {
 	// EngineProfile is the provider's latest SPEC-001-R006 self-reported
 	// engine profile; nil when absent or malformed. A routing prior only:
 	// it never feeds admission, trust tier or settlement.
-	EngineProfile *EngineProfile `json:"engine_profile,omitempty"`
+	// Not serialized with the provider; the admin provider listing exposes it.
+	EngineProfile *EngineProfile `json:"-"`
 	// Proof of Weights W2 — coordinator-side autotune admission cap derived
 	// from latest verified hardware-evidence benchmarks. Empty/zero when
 	// evidence observation is not wired or provider admitted before W2 rollout.

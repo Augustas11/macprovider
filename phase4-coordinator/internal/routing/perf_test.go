@@ -9,14 +9,15 @@ import (
 var perfNow = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 
 func observe(s *PerfStore, provider string, prompt, completion int64, ttftMs, decodeMs float64, at time.Time) {
-	s.Observe(PerfObservation{ProviderID: provider, Model: "m", PromptTokens: prompt, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, At: at})
+	s.Observe(PerfObservation{ProviderID: provider, Model: "m", PromptTokens: prompt, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: at})
 }
 
 func TestPerfStoreEWMAAndFreshness(t *testing.T) {
 	s := NewPerfStore()
 	observe(s, "p", 1000, 101, 100, 1000, perfNow)
 	e, ok := s.Lookup("p", "m")
-	if !ok || e.TTFTMs != 100 || e.PrefillTPS != 10000 || e.DecodeTPS != 100 {
+	// Prefill is input over the whole service time: 1000 / 1.1 s.
+	if !ok || e.TTFTMs != 100 || math.Abs(e.PrefillTPS-1000/1.1) > 1e-9 || e.DecodeTPS != 100 {
 		t.Fatalf("first sample: %+v", e)
 	}
 	if e.Fresh(perfNow) {
@@ -63,7 +64,7 @@ func TestPerfStoreClampsAndThresholds(t *testing.T) {
 		t.Fatalf("invalid observations stored: %d", s2.Len())
 	}
 	// A zero-token completion still carries TTFT evidence.
-	s2.Observe(PerfObservation{ProviderID: "zero", Model: "m", PromptTokens: 100, CompletionTokens: 0, TTFTMs: 10, At: perfNow})
+	s2.Observe(PerfObservation{ProviderID: "zero", Model: "m", PromptTokens: 100, CompletionTokens: 0, TTFTMs: 10, ServiceMs: 10, At: perfNow})
 	if e, ok := s2.Lookup("zero", "m"); !ok || e.TTFTSamples != 1 || e.PrefillSamples != 1 || e.DecodeSamples != 0 {
 		t.Fatalf("zero-token completion: %+v ok=%v", e, ok)
 	}
@@ -135,5 +136,24 @@ func TestPerfStorePerProviderBudget(t *testing.T) {
 	}
 	if _, ok := s.Lookup("rotator", "mj"); !ok {
 		t.Fatal("the newest rotator record should be kept")
+	}
+}
+
+// SPEC-002-R005: an early content token shortens TTFT but not the service
+// time, so it cannot inflate the prefill rate; decode-dominated attempts give
+// no prefill sample.
+func TestPerfPrefillUsesServiceTime(t *testing.T) {
+	s := NewPerfStore()
+	s.Observe(PerfObservation{ProviderID: "gamer", Model: "m", PromptTokens: 8000, CompletionTokens: 10, TTFTMs: 1, DecodeMs: 3999, ServiceMs: 4000, At: perfNow})
+	e, _ := s.Lookup("gamer", "m")
+	if e.PrefillTPS != 2000 || e.TTFTMs != 1 {
+		t.Fatalf("prefill = %+v", e)
+	}
+	s.Observe(PerfObservation{ProviderID: "chatty", Model: "m", PromptTokens: 500, CompletionTokens: 200, TTFTMs: 50, DecodeMs: 2000, ServiceMs: 2050, At: perfNow})
+	if e, _ := s.Lookup("chatty", "m"); e.PrefillSamples != 0 {
+		t.Fatalf("decode-dominated attempt gave a prefill sample: %+v", e)
+	}
+	if got := s.LookupMany("m", []string{"gamer", "absent"}); len(got) != 1 || got["gamer"].PrefillTPS != 2000 {
+		t.Fatalf("LookupMany = %+v", got)
 	}
 }

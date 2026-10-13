@@ -14,12 +14,15 @@ const (
 	PerfStoreMaxEntries      = 65536
 	PerfMaxModelsPerProvider = 64
 	PerfMinPrefillTokens     = 64
-	PerfMinDecodeTokens      = 8
-	PerfMaxTTFTMs            = 600_000
-	PerfMaxPrefillTPS        = 50_000
-	PerfMaxDecodeTPS         = 2_000
-	PerfPriorWeightSamples   = 2
-	PerfPriorCapOverMeasure  = 1.25
+	// PerfPrefillInputOutputRatio: a prefill sample needs input at least this
+	// many times the delivered completion.
+	PerfPrefillInputOutputRatio = 4
+	PerfMinDecodeTokens         = 8
+	PerfMaxTTFTMs               = 600_000
+	PerfMaxPrefillTPS           = 50_000
+	PerfMaxDecodeTPS            = 2_000
+	PerfPriorWeightSamples      = 2
+	PerfPriorCapOverMeasure     = 1.25
 )
 
 // PerfObservation is one coordinator-timed served attempt. Durations come
@@ -34,7 +37,10 @@ type PerfObservation struct {
 	CompletionTokens   int64
 	TTFTMs             float64
 	DecodeMs           float64
-	At                 time.Time
+	// ServiceMs is dispatch done to done: the whole provider service time,
+	// which an early content token cannot shorten.
+	ServiceMs float64
+	At        time.Time
 }
 
 // PerfEvidence is a read-only copy of one store record.
@@ -136,8 +142,10 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	}
 	e.TTFTMs = ewma(e.TTFTMs, e.TTFTSamples, ttft)
 	e.TTFTSamples = saturatingInc(e.TTFTSamples)
-	if uncached >= PerfMinPrefillTokens {
-		rate := clampFloat(float64(uncached)/(ttft/1000), 0, PerfMaxPrefillTPS)
+	// Prefill is measured on prefill-dominated attempts as input over the whole
+	// service time, so a provider cannot inflate it by emitting early content.
+	if uncached >= PerfMinPrefillTokens && uncached >= PerfPrefillInputOutputRatio*o.CompletionTokens && o.ServiceMs > 0 && !math.IsInf(o.ServiceMs, 0) {
+		rate := clampFloat(float64(uncached)/(o.ServiceMs/1000), 0, PerfMaxPrefillTPS)
 		e.PrefillTPS = ewma(e.PrefillTPS, e.PrefillSamples, rate)
 		e.PrefillSamples = saturatingInc(e.PrefillSamples)
 	}
@@ -201,6 +209,23 @@ func (s *PerfStore) evictLocked(now time.Time) {
 		}
 	}
 	s.deleteLocked(oldestKey)
+}
+
+// LookupMany returns copies of the records for model and each providerID
+// present, under one read lock.
+func (s *PerfStore) LookupMany(model string, providerIDs []string) map[string]PerfEvidence {
+	out := make(map[string]PerfEvidence, len(providerIDs))
+	if s == nil {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, id := range providerIDs {
+		if e, ok := s.entries[perfKey{providerID: id, model: model}]; ok {
+			out[id] = *e
+		}
+	}
+	return out
 }
 
 // Lookup returns a copy of the record for providerID and model.
