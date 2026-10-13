@@ -1,7 +1,13 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.19 (2026-10-10, chat-template headroom for prompt billing cap)
+**Version:** 0.6.20 (2026-10-13, ledger_request_credits request index)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.20 (2026-10-13, issue #1793):** §4.3 drops
+`idx_lrc_request(request_id)` from `ledger_request_credits`. The unique
+`(request_id, attempt_n, provider_id)` key has the same leading column and
+serves every lookup by `request_id`. Startup drops the index once (SPEC-022
+R-15.10). No billing, settlement, or payout behavior changes.
 
 **Change log v0.6.19 (2026-10-10):** §5.3.2 adds 64 tokens of chat-template
 headroom to the ordinary chat prompt cap, matching the gateway allowance.
@@ -971,10 +977,9 @@ SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots
 | `updated_at_utc` | TEXT | NULL | settlement/quarantine update time | bounded update |
 
 Indexes and uniqueness constraints:
-- `UNIQUE(request_id, attempt_n, provider_id)`
+- `UNIQUE(request_id, attempt_n, provider_id)` (also serves lookups by `request_id`; v0.6.20 dropped the redundant `idx_lrc_request`)
 - `INDEX idx_lrc_provider_ts(provider_id, ts_utc)`
 - `INDEX idx_lrc_unsettled(provider_id, settled, ts_utc)`
-- `INDEX idx_lrc_request(request_id)`
 - `INDEX idx_lrc_quarantine(quarantined, ts_utc)`
 - `INDEX idx_lrc_fault(provider_id, fault_flag, ts_utc)`
 

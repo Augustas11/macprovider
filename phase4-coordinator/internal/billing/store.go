@@ -34,6 +34,12 @@ type Store struct {
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
+
+	// routeSnapshotJournalPruneCursor is the journal id the R-15.10 prune
+	// walk resumes after; the mutex serializes prune runs.
+	routeSnapshotJournalPruneMu     sync.Mutex
+	routeSnapshotJournalPruneCursor int64
+
 	// poolAttestation is the SPEC-022-R012 durable pool authority (nil when
 	// trusted pools are disabled: pool_operator_attested is never derived).
 	poolAttestationMu sync.RWMutex
@@ -243,7 +249,6 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
 );
 CREATE INDEX IF NOT EXISTS idx_lrc_provider_ts ON ledger_request_credits(provider_id, ts_utc);
 CREATE INDEX IF NOT EXISTS idx_lrc_unsettled ON ledger_request_credits(provider_id, settled, ts_utc);
-CREATE INDEX IF NOT EXISTS idx_lrc_request ON ledger_request_credits(request_id);
 CREATE INDEX IF NOT EXISTS idx_lrc_quarantine ON ledger_request_credits(quarantined, ts_utc);
 CREATE INDEX IF NOT EXISTS idx_lrc_fault ON ledger_request_credits(provider_id, fault_flag, ts_utc);
 
@@ -395,9 +400,7 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
     created_at_utc TEXT NOT NULL,
     UNIQUE(account_scope, request_id, attempt_n, provider_id)
 );
-CREATE INDEX IF NOT EXISTS idx_srs_request ON settlement_route_snapshots(account_scope, request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_srs_provider ON settlement_route_snapshots(provider_id, created_at_utc);
-CREATE INDEX IF NOT EXISTS idx_srs_digest ON settlement_route_snapshots(route_snapshot_digest);
 CREATE TRIGGER IF NOT EXISTS trg_srs_immutable
 BEFORE UPDATE ON settlement_route_snapshots
 BEGIN
@@ -460,7 +463,6 @@ CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
     UNIQUE(account_scope, request_id, attempt_n, provider_id)
 );
 CREATE INDEX IF NOT EXISTS idx_sao_request_range ON settlement_attempt_outputs(account_scope, request_id, output_prefix_start_byte, output_prefix_end_byte);
-CREATE INDEX IF NOT EXISTS idx_sao_output_hash ON settlement_attempt_outputs(output_hash);
 
 CREATE TABLE IF NOT EXISTS settlement_attempt_output_journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -558,7 +560,6 @@ CREATE TABLE IF NOT EXISTS settlement_receipt_verdicts (
     UNIQUE(account_scope_hash, request_id, attempt_n, provider_id)
 );
 CREATE INDEX IF NOT EXISTS idx_srv_outcome ON settlement_receipt_verdicts(settlement_outcome, closed, received_at_unix_ms);
-CREATE INDEX IF NOT EXISTS idx_srv_request ON settlement_receipt_verdicts(account_scope_hash, request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_srv_provider_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_srv_provider_failed_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC)
     WHERE closed=1 AND settlement_outcome='quarantined';
@@ -708,6 +709,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	// Last: it fingerprints the payable view rebuilt above and must see every
 	// table rebuild that could have dropped its triggers.
 	if err := s.ensureProviderEarningsRollup(ctx); err != nil {
+		return err
+	}
+	if err := s.dropRedundantEvidenceIndexes(ctx); err != nil {
 		return err
 	}
 	return s.validateRequestLog(ctx)
@@ -1837,5 +1841,28 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); 
 	// observe newValue before this point because the only reader is
 	// h.store.Force*Enabled() which reads the corresponding atomic.
 	flag.Store(newValue)
+	return nil
+}
+
+// redundantEvidenceIndexes are the SPEC-022 R-15.10 indexes no query needs:
+// the first three are prefixes of their table's unique key, and every query
+// on route_snapshot_digest or output_hash also constrains the request, which
+// another index serves.
+var redundantEvidenceIndexes = []string{
+	"idx_lrc_request",
+	"idx_srs_request",
+	"idx_srv_request",
+	"idx_srs_digest",
+	"idx_sao_output_hash",
+}
+
+// dropRedundantEvidenceIndexes drops the R-15.10 indexes where an earlier
+// release created them. It does work only on the first open after upgrade.
+func (s *Store) dropRedundantEvidenceIndexes(ctx context.Context) error {
+	for _, name := range redundantEvidenceIndexes {
+		if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS `+name); err != nil {
+			return fmt.Errorf("drop index %s: %w", name, err)
+		}
+	}
 	return nil
 }

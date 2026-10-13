@@ -101,6 +101,10 @@ func ValidCompatibilitySetVersion(version string) bool {
 // Operators may not set audit_log_retention_days below this value.
 const minAuditLogRetentionDays = 90
 
+// maxRouteSnapshotJournalMirroredGraceMinutes bounds the SPEC-022 R-15.10
+// journal grace to a week, far below any duration overflow.
+const maxRouteSnapshotJournalMirroredGraceMinutes = 7 * 24 * 60
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Coordinator                  CoordinatorConfig            `yaml:"coordinator"`
@@ -1432,6 +1436,16 @@ type StorageConfig struct {
 	// operator_model_swap audit_log table (and any future audit event
 	// types). Default 90 days mirrors request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
+	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
+	// already copied into the audit database, so it leaves the money
+	// database this many hours after delivery. Poisoned and undelivered
+	// rows are never pruned. Independent of audit_log_retention_days, which
+	// governs the audit database itself.
+	SettlementReceiptAuditOutboxDrainedRetentionHours int `yaml:"settlement_receipt_audit_outbox_drained_retention_hours"`
+	// SPEC-022 R-15.10: a route-snapshot journal row leaves this many
+	// minutes after it was mirrored, once its primary row is verified to
+	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
+	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -1994,6 +2008,8 @@ func Default() Config {
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
+			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
+			RouteSnapshotJournalMirroredGraceMinutes:          60,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -3247,6 +3263,12 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
 		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
+	}
+	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
+	}
+	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
+		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")

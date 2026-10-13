@@ -1,11 +1,33 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.0
+Version: v0.4.2
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.2
+
+Issue #1793: hot per-request evidence footprint. Adds R-15.10 under
+`SPEC-022-R015` (still pending). Each request's evidence was held in the
+coordinator databases several times over. R-15.10:
+
+- prunes a drained, unpoisoned `settlement_receipt_audit_outbox` row after
+  `storage.settlement_receipt_audit_outbox_drained_retention_hours`
+  (default 24), separate from `storage.audit_log_retention_days`;
+- prunes a mirrored route-snapshot journal row after
+  `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60), once
+  its primary row is verified to hold the same digest and JSON;
+- stores `route_snapshot_canonical_json` empty on a new snapshot whose
+  preimage recomputes byte for byte from `route_snapshot_json`;
+- stores `{}` in `settlement_receipt_verdicts.verifier_diagnostics_json`,
+  whose members are all typed columns;
+- drops ten indexes that no request-path query needs.
+
+No settlement, payability, or archive rule changes. Retention (R-15.2,
+R-15.4) checks the outbox and journal rows that still exist. Old rows stay
+valid as written. This version follows v0.4.1.
 
 ### v0.4.0
 
@@ -882,7 +904,8 @@ until materialization succeeds. Materialization MAY yield during active buyer
 traffic only until its configured maximum deferral.
 Each materializer invocation MUST also have a fixed maximum number of batches;
 remaining journal rows stay authoritative for a later invocation. Pending
-journal selection MUST use an indexed keyset path.
+journal selection MUST use an indexed keyset path. Once a row is materialized
+and verified, R-15.10 bounds how long its journal copy stays.
 
 R-3.2.2. The provider-credit transaction MUST atomically append its compact
 immutable attempt-output event to the money database's evidence journal. Crash
@@ -1394,8 +1417,9 @@ admitted receipt-event arrival rate; staging acceptance proves sustainable
 delivery rather than assuming capacity from configuration. Exact pending depth
 and oldest age MUST use indexed reads. If a stats read times out, the last
 successful values remain exposed together with an explicit stale flag and
-sample age. Retention deletes only drained rows, in bounded indexed batches;
-pending and poison evidence is never pruned by that path.
+sample age. Retention deletes only drained rows, in bounded indexed batches,
+after the R-15.10 window; pending and poison evidence is never pruned by that
+path.
 
 R-11.2. Audit events MUST NOT contain raw prompts, raw outputs, receipt
 signatures, or receipt public keys unless an existing spec already permits the
@@ -2120,6 +2144,62 @@ against such a database. Once a retention-capable release has opened the
 database, the coordinator rolls forward only. A rollback that restores a
 database snapshot taken before that release first opened it, together with
 the release that wrote the snapshot, stays valid. No path may lower the floor.
+
+R-15.10. Hot footprint. Evidence that is already held elsewhere leaves the
+hot databases early, and no column or index holds what another already
+holds:
+
+1. Drained audit outbox rows. The audit database holds the copy of a drained
+   `settlement_receipt_audit_outbox` row. Such a row that is not poisoned
+   MAY be deleted once
+   `storage.settlement_receipt_audit_outbox_drained_retention_hours`
+   (default 24, minimum 1, at most 24 times `audit_log_retention_days`)
+   have passed since its `drained_at_utc`. This key
+   is separate from `storage.audit_log_retention_days`, which governs the
+   audit database. A poisoned or undelivered row MUST NOT be deleted by this
+   rule. Each prune run deletes bounded batches, within a short time
+   budget, until a batch comes back short, so pruning keeps pace with
+   delivery.
+2. Mirrored route-snapshot journal rows. A journal row MAY be deleted once
+   its `mirrored_at_utc` is at least
+   `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60,
+   minimum 1, at most 10080) old, and only while the primary `settlement_route_snapshots`
+   row of the same attempt has the same `route_snapshot_digest`,
+   `route_snapshot_json`, compute-integrity capture columns, and
+   `relay_blind_provider_binding_digest`, and that digest is the SHA-256 of
+   the primary row's canonical preimage (item 3). An unmirrored row, a row inside the
+   grace period, and a row whose primary copy is missing or differs MUST NOT
+   be deleted. The pruner walks the journal by id in bounded batches. Each
+   batch deletes in one short journal transaction, with a pause between
+   batches, and the walk resumes where it stopped, so rows that stay behind
+   never block it.
+3. Canonical preimage. A new route snapshot stores
+   `route_snapshot_canonical_json` empty when its canonical preimage
+   recomputes byte for byte from `route_snapshot_json`: parse the JSON and
+   apply the canonicalization the digest uses. Otherwise the column stores
+   the preimage. A reader that needs the preimage of a row whose column is
+   empty MUST recompute it that way. Rows that carry the preimage keep it.
+4. Verifier diagnostics. `settlement_receipt_verdicts.verifier_diagnostics_json`
+   repeats the typed columns `receipt_result`, `settlement_outcome`,
+   `reason`, `idempotency_status`, and `closed`. New and updated verdict
+   rows store `{}` in it. Readers MUST use the typed columns. `facts_json` is
+   unchanged: it holds receipt facts that no typed column carries, such as
+   the provider-signed `issued_at_unix_ms`.
+5. Indexes. Coordinator startup drops these indexes once
+   (`DROP INDEX IF EXISTS`). Each of `idx_srs_request`, `idx_srv_request`,
+   and `idx_lrc_request` is a prefix of its table's unique key, which serves
+   the same lookups. `idx_srs_digest` and `idx_sao_output_hash` serve no
+   request-path query: every such query on those columns also constrains
+   the request, which another index serves. The admin verdict counters,
+   which scan every snapshot, sort by digest instead of reading the index. In the route-snapshot journal,
+   `idx_srsj_request` is a prefix of the unique key, and no query reads
+   `idx_srsj_digest` or `idx_srsj_provider`. In the audit database, no query
+   reads `idx_audit_log_event_type` or `idx_audit_log_provider_id`
+   (SPEC-002 R-7.10.1).
+
+R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
+row already pruned under items 1 or 2 is neither a reason to keep a request
+hot nor a mismatch at deletion.
 
 ## Acceptance criteria
 

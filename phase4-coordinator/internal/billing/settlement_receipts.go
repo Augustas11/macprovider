@@ -1097,18 +1097,12 @@ func settlementReceiptAuthorizationFromState(state SettlementReceiptState) Settl
 	}
 }
 
+// settlementVerdictDiagnosticsJSON is the value new and updated verdict rows
+// store in verifier_diagnostics_json (SPEC-022 R-15.10).
+const settlementVerdictDiagnosticsJSON = "{}"
+
 func settlementReceiptPersistedFromState(state SettlementReceiptState, result SettlementVerifyResult) (settlementReceiptPersisted, error) {
 	checksJSON, err := json.Marshal(state.Checks)
-	if err != nil {
-		return settlementReceiptPersisted{}, err
-	}
-	diagnosticsJSON, err := json.Marshal(map[string]any{
-		"receipt_result":     state.ReceiptResult,
-		"settlement_outcome": state.SettlementOutcome,
-		"reason":             state.Reason,
-		"idempotency_status": state.IdempotencyStatus,
-		"closed":             state.Closed,
-	})
 	if err != nil {
 		return settlementReceiptPersisted{}, err
 	}
@@ -1123,8 +1117,12 @@ func settlementReceiptPersistedFromState(state SettlementReceiptState, result Se
 	return settlementReceiptPersisted{
 		SettlementReceiptState: state,
 		checksJSON:             string(checksJSON),
-		diagnosticsJSON:        string(diagnosticsJSON),
-		factsJSON:              facts,
+		// SPEC-022 R-15.10: every member the diagnostics blob held is a typed
+		// column (receipt_result, settlement_outcome, reason,
+		// idempotency_status, closed); the NOT NULL column keeps an empty
+		// object.
+		diagnosticsJSON: settlementVerdictDiagnosticsJSON,
+		factsJSON:       facts,
 	}, nil
 }
 
@@ -1682,6 +1680,9 @@ func (s *Store) drainSettlementReceiptAuditOutboxIDs(ctx context.Context, sink S
 	return result, firstErr
 }
 
+// PruneSettlementReceiptAuditOutbox deletes up to limit rows that were
+// drained into the audit database before cutoff (SPEC-022 R-15.10). A
+// poisoned or undelivered row is never deleted.
 func (s *Store) PruneSettlementReceiptAuditOutbox(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
 	if limit <= 0 {
 		limit = 500
@@ -1692,6 +1693,7 @@ DELETE FROM settlement_receipt_audit_outbox
        SELECT id
          FROM settlement_receipt_audit_outbox INDEXED BY idx_srao_drained_retention
         WHERE drained_at_utc IS NOT NULL
+          AND poisoned_at_utc IS NULL
           AND julianday(drained_at_utc) < julianday(?)
      ORDER BY julianday(drained_at_utc), id
         LIMIT ?

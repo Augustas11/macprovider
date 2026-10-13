@@ -903,13 +903,70 @@ func TestSettlementReceiptAuditOutboxDrainerStartupRunsDuringRecentTraffic(t *te
 		retainedPoisonStatsObserved: make(chan int64, 1),
 	}
 
-	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, fixedIdleTracker{idleFor: 0}, zerolog.Nop())
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, observer, fixedIdleTracker{idleFor: 0}, zerolog.Nop())
 
 	assertSignal(t, store.drainCalled, "startup audit outbox drain")
 	assertSignal(t, store.pruneCalled, "startup audit outbox prune")
 	assertInt64Signal(t, observer.statsObserved, 7, "audit outbox stats")
 	assertInt64Signal(t, observer.poisonStatsObserved, 2, "audit outbox poison stats")
 	assertInt64Signal(t, observer.retainedPoisonStatsObserved, 3, "audit outbox retained poison stats")
+}
+
+// SPEC-022 R-15.10: drained outbox rows are pruned after their own short
+// window, not after the audit-log retention days.
+func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainedRetention(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainCalled:  make(chan struct{}, 1),
+		pruneCalled:  make(chan struct{}, 1),
+		pruneCutoffs: make(chan time.Time, 1),
+	}
+	before := time.Now().UTC()
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, nil, nil, zerolog.Nop())
+	select {
+	case cutoff := <-store.pruneCutoffs:
+		if age := before.Sub(cutoff); age < 24*time.Hour-time.Minute || age > 24*time.Hour+time.Minute {
+			t.Fatalf("prune cutoff age=%s want 24h", age)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("drained outbox prune did not run")
+	}
+}
+
+// A run keeps pruning full batches up to PruneMaxBatches, so the 24h window
+// holds at the drain rate; a short batch ends the run.
+func TestSettlementReceiptAuditOutboxDrainerPrunesFullBatchesPerRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainCalled:   make(chan struct{}, 1),
+		pruneCalled:   make(chan struct{}, 8),
+		prunedBatches: []int64{10, 10, 3},
+	}
+	observer := &settlementReceiptAuditOutboxObserverStub{
+		drainOutcomes: make(chan string, 1),
+		rowOps:        make(chan string, 8),
+	}
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, observer, nil, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:          20,
+		CatchupBatches:      1,
+		PruneLimit:          10,
+		PruneMaxBatches:     5,
+		PruneTimeout:        time.Second,
+		DrainInterval:       time.Hour,
+		MaintenanceInterval: time.Hour,
+		DrainTimeout:        time.Second,
+		StatsTimeout:        time.Second,
+	})
+	for i := 0; i < 3; i++ {
+		assertSignal(t, store.pruneCalled, "audit outbox prune batch")
+	}
+	select {
+	case <-store.pruneCalled:
+		t.Fatal("prune continued after a short batch")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
@@ -926,7 +983,7 @@ func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
 		statsObserved: make(chan int64, 2),
 	}
 
-	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop())
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, observer, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop())
 
 	assertSignal(t, store.drainCalled, "audit outbox drain after idle")
 	assertSignal(t, store.pruneCalled, "audit outbox prune after idle")
@@ -943,7 +1000,7 @@ func TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic(t *testi
 		statsCalled:    make(chan struct{}, 1),
 	}
 
-	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, nil, fixedIdleTracker{idleFor: 0}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
 		BatchLimit:          20,
 		CatchupBatches:      1,
 		PruneLimit:          500,
@@ -973,7 +1030,7 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) 
 		rowOps:        make(chan string, 4),
 	}
 
-	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, nil, zerolog.Nop())
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, observer, nil, zerolog.Nop())
 
 	assertSignal(t, store.drainCalled, "audit outbox drain")
 	assertSignal(t, store.pruneCalled, "audit outbox prune")
@@ -991,7 +1048,7 @@ func TestSettlementReceiptAuditOutboxIdleCatchupIsBounded(t *testing.T) {
 		statsCalled:    make(chan struct{}, 4),
 	}
 
-	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
 		BatchLimit:          100,
 		CatchupBatches:      5,
 		PruneLimit:          500,
@@ -1022,7 +1079,7 @@ func TestSettlementReceiptAuditOutboxIdleCatchupStopsOnShortBatch(t *testing.T) 
 		statsCalled:    make(chan struct{}, 4),
 	}
 
-	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 90, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, nil, fixedIdleTracker{idleFor: time.Hour}, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
 		BatchLimit:          100,
 		CatchupBatches:      5,
 		PruneLimit:          500,
@@ -1307,6 +1364,8 @@ type settlementReceiptAuditOutboxDrainerStub struct {
 	drainErrs             []error
 	drainErr              error
 	pruned                int64
+	pruneCutoffs          chan time.Time
+	prunedBatches         []int64
 	drainCalled           chan struct{}
 	pruneCalled           chan struct{}
 	statsCalled           chan struct{}
@@ -1330,8 +1389,19 @@ func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOut
 	return billing.SettlementReceiptAuditOutboxDrainResult{DrainedRows: s.drained, PoisonedRows: s.poisoned}, err
 }
 
-func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOutbox(context.Context, time.Time, int) (int64, error) {
+func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOutbox(_ context.Context, cutoff time.Time, _ int) (int64, error) {
+	if s.pruneCutoffs != nil {
+		select {
+		case s.pruneCutoffs <- cutoff:
+		default:
+		}
+	}
 	s.pruneCalled <- struct{}{}
+	if len(s.prunedBatches) > 0 {
+		pruned := s.prunedBatches[0]
+		s.prunedBatches = s.prunedBatches[1:]
+		return pruned, nil
+	}
 	return s.pruned, nil
 }
 
@@ -3056,5 +3126,36 @@ func TestWithProviderAppAttestMountsBothRoutes(t *testing.T) {
 		if rr.Code != tc.want {
 			t.Fatalf("%s: status=%d want %d", tc.path, rr.Code, tc.want)
 		}
+	}
+}
+
+type routeSnapshotJournalPrunerStub struct {
+	calls chan billing.RouteSnapshotJournalPruneOptions
+}
+
+func (s *routeSnapshotJournalPrunerStub) PruneMirroredRouteSnapshotJournal(_ context.Context, opts billing.RouteSnapshotJournalPruneOptions) (billing.RouteSnapshotJournalPruneResult, error) {
+	select {
+	case s.calls <- opts:
+	default:
+	}
+	return billing.RouteSnapshotJournalPruneResult{Deleted: 1}, nil
+}
+
+// SPEC-022 R-15.10: the journal pruner runs on its interval with the
+// configured grace and bounded batches.
+func TestRouteSnapshotJournalPrunerRunsWithGrace(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stub := &routeSnapshotJournalPrunerStub{calls: make(chan billing.RouteSnapshotJournalPruneOptions, 4)}
+	cfg := defaultRouteSnapshotJournalPrunerConfig()
+	cfg.Interval = 10 * time.Millisecond
+	startRouteSnapshotJournalPrunerWithConfig(ctx, stub, fixedIdleTracker{idleFor: time.Hour}, time.Hour, zerolog.Nop(), cfg)
+	select {
+	case opts := <-stub.calls:
+		if opts.Grace != time.Hour || opts.BatchSize != cfg.Batch || opts.MaxBatches != cfg.MaxBatches || opts.BatchPause != cfg.BatchPause {
+			t.Fatalf("prune options=%+v", opts)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("journal pruner did not run")
 	}
 }
