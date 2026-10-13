@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -191,7 +192,7 @@ func TestCloseAllowanceRecordsSplitsFromTheLedger(t *testing.T) {
 	if funding != AllowanceFundingPaid || paid != paidGross || allowanceCredits != 0 {
 		t.Fatalf("paid split funding=%s paid=%d allowance=%d", funding, paid, allowanceCredits)
 	}
-	if err := store.SetAllowanceOverage(ctx, "acct", true, allowanceTestNow); err != nil {
+	if err := store.SetAllowanceOverage(ctx, "acct", false, allowanceTestNow); err != nil {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{`UPDATE allowance_request_splits SET paid_credits = 0`, `DELETE FROM allowance_request_splits`, `DELETE FROM allowance_overage_events`} {
@@ -201,19 +202,23 @@ func TestCloseAllowanceRecordsSplitsFromTheLedger(t *testing.T) {
 	}
 }
 
-func TestReapAllowanceClosesStaleHolds(t *testing.T) {
+func TestReapAllowanceClosesOnlyHoldsFromEarlierProcesses(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	ctx := context.Background()
 	grantAllowance(t, store, AllowanceStake{AccountID: "acct", Units: malibu(100)})
 	admit(t, store, "acct", "ext-crash", 50_000, false)
 	gross := writeAllowanceAttempt(t, reqStore, store, "acct", "ext-crash", "coord-9", 0, "provider-a")
-	closed, err := store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Minute), time.Hour)
+	// A hold created by this process (after startedAt) is never reaped,
+	// however old: its own handler closes it.
+	closed, err := store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(48*time.Hour), allowanceTestNow.Add(-time.Minute))
 	if err != nil || closed != 0 {
-		t.Fatalf("young hold reaped: %d %v", closed, err)
+		t.Fatalf("live hold reaped: %d %v", closed, err)
 	}
-	closed, err = store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(3*time.Hour), time.Hour)
+	// After a restart every earlier hold is orphaned and closed from the
+	// ledger.
+	closed, err = store.ReapAllowanceReservations(ctx, allowanceTestNow.Add(time.Hour), allowanceTestNow.Add(time.Minute))
 	if err != nil || closed != 1 {
-		t.Fatalf("stale hold not reaped: %d %v", closed, err)
+		t.Fatalf("orphaned hold not reaped: %d %v", closed, err)
 	}
 	status, _ := store.AllowanceStatusFor(ctx, "acct", allowanceTestNow)
 	if status.HeldCredits != 0 || status.SpentCredits != gross {
@@ -240,5 +245,65 @@ func TestAllowanceCreditBoundCoversTheLedgerGross(t *testing.T) {
 	// Out-of-range counts give a large bound, never zero.
 	if got := AllowanceCreditBound(rate, 1_000_000, 1<<62, 1<<62); got != 1<<63-1 {
 		t.Fatalf("huge bound %d", got)
+	}
+}
+
+// A gateway retry of an allowance request whose first attempt already closed
+// holds the bound again while it runs (SPEC-050-R007).
+func TestRetriedAllowanceRequestIsHeldAgain(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	grantAllowance(t, store, AllowanceStake{AccountID: "acct", Units: malibu(100)}) // 100,000
+	admit(t, store, "acct", "ext-r", 60_000, false)
+	gross := writeAllowanceAttempt(t, reqStore, store, "acct", "ext-r", "coord-r1", 0, "provider-a")
+	if err := store.CloseAllowanceReservation(ctx, "acct", "ext-r", allowanceTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if d := admit(t, store, "acct", "ext-r", 60_000, false); d.Funding != AllowanceFundingAllowance || d.RemainingCredits != 100_000-gross-60_000 {
+		t.Fatalf("retry decision %+v (gross %d)", d, gross)
+	}
+	// While the retry holds its bound, a concurrent request cannot take it.
+	if d := admit(t, store, "acct", "ext-other", 60_000, false); d.Funding != AllowanceFundingPaid {
+		t.Fatalf("concurrent request took the retry's hold: %+v", d)
+	}
+	gross2 := writeAllowanceAttempt(t, reqStore, store, "acct", "ext-r", "coord-r2", 0, "provider-a")
+	if err := store.CloseAllowanceReservation(ctx, "acct", "ext-r", allowanceTestNow); err != nil {
+		t.Fatal(err)
+	}
+	status, _ := store.AllowanceStatusFor(ctx, "acct", allowanceTestNow)
+	if status.SpentCredits != gross+gross2 || status.HeldCredits != 0 {
+		t.Fatalf("status %+v want spent %d", status, gross+gross2)
+	}
+}
+
+func TestOverageRecordsOnlyChangesAndIsBounded(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ctx := context.Background()
+	count := func() int {
+		var n int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM allowance_overage_events WHERE account_id = 'acct'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for i := 0; i < 5; i++ {
+		if err := store.SetAllowanceOverage(ctx, "acct", true, allowanceTestNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(); n != 0 {
+		t.Fatalf("setting the default recorded %d events", n)
+	}
+	var err error
+	for i := 0; i < maxOverageChangesPerDay; i++ {
+		if err = store.SetAllowanceOverage(ctx, "acct", i%2 == 1, allowanceTestNow); err != nil {
+			t.Fatalf("change %d: %v", i, err)
+		}
+	}
+	if err := store.SetAllowanceOverage(ctx, "acct", false, allowanceTestNow); !errors.Is(err, ErrAllowanceOverageRateLimited) {
+		t.Fatalf("change past the bound err = %v", err)
+	}
+	if n := count(); n != maxOverageChangesPerDay {
+		t.Fatalf("events %d", n)
 	}
 }

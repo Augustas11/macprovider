@@ -21,6 +21,8 @@ type RewardsConfig = config.RewardsConfig
 type SettlementConfig = config.SettlementConfig
 
 type Store struct {
+	// selfDealMemo briefly caches SPEC-050-R010 self-dealing answers.
+	selfDealMemo selfDealMemo
 	db           *sql.DB
 	readDB       atomic.Pointer[sql.DB]
 	now          func() time.Time

@@ -242,3 +242,37 @@ func TestStakeProxyForwardsOnlyTheVerifiedPrincipal(t *testing.T) {
 		t.Fatalf("refused calls reached the coordinator: %d", len(calls))
 	}
 }
+
+// SPEC-050-R014: an allowance-only request the coordinator did not fund (a
+// coordinator without SPEC-050) is charged to the paid quota, and the gateway
+// stops forwarding allowance-only requests for that account.
+func TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota(t *testing.T) {
+	reservation := promptCapTokens([]byte(chatBody(false))) + 20
+	client, hops := allowanceCoordinator(t, func(n int, r *http.Request) (int, http.Header, string) {
+		if n == 1 {
+			return http.StatusOK, allowanceOKHeaders("paid", "1"), retryChatSuccessBody
+		}
+		// A coordinator that ignores the allowance headers.
+		return http.StatusOK, allowanceOKHeaders("", ""), retryChatSuccessBody
+	})
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Quotas.AccountDailyTokens = reservation + 3
+		cfg.Retry503.Enabled = false
+	})
+	key := createAccountAndKey(t, store, cfg, "acct_unfunded")
+	reqID := func(n int) map[string]string {
+		return map[string]string{"X-Request-ID": "00000000-0000-4000-8000-00000000010" + strconv.Itoa(n)}
+	}
+	for i := 1; i <= 2; i++ {
+		if resp := postChat(t, h, key, chatBody(false), reqID(i)); resp.Code != http.StatusOK {
+			t.Fatalf("request %d status %d body %s", i, resp.Code, resp.Body.String())
+		}
+	}
+	if used := dailyTokensUsed(t, h, key); used != 14 {
+		t.Fatalf("daily_tokens_used=%v, want 14: the unfunded allowance-only request is charged to the paid quota", used)
+	}
+	before := len(hops())
+	if resp := postChat(t, h, key, chatBody(false), reqID(3)); resp.Code != http.StatusTooManyRequests || len(hops()) != before {
+		t.Fatalf("after an unfunded allowance-only request: status %d hops %d -> %d; want a local 429", resp.Code, before, len(hops()))
+	}
+}

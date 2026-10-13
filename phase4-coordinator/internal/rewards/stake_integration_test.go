@@ -281,3 +281,75 @@ func TestStakeChangesAreRateLimitedPerAccount(t *testing.T) {
 		t.Fatalf("replay after the bound: %v", err)
 	}
 }
+
+// SPEC-050-R002: ownership is re-read under the provider lock, a former
+// owner's lock does not block the current owner, the staking identity is
+// fixed, and unlock needs no current identity.
+func TestStakeOwnershipAndIdentityRules(t *testing.T) {
+	fx, _ := startPostgres(t)
+	db := openRewardsWriter(t, fx)
+	ctx := context.Background()
+	seedWithdrawableMALIBU(t, db, "p_own", "10")
+	owners := map[string]int64{"p_own": 1}
+	ledger, err := rewards.NewStakeLedger(db, 168*time.Hour, staticOwner(owners))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caller's ownership list is stale: the provider now belongs to 2.
+	owners["p_own"] = 2
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_old", GitHubUserID: 1, OwnedProviderIDs: []string{"p_own"}, AmountUnits: mustUnits(t, "1"), IdempotencyKey: "stale"}); !errors.Is(err, rewards.ErrStakeNoOwnedProviders) {
+		t.Fatalf("stale-ownership lock err = %v", err)
+	}
+	owners["p_own"] = 1
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_old", GitHubUserID: 1, OwnedProviderIDs: []string{"p_own"}, AmountUnits: mustUnits(t, "8"), IdempotencyKey: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	// Ownership moves to identity 2: the former owner's lock no longer keeps
+	// the new owner from staking the provider's MALIBU.
+	owners["p_own"] = 2
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_new", GitHubUserID: 2, OwnedProviderIDs: []string{"p_own"}, AmountUnits: mustUnits(t, "10"), IdempotencyKey: "b"}); err != nil {
+		t.Fatalf("new owner lock: %v", err)
+	}
+	// Withdrawal netting stays conservative: every lock in force counts.
+	bal, err := rewards.QueryAccrualBalance(ctx, db, "p_own", testEmissionConfig(time.Hour, 25, 100))
+	if err != nil || bal.WithdrawableMALIBU != "0.00000000" {
+		t.Fatalf("withdrawable %s err %v", bal.WithdrawableMALIBU, err)
+	}
+	// The staking identity of an account is fixed.
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_old", GitHubUserID: 2, OwnedProviderIDs: []string{"p_own"}, AmountUnits: 1, IdempotencyKey: "c"}); !errors.Is(err, rewards.ErrStakeIdentityChanged) {
+		t.Fatalf("identity change err = %v", err)
+	}
+	// The former owner can still unlock with no identity on the request.
+	res, err := ledger.Unlock(ctx, rewards.StakeRequest{AccountID: "acct_old", AmountUnits: mustUnits(t, "8"), IdempotencyKey: "u"})
+	if err != nil || len(res.Events) != 1 || res.Events[0].GitHubUserID != 1 {
+		t.Fatalf("unlock without identity %+v err %v", res, err)
+	}
+	if _, err := ledger.Unlock(ctx, rewards.StakeRequest{AccountID: "acct_never", AmountUnits: 1, IdempotencyKey: "u"}); !errors.Is(err, rewards.ErrStakeInsufficient) {
+		t.Fatalf("unlock with no stake err = %v", err)
+	}
+}
+
+func TestStakeRateBoundCountsEveryAppendedEvent(t *testing.T) {
+	fx, _ := startPostgres(t)
+	db := openRewardsWriter(t, fx)
+	ctx := context.Background()
+	seedWithdrawableMALIBU(t, db, "p_r1", "1")
+	seedWithdrawableMALIBU(t, db, "p_r2", "1")
+	ledger, err := rewards.NewStakeLedger(db, 168*time.Hour, staticOwner(map[string]int64{"p_r1": 4, "p_r2": 4}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 199; i++ {
+		if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_r", GitHubUserID: 4, OwnedProviderIDs: []string{"p_r1"}, AmountUnits: 1, IdempotencyKey: fmt.Sprintf("k%d", i)}); err != nil {
+			t.Fatalf("lock %d: %v", i, err)
+		}
+	}
+	// p_r1 has 1 MALIBU - 199 units free; this lock spans both providers and
+	// would append two events, taking the account past 200.
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_r", GitHubUserID: 4, OwnedProviderIDs: []string{"p_r1", "p_r2"}, AmountUnits: mustUnits(t, "1"), IdempotencyKey: "split"}); !errors.Is(err, rewards.ErrStakeRateLimited) {
+		t.Fatalf("two-event lock at 199 err = %v", err)
+	}
+	if _, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_r", GitHubUserID: 4, OwnedProviderIDs: []string{"p_r1"}, AmountUnits: 1, IdempotencyKey: "last"}); err != nil {
+		t.Fatalf("single-event lock at 199: %v", err)
+	}
+}

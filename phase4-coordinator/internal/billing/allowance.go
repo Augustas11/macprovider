@@ -135,9 +135,11 @@ func ComputeAllowanceGrants(stakes []AllowanceStake, policy AllowancePolicy) ([]
 		if raw.Cmp(capCredits) > 0 {
 			raw.Set(capCredits)
 		}
-		if raw.Sign() <= 0 {
-			continue
+		if raw.Sign() < 0 {
+			raw.SetInt64(0)
 		}
+		// Every earning account gets a grant row, a zero one included, so
+		// the run's audit lists every stake it saw (SPEC-050-R006).
 		totalRaw.Add(totalRaw, raw)
 		grants = append(grants, AllowanceGrant{AccountID: s.AccountID, GitHubUserID: s.GitHubUserID, StakeUnits: s.Units, RawCredits: raw.Int64()})
 	}
@@ -153,7 +155,7 @@ func ComputeAllowanceGrants(stakes []AllowanceStake, policy AllowancePolicy) ([]
 	out := grants[:0]
 	for _, g := range grants {
 		granted := g.RawCredits
-		if scaled {
+		if scaled && totalRaw.Sign() > 0 {
 			v := new(big.Int).Mul(big.NewInt(g.RawCredits), budget)
 			granted = v.Quo(v, totalRaw).Int64()
 		}

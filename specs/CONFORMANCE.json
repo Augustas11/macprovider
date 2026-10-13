@@ -12455,7 +12455,8 @@
         "phase4-coordinator/internal/rewards/stake.go:replayStakeEvents",
         "phase4-coordinator/internal/rewards/stake.go:ParseMALIBUUnits",
         "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency",
-        "phase4-coordinator/internal/rewards/stake.go:checkStakeRate"
+        "phase4-coordinator/internal/rewards/stake.go:checkStakeRate",
+        "phase4-coordinator/internal/rewards/stake.go:accountIdentity"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
@@ -12464,7 +12465,10 @@
         "phase4-coordinator/internal/rewards/stake_internal_test.go:TestAllocateStakeIsAllOrNothingInOrder",
         "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerLockUsesOwnedProvidersAndDerivedPrincipal",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
-        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeChangesAreRateLimitedPerAccount"
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeChangesAreRateLimitedPerAccount",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerUnlockNeedsNoGitHubIdentity",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeOwnershipAndIdentityRules",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeRateBoundCountsEveryAppendedEvent"
       ],
       "journeys": [],
       "evidence": [],
@@ -12481,14 +12485,16 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/rewards/rewards.go:netStakeLocks",
-        "phase4-coordinator/internal/rewards/stake.go:providerLockedUnits",
+        "phase4-coordinator/internal/rewards/stake.go:providerOwnerLockedUnits",
         "phase4-coordinator/internal/rewards/rewards.go:QueryAccrualBalance",
         "phase4-coordinator/internal/rewards/withdrawal.go:SelectWithdrawableMALIBU",
-        "phase4-coordinator/internal/rewards/rewards.go:stakeLockedUnits"
+        "phase4-coordinator/internal/rewards/rewards.go:stakeLockedUnits",
+        "phase4-coordinator/internal/rewards/withdrawal.go:SelectWithdrawableMALIBUTx"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
-        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake"
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeOwnershipAndIdentityRules"
       ],
       "journeys": [],
       "evidence": [],
@@ -12577,10 +12583,11 @@
         "phase5-gateway/internal/router/stake_allowance.go:setAllowanceRequestHeaders",
         "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
         "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
-        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:MarkReservationAllowanceFunded",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:MarkReservationFundingSource",
         "phase5-gateway/internal/storage/sqlite/store.go:dailyUsageTx",
         "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage",
-        "phase4-coordinator/internal/billing/allowance_spend.go:allowanceOverage"
+        "phase4-coordinator/internal/billing/allowance_spend.go:allowanceOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:SetAllowanceOverage"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAdmitAllowanceSpendOrderingAndOverage",
@@ -12591,7 +12598,9 @@
         "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
         "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceFundedReservationDoesNotDrawPaidQuota",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
-        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst"
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestRetriedAllowanceRequestIsHeldAgain",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestOverageRecordsOnlyChangesAndIsBounded"
       ],
       "journeys": [],
       "evidence": [],
@@ -12611,14 +12620,16 @@
         "phase4-coordinator/internal/billing/allowance_spend.go:closeAllowanceReservationTx",
         "phase4-coordinator/internal/billing/allowance_spend.go:ReapAllowanceReservations",
         "phase4-coordinator/internal/billing/wholesale_generation.go:wholesaleLineTotals",
-        "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance"
+        "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
-        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesStaleHolds",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesOnlyHoldsFromEarlierProcesses",
         "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
         "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
-        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst"
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestSettlementWritesConfirmedFunding"
       ],
       "journeys": [],
       "evidence": [],
@@ -12754,12 +12765,18 @@
       "implementation": [
         "phase4-coordinator/internal/buyer/allowance_hook.go:admitAllowance",
         "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
-        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse"
+        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
+        "phase5-gateway/internal/router/stake_allowance.go:allowanceActive",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:ensureQuotaReservationFundingSource",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:NoteAllowanceDay"
       ],
       "tests": [
         "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
         "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceFundedChatLeavesPaidQuotaUntouched",
-        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst"
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOnlyRequestFailsClosed",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates"
       ],
       "journeys": [],
       "evidence": [],

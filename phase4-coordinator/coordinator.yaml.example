@@ -313,7 +313,6 @@ stake_allowance:
   min_stake_age_hours: 24
   unlock_cooldown_hours: 168
   refresh_check_interval_seconds: 60
-  reservation_max_age_seconds: 7200
 
 endpoints:
   provider_earnings:

@@ -111,8 +111,7 @@ Coordinator `coordinator.yaml`, section `stake_allowance`:
 | `per_account_daily_cap_credits` | int ≥ 0 | `0` | Upper bound on one account's daily allowance. |
 | `min_stake_age_hours` | int 1..720 | `24` | A lock earns only from the first refresh at least this long after it. |
 | `unlock_cooldown_hours` | int 24..2160 | `168` | Time between an unlock and the release of its MALIBU. |
-| `refresh_check_interval_seconds` | int 10..3600 | `60` | How often the refresh job checks whether today's run is done. |
-| `reservation_max_age_seconds` | int 600..86400 | `7200` | An allowance hold still open after this (for example after a coordinator crash) is closed by the reaper. |
+| `refresh_check_interval_seconds` | int 10..3600 | `60` | How often the refresh job checks whether today's run is done and closes holds left by an earlier coordinator process. |
 
 When `daily_budget_credits > 0`, `credits_per_malibu` and
 `per_account_daily_cap_credits` MUST both be positive or the configuration
@@ -142,14 +141,22 @@ Stake events MUST be append-only rows keyed by account, provider, and an
 same request MUST return the original result without a new event; the same key
 with a different request MUST be refused with `409 idempotency_key_reused`. A
 lock MUST be split deterministically across owned providers in ascending
-`provider_id` order and MUST NOT exceed, per provider, withdrawable MALIBU minus
-MALIBU already locked on that provider by any account. The check and the insert
-MUST be atomic per provider, so concurrent locks cannot lock the same MALIBU
-twice. An unlock MUST NOT exceed the account's current earning-or-maturing
-stake and is taken in descending `provider_id` order. Amounts are decimal
-MALIBU strings with at most 8 fractional digits, positive, at most
-10,000,000,000 per call. One account MAY append at most 200 stake events in
-a rolling 24 hours; further changes are refused with `429
+`provider_id` order and MUST NOT exceed, per provider, withdrawable MALIBU
+minus MALIBU already locked on that provider by its current owner's identity.
+Under a per-provider lock the coordinator MUST re-read the provider's owner,
+skip a provider the account's identity no longer owns, compute the remainder,
+and insert the event, so concurrent locks cannot lock the same MALIBU twice. A
+lock is effective only while the provider is owned by the identity that placed
+it: a former owner's lock neither earns (SPEC-050-R004) nor keeps the current
+owner from staking. An account stakes under one GitHub identity for good; a
+lock under a different identity is refused with `409 stake_identity_changed`.
+An account's total stake MUST NOT exceed 10,000,000,000 MALIBU (`400
+stake_bound_exceeded`). An unlock MUST NOT exceed the account's current
+earning-or-maturing stake, is taken in descending `provider_id` order, and
+needs no current GitHub link. Amounts are decimal MALIBU strings with at most
+8 fractional digits, positive, at most 10,000,000,000 per call. One account
+MAY append at most 200 stake events in a rolling 24 hours, counting every
+event a change would append; further changes are refused with `429
 stake_rate_limited`, and a replay of an applied key is still answered.
 
 ### SPEC-050-R003 - Locked MALIBU cannot be withdrawn
@@ -159,8 +166,11 @@ netted out of that provider's withdrawable MALIBU on every SPEC-021 read
 surface and by any withdrawal runner. Locked MALIBU becomes withdrawable again
 only when its unlock's release time has passed and the SPEC-021 predicate still
 holds. The provider accrual read reports the locked amount as `locked_malibu`.
-A withdrawal selector takes withdrawable rows oldest first only while their
-running total stays within withdrawable minus locked MALIBU.
+Every lock still in force counts here, a former owner's included. A
+withdrawal selector MUST hold the same per-provider lock as staking for the
+whole transaction that claims the rows, and takes withdrawable rows oldest
+first only while their running total stays within withdrawable minus locked
+MALIBU, so no lock can commit between selection and claim.
 
 ### SPEC-050-R004 - Earning stake and the unlock cooldown
 
@@ -184,7 +194,8 @@ per_account_daily_cap_credits)`. When the sum of `raw` exceeds
 otherwise the grant is `raw`. The refresh MUST be idempotent per (account, UTC
 day): a second run for the same day MUST NOT add, change, or remove a grant.
 Unused allowance MUST NOT roll over. If the stake source is unavailable, the
-run MUST NOT be recorded and MUST be retried at the next check.
+run MUST NOT be recorded and MUST be retried at the next check. Every account
+with a positive earning stake gets a grant record, a zero one included.
 
 ### SPEC-050-R006 - Refresh audit
 
@@ -215,7 +226,11 @@ allowance for that UTC day, marked so that only the allowance may fund it; the
 coordinator MUST refuse it with `429 quota_exhausted` when the allowance
 cannot cover it. A refusal happens before dispatch and the gateway refunds its
 reservation. A request is funded by one source; allowance and paid quota are
-not combined inside one request.
+not combined inside one request. A gateway retry of an admitted request keeps
+its first funding, and a closed allowance hold is held again with a fresh
+bound while the retry runs. The overage setting is recorded only when it
+changes, at most 50 times per account in a rolling 24 hours (`429
+overage_rate_limited`).
 
 ### SPEC-050-R008 - Per-request split and allowance balance
 
@@ -230,7 +245,13 @@ requests MUST be excluded from SPEC-005 D1a wholesale statements. The
 allowance balance MUST NOT be withdrawable, transferable between accounts, or
 convertible to MALIBU or USDC. A closed request may spend more than its hold
 when the provider's real usage exceeds the bound; the overshoot is recorded
-and the remainder floors at zero.
+and the remainder floors at zero. A hold is closed by its own chat handler
+when the handler ends; holds created before the current coordinator process
+started belong to handlers that died with it and are closed by the refresh
+job from the ledger. Closing is re-entrant, so a later close adds any attempt
+recorded after an earlier one. The gateway settlement writes the confirmed
+funding onto its reservation in the same transaction, so a failed earlier
+update never leaves allowance usage on the paid quota.
 
 ### SPEC-050-R009 - Providers are paid unchanged
 
@@ -249,9 +270,12 @@ SPEC-016 payout address equals the payout address of any provider the account
 owns; or it is in the same referral cluster as any provider the account owns.
 A referral cluster is the connected set of providers linked by
 provider-issued (`P`) referral redemptions, walked in both directions to depth
-8 and at most 256 providers; operator seed codes do not link providers. When
-the walk limit is reached or any lookup fails, the attempt MUST be treated as
-self-dealt. USDC earnings are unaffected (SPEC-050-R009).
+8 and at most 256 providers; operator seed codes do not link providers. The
+account's identity is the one recorded on the grant of the day the request
+was admitted. When the walk limit is reached, any lookup fails, or the request
+has no allowance hold, the attempt MUST be treated as self-dealt. Answers MAY
+be cached for at most five minutes. USDC earnings are unaffected
+(SPEC-050-R009).
 
 ### SPEC-050-R011 - Account surface
 
@@ -295,10 +319,17 @@ A coordinator that does not know the allowance headers ignores them, and the
 request is paid as before; a gateway that does not send them gets no
 allowance admission. A gateway MUST NOT forward a paid-quota-exhausted request
 as allowance-only unless the coordinator reported an allowance for the account
-that UTC day. If the coordinator cannot record the admission, it MUST refuse an
-allowance-only request with `503 allowance_unavailable` and otherwise serve the
-request from the paid quota. The gateway MUST strip the internal allowance
-headers from buyer requests and from responses to buyers.
+that UTC day; it keeps that answer across restarts. If the coordinator cannot
+run admission for an allowance-only request (missing or invalid headers, no
+account context, no billing store, a store error), it MUST refuse it with
+`503 allowance_unavailable` before dispatch, and otherwise serve the request
+from the paid quota. If an allowance-only request comes back without an
+allowance funding answer (a coordinator without SPEC-050, or one rolled back),
+the gateway MUST charge it to the paid quota, even past its limit, and MUST
+stop forwarding allowance-only requests for that account that day. The gateway
+SQLite schema is version 19, which an older gateway refuses. The gateway MUST
+strip the internal allowance headers from buyer requests and from responses
+to buyers.
 
 ## 6. Implementation, tests, and journeys
 

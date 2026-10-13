@@ -145,7 +145,7 @@ func allowanceBalance(ctx context.Context, q allowanceDB, accountID, day string)
 	}
 	if err = q.QueryRowContext(ctx, `
 SELECT COALESCE(SUM(CASE WHEN status = 'closed' THEN spent_credits ELSE 0 END), 0),
-       COALESCE(SUM(CASE WHEN status = 'active' THEN bound_credits ELSE 0 END), 0)
+       COALESCE(SUM(CASE WHEN status = 'active' THEN spent_credits + bound_credits ELSE 0 END), 0)
   FROM allowance_reservations
  WHERE account_id = ? AND day = ? AND funding = 'allowance'`, accountID, day).Scan(&spent, &held); err != nil {
 		return 0, 0, 0, fmt.Errorf("allowance: balance: %w", err)
@@ -205,10 +205,25 @@ func (s *Store) AdmitAllowance(ctx context.Context, in AllowanceAdmission) (Allo
 		}
 		decision.GrantedCredits = granted
 		decision.HasAllowance = granted > 0
-		var existing string
-		switch err := conn.QueryRowContext(ctx, `SELECT funding FROM allowance_reservations WHERE account_id = ? AND request_id = ?`, in.AccountID, in.RequestID).Scan(&existing); {
+		var existing, existingStatus string
+		switch err := conn.QueryRowContext(ctx, `SELECT funding, status FROM allowance_reservations WHERE account_id = ? AND request_id = ?`, in.AccountID, in.RequestID).Scan(&existing, &existingStatus); {
 		case err == nil:
+			// A gateway retry of an admitted request keeps its first funding.
+			// A closed allowance hold is reopened with a fresh bound on top
+			// of what it already spent, so the retry is held again while it
+			// runs instead of spending a grant other requests may take.
 			decision.Funding = existing
+			if existing == AllowanceFundingAllowance && existingStatus == "closed" {
+				if _, err := conn.ExecContext(ctx, `
+UPDATE allowance_reservations SET status = 'active', bound_credits = ?, closed_at_utc = NULL
+ WHERE account_id = ? AND request_id = ? AND status = 'closed'`, in.BoundCredits, in.AccountID, in.RequestID); err != nil {
+					return fmt.Errorf("allowance: reopen reservation: %w", err)
+				}
+				granted, spent, held, err = allowanceBalance(ctx, conn, in.AccountID, day)
+				if err != nil {
+					return err
+				}
+			}
 			decision.RemainingCredits = remainingAllowance(granted, spent, held)
 			return nil
 		case !errors.Is(err, sql.ErrNoRows):
@@ -331,14 +346,17 @@ UPDATE allowance_reservations SET status = 'closed', spent_credits = ?, closed_a
 	return nil
 }
 
-// ReapAllowanceReservations closes holds still open after maxAge, for
-// example after a coordinator crash between admission and the handler's
-// close (SPEC-050-R008). By then any recovered ledger rows are in place.
-func (s *Store) ReapAllowanceReservations(ctx context.Context, now time.Time, maxAge time.Duration) (int64, error) {
+// ReapAllowanceReservations closes holds created before startedAt, the start
+// of this coordinator process. Every such hold belongs to a chat handler that
+// died with an earlier process (a crash between admission and the handler's
+// deferred close); a hold created by this process is always closed by its own
+// handler, so a live request is never reaped. Closing is re-entrant, so a
+// late close by a handler still records every attempt (SPEC-050-R008).
+func (s *Store) ReapAllowanceReservations(ctx context.Context, now, startedAt time.Time) (int64, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT account_id, request_id FROM allowance_reservations
  WHERE status = 'active' AND created_at_utc < ?
- LIMIT 500`, now.Add(-maxAge).UTC().Format(time.RFC3339Nano))
+ LIMIT 500`, startedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("allowance: reap: %w", err)
 	}
@@ -367,18 +385,44 @@ SELECT account_id, request_id FROM allowance_reservations
 	return closed, nil
 }
 
-// SetAllowanceOverage appends the account's overage setting.
+// maxOverageChangesPerDay bounds overage events per account in a rolling
+// 24 hours.
+const maxOverageChangesPerDay = 50
+
+// ErrAllowanceOverageRateLimited means the account changed its overage
+// setting too often.
+var ErrAllowanceOverageRateLimited = errors.New("allowance: too many overage changes in the last 24 hours")
+
+// SetAllowanceOverage records the account's overage setting. Only a change is
+// appended, and at most maxOverageChangesPerDay changes per rolling 24 hours.
 func (s *Store) SetAllowanceOverage(ctx context.Context, accountID string, enabled bool, now time.Time) error {
 	if accountID == "" {
 		return ErrAllowanceInvalidAdmission
 	}
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO allowance_overage_events (account_id, enabled, created_at_utc) VALUES (?, ?, ?)`,
-		accountID, v, now.UTC().Format(time.RFC3339Nano))
-	return err
+	return s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		current, err := allowanceOverage(ctx, conn, accountID)
+		if err != nil {
+			return err
+		}
+		if current == enabled {
+			return nil
+		}
+		var recent int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM allowance_overage_events WHERE account_id = ? AND created_at_utc > ?`,
+			accountID, now.Add(-24*time.Hour).UTC().Format(time.RFC3339Nano)).Scan(&recent); err != nil {
+			return fmt.Errorf("allowance: overage rate: %w", err)
+		}
+		if recent >= maxOverageChangesPerDay {
+			return ErrAllowanceOverageRateLimited
+		}
+		v := 0
+		if enabled {
+			v = 1
+		}
+		_, err = conn.ExecContext(ctx, `INSERT INTO allowance_overage_events (account_id, enabled, created_at_utc) VALUES (?, ?, ?)`,
+			accountID, v, now.UTC().Format(time.RFC3339Nano))
+		return err
+	})
 }
 
 // AllowanceStatusFor reports the account's allowance for the UTC day of now.

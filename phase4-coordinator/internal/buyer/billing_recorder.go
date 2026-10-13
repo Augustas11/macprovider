@@ -541,7 +541,7 @@ func (b *billingRecorder) recordRow(
 		// that is self-dealing for the staking account earns no MALIBU. The
 		// flag is insert-only, so it is decided before the ledger write.
 		if b.allowanceFunding == billing.AllowanceFundingAllowance && !row.RewardsExcluded &&
-			billingStore.AllowanceSelfDealing(ctx, b.accountID, stableProviderID, s.now()) {
+			billingStore.AllowanceSelfDealing(ctx, b.accountID, b.externalRequestID, stableProviderID) {
 			row.RewardsExcluded = true
 		}
 		accountScope := accountScopeForSettlement(b.accountID)

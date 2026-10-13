@@ -21,13 +21,12 @@ func TestStakeAllowanceDefaultsAreOnWithZeroBudget(t *testing.T) {
 
 func TestStakeAllowanceValidation(t *testing.T) {
 	for name, mutate := range map[string]func(*StakeAllowanceConfig){
-		"negative budget":             func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = -1 },
-		"budget without rate":         func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = 10; s.PerAccountDailyCapCredits = 5 },
-		"budget without cap":          func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = 10; s.CreditsPerMALIBU = 5 },
-		"cooldown too short":          func(s *StakeAllowanceConfig) { s.UnlockCooldownHours = 23 },
-		"min age zero":                func(s *StakeAllowanceConfig) { s.MinStakeAgeHours = 0 },
-		"reservation max age too big": func(s *StakeAllowanceConfig) { s.ReservationMaxAgeSeconds = 86401 },
-		"refresh interval too short":  func(s *StakeAllowanceConfig) { s.RefreshCheckIntervalSeconds = 1 },
+		"negative budget":            func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = -1 },
+		"budget without rate":        func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = 10; s.PerAccountDailyCapCredits = 5 },
+		"budget without cap":         func(s *StakeAllowanceConfig) { s.DailyBudgetCredits = 10; s.CreditsPerMALIBU = 5 },
+		"cooldown too short":         func(s *StakeAllowanceConfig) { s.UnlockCooldownHours = 23 },
+		"min age zero":               func(s *StakeAllowanceConfig) { s.MinStakeAgeHours = 0 },
+		"refresh interval too short": func(s *StakeAllowanceConfig) { s.RefreshCheckIntervalSeconds = 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := Default()
@@ -62,7 +61,7 @@ func TestCoordinatorYAMLExamplesCarryConservativeStakeAllowance(t *testing.T) {
 		}
 		text := string(b)
 		start := strings.Index(text, "# SPEC-050 MALIBU stake allowance")
-		end := strings.Index(text, "reservation_max_age_seconds")
+		end := strings.Index(text, "refresh_check_interval_seconds")
 		if start < 0 || end < start {
 			t.Fatalf("%s: stake_allowance block not found", rel)
 		}

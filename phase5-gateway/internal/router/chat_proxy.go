@@ -3618,6 +3618,7 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 		RelayBlind: relayBlindMetadataFor(r),
 		AccountID:  subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
 		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
+		FundingSource: settlementFundingSource(subject),
 	}
 	var err error
 	if subject.DemoIdentity != "" {

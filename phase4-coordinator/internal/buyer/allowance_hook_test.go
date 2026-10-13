@@ -163,3 +163,28 @@ func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
 		}
 	}
 }
+
+// SPEC-050-R014: an allowance-only request (gateway paid quota spent) whose
+// admission cannot run is refused before dispatch, never served unfunded.
+func TestAllowanceOnlyRequestFailsClosed(t *testing.T) {
+	h := newAllowanceHarness(t, billing.AllowanceStake{AccountID: "acct_req", GitHubUserID: 7, Units: 100 * billing.AllowanceUnitsPerMALIBU})
+	for name, headers := range map[string]map[string]string{
+		"missing model":   {allowanceRequiredHeader: "1", allowanceInputTokensHeader: "10", allowanceOutputTokensHeader: "10"},
+		"bad token count": {allowanceRequiredHeader: "1", allowanceModelHeader: "model-a", allowanceInputTokensHeader: "-1", allowanceOutputTokensHeader: "10"},
+	} {
+		external := "ext-" + strings.ReplaceAll(name, " ", "-")
+		rec := allowanceChat(h, "acct_req", external, headers)
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "allowance_unavailable") {
+			t.Fatalf("%s: status %d body %s", name, rec.Code, rec.Body.String())
+		}
+		if n := ledgerRowsFor(t, h, "acct_req", external); n != 0 {
+			t.Fatalf("%s: refused request dispatched %d attempts", name, n)
+		}
+	}
+	// Without the required marker the same malformed headers are ignored
+	// and the request is paid as before.
+	rec := allowanceChat(h, "acct_req", "ext-ignored", map[string]string{allowanceInputTokensHeader: "10"})
+	if rec.Code != http.StatusOK || rec.Header().Get(allowanceFundingHeader) != "" {
+		t.Fatalf("plain request status %d headers %v", rec.Code, rec.Header())
+	}
+}

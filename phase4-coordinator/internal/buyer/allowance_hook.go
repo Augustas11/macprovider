@@ -39,22 +39,39 @@ func parseAllowanceTokens(raw string) (int64, bool) {
 
 // admitAllowance runs SPEC-050-R007 admission for a gateway-authenticated
 // request that carries the allowance headers. It returns false after writing
-// a refusal; the caller must then stop.
+// a refusal; the caller must then stop. A request the gateway marked
+// allowance-only (its paid quota is spent) fails closed: if admission cannot
+// run for any reason it is refused before dispatch (SPEC-050-R014).
 func (s *Server) admitAllowance(w http.ResponseWriter, r *http.Request, rec *billingRecorder, accountID, externalRequestID string, hasAuthenticatedAccount bool) bool {
+	required := strings.TrimSpace(r.Header.Get(allowanceRequiredHeader)) == "1"
 	model := strings.TrimSpace(r.Header.Get(allowanceModelHeader))
-	if model == "" || !hasAuthenticatedAccount || accountID == "" || externalRequestID == "" || len(model) > 256 {
+	unavailable := func(reason string) bool {
+		if !required {
+			return true
+		}
+		s.log.Warn().Str("request_id", externalRequestID).Str("reason", reason).Msg("allowance-only request refused: admission unavailable")
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "allowance admission unavailable")
+		writeError(w, http.StatusServiceUnavailable, "allowance_unavailable", "Allowance is unavailable; retry shortly")
+		return false
+	}
+	if model == "" && !required {
 		return true
+	}
+	if !hasAuthenticatedAccount || accountID == "" || externalRequestID == "" {
+		return unavailable("no gateway account context")
+	}
+	if model == "" || len(model) > 256 {
+		return unavailable("invalid model header")
 	}
 	billingStore, _, _ := s.billingState()
 	if billingStore == nil {
-		return true
+		return unavailable("no billing store")
 	}
 	input, okIn := parseAllowanceTokens(r.Header.Get(allowanceInputTokensHeader))
 	output, okOut := parseAllowanceTokens(r.Header.Get(allowanceOutputTokensHeader))
 	if !okIn || !okOut {
-		return true
+		return unavailable("invalid token headers")
 	}
-	required := strings.TrimSpace(r.Header.Get(allowanceRequiredHeader)) == "1"
 	ctx, cancel := context.WithTimeout(r.Context(), allowanceHookTimeout)
 	defer cancel()
 	decision, err := billingStore.AdmitAllowance(ctx, billing.AllowanceAdmission{
@@ -63,14 +80,7 @@ func (s *Server) admitAllowance(w http.ResponseWriter, r *http.Request, rec *bil
 	})
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", externalRequestID).Msg("allowance admission failed")
-		if required {
-			// The gateway's paid quota cannot take this request; without an
-			// allowance answer it must not run.
-			rec.logBuyerFailure(http.StatusServiceUnavailable, "allowance admission unavailable")
-			writeError(w, http.StatusServiceUnavailable, "allowance_unavailable", "Allowance is unavailable; retry shortly")
-			return false
-		}
-		return true
+		return unavailable("admission store error")
 	}
 	active := "0"
 	if decision.HasAllowance {

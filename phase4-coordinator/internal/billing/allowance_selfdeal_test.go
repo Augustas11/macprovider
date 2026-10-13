@@ -43,6 +43,8 @@ func TestAllowanceSelfDealingRelations(t *testing.T) {
 		AllowanceStake{AccountID: "acct", GitHubUserID: 7, Units: malibu(10)},
 		AllowanceStake{AccountID: "acct_noid", Units: malibu(10)},
 	)
+	admit(t, store, "acct", "req", 1, false)
+	admit(t, store, "acct_noid", "req", 1, false)
 	for provider, want := range map[string]bool{
 		"p_own":     true,  // owned by the account's identity
 		"p_wallet":  true,  // same payout address, different case
@@ -52,17 +54,25 @@ func TestAllowanceSelfDealingRelations(t *testing.T) {
 		"p_seeded":  false, // operator seed codes link nobody
 		"p_unknown": false,
 	} {
-		if got := store.AllowanceSelfDealing(ctx, "acct", provider, allowanceTestNow); got != want {
+		if got := store.AllowanceSelfDealing(ctx, "acct", "req", provider); got != want {
 			t.Errorf("%s self-dealing=%v want %v", provider, got, want)
 		}
 	}
 	// Fail safe: no grant, or a grant without an identity, counts as
 	// self-dealt.
-	if !store.AllowanceSelfDealing(ctx, "acct_nogrant", "p_other", allowanceTestNow) {
+	if !store.AllowanceSelfDealing(ctx, "acct_nogrant", "req", "p_other") {
 		t.Error("account without a grant must count as self-dealt")
 	}
-	if !store.AllowanceSelfDealing(ctx, "acct_noid", "p_other", allowanceTestNow) {
+	if !store.AllowanceSelfDealing(ctx, "acct", "no-such-request", "p_other") {
+		t.Error("request without an allowance hold must count as self-dealt")
+	}
+	if !store.AllowanceSelfDealing(ctx, "acct_noid", "req", "p_other") {
 		t.Error("grant without an identity must count as self-dealt")
+	}
+	// The answer for a request follows the grant of its admission day, not
+	// the wall clock at ledger insert.
+	if store.AllowanceSelfDealing(ctx, "acct", "req", "p_other") {
+		t.Error("memoized answer changed")
 	}
 }
 
@@ -70,7 +80,8 @@ func TestAllowanceSelfDealingFailsSafe(t *testing.T) {
 	t.Run("missing tables", func(t *testing.T) {
 		_, store := newRequestAndBillingStores(t)
 		grantAllowance(t, store, AllowanceStake{AccountID: "acct", GitHubUserID: 7, Units: malibu(10)})
-		if !store.AllowanceSelfDealing(context.Background(), "acct", "p_any", allowanceTestNow) {
+		admit(t, store, "acct", "req", 1, false)
+		if !store.AllowanceSelfDealing(context.Background(), "acct", "req", "p_any") {
 			t.Fatal("a failed lookup must count as self-dealt")
 		}
 	})
@@ -85,7 +96,8 @@ func TestAllowanceSelfDealingFailsSafe(t *testing.T) {
 				fmt.Sprintf(`INSERT INTO referral_redemptions VALUES ('c', 'p%d', 'iss%d')`, i+1, i))
 		}
 		grantAllowance(t, store, AllowanceStake{AccountID: "acct", GitHubUserID: 7, Units: malibu(10)})
-		if !store.AllowanceSelfDealing(context.Background(), "acct", "p0", allowanceTestNow) {
+		admit(t, store, "acct", "req", 1, false)
+		if !store.AllowanceSelfDealing(context.Background(), "acct", "req", "p0") {
 			t.Fatal("an unbounded cluster walk must count as self-dealt")
 		}
 	})

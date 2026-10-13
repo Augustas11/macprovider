@@ -171,7 +171,8 @@ func decodeBody(r *http.Request, w http.ResponseWriter, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	if dec.More() {
+	// Exactly one JSON value: anything after it is refused.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("trailing data")
 	}
 	return nil
@@ -205,13 +206,15 @@ func (h *handler) handleStake(w http.ResponseWriter, r *http.Request, p principa
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_amount", "amount_malibu must be a positive decimal with at most 8 fractional digits")
 		return
 	}
-	if p.GitHubUserID <= 0 {
-		writeError(w, http.StatusForbidden, "permission_error", "github_identity_required", "Staking needs an account signed in with GitHub")
-		return
-	}
 	req := rewards.StakeRequest{AccountID: p.AccountID, GitHubUserID: p.GitHubUserID, AmountUnits: units, IdempotencyKey: key}
 	var result rewards.StakeResult
 	if lock {
+		// Locking needs the GitHub identity that owns the providers; an
+		// unlock is authorized by the account alone.
+		if p.GitHubUserID <= 0 {
+			writeError(w, http.StatusForbidden, "permission_error", "github_identity_required", "Staking needs an account signed in with GitHub")
+			return
+		}
 		if h.deps.OwnedProviderIDs == nil {
 			writeError(w, http.StatusServiceUnavailable, "api_error", "stake_source_unavailable", "Staking is not available right now")
 			return
@@ -268,6 +271,10 @@ func (h *handler) writeStakeError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusConflict, "invalid_request_error", "no_owned_provider", "This account owns no provider with MALIBU")
 	case errors.Is(err, rewards.ErrStakeInsufficient):
 		writeError(w, http.StatusConflict, "invalid_request_error", "insufficient_malibu", "Not enough MALIBU for this request")
+	case errors.Is(err, rewards.ErrStakeIdentityChanged):
+		writeError(w, http.StatusConflict, "invalid_request_error", "stake_identity_changed", "This account already staked under a different GitHub identity")
+	case errors.Is(err, rewards.ErrStakeAccountBound):
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "stake_bound_exceeded", "This lock would take the account's stake past its bound")
 	case errors.Is(err, rewards.ErrStakeRateLimited):
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "stake_rate_limited", "Too many stake changes in the last 24 hours")
 	case errors.Is(err, rewards.ErrStakeIdempotencyReused):
@@ -303,6 +310,10 @@ func (h *handler) handleOverage(w http.ResponseWriter, r *http.Request, p princi
 		return
 	}
 	if err := h.deps.Allowance.SetAllowanceOverage(r.Context(), p.AccountID, *body.Enabled, h.now()); err != nil {
+		if errors.Is(err, billing.ErrAllowanceOverageRateLimited) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "overage_rate_limited", "Too many overage changes in the last 24 hours")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "api_error", "allowance_unavailable", "Allowance is not available right now")
 		return
 	}

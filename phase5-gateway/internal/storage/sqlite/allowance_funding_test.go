@@ -49,3 +49,82 @@ func TestAllowanceFundedReservationDoesNotDrawPaidQuota(t *testing.T) {
 		t.Fatal("unknown funding source must be refused")
 	}
 }
+
+// The settlement writes the coordinator-confirmed funding atomically, so a
+// failed early update cannot leave allowance usage on the paid quota.
+func TestSettlementWritesConfirmedFunding(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_settle")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_settle", RequestID: "req_a", WindowDate: "2026-10-13",
+		RequestedTokens: 50, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_settle", RequestID: "req_a", PromptTokens: 10, CompletionTokens: 20,
+		TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime().Add(time.Minute),
+		FundingSource: storage.FundingSourceAllowance,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "acct_settle", "2026-10-13")
+	if err != nil || used != 0 || reserved != 0 {
+		t.Fatalf("used=%d reserved=%d err=%v; allowance-confirmed usage must leave the paid quota", used, reserved, err)
+	}
+	// An allowance-only reservation the coordinator did not fund is put back
+	// on the paid quota, even past its limit.
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_settle", RequestID: "req_b", WindowDate: "2026-10-13",
+		RequestedTokens: 500, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+		FundingSource: storage.FundingSourceAllowance,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkReservationFundingSource(ctx, "acct_settle", "req_b", storage.FundingSourceQuota); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_settle", RequestID: "req_b", PromptTokens: 100, CompletionTokens: 100,
+		TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime().Add(time.Minute),
+		FundingSource: storage.FundingSourceQuota,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if used, _, _ := store.DailyUsage(ctx, "acct_settle", "2026-10-13"); used != 200 {
+		t.Fatalf("unfunded allowance-only request used=%d, want 200 on the paid quota", used)
+	}
+	if err := store.SettleReservation(ctx, storage.ReservationSettlement{AccountID: "acct_settle", RequestID: "req_b", FundingSource: "voucher"}); err == nil {
+		t.Fatal("unknown funding source must be refused")
+	}
+}
+
+func TestAllowanceActiveDaysPersistAndSchemaV19Gates(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	day := now.UTC().Format("2006-01-02")
+	if ok, err := store.AllowanceDayActive(ctx, "acct_d", day); err != nil || ok {
+		t.Fatalf("fresh active=%v err=%v", ok, err)
+	}
+	if err := store.NoteAllowanceDay(ctx, "acct_d", day, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := store.AllowanceDayActive(ctx, "acct_d", day); !ok {
+		t.Fatal("noted day not active")
+	}
+	if err := store.NoteAllowanceDay(ctx, "acct_d", day, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := store.AllowanceDayActive(ctx, "acct_d", day); ok {
+		t.Fatal("cleared day still active")
+	}
+	var version int64
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 19 {
+		t.Fatalf("schema version=%d err=%v, want 19", version, err)
+	}
+	if err := store.checkSchemaVersionGateAt(ctx, 18); err == nil {
+		t.Fatal("a v18 gateway accepted a database carrying SPEC-050 funding sources")
+	}
+}

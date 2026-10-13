@@ -336,7 +336,7 @@ func netStakeLocks(ctx context.Context, db *sql.DB, providerID, withdrawable str
 // stakeLockedUnits is MALIBU locked on a provider by SPEC-050 stakes now,
 // including MALIBU in an unlock cooldown. A database without the stake
 // ledger (migration 032 not applied yet) has no locks.
-func stakeLockedUnits(ctx context.Context, db *sql.DB, providerID string) (int64, error) {
+func stakeLockedUnits(ctx context.Context, db queryRower, providerID string) (int64, error) {
 	var present bool
 	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.malibu_stake_events') IS NOT NULL`).Scan(&present); err != nil {
 		return 0, fmt.Errorf("stake ledger presence: %w", err)

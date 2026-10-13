@@ -13,7 +13,6 @@ type StakeAllowanceConfig struct {
 	MinStakeAgeHours            int   `yaml:"min_stake_age_hours"`
 	UnlockCooldownHours         int   `yaml:"unlock_cooldown_hours"`
 	RefreshCheckIntervalSeconds int   `yaml:"refresh_check_interval_seconds"`
-	ReservationMaxAgeSeconds    int   `yaml:"reservation_max_age_seconds"`
 }
 
 // DefaultStakeAllowanceConfig is the SPEC-050 §4 default: on, zero budget.
@@ -22,7 +21,6 @@ func DefaultStakeAllowanceConfig() StakeAllowanceConfig {
 		MinStakeAgeHours:            24,
 		UnlockCooldownHours:         168,
 		RefreshCheckIntervalSeconds: 60,
-		ReservationMaxAgeSeconds:    7200,
 	}
 }
 
@@ -42,9 +40,6 @@ func (c Config) validateStakeAllowance() error {
 	}
 	if s.RefreshCheckIntervalSeconds < 10 || s.RefreshCheckIntervalSeconds > 3600 {
 		return fmt.Errorf("stake_allowance.refresh_check_interval_seconds must be in [10, 3600]")
-	}
-	if s.ReservationMaxAgeSeconds < 600 || s.ReservationMaxAgeSeconds > 86400 {
-		return fmt.Errorf("stake_allowance.reservation_max_age_seconds must be in [600, 86400]")
 	}
 	return nil
 }

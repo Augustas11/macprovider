@@ -42,6 +42,7 @@ func TestComputeAllowanceGrantsRateCapAndProRata(t *testing.T) {
 			{"a", 0, malibu(1000) + 12_345, 250_000, 250_000},
 			{"b", 0, malibu(100), 100_000, 100_000},
 			{"c", 0, malibu(10_000), 250_000, 250_000},
+			{"e", 0, 99_999, 0, 0}, // under one credit: a zero grant row
 		}
 		if !reflect.DeepEqual(grants, want) {
 			t.Fatalf("grants %+v\nwant %+v", grants, want)

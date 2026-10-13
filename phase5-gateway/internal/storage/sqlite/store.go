@@ -132,6 +132,9 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     settlement dispatch hint and coordinator internal request id; an
 //	     older gateway would settle a relay-blind hold without coordinator
 //	     finality, so it must refuse this database.
+//	v19 — SPEC-050 (#1062): quota_reservations.funding_source and
+//	     allowance_active_days; an older gateway would count allowance-funded
+//	     usage against the paid daily quota, so it must refuse this database.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -142,7 +145,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 18
+const maxKnownSchemaVersion = 19
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -303,6 +306,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(19, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -1817,11 +1823,18 @@ func (s *Store) settleReservation(ctx context.Context, settlement storage.Reserv
 		return err
 	}
 	metadataArgs := relayBlindArgs(resolved)
+	fundingSource := ""
+	if settlement.FundingSource != "" {
+		if fundingSource, err = normalizeFundingSource(settlement.FundingSource); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0,
+		    funding_source = COALESCE(NULLIF(?, ''), funding_source)
 		WHERE account_id = ? AND request_id = ?`,
-		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
+		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], fundingSource, settlement.AccountID, settlement.RequestID)
 	if err != nil {
 		return err
 	}

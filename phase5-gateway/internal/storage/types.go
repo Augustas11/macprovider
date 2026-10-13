@@ -309,6 +309,10 @@ type ReservationSettlement struct {
 	Outcome                      string
 	SettledAt                    time.Time
 	RelayBlind                   *RelayBlindMetadata
+	// FundingSource, when set, is the SPEC-050 funding the coordinator
+	// confirmed for this request; the settlement writes it onto the
+	// reservation in the same transaction. Empty keeps the reservation's.
+	FundingSource string
 }
 
 type ConcurrencyRequest struct {

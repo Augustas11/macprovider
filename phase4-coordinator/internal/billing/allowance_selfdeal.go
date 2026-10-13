@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,31 +26,39 @@ const (
 var errSelfDealWalkLimit = errors.New("allowance: referral cluster walk limit reached")
 
 // AllowanceSelfDealing reports whether providerID is self-dealing for the
-// account's allowance on the UTC day of now: owned by the account's GitHub
-// identity, sharing a payout address with a provider that identity owns, or
-// in the same provider-issued referral cluster as one. Any lookup failure, an
-// account without a recorded identity, or a walk that reaches its bound
-// counts as self-dealt, so uncertainty never earns MALIBU.
-func (s *Store) AllowanceSelfDealing(ctx context.Context, accountID, providerID string, now time.Time) bool {
-	dealt, err := s.allowanceSelfDealing(ctx, accountID, providerID, now)
+// account's allowance request externalRequestID: owned by the GitHub identity
+// recorded on the grant of the request's admission day, sharing a payout
+// address with a provider that identity owns, or in the same provider-issued
+// referral cluster as one. Any lookup failure, a request without an
+// allowance hold, a grant without an identity, or a walk that reaches its
+// bound counts as self-dealt, so uncertainty never earns MALIBU. Answers are
+// memoized per (identity, provider) for a few minutes, so a request's
+// attempts and an account's repeated traffic do not repeat the walk.
+func (s *Store) AllowanceSelfDealing(ctx context.Context, accountID, externalRequestID, providerID string) bool {
+	if accountID == "" || externalRequestID == "" || providerID == "" {
+		return true
+	}
+	var githubUserID int64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT g.github_user_id
+  FROM allowance_reservations r
+  JOIN allowance_grants g ON g.account_id = r.account_id AND g.day = r.day
+ WHERE r.account_id = ? AND r.request_id = ?`, accountID, externalRequestID).Scan(&githubUserID); err != nil || githubUserID <= 0 {
+		return true
+	}
+	now := time.Now()
+	if dealt, ok := s.selfDealMemo.get(githubUserID, providerID, now); ok {
+		return dealt
+	}
+	dealt, err := s.allowanceSelfDealing(ctx, githubUserID, providerID)
 	if err != nil {
 		return true
 	}
+	s.selfDealMemo.put(githubUserID, providerID, dealt, now)
 	return dealt
 }
 
-func (s *Store) allowanceSelfDealing(ctx context.Context, accountID, providerID string, now time.Time) (bool, error) {
-	if accountID == "" || providerID == "" {
-		return true, errors.New("allowance: missing account or provider")
-	}
-	var githubUserID int64
-	if err := s.db.QueryRowContext(ctx, `SELECT github_user_id FROM allowance_grants WHERE account_id = ? AND day = ?`,
-		accountID, allowanceDay(now)).Scan(&githubUserID); err != nil {
-		return true, fmt.Errorf("allowance: grant identity: %w", err)
-	}
-	if githubUserID <= 0 {
-		return true, errors.New("allowance: grant has no identity")
-	}
+func (s *Store) allowanceSelfDealing(ctx context.Context, githubUserID int64, providerID string) (bool, error) {
 	owned, err := s.ownedProviderSet(ctx, githubUserID)
 	if err != nil {
 		return true, err
@@ -66,6 +75,47 @@ func (s *Store) allowanceSelfDealing(ctx context.Context, accountID, providerID 
 		return true, err
 	}
 	return s.referralClusterTouches(ctx, providerID, owned)
+}
+
+const (
+	selfDealMemoTTL        = 5 * time.Minute
+	selfDealMemoMaxEntries = 10_000
+)
+
+type selfDealKey struct {
+	githubUserID int64
+	providerID   string
+}
+
+type selfDealEntry struct {
+	dealt bool
+	at    time.Time
+}
+
+// selfDealMemo caches self-dealing answers briefly. Only answers computed
+// without error are stored; failures are never cached.
+type selfDealMemo struct {
+	mu      sync.Mutex
+	entries map[selfDealKey]selfDealEntry
+}
+
+func (m *selfDealMemo) get(github int64, provider string, now time.Time) (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[selfDealKey{github, provider}]
+	if !ok || now.Sub(e.at) > selfDealMemoTTL {
+		return false, false
+	}
+	return e.dealt, true
+}
+
+func (m *selfDealMemo) put(github int64, provider string, dealt bool, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entries == nil || len(m.entries) >= selfDealMemoMaxEntries {
+		m.entries = map[selfDealKey]selfDealEntry{}
+	}
+	m.entries[selfDealKey{github, provider}] = selfDealEntry{dealt: dealt, at: now}
 }
 
 func (s *Store) ownedProviderSet(ctx context.Context, githubUserID int64) (map[string]bool, error) {

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -47,28 +48,69 @@ const (
 // allowanceCache remembers, per account and UTC day, that the coordinator
 // reported an allowance. Only such an account may be forwarded once its paid
 // quota is exhausted, so the coordinator can fund it from the allowance alone.
+// The in-memory map is a front for the allowance_active_days table, which
+// keeps the answer across gateway restarts and instances.
 type allowanceCache struct {
 	mu      sync.Mutex
 	entries map[string]string // account -> UTC day with an allowance
 }
 
-func (c *allowanceCache) active(account, day string) bool {
+func (c *allowanceCache) get(account string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.entries[account] == day
+	day, ok := c.entries[account]
+	return day, ok
 }
 
 func (c *allowanceCache) set(account, day string, active bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !active {
-		delete(c.entries, account)
-		return
-	}
 	if c.entries == nil || len(c.entries) >= allowanceCacheMaxEntries {
 		c.entries = map[string]string{}
 	}
-	c.entries[account] = day
+	if active {
+		c.entries[account] = day
+	} else {
+		c.entries[account] = ""
+	}
+}
+
+// allowanceStore is implemented by the SQLite store.
+type allowanceStore interface {
+	MarkReservationFundingSource(ctx context.Context, accountID, requestID, source string) error
+	NoteAllowanceDay(ctx context.Context, accountID, day string, active bool, now time.Time) error
+	AllowanceDayActive(ctx context.Context, accountID, day string) (bool, error)
+}
+
+func (s *Server) allowanceActive(ctx context.Context, account, day string) bool {
+	if cached, ok := s.allowance.get(account); ok {
+		return cached == day
+	}
+	store, ok := s.store.(allowanceStore)
+	if !ok {
+		return false
+	}
+	active, err := store.AllowanceDayActive(ctx, account, day)
+	if err != nil {
+		slog.Warn("allowance day lookup failed", "account_id", account, "error", err)
+		return false
+	}
+	s.allowance.set(account, day, active)
+	return active
+}
+
+// noteAllowanceDay records the coordinator's answer, writing the table only
+// when the remembered answer changes.
+func (s *Server) noteAllowanceDay(account, day string, active bool) {
+	if cached, ok := s.allowance.get(account); ok && (cached == day) == active {
+		return
+	}
+	s.allowance.set(account, day, active)
+	if store, ok := s.store.(allowanceStore); ok {
+		if err := store.NoteAllowanceDay(context.Background(), account, day, active, s.now()); err != nil {
+			slog.Warn("allowance day record failed", "account_id", account, "error", err)
+		}
+	}
 }
 
 // setAllowanceRequestHeaders asks the coordinator to admit this request
@@ -87,7 +129,7 @@ func setAllowanceRequestHeaders(h http.Header, model string, inputUpperBound, ma
 // had an allowance today, reserve outside the paid quota and require the
 // coordinator to fund the request from the allowance (SPEC-050-R007).
 func (s *Server) reserveAllowanceOnly(ctx context.Context, subject *usageSubject, req storage.ReservationRequest) (storage.QuotaDecision, error, bool) {
-	if !s.allowance.active(subject.AccountID, req.WindowDate) {
+	if !s.allowanceActive(ctx, subject.AccountID, req.WindowDate) {
 		return storage.QuotaDecision{}, nil, false
 	}
 	req.FundingSource = storage.FundingSourceAllowance
@@ -99,9 +141,13 @@ func (s *Server) reserveAllowanceOnly(ctx context.Context, subject *usageSubject
 	return decision, err, true
 }
 
-// noteAllowanceResponse reads the coordinator's funding answer, marks an
-// allowance-funded reservation so it leaves the paid quota, and strips the
-// internal headers before anything reaches the buyer.
+// noteAllowanceResponse reads the coordinator's funding answer and strips
+// the internal headers before anything reaches the buyer. An allowance answer
+// takes the reservation off the paid quota; the settlement repeats the
+// funding atomically, so a failed early update cannot charge both. An
+// allowance-only request the coordinator did not fund (a coordinator without
+// SPEC-050, or one rolled back) is put back on the paid quota and charged
+// there, even past its limit, so it is never served unfunded (SPEC-050-R014).
 func (s *Server) noteAllowanceResponse(r *http.Request, subject *usageSubject, h http.Header) {
 	if h == nil {
 		return
@@ -115,29 +161,46 @@ func (s *Server) noteAllowanceResponse(r *http.Request, subject *usageSubject, h
 	}
 	day := subject.ReservationCreatedAt.UTC().Format("2006-01-02")
 	if active == "1" || active == "0" {
-		s.allowance.set(subject.AccountID, day, active == "1")
+		s.noteAllowanceDay(subject.AccountID, day, active == "1")
+	}
+	store, _ := s.store.(allowanceStore)
+	if subject.AllowanceRequired && funding != allowanceFundingAllowance {
+		s.noteAllowanceDay(subject.AccountID, day, false)
+		subject.AllowanceFunded = false
+		if store != nil {
+			if err := store.MarkReservationFundingSource(context.Background(), subject.AccountID, requestID(r), storage.FundingSourceQuota); err != nil {
+				slog.Error("allowance-only request not funded by the coordinator; settlement charges the paid quota",
+					"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
+			}
+		}
+		return
 	}
 	if funding != allowanceFundingAllowance || subject.AllowanceFunded {
 		return
 	}
-	marker, ok := s.store.(allowanceFundingMarker)
-	if !ok {
-		return
-	}
-	if err := marker.MarkReservationAllowanceFunded(context.Background(), subject.AccountID, requestID(r)); err != nil {
-		slog.Error("allowance funding mark failed; request settles against the paid quota",
-			"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
-		return
-	}
 	subject.AllowanceFunded = true
+	if store != nil {
+		if err := store.MarkReservationFundingSource(context.Background(), subject.AccountID, requestID(r), storage.FundingSourceAllowance); err != nil {
+			slog.Warn("allowance funding mark failed; the settlement records it",
+				"request_id", requestID(r), "account_id", subject.AccountID, "error", err)
+		}
+	}
+}
+
+// settlementFundingSource is the funding a settlement writes onto the
+// reservation: the coordinator-confirmed allowance, the paid quota for an
+// allowance-only request it did not fund, or "" to keep the reservation's.
+func settlementFundingSource(subject usageSubject) string {
+	switch {
+	case subject.AllowanceFunded:
+		return storage.FundingSourceAllowance
+	case subject.AllowanceRequired:
+		return storage.FundingSourceQuota
+	}
+	return ""
 }
 
 const allowanceFundingAllowance = "allowance"
-
-// allowanceFundingMarker is implemented by the SQLite store.
-type allowanceFundingMarker interface {
-	MarkReservationAllowanceFunded(ctx context.Context, accountID, requestID string) error
-}
 
 // newStakeUpstreamRequest builds a request to the coordinator's internal
 // stake/allowance mount from an empty header set. Like the creator proxy it

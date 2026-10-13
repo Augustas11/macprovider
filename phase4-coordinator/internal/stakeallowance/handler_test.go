@@ -172,6 +172,9 @@ func TestStakeHandlerRefusals(t *testing.T) {
 		{"no github identity", &fakeLedger{}, `{"amount_malibu":"1"}`, func(m map[string]string) { delete(m, GitHubUserIDHeader) }, 403, "github_identity_required"},
 		{"bad amount", &fakeLedger{}, `{"amount_malibu":"1.000000001"}`, nil, 400, "invalid_amount"},
 		{"unknown field", &fakeLedger{}, `{"amount_malibu":"1","account_id":"x"}`, nil, 400, "invalid_body"},
+		{"trailing value", &fakeLedger{}, `{"amount_malibu":"1"} {"amount_malibu":"2"}`, nil, 400, "invalid_body"},
+		{"identity changed", &fakeLedger{err: rewards.ErrStakeIdentityChanged}, `{"amount_malibu":"1"}`, nil, 409, "stake_identity_changed"},
+		{"account bound", &fakeLedger{err: rewards.ErrStakeAccountBound}, `{"amount_malibu":"1"}`, nil, 400, "stake_bound_exceeded"},
 		{"insufficient", &fakeLedger{err: rewards.ErrStakeInsufficient}, `{"amount_malibu":"1"}`, nil, 409, "insufficient_malibu"},
 		{"key reused", &fakeLedger{err: rewards.ErrStakeIdempotencyReused}, `{"amount_malibu":"1"}`, nil, 409, "idempotency_key_reused"},
 		{"no owned provider", &fakeLedger{err: rewards.ErrStakeNoOwnedProviders}, `{"amount_malibu":"1"}`, nil, 409, "no_owned_provider"},
@@ -281,5 +284,15 @@ func TestDisclosureMatchesSpec(t *testing.T) {
 	spec := strings.Join(strings.Fields(string(raw)), " ")
 	if !strings.Contains(spec, `"`+Disclosure+`"`) {
 		t.Fatal("coordinator stake disclosure drifted from SPEC-050-R012")
+	}
+}
+
+func TestStakeHandlerUnlockNeedsNoGitHubIdentity(t *testing.T) {
+	ledger := &fakeLedger{}
+	headers := principalHeaders()
+	delete(headers, GitHubUserIDHeader)
+	rec := stakeCall(newTestHandler(ledger), "unlock", `{"amount_malibu":"1"}`, headers)
+	if rec.Code != http.StatusOK || ledger.unlockReq.AccountID != "acct_1" || ledger.unlockReq.GitHubUserID != 0 {
+		t.Fatalf("unlock without identity status %d body %s req %+v", rec.Code, rec.Body.String(), ledger.unlockReq)
 	}
 }

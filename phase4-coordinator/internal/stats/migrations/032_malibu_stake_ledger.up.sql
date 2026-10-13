@@ -6,9 +6,10 @@
 -- stake; an unlock stops it earning at once and releases it at release_at.
 --
 -- Only the coordinator writes here, through rewards_writer, which gets SELECT
--- and INSERT and nothing else. stats_reader and stats_rollup get no grant.
--- A trigger refuses UPDATE and DELETE for every role, so the ledger stays
--- append-only even under an admin connection.
+-- and INSERT and nothing else (every other privilege is revoked first).
+-- stats_reader and stats_rollup get no grant. Triggers refuse UPDATE, DELETE
+-- and TRUNCATE for every role, so the ledger stays append-only even under an
+-- admin connection.
 
 CREATE TABLE IF NOT EXISTS malibu_stake_events (
     id               BIGSERIAL PRIMARY KEY,
@@ -46,6 +47,14 @@ CREATE TRIGGER malibu_stake_events_no_update
     BEFORE UPDATE OR DELETE ON malibu_stake_events
     FOR EACH ROW EXECUTE FUNCTION malibu_stake_events_append_only();
 
+DROP TRIGGER IF EXISTS malibu_stake_events_no_truncate ON malibu_stake_events;
+CREATE TRIGGER malibu_stake_events_no_truncate
+    BEFORE TRUNCATE ON malibu_stake_events
+    FOR EACH STATEMENT EXECUTE FUNCTION malibu_stake_events_append_only();
+
 REVOKE ALL ON malibu_stake_events FROM PUBLIC;
+REVOKE ALL ON malibu_stake_events FROM rewards_writer;
+REVOKE ALL ON SEQUENCE malibu_stake_events_id_seq FROM PUBLIC;
+REVOKE ALL ON SEQUENCE malibu_stake_events_id_seq FROM rewards_writer;
 GRANT SELECT, INSERT ON malibu_stake_events TO rewards_writer;
 GRANT USAGE ON SEQUENCE malibu_stake_events_id_seq TO rewards_writer;

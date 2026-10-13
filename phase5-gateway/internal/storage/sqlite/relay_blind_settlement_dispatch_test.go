@@ -87,8 +87,8 @@ func TestRelayBlindSettlementDispatchMigrationRefusesV17Gateway(t *testing.T) {
 	}
 	defer store.Close()
 	var version int64
-	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 18 {
-		t.Fatalf("schema version=%d err=%v, want 18", version, err)
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version < 18 {
+		t.Fatalf("schema version=%d err=%v, want at least 18", version, err)
 	}
 	if err := store.checkSchemaVersionGateAt(ctx, 17); err == nil {
 		t.Fatal("a v17 gateway accepted a database carrying the relay-blind dispatch columns")
