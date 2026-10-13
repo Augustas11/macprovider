@@ -246,6 +246,10 @@ type forwardState struct {
 	// X-MacProvider-Internal-Conv key. ConversationCache hits on that
 	// authenticated path are creditable without activating sticky affinity.
 	conversationCacheOnly bool
+	// conversationKeyWithheld is true when forwardWS dispatched without the
+	// request's conversation_key (providerAcceptsConversationKey, #1998). The
+	// provider had no key, so it cannot hold a creditable prefix-cache hit.
+	conversationKeyWithheld bool
 
 	// declaredFunctionNames is the buyer-declared tools[] function.name set.
 	// Used to recover Qwen function-XML that leaked into message.content when
@@ -271,6 +275,13 @@ func newForwardState(startedAt time.Time) *forwardState {
 	}
 	state.phaseTiming.init(startedAt)
 	return state
+}
+
+// cacheCreditEligible reports whether provider-reported cached prompt tokens
+// may be credited: a sticky hit or a cache-only key that reached the provider.
+func (state *forwardState) cacheCreditEligible() bool {
+	return state != nil && !state.conversationKeyWithheld &&
+		(state.stickyResult == "hit" || state.conversationCacheOnly)
 }
 
 func (state *forwardState) markConversationCacheOnly(headers http.Header) {
