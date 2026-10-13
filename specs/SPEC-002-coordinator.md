@@ -1,6 +1,12 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.14 (2026-10-11, pinned slot-queue lane)
+**Version:** 1.6.15 (2026-10-13, audit-log indexes)
+
+**Change log v1.6.15 (2026-10-13, issue #1793):** R-7.10.1 and AC-K.17 keep
+one `audit_log` index, `idx_audit_log_ts_utc`, which the retention prune
+reads. No query reads `idx_audit_log_provider_id` or
+`idx_audit_log_event_type`, so startup drops them once (SPEC-022 R-15.10).
+The table, its columns, and `ts_utc` stay unchanged.
 
 **Change log v1.6.14 (2026-10-11, issue #1911):** the bounded slot queue
 (SPEC-006 §7.8) is FIFO per provider within each of two lanes. Plaintext
@@ -3839,9 +3845,12 @@ CREATE TABLE audit_log (
     payload_json TEXT NOT NULL
 );
 CREATE INDEX idx_audit_log_ts_utc ON audit_log(ts_utc);
-CREATE INDEX idx_audit_log_provider_id ON audit_log(provider_id);
-CREATE INDEX idx_audit_log_event_type ON audit_log(event_type);
 ```
+
+Since v1.6.15 the table has no `provider_id` or `event_type` index: no query
+reads them, and startup drops them where an earlier release created them
+(SPEC-022 R-15.10). An ad hoc forensic query by those columns scans the
+table.
 
 R-7.10.2 `ts_utc` MUST be RFC3339 in UTC. `payload_json` MUST be a
 well-formed JSON object whose schema depends on `event_type`. The table
@@ -4817,9 +4826,9 @@ R-7.9.6 and SPEC-010 v1.5 R-3.1.10 (defensive-bound rationale).
 **AC-K.17 Audit-log table schema + `ts_utc` format.**
 Coordinator startup migrations MUST create the `audit_log` table with
 exactly the §7.10.1 R-7.10.1 column list (`id`, `ts_utc`, `event_type`,
-`provider_id`, `payload_json`) and exactly the three indexes
-(`idx_audit_log_ts_utc`, `idx_audit_log_provider_id`,
-`idx_audit_log_event_type`). Every persisted `ts_utc` value MUST be a
+`provider_id`, `payload_json`) and the index `idx_audit_log_ts_utc`. Since
+v1.6.15, startup drops `idx_audit_log_provider_id` and
+`idx_audit_log_event_type` where they exist. Every persisted `ts_utc` value MUST be a
 valid RFC3339 string in UTC (with `Z` suffix or `+00:00`); non-UTC or
 non-RFC3339 values MUST NOT be written. Traces to SPEC-002 v1.3.5
 R-7.10.1 / R-7.10.2.
