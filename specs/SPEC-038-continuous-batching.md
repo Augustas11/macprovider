@@ -1309,9 +1309,12 @@ from 2 runs an exactness probe through the production scheduler:
    prefill or decode or a prefill chunk runs, so a pool-capacity bounce
    lets decode run. All k therefore decode in the same forwards, split by
    the FR-CB2 decode row bound as served. Each row counts the decode tokens
-   it generated in steps that decoded its whole cohort and no other row. Each row generates max(48, R + 1) tokens,
-   where R = max(16, serve window) is the decode tokens every row MUST reach
-   at full cohort width.
+   it generated in scheduler decode steps that decoded its whole cohort and
+   no other row, i.e. over the forwards the FR-CB2 split makes of the
+   cohort, which is how a grant of k rows decodes when it serves. Each row
+   generates max(48, R + 1) tokens, where R = max(16, serve window), the
+   window counted up to 4096, is the decode tokens every row MUST reach at
+   full cohort width.
 3. Comparison. Every row is compared with the same prompt run alone on the
    same paged engine, under the item 2 rule with an exact-tie tolerance of
    1/1024 logit. Under the row bound, batched and lone rows are
@@ -1334,10 +1337,15 @@ from 2 runs an exactness probe through the production scheduler:
    them, and the full ladder is re-measured after 1 h. A row divergence is
    a correctness result even when the cohort shape was not met: the rows
    differed from their lone runs in the served path at a width at most k.
+   With no width verified yet, a crashed step or an unmet shape is the
+   result even before a serial baseline exists, so it never reads as
+   `serial_baseline_unavailable`, which keeps a prior grant.
 5. Key. The stored key carries the probe version and the route boundary
    (`cb-probe-v2/route<B>`). With the decode window already in the key,
-   they fix the probe prompts and completion length, so stored lone outputs
-   always belong to the current probe. A result measured by an older probe
+   they fix the probe prompts and completion length. Each stored lone
+   output is also bound to the SHA-256 of its prompt and reused only for
+   that prompt at that completion length; the store file is read only when
+   no other user can read or write it. A result measured by an older probe
    re-runs, and its grant carries the Mac through the re-run under the
    item 2 continuation rule, within item 4's shape bound.
 

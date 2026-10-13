@@ -5027,7 +5027,8 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:struct ContinuousBatchSelfCheckCohort",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func selfCheckCohortComplete",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func runContinuousBatchingSelfCheckBatch",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func continuousBatchingSelfCheckTarget"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:func continuousBatchingSelfCheckTarget",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func reusableLoneOutputs"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
@@ -5043,7 +5044,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeBoundCapsTheLadderOnSmallPools",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testUnmetProbeShapeGrantsNoWidthItDidNotVerify",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbePromptsAreCutToExactLengthsKeepingTheTemplateClose",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeVersionBumpRerunsTheCheckAndKeepsAStoredGrantMeanwhile"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeVersionBumpRerunsTheCheckAndKeepsAStoredGrantMeanwhile",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testCrashBeforeAnySerialBaselineRevokesAPriorGrant",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoredProbeLoneOutputsAreReusedOnlyForTheirOwnPrompts",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeUnavailableRerunsWhenTheShapeFits",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoreIgnoresAFileReadableByOtherUsers"
       ],
       "journeys": [],
       "evidence": [],
