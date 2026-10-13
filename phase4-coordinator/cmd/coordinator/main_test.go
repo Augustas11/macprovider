@@ -934,6 +934,41 @@ func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainedRetention(t *testi
 	}
 }
 
+// A run keeps pruning full batches up to PruneMaxBatches, so the 24h window
+// holds at the drain rate; a short batch ends the run.
+func TestSettlementReceiptAuditOutboxDrainerPrunesFullBatchesPerRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainCalled:   make(chan struct{}, 1),
+		pruneCalled:   make(chan struct{}, 8),
+		prunedBatches: []int64{10, 10, 3},
+	}
+	observer := &settlementReceiptAuditOutboxObserverStub{
+		drainOutcomes: make(chan string, 1),
+		rowOps:        make(chan string, 8),
+	}
+	startSettlementReceiptAuditOutboxDrainerWithConfig(ctx, store, settlementReceiptAuditSinkStub{}, 24*time.Hour, observer, nil, zerolog.Nop(), settlementReceiptAuditOutboxDrainerConfig{
+		BatchLimit:          20,
+		CatchupBatches:      1,
+		PruneLimit:          10,
+		PruneMaxBatches:     5,
+		PruneTimeout:        time.Second,
+		DrainInterval:       time.Hour,
+		MaintenanceInterval: time.Hour,
+		DrainTimeout:        time.Second,
+		StatsTimeout:        time.Second,
+	})
+	for i := 0; i < 3; i++ {
+		assertSignal(t, store.pruneCalled, "audit outbox prune batch")
+	}
+	select {
+	case <-store.pruneCalled:
+		t.Fatal("prune continued after a short batch")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestSettlementReceiptAuditOutboxDrainerRunsAfterIdle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1330,6 +1365,7 @@ type settlementReceiptAuditOutboxDrainerStub struct {
 	drainErr              error
 	pruned                int64
 	pruneCutoffs          chan time.Time
+	prunedBatches         []int64
 	drainCalled           chan struct{}
 	pruneCalled           chan struct{}
 	statsCalled           chan struct{}
@@ -1355,9 +1391,17 @@ func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOut
 
 func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOutbox(_ context.Context, cutoff time.Time, _ int) (int64, error) {
 	if s.pruneCutoffs != nil {
-		s.pruneCutoffs <- cutoff
+		select {
+		case s.pruneCutoffs <- cutoff:
+		default:
+		}
 	}
 	s.pruneCalled <- struct{}{}
+	if len(s.prunedBatches) > 0 {
+		pruned := s.prunedBatches[0]
+		s.prunedBatches = s.prunedBatches[1:]
+		return pruned, nil
+	}
 	return s.pruned, nil
 }
 
@@ -3090,7 +3134,10 @@ type routeSnapshotJournalPrunerStub struct {
 }
 
 func (s *routeSnapshotJournalPrunerStub) PruneMirroredRouteSnapshotJournal(_ context.Context, opts billing.RouteSnapshotJournalPruneOptions) (billing.RouteSnapshotJournalPruneResult, error) {
-	s.calls <- opts
+	select {
+	case s.calls <- opts:
+	default:
+	}
 	return billing.RouteSnapshotJournalPruneResult{Deleted: 1}, nil
 }
 

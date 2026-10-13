@@ -223,3 +223,70 @@ func TestEvidenceRetentionAfterRouteJournalPrune(t *testing.T) {
 		t.Fatal("archive file missing")
 	}
 }
+
+// The primary row must also agree on the columns outside the JSON and the
+// digest, and its stored preimage must hash to the digest; a legacy row that
+// stores its preimage is pruned like a new one.
+func TestPruneMirroredRouteSnapshotJournalChecksTypedColumnsAndStoredPreimage(t *testing.T) {
+	ctx := context.Background()
+	store, journalDB := newJournalPruneStore(t)
+	ids := []string{"req-legacy", "req-bad-preimage", "req-binding-differs", "req-capture-differs", "req-late-mirror"}
+	for _, id := range ids {
+		insertJournalSnapshot(t, store, id)
+	}
+	if _, err := store.MirrorPendingRouteSnapshots(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER IF EXISTS trg_srs_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	var rendered string
+	if err := store.db.QueryRow(`SELECT route_snapshot_json FROM settlement_route_snapshots WHERE request_id = 'req-legacy'`).Scan(&rendered); err != nil {
+		t.Fatal(err)
+	}
+	preimage, err := RouteSnapshotCanonicalJSON("", rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		// A legacy row stores its preimage on both sides.
+		`UPDATE settlement_route_snapshots SET route_snapshot_canonical_json = '` + string(preimage) + `' WHERE request_id = 'req-legacy'`,
+		`UPDATE settlement_route_snapshots SET route_snapshot_canonical_json = '{"tampered":true}' WHERE request_id = 'req-bad-preimage'`,
+		`UPDATE settlement_route_snapshots SET relay_blind_provider_binding_digest = '` + strings.Repeat("A", 43) + `' WHERE request_id = 'req-binding-differs'`,
+		`UPDATE settlement_route_snapshots SET compute_integrity_sampling_profile_covered = 1 WHERE request_id = 'req-capture-differs'`,
+	} {
+		if _, err := store.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ids {
+		backdateJournal(t, journalDB, id, 2*time.Hour)
+	}
+	// Created before the cutoff, mirrored inside the grace period: skipped
+	// now, pruned once its grace has passed.
+	if _, err := journalDB.Exec(`UPDATE settlement_route_snapshot_journal SET mirrored_at_utc = ? WHERE request_id = 'req-late-mirror'`,
+		time.Now().UTC().Add(-10*time.Minute).Format(routeSnapshotJournalTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.PruneMirroredRouteSnapshotJournal(ctx, journalPruneOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Deleted != 1 || result.Kept != 3 {
+		t.Fatalf("result=%+v want deleted=1 kept=3", result)
+	}
+	for id, want := range map[string]int64{"req-legacy": 0, "req-bad-preimage": 1, "req-binding-differs": 1, "req-capture-differs": 1, "req-late-mirror": 1} {
+		if got := journalRows(t, journalDB, id); got != want {
+			t.Fatalf("%s journal rows=%d want %d", id, got, want)
+		}
+	}
+	later := time.Now().Add(time.Hour)
+	store.now = func() time.Time { return later }
+	result, err = store.PruneMirroredRouteSnapshotJournal(ctx, journalPruneOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Deleted != 1 || journalRows(t, journalDB, "req-late-mirror") != 0 {
+		t.Fatalf("late mirror prune=%+v", result)
+	}
+}

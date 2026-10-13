@@ -44,6 +44,12 @@ type routeSnapshotJournalPruneRow struct {
 	rendered   string
 	createdAt  string
 	mirroredAt sql.NullString
+	// Columns outside route_snapshot_json and the digest; the primary row
+	// must hold the same values.
+	captureRequired int64
+	samplingCovered int64
+	hardwareDigest  sql.NullString
+	bindingDigest   sql.NullString
 }
 
 // RouteSnapshotCanonicalJSON returns the digest preimage of a stored route
@@ -168,7 +174,9 @@ func (s *Store) PruneMirroredRouteSnapshotJournal(ctx context.Context, opts Rout
 func loadRouteSnapshotJournalPruneBatch(ctx context.Context, db *sql.DB, afterID int64, limit int) ([]routeSnapshotJournalPruneRow, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT id, account_scope, request_id, attempt_n, provider_id,
-       route_snapshot_digest, route_snapshot_json, created_at_utc, mirrored_at_utc
+       route_snapshot_digest, route_snapshot_json, created_at_utc, mirrored_at_utc,
+       compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
+       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest
   FROM settlement_route_snapshot_journal
  WHERE id > ?
  ORDER BY id
@@ -181,7 +189,8 @@ SELECT id, account_scope, request_id, attempt_n, provider_id,
 	for rows.Next() {
 		var row routeSnapshotJournalPruneRow
 		if err := rows.Scan(&row.id, &row.identity.AccountScope, &row.identity.RequestID, &row.identity.AttemptN,
-			&row.identity.ProviderID, &row.digest, &row.rendered, &row.createdAt, &row.mirroredAt); err != nil {
+			&row.identity.ProviderID, &row.digest, &row.rendered, &row.createdAt, &row.mirroredAt,
+			&row.captureRequired, &row.samplingCovered, &row.hardwareDigest, &row.bindingDigest); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -190,23 +199,29 @@ SELECT id, account_scope, request_id, attempt_n, provider_id,
 }
 
 // routeSnapshotJournalRowMatchesPrimary reports whether the primary row of
-// the journal row's attempt holds the same digest and JSON and its canonical
-// preimage hashes to that digest.
+// the journal row's attempt holds the same digest, JSON, and columns outside
+// the JSON, and its canonical preimage hashes to that digest.
 func (s *Store) routeSnapshotJournalRowMatchesPrimary(ctx context.Context, row routeSnapshotJournalPruneRow) (bool, error) {
 	var digest, rendered, canonical string
+	var captureRequired, samplingCovered int64
+	var hardwareDigest, bindingDigest sql.NullString
 	err := s.reader().QueryRowContext(ctx, `
-SELECT route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json
+SELECT route_snapshot_digest, route_snapshot_json, route_snapshot_canonical_json,
+       compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
+       compute_integrity_hardware_runtime_class_digest, relay_blind_provider_binding_digest
   FROM settlement_route_snapshots
  WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
 		row.identity.AccountScope, row.identity.RequestID, row.identity.AttemptN, row.identity.ProviderID,
-	).Scan(&digest, &rendered, &canonical)
+	).Scan(&digest, &rendered, &canonical, &captureRequired, &samplingCovered, &hardwareDigest, &bindingDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if digest != row.digest || rendered != row.rendered {
+	if digest != row.digest || rendered != row.rendered ||
+		captureRequired != row.captureRequired || samplingCovered != row.samplingCovered ||
+		hardwareDigest != row.hardwareDigest || bindingDigest != row.bindingDigest {
 		return false, nil
 	}
 	preimage, err := RouteSnapshotCanonicalJSON(canonical, rendered)

@@ -301,7 +301,9 @@ def export_cell(column: str, value, redactor: Redactor):
 
 def _jcs(value) -> str:
     """RFC 8785 canonical JSON as the coordinator's internal/jcs writes it:
-    UTF-16 key order, NFC-normalized string values, integers verbatim."""
+    UTF-16 key order, NFC-normalized string values, integers verbatim.
+    Route snapshots carry no floats, so a float raises and the preimage stays
+    empty (the validator then reports the digest gap)."""
     if value is None or isinstance(value, bool):
         return json.dumps(value)
     if isinstance(value, int):
@@ -322,7 +324,7 @@ def route_snapshot_canonical(record: dict) -> str:
     when it hashes to the stored digest (otherwise the validator sees the gap)."""
     try:
         text = _jcs(json.loads(record["route_snapshot_json"]))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return ""
     if hashlib.sha256(text.encode("utf-8")).hexdigest() != record.get("route_snapshot_digest"):
         return ""

@@ -101,6 +101,10 @@ func ValidCompatibilitySetVersion(version string) bool {
 // Operators may not set audit_log_retention_days below this value.
 const minAuditLogRetentionDays = 90
 
+// maxRouteSnapshotJournalMirroredGraceMinutes bounds the SPEC-022 R-15.10
+// journal grace to a week, far below any duration overflow.
+const maxRouteSnapshotJournalMirroredGraceMinutes = 7 * 24 * 60
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Coordinator                  CoordinatorConfig            `yaml:"coordinator"`
@@ -3260,11 +3264,11 @@ func (c Config) Validate() error {
 	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
 		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
 	}
-	if c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours < 1 {
-		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be >= 1")
+	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
 	}
-	if c.Storage.RouteSnapshotJournalMirroredGraceMinutes < 1 {
-		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be >= 1")
+	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
+		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")

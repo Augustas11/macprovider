@@ -291,7 +291,9 @@ These run without the nightly job and need no operator step:
 - Drained, unpoisoned audit-outbox rows leave the money database
   `storage.settlement_receipt_audit_outbox_drained_retention_hours` (default
   24) after delivery. The audit database keeps its copy for
-  `storage.audit_log_retention_days`.
+  `storage.audit_log_retention_days`. A lab journey whose validator reads
+  outbox rows (the privacy-class journey) must extract the money database
+  within that window.
 - Route-snapshot journal rows leave
   `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60) after
   mirroring, once the primary row is verified to hold the same digest and

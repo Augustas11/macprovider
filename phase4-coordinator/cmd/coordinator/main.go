@@ -2058,6 +2058,9 @@ type settlementReceiptAuditOutboxDrainerConfig struct {
 	BatchLimit          int
 	CatchupBatches      int
 	PruneLimit          int
+	PruneMaxBatches     int
+	PruneTimeout        time.Duration
+	PruneBatchPause     time.Duration
 	DrainInterval       time.Duration
 	MaintenanceInterval time.Duration
 	DrainTimeout        time.Duration
@@ -2108,9 +2111,11 @@ func defaultRouteSnapshotJournalMirrorConfig() routeSnapshotJournalMirrorConfig 
 
 func defaultRouteSnapshotJournalPrunerConfig() routeSnapshotJournalPrunerConfig {
 	return routeSnapshotJournalPrunerConfig{
-		Interval:    time.Minute,
-		Timeout:     2 * time.Minute,
-		Batch:       200,
+		Interval: time.Minute,
+		Timeout:  2 * time.Minute,
+		// Small batches keep each hold of the journal's single connection
+		// short; 100 batches still clear several times the arrival rate.
+		Batch:       100,
 		BatchPause:  50 * time.Millisecond,
 		MaxBatches:  100,
 		MinIdle:     moneySQLiteMaintenanceMinIdle,
@@ -2175,9 +2180,14 @@ func routeSnapshotJournalWALCheckpointerConfig(dbPath string) moneySQLiteWALChec
 
 func defaultSettlementReceiptAuditOutboxDrainerConfig() settlementReceiptAuditOutboxDrainerConfig {
 	return settlementReceiptAuditOutboxDrainerConfig{
-		BatchLimit:          20,
-		CatchupBatches:      1,
-		PruneLimit:          500,
+		BatchLimit:     20,
+		CatchupBatches: 1,
+		PruneLimit:     500,
+		// 20 batches of 500 every 30s is about 330 rows/s, well above the
+		// receipt-event arrival rate the drain is paced for.
+		PruneMaxBatches:     20,
+		PruneTimeout:        2 * time.Second,
+		PruneBatchPause:     10 * time.Millisecond,
 		DrainInterval:       250 * time.Millisecond,
 		MaintenanceInterval: 30 * time.Second,
 		DrainTimeout:        200 * time.Millisecond,
@@ -2534,7 +2544,7 @@ func startRouteSnapshotJournalPrunerWithConfig(ctx context.Context, pruner route
 			logger.Warn().Err(err).Int64("deleted_rows", result.Deleted).Msg("route snapshot journal prune failed")
 			return
 		}
-		if result.Deleted > 0 || result.Kept > 0 {
+		if result.Deleted > 0 {
 			logger.Info().Int64("deleted_rows", result.Deleted).Int64("kept_rows", result.Kept).Int64("scanned_rows", result.Scanned).
 				Msg("route snapshot journal pruned mirrored rows")
 		}
@@ -2657,6 +2667,14 @@ func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, sto
 	// 60 rows/s arrival rate at the 30 request/s acceptance target while each
 	// acknowledgement remains a short independent SQLite write.
 	_ = idle
+	pruneMaxBatches := cfg.PruneMaxBatches
+	if pruneMaxBatches <= 0 {
+		pruneMaxBatches = 1
+	}
+	pruneTimeout := cfg.PruneTimeout
+	if pruneTimeout <= 0 {
+		pruneTimeout = cfg.DrainTimeout
+	}
 	var lastStatsSuccess time.Time
 	observeStats := func(runCtx context.Context) {
 		statsCtx, cancel := context.WithTimeout(runCtx, cfg.StatsTimeout)
@@ -2711,18 +2729,38 @@ func startSettlementReceiptAuditOutboxDrainerWithConfig(ctx context.Context, sto
 	finishRun := func(runCtx context.Context) {
 		// SPEC-022 R-15.10: a drained row is already in the audit
 		// database; poisoned and undelivered rows are never pruned.
+		// Each run deletes up to PruneMaxBatches short batches, so pruning
+		// keeps up with the drain rate at the 24h window.
 		if drainedRetention > 0 {
 			cutoff := time.Now().UTC().Add(-drainedRetention)
-			pruneCtx, cancel := context.WithTimeout(runCtx, cfg.DrainTimeout)
-			defer cancel()
-			pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, cfg.PruneLimit)
-			if err != nil {
-				logger.Warn().Err(err).Msg("settlement receipt audit outbox prune failed")
-			} else if pruned > 0 {
-				logger.Info().Int64("pruned_rows", pruned).Msg("settlement receipt audit outbox pruned rows")
+			var total int64
+			for batch := 0; batch < pruneMaxBatches; batch++ {
+				if batch > 0 {
+					select {
+					case <-runCtx.Done():
+					case <-time.After(cfg.PruneBatchPause):
+					}
+				}
+				if runCtx.Err() != nil {
+					break
+				}
+				pruneCtx, cancel := context.WithTimeout(runCtx, pruneTimeout)
+				pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, cfg.PruneLimit)
+				cancel()
+				total += pruned
+				if err != nil {
+					logger.Warn().Err(err).Msg("settlement receipt audit outbox prune failed")
+					break
+				}
+				if pruned < int64(cfg.PruneLimit) {
+					break
+				}
+			}
+			if total > 0 {
+				logger.Info().Int64("pruned_rows", total).Msg("settlement receipt audit outbox pruned rows")
 			}
 			if observer != nil {
-				observer.AddSettlementReceiptAuditOutboxRows("pruned", pruned)
+				observer.AddSettlementReceiptAuditOutboxRows("pruned", total)
 			}
 		}
 		observeStats(runCtx)

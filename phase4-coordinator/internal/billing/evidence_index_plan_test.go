@@ -58,7 +58,8 @@ func TestMigrateDropsRedundantEvidenceIndexes(t *testing.T) {
 
 // Every query shape that read a dropped index still searches an index: the
 // table's unique key, the SPEC-022 payable indexes, or idx_sao_request_range.
-// Only the admin verdict counters scan, as they did before (a full GROUP BY).
+// The admin verdict counters (not listed) scan every snapshot either way and
+// now sort by digest for their GROUP BY instead of reading idx_srs_digest.
 func TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes(t *testing.T) {
 	store, journalDB := newJournalPruneStore(t)
 	dropped := append(append([]string{}, redundantEvidenceIndexes...), droppedJournalIndexes...)
@@ -110,6 +111,9 @@ SELECT COUNT(*) FROM settlement_attempt_outputs
 		for _, step := range strings.Split(plan, " | ") {
 			if strings.HasPrefix(step, "SCAN ") && !strings.Contains(step, "CONSTANT ROW") {
 				t.Errorf("%s: full scan %q (plan %q)", q.name, step, plan)
+			}
+			if strings.Contains(step, "AUTOMATIC") {
+				t.Errorf("%s: automatic index %q (plan %q)", q.name, step, plan)
 			}
 		}
 		for _, name := range dropped {

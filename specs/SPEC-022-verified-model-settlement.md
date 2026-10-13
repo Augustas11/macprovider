@@ -23,7 +23,7 @@ coordinator databases several times over. R-15.10:
   preimage recomputes byte for byte from `route_snapshot_json`;
 - stores `{}` in `settlement_receipt_verdicts.verifier_diagnostics_json`,
   whose members are all typed columns;
-- drops ten indexes that no query needs.
+- drops ten indexes that no request-path query needs.
 
 No settlement, payability, or archive rule changes. Retention (R-15.2,
 R-15.4) checks the outbox and journal rows that still exist. Old rows stay
@@ -2156,14 +2156,16 @@ holds:
    (default 24, minimum 1) have passed since its `drained_at_utc`. This key
    is separate from `storage.audit_log_retention_days`, which governs the
    audit database. A poisoned or undelivered row MUST NOT be deleted by this
-   rule.
+   rule. Each prune run deletes bounded batches until a batch comes back
+   short, so pruning keeps pace with delivery.
 2. Mirrored route-snapshot journal rows. A journal row MAY be deleted once
    its `mirrored_at_utc` is at least
    `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60,
    minimum 1) old, and only while the primary `settlement_route_snapshots`
-   row of the same attempt has the same `route_snapshot_digest` and
-   `route_snapshot_json`, and that digest is the SHA-256 of the primary
-   row's canonical preimage (item 3). An unmirrored row, a row inside the
+   row of the same attempt has the same `route_snapshot_digest`,
+   `route_snapshot_json`, compute-integrity capture columns, and
+   `relay_blind_provider_binding_digest`, and that digest is the SHA-256 of
+   the primary row's canonical preimage (item 3). An unmirrored row, a row inside the
    grace period, and a row whose primary copy is missing or differs MUST NOT
    be deleted. The pruner walks the journal by id in bounded batches. Each
    batch deletes in one short journal transaction, with a pause between
@@ -2185,8 +2187,9 @@ holds:
    (`DROP INDEX IF EXISTS`). Each of `idx_srs_request`, `idx_srv_request`,
    and `idx_lrc_request` is a prefix of its table's unique key, which serves
    the same lookups. `idx_srs_digest` and `idx_sao_output_hash` serve no
-   query: every query on those columns also constrains the request, which
-   another index serves. In the route-snapshot journal,
+   request-path query: every such query on those columns also constrains
+   the request, which another index serves. The admin verdict counters,
+   which scan every snapshot, sort by digest instead of reading the index. In the route-snapshot journal,
    `idx_srsj_request` is a prefix of the unique key, and no query reads
    `idx_srsj_digest` or `idx_srsj_provider`. In the audit database, no query
    reads `idx_audit_log_event_type` or `idx_audit_log_provider_id`
