@@ -12211,14 +12211,20 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/EngineProfile.swift:EngineProfile",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat"
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
+        "phase4-coordinator/internal/ws/messages.go:parseEngineProfile",
+        "phase4-coordinator/internal/pool/provider.go:SetEngineProfile",
+        "phase4-coordinator/internal/ws/server.go:handleHeartbeat"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testEngineFamilyPrefersNativeMTPThenContinuousBatching",
         "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testChipClassIsClosed",
         "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testRAMClassAndBounds",
         "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testWireObjectIsClosedAndVersioned",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatDisabledModeOmitsBothFields"
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatDisabledModeOmitsBothFields",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestParseHeartbeatAcceptsEngineProfile",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestParseHeartbeatDropsInvalidEngineProfileWithoutRejecting",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestRegistrySetEngineProfile"
       ],
       "journeys": [],
       "evidence": [],
@@ -12233,8 +12239,20 @@
       "requirement_id": "SPEC-002-R005",
       "spec_id": "SPEC-002",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/routing/perf.go:Observe",
+        "phase4-coordinator/internal/routing/perf.go:DecodeWithPrior",
+        "phase4-coordinator/internal/routing/perf.go:evictLocked",
+        "phase4-coordinator/internal/buyer/phase_routing.go:observeServedPerformance",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreClampsAndThresholds",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfSelfReportIsCappedPrior",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEvictsStaleThenOldest",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12248,8 +12266,24 @@
       "requirement_id": "SPEC-002-R006",
       "spec_id": "SPEC-002",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/routing/phase.go:ClassifyPhase",
+        "phase4-coordinator/internal/routing/phase.go:PhaseOrder",
+        "phase4-coordinator/internal/routing/phase.go:scorePhase",
+        "phase4-coordinator/internal/buyer/phase_routing.go:applyPhaseOrder",
+        "phase4-coordinator/internal/buyer/phase_routing.go:requestMaxOutputTokens",
+        "phase4-coordinator/internal/buyer/server.go:selectProviderExcluding"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/phase_test.go:TestClassifyPhase",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderPrefersMeasuredFitPerPhase",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderFallsBackWithoutEvidence",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderExploresUnmeasuredProviders",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionPrefersMeasuredFastProvider",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionFallsBackWithoutEvidence",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRequestMaxOutputTokens"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12263,8 +12297,19 @@
       "requirement_id": "SPEC-002-R007",
       "spec_id": "SPEC-002",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/routing/phase.go:RouteTraceHeader",
+        "phase4-coordinator/internal/routing/phase.go:LatencyClass",
+        "phase4-coordinator/internal/routing/phase.go:EngineClass",
+        "phase4-coordinator/internal/buyer/phase_routing.go:noteRouteTrace",
+        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
+        "phase4-coordinator/internal/stats/metrics/metrics.go:IncRouteSelection"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/phase_test.go:TestRouteTraceHeaderGrammar",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRouteTracePinnedAndCounted",
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestRouteSelectionMetrics"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

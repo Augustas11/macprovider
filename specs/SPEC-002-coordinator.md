@@ -5306,7 +5306,9 @@ rather than replacing it with a protocol-shape error.
 The coordinator MUST keep an in-memory performance record per
 (`provider_id`, requested model) built only from requests it served and timed
 itself. An observation is recorded once per provider attempt, when the attempt
-completed with a 2xx status, names its provider, carries a provider-reported
+was streamed (a non-streamed response's first byte follows the whole
+generation, so its TTFT is not a prefill time), completed with a 2xx status,
+names its provider, carries a provider-reported
 `completion_tokens` (not the coordinator estimate), and has a coordinator
 TTFT measured for that same attempt (SPEC-006 phase timing: provider dispatch
 done to first provider byte). Relay-blind and privacy-class attempts MUST NOT

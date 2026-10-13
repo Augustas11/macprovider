@@ -244,6 +244,10 @@ type Server struct {
 	defaultObjective  string
 	tiebreakRandomize bool
 	tiebreakEpsilon   float64
+	// perf is the SPEC-002-R005 measured-performance store; routeMetrics
+	// counts SPEC-002-R007 selections (nil = not wired).
+	perf         *routing.PerfStore
+	routeMetrics RouteSelectionMetrics
 	// routingMu guards defaultObjective, modelClasses, and
 	// minProviderThroughput, which are hot-swapped on SIGHUP when routing
 	// config changes (issue #266 T1 + min_provider_throughput_tps).
@@ -873,6 +877,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		failoverEnabled:          true,
 		failoverTimeout:          5 * time.Second,
 		defaultObjective:         "default",
+		perf:                     routing.NewPerfStore(),
 		retryPerAttemptTimeout:   60 * time.Second,
 		stickyTTL:                30 * time.Minute,
 		stickyMaxEntries:         10000,
@@ -2776,6 +2781,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.routingDone = s.now()
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
+	// SPEC-002-R007: trace the first selection for operators and the buyer.
+	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.estimatedTokens))
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
@@ -7967,10 +7974,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// logRoutingDecisionFullWithCache) finds the same value the
 	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
 	balancedCache := s.sortCandidates(candidates, objective)
+	// SPEC-002-R006: reorder by request phase; only the order changes.
+	phaseDecision := s.applyPhaseOrder(requestID, req, estimatedTokens, candidates, dailyKey)
 	candidates, stickyResult, stickyMissReason := s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
 	seed, draw, reason := int64(0), float64(0), "sticky_hit"
 	if stickyResult != "hit" {
-		candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		if phaseDecision.basis == routing.BasisFallback {
+			candidates, seed, draw, reason = s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
+		} else {
+			reason = "phase_" + string(phaseDecision.basis)
+		}
 	}
 	// Thread real pre-filter pool size + per-reason rejection counts
 	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
@@ -7986,6 +7999,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		provider, routeErr := s.selectReservedProvider(candidate, req.Model, requestID, estimatedTokens, state)
 		if routeErr == nil {
 			if state != nil {
+				state.routeDecision = &phaseDecision
 				checker.rememberSelectedProvider(provider)
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
