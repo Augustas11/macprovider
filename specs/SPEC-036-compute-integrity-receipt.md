@@ -102,7 +102,9 @@ Out of scope:
   digest/replay wire framing — it owns its settlement-bearing digest preimage,
   replay binding, Tier-2 carrier, and result variants (FR-6), reusing only the
   encrypted-carrier structural pattern by substituting the profile discriminator.
-- Covert canaries or buyer-indistinguishable probes.
+- Covert canaries or buyer-indistinguishable probes under FR-1 through FR-18.
+  §5A (FR-19 through FR-25) adds the buyer-indistinguishable verification path
+  separately; FR-1 through FR-18 remain the overt path.
 - Hardware attestation, binary attestation, or cryptographic proof that a
   malicious provider honestly ran a model.
 - Buyer-issued quarantine-grade canaries.
@@ -1967,7 +1969,10 @@ Manual review MUST define:
 
 ### FR-17 Cost, capacity, and funding
 
-Compute-integrity probes are non-billable.
+Compute-integrity probes are non-billable. FR-17 governs the overt FR-6
+profile, trusted-reference and consensus work. It does not govern §5A: an
+FR-20 verification request is an ordinary paid SPEC-022 attempt with no buyer
+debit (SPEC-022 R-16.9), and an FR-21 scoring job is unpaid.
 
 All SPEC-036 probe, trusted-reference, and consensus-telemetry work MUST NOT create
 buyer debit, provider credit, provider earnings, payout readiness, or any uncapped
@@ -2138,9 +2143,10 @@ Money:
 Rate bounds:
 
 - Base cadence per verification key: one request per
-  `compute_integrity.scoring.base_interval` (default 6 h) with ±50 % uniform
-  jitter. A key in `suspect` (FR-23) is probed every
-  `escalation_interval` (default 10 min) with the same jitter.
+  `compute_integrity.scoring.base_interval_seconds` (default 6 h) with ±50 %
+  uniform jitter, including the first request after a key appears or the
+  coordinator starts. A key in `suspect` or `recovering` (FR-23) is probed every
+  `escalation_interval_seconds` (default 10 min) with the same jitter.
 - At most `max_in_flight` (default 4) verification requests are outstanding
   coordinator-wide, and at most one per verification key.
 - At most `max_per_hour` (default 240) verification requests start per hour
@@ -2166,8 +2172,9 @@ session is `inconclusive:dispatch`.
 
 ### FR-21 Teacher-forced scoring job (SPEC-036-R021)
 
-Scorer selection: for each scored measurement the coordinator picks a scorer
-uniformly at random among providers that
+Scorer selection: for each scored measurement the coordinator draws distinct
+operators uniformly at random, then one provider of each, among providers
+that
 
 1. are scorer candidates (FR-19),
 2. serve the same `model_id` and report the same manifest hash as the verified
@@ -2346,8 +2353,9 @@ state for the model.
   up to 8 recent measurements that two scorers both scored in band with
   `mean_logprob` within 0.25 of each other. After every 25th scoring job the
   coordinator also sends one of these known sequences to a random eligible
-  scorer that did not score it originally. The cadence counts every scoring
-  job sent, answered or not. An answer more than 0.5 below the recorded
+  scorer that is independent of it: not the provider that produced the
+  output, not an original scorer, and of none of their operators. The cadence
+  counts every scoring job successfully sent, answered or not. An answer more than 0.5 below the recorded
   `mean_logprob`, or with `top1_rate` more than 0.1 below it, counts as a split
   answer for that scorer.
 - A scorer that does not answer within the deadline counts as
@@ -2357,9 +2365,12 @@ state for the model.
 
 Consequences of `failed`:
 
-- The provider is excluded from routing for that model: every buyer path that
-  checks routing eligibility (ordinary, pinned, relay-blind, slot queue)
-  skips it. Other models the provider may later serve are unaffected.
+- The provider is excluded from routing for that model: every buyer path
+  (ordinary, pinned, slot queue, relay-blind and privacy-class binding, and
+  their capability counts) skips it. Other models the provider may later serve
+  are unaffected. The provider stays connected, so it can recover; the
+  pool-check `buyer_serving` session-liveness signal is unchanged, and the
+  provider learns its state from the status surface below.
 - Its unsettled earnings for that model inside the affected window are held
   under SPEC-022 R-16. Nothing is burned. A hold has no expiry and is released
   only by FR-23 recovery (recovery hold) or by an operator (any hold).
@@ -2401,7 +2412,12 @@ Telemetry:
 - Gauge `compute_integrity_held_holds`.
 
 Labels are closed sets. Provider ids, model ids and operator keys never
-appear as metric labels. Logs MAY name provider and model ids on state
+appear as metric labels.
+
+Memory: tolerance windows and known sequences of a (model, manifest) unseen
+for 7 days are dropped, and so are in-memory states of providers absent for
+7 days in `unverified` or `passing` (their durable rows stay). `suspect`,
+`failed` and `recovering` keys are never pruned. Logs MAY name provider and model ids on state
 transitions; they MUST NOT contain prompts, outputs, or scorer token data.
 
 ## 6. Migration

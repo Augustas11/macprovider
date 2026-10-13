@@ -2315,13 +2315,19 @@ generation for each credit the hold covers, in the writer's transaction, and
 a change of `settled` on a credit a held hold covers bumps its bucket, so
 cached earnings never serve a figure that disagrees with the view.
 
+R-16.7. The provider sees its holds (window, kind, status, reason, held
+provider credits) on the SPEC-036 FR-25 provider status surface.
+
 R-16.8. The transaction that writes the first hold raises the billing
 compatibility floor to contract 5. A coordinator that predates R-16 would pay
 held credits, so it refuses the database from then on; a rollback stays
 possible until the first hold exists.
 
-R-16.7. The provider sees its holds (window, kind, status, reason, held
-provider credits) on the SPEC-036 FR-25 provider status surface.
+R-16.9. A SPEC-036 FR-20 verification request is an ordinary attempt under
+this specification: same route snapshot, receipt, verdict and R-7 gate, and
+an ordinary `ledger_request_credits` row for the provider. It debits no buyer,
+because buyer debit happens only in the gateway and the request never passes
+through it; the network funds it.
 
 ## Acceptance criteria
 

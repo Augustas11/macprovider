@@ -10,6 +10,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 )
 
 // SamplingClass splits tolerance windows by how the verified output was
@@ -140,11 +141,40 @@ type toleranceEntry struct {
 type Tolerance struct {
 	mu      sync.Mutex
 	windows map[ToleranceKey][]toleranceEntry
+	seen    map[ToleranceKey]time.Time
 }
 
 // NewTolerance returns an empty tracker; every key starts cold.
 func NewTolerance() *Tolerance {
-	return &Tolerance{windows: map[ToleranceKey][]toleranceEntry{}}
+	return &Tolerance{windows: map[ToleranceKey][]toleranceEntry{}, seen: map[ToleranceKey]time.Time{}}
+}
+
+// Touch marks the keys of a (model, manifest) as in use at now.
+func (t *Tolerance) Touch(modelID, manifest string, now time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, class := range []SamplingClass{SamplingGreedy, SamplingSampled} {
+		t.seen[ToleranceKey{ModelID: modelID, ManifestSHA256: manifest, Class: class}] = now
+	}
+}
+
+// Prune drops windows of keys not in use since cutoff (retired models and
+// manifests); a key in use again starts cold.
+func (t *Tolerance) Prune(cutoff time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key, at := range t.seen {
+		if at.Before(cutoff) {
+			delete(t.windows, key)
+			delete(t.seen, key)
+		}
+	}
 }
 
 // Accept records an in-band measurement from a verified provider of the
@@ -175,6 +205,9 @@ func (t *Tolerance) Accept(key ToleranceKey, operator string, m Measurement) {
 	}
 	window = append(window, toleranceEntry{operator: operator, top1: m.Top1Rate(), meanLogprob: m.MeanLogprob()})
 	t.windows[key] = window
+	if _, ok := t.seen[key]; !ok {
+		t.seen[key] = time.Now()
+	}
 }
 
 // Band returns the current band for key: the learned band once warm, the

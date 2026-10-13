@@ -5,7 +5,9 @@ package computeintegrity
 import (
 	"math"
 	"math/rand"
+	"sort"
 	"sync"
+	"time"
 )
 
 // ScorerCandidate is the subset of a connected provider session scorer
@@ -20,10 +22,12 @@ type ScorerCandidate struct {
 	Ready          bool // connected and ready or busy
 }
 
-// SelectScorers picks up to n scorers for a verified provider uniformly at
-// random, each of a different operator from the verified provider and from
-// each other (FR-21, FR-23). eligible filters out keys in suspect, failed or
-// recovering and scorer-excluded providers.
+// SelectScorers picks up to n scorers for a verified provider: distinct
+// operators uniformly at random, then one eligible provider of each, so an
+// operator with many Macs is not chosen more often (FR-21, FR-24). Every
+// scorer has a different operator from the verified provider and from each
+// other. eligible filters out keys in suspect, failed or recovering and
+// scorer-excluded providers.
 func SelectScorers(
 	rng *rand.Rand,
 	verified ScorerCandidate,
@@ -45,18 +49,24 @@ func SelectScorers(
 		}
 		pool = append(pool, c)
 	}
-	rng.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
-	out := make([]ScorerCandidate, 0, n)
-	usedOps := map[string]struct{}{}
+	byOperator := map[string][]ScorerCandidate{}
+	var operators []string
 	for _, c := range pool {
+		if _, seen := byOperator[c.OperatorKey]; !seen {
+			operators = append(operators, c.OperatorKey)
+		}
+		byOperator[c.OperatorKey] = append(byOperator[c.OperatorKey], c)
+	}
+	// Deterministic order before the shuffle so a seeded rng is reproducible.
+	sort.Strings(operators)
+	rng.Shuffle(len(operators), func(i, j int) { operators[i], operators[j] = operators[j], operators[i] })
+	out := make([]ScorerCandidate, 0, n)
+	for _, op := range operators {
 		if len(out) >= n {
 			break
 		}
-		if _, used := usedOps[c.OperatorKey]; used {
-			continue
-		}
-		usedOps[c.OperatorKey] = struct{}{}
-		out = append(out, c)
+		members := byOperator[op]
+		out = append(out, members[rng.Intn(len(members))])
 	}
 	return out
 }
@@ -172,29 +182,67 @@ func (t *ScorerTracker) Clear(providerID string) {
 }
 
 // KnownSequence is an FR-24 consensus measurement kept in memory only.
+// SourceProvider and SourceOperator name the verified provider that produced
+// the output; Scorers and ScorerOperators the two scorers that agreed on it.
 type KnownSequence struct {
-	Body          []byte
-	OutputText    string
-	ReasoningText string
-	MeanLogprob   float64
-	Top1Rate      float64
-	Scorers       []string
+	Body            []byte
+	OutputText      string
+	ReasoningText   string
+	MeanLogprob     float64
+	Top1Rate        float64
+	SourceProvider  string
+	SourceOperator  string
+	Scorers         []string
+	ScorerOperators []string
+}
+
+// independentOf reports whether a scorer may check this sequence: it is
+// neither the source nor an original scorer, and shares no operator with
+// any of them.
+func (seq KnownSequence) independentOf(c ScorerCandidate) bool {
+	if c.OperatorKey == "" || c.ProviderID == seq.SourceProvider || c.OperatorKey == seq.SourceOperator {
+		return false
+	}
+	for _, s := range seq.Scorers {
+		if s == c.ProviderID {
+			return false
+		}
+	}
+	for _, op := range seq.ScorerOperators {
+		if op == c.OperatorKey {
+			return false
+		}
+	}
+	return true
 }
 
 // KnownSequences is the FR-24 in-memory cache. Safe for concurrent use.
 type KnownSequences struct {
 	mu   sync.Mutex
 	keys map[ToleranceKey][]KnownSequence
+	seen map[ToleranceKey]time.Time
 }
 
 // NewKnownSequences returns an empty cache.
 func NewKnownSequences() *KnownSequences {
-	return &KnownSequences{keys: map[ToleranceKey][]KnownSequence{}}
+	return &KnownSequences{keys: map[ToleranceKey][]KnownSequence{}, seen: map[ToleranceKey]time.Time{}}
+}
+
+// Prune drops cached sequences of keys not offered since cutoff.
+func (k *KnownSequences) Prune(cutoff time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key, at := range k.seen {
+		if at.Before(cutoff) {
+			delete(k.keys, key)
+			delete(k.seen, key)
+		}
+	}
 }
 
 // Offer adds a measurement two scorers both scored in band with mean
 // log-probabilities within 0.25 of each other.
-func (k *KnownSequences) Offer(key ToleranceKey, seq KnownSequence, a, b Measurement) bool {
+func (k *KnownSequences) Offer(key ToleranceKey, seq KnownSequence, a, b Measurement, now time.Time) bool {
 	if !a.Valid() || !b.Valid() || math.Abs(a.MeanLogprob()-b.MeanLogprob()) > knownSequenceLogprobGap {
 		return false
 	}
@@ -202,6 +250,7 @@ func (k *KnownSequences) Offer(key ToleranceKey, seq KnownSequence, a, b Measure
 	seq.Top1Rate = (a.Top1Rate() + b.Top1Rate()) / 2
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	k.seen[key] = now
 	list := append(k.keys[key], seq)
 	if len(list) > knownSequencesPerKey {
 		list = list[len(list)-knownSequencesPerKey:]
@@ -210,20 +259,15 @@ func (k *KnownSequences) Offer(key ToleranceKey, seq KnownSequence, a, b Measure
 	return true
 }
 
-// Pick returns a known sequence for key that scorer did not score originally.
-func (k *KnownSequences) Pick(rng *rand.Rand, key ToleranceKey, scorer string) (KnownSequence, bool) {
+// Pick returns a known sequence for key that scorer may check
+// independently: not its source, not an original scorer, and no shared
+// operator with either.
+func (k *KnownSequences) Pick(rng *rand.Rand, key ToleranceKey, scorer ScorerCandidate) (KnownSequence, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var options []KnownSequence
 	for _, seq := range k.keys[key] {
-		scored := false
-		for _, s := range seq.Scorers {
-			if s == scorer {
-				scored = true
-				break
-			}
-		}
-		if !scored {
+		if seq.independentOf(scorer) {
 			options = append(options, seq)
 		}
 	}

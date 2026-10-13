@@ -1,4 +1,4 @@
-# Audit brief: cross-provider compute-integrity scoring (#1644), round R2
+# Audit brief: cross-provider compute-integrity scoring (#1644), round R3 (final)
 
 Method constraint: this is a first-party software-correctness and design review.
 Do NOT author or construct malformed payloads or exploit code. Evaluate by
@@ -41,6 +41,8 @@ Output format: a numbered list of findings, each with severity, file:line,
 the problem, and the concrete fix. End with exactly one line:
 VERDICT: CRITICAL=<n> HIGH=<n> MEDIUM=<n> LOW=<n>
 
-Round 2 (anchored): audits/2026-10-13-1644/R1_DISPOSITION.md lists every round-1
-finding and how it was fixed. Verify each fix in the code, then review the full
-diff again. Report a round-1 finding again only if its fix is incomplete or wrong.
+Round 3 (anchored, final): audits/2026-10-13-1644/R1_DISPOSITION.md and
+R2_DISPOSITION.md list every earlier finding and how it was fixed or why it is
+carried. Verify each fix in the code, then review the full diff again. Report an
+earlier finding again only if its fix is incomplete or wrong, or if a carried
+item is actually a CRITICAL/HIGH/MEDIUM defect.

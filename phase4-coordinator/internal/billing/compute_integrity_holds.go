@@ -77,8 +77,14 @@ func computeIntegrityHoldCreditMatchSQL(row string) string {
 // computeIntegrityHoldRollupTriggers bump the earnings rollup of every
 // credit a hold covers before and after each write (SPEC-022 R-16.6).
 func computeIntegrityHoldRollupTriggers() []earningsRollupTrigger {
+	// One bump per distinct (provider, hour) bucket, not per credit, so a
+	// hold over a long window stays a bounded write.
 	mark := func(row string) string {
-		return earningsMarkSQL("ledger_request_credits c", computeIntegrityHoldCreditMatchSQL(row))
+		return `INSERT INTO provider_earnings_rollup_buckets(provider_id, bucket_hour, gen, computed_gen)
+    SELECT DISTINCT c.provider_id, ` + earningsHourKeySQL("c.ts_utc") + `, 1, 0
+      FROM ledger_request_credits c
+     WHERE ` + computeIntegrityHoldCreditMatchSQL(row) + `
+    ON CONFLICT(provider_id, bucket_hour) DO UPDATE SET gen = gen + 1;`
 	}
 	return []earningsRollupTrigger{
 		{"trg_per_cieh_insert", `CREATE TRIGGER trg_per_cieh_insert AFTER INSERT ON compute_integrity_earnings_holds

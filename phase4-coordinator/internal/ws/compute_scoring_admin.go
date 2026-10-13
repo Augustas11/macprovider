@@ -78,8 +78,10 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 	if st == nil {
 		return false, nil
 	}
+	before := cloneKeyState(st)
 	tr := st.OperatorClear(now)
 	if !e.applyTransitionLocked(ctx, st, tr, now) {
+		*st = before
 		return true, errors.New("compute-integrity clear not applied")
 	}
 	delete(e.nextDue, key)

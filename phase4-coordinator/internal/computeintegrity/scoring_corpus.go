@@ -89,7 +89,6 @@ var ProbeMaxTokens = []int{96, 160, 256}
 // probeStyles vary every drawn prompt the way buyers phrase requests, so a
 // verification request never repeats a corpus entry verbatim.
 var probeStyles = []string{
-	"",
 	"Keep it brief.",
 	"Use plain language.",
 	"Give one concrete example.",
@@ -129,9 +128,7 @@ func DrawProbe(rng *rand.Rand, corpus Corpus, modelID string, greedyOnly bool) (
 		return ProbeRequest{}, fmt.Errorf("compute-integrity corpus is empty")
 	}
 	prompt := corpus.Prompt(rng.Intn(corpus.Len()))
-	if style := drawStyle(rng); style != "" {
-		prompt.User = prompt.User + " " + style
-	}
+	prompt.User = prompt.User + " " + drawStyle(rng)
 	profile := SamplingProfiles[0]
 	if !greedyOnly {
 		profile = SamplingProfiles[rng.Intn(len(SamplingProfiles))]

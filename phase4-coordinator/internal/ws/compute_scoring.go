@@ -41,6 +41,12 @@ const (
 	computeScoreMaxScoredTokens = 512
 	computeScoreMaxOutputBytes  = 32 * 1024
 	computeScoreLogprobFloor    = 100.0
+
+	// computeScoreRetention bounds in-memory history: tolerance windows and
+	// known sequences of a (model, manifest) unseen this long are dropped,
+	// and so are in-memory states of absent providers in unverified or
+	// passing (their durable rows stay). Adverse states are never pruned.
+	computeScoreRetention = 7 * 24 * time.Hour
 )
 
 // ComputeScoreRequest is the FR-21 coordinator-to-scorer frame.
@@ -221,6 +227,9 @@ type computeScoringEngine struct {
 	s    *Server
 	deps ComputeScoringDeps
 
+	// lastSeen records when each provider was last in the pool, for pruning.
+	lastSeen map[string]time.Time
+
 	tolerance *computeintegrity.Tolerance
 	scorers   *computeintegrity.ScorerTracker
 	known     *computeintegrity.KnownSequences
@@ -290,6 +299,7 @@ func (s *Server) newComputeScoringEngine(ctx context.Context, deps ComputeScorin
 		inFlight:     map[computeScoringKey]bool{},
 		pending:      map[string]*pendingComputeScore{},
 		operatorKeys: map[string]cachedOperatorKey{},
+		lastSeen:     map[string]time.Time{},
 	}
 	for _, st := range states {
 		st.RecoveryCooldown = e.recoveryCooldown()
@@ -389,25 +399,26 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	for _, p := range providers {
 		present[p.ProviderID] = struct{}{}
 	}
-	e.prune(present)
+	e.prune(present, now)
 	if !e.deps.Config.Enabled {
 		e.publishGauges(ctx)
 		return
 	}
 	// One scorer index per sweep, keyed by (model, manifest), so selection
 	// costs the size of one model's pool rather than the whole fleet.
+	// Operator keys are resolved only for pools with a provider due.
 	index := map[scorerPoolKey][]computeintegrity.ScorerCandidate{}
 	for _, p := range providers {
 		if !providerVerifiable(p) {
 			continue
 		}
 		k := scorerPoolKey{p.ModelID, p.WeightsManifestSHA256}
+		e.tolerance.Touch(p.ModelID, p.WeightsManifestSHA256, now)
 		index[k] = append(index[k], computeintegrity.ScorerCandidate{
 			ProviderID:     p.ProviderID,
 			AssignedID:     p.AssignedID,
 			ModelID:        p.ModelID,
 			ManifestSHA256: p.WeightsManifestSHA256,
-			OperatorKey:    e.operatorKey(ctx, p.ProviderID, now),
 			Capable:        p.ComputeScoreV1,
 			Ready:          true,
 		})
@@ -421,11 +432,18 @@ func (e *computeScoringEngine) sweep(ctx context.Context, now time.Time) {
 	e.publishGauges(ctx)
 }
 
-// prune drops schedule and cache entries of providers that left the pool.
-// Key states stay: a failed key must survive a disconnect.
-func (e *computeScoringEngine) prune(present map[string]struct{}) {
+// prune drops schedule and cache entries of providers that left the pool,
+// and in-memory history past computeScoreRetention. Adverse key states stay:
+// a failed key must survive a disconnect.
+func (e *computeScoringEngine) prune(present map[string]struct{}, now time.Time) {
+	cutoff := now.Add(-computeScoreRetention)
+	e.tolerance.Prune(cutoff)
+	e.known.Prune(cutoff)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	for id := range present {
+		e.lastSeen[id] = now
+	}
 	for key := range e.nextDue {
 		if _, ok := present[key.providerID]; !ok && !e.inFlight[key] {
 			delete(e.nextDue, key)
@@ -434,6 +452,19 @@ func (e *computeScoringEngine) prune(present map[string]struct{}) {
 	for id := range e.operatorKeys {
 		if _, ok := present[id]; !ok {
 			delete(e.operatorKeys, id)
+		}
+	}
+	for key, st := range e.states {
+		if _, ok := present[key.providerID]; ok || e.inFlight[key] || !st.State.AcceptsHonestSamples() {
+			continue
+		}
+		if seen, ok := e.lastSeen[key.providerID]; !ok || seen.Before(cutoff) {
+			delete(e.states, key)
+		}
+	}
+	for id, seen := range e.lastSeen {
+		if seen.Before(cutoff) {
+			delete(e.lastSeen, id)
 		}
 	}
 }
@@ -456,9 +487,9 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	}
 	due, scheduled := e.nextDue[key]
 	if !scheduled {
-		// Spread first requests over one interval so a restart does not
-		// probe the whole fleet at once.
-		e.nextDue[key] = now.Add(time.Duration(e.rng.Float64() * float64(e.interval(st.State))))
+		// The first request of a key follows the same jittered cadence, so a
+		// restart neither probes the fleet at once nor early.
+		e.nextDue[key] = now.Add(e.jitter(e.interval(st.State)))
 		e.mu.Unlock()
 		return
 	}
@@ -491,8 +522,16 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	if state.Escalating() {
 		n = 2
 	}
+	scorerPool := make([]computeintegrity.ScorerCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.ProviderID == verified.ProviderID || !c.Capable {
+			continue
+		}
+		c.OperatorKey = e.operatorKey(ctx, c.ProviderID, now)
+		scorerPool = append(scorerPool, c)
+	}
 	e.mu.Lock()
-	scorers := computeintegrity.SelectScorers(e.rng, verified, candidates, n, e.scorerEligibleLocked)
+	scorers := computeintegrity.SelectScorers(e.rng, verified, scorerPool, n, e.scorerEligibleLocked)
 	if len(scorers) == 0 {
 		e.nextDue[key] = now.Add(e.jitter(e.interval(state)))
 		e.mu.Unlock()
@@ -673,25 +712,27 @@ func (e *computeScoringEngine) score(ctx context.Context, scorer computeintegrit
 		scorerID: scorer.ProviderID, assignedID: scorer.AssignedID, modelID: scorer.ModelID,
 		manifest: manifest, deadline: now.Add(deadline), ch: make(chan ComputeScoreResult, 1),
 	}
-	checkKnown := false
 	e.mu.Lock()
 	e.pending[scoreID] = pending
-	if countJob {
-		e.scoringJobs++
-		checkKnown = e.scoringJobs%computeintegrity.KnownSequenceCheckEvery == 0
-	}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
 		delete(e.pending, scoreID)
 		e.mu.Unlock()
 	}()
-	if checkKnown {
-		go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: manifest})
-	}
 	if err := session.send(raw); err != nil {
 		e.scoringJobMetric("timeout")
 		return ComputeScoreResult{}, false
+	}
+	if countJob {
+		// FR-24 cadence counts scoring jobs actually sent.
+		e.mu.Lock()
+		e.scoringJobs++
+		checkKnown := e.scoringJobs%computeintegrity.KnownSequenceCheckEvery == 0
+		e.mu.Unlock()
+		if checkKnown {
+			go e.knownSequenceCheck(ctx, computeintegrity.ToleranceKey{ModelID: scorer.ModelID, ManifestSHA256: manifest})
+		}
 	}
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
@@ -739,24 +780,32 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 			e.persistExclusion(ctx, id, now)
 		}
 		if allIn {
+			seq.SourceProvider = verified.ProviderID
+			seq.SourceOperator = verified.OperatorKey
 			seq.Scorers = []string{ms[0].scorer.ProviderID, ms[1].scorer.ProviderID}
-			e.known.Offer(tkey, seq, ms[0].measurement, ms[1].measurement)
+			seq.ScorerOperators = []string{ms[0].scorer.OperatorKey, ms[1].scorer.OperatorKey}
+			e.known.Offer(tkey, seq, ms[0].measurement, ms[1].measurement, now)
 		}
 	}
 	outcome := computeintegrity.Outcome{InBand: allIn, OutOfBand: allOut, OutReason: outReason, ScorerOperators: ops, At: now}
 
 	e.mu.Lock()
 	st := e.stateLocked(key, now)
-	if allIn && st.State.AcceptsHonestSamples() {
-		e.tolerance.Accept(tkey, verified.OperatorKey, ms[0].measurement)
-	}
+	acceptsHonest := st.State.AcceptsHonestSamples()
 	before := cloneKeyState(st)
+	committed := true
 	if tr := st.Apply(outcome); tr != nil {
-		if !e.applyTransitionLocked(ctx, st, tr, now) {
-			*st = before
-		}
+		committed = e.applyTransitionLocked(ctx, st, tr, now)
 	} else if err := e.deps.Store.UpsertKeyState(ctx, st, now); err != nil {
-		e.s.log.Warn().Str("event", "compute_integrity_state_persist_failed").Msg("compute-integrity state not persisted")
+		committed = false
+		e.s.log.Warn().Str("event", "compute_integrity_state_persist_failed").Str("provider_id", st.ProviderID).Msg("compute-integrity state not persisted; measurement dropped")
+	}
+	if !committed {
+		// Memory never runs ahead of the durable state: the measurement is
+		// dropped and the next one retries.
+		*st = before
+	} else if allIn && acceptsHonest {
+		e.tolerance.Accept(tkey, verified.OperatorKey, ms[0].measurement)
 	}
 	e.mu.Unlock()
 
@@ -831,12 +880,20 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 // eligible scorer that did not score it originally. tkey names the model and
 // manifest; every sampling class is eligible.
 func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey computeintegrity.ToleranceKey) {
+	now := e.s.now()
 	var candidates []computeintegrity.ScorerCandidate
 	for _, p := range e.s.pool.Snapshot() {
 		if !p.ComputeScoreV1 || !providerVerifiable(p) || p.ModelID != tkey.ModelID || p.WeightsManifestSHA256 != tkey.ManifestSHA256 {
 			continue
 		}
-		candidates = append(candidates, computeintegrity.ScorerCandidate{ProviderID: p.ProviderID, AssignedID: p.AssignedID, ModelID: p.ModelID, ManifestSHA256: p.WeightsManifestSHA256})
+		op := e.operatorKey(ctx, p.ProviderID, now)
+		if op == "" {
+			continue
+		}
+		candidates = append(candidates, computeintegrity.ScorerCandidate{
+			ProviderID: p.ProviderID, AssignedID: p.AssignedID, ModelID: p.ModelID, ManifestSHA256: p.WeightsManifestSHA256,
+			OperatorKey: op, Capable: true, Ready: true,
+		})
 	}
 	e.mu.Lock()
 	e.rng.Shuffle(len(candidates), func(i, j int) { candidates[i], candidates[j] = candidates[j], candidates[i] })
@@ -850,7 +907,7 @@ func (e *computeScoringEngine) knownSequenceCheck(ctx context.Context, tkey comp
 		for _, class := range []computeintegrity.SamplingClass{computeintegrity.SamplingGreedy, computeintegrity.SamplingSampled} {
 			k := tkey
 			k.Class = class
-			if s, ok := e.known.Pick(e.rng, k, c.ProviderID); ok {
+			if s, ok := e.known.Pick(e.rng, k, c); ok {
 				scorer, seq, found = c, s, true
 				break
 			}

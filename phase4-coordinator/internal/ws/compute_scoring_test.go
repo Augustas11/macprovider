@@ -35,6 +35,9 @@ type fakeHoldStore struct {
 	holds    []*fakeHold
 	fail     atomic.Bool
 	attempts atomic.Int64
+	// breakStateWrite makes the state write of the same transaction fail
+	// (the rename is rolled back with it).
+	breakStateWrite atomic.Bool
 }
 
 func (f *fakeHoldStore) ApplyComputeIntegrityHoldAction(ctx context.Context, tx *sql.Tx, providerID, modelID string, action computeintegrity.HoldAction, reason string, now time.Time) error {
@@ -50,6 +53,11 @@ func (f *fakeHoldStore) ApplyComputeIntegrityHoldAction(ctx context.Context, tx 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO fake_hold_log VALUES (?, ?)`, providerID, string(action.Kind)); err != nil {
+		return err
+	}
+	if f.breakStateWrite.Load() {
+		f.attempts.Add(1)
+		_, err := tx.ExecContext(ctx, `ALTER TABLE compute_integrity_scoring_keys RENAME TO compute_integrity_scoring_keys_off`)
 		return err
 	}
 	switch action.Kind {
@@ -659,9 +667,7 @@ func TestComputeScoringTransitionIsAtomic(t *testing.T) {
 	if h.state("cheat") != computeintegrity.VerificationSuspect {
 		t.Fatal("setup: expected suspect")
 	}
-	if _, err := h.db.Exec(`ALTER TABLE compute_integrity_scoring_keys RENAME TO compute_integrity_scoring_keys_off`); err != nil {
-		t.Fatal(err)
-	}
+	h.holds.breakStateWrite.Store(true)
 	for i := 0; i < 40 && h.holds.attempts.Load() == 0; i++ {
 		h.round(20 * time.Minute)
 	}
@@ -685,5 +691,47 @@ func TestComputeScoringTransitionIsAtomic(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Fatalf("the hold write must roll back with the state write, %d rows remain", rows)
+	}
+}
+
+// FR-25: an operator clear whose commit fails changes nothing, in memory or
+// in routing.
+func TestComputeScoringOperatorClearFailureRestoresState(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "scorer-a": "github:3", "scorer-b": "github:4"}
+	h := newScoringHarness(t, providers, map[string]bool{"cheat": true})
+	for i := 0; i < 120 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+		h.round(20 * time.Minute)
+	}
+	if h.state("cheat") != computeintegrity.VerificationFailed {
+		t.Fatal("setup: expected failure")
+	}
+	if _, err := h.db.Exec(`ALTER TABLE compute_integrity_scoring_keys RENAME TO compute_integrity_scoring_keys_off`); err != nil {
+		t.Fatal(err)
+	}
+	code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/clear", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"fixed"}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("clear with a failing store code=%d", code)
+	}
+	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {
+		t.Fatalf("a failed clear must leave the key failed, got %s", got)
+	}
+	if p, _ := h.registry.Resolve("cheat", "as-cheat"); !p.ComputeIntegritySuspended {
+		t.Fatal("a failed clear must keep the suspension")
+	}
+}
+
+// FR-20: the first request of a key follows the jittered cadence.
+func TestComputeScoringFirstRequestUsesJitteredCadence(t *testing.T) {
+	providers := map[string]string{"a": "github:1", "b": "github:2"}
+	h := newScoringHarness(t, providers, nil)
+	start := h.now()
+	h.engine.sweep(context.Background(), start)
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	interval := h.engine.interval(computeintegrity.VerificationUnverified)
+	for key, due := range h.engine.nextDue {
+		if d := due.Sub(start); d < interval/2 || d >= interval*3/2 {
+			t.Fatalf("%v first due after %v, want within [0.5, 1.5) x %v", key, d, interval)
+		}
 	}
 }

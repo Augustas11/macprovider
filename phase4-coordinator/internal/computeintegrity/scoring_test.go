@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"path/filepath"
 	"testing"
@@ -310,26 +311,57 @@ func TestScorerTrackerExcludesPersistentDisagreer(t *testing.T) {
 
 func TestKnownSequencesOfferPickAndCheck(t *testing.T) {
 	ks := NewKnownSequences()
+	now := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
 	key := ToleranceKey{ModelID: "m", ManifestSHA256: "h", Class: SamplingGreedy}
-	if ks.Offer(key, KnownSequence{Scorers: []string{"a", "b"}}, meas(64, 0.95, -0.2), meas(64, 0.95, -0.6)) {
+	if ks.Offer(key, KnownSequence{Scorers: []string{"a", "b"}}, meas(64, 0.95, -0.2), meas(64, 0.95, -0.6), now) {
 		t.Fatal("scorers more than 0.25 apart must not form a known sequence")
 	}
-	if !ks.Offer(key, KnownSequence{OutputText: "x", Scorers: []string{"a", "b"}}, meas(64, 0.95, -0.2), meas(64, 0.97, -0.3)) {
+	seqIn := KnownSequence{OutputText: "x", SourceProvider: "src", SourceOperator: "op-src", Scorers: []string{"a", "b"}, ScorerOperators: []string{"op-a", "op-b"}}
+	if !ks.Offer(key, seqIn, meas(64, 0.95, -0.2), meas(64, 0.97, -0.3), now) {
 		t.Fatal("agreeing scorers must form a known sequence")
 	}
 	rng := rand.New(rand.NewSource(3))
-	if _, ok := ks.Pick(rng, key, "a"); ok {
-		t.Fatal("a scorer is never checked on a sequence it scored")
+	for name, c := range map[string]ScorerCandidate{
+		"original scorer":         {ProviderID: "a", OperatorKey: "op-z"},
+		"original scorer op":      {ProviderID: "a2", OperatorKey: "op-a"},
+		"source provider":         {ProviderID: "src", OperatorKey: "op-y"},
+		"source operator sibling": {ProviderID: "src-2", OperatorKey: "op-src"},
+		"unknown operator":        {ProviderID: "c"},
+	} {
+		if _, ok := ks.Pick(rng, key, c); ok {
+			t.Fatalf("%s must not check this sequence", name)
+		}
 	}
-	seq, ok := ks.Pick(rng, key, "c")
+	seq, ok := ks.Pick(rng, key, ScorerCandidate{ProviderID: "c", OperatorKey: "op-c"})
 	if !ok {
-		t.Fatal("expected a known sequence for a new scorer")
+		t.Fatal("expected a known sequence for an independent scorer")
 	}
 	if !KnownCheckPassed(seq, meas(64, 0.94, -0.4)) {
 		t.Fatal("close answer must pass")
 	}
 	if KnownCheckPassed(seq, meas(64, 0.94, -1.0)) || KnownCheckPassed(seq, meas(64, 0.7, -0.25)) {
 		t.Fatal("answers far below the consensus must fail")
+	}
+}
+
+func TestSelectScorersIsOperatorWeighted(t *testing.T) {
+	verified := ScorerCandidate{ProviderID: "v", ModelID: "m", ManifestSHA256: "h", OperatorKey: "op-v"}
+	var candidates []ScorerCandidate
+	for i := 0; i < 20; i++ {
+		candidates = append(candidates, ScorerCandidate{ProviderID: fmt.Sprintf("farm-%d", i), ModelID: "m", ManifestSHA256: "h", OperatorKey: "op-farm", Capable: true, Ready: true})
+	}
+	candidates = append(candidates, ScorerCandidate{ProviderID: "solo", ModelID: "m", ManifestSHA256: "h", OperatorKey: "op-solo", Capable: true, Ready: true})
+	rng := rand.New(rand.NewSource(7))
+	solo := 0
+	const draws = 2000
+	for i := 0; i < draws; i++ {
+		if got := SelectScorers(rng, verified, candidates, 1, nil); got[0].OperatorKey == "op-solo" {
+			solo++
+		}
+	}
+	// Operators are drawn uniformly: about half, not 1/21, of the draws.
+	if solo < draws*40/100 || solo > draws*60/100 {
+		t.Fatalf("solo operator chosen %d/%d times; selection must weight operators, not Macs", solo, draws)
 	}
 }
 
@@ -355,6 +387,12 @@ func TestDefaultCorpusAndProbeBody(t *testing.T) {
 		msgs := body["messages"].([]any)
 		if len(msgs) != 2 || msgs[0].(map[string]any)["role"] != "system" {
 			t.Fatalf("probe must carry a system and a user message: %v", msgs)
+		}
+		user := msgs[1].(map[string]any)["content"].(string)
+		for j := 0; j < c.Len(); j++ {
+			if user == c.Prompt(j).User {
+				t.Fatalf("probe repeated corpus entry %d verbatim", j)
+			}
 		}
 		if int(body["max_tokens"].(float64)) != p.MaxTokens {
 			t.Fatal("max_tokens mismatch")
