@@ -1,8 +1,14 @@
 # SPEC-021 — MALIBU rewards emission ledger
 
-**Version:** 0.4.0 (2026-08-19, sybil-resistant reward economics)
+**Version:** 0.4.1 (2026-10-13, SPEC-050 stake locks)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-005 (buyer billing and settlement ledger separation); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings); SPEC-034 (referral/admission anti-wash boundary); SPEC-036 (compute-integrity reward gating input)
+
+**Change log v0.4.1 (2026-10-13, #1062 SPEC-050 stake locks):**
+- MALIBU locked by the SPEC-050 stake ledger (including MALIBU in an unlock
+  cooldown) is netted out of withdrawable MALIBU on the provider read API and
+  by any withdrawal runner (SPEC-050-R003). The read API adds `locked_malibu`.
+  Accrual, holds, caps, and dispositions are unchanged.
 
 **Change log v0.4.0 (2026-08-19, sybil-resistant reward economics):**
 - Defines usage-gated reward epochs as the only v0.4 issuance path. Epoch
@@ -594,6 +600,9 @@ references the active epoch-disposition fact it clears.
 This is the same canonical withdrawability predicate defined in §2.6 and used
 by provider reads and projections.
 
+A withdrawal runner MUST also net MALIBU locked by the SPEC-050 stake ledger
+for the provider; see SPEC-050-R003, which owns the lock arithmetic.
+
 USDC `ledger_payout_ready` runner is unchanged.
 
 ---
@@ -612,6 +621,7 @@ USDC `ledger_payout_ready` runner is unchanged.
   "provider_daily_capped": false,
   "wallet_daily_cap_malibu": "100",
   "withdrawal_hold_reasons": ["trust_tier_provisional"],
+  "locked_malibu": "0",
   "reward_eligibility": {
     "schema_version": "malibu_reward_eligibility.v1",
     "earning_state": "held",
@@ -633,6 +643,10 @@ withdrawable only when both the legacy hold field is NULL and no active
 non-withdrawable epoch-disposition fact applies. `held_malibu`,
 `withdrawal_state`, reward eligibility reasons, and projection totals MUST use
 the same predicate so provider copy cannot diverge from withdrawal selection.
+
+`locked_malibu` is the provider's MALIBU locked by SPEC-050 stakes, including
+MALIBU in an unlock cooldown. `withdrawable_malibu` is reported after netting it
+(floored at zero); SPEC-050-R003 owns that rule.
 
 ### 5.1 Reward audit API
 
@@ -865,4 +879,4 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.4.0.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.4.1.*

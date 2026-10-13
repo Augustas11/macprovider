@@ -7463,6 +7463,7 @@ var gatewayEmittedErrorCodes = []string{
 	"capacity_tier_load_failed", "comment_too_long", "concurrency_reservation_failed",
 	"coordinator_models_error", "coordinator_rate_card_error", "coordinator_receipt_error", "coordinator_sticky_error", "coordinator_unavailable",
 	"creator_identity_lookup_failed", "creator_upstream_error", "demo_creator_forbidden", "wallet_session_creator_forbidden",
+	"stake_identity_lookup_failed", "stake_upstream_error", "demo_stake_forbidden", "wallet_session_stake_forbidden",
 	"demo_concurrency_exceeded", "demo_paused", "demo_receipt_forbidden", "demo_session_check_failed",
 	"demo_session_rate_limited", "demo_session_record_failed", "demo_token_issuance_failed",
 	"docs_missing", "docs_render_failed", "duplicate_request_id",

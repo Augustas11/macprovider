@@ -212,6 +212,11 @@ type billingRecorder struct {
 	// set only for the ledger write. A loopback attempt is credited only
 	// behind a receipt bound to it whose billable usage is the recorded usage.
 	pendingReceipt pendingSettlementReceipt
+	// allowanceFunding is the SPEC-050 funding this request was admitted
+	// under ("allowance" or "paid" for an account with an allowance today,
+	// "" otherwise). An allowance funding runs the SPEC-050-R010
+	// self-dealing check before the ledger insert.
+	allowanceFunding string
 }
 
 type pendingSettlementReceipt struct {
@@ -532,6 +537,13 @@ func (b *billingRecorder) recordRow(
 			faultFlag = billing.FaultNone
 		}
 		b.dispatchedThisAttemptFaultFlag = faultFlag
+		// SPEC-050-R010: an allowance-funded attempt served by a provider
+		// that is self-dealing for the staking account earns no MALIBU. The
+		// flag is insert-only, so it is decided before the ledger write.
+		if b.allowanceFunding == billing.AllowanceFundingAllowance && !row.RewardsExcluded &&
+			billingStore.AllowanceSelfDealing(ctx, b.accountID, b.externalRequestID, stableProviderID) {
+			row.RewardsExcluded = true
+		}
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)

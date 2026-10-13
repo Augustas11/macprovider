@@ -1,7 +1,13 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.20 (2026-10-13, ledger_request_credits request index)
+**Version:** 0.6.21 (2026-10-13, SPEC-050 allowance funding)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.21 (2026-10-13, issue #1062):** §2.1a notes that requests
+funded by a SPEC-050 MALIBU stake allowance are left off D1a wholesale
+statements. Provider credits, rates, gross credits, settlement, and payout are
+unchanged; SPEC-050 measures allowance spend from the ledger rows this spec
+owns.
 
 **Change log v0.6.20 (2026-10-13, issue #1793):** §4.3 drops
 `idx_lrc_request(request_id)` from `ledger_request_credits`. The unique
@@ -759,6 +765,7 @@ It is read-only except for the v0.6.7 **D3 storage and authoring-path** reopen (
 - Live wholesale inference MUST NOT return HTTP 402. Unpaid statements are an operator kill-switch (disable the partner account or `kill_switch.all_public_api`), not a mid-request 402.
 - Billing logic MUST stay in `phase4-coordinator/internal/billing`. The Phase 5 gateway MUST NOT grow a billing package.
 **Reference discipline:** Later sections may cite D1a; they MUST NOT extend it to public buyers or introduce Stripe.
+**SPEC-050 allowance (v0.6.21).** Requests funded by a SPEC-050 MALIBU stake allowance are not partner-paid usage and are left off wholesale statements; SPEC-050-R008 owns that rule. Their provider credits follow D3/D5 unchanged (SPEC-050-R009).
 
 ### 2.2 D2 - Settlement cadence
 

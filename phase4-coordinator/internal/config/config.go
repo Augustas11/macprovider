@@ -133,6 +133,7 @@ type Config struct {
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
+	StakeAllowance               StakeAllowanceConfig         `yaml:"stake_allowance"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
 	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
 	AdmissionCanaryHarness       AdmissionCanaryHarnessConfig `yaml:"admission_canary_harness"`
@@ -2056,6 +2057,7 @@ func Default() Config {
 				},
 			},
 		},
+		StakeAllowance: DefaultStakeAllowanceConfig(),
 		Billing: BillingConfig{
 			Retention: BillingRetentionConfig{
 				Enabled:                     true,
@@ -3290,6 +3292,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateBillingRetention(); err != nil {
+		return err
+	}
+	if err := c.validateStakeAllowance(); err != nil {
 		return err
 	}
 	if err := c.validateStats(); err != nil {

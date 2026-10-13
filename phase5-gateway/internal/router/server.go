@@ -47,12 +47,14 @@ type Server struct {
 	// invoked via readStore() is a COMPILE error, not a runtime mode=ro
 	// driver error. The DSN-level mode=ro+query_only(1) guard in
 	// internal/storage/sqlite stays as defense in depth.
-	readOnlyStore    ReadStore
-	keyMgr           auth.KeyManager
-	demoMgr          auth.DemoManager
-	oauth            auth.OAuthProvider
-	now              func() time.Time
-	client           *http.Client
+	readOnlyStore ReadStore
+	keyMgr        auth.KeyManager
+	demoMgr       auth.DemoManager
+	oauth         auth.OAuthProvider
+	now           func() time.Time
+	client        *http.Client
+	// allowance caches SPEC-050 admission answers (SPEC-050-R014).
+	allowance        allowanceCache
 	trustedProxyNets []*net.IPNet
 	version          string
 	mu               sync.RWMutex
@@ -253,6 +255,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
 	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
 	mux.HandleFunc("/v1/creator/", s.handleCreatorProxy)
+	// SPEC-050-R011 MALIBU stake allowance account surface.
+	mux.HandleFunc("/v1/stake", s.handleStakeProxy)
+	mux.HandleFunc("/v1/stake/", s.handleStakeProxy)
 	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
 	mux.Handle(privacyDirectoryRoute, s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePrivacyDirectory)))
 	if s.cfg.Features.ResponsesAPIEnabled {
@@ -1567,6 +1572,9 @@ var gatewayPermanentCodes = map[string]bool{
 	// SPEC-006 §5.11 creator self-serve proxy.
 	"creator_upstream_error": true, "creator_identity_lookup_failed": true,
 	"demo_creator_forbidden": true, "wallet_session_creator_forbidden": true,
+	// SPEC-050-R011 /v1/stake proxy.
+	"stake_upstream_error": true, "stake_identity_lookup_failed": true,
+	"demo_stake_forbidden": true, "wallet_session_stake_forbidden": true,
 	// SPEC-006-R016 buyer engine selection: the named engine cannot serve the
 	// same request on this route later, and a bad selector is a client error.
 	"engine_unavailable": true, "invalid_engine_selection": true,

@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.20",
+      "version": "0.6.21",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.52",
+      "version": "0.9.53",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -594,7 +594,7 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU rewards emission ledger",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1551,6 +1551,40 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
         "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. A full signed v0.2 journey and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
+      }
+    },
+    {
+      "spec_id": "SPEC-050",
+      "title": "MALIBU Stake Allowance",
+      "version": "0.1.0",
+      "path": "specs/SPEC-050-malibu-stake-allowance.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "malibu-stake-allowance"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-016",
+        "SPEC-021",
+        "SPEC-022",
+        "SPEC-034",
+        "SPEC-041",
+        "SPEC-049"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 defines the MALIBU stake allowance: a ledger-MALIBU stake, a budgeted daily non-withdrawable inference allowance, allowance-first spend ordering, and the self-dealing reward exclusion. It ships on; the operator's daily budget sets its size. Every requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
       }
     }
   ],
@@ -12383,6 +12417,390 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1355",
         "rationale": "SPEC-006 v0.9.51 route trace forwarding (#1355). It ships in a later gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R001",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:NewStakeLedger",
+        "phase4-coordinator/internal/rewards/stake.go:Lock",
+        "phase4-coordinator/internal/rewards/stake.go:providerWithdrawableUnits",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleStake",
+        "phase4-coordinator/internal/billing/allowance.go:AllowanceStakeSource",
+        "phase4-coordinator/cmd/coordinator/stake_allowance.go:stakeSourceAdapter"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRefusals"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R002",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:Lock",
+        "phase4-coordinator/internal/rewards/stake.go:Unlock",
+        "phase4-coordinator/internal/rewards/stake.go:allocateStake",
+        "phase4-coordinator/internal/rewards/stake.go:replayStakeEvents",
+        "phase4-coordinator/internal/rewards/stake.go:ParseMALIBUUnits",
+        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency",
+        "phase4-coordinator/internal/rewards/stake.go:checkStakeRate",
+        "phase4-coordinator/internal/rewards/stake.go:accountIdentity"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestConcurrentStakeLocksCannotLockTheSameMALIBUTwice",
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestParseMALIBUUnits",
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestAllocateStakeIsAllOrNothingInOrder",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerLockUsesOwnedProvidersAndDerivedPrincipal",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeChangesAreRateLimitedPerAccount",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerUnlockNeedsNoGitHubIdentity",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeOwnershipAndIdentityRules",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeRateBoundCountsEveryAppendedEvent"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R003",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/rewards.go:netStakeLocks",
+        "phase4-coordinator/internal/rewards/stake.go:providerOwnerLockedUnits",
+        "phase4-coordinator/internal/rewards/rewards.go:QueryAccrualBalance",
+        "phase4-coordinator/internal/rewards/withdrawal.go:SelectWithdrawableMALIBU",
+        "phase4-coordinator/internal/rewards/rewards.go:stakeLockedUnits",
+        "phase4-coordinator/internal/rewards/withdrawal.go:SelectWithdrawableMALIBUTx"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeOwnershipAndIdentityRules"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R004",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:EarningStakes",
+        "phase4-coordinator/internal/rewards/stake.go:computeEarningStakes",
+        "phase4-coordinator/internal/rewards/stake.go:Unlock"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestComputeEarningStakes",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R005",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance.go:ComputeAllowanceGrants",
+        "phase4-coordinator/internal/billing/allowance.go:RefreshAllowanceDay",
+        "phase4-coordinator/cmd/coordinator/stake_allowance.go:startAllowanceRefresher"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestComputeAllowanceGrantsRateCapAndProRata",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayIsIdempotentPerAccountDay",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayRecordsNothingWhenSourceFails",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R006",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance.go:RefreshAllowanceDay",
+        "phase4-coordinator/internal/billing/allowance.go:ensureAllowanceTables"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestAllowanceAuditTablesAreAppendOnly",
+        "phase4-coordinator/internal/billing/allowance_refresh_test.go:TestRefreshAllowanceDayIsIdempotentPerAccountDay"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R007",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:AdmitAllowance",
+        "phase4-coordinator/internal/billing/allowance_spend.go:AllowanceCreditBound",
+        "phase4-coordinator/internal/buyer/allowance_hook.go:admitAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:setAllowanceRequestHeaders",
+        "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:MarkReservationFundingSource",
+        "phase5-gateway/internal/storage/sqlite/store.go:dailyUsageTx",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:allowanceOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:SetAllowanceOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:admissionDay"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAdmitAllowanceSpendOrderingAndOverage",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestConcurrentAdmissionsNeverOverholdTheGrant",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAllowanceCreditBoundCoversTheLedgerGross",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceFundedChatLeavesPaidQuotaUntouched",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceFundedReservationDoesNotDrawPaidQuota",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestRetriedAllowanceRequestIsHeldAgain",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestOverageRecordsOnlyChangesAndIsBounded",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAllowanceAdmissionDayAcrossMidnight"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R008",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:CloseAllowanceReservation",
+        "phase4-coordinator/internal/billing/allowance_spend.go:closeAllowanceReservationTx",
+        "phase4-coordinator/internal/billing/allowance_spend.go:ReapAllowanceReservations",
+        "phase4-coordinator/internal/billing/wholesale_generation.go:wholesaleLineTotals",
+        "phase4-coordinator/internal/buyer/allowance_hook.go:closeAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:settlementFundingSource",
+        "phase5-gateway/internal/router/stake_allowance.go:persistFundingSource",
+        "phase5-gateway/internal/router/settlement_journal_recovery.go:redriveSettlementEffect",
+        "phase4-coordinator/internal/billing/allowance_spend.go:RenewAllowanceProcessLease",
+        "phase5-gateway/internal/router/stake_allowance.go:markFundingWithRetry"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestReapAllowanceClosesOnlyHoldsOfDeadProcesses",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestSettlementWritesConfirmedFunding",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestJournalRecoveryKeepsAllowanceFunding",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestAllowanceFundingMarkIsRetried",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestLiveFallbackDefersWhenFundingIsNotDurable",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestJournalRecoveryRetriesUntilFundingIsDurable",
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestRetriedActiveHoldMovesToTheServingProcess"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R009",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_spend.go:closeAllowanceReservationTx"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_spend_test.go:TestCloseAllowanceRecordsSplitsFromTheLedger",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestCoordinatorAllowanceAdmissionFundsAndSplits",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePrivateRequestSpendsAllowanceFirst"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R010",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:AllowanceSelfDealing",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:sharesPayoutAddress",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:referralClusterTouches",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:referralNeighbors",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingRelations",
+        "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingFailsSafe",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceSelfDealtAttemptIsRewardsExcluded"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R011",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/stake_allowance.go:handleStakeProxy",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleAccount",
+        "phase4-coordinator/internal/stakeallowance/ownership.go:PayoutAddressLookup",
+        "phase5-gateway/internal/router/pages.go:handleAccount"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerAccountViewAndOverage",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewReportsUnavailableLedger",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeAccountViewWithoutLedgerIsUnavailable"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R012",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stakeallowance/handler.go:Disclosure",
+        "phase5-gateway/internal/router/pages.go:stakeAllowanceDisclosure"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeSurfacesCarryNoYieldLanguage",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestDisclosureMatchesSpec",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestStakeDisclosureMatchesSpec",
+        "phase5-gateway/internal/router/stake_allowance_page_test.go:TestAccountPageShowsStakePanelWithDisclosure",
+        "phase4-coordinator/internal/config/stake_allowance_test.go:TestCoordinatorYAMLExamplesCarryConservativeStakeAllowance"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R013",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:GRANT SELECT, INSERT ON malibu_stake_events TO rewards_writer",
+        "phase4-coordinator/internal/stakeallowance/handler.go:authenticate"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLedgerIsAppendOnlyAndRoleBounded",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRequiresServiceTokenAndPrincipal",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestStakeProxyForwardsOnlyTheVerifiedPrincipal"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-050-R014",
+      "spec_id": "SPEC-050",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/allowance_hook.go:admitAllowance",
+        "phase5-gateway/internal/router/stake_allowance.go:reserveAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
+        "phase5-gateway/internal/router/stake_allowance.go:allowanceActive",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:ensureQuotaReservationFundingSource",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding.go:NoteAllowanceDay"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestPaidQuotaExhaustedFallsBackToAllowanceOnly",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceFundedChatLeavesPaidQuotaUntouched",
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceOnlyRequestFailsClosed",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestUnfundedAllowanceOnlyRequestIsChargedToPaidQuota",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceActiveDaysPersistAndSchemaV19Gates",
+        "phase5-gateway/internal/router/stake_allowance_test.go:TestAllowanceDayLookupIsNotBlockedByANegativeAnswer",
+        "phase5-gateway/internal/storage/sqlite/allowance_funding_test.go:TestAllowanceOnlyReservationStaysPaidUntilConfirmed",
+        "phase5-gateway/internal/router/stake_allowance_durability_test.go:TestPositiveAllowanceDayIsCachedOnlyAfterItIsStored"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1062",
+        "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
       }
     }
   ]

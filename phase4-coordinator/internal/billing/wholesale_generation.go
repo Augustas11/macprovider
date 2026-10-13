@@ -91,6 +91,12 @@ SELECT rl.id, rl.request_id, rl.provider_assigned_id, rl.model, rl.ts_utc, rl.pr
    AND rl.status = 200
    AND julianday(rl.ts_utc) >= julianday(?)
    AND julianday(rl.ts_utc) < julianday(?)
+   -- SPEC-050-R008: allowance-funded requests are not partner-paid usage.
+   AND NOT EXISTS (
+       SELECT 1 FROM allowance_reservations ar
+        WHERE ar.account_id = rl.account_id
+          AND ar.request_id = rl.external_request_id
+          AND ar.funding = 'allowance')
 )
 SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
        (SELECT lpis.config_snapshot_id `+identityAt("attempt_ordinal")+`) AS exact_snapshot_id,
