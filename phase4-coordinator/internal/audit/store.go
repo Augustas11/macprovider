@@ -138,8 +138,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts_utc ON audit_log(ts_utc);
-CREATE INDEX IF NOT EXISTS idx_audit_log_provider_id ON audit_log(provider_id);
-CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+-- SPEC-002 R-7.10.1 v1.6.15 / SPEC-022 R-15.10: no query reads these.
+DROP INDEX IF EXISTS idx_audit_log_provider_id;
+DROP INDEX IF EXISTS idx_audit_log_event_type;
 `)
 	if err != nil {
 		return err

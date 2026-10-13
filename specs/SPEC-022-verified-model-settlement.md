@@ -1,11 +1,56 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.0
+Version: v0.4.3
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.3
+
+Issue #1979: retention drains instead of stopping at a fixed request count.
+R-15.5 now bounds each archive by `max_requests_per_run` requests (the key
+keeps its name so existing configurations load) and each run by a
+wall-clock budget (`run_budget_minutes`, default 30) and the scan bound
+(default raised to 5,000,000 credits). Selection walks the ledger in laps
+that start at a persisted archived low watermark, so a run spends its budget
+above the archived prefix instead of re-walking it. A request skipped for a
+reason that can clear goes to a persisted holds table that every lap
+re-checks; only too-young credits keep the watermark below them. Whether the backlog
+drained (`backlog_drained`) is derived from the last completed lap and
+persisted across runs. Each run reports why it stopped, the lap state, the
+last lap's skip counts by reason, an upper bound of the remaining backlog
+above the watermark, and each database's `auto_vacuum` mode. A database in
+`auto_vacuum = NONE` skips the incremental-vacuum step and says so. The
+one-time conversion to `INCREMENTAL` is an operator step through the ops
+entry point, gated on the drain; retention never runs a full `VACUUM`. The
+conformance state of `SPEC-022-R015` does not change. This version follows
+v0.4.2: a journal or outbox row that R-15.10 prunes between export and
+deletion makes the deletion re-check refuse the request, which is held and
+re-archived by a later lap.
+
+### v0.4.2
+
+Issue #1793: hot per-request evidence footprint. Adds R-15.10 under
+`SPEC-022-R015` (still pending). Each request's evidence was held in the
+coordinator databases several times over. R-15.10:
+
+- prunes a drained, unpoisoned `settlement_receipt_audit_outbox` row after
+  `storage.settlement_receipt_audit_outbox_drained_retention_hours`
+  (default 24), separate from `storage.audit_log_retention_days`;
+- prunes a mirrored route-snapshot journal row after
+  `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60), once
+  its primary row is verified to hold the same digest and JSON;
+- stores `route_snapshot_canonical_json` empty on a new snapshot whose
+  preimage recomputes byte for byte from `route_snapshot_json`;
+- stores `{}` in `settlement_receipt_verdicts.verifier_diagnostics_json`,
+  whose members are all typed columns;
+- drops ten indexes that no request-path query needs.
+
+No settlement, payability, or archive rule changes. Retention (R-15.2,
+R-15.4) checks the outbox and journal rows that still exist. Old rows stay
+valid as written. This version follows v0.4.0.
 
 ### v0.4.0
 
@@ -882,7 +927,8 @@ until materialization succeeds. Materialization MAY yield during active buyer
 traffic only until its configured maximum deferral.
 Each materializer invocation MUST also have a fixed maximum number of batches;
 remaining journal rows stay authoritative for a later invocation. Pending
-journal selection MUST use an indexed keyset path.
+journal selection MUST use an indexed keyset path. Once a row is materialized
+and verified, R-15.10 bounds how long its journal copy stays.
 
 R-3.2.2. The provider-credit transaction MUST atomically append its compact
 immutable attempt-output event to the money database's evidence journal. Crash
@@ -1394,8 +1440,9 @@ admitted receipt-event arrival rate; staging acceptance proves sustainable
 delivery rather than assuming capacity from configuration. Exact pending depth
 and oldest age MUST use indexed reads. If a stats read times out, the last
 successful values remain exposed together with an explicit stale flag and
-sample age. Retention deletes only drained rows, in bounded indexed batches;
-pending and poison evidence is never pruned by that path.
+sample age. Retention deletes only drained rows, in bounded indexed batches,
+after the R-15.10 window; pending and poison evidence is never pruned by that
+path.
 
 R-11.2. Audit events MUST NOT contain raw prompts, raw outputs, receipt
 signatures, or receipt public keys unless an existing spec already permits the
@@ -2050,16 +2097,58 @@ filesystem. It re-reads free space as the archive grows and stops the export,
 removing the partial archive and deleting nothing, if the floor is reached. Each run reports the archive's byte size and the filesystem's
 free and total bytes. Retention uses one short `BEGIN IMMEDIATE` transaction
 per batch of requests and pauses between batches, so the hot-path writer is
-never starved. The number of requests per run and the ledger rows scanned
-per run are bounded by configuration. Memory is bounded independently of the
-number of requests per run: selection, dry run, and export hold one request's
+never starved. A run drains: it writes, verifies, and deletes one archive
+after another along a scan lap until the lap completes, the ledger rows
+scanned per run reach their configured bound, a refusal stops it, or its
+wall-clock budget (`run_budget_minutes`, default 30) is spent. Each archive
+holds at most `max_requests_per_run` requests. The budget is checked
+between scan chunks, between archives, and between delete batches. An
+archive whose deletion the budget cut short stays pending; the next run
+resumes it and skips the requests it already deleted.
+
+A lap walks the ledger from a persisted archived low watermark to its end,
+across runs. Every credit at or below the watermark MUST be archived, kept
+hot for a reason that never clears (the provider's first verified verdict,
+relay-blind settlement, a quarantine resolution, or an archived credit of the
+same request), or named in a persisted holds table. A request skipped or
+refused for a reason that can clear, other than being too young, MUST be
+written to the holds table, and every lap MUST first re-check the holds
+below its start. A hold that only the deletion re-check refused because its
+settlement finality was open MUST have its finality read before it is
+archived again, so it is neither re-archived nor counted as eligible while
+the finality stays open. A too-young credit (inside the reconcile horizon, or in a
+settlement window fewer than `min_settlement_cycles` cycles old), a request
+the lap selected, and a request in a pending or failed archive keep the
+watermark below them. When a lap completes, the watermark moves to the
+lap's end or below the lowest such credit, and the run stops. A request
+wrongly treated as kept hot for good only stays hot; nothing is deleted
+early.
+
+Each run reports:
+
+- why it stopped (`stop_reason`);
+- whether the last completed lap found no eligible request
+  (`backlog_drained`, persisted across runs);
+- the watermark, the lap counters, and the last lap's skip counts by reason,
+  which are the expected non-zero floor of a drained backlog;
+- the held requests plus the settled, unarchived credits above the
+  watermark that are past both finality cutoffs
+  (`backlog_candidate_credits`, an upper bound of the remaining eligible
+  backlog).
+
+Memory is bounded independently of the number of requests per
+archive and per run: selection, dry run, and export hold one request's
 evidence at a time, verification keeps only a digest per request, and deletion
 re-reads the archive as a stream holding one batch, capped by the batch size
 and a fixed payload budget. Each re-read request MUST match its digest from
 the verified pass, or deletion stops. Retention reclaims space only through
 `PRAGMA incremental_vacuum` in bounded page steps. It MUST NOT run a full
-`VACUUM`. A database that is not in `auto_vacuum = INCREMENTAL` mode reports
-that fact and needs the operator's one-time conversion.
+`VACUUM`. Each run reports every database's `auto_vacuum` mode. A database
+in `auto_vacuum = NONE` skips the incremental-vacuum step, logs that it was
+skipped, and needs the operator's one-time conversion. That conversion runs
+only through the ops entry point, after the drain. The entry point states
+the downtime, refuses unless `quick_check` passes first, takes a fresh
+backup copy of each file, and runs `quick_check` again afterwards.
 
 R-15.6. Archived state stays visible. In the delete transaction, retention
 records:
@@ -2120,6 +2209,62 @@ against such a database. Once a retention-capable release has opened the
 database, the coordinator rolls forward only. A rollback that restores a
 database snapshot taken before that release first opened it, together with
 the release that wrote the snapshot, stays valid. No path may lower the floor.
+
+R-15.10. Hot footprint. Evidence that is already held elsewhere leaves the
+hot databases early, and no column or index holds what another already
+holds:
+
+1. Drained audit outbox rows. The audit database holds the copy of a drained
+   `settlement_receipt_audit_outbox` row. Such a row that is not poisoned
+   MAY be deleted once
+   `storage.settlement_receipt_audit_outbox_drained_retention_hours`
+   (default 24, minimum 1, at most 24 times `audit_log_retention_days`)
+   have passed since its `drained_at_utc`. This key
+   is separate from `storage.audit_log_retention_days`, which governs the
+   audit database. A poisoned or undelivered row MUST NOT be deleted by this
+   rule. Each prune run deletes bounded batches, within a short time
+   budget, until a batch comes back short, so pruning keeps pace with
+   delivery.
+2. Mirrored route-snapshot journal rows. A journal row MAY be deleted once
+   its `mirrored_at_utc` is at least
+   `storage.route_snapshot_journal_mirrored_grace_minutes` (default 60,
+   minimum 1, at most 10080) old, and only while the primary `settlement_route_snapshots`
+   row of the same attempt has the same `route_snapshot_digest`,
+   `route_snapshot_json`, compute-integrity capture columns, and
+   `relay_blind_provider_binding_digest`, and that digest is the SHA-256 of
+   the primary row's canonical preimage (item 3). An unmirrored row, a row inside the
+   grace period, and a row whose primary copy is missing or differs MUST NOT
+   be deleted. The pruner walks the journal by id in bounded batches. Each
+   batch deletes in one short journal transaction, with a pause between
+   batches, and the walk resumes where it stopped, so rows that stay behind
+   never block it.
+3. Canonical preimage. A new route snapshot stores
+   `route_snapshot_canonical_json` empty when its canonical preimage
+   recomputes byte for byte from `route_snapshot_json`: parse the JSON and
+   apply the canonicalization the digest uses. Otherwise the column stores
+   the preimage. A reader that needs the preimage of a row whose column is
+   empty MUST recompute it that way. Rows that carry the preimage keep it.
+4. Verifier diagnostics. `settlement_receipt_verdicts.verifier_diagnostics_json`
+   repeats the typed columns `receipt_result`, `settlement_outcome`,
+   `reason`, `idempotency_status`, and `closed`. New and updated verdict
+   rows store `{}` in it. Readers MUST use the typed columns. `facts_json` is
+   unchanged: it holds receipt facts that no typed column carries, such as
+   the provider-signed `issued_at_unix_ms`.
+5. Indexes. Coordinator startup drops these indexes once
+   (`DROP INDEX IF EXISTS`). Each of `idx_srs_request`, `idx_srv_request`,
+   and `idx_lrc_request` is a prefix of its table's unique key, which serves
+   the same lookups. `idx_srs_digest` and `idx_sao_output_hash` serve no
+   request-path query: every such query on those columns also constrains
+   the request, which another index serves. The admin verdict counters,
+   which scan every snapshot, sort by digest instead of reading the index. In the route-snapshot journal,
+   `idx_srsj_request` is a prefix of the unique key, and no query reads
+   `idx_srsj_digest` or `idx_srsj_provider`. In the audit database, no query
+   reads `idx_audit_log_event_type` or `idx_audit_log_provider_id`
+   (SPEC-002 R-7.10.1).
+
+R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
+row already pruned under items 1 or 2 is neither a reason to keep a request
+hot nor a mismatch at deletion.
 
 ## Acceptance criteria
 
@@ -2426,10 +2571,14 @@ the release that wrote the snapshot, stays valid. No path may lower the floor.
 - **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
   compatibility floor 4 at open and in every delete transaction, so a
   coordinator below contract 4 refuses to open the database.
-- **AC-022-75 (v0.4.0):** Retention is enabled by default with the default
-  archive directory next to the database. A run archives at most
-  `max_requests_per_run` requests and deletes them `batch_size` requests per
-  transaction. A run that would write a new archive below the archive
+- **AC-022-75 (v0.4.3):** Retention is enabled by default with the default
+  archive directory next to the database. A run drains the eligible backlog
+  along a scan lap that starts at the archived low watermark, in archives of
+  at most `max_requests_per_run` requests deleted `batch_size` requests per
+  transaction. It stops when the lap completes or its `run_budget_minutes`
+  budget is spent, and reports whether the last completed lap drained the
+  backlog. A request that can still become eligible stays in a holds table
+  that every lap re-checks, or, when too young, below the watermark. A run that would write a new archive below the archive
   filesystem's free-space floor exports and deletes nothing.
 
 ## Implementation sequencing

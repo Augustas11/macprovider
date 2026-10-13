@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import sqlite3
@@ -141,6 +142,39 @@ class ExtractorTests(unittest.TestCase):
         logged = json.loads((primary / "logs/coordinator-events.json").read_text())["events"]
         self.assertFalse(any("unrelated routine line" in str(event) for event in logged))
         self.assertTrue(all(event["time_utc"].endswith("Z") for event in logged))
+
+    def test_recomputes_an_empty_route_snapshot_canonical_preimage(self) -> None:
+        # SPEC-022 R-15.10: a new route snapshot stores its canonical preimage
+        # empty; the extractor recomputes it from route_snapshot_json.
+        raw = Path(self.fx.tmp.name) / "raw-empty-canonical"
+        shutil.copytree(self.fx.raw, raw, symlinks=True)
+        with sqlite3.connect(raw / "db" / "coordinator.db") as db:
+            db.execute("UPDATE settlement_route_snapshots SET route_snapshot_canonical_json = ''")
+        out = Path(self.fx.tmp.name) / "extract-empty-canonical"
+        completed = run_extractor(raw, out, self.fx.facts)
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        exported = json.loads((out / "primary/db/coordinator.db/settlement_route_snapshots.json").read_text())["rows"]
+        original = json.loads((self.fx.out / "primary/db/coordinator.db/settlement_route_snapshots.json").read_text())["rows"]
+        self.assertTrue(exported)
+        self.assertEqual(
+            [row["route_snapshot_canonical_json"] for row in original],
+            [row["route_snapshot_canonical_json"] for row in exported],
+        )
+
+    def test_route_snapshot_canonical_matches_the_coordinator(self) -> None:
+        # Vector written by the coordinator (Go internal/jcs): HTML characters,
+        # U+2028, a decomposed accent, a quote, and a control character.
+        spec = importlib.util.spec_from_file_location("extract_primary_evidence", EXTRACTOR)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        RENDERED = '{"account_scope":"acct_sha256:1111111111111111111111111111111111111111111111111111111111111111","attempt_n":0,"catalog_body_digest":"4444444444444444444444444444444444444444444444444444444444444444","catalog_expires_at_unix_ms":1800000000000,"catalog_id":"catalog-a","catalog_signature_key_id":"catalog-key-a","catalog_signature_pubkey_fingerprint":"ed25519-sha256:5555555555555555555555555555555555555555555555555555555555555555","expected_catalog_model_hash":"3333333333333333333333333333333333333333333333333333333333333333","expected_catalog_model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_id":"model \\u003c\\u0026\\u003e \\u2028 é \\"q\\" \\u0001","paid_entrypoint":"coordinator_buyer_v1_chat_completions","pending_deadline_seconds":30,"prompt_hash":"6666666666666666666666666666666666666666666666666666666666666666","prompt_hash_basis":"coordinator_prompt_canonical_v1","provider_generation_id":"generation-a","provider_id":"provider-a","provider_receipt_key_id":"ed25519-sha256:2222222222222222222222222222222222222222222222222222222222222222","provider_receipt_key_source":"auth_session","provider_reported_model_hash":"3333333333333333333333333333333333333333333333333333333333333333","provider_reported_model_hash_algorithm":"macprovider.snapshot-manifest.v1","provider_session_id":"session-a","request_id":"req-a","request_start_ts_unix_ms":1716768000000,"route_decision_ts_unix_ms":1716768000100,"route_snapshot_mode":"observe","route_snapshot_policy_version":"spec022-prereq-v1","spec008_hash_status":"hash_verified"}'
+        CANONICAL = '{"account_scope":"acct_sha256:1111111111111111111111111111111111111111111111111111111111111111","attempt_n":0,"catalog_body_digest":"4444444444444444444444444444444444444444444444444444444444444444","catalog_expires_at_unix_ms":1800000000000,"catalog_id":"catalog-a","catalog_signature_key_id":"catalog-key-a","catalog_signature_pubkey_fingerprint":"ed25519-sha256:5555555555555555555555555555555555555555555555555555555555555555","expected_catalog_model_hash":"3333333333333333333333333333333333333333333333333333333333333333","expected_catalog_model_hash_algorithm":"macprovider.snapshot-manifest.v1","model_id":"model <&> \u2028 é \\"q\\" \\u0001","paid_entrypoint":"coordinator_buyer_v1_chat_completions","pending_deadline_seconds":30,"prompt_hash":"6666666666666666666666666666666666666666666666666666666666666666","prompt_hash_basis":"coordinator_prompt_canonical_v1","provider_generation_id":"generation-a","provider_id":"provider-a","provider_receipt_key_id":"ed25519-sha256:2222222222222222222222222222222222222222222222222222222222222222","provider_receipt_key_source":"auth_session","provider_reported_model_hash":"3333333333333333333333333333333333333333333333333333333333333333","provider_reported_model_hash_algorithm":"macprovider.snapshot-manifest.v1","provider_session_id":"session-a","request_id":"req-a","request_start_ts_unix_ms":1716768000000,"route_decision_ts_unix_ms":1716768000100,"route_snapshot_mode":"observe","route_snapshot_policy_version":"spec022-prereq-v1","spec008_hash_status":"hash_verified"}'
+        DIGEST = 'b941aef7799e4708edf4caf1d9e2f902b89793642c858b43fe90b7e14c765230'
+        self.assertNotEqual(RENDERED, CANONICAL)
+        record = {"route_snapshot_json": RENDERED, "route_snapshot_digest": DIGEST}
+        self.assertEqual(CANONICAL, module.route_snapshot_canonical(record))
+        record["route_snapshot_digest"] = "0" * 64
+        self.assertEqual("", module.route_snapshot_canonical(record))
 
     def test_opens_databases_read_only(self) -> None:
         before = {path.name: path.read_bytes() for path in (self.fx.raw / "db").iterdir()}

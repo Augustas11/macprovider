@@ -101,6 +101,10 @@ func ValidCompatibilitySetVersion(version string) bool {
 // Operators may not set audit_log_retention_days below this value.
 const minAuditLogRetentionDays = 90
 
+// maxRouteSnapshotJournalMirroredGraceMinutes bounds the SPEC-022 R-15.10
+// journal grace to a week, far below any duration overflow.
+const maxRouteSnapshotJournalMirroredGraceMinutes = 7 * 24 * 60
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Coordinator                  CoordinatorConfig            `yaml:"coordinator"`
@@ -1432,6 +1436,16 @@ type StorageConfig struct {
 	// operator_model_swap audit_log table (and any future audit event
 	// types). Default 90 days mirrors request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
+	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
+	// already copied into the audit database, so it leaves the money
+	// database this many hours after delivery. Poisoned and undelivered
+	// rows are never pruned. Independent of audit_log_retention_days, which
+	// governs the audit database itself.
+	SettlementReceiptAuditOutboxDrainedRetentionHours int `yaml:"settlement_receipt_audit_outbox_drained_retention_hours"`
+	// SPEC-022 R-15.10: a route-snapshot journal row leaves this many
+	// minutes after it was mirrored, once its primary row is verified to
+	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
+	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -1771,10 +1785,19 @@ type BillingRetentionConfig struct {
 	// BatchPauseMS is the pause between delete batches that yields the
 	// SQLite writer to the hot path.
 	BatchPauseMS int `yaml:"batch_pause_ms"`
-	// MaxRequestsPerRun bounds the requests one run archives.
+	// MaxRequestsPerRun bounds the requests in one archive (the key keeps
+	// its pre-#1979 name so existing configs load). A run drains: it writes,
+	// verifies, and deletes archive after archive along a scan lap that
+	// starts at the archived low watermark, until the lap completes,
+	// MaxScanRowsPerRun is reached, or RunBudgetMinutes is spent; the lap
+	// continues in the next run.
 	MaxRequestsPerRun int `yaml:"max_requests_per_run"`
-	// MaxScanRowsPerRun bounds the ledger credits one run walks.
+	// MaxScanRowsPerRun bounds the ledger credits one run walks. Default
+	// 5,000,000, so the run budget is normally the effective limit.
 	MaxScanRowsPerRun int `yaml:"max_scan_rows_per_run"`
+	// RunBudgetMinutes is one run's wall-clock budget, checked between
+	// archives and between delete batches. Default 30.
+	RunBudgetMinutes int `yaml:"run_budget_minutes"`
 	// IncrementalVacuumPages is the page budget per incremental_vacuum step;
 	// IncrementalVacuumMaxSteps bounds the steps per run.
 	IncrementalVacuumPages    int `yaml:"incremental_vacuum_pages"`
@@ -1994,6 +2017,8 @@ func Default() Config {
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
+			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
+			RouteSnapshotJournalMirroredGraceMinutes:          60,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -2038,7 +2063,8 @@ func Default() Config {
 				BatchSize:                   50,
 				BatchPauseMS:                200,
 				MaxRequestsPerRun:           20000,
-				MaxScanRowsPerRun:           500000,
+				MaxScanRowsPerRun:           5000000,
+				RunBudgetMinutes:            30,
 				IncrementalVacuumPages:      2048,
 				IncrementalVacuumMaxSteps:   256,
 				ArchiveMinFreeBytes:         20 << 30,
@@ -3247,6 +3273,12 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
 		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
+	}
+	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
+	}
+	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
+		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
@@ -4689,6 +4721,11 @@ func (c Config) validateBillingRetention() error {
 	}
 	if r.MaxScanRowsPerRun < 1 {
 		return fmt.Errorf("billing.retention.max_scan_rows_per_run must be >= 1")
+	}
+	// The cap leaves the admin run route's 6 h timeout room for the
+	// end-of-run backlog count and incremental vacuum.
+	if r.RunBudgetMinutes < 1 || r.RunBudgetMinutes > 240 {
+		return fmt.Errorf("billing.retention.run_budget_minutes must be in [1, 240]")
 	}
 	if r.IncrementalVacuumPages < 0 || r.IncrementalVacuumMaxSteps < 0 {
 		return fmt.Errorf("billing.retention.incremental_vacuum_pages and incremental_vacuum_max_steps must be >= 0")

@@ -51,12 +51,66 @@ WHERE type IN ('table', 'index') AND name IN (
 	for _, name := range []string{
 		"audit_log",
 		"idx_audit_log_ts_utc",
-		"idx_audit_log_provider_id",
-		"idx_audit_log_event_type",
 	} {
 		if !seen[name] {
 			t.Fatalf("missing schema object %q; got %#v", name, seen)
 		}
+	}
+	// SPEC-002 v1.6.15 R-7.10.1: no query reads these indexes.
+	for _, name := range []string{"idx_audit_log_provider_id", "idx_audit_log_event_type"} {
+		if seen[name] {
+			t.Fatalf("schema object %q must not exist; got %#v", name, seen)
+		}
+	}
+}
+
+// An audit database created by an earlier release loses the two unused
+// indexes on its next open; rows and the retention index stay.
+func TestOpenStoreDropsUnusedAuditLogIndexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coordinator-audit.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX idx_audit_log_ts_utc ON audit_log(ts_utc);
+CREATE INDEX idx_audit_log_provider_id ON audit_log(provider_id);
+CREATE INDEX idx_audit_log_event_type ON audit_log(event_type);
+INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json) VALUES ('2026-01-01T00:00:00Z', 'operator_model_swap', 'p', '{}');`); err != nil {
+		t.Fatal(err)
+	}
+	_ = legacy.Close()
+	store, err := OpenSettlementReceiptStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var indexes []string
+	rows, err := store.DB().Query(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit_log' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		indexes = append(indexes, name)
+	}
+	_ = rows.Close()
+	if strings.Join(indexes, ",") != "idx_audit_log_settlement_receipt_outbox,idx_audit_log_ts_utc" {
+		t.Fatalf("audit_log indexes=%v", indexes)
+	}
+	var n int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM audit_log`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("audit rows=%d err=%v", n, err)
 	}
 }
 

@@ -9,6 +9,7 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    the files now on disk, /healthz recommending
                                    the config's latest_binary_version; the
                                    config becomes svc/running.yaml
+  stop U / start U                 append the action to svc/unit-actions
   _init                            create the first /proc entry
 Anything else exits 1. A file svc/restart_fail makes restart fail.
 """
@@ -73,5 +74,8 @@ elif args[:1] == ["restart"]:
     if m:
         health["recommended_binary_version"] = m.group(1)
     json.dump(health, open(h, "w"))
+elif args[:1] in (["stop"], ["start"]):
+    with open(os.path.join(svc, "unit-actions"), "a") as f:
+        f.write(args[0] + "\n")
 else:
     sys.exit(1)

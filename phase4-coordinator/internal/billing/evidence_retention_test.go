@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,7 +160,7 @@ func retentionTestOptions(dir string, verifier EvidenceArchiveOffhostVerifier) E
 		CadenceDays:               7,
 		ReconcileHorizon:          8 * 24 * time.Hour,
 		BatchSize:                 1,
-		MaxRequestsPerRun:         100,
+		MaxRequestsPerArchive:     100,
 		MaxScanRowsPerRun:         10000,
 		IncrementalVacuumPages:    16,
 		IncrementalVacuumMaxSteps: 4,
@@ -1062,12 +1063,23 @@ func TestEvidenceRetentionIncrementalVacuumIsBounded(t *testing.T) {
 	if _, err := plain.Exec(`CREATE TABLE t (v TEXT)`); err != nil {
 		t.Fatal(err)
 	}
+	var logged bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
 	r = incrementalVacuum(ctx, plain, "plain", EvidenceRetentionOptions{IncrementalVacuumPages: 10, IncrementalVacuumMaxSteps: 3})
-	if r.AutoVacuumMode != "none" || !r.ConversionNeeds || r.Steps != 0 {
+	log.SetOutput(prevOut)
+	log.SetFlags(prevFlags)
+	if r.AutoVacuumMode != "none" || !r.ConversionNeeds || r.Steps != 0 || !strings.Contains(r.Skipped, "auto_vacuum=NONE") {
 		t.Fatalf("non-incremental vacuum=%+v", r)
+	}
+	if !strings.Contains(logged.String(), "database=plain auto_vacuum=none incremental_vacuum=skipped") {
+		t.Fatalf("auto_vacuum NONE skip not logged: %q", logged.String())
 	}
 }
 
+// A per-archive cap of one makes the run write one archive per request; the
+// scan resumes at the next candidate each time and the run drains them all.
 func TestEvidenceRetentionRunCapResumesAtNextCandidate(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
@@ -1076,14 +1088,17 @@ func TestEvidenceRetentionRunCapResumesAtNextCandidate(t *testing.T) {
 	f.seed(t, "c")
 	f.settle(t)
 	opts := retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify)
-	opts.MaxRequestsPerRun = 1
-	for run, want := range []string{"b", "c"} {
-		report, err := f.store.RunEvidenceRetention(ctx, opts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if report.DeletedRequests != 1 || f.hotRows(t, want) != 0 {
-			t.Fatalf("run %d report=%+v hot(%s)=%d", run, report, want, f.hotRows(t, want))
+	opts.MaxRequestsPerArchive = 1
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Archives != 2 || report.DeletedRequests != 2 || report.BacklogDrained || report.StopReason != EvidenceRetentionStopLapComplete {
+		t.Fatalf("report=%+v", report)
+	}
+	for _, id := range []string{"b", "c"} {
+		if f.hotRows(t, id) != 0 {
+			t.Fatalf("hot(%s)=%d", id, f.hotRows(t, id))
 		}
 	}
 	if f.hotRows(t, "first") != 3 {
@@ -1115,11 +1130,11 @@ func TestEvidenceRetentionStopsDeletingWhenDisabledMidRun(t *testing.T) {
 	}
 }
 
-// The first run on a large backlog is chunked: it archives at most
-// max_requests_per_run requests and deletes them batch_size requests per short
-// transaction; the rest waits for later runs. The shipped defaults keep that
-// bound.
-func TestEvidenceRetentionFirstRunIsChunked(t *testing.T) {
+// A run drains a backlog larger than one archive: it writes bounded
+// archives (max_requests_per_run requests each) and deletes them batch_size
+// requests per short transaction until nothing eligible remains. The shipped
+// defaults keep those bounds.
+func TestEvidenceRetentionRunDrainsBacklogAcrossArchives(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
 	f.seed(t, "first")
@@ -1129,32 +1144,44 @@ func TestEvidenceRetentionFirstRunIsChunked(t *testing.T) {
 	}
 	f.settle(t)
 	opts := retentionTestOptions(t.TempDir(), nil)
-	opts.MaxRequestsPerRun = 3
+	opts.MaxRequestsPerArchive = 3
 	opts.BatchSize = 2
 	report, err := f.store.RunEvidenceRetention(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.EligibleRequests != 3 || report.DeletedRequests != 3 || report.DeleteBatches != 2 {
-		t.Fatalf("first run=%+v want 3 requests in 2 delete batches", report)
+	if report.Status != EvidenceRetentionStatusDeleted || report.Archives != 2 || report.EligibleRequests != 5 ||
+		report.DeletedRequests != 5 || report.DeleteBatches != 3 {
+		t.Fatalf("run=%+v want 5 requests in 2 archives and 3 delete batches", report)
 	}
-	hot := 0
+	// The lap that drained found eligible requests; the next lap proves the
+	// backlog is empty.
+	if report.BacklogDrained || report.StopReason != EvidenceRetentionStopLapComplete || report.LapsCompleted != 1 ||
+		report.LastLapEligibleRequests != 5 || report.LastLapSkippedRequests[retentionSkipFirstVerified] != 1 {
+		t.Fatalf("lap report=%+v", report)
+	}
 	for _, id := range backlog {
 		if f.hotRows(t, id) != 0 {
-			hot++
+			t.Fatalf("hot(%s)=%d after drain", id, f.hotRows(t, id))
 		}
 	}
-	if hot != 2 {
-		t.Fatalf("hot backlog after first run=%d want 2", hot)
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives WHERE status = 'deleted' AND request_count <= 3`); got != 2 {
+		t.Fatalf("bounded deleted archives=%d want 2", got)
 	}
 	report, err = f.store.RunEvidenceRetention(ctx, opts)
-	if err != nil || report.DeletedRequests != 2 || report.DeleteBatches != 1 {
+	if err != nil || report.Status != EvidenceRetentionStatusNothingEligible || !report.BacklogDrained ||
+		report.StopReason != EvidenceRetentionStopDrained || report.DeletedRequests != 0 || report.BacklogCandidateCredits != 0 {
 		t.Fatalf("second run=%+v err=%v", report, err)
+	}
+	// The watermark passed every archived credit and the first verified
+	// request (kept hot for good), so the next lap scans nothing below it.
+	if maxID := scalar(t, f.store.db, `SELECT MAX(id) FROM ledger_request_credits`); report.WatermarkCreditID != maxID {
+		t.Fatalf("watermark=%d want %d", report.WatermarkCreditID, maxID)
 	}
 
 	def := config.Default()
 	d := EvidenceRetentionOptionsFromConfig(def.Billing.Retention, def.Settlement)
-	if !d.Enabled || d.BatchSize != 50 || d.BatchPause != 200*time.Millisecond || d.MaxRequestsPerRun != 20000 || d.MaxScanRowsPerRun != 500000 {
+	if !d.Enabled || d.BatchSize != 50 || d.BatchPause != 200*time.Millisecond || d.MaxRequestsPerArchive != 20000 || d.RunBudget != 30*time.Minute || d.MaxScanRowsPerRun != 5000000 {
 		t.Fatalf("default bounds=%+v", d)
 	}
 	if d.ArchiveDir != "" || d.OffhostVerifier != nil {
@@ -1310,5 +1337,321 @@ func TestEvidenceRetentionStopsExportAtArchiveDiskFloor(t *testing.T) {
 	report, err = f.store.RunEvidenceRetention(ctx, opts)
 	if err != nil || report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 2 {
 		t.Fatalf("run with room=%+v err=%v", report, err)
+	}
+}
+
+// The wall-clock budget stops a run at a delete-batch boundary. The archive
+// cut short stays pending and the next run resumes it and finishes the
+// drain. A run that stops early reports the remaining backlog.
+func TestEvidenceRetentionRunStopsAtBudgetAndResumes(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	for _, id := range []string{"b", "c", "d"} {
+		f.seed(t, id)
+	}
+	f.settle(t)
+	clock := f.store.now()
+	f.store.now = func() time.Time { return clock }
+	calls := 0
+	verifier := &recordingVerifier{hook: func() {
+		calls++
+		if calls == 2 {
+			clock = clock.Add(31 * time.Minute)
+		}
+	}}
+	opts := retentionTestOptions(t.TempDir(), verifier.verify)
+	opts.MaxRequestsPerArchive = 1
+	opts.RunBudget = 30 * time.Minute
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.StopReason != EvidenceRetentionStopBudget || report.Status != EvidenceRetentionStatusDeleted ||
+		report.Archives != 1 || report.DeletedRequests != 1 || report.BacklogDrained {
+		t.Fatalf("budget run=%+v", report)
+	}
+	// "first" (kept hot as the provider's first verified verdict), the
+	// pending archive's request, and the unscanned one: the count is an
+	// upper bound of the eligible backlog.
+	if report.BacklogCandidateCredits != 3 {
+		t.Fatalf("backlog candidate credits=%d want 3", report.BacklogCandidateCredits)
+	}
+	line := evidenceRetentionLogLine(report)
+	for _, want := range []string{"stop_reason=run_budget", "backlog_drained=false", "backlog_candidate_credits=3", "auto_vacuum=coordinator=none"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log line %q missing %q", line, want)
+		}
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives WHERE status IN ('exported','offhost_verified')`); got != 1 {
+		t.Fatalf("pending archives=%d want 1", got)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.ResumedArchive || report.DeletedRequests != 2 || report.StopReason != EvidenceRetentionStopLapComplete {
+		t.Fatalf("resumed run=%+v", report)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || !report.BacklogDrained || report.StopReason != EvidenceRetentionStopDrained {
+		t.Fatalf("drain-proving run=%+v err=%v", report, err)
+	}
+	for _, id := range []string{"b", "c", "d"} {
+		if f.hotRows(t, id) != 0 {
+			t.Fatalf("hot(%s)=%d after resume", id, f.hotRows(t, id))
+		}
+	}
+	if !strings.Contains(evidenceRetentionLogLine(report), "backlog_drained=true") {
+		t.Fatal("drained run log line does not say so")
+	}
+}
+
+// A budget spent before anything is deleted is its own status, never
+// "nothing eligible".
+func TestEvidenceRetentionRunBudgetSpentBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.settle(t)
+	clock := f.store.now()
+	f.store.now = func() time.Time { return clock }
+	verifier := &recordingVerifier{hook: func() { clock = clock.Add(time.Hour) }}
+	opts := retentionTestOptions(t.TempDir(), verifier.verify)
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.Status != EvidenceRetentionStatusBudgetSpent || report.DeletedRequests != 0 || f.hotRows(t, "b") != 3 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// #1979: credits that may never settle (an old quarantined credit, a
+// credit left unsettled after its window settled, as for a provider below
+// the minimum payout) and requests waiting on a delivery go to the holds
+// table instead of pinning the watermark. Every lap re-checks the holds, so
+// a held request is archived once it qualifies, and a drained ledger is not
+// re-walked.
+func TestEvidenceRetentionHoldsDoNotPinTheWatermark(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "undrained")
+	f.addDrainedOutbox(t, "undrained", false, false)
+	f.seed(t, "quarantined")
+	f.settle(t)
+	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 1, quarantine_reason = 'operator' WHERE request_id = ?`, f.inputs["quarantined"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	// Seeded inside the settled window but after its settlement ran: an
+	// old credit that stays unsettled until a later settlement picks it up.
+	f.seed(t, "below-min")
+	opts := retentionTestOptions(t.TempDir(), nil)
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || report.StopReason != EvidenceRetentionStopLapComplete || report.HeldRequests != 3 {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	maxID := scalar(t, f.store.db, `SELECT MAX(id) FROM ledger_request_credits`)
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || !report.BacklogDrained || report.WatermarkCreditID != maxID {
+		t.Fatalf("second run=%+v err=%v; want drained with the watermark at %d", report, err, maxID)
+	}
+	for _, reason := range []string{retentionSkipOutboxUndelivered, retentionSkipQuarantined, retentionSkipUnsettled} {
+		if report.LastLapSkippedRequests[reason] != 1 {
+			t.Fatalf("last lap skipped=%v missing %s", report.LastLapSkippedRequests, reason)
+		}
+	}
+	if report.HeldRequests != 3 || report.BacklogCandidateCredits != 3 {
+		t.Fatalf("held=%d candidates=%d want 3 and 3", report.HeldRequests, report.BacklogCandidateCredits)
+	}
+	// A drained lap re-reads nothing below the watermark.
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.ScannedCredits != 0 || !report.BacklogDrained {
+		t.Fatalf("third run=%+v err=%v", report, err)
+	}
+	// The outbox delivers and the unsettled credit settles: the next lap's
+	// hold re-check archives both; the quarantined credit stays held.
+	if _, err := f.store.db.Exec(`UPDATE settlement_receipt_audit_outbox SET drained_at_utc = ? WHERE request_id = ?`,
+		sqliteTimeText(f.windowEnd), f.inputs["undrained"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, f.windowStart, f.windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, f.store.db, `SELECT settled FROM ledger_request_credits WHERE request_id = ?`, f.inputs["below-min"].RequestID); got != 1 {
+		t.Fatalf("below-min credit settled=%d after the later settlement", got)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 2 || f.hotRows(t, "undrained") != 0 || f.hotRows(t, "below-min") != 0 {
+		t.Fatalf("hold re-check run=%+v err=%v", report, err)
+	}
+	if f.hotRows(t, "quarantined") != 3 || f.hotRows(t, "first") != 3 || report.HeldRequests != 1 {
+		t.Fatalf("quarantined hot=%d first hot=%d held=%d", f.hotRows(t, "quarantined"), f.hotRows(t, "first"), report.HeldRequests)
+	}
+}
+
+// A request the deletion re-check keeps hot after its lap selected it goes to
+// the holds table, so a later lap selects it again and deletes it.
+func TestEvidenceRetentionDeletionRefusalHoldsWatermark(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	changed := false
+	verifier := &recordingVerifier{hook: func() {
+		if changed {
+			return
+		}
+		changed = true
+		if _, err := f.store.db.Exec(`UPDATE settlement_receipt_verdicts SET reason = reason || '-changed' WHERE request_id = ?`, b.RequestID); err != nil {
+			t.Error(err)
+		}
+	}}
+	opts := retentionTestOptions(t.TempDir(), verifier.verify)
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "b") != 3 {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_retention_holds WHERE request_id = ?`, b.RequestID); got != 1 {
+		t.Fatalf("refused request holds=%d want 1", got)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "b") != 0 || report.HeldRequests != 0 {
+		t.Fatalf("second run=%+v err=%v hot(b)=%d", report, err, f.hotRows(t, "b"))
+	}
+}
+
+// A cursor left by the first retention release (no lap state) starts a lap
+// at the watermark, so the part of the ledger below the old cursor is not
+// skipped.
+func TestEvidenceRetentionLegacyCursorStartsLapAtWatermark(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	if _, err := f.store.db.Exec(`INSERT INTO settlement_evidence_retention_state (id, scan_cursor_credit_id, updated_at_utc) VALUES (1, ?, ?)`,
+		f.creditID(t, "c"), sqliteTimeText(f.windowEnd)); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
+	if err != nil || report.ScanFromCreditID != 0 || report.DeletedRequests != 2 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+// A resumed archive skips the requests it already deleted (only their
+// journal step runs), so its delete batches and pauses go to new requests.
+func TestEvidenceRetentionResumedArchiveSkipsDeletedRequests(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, true)
+	f.seed(t, "first")
+	for _, id := range []string{"b", "c", "d"} {
+		f.seed(t, id)
+	}
+	if _, err := f.store.MirrorPendingRouteSnapshots(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	f.settle(t)
+	if _, err := f.journalDB.Exec(`CREATE TRIGGER block_journal_delete BEFORE DELETE ON settlement_route_snapshot_journal BEGIN SELECT RAISE(ABORT, 'journal unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	opts := retentionTestOptions(t.TempDir(), nil)
+	if _, err := f.store.RunEvidenceRetention(ctx, opts); err == nil {
+		t.Fatal("journal failure did not stop the run")
+	}
+	if f.hotRows(t, "b") != 0 || f.hotRows(t, "c") != 3 {
+		t.Fatalf("after interruption hot(b)=%d hot(c)=%d", f.hotRows(t, "b"), f.hotRows(t, "c"))
+	}
+	if _, err := f.journalDB.Exec(`DROP TRIGGER block_journal_delete`); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || !report.ResumedArchive || report.DeletedRequests != 2 || report.DeleteBatches != 2 || report.RouteJournalDeletedRows != 3 {
+		t.Fatalf("resumed run=%+v err=%v", report, err)
+	}
+}
+
+// The archive is recorded before the lap moves past its requests: when the
+// record fails in a pass that does not complete the lap, a later pass
+// re-selects the same requests.
+func TestEvidenceRetentionArchiveRecordFailureKeepsRequestsReachable(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	if _, err := f.store.db.Exec(`CREATE TRIGGER block_archive_record BEFORE INSERT ON settlement_evidence_archives BEGIN SELECT RAISE(ABORT, 'archive record unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	opts := retentionTestOptions(t.TempDir(), nil)
+	opts.MaxRequestsPerArchive = 1
+	if _, err := f.store.RunEvidenceRetention(ctx, opts); err == nil {
+		t.Fatal("record failure did not fail the run")
+	}
+	if f.hotRows(t, "b") != 3 {
+		t.Fatal("evidence deleted without a recorded archive")
+	}
+	st, err := loadRetentionLapState(ctx, f.store.db)
+	if err != nil || st.cursor >= f.creditID(t, "b") || st.lapsCompleted != 0 {
+		t.Fatalf("lap moved past the unrecorded request: %+v err=%v", st, err)
+	}
+	if _, err := f.store.db.Exec(`DROP TRIGGER block_archive_record`); err != nil {
+		t.Fatal(err)
+	}
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || f.hotRows(t, "b") != 0 || f.hotRows(t, "c") != 0 {
+		t.Fatalf("later run=%+v err=%v hot(b)=%d hot(c)=%d", report, err, f.hotRows(t, "b"), f.hotRows(t, "c"))
+	}
+}
+
+// A request only the deletion re-check refuses (its settlement finality
+// stays open) is held, and later laps pre-check that finality: it is not
+// re-archived every night and does not keep the backlog from draining.
+func TestEvidenceRetentionFinalityRefusalIsNotReArchived(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	b := f.seed(t, "b")
+	f.seed(t, "c")
+	f.settle(t)
+	prev := frozenRequestFinalityFunc
+	t.Cleanup(func() { frozenRequestFinalityFunc = prev })
+	frozenRequestFinalityFunc = func(s *Store, ctx context.Context, req archivedRequest, now int64) ([]frozenFinality, bool, error) {
+		if req.RequestID == b.RequestID {
+			return nil, false, nil
+		}
+		return prev(s, ctx, req, now)
+	}
+	opts := retentionTestOptions(t.TempDir(), nil)
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || report.SkippedRequests[retentionSkipFinalityOpen] != 1 || report.HeldRequests != 1 {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	archives := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`)
+	for run := 0; run < 2; run++ {
+		report, err = f.store.RunEvidenceRetention(ctx, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !report.BacklogDrained || report.LastLapEligibleRequests != 0 || report.LastLapSkippedRequests[retentionSkipFinalityOpen] != 1 {
+		t.Fatalf("refused request kept the backlog open: %+v", report)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archives`); got != archives {
+		t.Fatalf("refused request re-archived: archives %d -> %d", archives, got)
+	}
+	if f.hotRows(t, "b") != 3 {
+		t.Fatal("refused request lost evidence")
+	}
+	// Once its finality closes, the next lap archives and deletes it.
+	frozenRequestFinalityFunc = prev
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "b") != 0 || report.HeldRequests != 0 {
+		t.Fatalf("closed-finality run=%+v err=%v", report, err)
 	}
 }

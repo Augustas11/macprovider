@@ -29,6 +29,23 @@
 #   7 wait_updater      bounded wait for the updater unit to exit
 #   8 health            coordinator and gateway /healthz report the tag
 #
+# One-time task (PEARL_RUNTIME_TASK=retention-vacuum-conversion), outside the
+# release train: convert the coordinator database files to
+# auto_vacuum=INCREMENTAL with a full VACUUM
+# (ops/runbooks/settlement-evidence-retention.md section 4):
+#   1 vacuum_mode       read-only: PRAGMA auto_vacuum of both files on Pearl
+#   2 drain_gate        read-only: the last completed retention lap found no
+#                       eligible request (backlog_drained)
+#   3 convert           under the live-ops lock and the three Pearl locks:
+#                       stop the coordinator, quick_check (refuse on failure),
+#                       take a fresh VACUUM INTO backup of each file, VACUUM
+#                       with auto_vacuum=INCREMENTAL, quick_check again, start
+#                       it (downtime stated first)
+#   Env: PEARL_COORDINATOR_DB (absolute path of the coordinator database on
+#   Pearl, required), PEARL_SQLITE3, PEARL_COORDINATOR_UNIT,
+#   PEARL_UPDATER_LOCK, PEARL_DEPLOY_LOCK, PEARL_DEPLOY_OPERATION_LOCK,
+#   PEARL_COORDINATOR_HEALTHZ_URL.
+#
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
@@ -45,6 +62,8 @@ OPS_REQUIRE_CLEAN_FOR_ALL=1
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
+RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
+VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator and route-snapshot journal database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
 
 
@@ -54,7 +73,145 @@ max_remote_tag() {
     sort -t. -k1,1n -k2,2n -k3,3n | tail -n1
 }
 
+# Read one PRAGMA/SELECT from a Pearl database file without writing it. The
+# statement must not contain single quotes; columns come back |-separated.
+pearl_sqlite_read() {
+  ssh "$PEARL_SSH" "'$1' -readonly '$2' '$3'" 2>/dev/null
+}
+
+gather_retention_vacuum() {
+  OPS_SCOPE="retention-vacuum-conversion"
+  NEXT_RUNBOOK="$RETENTION_DOC"
+  local db="${PEARL_COORDINATOR_DB:-}" sqlite="${PEARL_SQLITE3:-/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3}"
+  local unit="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
+  local ulock="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
+  local dlock="${PEARL_DEPLOY_LOCK:-/opt/macprovider/.coordinator-deploy.lock}"
+  local olock="${PEARL_DEPLOY_OPERATION_LOCK:-/opt/macprovider/.coordinator-deploy-operation.lock}"
+  local healthz="${PEARL_COORDINATOR_HEALTHZ_URL:-http://127.0.0.1:8444/healthz}"
+  local p
+  for p in "$sqlite" "$ulock" "$dlock" "$olock"; do
+    [[ "$p" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "Pearl paths must be absolute and plain: $p"
+  done
+  [[ "$unit" =~ ^[A-Za-z0-9][A-Za-z0-9@._-]*$ ]] || refuse "PEARL_COORDINATOR_UNIT must be a plain unit name"
+  [[ "$healthz" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]*$ ]] || refuse "PEARL_COORDINATOR_HEALTHZ_URL must be a plain http(s) URL"
+  if [ -z "$db" ]; then
+    step vacuum_mode pending "PEARL_COORDINATOR_DB is unset"
+    set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" "set PEARL_COORDINATOR_DB to the coordinator database path on Pearl"
+    return
+  fi
+  [[ "$db" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_DB must be an absolute plain path"
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step vacuum_mode pending "PEARL_SSH is unset"
+    set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" "PEARL_SSH is unset"
+    return
+  fi
+  local main_mode journal_mode="absent"
+  main_mode="$(pearl_sqlite_read "$sqlite" "$db" 'PRAGMA auto_vacuum;' || true)"
+  if ssh "$PEARL_SSH" "test -f '$db.route-snapshots'" 2>/dev/null; then
+    journal_mode="$(pearl_sqlite_read "$sqlite" "$db.route-snapshots" 'PRAGMA auto_vacuum;' || true)"
+  fi
+  fact coordinator_db_auto_vacuum "$main_mode"
+  fact route_snapshot_journal_auto_vacuum "$journal_mode"
+  if ! [[ "$main_mode" =~ ^[0-2]$ ]] || ! [[ "$journal_mode" =~ ^([0-2]|absent)$ ]]; then
+    step vacuum_mode blocked "cannot read PRAGMA auto_vacuum on Pearl"
+    set_next vacuum_mode blocked "Read the coordinator database auto_vacuum mode" "" \
+      "PRAGMA auto_vacuum over ssh failed (coordinator=$main_mode journal=$journal_mode); check PEARL_COORDINATOR_DB and PEARL_SQLITE3"
+    return
+  fi
+  if [ "$main_mode" = 2 ] && [[ "$journal_mode" =~ ^(2|absent)$ ]]; then
+    local s
+    for s in vacuum_mode drain_gate convert; do step "$s" "done" ""; done
+    set_next "done" "done" "both database files are auto_vacuum=INCREMENTAL" ""
+    return
+  fi
+  step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode (2 = INCREMENTAL)"
+
+  # The drain signal: the last completed retention lap found nothing eligible.
+  local lap
+  lap="$(pearl_sqlite_read "$sqlite" "$db" "SELECT laps_completed, last_lap_eligible_requests, last_lap_completed_at_utc FROM settlement_evidence_retention_state WHERE id = 1;" || true)"
+  fact retention_last_lap "$lap"
+  local laps="${lap%%|*}" rest="${lap#*|}"
+  local eligible="${rest%%|*}"
+  if [[ "$laps" =~ ^[0-9]+$ ]] && [ "$laps" -gt 0 ] && [ "$eligible" = 0 ]; then
+    step drain_gate "done" "last lap completed ${rest#*|} with 0 eligible requests"
+  else
+    step drain_gate blocked "retention has not drained (laps_completed=${laps:-?} last_lap_eligible_requests=${eligible:-?})"
+    set_next drain_gate blocked "Wait for settlement-evidence retention to drain" "" \
+      "the conversion rewrites the whole file, so it waits until a completed retention lap finds no eligible request (backlog_drained=true in the nightly log); now laps_completed=${laps:-?} last_lap_eligible_requests=${eligible:-?}"
+    return
+  fi
+
+  step convert pending ""
+  set_next convert mutate "Convert the coordinator database files to auto_vacuum=INCREMENTAL (one-time)" \
+"ssh \"\$PEARL_SSH\" 'bash -s -- $db $sqlite $unit $ulock $dlock $olock $healthz' <<'REMOTE'
+set -euo pipefail
+trap '' PIPE
+umask 077
+db=\"\$1\"; sqlite=\"\$2\"; unit=\"\$3\"; healthz=\"\$7\"
+# The Pearl locks are 0600 regular files (the config guard refuses others).
+for l in \"\$4\" \"\$5\" \"\$6\"; do
+  if [ -L \"\$l\" ]; then echo \"refused: lock \$l is a symlink\" >&2; exit 1; fi
+  [ -e \"\$l\" ] || : >> \"\$l\"
+done
+exec 7>>\"\$4\"; flock -n 7 || { echo \"lock busy: \$4\" >&2; exit 1; }
+exec 8>>\"\$5\"; flock -n 8 || { echo \"lock busy: \$5\" >&2; exit 1; }
+exec 9>>\"\$6\"; flock -n 9 || { echo \"lock busy: \$6\" >&2; exit 1; }
+files=\"\$db\"; [ ! -e \"\$db.route-snapshots\" ] || files=\"\$files \$db.route-snapshots\"
+need=0
+for f in \$files; do
+  [ -f \"\$f\" ] && [ ! -L \"\$f\" ] || { echo \"refused: \$f is not a regular file\" >&2; exit 1; }
+  need=\$((need + \$(wc -c < \"\$f\")))
+done
+# A fresh backup copy, VACUUM's temporary copy (kept next to the files by
+# SQLITE_TMPDIR), and the rewritten file's WAL, all on this filesystem.
+export SQLITE_TMPDIR=\"\$(dirname \"\$db\")\"
+want=\$((need * 3))
+free=\$((\$(df -Pk \"\$(dirname \"\$db\")\" | awk 'NR == 2 { print \$4 }') * 1024))
+[ \"\$free\" -gt \"\$want\" ] || { echo \"refused: the conversion needs about \$want free bytes, \$free free\" >&2; exit 1; }
+stamp=\$(date -u +%Y%m%dT%H%M%SZ)
+keep_stopped=0
+trap '[ \"\$keep_stopped\" = 1 ] || systemctl start -- \"\$unit\"' EXIT
+systemctl stop -- \"\$unit\"
+for f in \$files; do
+  if [ \"\$(\"\$sqlite\" \"\$f\" 'PRAGMA quick_check;')\" != ok ]; then
+    echo \"refused: quick_check failed on \$f before the conversion; nothing was changed\" >&2
+    exit 1
+  fi
+done
+for f in \$files; do
+  backup=\"\$f.pre-incremental-\$stamp\"
+  \"\$sqlite\" \"\$f\" \"VACUUM INTO '\$backup';\"
+  echo \"backup: \$backup\" >&2
+  owner=\$(ls -ln \"\$f\" | awk '{ print \$3 \":\" \$4 }')
+  \"\$sqlite\" \"\$f\" 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM;'
+  if [ \"\$(\"\$sqlite\" \"\$f\" 'PRAGMA quick_check;')\" != ok ]; then
+    keep_stopped=1
+    echo \"quick_check failed on \$f after VACUUM: the coordinator stays stopped; restore \$f from \$backup\" >&2
+    exit 1
+  fi
+  [ \"\$(\"\$sqlite\" \"\$f\" 'PRAGMA auto_vacuum;')\" = 2 ] || { echo \"auto_vacuum is not INCREMENTAL on \$f (backup: \$backup)\" >&2; exit 1; }
+  # WAL side files this shell created must stay the coordinator's; never
+  # follow a link.
+  for x in \"\$f-wal\" \"\$f-shm\"; do
+    if [ -L \"\$x\" ]; then echo \"refused: \$x is a symlink\" >&2; exit 1; fi
+    [ ! -e \"\$x\" ] || chown -h \"\$owner\" \"\$x\"
+  done
+done
+trap - EXIT
+systemctl start -- \"\$unit\"
+for _ in \$(seq 90); do curl -sf \"\$healthz\" >/dev/null && exit 0; sleep 2; done
+echo \"coordinator not healthy after the conversion\" >&2; exit 1
+REMOTE"
+  next_meta convert "$RETENTION_DOC" "$VACUUM_DOWNTIME" convert
+}
+
 gather() {
+  if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
+    case "$PEARL_RUNTIME_TASK" in
+      retention-vacuum-conversion) gather_retention_vacuum; return ;;
+      *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
+    esac
+  fi
   local main_sha live gw_live T
   main_sha="$(origin_main_sha)"
   is_sha40 "$main_sha" || die "cannot resolve origin/main"

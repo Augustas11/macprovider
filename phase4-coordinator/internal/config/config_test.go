@@ -2107,3 +2107,42 @@ func TestTrustedPoolsPoolModelPricingBoundsClosedDecodeAndOverflow(t *testing.T)
 		t.Fatal("bounds under an unrepresentable multiplier validated")
 	}
 }
+
+// SPEC-022 R-15.10: the drained outbox window is its own key, independent of
+// audit_log_retention_days.
+func TestStorageDrainedOutboxRetentionDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; got != 24 {
+		t.Fatalf("drained outbox retention default=%d want 24", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "settlement_receipt_audit_outbox_drained_retention_hours") {
+		t.Fatalf("drained outbox retention=0 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours = 1
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("drained outbox retention=1 should pass: %v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours = 24*cfg.Storage.AuditLogRetentionDays + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "settlement_receipt_audit_outbox_drained_retention_hours") {
+		t.Fatalf("drained outbox retention past the audit-log window should fail; err=%v", err)
+	}
+}
+
+func TestStorageRouteSnapshotJournalGraceDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.RouteSnapshotJournalMirroredGraceMinutes; got != 60 {
+		t.Fatalf("route snapshot journal grace default=%d want 60", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.RouteSnapshotJournalMirroredGraceMinutes = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "route_snapshot_journal_mirrored_grace_minutes") {
+		t.Fatalf("route snapshot journal grace=0 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.RouteSnapshotJournalMirroredGraceMinutes = 7*24*60 + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "route_snapshot_journal_mirrored_grace_minutes") {
+		t.Fatalf("route snapshot journal grace above a week should fail; err=%v", err)
+	}
+}
