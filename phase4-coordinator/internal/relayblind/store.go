@@ -969,6 +969,8 @@ func (s *Store) columnExists(ctx context.Context, table, column string) (bool, e
 		query = `PRAGMA table_info(relay_blind_reservations)`
 	case "privacy_class_operator_clear":
 		query = `PRAGMA table_info(privacy_class_operator_clear)`
+	case "privacy_class_enrollment":
+		query = `PRAGMA table_info(privacy_class_enrollment)`
 	default:
 		return false, fmt.Errorf("%w: unknown table", ErrStoreUnavailable)
 	}

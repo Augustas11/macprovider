@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.2.7",
+      "version": "0.3.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11808,6 +11808,47 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1911",
         "rationale": "SPEC-049 v0.2.7 real privacy reject reasons (#1911) are implemented in the coordinator and gateway with unit tests. They ship in a later runtime train; the requirement stays pending until deployed and observed live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R031",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_rotation.go:BeginRotationChallenge",
+        "phase4-coordinator/internal/relayblind/privacy_rotation.go:VerifyRotation",
+        "phase4-coordinator/internal/relayblind/privacy_rotation.go:commitRotation",
+        "phase4-coordinator/internal/relayblind/store_enrollment.go:RotatePrivacyIdentity",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:resolveKeys",
+        "phase4-coordinator/internal/ws/privacy_rotation.go:runPrivacyKeyRotation",
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyInvalidatedCode",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:respondToRotation",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:applyRotationResult",
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:stageNextIdentity",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:rotationRequest",
+        "phase3-binary/Sources/macprovider-cli/PrivacyClassIdentityCommand.swift:PrivacyClassRotateIdentityCommand"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationSwapsEnrollmentWithoutOperator",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationUnsignedOrMismatchedQuarantines",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationRejectsWithoutQuarantine",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationReplayIsRejected",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationRetryIsIdempotent",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_test.go:TestRotationRetiredKeyPostureIsNotQuarantined",
+        "phase4-coordinator/internal/relayblind/privacy_rotation_vector_test.go:TestPrivacyRotationVector",
+        "phase4-coordinator/internal/ws/privacy_rotation_test.go:TestPrivacyKeyRotationExchange",
+        "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyRotatedReservationIsPostureStale",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKeyRotationTests.swift:testRotationFramingMatchesSharedVector",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKeyRotationTests.swift:testStagedRotationSignsWithAllThreeKeysAndPromotesOnlyWhenAccepted",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyKeyRotationTests.swift:testInterruptedPromotionIsRepairedAtStart"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.3.0 in-band identity key rotation (#1911) is implemented in the coordinator and the provider CLI with unit tests and a shared framing vector. The coordinator side ships in a later runtime train and the provider side in the next CLI release; a real-provider rotation through the gateway is still needed. The requirement stays pending."
       }
     },
     {

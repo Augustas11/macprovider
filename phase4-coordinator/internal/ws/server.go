@@ -276,6 +276,9 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// SPEC-049-R031 identity key rotation exchanges, one per session.
+	privacyRotationChans    sync.Map
+	privacyRotationInFlight sync.Map
 	// privacyAdvertised is the last accepted privacy key digest set per
 	// session, so an unchanged heartbeat re-advertisement does not challenge.
 	privacyAdvertised sync.Map
@@ -4927,6 +4930,10 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleSELivenessResponse(providerID, assignedID, payload)
 	case "privacy_posture_response":
 		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
+	case "privacy_key_rotation_request":
+		s.handlePrivacyKeyRotationRequest(providerID, assignedID, payload)
+	case "privacy_key_rotation":
+		s.handlePrivacyKeyRotation(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":

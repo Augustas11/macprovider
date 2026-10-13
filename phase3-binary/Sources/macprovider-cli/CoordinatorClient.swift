@@ -2695,6 +2695,10 @@ actor CoordinatorClient {
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         case "se_liveness_challenge":
             try await handleSELivenessChallenge(dict)
+        case "privacy_key_rotation_challenge":
+            try await handlePrivacyKeyRotationChallenge(dict)
+        case "privacy_key_rotation_result":
+            try await handlePrivacyKeyRotationResult(dict)
         case "privacy_posture_challenge":
             try await handlePrivacyPostureChallenge(dict)
         case "native_mtp_canary_request_v1":
@@ -8035,6 +8039,48 @@ actor CoordinatorClient {
         }
         guard let response else { return }
         try await send(response)
+        // SPEC-049-R031: a staged identity key is offered after a posture,
+        // at most once per rotation interval.
+        if let request = privacyPostureResponder.rotationRequest() {
+            try await send(request)
+        }
+    }
+
+    private func handlePrivacyKeyRotationChallenge(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder,
+              coordinatorSessionAccepted,
+              let assigned = acceptedAssignedProviderID,
+              !assigned.isEmpty else {
+            return
+        }
+        let message: [String: Any]?
+        do {
+            message = try privacyPostureResponder.respondToRotation(challenge: dict, assignedSession: assigned)
+        } catch {
+            return
+        }
+        guard let message else { return }
+        try await send(message)
+    }
+
+    private func handlePrivacyKeyRotationResult(_ dict: [String: Any]) async throws {
+        guard appConfig.privacyClassBeta, let privacyPostureResponder else { return }
+        let promoted: Bool
+        do {
+            promoted = try privacyPostureResponder.applyRotationResult(dict)
+        } catch {
+            FileHandle.standardError.write(Data("privacy_class identity_rotation_failed\n".utf8))
+            return
+        }
+        let reason = (dict["reason"] as? String).map { String($0.filter { $0.isASCII && ($0.isLetter || $0 == "_") }.prefix(48)) } ?? ""
+        guard promoted else {
+            FileHandle.standardError.write(Data("privacy_class identity_rotation_not_accepted reason=\(reason)\n".utf8))
+            return
+        }
+        FileHandle.standardError.write(Data("privacy_class identity_rotated\n".utf8))
+        // Re-advertise under the new identity now; the coordinator challenges
+        // the changed key set immediately (SPEC-049-R005).
+        try await sendHeartbeatBounded(resetWindow: false)
     }
 
     /// Runs the injected refresher at most once per minimum interval and stages

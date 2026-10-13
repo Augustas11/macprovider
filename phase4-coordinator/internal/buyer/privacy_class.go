@@ -443,7 +443,8 @@ func (p *privacyStreamRelay) complete() error {
 
 // privacyInvalidatedCode maps a privacy reservation that the control plane
 // rejected before dispatch (quarantine, privacy-key revocation or an empty
-// privacy-key advertisement, or the kill switch) to its typed SPEC-049 code.
+// privacy-key advertisement, an identity key rotation, or the kill switch)
+// to its typed SPEC-049 code.
 // Expired, consumed, dispatched, and terminal reservations stay replays.
 func privacyInvalidatedCode(r relayblind.Reservation, now time.Time) string {
 	if !r.PrivacyClass || r.State != relayblind.ReservationStateRejected || r.ExpiresAtUnix <= now.Unix() {
@@ -454,6 +455,9 @@ func privacyInvalidatedCode(r relayblind.Reservation, now time.Time) string {
 		return privacyClassUnavailable
 	case privacyClassDisabled:
 		return privacyClassDisabled
+	case relayblind.PrivacyKeyRotatedTerminalCode:
+		// SPEC-049-R031 item 9: retryable with a new reservation.
+		return privacyClassStale
 	}
 	return ""
 }

@@ -22,3 +22,13 @@ the kid stays the same. The envelope digest is SHA-256 of the compact JSON
 encoding produced by `Envelope.Digest`. Regenerate with
 `MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyGoldenVectorGenerate$'`
 from either relay-blind module.
+
+`privacy-key-rotation-v1.json` is the SPEC-049 §4.12 identity key rotation
+vector. It locks the posture digest and the rotation framing, and carries the
+deterministic Ed25519 signatures of the previous and new identity keys, both
+made from fixed byte-pattern seeds. The Secure Enclave key is the P-256
+generator point, used only as a valid public key; ECDSA signatures are
+randomized and are not part of the vector. The coordinator Go tests and the
+Swift provider tests consume it. Regenerate with
+`MACPROVIDER_REGEN_FIXTURES=1 go test ./internal/relayblind -run '^TestPrivacyRotationVectorGenerate$'`
+from the coordinator module.

@@ -495,7 +495,8 @@ func (m *Metrics) IncPrivacyPostureRejection(reason string) {
 		"posture_session_binding", "posture_required_value", "posture_sequence_regression", "posture_cdhash_changed",
 		"posture_se_key_mismatch", "posture_clock_skew", "posture_key_backend", "posture_timeout", "posture_keys_stale",
 		"privacy_class_disabled", "privacy_enrollment_key_changed", "privacy_enrollment_claim_changed",
-		"privacy_enrollment_key_in_use":
+		"privacy_enrollment_key_in_use", "privacy_key_rotation_invalid", "privacy_key_rotation_pending",
+		"privacy_key_rotation_rejected":
 	default:
 		reason = "other"
 	}

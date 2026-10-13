@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.2.7
+**Version:** 0.3.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -133,12 +133,14 @@ Enrollment protects against:
 - one identity key or Secure Enclave key serving two provider IDs at once;
 - a relay substituting a buyer pin: the buyer accepts only directory entries signed by its pinned directory key, unexpired, and not revoked (SPEC-049-R028);
 - a stale buyer view: a directory older than its signed expiry is rejected, and a quarantined or re-enrolled identity is published as revoked.
+- an identity key rotation that the enrolled identity key and the enrolled Secure Enclave key did not both sign over a fresh coordinator nonce: it quarantines and never changes the enrollment (SPEC-049-R031).
 
 Enrollment does not protect against:
 
 - whoever first completes an attested session for a provider ID. Posture is self-attested and device-bound, not code-bound (§2.4), so a modifying operator or a credential holder who connects first is enrolled exactly like the genuine device;
 - a compromised coordinator host or operator, which can enroll, sign, and route to an identity of its choice. A buyer who must exclude the coordinator from identity trust uses an out-of-band `--identity-pin`, and an operator who must pin a specific device uses the configuration pins, which override enrollment (SPEC-049-R004);
 - the residual risks of §2.5, which are unchanged.
+- whoever holds the enrolled identity key and can sign with the device's Secure Enclave key rotating the identity to a key of its choice (SPEC-049-R031). That party can already sign postures and key records as the provider, so rotation adds no capability.
 
 ## 3. Authority and composition
 
@@ -151,7 +153,7 @@ SPEC-049 owns authority domain `operator-constrained-privacy-class`: the privacy
 - **SPEC-022** owns verified-model settlement. Privacy-class work is excluded from `verified` as relay-blind work is. Under `enforce` it settles only through the SPEC-022 R-14 relay-blind lane as `relay_blind_settled`.
 - **SPEC-005** owns settlement arithmetic. Unchanged.
 - **SPEC-025** owns the signed `pearl-release.json` and its §6.2.1 `provider_code_identity`. SPEC-049 consumes that field as an approval source (SPEC-049-R027) and does not change it.
-- **SPEC-001** owns provider wire framing. SPEC-049 adds the `privacy_class` field on `inference_request`, the `privacy_posture_challenge` / `privacy_posture_response` messages, and the `privacy_key_records` and `privacy_enrollment` advertisement fields.
+- **SPEC-001** owns provider wire framing. SPEC-049 adds the `privacy_class` field on `inference_request`, the `privacy_posture_challenge` / `privacy_posture_response` messages, the optional `privacy_key_rotation_request` / `privacy_key_rotation_challenge` / `privacy_key_rotation` / `privacy_key_rotation_result` messages (§4.12), and the `privacy_key_records` and `privacy_enrollment` advertisement fields.
 - **SPEC-002** owns assignment and lifecycle. SPEC-049 adds gate checks without bypassing them.
 - **SPEC-006** owns public errors, headers, and JSON/SSE compatibility. SPEC-049 adds the header and error codes in §4 and the `GET /v1/privacy-class/directory` route (SPEC-049-R028).
 
@@ -180,6 +182,8 @@ All encodings follow SPEC-041 §3: canonical unpadded base64url; u32-length-pref
 | Identity directory version | `privacy-identity-directory-v1` |
 | Identity directory envelope version | `privacy-identity-directory-envelope-v1` |
 | Identity directory signing domain | `macprovider/spec049/identity-directory/v1` |
+| Key rotation version | `privacy-key-rotation-v1` |
+| Key rotation signing domain | `macprovider/spec049/key-rotation/v1` |
 
 ### 4.2 Header marker
 
@@ -393,6 +397,61 @@ The signed envelope, which is the exact response body of the directory route:
 ```
 
 The signature covers `frame("macprovider/spec049/identity-directory/v1") || frame(payload bytes)` with the SPEC-041 u32 length framing. Verifiers decode `payload`, verify the signature over those exact bytes, and only then parse them as the closed payload; they never re-serialize JSON to verify. The envelope is at most 1 MiB.
+### 4.12 `privacy-key-rotation-v1`
+
+Four optional messages over the authenticated provider WebSocket carry the SPEC-049-R031 identity key rotation. Each is a closed object.
+
+Provider to coordinator, asking for a rotation nonce:
+
+```json
+{"type": "privacy_key_rotation_request", "version": 1}
+```
+
+Coordinator to provider:
+
+```json
+{"type": "privacy_key_rotation_challenge", "version": 1, "nonce": "<base64url 32 random bytes>", "issued_at_unix": 0}
+```
+
+Provider to coordinator, at most 16384 encoded bytes:
+
+```json
+{
+  "type": "privacy_key_rotation",
+  "version": 1,
+  "statement": { "...": "closed privacy-key-rotation-v1 object" },
+  "posture": { "...": "closed privacy-posture-v1 object" },
+  "se_signature": "<base64url DER ECDSA-P256-SHA256 by the enrolled Secure Enclave key over the rotation framing>",
+  "previous_identity_signature": "<base64url raw 64-byte Ed25519 by the enrolled identity key over the rotation framing>",
+  "identity_signature": "<base64url raw 64-byte Ed25519 by the new identity key over the rotation framing>"
+}
+```
+
+The rotation statement; the signing framing encodes the domain `macprovider/spec049/key-rotation/v1` first and then every field in this order:
+
+| # | Field | JSON type | Framing | Constraint |
+|---|---|---|---|---|
+| 1 | `version` | string | string | `privacy-key-rotation-v1` |
+| 2 | `privacy_class` | string | string | `operator_constrained_beta_v1` |
+| 3 | `provider_id` | string | string | authenticated provider ID, 1..128 printable ASCII |
+| 4 | `assigned_session` | string | string | current assigned session, 1..128 printable ASCII |
+| 5 | `nonce` | string | raw 32 bytes | base64url of the rotation challenge nonce |
+| 6 | `issued_at_unix` | integer | i64 | provider clock |
+| 7 | `previous_identity_public_key` | string | string | canonical base64url raw 32-byte Ed25519, the enrolled identity key |
+| 8 | `identity_public_key` | string | string | canonical base64url raw 32-byte Ed25519, the new identity key |
+| 9 | `se_public_key` | string | string | canonical standard base64 raw 64-byte P-256 X\|\|Y, the enrolled Secure Enclave key |
+| 10 | `posture_digest` | string | string | canonical base64url SHA-256 of the §4.3 framing of `posture` |
+
+`posture` is a complete §4.3 statement whose `nonce` equals the rotation nonce. It carries no signatures of its own: the three rotation signatures cover it through `posture_digest`.
+
+Coordinator to provider:
+
+```json
+{"type": "privacy_key_rotation_result", "version": 1, "nonce": "<the challenge nonce>", "status": "accepted|rejected", "reason": "<bounded code>"}
+```
+
+`nonce` is the challenge nonce, or the empty string when the coordinator refused before issuing one. `reason` is `accepted` on acceptance and otherwise one of `rotation_unavailable`, `rotation_invalid`, `rotation_identity_pinned`, `rotation_not_enrolled`, `rotation_key_in_use`, `rotation_unapproved_code_identity`, `rotation_stale`, `rotation_quarantined`, or `rotation_store_unavailable`.
+
 ## 5. Normative requirements
 
 ### SPEC-049-R001 - Enablement in every component
@@ -480,7 +539,7 @@ The reference client MUST, before encryption, verify the reservation version is 
 
 ### SPEC-049-R017 - Quarantine and key revocation
 
-On a posture signature failure, a denied code identity, any SPEC-049-R006 required value violated, a sequence regression, a `code_cdhash` change within one session, a key attestation cdhash differing from the session's verified posture cdhash, a SPEC-008 Secure Enclave key mismatch, or an enrollment key change (SPEC-049-R026), the coordinator MUST durably quarantine the provider for `privacy_class.quarantine_seconds` (default 86400) and durably revoke all of its privacy key records. If the durable quarantine write fails, the coordinator MUST hold the quarantine in memory, treat the provider as quarantined, and retry the write on every later check until it succeeds, unless an operator `unquarantine` or `reenroll` of that provider is recorded after the failure, which drops the held quarantine. A quarantined provider MUST be ineligible across coordinator restarts until expiry or explicit operator unquarantine, and its identity directory entry MUST be published as revoked while the quarantine lasts. A posture timeout, a missed challenge, an unapproved but not denied code identity, or an unresolvable key MUST make the provider ineligible without quarantine.
+On a posture signature failure, a denied code identity, any SPEC-049-R006 required value violated, a sequence regression, a `code_cdhash` change within one session, a key attestation cdhash differing from the session's verified posture cdhash, a SPEC-008 Secure Enclave key mismatch, an enrollment key change (SPEC-049-R026), or an invalid identity key rotation (SPEC-049-R031), the coordinator MUST durably quarantine the provider for `privacy_class.quarantine_seconds` (default 86400) and durably revoke all of its privacy key records. If the durable quarantine write fails, the coordinator MUST hold the quarantine in memory, treat the provider as quarantined, and retry the write on every later check until it succeeds, unless an operator `unquarantine` or `reenroll` of that provider is recorded after the failure, which drops the held quarantine. A quarantined provider MUST be ineligible across coordinator restarts until expiry or explicit operator unquarantine, and its identity directory entry MUST be published as revoked while the quarantine lasts. A posture timeout, a missed challenge, an unapproved but not denied code identity, or an unresolvable key MUST make the provider ineligible without quarantine.
 
 ### SPEC-049-R018 - Durable kill switch
 
@@ -577,7 +636,7 @@ There MUST be at most one active enrollment per provider ID. An identity public 
 
 ### SPEC-049-R026 - Key change quarantine and re-enrollment
 
-After enrollment, a §4.10 claim or a posture whose identity key or Secure Enclave key, where not configuration-pinned, differs from the active enrollment MUST NOT replace the enrollment. The coordinator MUST quarantine the provider under SPEC-049-R017 with reason `privacy_enrollment_key_changed`, which revokes its privacy key records, and MUST keep the enrollment active so its directory entry is published as revoked while the quarantine lasts. Quarantine expiry does not change the enrollment, so the same different key quarantines again. The re-enrollment path is the operator command `coordinator-cli privacy-class reenroll --provider <id> --reason <text>`, which in one transaction marks the active enrollment revoked with that reason and time, revokes the provider's privacy key records, rejects its held predispatch privacy reservations, and clears its quarantine; the next posture that passes SPEC-049-R025 enrolls the provider's current keys. Revoked enrollments are published as `revoked: true` for 30 days. Operator configuration pins override enrollment (SPEC-049-R004). v0.2 has no in-band signed key rotation.
+After enrollment, a §4.10 claim or a posture whose identity key or Secure Enclave key, where not configuration-pinned, differs from the active enrollment MUST NOT replace the enrollment, except through an accepted SPEC-049-R031 rotation. The coordinator MUST quarantine the provider under SPEC-049-R017 with reason `privacy_enrollment_key_changed`, which revokes its privacy key records, and MUST keep the enrollment active so its directory entry is published as revoked while the quarantine lasts. Quarantine expiry does not change the enrollment, so the same different key quarantines again. The re-enrollment path is the operator command `coordinator-cli privacy-class reenroll --provider <id> --reason <text>`, which in one transaction marks the active enrollment revoked with that reason and time, revokes the provider's privacy key records, rejects its held predispatch privacy reservations, and clears its quarantine; the next posture that passes SPEC-049-R025 enrolls the provider's current keys. Revoked enrollments are published as `revoked: true` for 30 days. Operator configuration pins override enrollment (SPEC-049-R004). The identity key that an accepted SPEC-049-R031 rotation retired is refused without quarantine (SPEC-049-R031 item 7); every other different key quarantines.
 
 ### SPEC-049-R027 - Approved code identities from signed release metadata
 
@@ -622,20 +681,35 @@ When the coordinator refuses a privacy-class request at reservation, at consume,
 4. **Closed labels.** Neither log line nor metric carries a provider ID, session, key digest, kid, account, wallet session, request ID, raw store error, or request or response content. A value outside the closed sets is recorded as `other`.
 5. **Buyer-visible error.** The buyer error is unchanged: the §4.9 code, HTTP status, retryable flag, retry action, and message stay as they are, and SPEC-049-R019 still forbids new codes and remapping. The reason is not added to the buyer error. With one provider serving a model, every reason other than `model_not_served` and `model_not_private_capable` describes the state of that one provider (quarantine, enrollment, posture, code identity, seat), so a buyer could learn which providers exist and what state each is in. The only buyer-safe distinction, that no provider for a model is privacy-capable, is already published as `capable_provider_count` on `/v1/models` (SPEC-049-R020).
 
+### SPEC-049-R031 - In-band signed identity key rotation
+
+A provider whose relay-blind identity key is enrolled (SPEC-049-R025) MAY replace that key without an operator step. The enrolled identity key and the enrolled Secure Enclave key sign the new key, the new key signs too, and a full posture travels with them, all over one fresh coordinator nonce (§4.12). Only the identity key rotates. The Secure Enclave key is also the SPEC-008 session key, so it stays fixed: a Secure Enclave key change still quarantines (SPEC-049-R026) and is re-enrolled by the operator. Rotation creates no trust tier and changes no assurance label, claim, or disclosure string (SPEC-049-R002).
+
+1. **Challenge.** On `privacy_key_rotation_request` the coordinator sends `privacy_key_rotation_challenge` with a fresh 32-byte nonce only when the class is enabled, the kill switch is off, the session is the live authenticated one, the provider is not quarantined, it has an active enrollment, and its identity key is not configuration-pinned. It holds at most one outstanding rotation nonce per session and issues at most one per `posture_challenge_interval_seconds` per session. Otherwise it answers `privacy_key_rotation_result` with status `rejected` and does not challenge.
+2. **Acceptance.** The coordinator MUST accept a `privacy_key_rotation` only when all of these hold: the message, statement, and posture are closed and valid per §4.12 and §4.3 and the message is at most 16384 bytes; the nonce is an exact echo of the session's outstanding rotation nonce, used once, received within `posture_response_timeout_seconds`, and both `issued_at_unix` values are within ±30 seconds of coordinator time; `provider_id` and `assigned_session` of the statement and the posture equal the live session; the posture nonce equals the statement nonce; `posture_digest` equals the SHA-256 of the posture framing, recomputed from the parsed fields; `previous_identity_public_key` equals the active enrollment's identity key; `se_public_key` equals the resolved Secure Enclave key (SPEC-049-R004) and the session's SPEC-008 key when the session carries one; the new identity key is a valid Ed25519 key that differs from the previous one and has never appeared in any enrollment of any provider; `se_signature`, `previous_identity_signature`, and `identity_signature` verify over the rotation framing recomputed from the parsed fields; and the posture passes every SPEC-049-R006 required value and code approval, its `sequence` is greater than the session's last accepted sequence, its `code_cdhash` equals the session's verified cdhash when there is one, and its key backend is allowed.
+3. **Quarantine or reject.** A Secure Enclave or either identity signature that does not verify, a previous identity key or Secure Enclave key that differs from the enrollment, a denied code identity, a violated required value, a sequence regression, or a cdhash change MUST quarantine the provider under SPEC-049-R017 (reason `privacy_key_rotation_invalid`, or the matching posture reason). An unapproved but not denied code identity, a nonce, timeout, or clock failure, a configuration-pinned identity, a new key already in use or used before, the kill switch, a quarantine, or a store failure MUST reject without quarantine. A rejection never changes the enrollment.
+4. **Atomic commit.** On acceptance the coordinator MUST, in one store transaction: confirm the active enrollment still names the previous identity key; mark it revoked with reason `rotated`; insert the new active enrollment with the same Secure Enclave key, the new identity key, the posture's `team_id`, `signing_identifier`, `code_cdhash`, and `binary_version`, and the previous identity key's fingerprint; revoke every privacy key record of the provider; and move its held predispatch privacy reservations to `rejected` with `privacy_class_posture_stale`. A store failure leaves everything unchanged. After the commit the coordinator clears the provider's in-memory posture eligibility, drops the session's outstanding posture nonce, records the posture sequence, and answers `privacy_key_rotation_result` with status `accepted`. A rejection answers status `rejected` with a §4.12 reason.
+5. **Provider.** The provider MUST keep serving with its enrolled identity key until it receives an `accepted` result for its own outstanding nonce. Only then does it durably make the new key its identity key and advertise new privacy key records and a §4.10 claim under it. A provider that receives no result, or a `rejected` one, keeps its enrolled key and MAY ask again later. The new key's first posture verifies under the new enrollment through the immediate challenge of SPEC-049-R005.
+6. **Idempotent retry.** A rotation whose previous key equals the identity that the active enrollment rotated from, and whose new key equals the active identity key, MUST be answered `accepted` without a store change when it otherwise passes item 2. This covers a provider that lost the result or restarted before it switched keys.
+7. **Retired key.** After an accepted rotation, a claim, key advertisement, or posture that presents the identity key the active enrollment rotated from MUST be refused without quarantine and MUST NOT be accepted (reason `privacy_key_rotation_pending`). Any other key that differs from the enrollment still quarantines under SPEC-049-R026.
+8. **Replay protection.** The nonce is single-use and bound to the provider ID and assigned session; both statements carry the coordinator nonce and a provider time within ±30 seconds; the posture sequence must increase; the rotation names the exact previous key, so after acceptance a replay cannot change state; and a key that has appeared in any enrollment can never be rotated to.
+9. **In-flight private requests.** A request already dispatched completes: its X25519 privacy key and its response encryption do not depend on the identity key. Held predispatch reservations on the retired key's records are rejected with the retryable `privacy_class_posture_stale`, so the buyer makes a new reservation and envelope. A dispatch that reaches the provider after it switched keys is refused before decryption with SPEC-041-R005 bound rejection evidence. The identity directory publishes the retired identity as `revoked: true` for 30 days and the new identity as active, so a buyer pinned to the retired identity fails before encryption.
+10. **Compatibility.** The four messages are optional. A coordinator without them ignores the request, and the provider keeps its enrolled key. A provider without them never asks, and enrollment, quarantine, and operator re-enrollment are unchanged.
+
 ## 6. Operator runbook requirement
 
-The normative operator procedure is `docs/runbooks/privacy-class-beta-operations.md`. It covers: enabling the coordinator with automatic enrollment, release-derived approval, and the directory key; generating and holding the directory key and distributing its public key to buyers; the provider opt-out and the eligibility log lines; the optional configuration pins that override enrollment; enabling the gateway and the buyer client; the incident procedure (kill switch, quarantine, enrollment key change, re-enrollment, key revocation, rotation by restart, directory key rotation); and the residual-risk table of §2.5. Tooling and documentation MUST never print private key bytes.
+The normative operator procedure is `docs/runbooks/privacy-class-beta-operations.md`. It covers: enabling the coordinator with automatic enrollment, release-derived approval, and the directory key; generating and holding the directory key and distributing its public key to buyers; the provider opt-out and the eligibility log lines; the optional configuration pins that override enrollment; enabling the gateway and the buyer client; the incident procedure (kill switch, quarantine, enrollment key change, re-enrollment, key revocation, rotation by restart, in-band identity key rotation, directory key rotation, the privacy reject reasons); and the residual-risk table of §2.5. Tooling and documentation MUST never print private key bytes.
 
 ## 7. Implementation, tests, and journeys
 
-The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements map to `JOURNEY-PRIVACY-CLASS-BETA`; implementation and test selectors are added as the implementation lands. Planned surfaces: shared Go privacy crypto and types in both relay-blind modules with a byte-identity parity check; Swift crypto parity against the shared vector `test/fixtures/relay-blind/privacy-response-v1.json`; provider hardening, posture responder, and response sealing; coordinator configuration, store, posture verification, routing gate, and kill-switch CLI; gateway marker, opaque relay, and disclosure; reference-client verification; and the cross-service redaction and adversarial integration suite. v0.2 adds: provider automatic-mode eligibility and the enrollment claim; the coordinator enrollment table, key-change quarantine, `reenroll` and `directory-keygen` CLI, release-derived approval loader, and directory signer and route; the Pearl updater release-identity staging; the gateway directory passthrough; the shared directory verifier in both relay-blind modules under the parity check; and client directory auto-pin.
+The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements map to `JOURNEY-PRIVACY-CLASS-BETA`; implementation and test selectors are added as the implementation lands. Planned surfaces: shared Go privacy crypto and types in both relay-blind modules with a byte-identity parity check; Swift crypto parity against the shared vector `test/fixtures/relay-blind/privacy-response-v1.json`; provider hardening, posture responder, and response sealing; coordinator configuration, store, posture verification, routing gate, and kill-switch CLI; gateway marker, opaque relay, and disclosure; reference-client verification; and the cross-service redaction and adversarial integration suite. v0.2 adds: provider automatic-mode eligibility and the enrollment claim; the coordinator enrollment table, key-change quarantine, `reenroll` and `directory-keygen` CLI, release-derived approval loader, and directory signer and route; the Pearl updater release-identity staging; the gateway directory passthrough; the shared directory verifier in both relay-blind modules under the parity check; and client directory auto-pin. v0.2.7 adds the closed reject reasons in both relay-blind modules under the parity check. v0.3.0 adds the coordinator rotation verifier and atomic enrollment swap, and the provider rotation responder and staged identity key.
 
 ## 8. Open gaps
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
 | `SPEC-049-R001`..`SPEC-049-R028` | `DECISION_REQUIRED` | `@Augustas11` | `#1749` | Implementation, automated tests, signed hardware journey on a v0.2 release, staged canary, three-lane audits |
-| In-band signed key rotation | `DECISION_REQUIRED` | `@Augustas11` | follow-up of `#1749` | A rotation statement signed by the enrolled keys; v0.2 re-enrolls only through the operator |
+| In-band signed key rotation (SPEC-049-R031) | `DECISION_REQUIRED` | `@Augustas11` | `#1911` | Identity key rotation is specified and unit-tested; it needs a provider CLI release and a real-provider rotation through the gateway. Secure Enclave key rotation stays operator re-enrollment, because that key is also the SPEC-008 session key |
 | Code-bound posture key | `DECISION_REQUIRED` | `@Augustas11` | follow-up of `#1749` | Malibu.app-embedded provider with `keychain-access-groups`; a new label requires a SPEC-049 amendment first |
 | Trusted Pool composition | `DECISION_REQUIRED` | `@Augustas11` | follow-up of `#1749` | SPEC-042-R009 amendment binding pool identity into AAD and posture |
 
@@ -751,6 +825,8 @@ remains open; R023 promotion is not required for operation.
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json` and its bundle: the reviewed redacted evidence (#1864).
 
 ## 10. Changelog and history
+
+- 0.3.0 - #1911 hardening item "in-band signed key rotation". New §4.12 and SPEC-049-R031: an enrolled provider rotates its relay-blind identity key without an operator step. The enrolled identity key, the enrolled Secure Enclave key, and the new identity key each sign one rotation statement over a single-use coordinator nonce, and the statement binds a full posture by digest. The coordinator swaps the enrollment, revokes the provider's privacy key records, and rejects its held predispatch reservations in one transaction. An invalid or mismatched rotation quarantines; any other refusal leaves the enrollment unchanged. The retired identity is refused without quarantine; every other key change still quarantines. The Secure Enclave key does not rotate in band. SPEC-049-R017 and SPEC-049-R026 point to R031, and §2.6 states what rotation trusts. The messages are optional in both directions. No trust tier, assurance label, disclosure string, or §4.9 error code changes.
 
 - 0.2.7 - #1911 hardening item "real privacy reject reason". New SPEC-049-R030: every refused privacy-class request records one reason from a closed set, at a closed phase, in one coordinator log line and the `relayblind_privacy_route_rejections_total` metric, and hands it to the gateway in the internal `X-MacProvider-Privacy-Reject-Reason` header; the gateway logs and counts it and never forwards it. When no candidate is eligible, selection reports the cause of the candidate that came closest to serving the request instead of a generic unavailable. The buyer error code, status, retry action, and message are unchanged, because a finer buyer-visible reason would reveal the state of individual providers. SPEC-049-R013 points to R030. No wire, schema, disclosure string, error code, or eligibility change.
 

@@ -263,3 +263,17 @@ func TestPrivacyDispatchPostureLapseRecordsRealReason(t *testing.T) {
 		t.Fatalf("event=%v", event)
 	}
 }
+
+// SPEC-049-R031 item 9: a held reservation rejected by an identity key
+// rotation is the retryable posture-stale outcome, not a replay.
+func TestPrivacyRotatedReservationIsPostureStale(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	row := relayblind.Reservation{PrivacyClass: true, State: relayblind.ReservationStateRejected, ExpiresAtUnix: now.Unix() + 30, TerminalCode: relayblind.PrivacyKeyRotatedTerminalCode}
+	if got := privacyInvalidatedCode(row, now); got != privacyClassStale {
+		t.Fatalf("code=%q", got)
+	}
+	row.PrivacyClass = false
+	if got := privacyInvalidatedCode(row, now); got != "" {
+		t.Fatalf("relay-blind row mapped to %q", got)
+	}
+}

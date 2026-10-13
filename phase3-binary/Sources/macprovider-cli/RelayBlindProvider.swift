@@ -400,6 +400,14 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         keyManager.identityPublicKeyBase64URL()
     }
 
+    func stagedIdentity() throws -> Curve25519.Signing.PrivateKey? {
+        try keyManager.stagedIdentity()
+    }
+
+    func promoteStagedIdentity(expectedPublicKey: String) throws {
+        try keyManager.promoteStagedIdentity(expectedPublicKey: expectedPublicKey)
+    }
+
     func open(
         envelopeBody: String,
         outerRequestID: String,
@@ -530,7 +538,8 @@ final class RelayBlindKeyManager: @unchecked Sendable {
     private let lock = NSLock()
     private let directory: URL
     private let secureDirectory: RelayBlindSecureDirectory
-    private let identityKey: Curve25519.Signing.PrivateKey
+    /// Replaced only by `promoteStagedIdentity` (SPEC-049-R031); read under `lock`.
+    private var identityKey: Curve25519.Signing.PrivateKey
     private var encryptionKey: Curve25519.KeyAgreement.PrivateKey
     private var notBeforeUnix: Int64
     private var expiresAtUnix: Int64
@@ -567,7 +576,10 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         let secureDirectory = try RelayBlindSecureDirectory.openOrCreate(directory)
         try RelayBlindSecureFiles.removeOrphanTemps(
             secureDirectory,
-            allowedTargets: ["encryption.current.x25519", "encryption.current.json", "revoked-kids.json"]
+            allowedTargets: [
+                "encryption.current.x25519", "encryption.current.json", "revoked-kids.json",
+                Self.identityFileName,
+            ]
         )
         self.directory = directory
         self.secureDirectory = secureDirectory
@@ -575,7 +587,14 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         self.maxEncryptedRequestBytes = maxEncryptedRequestBytes
         self.lifetimeSeconds = lifetimeSeconds
         self.persistAgreementKey = persistAgreementKey
-        self.identityKey = try RelayBlindSecureFiles.loadOrCreateSigningKey(secureDirectory, name: "identity.ed25519")
+        self.identityKey = try RelayBlindSecureFiles.loadOrCreateSigningKey(secureDirectory, name: Self.identityFileName)
+        // A promotion that replaced the identity but stopped before removing
+        // the staged copy leaves two equal keys; the staged copy is spent.
+        if let staged = try RelayBlindSecureFiles.loadSecret(secureDirectory, name: Self.stagedIdentityFileName),
+           staged == self.identityKey.rawRepresentation {
+            try secureDirectory.remove(Self.stagedIdentityFileName)
+            try secureDirectory.synchronize()
+        }
         let nowUnix = Int64(now.timeIntervalSince1970)
         if persistAgreementKey {
             self.encryptionKey = try RelayBlindSecureFiles.loadOrCreateAgreementKey(secureDirectory, name: "encryption.current.x25519")
@@ -596,17 +615,75 @@ final class RelayBlindKeyManager: @unchecked Sendable {
         self.revokedKids = try RelayBlindSecureFiles.loadRevocations(secureDirectory, name: "revoked-kids.json")
     }
 
+    static let identityFileName = "identity.ed25519"
+    /// SPEC-049-R031 staged next identity key. It is used only to sign a
+    /// rotation until the coordinator accepts it.
+    static let stagedIdentityFileName = "identity.next.ed25519"
+
     func identityPublicKeyBase64URL() -> String {
-        RelayBlindBase64URL.encode(identityKey.publicKey.rawRepresentation)
+        lock.lock()
+        defer { lock.unlock() }
+        return RelayBlindBase64URL.encode(identityKey.publicKey.rawRepresentation)
     }
 
     func identityFingerprintBase64URL() -> String {
-        RelayBlindBase64URL.encode(Data(SHA256.hash(data: identityKey.publicKey.rawRepresentation)))
+        lock.lock()
+        defer { lock.unlock() }
+        return RelayBlindBase64URL.encode(Data(SHA256.hash(data: identityKey.publicKey.rawRepresentation)))
     }
 
     /// Raw Ed25519 over `message`. SPEC-049 signs posture and key-attestation framing directly.
     func identitySignatureBase64URL(for message: Data) throws -> String {
-        RelayBlindBase64URL.encode(try identityKey.signature(for: message))
+        lock.lock()
+        defer { lock.unlock() }
+        return RelayBlindBase64URL.encode(try identityKey.signature(for: message))
+    }
+
+    /// Creates the staged next identity key if none exists and returns its
+    /// public key. The running provider offers it in a SPEC-049-R031 rotation.
+    static func stageNextIdentity(directory: URL) throws -> (current: String, next: String) {
+        let secure = try RelayBlindSecureDirectory.openOrCreate(directory)
+        let current = try RelayBlindSecureFiles.loadOrCreateSigningKey(secure, name: identityFileName)
+        let next = try RelayBlindSecureFiles.loadOrCreateSigningKey(secure, name: stagedIdentityFileName)
+        guard next.rawRepresentation != current.rawRepresentation else {
+            throw RelayBlindProviderError.invalidConfiguration("staged identity equals the current identity")
+        }
+        return (
+            RelayBlindBase64URL.encode(current.publicKey.rawRepresentation),
+            RelayBlindBase64URL.encode(next.publicKey.rawRepresentation)
+        )
+    }
+
+    /// The staged next identity key, when one exists and differs from the current key.
+    func stagedIdentity() throws -> Curve25519.Signing.PrivateKey? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try stagedIdentityLocked()
+    }
+
+    /// Makes the staged key the identity key after the coordinator accepted a
+    /// rotation to `expectedPublicKey`: the identity file is replaced
+    /// atomically, then the staged file is removed, then the in-memory key
+    /// switches. A crash between the two file steps is repaired at init.
+    func promoteStagedIdentity(expectedPublicKey: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let staged = try stagedIdentityLocked(),
+              RelayBlindBase64URL.encode(staged.publicKey.rawRepresentation) == expectedPublicKey else {
+            throw RelayBlindProviderError.invalidConfiguration("staged identity does not match the accepted rotation")
+        }
+        try RelayBlindSecureFiles.replaceSecret(secureDirectory, name: Self.identityFileName, data: staged.rawRepresentation)
+        try secureDirectory.remove(Self.stagedIdentityFileName)
+        try secureDirectory.synchronize()
+        identityKey = staged
+    }
+
+    private func stagedIdentityLocked() throws -> Curve25519.Signing.PrivateKey? {
+        guard let raw = try RelayBlindSecureFiles.loadSecret(secureDirectory, name: Self.stagedIdentityFileName) else {
+            return nil
+        }
+        let staged = try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
+        return staged.rawRepresentation == identityKey.rawRepresentation ? nil : staged
     }
 
     func currentRecord(now: Date = Date()) throws -> RelayBlindKeyRecord {

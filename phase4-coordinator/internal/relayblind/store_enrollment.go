@@ -23,7 +23,19 @@ var (
 	// ErrEnrollmentKeysStale means a key the enrolling posture listed is no
 	// longer fresh for that session, for example after a reenroll.
 	ErrEnrollmentKeysStale = errors.New("relayblind: privacy enrollment keys are not fresh")
+	// ErrEnrollmentKeyReused means a rotation names an identity key that has
+	// appeared in an enrollment before (SPEC-049-R031).
+	ErrEnrollmentKeyReused = errors.New("relayblind: privacy identity key was enrolled before")
 )
+
+// PrivacyKeyRotatedTerminalCode marks a held privacy reservation rejected by
+// an accepted identity key rotation (SPEC-049-R031). The buyer sees the
+// retryable privacy_class_posture_stale.
+const PrivacyKeyRotatedTerminalCode = "privacy_key_rotated"
+
+// enrollmentRotatedReason is the revoked_reason of an enrollment that an
+// accepted identity key rotation replaced.
+const enrollmentRotatedReason = "rotated"
 
 // PrivacyEnrollment is one SPEC-049-R025 durable enrollment row. Keys are
 // public: identity in canonical base64url, Secure Enclave in standard base64.
@@ -40,6 +52,9 @@ type PrivacyEnrollment struct {
 	EnrolledAtUnix      int64
 	RevokedAtUnix       int64
 	RevokedReason       string
+	// PreviousIdentityFingerprint names the identity key this enrollment
+	// rotated from (SPEC-049-R031), empty for a first enrollment.
+	PreviousIdentityFingerprint string
 }
 
 func (s *Store) ensureEnrollmentSchema(ctx context.Context) error {
@@ -74,14 +89,20 @@ CREATE TABLE IF NOT EXISTS privacy_class_operator_clear (
 	if err := s.addColumnIfMissing(ctx, "privacy_class_operator_clear", "clear_generation", `ALTER TABLE privacy_class_operator_clear ADD COLUMN clear_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := s.addColumnIfMissing(ctx, "privacy_class_enrollment", "previous_identity_fingerprint", `ALTER TABLE privacy_class_enrollment ADD COLUMN previous_identity_fingerprint TEXT NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_privacy_enrollment_identity ON privacy_class_enrollment(identity_fingerprint)`); err != nil {
+		return fmt.Errorf("%w: migrate privacy enrollment: %v", ErrStoreUnavailable, err)
+	}
 	return nil
 }
 
-const enrollmentColumns = `provider_id,identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix,COALESCE(revoked_at_unix,0),COALESCE(revoked_reason,'')`
+const enrollmentColumns = `provider_id,identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix,COALESCE(revoked_at_unix,0),COALESCE(revoked_reason,''),COALESCE(previous_identity_fingerprint,'')`
 
 func scanEnrollment(row rowScanner) (PrivacyEnrollment, error) {
 	var e PrivacyEnrollment
-	err := row.Scan(&e.ProviderID, &e.IdentityPublicKey, &e.IdentityFingerprint, &e.SEPublicKey, &e.SEFingerprint, &e.TeamID, &e.SigningIdentifier, &e.CodeCDHash, &e.BinaryVersion, &e.EnrolledAtUnix, &e.RevokedAtUnix, &e.RevokedReason)
+	err := row.Scan(&e.ProviderID, &e.IdentityPublicKey, &e.IdentityFingerprint, &e.SEPublicKey, &e.SEFingerprint, &e.TeamID, &e.SigningIdentifier, &e.CodeCDHash, &e.BinaryVersion, &e.EnrolledAtUnix, &e.RevokedAtUnix, &e.RevokedReason, &e.PreviousIdentityFingerprint)
 	return e, err
 }
 
@@ -158,6 +179,84 @@ func (s *Store) enrollPrivacyIdentity(ctx context.Context, e PrivacyEnrollment, 
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO privacy_class_enrollment(provider_id,identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		e.ProviderID, e.IdentityPublicKey, e.IdentityFingerprint, e.SEPublicKey, e.SEFingerprint, e.TeamID, e.SigningIdentifier, e.CodeCDHash, e.BinaryVersion, e.EnrolledAtUnix); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return nil
+}
+
+// IdentityKeyEnrolledBefore reports whether identityFingerprint appears in any
+// enrollment row, active or revoked, of any provider.
+func (s *Store) IdentityKeyEnrolledBefore(ctx context.Context, identityFingerprint string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrStoreUnavailable
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM privacy_class_enrollment WHERE identity_fingerprint=?`, identityFingerprint).Scan(&count); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	return count > 0, nil
+}
+
+// RotatePrivacyIdentity is the SPEC-049-R031 atomic swap. In one transaction
+// it confirms the active enrollment still names previous's keys and the
+// provider is not quarantined, refuses a new identity key that any enrollment
+// has used, revokes the active enrollment as rotated, inserts next as the new
+// active enrollment, revokes the provider's privacy key records, and rejects
+// its held predispatch privacy reservations. next keeps previous's Secure
+// Enclave key.
+func (s *Store) RotatePrivacyIdentity(ctx context.Context, previous, next PrivacyEnrollment, now time.Time, replayRetention time.Duration) error {
+	if s == nil || s.db == nil {
+		return ErrStoreUnavailable
+	}
+	if strings.TrimSpace(next.ProviderID) == "" || next.ProviderID != previous.ProviderID || next.IdentityFingerprint == "" ||
+		next.IdentityFingerprint == previous.IdentityFingerprint || next.SEFingerprint != previous.SEFingerprint || next.SEPublicKey != previous.SEPublicKey {
+		return fmt.Errorf("%w: rotation fields", ErrInvalidPrivacy)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	defer tx.Rollback()
+	active, err := scanEnrollment(tx.QueryRowContext(ctx, `SELECT `+enrollmentColumns+` FROM privacy_class_enrollment WHERE provider_id=? AND revoked_at_unix IS NULL`, previous.ProviderID))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrEnrollmentKeyChanged
+	case err != nil:
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if active.IdentityPublicKey != previous.IdentityPublicKey || active.SEPublicKey != previous.SEPublicKey {
+		return ErrEnrollmentKeyChanged
+	}
+	var quarantinedUntil int64
+	err = tx.QueryRowContext(ctx, `SELECT expires_at_unix FROM privacy_class_quarantine WHERE provider_id=?`, previous.ProviderID).Scan(&quarantinedUntil)
+	switch {
+	case err == nil && quarantinedUntil > now.Unix():
+		return ErrPrivacyQuarantined
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	var used int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM privacy_class_enrollment WHERE identity_fingerprint=?`, next.IdentityFingerprint).Scan(&used); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if used > 0 {
+		return ErrEnrollmentKeyReused
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE privacy_class_enrollment SET revoked_at_unix=?,revoked_reason=? WHERE provider_id=? AND revoked_at_unix IS NULL`, now.Unix(), enrollmentRotatedReason, previous.ProviderID); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO privacy_class_enrollment(provider_id,identity_public_key,identity_fingerprint,se_public_key,se_fingerprint,team_id,signing_identifier,code_cdhash,binary_version,enrolled_at_unix,previous_identity_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		next.ProviderID, next.IdentityPublicKey, next.IdentityFingerprint, next.SEPublicKey, next.SEFingerprint, next.TeamID, next.SigningIdentifier, next.CodeCDHash, next.BinaryVersion, now.Unix(), previous.IdentityFingerprint); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	retainedUntil := now.Add(replayRetention).Unix()
+	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_key_records SET revoked_at_unix=?,revocation_retained_until_unix=MAX(expires_at_unix,?) WHERE provider_id=? AND key_class=? AND revoked_at_unix IS NULL`, now.Unix(), retainedUntil, previous.ProviderID, KeyClassPrivacy); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE relay_blind_reservations SET state='rejected',terminal_code=?,terminal_at_unix=? WHERE provider_id=? AND privacy_class=1 AND state IN ('reserved','consumed_predispatch')`, PrivacyKeyRotatedTerminalCode, now.Unix(), previous.ProviderID); err != nil {
 		return fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	if err := tx.Commit(); err != nil {

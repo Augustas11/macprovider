@@ -165,6 +165,14 @@ type privacySession struct {
 	// advertReject is the SPEC-049-R030 reason the session's last key
 	// advertisement was refused for, empty after an accepted one.
 	advertReject string
+	// SPEC-049-R031 rotation state: the outstanding single-use rotation
+	// nonce, the last time one was issued, and the identity key a rotation
+	// accepted on this session retired.
+	rotationNonce         string
+	rotationIssued        int64
+	hasRotationNonce      bool
+	lastRotationChallenge time.Time
+	retiredIdentity       ed25519.PublicKey
 }
 
 type postureSnapshot struct {
@@ -380,6 +388,10 @@ func (a *PrivacyAuthority) acceptPrivacyKeysWithClaim(ctx context.Context, provi
 	if changed {
 		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
 	}
+	if keys.retiredClaim {
+		a.forgetAdvertisement(id)
+		return a.reject(privacyKeyRotationPendingReason)
+	}
 	// Before enrollment the claim is this session's only key source, so it
 	// must not change mid-session: records verified under an earlier claim
 	// would otherwise sit beside a posture enrolled under a later one.
@@ -473,6 +485,9 @@ type resolvedPrivacyKeys struct {
 	identityPinned bool
 	sePinned       bool
 	enrolled       bool
+	// retiredClaim is a claim naming the identity key an accepted rotation
+	// retired (SPEC-049-R031 item 7): refused without quarantine.
+	retiredClaim bool
 }
 
 // needsEnrollment is SPEC-049-R025: no active enrollment and at least one key
@@ -504,12 +519,16 @@ func (a *PrivacyAuthority) resolveKeys(ctx context.Context, providerID string, c
 		keys.enrolled = true
 		changed := false
 		if claim != nil {
-			if !keys.identityPinned && claim.IdentityPublicKey != enrollment.IdentityPublicKey {
-				changed = true
+			identityChanged := !keys.identityPinned && claim.IdentityPublicKey != enrollment.IdentityPublicKey
+			seChanged := !keys.sePinned && claim.SEPublicKey != enrollment.SEPublicKey
+			if identityChanged && !seChanged && enrollment.PreviousIdentityFingerprint != "" {
+				if decoded, err := decodeBase64URLFixed(claim.IdentityPublicKey, ed25519.PublicKeySize); err == nil &&
+					PublicKeyFingerprint(decoded) == enrollment.PreviousIdentityFingerprint {
+					keys.retiredClaim = true
+					identityChanged = false
+				}
 			}
-			if !keys.sePinned && claim.SEPublicKey != enrollment.SEPublicKey {
-				changed = true
-			}
+			changed = identityChanged || seChanged
 		}
 		if !keys.identityPinned {
 			decoded, err := decodeBase64URLFixed(enrollment.IdentityPublicKey, ed25519.PublicKeySize)
@@ -630,11 +649,21 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 	if changed {
 		return a.failQuarantine(ctx, providerID, now, "privacy_enrollment_key_changed")
 	}
+	if keys.retiredClaim {
+		a.NoteChallengeTimeout(providerID, session)
+		return a.reject(privacyKeyRotationPendingReason)
+	}
 	sePin, idPub := keys.se, keys.identity
 	if sePin == nil || idPub == nil {
 		return a.reject("posture_pin_missing")
 	}
 	if !verifySEPosture(sePin, framing, response.SESignature) || !verifyIdentityPosture(idPub, framing, response.IdentitySignature) {
+		// SPEC-049-R031 item 7: a posture this session signed with the key a
+		// rotation just retired is refused, not quarantined.
+		if retired := a.retiredIdentity(id); retired != nil && verifySEPosture(sePin, framing, response.SESignature) && verifyIdentityPosture(retired, framing, response.IdentitySignature) {
+			a.NoteChallengeTimeout(providerID, session)
+			return a.reject(privacyKeyRotationPendingReason)
+		}
 		return a.failQuarantine(ctx, providerID, now, "posture_signature_failure")
 	}
 	// A consumed challenge that fails without quarantine also clears the
@@ -1112,6 +1141,15 @@ func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapsh
 	entry.seq = statement.Sequence
 	entry.hasSeq = true
 	return true
+}
+
+func (a *PrivacyAuthority) retiredIdentity(id privacySessionID) ed25519.PublicKey {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if entry := a.sessions[id]; entry != nil && len(entry.retiredIdentity) == ed25519.PublicKeySize {
+		return entry.retiredIdentity
+	}
+	return nil
 }
 
 func (a *PrivacyAuthority) verifiedCDHash(id privacySessionID) (string, bool) {

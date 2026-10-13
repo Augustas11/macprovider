@@ -1,0 +1,47 @@
+{
+  "version": "privacy-key-rotation-v1",
+  "posture": {
+    "version": "privacy-posture-v1",
+    "privacy_class": "operator_constrained_beta_v1",
+    "provider_id": "provider-fixture",
+    "assigned_session": "session-fixture",
+    "nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+    "sequence": 7,
+    "issued_at_unix": 1700000000,
+    "binary_version": "0.0.0-fixture",
+    "code_cdhash": "0123456789abcdef0123456789abcdef01234567",
+    "team_id": "AB12CD34EF",
+    "signing_identifier": "live.malibu.provider.cli",
+    "hardened_runtime": true,
+    "library_validation": true,
+    "get_task_allow": false,
+    "cs_debugged": false,
+    "p_traced": false,
+    "pt_deny_attach_applied": true,
+    "core_dumps_disabled": true,
+    "sip_enabled": true,
+    "runtime_source": "native_mlx",
+    "diagnostic_env_clear": true,
+    "kv_disk_tier_disabled": true,
+    "se_key_backend": "file",
+    "privacy_key_record_digests": [
+      "xPyccfRu3euY3JtLkfdfuR5x2vDS7c4jjS1C0f1v6Yo"
+    ]
+  },
+  "posture_digest": "GVFukoPrLgUPftAqTYEyxdfJEmxwkGQYFJkIKr1O3To",
+  "statement": {
+    "version": "privacy-key-rotation-v1",
+    "privacy_class": "operator_constrained_beta_v1",
+    "provider_id": "provider-fixture",
+    "assigned_session": "session-fixture",
+    "nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+    "issued_at_unix": 1700000000,
+    "previous_identity_public_key": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+    "identity_public_key": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+    "se_public_key": "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q==",
+    "posture_digest": "GVFukoPrLgUPftAqTYEyxdfJEmxwkGQYFJkIKr1O3To"
+  },
+  "rotation_framing_hex": "000000236d616370726f76696465722f737065633034392f6b65792d726f746174696f6e2f763100000017707269766163792d6b65792d726f746174696f6e2d76310000001c6f70657261746f725f636f6e73747261696e65645f626574615f76310000001070726f76696465722d666978747572650000000f73657373696f6e2d66697874757265000000205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a000000006553f1000000002b696f6a6a3358514a385a583955747374504c70646373706e436238646c42496238335349416251506231770000002b67546c3344716839463139576f31526d7730782d7a4d754e69704730376a65695866595057345f4a733551000000586178665238754573516b6634764f626c59365241386e634466594574367a4f67394b45355264695977705a5034304c692f68702f6d34376e36307038443534574b38347a563273785873374c746b426f4e37395239513d3d0000002b475646756b6f50724c67555066744171545945797864664a456d78776b475159464a6b494b72314f33546f",
+  "previous_identity_signature": "EqIUURZgjyk_cWf6Sxarsq2AfLpnSuOOlaeJn1mvMGfucTk61VpoXOKWnGLPZxQMuJSzBpWopsy49oU-gH6vBg",
+  "identity_signature": "KkdrhS3hjckj4qtJBkSYch96gTsFLSvwQSFXuKUFvzpEXpPzmH_DV3CVHLdl_Jn4q3T_acDwH46sONbLF4dpCA"
+}

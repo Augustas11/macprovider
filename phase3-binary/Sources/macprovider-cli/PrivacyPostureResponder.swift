@@ -46,6 +46,12 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     private var advertisingDisabled = false
     private var decryptFailureLatched = false
     private var hasAdvertisedKeys = false
+    /// SPEC-049-R031: the outstanding rotation (nonce and the new identity
+    /// public key it offered) and the last time a rotation was requested.
+    private var pendingRotation: (nonce: String, identityPublicKey: String)?
+    private var lastRotationRequest: Date?
+    /// Minimum spacing between rotation requests on one process.
+    static let rotationRequestInterval: TimeInterval = 600
 
     init(
         probe: any PrivacyPostureProbe,
@@ -125,10 +131,152 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         case .ready(_, let values):
             digests = values
         }
+        let statement = try nextStatementLocked(
+            observation: observation,
+            nonce: nonce,
+            assignedSession: assignedSession,
+            digests: digests,
+            now: now
+        )
+        let framing = try statement.framing()
+        guard seSigner.publicKeyRaw.count == 64 else { throw PrivacyClassError.invalidMaterial }
+        let seSignature = RelayBlindBase64URL.encode(try seSigner.sign(framing))
+        let identitySignature = try relayBlindRuntime.identitySignatureBase64URL(for: framing)
+        let response: [String: Any] = [
+            "type": "privacy_posture_response",
+            "version": 1,
+            "statement": statement.wireObject,
+            "se_signature": seSignature,
+            "identity_signature": identitySignature,
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: response, options: [.withoutEscapingSlashes])
+        guard encoded.count <= maxPrivacyPostureResponseBytes else { throw PrivacyClassError.invalidMaterial }
+        return response
+    }
+
+    /// SPEC-049-R031: asks for a rotation nonce when a staged identity key
+    /// exists and the last request is at least `rotationRequestInterval` old. A coordinator without rotation support
+    /// ignores the request, and the provider keeps its enrolled key.
+    func rotationRequest(now: Date = Date()) -> [String: Any]? {
+        lock.lock()
+        defer { lock.unlock() }
+        noteDecryptRecheckLocked()
+        guard !advertisingDisabled else { return nil }
+        let staged = try? relayBlindRuntime.stagedIdentity()
+        guard staged != nil else { return nil }
+        if let lastRotationRequest, now.timeIntervalSince(lastRotationRequest) < Self.rotationRequestInterval {
+            return nil
+        }
+        // An exchange that never got a result is abandoned; a late result
+        // for its nonce no longer matches.
+        pendingRotation = nil
+        lastRotationRequest = now
+        return ["type": "privacy_key_rotation_request", "version": 1]
+    }
+
+    /// Builds the signed `privacy_key_rotation` for a coordinator rotation
+    /// challenge: a fresh posture bound by digest, signed by the enrolled
+    /// Secure Enclave key, the current identity key, and the staged key.
+    func respondToRotation(challenge: [String: Any], assignedSession: String, now: Date = Date()) throws -> [String: Any]? {
+        guard Set(challenge.keys) == ["type", "version", "nonce", "issued_at_unix"],
+              challenge["type"] as? String == "privacy_key_rotation_challenge",
+              strictJSONInt64(challenge["version"]) == 1,
+              let nonce = challenge["nonce"] as? String,
+              strictJSONInt64(challenge["issued_at_unix"]) != nil,
+              privacyVisibleASCII(assignedSession, maxBytes: PrivacyClassConstants.maxIdentifierBytes) else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        _ = try RelayBlindBase64URL.decode(nonce, exactCount: 32)
+        lock.lock()
+        defer { lock.unlock() }
+        guard let observation = healthyObservationLocked(),
+              let staged = try relayBlindRuntime.stagedIdentity() else {
+            return nil
+        }
+        let digests: [String]
+        switch try buildRecordsLocked(observation: observation, now: now) {
+        case .disabled:
+            return nil
+        case .ready(_, let values):
+            digests = values
+        }
+        let posture = try nextStatementLocked(
+            observation: observation,
+            nonce: nonce,
+            assignedSession: assignedSession,
+            digests: digests,
+            now: now
+        )
+        let sePublicKey = seSigner.publicKeyRaw
+        guard sePublicKey.count == 64 else { throw PrivacyClassError.invalidMaterial }
+        let nextPublicKey = RelayBlindBase64URL.encode(staged.publicKey.rawRepresentation)
+        let statement = PrivacyKeyRotationStatement(
+            version: PrivacyClassConstants.keyRotationVersion,
+            privacyClass: PrivacyClassConstants.v1,
+            providerID: providerID,
+            assignedSession: assignedSession,
+            nonce: nonce,
+            issuedAtUnix: Int64(now.timeIntervalSince1970),
+            previousIdentityPublicKey: relayBlindRuntime.identityPublicKeyBase64URL(),
+            identityPublicKey: nextPublicKey,
+            sePublicKey: sePublicKey.base64EncodedString(),
+            postureDigest: try posture.digest()
+        )
+        let framing = try statement.framing()
+        let message: [String: Any] = [
+            "type": "privacy_key_rotation",
+            "version": 1,
+            "statement": statement.wireObject,
+            "posture": posture.wireObject,
+            "se_signature": RelayBlindBase64URL.encode(try seSigner.sign(framing)),
+            "previous_identity_signature": try relayBlindRuntime.identitySignatureBase64URL(for: framing),
+            "identity_signature": RelayBlindBase64URL.encode(try staged.signature(for: framing)),
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: message, options: [.withoutEscapingSlashes])
+        guard encoded.count <= PrivacyClassConstants.maxKeyRotationBytes else { throw PrivacyClassError.invalidMaterial }
+        pendingRotation = (nonce, nextPublicKey)
+        return message
+    }
+
+    /// Applies a `privacy_key_rotation_result`. Only an `accepted` result for
+    /// the outstanding nonce switches the identity key; it returns true then,
+    /// so the caller re-advertises under the new key. Anything else keeps the
+    /// enrolled key.
+    func applyRotationResult(_ result: [String: Any]) throws -> Bool {
+        guard Set(result.keys) == ["type", "version", "nonce", "status", "reason"],
+              result["type"] as? String == "privacy_key_rotation_result",
+              strictJSONInt64(result["version"]) == 1,
+              let nonce = result["nonce"] as? String,
+              let status = result["status"] as? String,
+              result["reason"] is String else {
+            throw PrivacyClassError.invalidMaterial
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pending = pendingRotation else { return false }
+        if status != "accepted" {
+            if nonce.isEmpty || nonce == pending.nonce { pendingRotation = nil }
+            return false
+        }
+        guard nonce == pending.nonce else { return false }
+        pendingRotation = nil
+        try relayBlindRuntime.promoteStagedIdentity(expectedPublicKey: pending.identityPublicKey)
+        return true
+    }
+
+    /// The next posture statement. Sequence is strictly increasing per
+    /// process across posture responses and rotations.
+    private func nextStatementLocked(
+        observation: PrivacyPostureObservation,
+        nonce: String,
+        assignedSession: String,
+        digests: [String],
+        now: Date
+    ) throws -> PrivacyPostureStatement {
         guard sequence < UInt64.max else { throw PrivacyClassError.invalidMaterial }
         sequence += 1
         let issuedAt = Int64(now.timeIntervalSince1970)
-        let statement = PrivacyPostureStatement(
+        return PrivacyPostureStatement(
             version: PrivacyClassConstants.postureVersion,
             privacyClass: PrivacyClassConstants.v1,
             providerID: providerID,
@@ -154,20 +302,6 @@ final class PrivacyPostureResponder: @unchecked Sendable {
             seKeyBackend: seKeyBackend,
             privacyKeyRecordDigests: digests
         )
-        let framing = try statement.framing()
-        guard seSigner.publicKeyRaw.count == 64 else { throw PrivacyClassError.invalidMaterial }
-        let seSignature = RelayBlindBase64URL.encode(try seSigner.sign(framing))
-        let identitySignature = try relayBlindRuntime.identitySignatureBase64URL(for: framing)
-        let response: [String: Any] = [
-            "type": "privacy_posture_response",
-            "version": 1,
-            "statement": statement.wireObject,
-            "se_signature": seSignature,
-            "identity_signature": identitySignature,
-        ]
-        let encoded = try JSONSerialization.data(withJSONObject: response, options: [.withoutEscapingSlashes])
-        guard encoded.count <= maxPrivacyPostureResponseBytes else { throw PrivacyClassError.invalidMaterial }
-        return response
     }
 
     private func latchedWithdrawalLocked() -> [[String: Any]]? {
