@@ -101,12 +101,13 @@ struct ContinuousBatchingSelfCheckTarget: Sendable, Equatable {
     /// The pool's block size: each probe row reserves whole blocks.
     var blockSizeTokens: Int = 16
 
-    /// The most slots any grant may serve on this target: the scheduler rows,
-    /// capped by the widest exactness-probe shape it holds
+    /// The most slots any grant may serve on this target: the scheduler rows
+    /// and queue limit, capped by the widest exactness-probe shape they hold
     /// (`ContinuousBatchingSelfCheck.exactnessProbeBound`). A stored, prior or
     /// provisional grant above it is served only up to it.
     var grantableRows: Int {
-        min(maxRows, ContinuousBatchingSelfCheck.exactnessProbeBound(target: self, maxCount: maxRows))
+        let configured = max(1, min(maxRows, queueLimit))
+        return min(configured, ContinuousBatchingSelfCheck.exactnessProbeBound(target: self, maxCount: configured))
     }
 }
 
@@ -510,10 +511,13 @@ enum ContinuousBatchingSelfCheck {
     ) -> ContinuousBatchingSelfCheckDecision {
         let exactPrefix = Array(measurements.prefix { $0.conformant })
         let verified = exactPrefix.last?.slots ?? 1
-        // With nothing verified, a crash or an unmet probe shape is the
-        // result even before a serial baseline exists, so it is never read
-        // as a throughput result that keeps a prior grant.
-        if exactPrefix.isEmpty, measurements.isEmpty {
+        // With nothing verified, a divergence, a crash or an unmet probe
+        // shape is the result even before a serial baseline exists, so it is
+        // never read as a throughput result that keeps a prior grant.
+        if exactPrefix.isEmpty {
+            if let first = measurements.first {
+                return .init(slots: 1, reason: "row_divergence_at_\(first.slots)", verifiedSlots: 1)
+            }
             if let crashedAt {
                 return .init(slots: 1, reason: "crashed_at_\(crashedAt)", verifiedSlots: 1)
             }
@@ -1067,6 +1071,11 @@ actor ContinuousBatchingSelfCheckDriver {
             let reason = configuredSlots >= 2 ? "probe_shape_unavailable" : "single_row"
             record.decision = .init(slots: 1, reason: reason, verifiedSlots: 1)
             record.ladderBound = maxSlots
+            // Decided: it re-runs when the bound grows, not on a timer.
+            record.inProgressSlots = nil
+            record.remeasureInProgress = nil
+            record.remeasureAfter = nil
+            record.decidedAt = ISO8601DateFormatter().string(from: Date())
             try? save(record)
             await apply(record.decision!, target: target, source: "measured")
             return
@@ -1122,11 +1131,17 @@ actor ContinuousBatchingSelfCheckDriver {
                     record.probeAloneOutputs = probeAlone
                     record.probePromptSHA256s = probePrompts.prefix(probeAlone.count).map(ContinuousBatchingSelfCheck.promptSHA256)
                 }
-                let probe = try await yieldingToRequests {
-                    try await runtime.runContinuousBatchingSelfCheckBatch(
-                        prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
-                        idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
-                    )
+                let probe: (outputs: [[Int]], seconds: Double, cohortDecodeTokens: [Int])
+                do {
+                    probe = try await yieldingToRequests {
+                        try await runtime.runContinuousBatchingSelfCheckBatch(
+                            prompts: Array(probePrompts.prefix(slots)), maxOutputTokens: probeTokens,
+                            idPrefix: "cb-self-check-\(attempt)-probe-k\(slots)", cohort: true
+                        )
+                    }
+                } catch where (error as? ContinuousBatchSchedulerError) == .queueWaitTimedOut {
+                    // The cohort never all reached a row: its shape was not met.
+                    throw StepError.probeShapeUnmet(slots: slots)
                 }
                 let probeCheck = try await checkRows(
                     passes: [probe.outputs], alone: Array(probeAlone.prefix(slots)), prompts: probePrompts, label: "probe"

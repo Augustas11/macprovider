@@ -578,6 +578,9 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
             measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-10-13T00:00:00Z"
         ))
         XCTAssertEqual(target.grantableRows, small)
+        var queued = target
+        queued.queueLimit = 4
+        XCTAssertEqual(queued.grantableRows, 4, "a grant never serves above the queue limit either")
         XCTAssertEqual(
             ContinuousBatchingSelfCheckResolution.resolve(store: store, target: target, ownerPinned: nil, provisional: nil)?
                 .servedSlots,
@@ -705,6 +708,15 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(reconciled.decision.slots, 1)
         let unmet = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [], probeShapeUnmetAt: 2)
         XCTAssertEqual(unmet.reason, "probe_shape_unmet_at_2")
+        // A first-width probe divergence leaves no serial baseline either.
+        let diverged = ContinuousBatchingSelfCheck.decide(serialTPS: 0, measurements: [m(2, exact: false, tps: 0)])
+        XCTAssertEqual(diverged, .init(slots: 1, reason: "row_divergence_at_2", verifiedSlots: 1))
+        XCTAssertEqual(
+            ContinuousBatchingSelfCheck.reconcile(
+                fresh: diverged, priorGrant: 16, serialTPS: 0, measurements: [m(2, exact: false, tps: 0)], previousStreak: 0
+            ).decision.reason,
+            "row_divergence_at_2"
+        )
     }
 
     /// Stored lone outputs are reused only for the prompt they were generated

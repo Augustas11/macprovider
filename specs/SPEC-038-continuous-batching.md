@@ -14,8 +14,8 @@ at a time, so rows rarely decoded all together, and its 1.0-logit near-tie
 rule excused the flips it did see (two, at a 0.125 logit gap). Each width k
 now first runs an exactness probe: k rows with unequal prompt lengths on both
 sides of the device's vector-attention route boundary (1024 keys on
-Max/Ultra-class GPUs, 4096 on the others) and one row that crosses it while
-decoding. None is admitted before all are queued, and none decodes while
+Max/Ultra-class GPUs, 4096 on the others) and, from k = 3, one row that
+crosses it while decoding. None is admitted before all are queued, and none decodes while
 another is still prefilling, so all k decode in the same forwards, split by
 the FR-CB2 row bound exactly as served. Every row must decode at least
 max(16, serve window) tokens beside the whole cohort, and must equal its lone
@@ -1178,8 +1178,10 @@ above are superseded where they conflict:
    runs through the production scheduler, so it probes at the serve path's
    own decode lockstep window, and its prompts have unequal lengths because
    batched decode pads keys to the longest row, which can change a
-   neighbour's attention route (v0.3.19: the exactness probe below). Every slot count k from 2 to
-   the scheduler rows is checked (a grant covers every row count below it):
+   neighbour's attention route (v0.3.19: the exactness probe below). Every
+   slot count k from 2 to the ladder bound is checked (a grant covers every
+   row count below it); the bound is the scheduler rows, lowered by the
+   items below and, from v0.3.19, by the widest probe shape the Mac holds:
    it submits k distinct fixed greedy prompts together. (v0.3.17) The ladder
    also stops at the scheduler's waiting-queue limit, because a wider probe is
    refused with backpressure before any row runs (and at an owner pin and
@@ -1257,7 +1259,8 @@ divergence; the check is defence in depth.
    (a pin may lower the count, never raise it past what was verified). The
    decision (`granted`, `no_net_gain`, `row_divergence_at_<k>`,
    `crashed_at_<k>`, `serial_baseline_unavailable`, `kept_prior_grant_*`,
-   `probe_shape_unavailable`, `probe_shape_unmet_at_<k>` (v0.3.19),
+   `single_row`, `probe_shape_unavailable`, `probe_shape_unmet_at_<k>`
+   (v0.3.19),
    `prior_grant_pending_recheck`, or `pending`/`deferred`
    before one exists), served slots, `verified_k`, deferral count and the
    runtime identity it was measured on are reported in `/v1/status`
@@ -1326,10 +1329,12 @@ from 2 runs an exactness probe through the production scheduler:
    per-request cap and, together, its paged-KV pool (each row's prompt,
    completion and decode headroom rounded up to whole blocks). The ladder
    stops at the widest k that fits (`probe_shape_unavailable` when two rows
-   do not). Like the scheduler rows, this shape bound also caps every grant
-   the Mac serves, stored, prior or provisional, so a smaller pool or
-   context never keeps a wider grant. A conformant width whose rows did not
-   all reach R tokens at full cohort width, or whose prompts cannot be cut
+   do not; that decision re-runs once the bound reaches 2). Like the
+   scheduler rows, this shape bound and the queue limit also cap every
+   grant the Mac serves, stored, prior or provisional, so a smaller pool,
+   context or queue never keeps a wider grant. A conformant width whose
+   rows did not all reach R tokens at full cohort width, whose rows were
+   not all admitted within the queue wait, or whose prompts cannot be cut
    to their lengths, ends the ladder with no correctness result, unless a
    buyer request was in flight or started during the step (then it is a
    yield). The decision then uses the widths verified below it
@@ -1337,9 +1342,9 @@ from 2 runs an exactness probe through the production scheduler:
    them, and the full ladder is re-measured after 1 h. A row divergence is
    a correctness result even when the cohort shape was not met: the rows
    differed from their lone runs in the served path at a width at most k.
-   With no width verified yet, a crashed step or an unmet shape is the
-   result even before a serial baseline exists, so it never reads as
-   `serial_baseline_unavailable`, which keeps a prior grant.
+   With no width verified yet, a divergence, a crashed step or an unmet
+   shape is the result even before a serial baseline exists, so it never
+   reads as `serial_baseline_unavailable`, which keeps a prior grant.
 5. Key. The stored key carries the probe version and the route boundary
    (`cb-probe-v2/route<B>`). With the decode window already in the key,
    they fix the probe prompts and completion length. Each stored lone
