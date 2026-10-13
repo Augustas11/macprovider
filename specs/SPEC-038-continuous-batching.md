@@ -1,11 +1,31 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.19
+Version: v0.3.20
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.20 (2026-10-15, FR-CB10 exactness probe):**
+FR-CB10: the self-check's isolation probe now exercises the failure it
+missed. On the Studio, main's self-check granted 16 rows while 16 rows in one
+forward flipped 30-38 greedy tokens: its short prompts were prefilled a few
+at a time, so rows rarely decoded all together, and its 1.0-logit near-tie
+rule excused the flips it did see (two, at a 0.125 logit gap). Each width k
+now first runs an exactness probe: k rows with unequal prompt lengths on both
+sides of the device's vector-attention route boundary (1024 keys on
+Max/Ultra-class GPUs, 4096 on the others) and one row that crosses it while
+decoding. None is admitted before all are queued, and none decodes while
+another is still prefilling, so all k decode in the same forwards, split by
+the FR-CB2 row bound exactly as served. Every row must decode at least
+max(16, serve window) tokens beside the whole cohort, and must equal its lone
+run token for token. A first difference is excused only at an exact tie
+(stock serial top two within 1/1024 logit), and is counted. A width whose
+rows did not all decode together, or a Mac whose pool or served context
+cannot hold the probe at a width, verifies no width at or above it. The
+stored key gains the probe version, so results re-run once; a stored grant
+keeps serving during the re-run.
+
 **Change log v0.3.19 (2026-10-14, #1570 — relay preflight before the opening chunk):** The coordinator commits a buyer's streaming response on the provider's first chunk, and the relay sent its opening role chunk before tokenizing the prompt. A prompt over the served context therefore failed after commit, as a mid-stream `provider_error`, although v0.3.5 specifies a pre-commit 413. The relay now runs the runtime's full preflight (tokenization, the `context_length_exceeded` check and the paged-KV attach check) before the opening chunk, as the direct HTTP path already did, so that rejection ends as `error_context_exceeded` with `chunks_sent: 0` (coordinator 413 `context_exceeds_capacity`, not retried, not breaker-qualifying). A relay-blind request, already tokenized and context-checked by its relay-blind preparation on the same handle, keeps the paged-KV attach check only. A `cancel_request` that arrives during preflight ends the request before the opening chunk with the usual `cancelled` end frame. Rejections that only the scheduler can make (a prompt that leaves no room for one output token, pool capacity, queue-wait timeout) still happen after the opening chunk; making them pre-commit needs an admission signal from the scheduler to the relay and is not in this version.
 
 **Change log v0.3.18 (2026-10-11, decode and verification row isolation):**
@@ -1155,9 +1175,9 @@ above are superseded where they conflict:
    decode-window change (v0.3.16) therefore re-runs it. A result stored before
    the window was keyed matches no window and re-runs. It
    runs through the production scheduler, so it probes at the serve path's
-   own decode lockstep window, and its prompts have unequal lengths (short to
-   about 1.5k tokens) because batched decode pads keys to the longest row,
-   which can change a neighbour's attention route. Every slot count k from 2 to
+   own decode lockstep window, and its prompts have unequal lengths because
+   batched decode pads keys to the longest row, which can change a
+   neighbour's attention route (v0.3.19: the exactness probe below). Every slot count k from 2 to
    the scheduler rows is checked (a grant covers every row count below it):
    it submits k distinct fixed greedy prompts together. (v0.3.17) The ladder
    also stops at the scheduler's waiting-queue limit, because a wider probe is
@@ -1178,12 +1198,11 @@ above are superseded where they conflict:
    crash, never lowers a prior grant, and does not grow the deferral backoff;
    with no width verified yet it is an ordinary deferral. Every row MUST equal
    that prompt run
-   alone on the same paged engine, or first differ only at a numerical
-   near-tie judged by the load-time isolation probe's own rule: at the first
-   differing position both tokens are the stock serial top two for the
-   shared prefix, within `batchedArgmaxLogitTolerance` (1.0 logit), and the
-   batched token is not another row's token at that position unless it is
-   the stock argmax. A row that fails stops the ladder; that k and above are
+   alone on the same paged engine, or first differ only at an exact tie
+   (v0.3.19): at the first differing position both tokens are the stock
+   serial top two for the shared prefix, within `nearTieLogitTolerance`
+   (1/1024 logit), and the batched token is not another row's token at that
+   position unless it is the stock argmax. A row that fails stops the ladder; that k and above are
    not granted. Batched and contiguous serial decode reduce attention in a
    different order and MoE gathers group rows differently, so exact
    serial-vs-batched token identity is not required; the load-time SPEC-039
@@ -1229,12 +1248,15 @@ revokes nothing (operator decision; a verified revocation is enforced); and
 the near-tie rule is a heuristic, so contamination that lands on a row's own
 top-two token without matching another row's token at that position is not
 detected by it. The load-time isolation probe and the per-width checks bound
-both.
+both. (v0.3.19) The tie rule now excuses only an exact tie, and the FR-CB2
+row bound, not this check, is the structural guard against kernel-route
+divergence; the check is defence in depth.
 
 4. The served count MUST NOT exceed `verified_k`, including an owner pin
    (a pin may lower the count, never raise it past what was verified). The
    decision (`granted`, `no_net_gain`, `row_divergence_at_<k>`,
    `crashed_at_<k>`, `serial_baseline_unavailable`, `kept_prior_grant_*`,
+   `probe_shape_unavailable`, `probe_shape_unmet_at_<k>` (v0.3.19),
    `prior_grant_pending_recheck`, or `pending`/`deferred`
    before one exists), served slots, `verified_k`, deferral count and the
    runtime identity it was measured on are reported in `/v1/status`
@@ -1260,6 +1282,51 @@ the FR-CB2 decode row bound (v0.3.17 bounds it only by the scheduler rows,
 the owner pin and the queue limit); the scheduler splits those decode
 forwards into forwards of at most the bound, so the check measures and
 grants the split execution that serves.
+
+**(v0.3.19) Exactness probe.** Before its throughput passes, each width k
+from 2 runs an exactness probe through the production scheduler:
+
+1. Shape. k rows of fixed greedy prompts cut to exact token lengths. The
+   rows repeat four kinds: short (about 160 tokens), long (past the route
+   boundary B), crossing (starting below B and crossing it mid-completion)
+   and mid (B/4). B is the smallest key length at which a GQA decode row
+   takes the two-pass vector attention kernel in the FR-CB2 route table:
+   1024 on Max/Ultra-class GPUs, 4096 on the others. Where B is above 1024,
+   long and crossing rows after the first of each become short or mid rows,
+   so small Macs stay within their pool. Every k has rows on both sides of B
+   and, from k = 3, a crossing row, and no two rows share a length. The
+   16384-key partition boundary is not crossed: the `qmv`/`qmm` switch
+   depends on the row count, per-row attention already gives each row its
+   own route (Studio, with the row bound: 256/256 bitwise at 300-16,380
+   keys), and a 16k prompt per row is more prefill and KV than an 8 GB Mac
+   holds at its row count.
+2. Cohort. The k rows are one cohort. No row is admitted until all k are
+   queued, and no row decodes while another is still waiting or prefilling.
+   The hold lasts only while admission or prefill makes progress. All k
+   therefore decode in the same forwards, split by the FR-CB2 decode row
+   bound as served. Each row counts the decode tokens it generated while the
+   whole cohort was decoding. Each row generates max(48, R + 1) tokens,
+   where R = max(16, serve window) is the decode tokens every row MUST reach
+   at full cohort width.
+3. Comparison. Every row is compared with the same prompt run alone on the
+   same paged engine, under the item 2 rule with an exact-tie tolerance of
+   1/1024 logit. Under the row bound, batched and lone rows are
+   bit-identical (Studio, 256/256), so any flip means the logits differ. The
+   flips the old 1.0-logit rule accepted sat at 0.125, one bfloat16 step at
+   logits of 16-32. 1/1024 is below one bfloat16 step at any logit of
+   magnitude 0.25 or more. Excused ties are counted (`near_tie_rows`).
+4. Fail closed. A width is probed only if all k rows fit the scheduler's
+   per-request cap and, together (prompt, completion, decode headroom and
+   one block each), its paged-KV pool. The ladder stops at the widest k that
+   fits (`probe_shape_unavailable` when two rows do not). A width whose rows
+   did not all reach R tokens at full cohort width, or whose prompts cannot
+   be cut to their lengths, ends the ladder with no correctness result. The
+   decision then uses the widths verified below it
+   (`probe_shape_unmet_at_<k>` when none), lowers a wider prior grant to
+   them, and the full ladder is re-measured after 1 h.
+5. Key. The stored key carries the probe version (`cb-probe-v2`). A result
+   measured by an older probe re-runs, and its grant carries the Mac through
+   the re-run under the item 2 continuation rule.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 

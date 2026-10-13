@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.19",
+      "version": "0.3.20",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5016,14 +5016,29 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let minimumAggregateGain",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:actor ContinuousBatchingSelfCheckDriver {",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift:static func defaultOn",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchingSelfCheckRuntimeBuild"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func continuousBatchingSelfCheckRuntimeBuild",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessPromptLength(index",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func exactnessProbeBound",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static func divergenceVerdict",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSelfCheck.swift:static let nearTieLogitTolerance",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private var selfCheckCohortDecodeHeld",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func noteSelfCheckCohortDecodeStep"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testRowDivergenceAtTwoServesSerially",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testShippedPolicyKeepsTheStudioQwenTupleBatching",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSignedPolicyTests.swift:testRolloutOffRevokesTheModelOnItsRuntimeRevisionOnly",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testResultFromAnotherDecodeWindowDoesNotQualifyThisOne",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSelfCheckKeyCarriesTheRowIsolationPolicy"
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSelfCheckKeyCarriesTheRowIsolationPolicy",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testExactnessProbeCatchesTheQmmFlipAboveTheVectorLimitOnlyWithoutTheRowBound",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testExactnessProbeCohortThatNeverFillsRunsNothingAndTimesOut",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testNearTieToleranceExcusesOnlyAnExactTie",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeStraddlesTheDevicesVectorAttentionRouteBoundary",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeCrossesTheBoundaryWithUnequalRowsAtEveryWidth",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeBoundCapsTheLadderOnSmallPools",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testUnmetProbeShapeGrantsNoWidthItDidNotVerify",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbePromptsAreCutToExactLengthsKeepingTheTemplateClose",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeVersionBumpRerunsTheCheckAndKeepsAStoredGrantMeanwhile"
       ],
       "journeys": [],
       "evidence": [],
