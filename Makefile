@@ -49,8 +49,9 @@ test-coordinator:
 # -race turns on checkptr everywhere; in the transpiled modernc SQLite C
 # code it was over half of billing's runtime (query planning). The race
 # detector itself still instruments every package, modernc included.
+# -timeout stays below the CI job's 26 minutes so a hang still dumps stacks.
 test-coordinator-billing-race:
-	cd phase4-coordinator && go test -race -gcflags='modernc.org/...=-d=checkptr=0' -timeout 30m ./internal/billing
+	cd phase4-coordinator && go test -race -gcflags='modernc.org/...=-d=checkptr=0' -timeout 24m ./internal/billing
 
 # SPEC-017 Step 1 and provider-onboarding Postgres integration tests.
 # Tagged with `integration` so

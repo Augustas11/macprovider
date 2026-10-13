@@ -29,9 +29,9 @@ const (
 var (
 	ErrRecoveryInProgress = errors.New("ledger recovery already in progress")
 
-	// recoverLedgerBatchBudget bounds each recovery batch. It is a var only
-	// so -race test builds can widen it (recovery_race_test.go); production
-	// never writes it.
+	// recoverLedgerBatchBudget bounds the run claim, each recovery batch and
+	// the failure write. It is a var only so -race test builds can widen it
+	// (recovery_race_test.go); production never writes it.
 	recoverLedgerBatchBudget = 2 * time.Second
 
 	recoverLedgerAfterClaimForTest func()
