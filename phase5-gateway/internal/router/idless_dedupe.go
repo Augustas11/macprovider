@@ -145,7 +145,6 @@ type idlessDedupeEntry struct {
 	completed   bool
 	status      int
 	contentType string
-	providerID  string
 	// body is the captured buyer-visible response. nil means "replay
 	// unavailable" — never cached, or the body was evicted under memory
 	// pressure while the fingerprint→requestID mapping was kept.
@@ -169,7 +168,6 @@ type idlessDedupeReplay struct {
 	requestID   string
 	status      int
 	contentType string
-	providerID  string
 	body        []byte
 }
 
@@ -232,7 +230,7 @@ func (x *idlessDedupeIndex) claim(fp, requestID string, now time.Time, window ti
 // publish records the owner's buyer-visible 2xx response. A no-op unless
 // requestID still owns fp (the entry may have been evicted, or replaced by a
 // later attempt after eviction).
-func (x *idlessDedupeIndex) publish(fp, requestID string, status int, contentType, providerID string, body []byte, now time.Time) {
+func (x *idlessDedupeIndex) publish(fp, requestID string, status int, contentType string, body []byte, now time.Time) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	entry := x.entries[fp]
@@ -241,7 +239,6 @@ func (x *idlessDedupeIndex) publish(fp, requestID string, status int, contentTyp
 	}
 	entry.status = status
 	entry.contentType = contentType
-	entry.providerID = providerID
 	if len(body) > 0 && len(body) <= idlessDedupeMaxEntryBytes {
 		entry.body = body
 		x.totalBytes += len(body)
@@ -316,7 +313,6 @@ func (x *idlessDedupeIndex) replaySnapshot(entry *idlessDedupeEntry, now time.Ti
 		requestID:   entry.requestID,
 		status:      entry.status,
 		contentType: entry.contentType,
-		providerID:  entry.providerID,
 		body:        entry.body,
 	}, true
 }
@@ -460,9 +456,6 @@ func (s *Server) replayIdlessDuplicate(w http.ResponseWriter, r *http.Request, s
 	header.Del("Retry-After")
 	if snapshot.contentType != "" {
 		header.Set("Content-Type", snapshot.contentType)
-	}
-	if snapshot.providerID != "" {
-		header.Set("X-Provider-Id", snapshot.providerID)
 	}
 	header.Set("X-Request-ID", snapshot.requestID)
 	header.Set(idlessDedupeHeader, idlessDedupeHeaderValue)

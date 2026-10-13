@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.32",
+      "version": "1.9.33",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.15",
+      "version": "1.6.16",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.50",
+      "version": "0.9.52",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -12203,6 +12203,186 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1914",
         "rationale": "Repository admission with exact revocations, update-only revoked sessions, deprecated allowlist parsing, reload refusal and the release-train policy check are implemented and tested; the coordinator runtime that carries them is pending deployment."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R006",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/EngineProfile.swift:EngineProfile",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
+        "phase4-coordinator/internal/ws/messages.go:parseEngineProfile",
+        "phase4-coordinator/internal/pool/provider.go:SetEngineProfile",
+        "phase4-coordinator/internal/ws/server.go:handleHeartbeat"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testEngineFamilyPrefersNativeMTPThenContinuousBatching",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testChipClassIsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testRAMClassAndBounds",
+        "phase3-binary/Tests/macprovider-cliTests/EngineProfileTests.swift:testWireObjectIsClosedAndVersioned",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatDisabledModeOmitsBothFields",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestParseHeartbeatAcceptsEngineProfile",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestParseHeartbeatDropsInvalidEngineProfileWithoutRejecting",
+        "phase4-coordinator/internal/ws/engine_profile_test.go:TestRegistrySetEngineProfile"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-001 v1.9.33 engine profile heartbeat object (#1355). It ships with the next provider CLI release. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R005",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/routing/perf.go:Observe",
+        "phase4-coordinator/internal/routing/perf.go:DecodeWithPrior",
+        "phase4-coordinator/internal/routing/perf.go:evictLocked",
+        "phase4-coordinator/internal/buyer/phase_routing.go:observeServedPerformance",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow",
+        "phase4-coordinator/internal/buyer/phase_routing.go:markFirstTokenOnContent",
+        "phase4-coordinator/internal/buyer/phase_timing.go:routingTTFTMs",
+        "phase4-coordinator/internal/buyer/delivered_sse_accounting.go:notifyFirstContent",
+        "phase4-coordinator/internal/routing/perf.go:evictProviderOldestLocked",
+        "phase4-coordinator/internal/routing/perf.go:LookupMany",
+        "phase4-coordinator/internal/buyer/phase_timing.go:routingServiceMs"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreClampsAndThresholds",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfSelfReportIsCappedPrior",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEvictsStaleThenOldest",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestFirstTokenMarkedOnFirstContent",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfStorePerProviderBudget",
+        "phase4-coordinator/internal/routing/perf_test.go:TestPerfPrefillUsesServiceTime"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-002 v1.6.16 measured-performance store (#1355). It ships in a later coordinator runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R006",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/routing/phase.go:ClassifyPhase",
+        "phase4-coordinator/internal/routing/phase.go:PhaseOrder",
+        "phase4-coordinator/internal/routing/phase.go:scorePhase",
+        "phase4-coordinator/internal/buyer/phase_routing.go:applyPhaseOrder",
+        "phase4-coordinator/internal/buyer/server.go:validateChatRequestDetailed",
+        "phase4-coordinator/internal/buyer/server.go:selectProviderExcluding",
+        "phase4-coordinator/internal/buyer/phase_routing.go:stickyRouteDecision"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/phase_test.go:TestClassifyPhase",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderPrefersMeasuredFitPerPhase",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderFallsBackWithoutEvidence",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderExploresUnmeasuredProviders",
+        "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionPrefersMeasuredFastProvider",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionFallsBackWithoutEvidence",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestValidateChatRequestCapturesMaxTokens",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestStickyHitSkipsPhaseReorder"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-002 v1.6.16 phase-aware selection (#1355). It ships in a later coordinator runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R007",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/routing/phase.go:RouteTraceHeader",
+        "phase4-coordinator/internal/routing/phase.go:LatencyClass",
+        "phase4-coordinator/internal/routing/phase.go:EngineClass",
+        "phase4-coordinator/internal/buyer/phase_routing.go:noteRouteTrace",
+        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
+        "phase4-coordinator/internal/stats/metrics/metrics.go:IncRouteSelection"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/routing/phase_test.go:TestRouteTraceHeaderGrammar",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRouteTracePinnedAndCounted",
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestRouteSelectionMetrics",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-002 v1.6.16 route trace (#1355). It ships in a later coordinator and gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R019",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/privacy_mode.go:requestedPrivacyMode",
+        "phase5-gateway/internal/router/privacy_mode.go:gatePrivacyModeBeforeRelayBlind",
+        "phase5-gateway/internal/router/privacy_mode.go:effectivePrivacyModeForPlaintext",
+        "phase5-gateway/internal/router/privacy_mode.go:setPrivacyModeHeaders",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase4-coordinator/internal/buyer/phase_routing.go:internalPrivacyMode"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_DefaultAndPoolServeAsToday",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_InvalidValuesRejectedBeforeDispatch",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_RelayBlindRequiredFailsClosed",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_OwnedProviderNeedsPoolSelection",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_EffectiveModeAndInternalLabel",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-006 v0.9.51 buyer privacy mode (#1355). It ships in a later gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R020",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/privacy_mode.go:buyerVisibleRouteTraceHeader",
+        "phase5-gateway/internal/router/server.go:copyCleanHeadersFiltered",
+        "phase5-gateway/internal/router/cors.go:setCORSHeaders"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestRouteTraceForwardingIsClosed",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyModeCORSHeaders"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1355",
+        "rationale": "SPEC-006 v0.9.51 route trace forwarding (#1355). It ships in a later gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
       }
     }
   ]

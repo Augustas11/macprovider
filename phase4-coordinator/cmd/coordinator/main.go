@@ -1132,6 +1132,7 @@ func runCoordinator() (exitCode int) {
 		buyer.WithBreakerConfig(cfg.Pool.BreakerFailureThreshold, time.Duration(cfg.Pool.BreakerWindowS)*time.Second),
 		buyer.WithFailoverConfig(cfg.Routing.FailoverEnabled, time.Duration(cfg.Routing.FailoverTimeoutS)*time.Second),
 		buyer.WithRoutingConfig(cfg.Routing),
+		buyer.WithRouteSelectionMetrics(metricsHandle),
 		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithModelVersionFloors(cfg.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion),
 		buyer.WithLimitsConfig(cfg.Limits),

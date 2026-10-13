@@ -494,3 +494,23 @@ func TestPrivacyRouteRejectionMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteSelectionMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+	m.IncRouteSelection("interactive", "measured")
+	m.IncRouteSelection("interactive", "measured")
+	m.IncRouteSelection("long_input", "explore")
+	m.IncRouteSelection("provider-123", "fallback")
+	m.IncRouteSelection("throughput", "attacker")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "interactive", "basis": "measured"}, 2)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "long_input", "basis": "explore"}, 1)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "other", "basis": "fallback"}, 1)
+	assertMetricValue(t, families, "coordinator_route_selections_total", map[string]string{"phase": "throughput", "basis": "other"}, 1)
+	var nilMetrics *Metrics
+	nilMetrics.IncRouteSelection("interactive", "measured")
+}

@@ -6502,6 +6502,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		})
 		if heartbeatResult.OK {
 			s.pool.SetCBSelfCheck(providerID, hb.CBSelfCheck)
+			s.pool.SetEngineProfile(providerID, hb.EngineProfile)
 			s.heartbeatSessionEvaluationLocked(*heartbeatResult.Provider, priorBinding, hadPriorBinding, section)
 		}
 	})

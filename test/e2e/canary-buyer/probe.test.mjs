@@ -1660,7 +1660,7 @@ test('a content-bearing stream without terminal DONE is a partial-stream failure
   try {
     globalThis.fetch = async () => new Response(
       'data: {"model":"model-a","choices":[{"delta":{"content":"ready"}}]}\n\n',
-      { status: 200, headers: { 'content-type': 'text/event-stream', 'x-provider-id': 'provider-a' } }
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
     );
     const partial = await streamOne({
       model: 'model-a', messages: [{ role: 'user', content: 'ready' }], maxTokens: 8, timeoutMs: 1_000,
@@ -1671,7 +1671,7 @@ test('a content-bearing stream without terminal DONE is a partial-stream failure
 
     globalThis.fetch = async () => new Response(
       'data: {"model":"model-a","choices":[{"delta":{"content":"ready"}}]}\n\ndata: [DONE]\n\n',
-      { status: 200, headers: { 'content-type': 'text/event-stream', 'x-provider-id': 'provider-a' } }
+      { status: 200, headers: { 'content-type': 'text/event-stream' } }
     );
     const complete = await streamOne({
       model: 'model-a', messages: [{ role: 'user', content: 'ready' }], maxTokens: 8, timeoutMs: 1_000,

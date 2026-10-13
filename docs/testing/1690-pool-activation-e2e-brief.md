@@ -269,12 +269,12 @@ python3 $B --pool P --engine llamacpp --stream --n 2      | tee $LAB/logs/e2e-pa
 `buyer.py` sends `X-MacProvider-Pool-Select: <pool P id>` and
 `X-MacProvider-Engine-Select: llamacpp` to the gateway at `:19110`, with a
 unique prompt each time. It prints one sanitized JSON line per request with
-`status`, `engine` (the response's `X-MacProvider-Engine`), `provider`
-(`X-Provider-Id`) and `usage`. It does not print request ids; §7 shows
+`status`, `engine` (the response's `X-MacProvider-Engine`) and `usage`.
+The gateway never returns provider identity to buyers (#1991), so the serving
+provider is checked in the coordinator `request_log`, not the response. It does not print request ids; §7 shows
 how to find them.
 
-Expected per request: `200`, `engine: llamacpp_loopback`, `provider:
-lab-1690-m6-provider`; streams end with a `finish_reason` and `[DONE]`.
+Expected per request: `200`, `engine: llamacpp_loopback`; streams end with a `finish_reason` and `[DONE]`.
 Wait 2 minutes, then check §7 for each request.
 
 Then run the harness's own paid and engine cases on rig pool A as the

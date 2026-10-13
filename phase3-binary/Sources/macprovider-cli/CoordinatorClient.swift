@@ -7192,8 +7192,19 @@ actor CoordinatorClient {
         }
         // SPEC-038 v0.3.15: the on-device CB self-check state, for the release
         // canary and operators. Absent until a self-check exists.
-        if let selfCheck = await modelRuntime.currentSnapshot().continuousBatching?.selfCheck {
+        let engineRuntimeSnapshot = await modelRuntime.currentSnapshot()
+        if let selfCheck = engineRuntimeSnapshot.continuousBatching?.selfCheck {
             payload["cb_self_check"] = selfCheck.jsonObject
+        }
+        // SPEC-001-R006: the MLX engine profile, a routing prior only. An
+        // external loopback runtime already reports its class at auth.
+        if !CoordinatorClient.isBYOMLoopbackRuntimeSource(runtimeSource) {
+            payload["engine_profile"] = EngineProfile(
+                snapshot: engineRuntimeSnapshot,
+                chip: hardwareSummary?["chip"] as? String,
+                ramGB: snapshot.capacity.ramGB,
+                maxContextTokens: snapshot.capacity.maxContextTokens
+            ).wireObject
         }
         appendRelayBlindKeyRecords(to: &payload)
         appendPrivacyKeyRecords(to: &payload)

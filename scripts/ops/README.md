@@ -154,6 +154,7 @@ STUDIO_SSH_KEY=<optional key file>
 STUDIO_STATUS_PORT=<provider local status port>
 BUYER_TOKEN_FILE=<file holding a buyer API key>  # gateway proof only
 PROBE_MODEL=<model id>                           # default: the admission tuple's model
+PEARL_COORDINATOR_DB=<coordinator database path on the coordinator host>  # gateway proof reads request_log (buyers get no provider id)
 CATALOG_CANARY_PROVIDER_ID=...                   # as scripts/catalog-content-release.sh
 PEARL_RUNTIME_VERSION=v<x.y.z>                   # pearl-runtime.sh target tag
 # cli-release.sh Pearl layout; the defaults are the production paths:

@@ -303,6 +303,11 @@ type Provider struct {
 	// observability for operators and release canaries; routing still uses
 	// the advertised slots and the pool concurrency ceiling.
 	CBSelfCheck *ProviderCBSelfCheck `json:"cb_self_check,omitempty"`
+	// EngineProfile is the provider's latest SPEC-001-R006 self-reported
+	// engine profile; nil when absent or malformed. A routing prior only:
+	// it never feeds admission, trust tier or settlement.
+	// Not serialized with the provider; the admin provider listing exposes it.
+	EngineProfile *EngineProfile `json:"-"`
 	// Proof of Weights W2 — coordinator-side autotune admission cap derived
 	// from latest verified hardware-evidence benchmarks. Empty/zero when
 	// evidence observation is not wired or provider admitted before W2 rollout.
@@ -509,6 +514,36 @@ func (r *Registry) SetCBSelfCheck(providerID string, selfCheck *ProviderCBSelfCh
 	if p, ok := r.providers[providerID]; ok {
 		p.CBSelfCheck = cloneProviderCBSelfCheck(selfCheck)
 	}
+}
+
+// EngineProfile mirrors the closed SPEC-001-R006 `engine_profile` heartbeat
+// object (engine-profile-v1).
+type EngineProfile struct {
+	Version                string `json:"version"`
+	EngineFamily           string `json:"engine_family"`
+	CBGrantedSlots         int    `json:"cb_granted_slots"`
+	NativeMTPActive        bool   `json:"native_mtp_active"`
+	ChipClass              string `json:"chip_class"`
+	RAMClassGB             int    `json:"ram_class_gb"`
+	MaxStableContextTokens int    `json:"max_stable_context_tokens"`
+}
+
+// SetEngineProfile records the engine profile carried on the heartbeat just
+// applied for this provider session. Nil clears it.
+func (r *Registry) SetEngineProfile(providerID string, profile *EngineProfile) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.providers[providerID]; ok {
+		p.EngineProfile = cloneEngineProfile(profile)
+	}
+}
+
+func cloneEngineProfile(in *EngineProfile) *EngineProfile {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func cloneProviderCBSelfCheck(in *ProviderCBSelfCheck) *ProviderCBSelfCheck {
@@ -3470,6 +3505,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
 		cp.CBSelfCheck = cloneProviderCBSelfCheck(p.CBSelfCheck)
+		cp.EngineProfile = cloneEngineProfile(p.EngineProfile)
 		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 		out = append(out, cp)
 	}

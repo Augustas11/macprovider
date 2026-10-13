@@ -1687,6 +1687,10 @@ type fakeProvider struct {
 	// reconnectRequests makes runWS close its session and hello again on
 	// the same receipt key, as a restarted provider CLI does.
 	reconnectRequests chan struct{}
+	// streamFirstByteDelay holds a streamed response between its headers and
+	// its first chunk, so the coordinator measures it as time to first token
+	// (SPEC-002-R005 phase-aware routing journey).
+	streamFirstByteDelay time.Duration
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -2347,6 +2351,12 @@ func (p *fakeProvider) start(ctx context.Context) {
 				w.Header().Add("Trailer", "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS")
 			}
 			w.WriteHeader(http.StatusOK)
+			if p.streamFirstByteDelay > 0 {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				time.Sleep(p.streamFirstByteDelay)
+			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))

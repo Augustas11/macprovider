@@ -44,15 +44,16 @@ type deliveredSSEAccounting struct {
 	staged        []stagedSSEUsage
 
 	// buyer side
-	queued        int    // rendered bytes queued for the buyer
-	lastBoundary  int    // queued offset of the last event terminator
-	renderedUsage bool   // the open rendered event carries usage
-	pending       []byte // accepted bytes after the last delivered event boundary
-	delivered     int    // accepted bytes through the last delivered event boundary
-	usage         sseUsage
-	reached       sseUsage // prompt of pinned events the buyer began to receive
-	overflow      bool     // a buffer passed maxDeliveredSSEBuffer
-	tracker       *settlementStreamOutputTracker
+	queued         int    // rendered bytes queued for the buyer
+	lastBoundary   int    // queued offset of the last event terminator
+	renderedUsage  bool   // the open rendered event carries usage
+	pending        []byte // accepted bytes after the last delivered event boundary
+	delivered      int    // accepted bytes through the last delivered event boundary
+	usage          sseUsage
+	reached        sseUsage // prompt of pinned events the buyer began to receive
+	overflow       bool     // a buffer passed maxDeliveredSSEBuffer
+	tracker        *settlementStreamOutputTracker
+	onFirstContent func()
 }
 
 type sseUsage struct {
@@ -72,6 +73,16 @@ type stagedSSEUsage struct {
 	usage  sseUsage
 	start  int // queued offset where the pinned event begins
 	offset int // queued offset just past the pinned event's terminator
+}
+
+// onFirstContent, when set, runs once when the first delivered event carries
+// generated content or a tool call (SPEC-002-R005 first-token timing).
+func (a *deliveredSSEAccounting) notifyFirstContent() {
+	if a.onFirstContent != nil && a.contentDelivered() {
+		f := a.onFirstContent
+		a.onFirstContent = nil
+		f()
+	}
 }
 
 func newDeliveredSSEAccounting() *deliveredSSEAccounting {
@@ -178,6 +189,7 @@ func (a *deliveredSSEAccounting) written(accepted []byte) {
 		return
 	}
 	_ = a.tracker.observeBlock(a.pending[:end])
+	a.notifyFirstContent()
 	a.delivered += end
 	a.pending = append(a.pending[:0], a.pending[end:]...)
 	kept := a.staged[:0]

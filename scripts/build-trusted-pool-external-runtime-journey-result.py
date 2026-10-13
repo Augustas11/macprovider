@@ -365,7 +365,13 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
     require(status == 200, f"{kind} response status must be 200")
     require(headers.get("x-macprovider-engine") == RUNTIME_SOURCE, f"{kind} X-MacProvider-Engine must be {RUNTIME_SOURCE}")
     request_id = require_string(headers.get("x-request-id"), None, f"{kind} X-Request-ID")
-    require(headers.get("x-provider-id") == run["member_provider_id"], f"{kind} X-Provider-Id must be the pool member")
+    # Buyers never receive provider identity (SPEC-006 5.4, #1991); the member is
+    # proven by the ledger credit below. A legacy capture that still carries the
+    # header must name the member.
+    require(
+        headers.get("x-provider-id") in (None, run["member_provider_id"]),
+        f"{kind} X-Provider-Id, when present, must be the pool member",
+    )
     if kind == "nonstream":
         body = read_capture_file(capture, f"{base}/response.json")
         doc = require_object(parse_json_bytes(body, f"{base}/response.json"), f"{kind} body")

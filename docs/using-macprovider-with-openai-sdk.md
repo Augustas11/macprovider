@@ -188,14 +188,7 @@ Provider IDs are visible on the pool dashboard at [console.malibu.tech](https://
 
 ## Which provider served this request?
 
-Every response carries `X-MacProvider-Provider` identifying which provider actually served it — useful for logging, debugging, or feeding a subsequent pin.
-
-```python
-resp = client.chat.completions.create(...)
-served_by = resp.response.headers.get("X-MacProvider-Provider")
-```
-
-(Extracting response headers from `openai-python` requires the `raw_response` accessor — see the [OpenAI SDK docs](https://github.com/openai/openai-python#accessing-raw-response-data-eg-headers) for the exact pattern.)
+You cannot tell, by design. Responses carry no provider identity headers: the gateway removes `X-Provider-Id`, `X-MacProvider-Provider`, and similar from every buyer response. A signed receipt, where present, includes the provider's receipt public key so you can verify it. Use `X-Request-ID` to correlate a request with support or its receipt.
 
 ## Signed inference receipts
 
@@ -261,7 +254,6 @@ raw = client.chat.completions.with_raw_response.create(
 )
 resp = raw.parse()
 
-print("served by:  ", raw.headers.get("X-MacProvider-Provider"))
 print("cached toks:", resp.usage.cached_prompt_tokens if hasattr(resp.usage, "cached_prompt_tokens") else 0)
 print("receipt:    ", raw.headers.get("X-MacProvider-Receipt")[:60], "...")
 print("payload:    ", json.loads(resp.choices[0].message.content))
@@ -342,6 +334,36 @@ curl -sS -D - https://api.malibu.tech/v1/chat/completions \
 
 Running a pool yourself and want to serve it with your own engine? See [Serving a Trusted Pool with your own engine](runbooks/trusted-pool-external-engines.md).
 
+## Privacy mode
+
+State the privacy boundary a request needs with `X-MacProvider-Privacy-Mode`. It selects an existing path; it adds no new protection.
+
+| Value | What you get | Refused when |
+|---|---|---|
+| `pool` (default) | Normal network routing. The serving provider and the network relays can read the request and the response. | Never. |
+| `relay_blind_required` | The relay-blind encrypted request path: relays cannot read the content, the serving provider's runtime still reads it. | The body is plaintext, or the request selects a Trusted Pool. |
+| `owned_provider` | Only members of the Trusted Pool you select with `X-MacProvider-Pool-Select` serve the request; it never spills to the network. | No pool is selected. |
+
+- **Errors** are permanent for the same request (`retryable: false`): `400 invalid_privacy_mode` for any other value or for more than one value, and `400 privacy_mode_unsatisfied` when the request cannot meet the mode. A refused request is never served under a weaker mode.
+- **Disclosure.** Every response names the mode it was served under in `X-MacProvider-Privacy-Mode` and states it in `X-MacProvider-Privacy-Mode-Disclosure`. A request that selects a Trusted Pool is reported as `owned_provider` even when you did not ask for it.
+- No mode hides content from the provider runtime that serves it, and none is hardware isolation or attestation. The privacy class has its own, more detailed disclosure in the response usage.
+
+## Why was this provider chosen?
+
+Every network-routed response carries `X-MacProvider-Route-Trace`, for example:
+
+```
+X-MacProvider-Route-Trace: v=1; phase=interactive; basis=measured; evidence=fresh; engine=native_mtp; latency=low
+```
+
+- `phase`: how the network read your request: `interactive` (streamed), `long_input` (a long prompt with a short answer), or `throughput` (not streamed).
+- `basis`: `measured` (chosen from the network's own timings of recent traffic), `explore` (a provider still being measured), `fallback` (not enough recent timings, so the network used its standard order), or `pinned` (you pinned the provider).
+- `evidence`: whether recent measurements of the chosen provider exist (`fresh` or `none`).
+- `engine`: the serving engine family the provider reports (`general_mlx`, `continuous_batching`, `native_mtp`, or `unknown`).
+- `latency`: the expected time to first token from those measurements (`low` under 0.5 s, `medium` under 2 s, `high`, or `unknown`).
+
+The trace explains the routing choice. It never names the provider, and it is not a performance guarantee.
+
 ## Header reference
 
 | Header | Direction | Purpose | Ref |
@@ -349,11 +371,13 @@ Running a pool yourself and want to serve it with your own engine? See [Serving 
 | `X-MacProvider-Conversation` | Request | Sticky-affinity tag for prefix-cache reuse | SPEC-004, SPEC-024 |
 | `X-MacProvider-Pin-Provider` | Request | Strict-pin to specific provider | SPEC-004 |
 | `X-MacProvider-Pool-Select` | Request | Route the request inside a Trusted Pool you are authorized for | SPEC-042 |
+| `X-MacProvider-Privacy-Mode` | Request and response | Privacy boundary: `pool`, `relay_blind_required`, `owned_provider`; the response names the mode served | SPEC-006-R019 |
+| `X-MacProvider-Privacy-Mode-Disclosure` | Response | Fixed plain statement of what the served mode protects | SPEC-006-R019 |
+| `X-MacProvider-Route-Trace` | Response | Why the provider was chosen, in classes only | SPEC-002-R007, SPEC-006-R020 |
 | `X-MacProvider-Engine-Select` | Request | Choose the inference engine (`native`, `llamacpp`, `lmstudio`, `mlxlm`, `ollama`, `omlx`) | SPEC-006-R016, SPEC-042-R014 |
 | `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `lmstudio_loopback`, `mlxlm_loopback`, `ollama_loopback`, `omlx_loopback`) | SPEC-006-R016 |
 | `X-MacProvider-Model-Disclosure` | Response | `pool_attested_unverified` on a pool-only model route | SPEC-006-R018 |
 | `X-MacProvider-Pool-Manifest-Core-Digest` | Response | Digest of the signed pool policy that authorized a pool-only model route | SPEC-006-R018 |
-| `X-MacProvider-Provider` | Response | Which provider actually served this | SPEC-002 |
 | `X-MacProvider-Receipt` | Response | ed25519-signed inference receipt | SPEC-015 v0.3 |
 
 ## Usage object reference

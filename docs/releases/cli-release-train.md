@@ -74,7 +74,9 @@ loopback coordinator, gateway and CLI; 1.8.240 vs final main; output-heavy at
 announced pause windows of at most 25 minutes). Cut only after it passes; any
 merge in between changes the SHA and re-runs it.
 
-**Version and timing (2026-10-13):** the cut is **1.8.242** (staging PR #1978; runtime v1.8.241 took the 241 tag first). It runs on or after 2026-10-18, when the Studio is reachable again for the pre-cut isolated e2e and the canary.
+**Version and timing (2026-10-13, operator):** one cut, **1.8.242** (staging PR #1978; runtime v1.8.241 took the 241 tag), carrying **every CLI-side implementation** merged by freeze time. The only hold is Studio reachability (not on the tailnet; operator off the home LAN until 2026-10-18): the CB session's pre-cut isolated e2e and the Studio canary both need it. If the Studio is put on the tailnet earlier, the cut moves up.
+
+Order on the cut day: (1) Studio validation + one verification audit for #1986 (provider scoring job), then merge; (2) freeze main and merge #1978; (3) CB-session isolated e2e of that exact SHA; (4) `scripts/ops/cli-release.sh` step by step with the Studio canary.
 
 | PR | Change | Status |
 |---|---|---|
@@ -87,6 +89,8 @@ merge in between changes the SHA and re-runs it.
 | #1961 | Watchdog grace window after an operator-pause resume | merged (#1965) |
 | #1968 | Malibu.app App Attest signing + CLI challenge/submit subcommands (coordinator side live in v1.8.241) | merged (`f387e3841`) |
 | #1983 | Privacy in-band identity key rotation, provider side (`privacy-class rotate-identity`, SPEC-049-R031) | merged (`723ea9c5f`) |
+| #1987 | Per-Mac engine profile in the heartbeat (SPEC-001-R006) for capability-aware routing (#1355) | merged (`79abef361`) |
+| #1986 | Compute-integrity teacher-forced scoring job (SPEC-036 FR-21, #1644) | draft: Studio validation + one verification audit, then merge before freeze |
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
