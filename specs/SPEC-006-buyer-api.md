@@ -1,7 +1,16 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.52 (2026-10-13, buyers never receive provider identity)
+**Version:** 0.9.53 (2026-10-13, SPEC-050 stake allowance)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
+- §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
+  coordinator owned by SPEC-050-R011.
+- §7.4 runs SPEC-050 allowance admission before quota availability for API-key
+  plaintext and relay-blind requests. An allowance-funded request does not
+  count against the daily token quota (SPEC-050-R007).
+- §7.7 adds `429 allowance_exhausted` and `503 allowance_unavailable`
+  (SPEC-050-R007, SPEC-050-R014). Wallet-session and demo traffic are unchanged.
 
 **Change log v0.9.52 (2026-10-13, issue #1991 — buyers never receive provider identity):**
 - §5.4: no buyer-facing response on any path (success, stream, error, relay-blind, id-less retry replay) carries `X-Provider-Id`, `X-Provider-Assigned-Id`, `X-Provider-Fingerprint`, `X-Route-Provider`, `X-MacProvider-Provider`, `X-MacProvider-Route`, `X-MacProvider-Session`, or any equivalent provider or assigned-session identifier in a response header. The gateway deletes them at the buyer boundary, which supersedes the earlier gateway-emitted `X-Provider-Id` attribution header. Operators attribute a request to a provider from the coordinator `request_log` (keyed by the echoed `X-Request-ID`) and logs, never from the buyer response. No wire field is added.
@@ -2587,6 +2596,14 @@ MUST NOT claim private inference, hardware attestation, or a US datacenter regio
 3. **Mapping.** `/v1/creator/<rest>` maps to the coordinator's `/internal/creator/trust-pools/<rest>` with the same method and query string. Only `GET` and `POST` are proxied. The request body is capped at 64 KiB and the upstream response at 1 MiB. The coordinator's status and JSON body are returned unchanged with `Cache-Control: no-store`. An unreachable coordinator, an oversized response, or an upstream `401` (the coordinator refusing the gateway service token after the caller's key already passed) returns `502 api_error` / `creator_upstream_error`.
 4. **Scope.** The surface never selects a pool for chat, never changes quota or billing state, and is not listed in `/v1/models`. Its operations are Agreement acceptance, pool creation and signed-event submission, root-registration nonces, member admission and revocation, buyer grants, restrictive lifecycle, self-serve promotion, pool reads and exports, the owned-provider list, and the earnings read.
 
+### 5.12 `/v1/stake` MALIBU stake allowance (v0.9.51, SPEC-050, #1062)
+
+`GET /v1/stake` and `POST /v1/stake/lock`, `/v1/stake/unlock`,
+`/v1/stake/overage` let an account stake MALIBU from providers it owns and see
+its daily allowance. SPEC-050-R011 owns the authentication, the forwarded
+principal, and the response fields; SPEC-050-R012 owns the disclosure text. The
+gateway holds no stake or allowance state.
+
 ---
 
 ## 6. Identity and auth
@@ -2887,7 +2904,7 @@ The gateway SHOULD enforce in this order:
 6. request-start rate bucket for chat completions.
 7. signup closed state for signup paths.
 8. per-request caps.
-9. quota availability.
+9. quota availability, after SPEC-050 allowance admission for API-key plaintext and relay-blind requests (SPEC-050-R007).
 10. concurrency reservation.
 11. coordinator availability.
 
@@ -2926,6 +2943,13 @@ quota_exhausted
 ```
 
 The response MUST include `X-RateLimit-Reset`.
+
+When an account's SPEC-050 allowance cannot cover a request and its overage
+setting is off, the gateway returns `429 rate_limit_exceeded` with code
+`allowance_exhausted` and `X-RateLimit-Reset` at the next 00:00 UTC. When the
+coordinator cannot answer and the account's last known overage setting is off,
+it returns `503 api_error` with code `allowance_unavailable`. SPEC-050-R007 and
+SPEC-050-R014 own both.
 
 ### 7.8 Bounded slot queueing
 
