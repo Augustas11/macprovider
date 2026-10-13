@@ -127,9 +127,11 @@ type StakePosition struct {
 }
 
 // AccountStake is one account's earning stake for a UTC day.
+// GitHubUserID is the identity that owns the providers behind the stake.
 type AccountStake struct {
-	AccountID string
-	Units     int64
+	AccountID    string
+	GitHubUserID int64
+	Units        int64
 }
 
 // StakeLedger reads and appends malibu_stake_events through the
@@ -541,6 +543,7 @@ func computeEarningStakes(rows []stakeEarningRow, withdrawable map[string]int64,
 		remaining[p] = w
 	}
 	perAccount := map[string]int64{}
+	githubOf := map[string]int64{}
 	for _, k := range keys {
 		earning := matured[k] - unlocked[k]
 		if earning <= 0 {
@@ -554,10 +557,11 @@ func computeEarningStakes(rows []stakeEarningRow, withdrawable map[string]int64,
 		}
 		remaining[k.provider] -= earning
 		perAccount[k.account] += earning
+		githubOf[k.account] = owner[k.provider]
 	}
 	out := make([]AccountStake, 0, len(perAccount))
 	for account, units := range perAccount {
-		out = append(out, AccountStake{AccountID: account, Units: units})
+		out = append(out, AccountStake{AccountID: account, GitHubUserID: githubOf[account], Units: units})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AccountID < out[j].AccountID })
 	return out

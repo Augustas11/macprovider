@@ -32,16 +32,16 @@ func TestComputeAllowanceGrantsRateCapAndProRata(t *testing.T) {
 	policy := testAllowancePolicy()
 	t.Run("under budget grants raw", func(t *testing.T) {
 		grants, totals := ComputeAllowanceGrants([]AllowanceStake{
-			{"b", malibu(100)},
-			{"a", malibu(1000) + 12_345}, // fraction of a MALIBU floors away
-			{"c", malibu(10_000)},        // capped at 250,000
-			{"d", 0},
-			{"e", 99_999}, // under one credit
+			{AccountID: "b", Units: malibu(100)},
+			{AccountID: "a", Units: malibu(1000) + 12_345}, // fraction of a MALIBU floors away
+			{AccountID: "c", Units: malibu(10_000)},        // capped at 250,000
+			{AccountID: "d", Units: 0},
+			{AccountID: "e", Units: 99_999}, // under one credit
 		}, policy)
 		want := []AllowanceGrant{
-			{"a", malibu(1000) + 12_345, 250_000, 250_000},
-			{"b", malibu(100), 100_000, 100_000},
-			{"c", malibu(10_000), 250_000, 250_000},
+			{"a", 0, malibu(1000) + 12_345, 250_000, 250_000},
+			{"b", 0, malibu(100), 100_000, 100_000},
+			{"c", 0, malibu(10_000), 250_000, 250_000},
 		}
 		if !reflect.DeepEqual(grants, want) {
 			t.Fatalf("grants %+v\nwant %+v", grants, want)
@@ -53,7 +53,7 @@ func TestComputeAllowanceGrantsRateCapAndProRata(t *testing.T) {
 	t.Run("over budget scales pro rata with floor", func(t *testing.T) {
 		policy := policy
 		policy.DailyBudgetCredits = 100_000
-		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{"a", malibu(100)}, {"b", malibu(200)}}, policy)
+		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{AccountID: "a", Units: malibu(100)}, {AccountID: "b", Units: malibu(200)}}, policy)
 		// raw 100,000 + 200,000 = 300,000; scale = 1/3.
 		if grants[0].GrantedCredits != 33_333 || grants[1].GrantedCredits != 66_666 {
 			t.Fatalf("grants %+v", grants)
@@ -65,14 +65,14 @@ func TestComputeAllowanceGrantsRateCapAndProRata(t *testing.T) {
 	t.Run("zero budget grants nothing", func(t *testing.T) {
 		policy := policy
 		policy.DailyBudgetCredits = 0
-		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{"a", malibu(100)}}, policy)
+		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{AccountID: "a", Units: malibu(100)}}, policy)
 		if len(grants) != 1 || grants[0].GrantedCredits != 0 || totals.TotalGrantedCredits != 0 || totals.ScalePPM != 0 {
 			t.Fatalf("grants %+v totals %+v", grants, totals)
 		}
 	})
 	t.Run("huge stakes do not overflow", func(t *testing.T) {
 		policy := AllowancePolicy{DailyBudgetCredits: 1 << 50, CreditsPerMALIBU: 1 << 40, PerAccountDailyCapCredits: 1 << 62}
-		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{"a", 1 << 62}, {"b", 1 << 62}}, policy)
+		grants, totals := ComputeAllowanceGrants([]AllowanceStake{{AccountID: "a", Units: 1 << 62}, {AccountID: "b", Units: 1 << 62}}, policy)
 		if totals.TotalGrantedCredits > policy.DailyBudgetCredits || grants[0].GrantedCredits <= 0 {
 			t.Fatalf("grants %+v totals %+v", grants, totals)
 		}
@@ -85,14 +85,14 @@ func TestRefreshAllowanceDayIsIdempotentPerAccountDay(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 13, 0, 0, 30, 0, time.UTC)
-	src := &fakeAllowanceSource{stakes: []AllowanceStake{{"acct_a", malibu(100)}, {"acct_b", malibu(50)}}}
+	src := &fakeAllowanceSource{stakes: []AllowanceStake{{AccountID: "acct_a", Units: malibu(100)}, {AccountID: "acct_b", Units: malibu(50)}}}
 	created, totals, err := store.RefreshAllowanceDay(ctx, now, src, testAllowancePolicy())
 	if err != nil || !created || totals.TotalGrantedCredits != 150_000 {
 		t.Fatalf("first run created=%v totals=%+v err=%v", created, totals, err)
 	}
 	// A later run on the same day with a different stake changes nothing,
 	// and does not even ask the source.
-	src.stakes = []AllowanceStake{{"acct_a", malibu(200)}, {"acct_c", malibu(5)}}
+	src.stakes = []AllowanceStake{{AccountID: "acct_a", Units: malibu(200)}, {AccountID: "acct_c", Units: malibu(5)}}
 	created, _, err = store.RefreshAllowanceDay(ctx, now.Add(10*time.Hour), src, testAllowancePolicy())
 	if err != nil || created || src.calls != 1 {
 		t.Fatalf("second run created=%v calls=%d err=%v", created, src.calls, err)
@@ -132,7 +132,7 @@ func TestRefreshAllowanceDayRecordsNothingWhenSourceFails(t *testing.T) {
 	if _, _, err := store.RefreshAllowanceDay(ctx, now, src, testAllowancePolicy()); err == nil {
 		t.Fatal("source failure must surface")
 	}
-	src.err, src.stakes = nil, []AllowanceStake{{"acct_a", malibu(1)}}
+	src.err, src.stakes = nil, []AllowanceStake{{AccountID: "acct_a", Units: malibu(1)}}
 	created, _, err := store.RefreshAllowanceDay(ctx, now, src, testAllowancePolicy())
 	if err != nil || !created {
 		t.Fatalf("retry created=%v err=%v", created, err)
@@ -143,7 +143,7 @@ func TestAllowanceAuditTablesAreAppendOnly(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	ctx := context.Background()
 	now := time.Date(2026, 10, 13, 1, 0, 0, 0, time.UTC)
-	if _, _, err := store.RefreshAllowanceDay(ctx, now, &fakeAllowanceSource{stakes: []AllowanceStake{{"acct_a", malibu(1)}}}, testAllowancePolicy()); err != nil {
+	if _, _, err := store.RefreshAllowanceDay(ctx, now, &fakeAllowanceSource{stakes: []AllowanceStake{{AccountID: "acct_a", Units: malibu(1)}}}, testAllowancePolicy()); err != nil {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{

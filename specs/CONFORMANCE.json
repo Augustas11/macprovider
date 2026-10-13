@@ -12642,8 +12642,18 @@
       "requirement_id": "SPEC-050-R010",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:AllowanceSelfDealing",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:sharesPayoutAddress",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:referralClusterTouches",
+        "phase4-coordinator/internal/billing/allowance_selfdeal.go:referralNeighbors",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingRelations",
+        "phase4-coordinator/internal/billing/allowance_selfdeal_test.go:TestAllowanceSelfDealingFailsSafe",
+        "phase4-coordinator/internal/buyer/allowance_hook_test.go:TestAllowanceSelfDealtAttemptIsRewardsExcluded"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

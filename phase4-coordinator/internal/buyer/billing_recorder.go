@@ -537,6 +537,13 @@ func (b *billingRecorder) recordRow(
 			faultFlag = billing.FaultNone
 		}
 		b.dispatchedThisAttemptFaultFlag = faultFlag
+		// SPEC-050-R010: an allowance-funded attempt served by a provider
+		// that is self-dealing for the staking account earns no MALIBU. The
+		// flag is insert-only, so it is decided before the ledger write.
+		if b.allowanceFunding == billing.AllowanceFundingAllowance && !row.RewardsExcluded &&
+			billingStore.AllowanceSelfDealing(ctx, b.accountID, stableProviderID, s.now()) {
+			row.RewardsExcluded = true
+		}
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)

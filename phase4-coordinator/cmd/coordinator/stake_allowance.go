@@ -74,7 +74,7 @@ func (a stakeSourceAdapter) EarningStakes(ctx context.Context, dayStart time.Tim
 	}
 	out := make([]billing.AllowanceStake, 0, len(stakes))
 	for _, s := range stakes {
-		out = append(out, billing.AllowanceStake{AccountID: s.AccountID, Units: s.Units})
+		out = append(out, billing.AllowanceStake{AccountID: s.AccountID, GitHubUserID: s.GitHubUserID, Units: s.Units})
 	}
 	return out, nil
 }

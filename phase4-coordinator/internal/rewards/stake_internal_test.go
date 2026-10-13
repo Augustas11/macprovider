@@ -53,7 +53,7 @@ func TestComputeEarningStakes(t *testing.T) {
 	t.Run("matured lock minus unlocks", func(t *testing.T) {
 		rows := []stakeEarningRow{{AccountID: "acct1", ProviderID: "p1", GitHubUserID: gh1, MaturedLock: 100, Unlocked: 30}}
 		got := computeEarningStakes(rows, map[string]int64{"p1": 1000}, map[string]int64{"p1": gh1})
-		if !reflect.DeepEqual(got, []AccountStake{{"acct1", 70}}) {
+		if !reflect.DeepEqual(got, []AccountStake{{"acct1", gh1, 70}}) {
 			t.Fatalf("got %v", got)
 		}
 	})
@@ -89,7 +89,7 @@ func TestComputeEarningStakes(t *testing.T) {
 	t.Run("withdrawable decrease caps earning", func(t *testing.T) {
 		rows := []stakeEarningRow{{AccountID: "acct1", ProviderID: "p1", GitHubUserID: gh1, MaturedLock: 500}}
 		got := computeEarningStakes(rows, map[string]int64{"p1": 40}, map[string]int64{"p1": gh1})
-		if !reflect.DeepEqual(got, []AccountStake{{"acct1", 40}}) {
+		if !reflect.DeepEqual(got, []AccountStake{{"acct1", gh1, 40}}) {
 			t.Fatalf("got %v", got)
 		}
 	})
@@ -99,7 +99,7 @@ func TestComputeEarningStakes(t *testing.T) {
 			{AccountID: "acct1", ProviderID: "p2", GitHubUserID: gh1, MaturedLock: 15},
 		}
 		got := computeEarningStakes(rows, map[string]int64{"p1": 100, "p2": 100}, map[string]int64{"p1": gh1, "p2": gh1})
-		if !reflect.DeepEqual(got, []AccountStake{{"acct1", 25}}) {
+		if !reflect.DeepEqual(got, []AccountStake{{"acct1", gh1, 25}}) {
 			t.Fatalf("got %v", got)
 		}
 	})

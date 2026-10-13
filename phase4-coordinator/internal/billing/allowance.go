@@ -20,10 +20,12 @@ import (
 // the NUMERIC(24,8) scale of the SPEC-021 ledger.
 const AllowanceUnitsPerMALIBU int64 = 100_000_000
 
-// AllowanceStake is one account's earning stake, in 1e-8 MALIBU units.
+// AllowanceStake is one account's earning stake, in 1e-8 MALIBU units, and
+// the GitHub identity that owns the providers behind it.
 type AllowanceStake struct {
-	AccountID string
-	Units     int64
+	AccountID    string
+	GitHubUserID int64
+	Units        int64
 }
 
 // AllowanceStakeSource is the SPEC-050-R001 stake source interface: the
@@ -44,6 +46,7 @@ type AllowancePolicy struct {
 // AllowanceGrant is one account's allowance for one UTC day.
 type AllowanceGrant struct {
 	AccountID      string
+	GitHubUserID   int64
 	StakeUnits     int64
 	RawCredits     int64
 	GrantedCredits int64
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS allowance_refresh_runs (
 CREATE TABLE IF NOT EXISTS allowance_grants (
     account_id TEXT NOT NULL,
     day TEXT NOT NULL REFERENCES allowance_refresh_runs(day),
+    github_user_id INTEGER NOT NULL CHECK(github_user_id >= 0),
     stake_units INTEGER NOT NULL CHECK(stake_units >= 0),
     raw_credits INTEGER NOT NULL CHECK(raw_credits >= 0),
     granted_credits INTEGER NOT NULL CHECK(granted_credits >= 0 AND granted_credits <= raw_credits),
@@ -135,7 +139,7 @@ func ComputeAllowanceGrants(stakes []AllowanceStake, policy AllowancePolicy) ([]
 			continue
 		}
 		totalRaw.Add(totalRaw, raw)
-		grants = append(grants, AllowanceGrant{AccountID: s.AccountID, StakeUnits: s.Units, RawCredits: raw.Int64()})
+		grants = append(grants, AllowanceGrant{AccountID: s.AccountID, GitHubUserID: s.GitHubUserID, StakeUnits: s.Units, RawCredits: raw.Int64()})
 	}
 	budget := big.NewInt(policy.DailyBudgetCredits)
 	scaled := totalRaw.Cmp(budget) > 0
@@ -235,8 +239,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		}
 		for _, g := range grants {
 			if _, err := conn.ExecContext(ctx, `
-INSERT INTO allowance_grants (account_id, day, stake_units, raw_credits, granted_credits, created_at_utc)
-VALUES (?, ?, ?, ?, ?, ?)`, g.AccountID, day, g.StakeUnits, g.RawCredits, g.GrantedCredits, createdAt); err != nil {
+INSERT INTO allowance_grants (account_id, day, github_user_id, stake_units, raw_credits, granted_credits, created_at_utc)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, g.AccountID, day, g.GitHubUserID, g.StakeUnits, g.RawCredits, g.GrantedCredits, createdAt); err != nil {
 				return fmt.Errorf("allowance: insert grant: %w", err)
 			}
 		}

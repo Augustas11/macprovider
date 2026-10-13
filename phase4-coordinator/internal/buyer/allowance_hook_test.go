@@ -123,3 +123,43 @@ func TestCoordinatorAllowanceAdmissionFundsAndSplits(t *testing.T) {
 		t.Fatalf("refused request dispatched %d attempts", n)
 	}
 }
+
+// SPEC-050-R010: an allowance request served by the staker's own provider is
+// written rewards-excluded; one served by an unrelated provider is not, and
+// both providers keep their credit.
+func TestAllowanceSelfDealtAttemptIsRewardsExcluded(t *testing.T) {
+	h := newAllowanceHarness(t,
+		billing.AllowanceStake{AccountID: "acct_self", GitHubUserID: 7, Units: 100 * billing.AllowanceUnitsPerMALIBU},
+		billing.AllowanceStake{AccountID: "acct_clean", GitHubUserID: 8, Units: 100 * billing.AllowanceUnitsPerMALIBU},
+	)
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS provider_ownership (provider_id TEXT PRIMARY KEY, github_user_id INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS provider_payout_addresses (provider_id TEXT NOT NULL, chain TEXT NOT NULL, address TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS referral_issuers (issuer_id TEXT PRIMARY KEY, code_type TEXT NOT NULL, provider_id TEXT)`,
+		`CREATE TABLE IF NOT EXISTS referral_redemptions (campaign TEXT NOT NULL, provider_id TEXT NOT NULL, issuer_id TEXT NOT NULL)`,
+		`INSERT INTO provider_ownership VALUES ('p1', 7), ('p_clean', 8)`,
+	} {
+		if _, err := h.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for account, want := range map[string]int{"acct_self": 1, "acct_clean": 0} {
+		external := "ext-" + account
+		rec := allowanceChat(h, account, external, allowanceHeaders("50", false))
+		if rec.Code != http.StatusOK || rec.Header().Get(allowanceFundingHeader) != billing.AllowanceFundingAllowance {
+			t.Fatalf("%s status %d headers %v", account, rec.Code, rec.Header())
+		}
+		var excluded int
+		var providerCredits int64
+		if err := h.db.QueryRow(`SELECT rewards_excluded, provider_credits FROM ledger_request_credits WHERE request_id IN (SELECT request_id FROM request_log WHERE account_id = ? AND external_request_id = ?)`, account, external).Scan(&excluded, &providerCredits); err != nil {
+			t.Fatal(err)
+		}
+		if excluded != want || providerCredits <= 0 {
+			t.Fatalf("%s rewards_excluded=%d provider_credits=%d, want excluded=%d and a paid provider", account, excluded, providerCredits, want)
+		}
+		var splitExcluded int
+		if err := h.db.QueryRow(`SELECT rewards_excluded FROM allowance_request_splits WHERE external_request_id = ?`, external).Scan(&splitExcluded); err != nil || splitExcluded != want {
+			t.Fatalf("%s split rewards_excluded=%d err=%v", account, splitExcluded, err)
+		}
+	}
+}
