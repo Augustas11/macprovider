@@ -1620,6 +1620,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private var inferenceGate: AsyncSemaphore
+    /// SPEC-036 FR-21: scoring jobs run under the same serial permit as
+    /// serial buyer requests.
+    var serialInferenceGate: AsyncSemaphore { inferenceGate }
     /// SPEC-038-R011: the served slot count. The serial `inferenceGate` and
     /// the scheduler's buyer-row limit are sized to it (the scheduler keeps
     /// its own bounded queue, token budget, wait timeout and cancellation),

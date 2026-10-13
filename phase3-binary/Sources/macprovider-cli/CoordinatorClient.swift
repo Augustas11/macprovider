@@ -166,6 +166,9 @@ actor CoordinatorClient {
     typealias CatalogEnvelopeRefresher = @Sendable () async -> CatalogEnvelope?
     typealias NativeMTPCanaryExecutor = @Sendable (NativeMTPCanaryRequestPayload) async -> NativeMTPCanaryResultPayload
     typealias NativeMTPTupleDisableHandler = @Sendable (NativeMTPTupleDisablePayload) async -> Void
+    /// SPEC-036 FR-21 teacher-forced scoring job. Nil when this runtime cannot
+    /// score; the capability is then not advertised.
+    typealias ComputeScoreExecutor = @Sendable (ComputeScoreProtocol.Request) async -> ComputeScoreProtocol.Result
 
     struct CatalogEnvelope: Sendable, Equatable {
         let releaseID: String
@@ -702,6 +705,8 @@ actor CoordinatorClient {
     private let catalogArtifactIdentity: CatalogArtifactIdentity
     private let nativeMTPCanaryExecutor: NativeMTPCanaryExecutor
     private let nativeMTPTupleDisableHandler: NativeMTPTupleDisableHandler
+    private let computeScoreExecutor: ComputeScoreExecutor?
+    private var computeScoreInFlight = false
     private let coordinatorReadiness: CoordinatorReadiness
     /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
     /// literal loopback coordinator URL): that relaxation skips the catalog
@@ -775,6 +780,7 @@ actor CoordinatorClient {
         catalogArtifactIdentity: CatalogArtifactIdentity? = nil,
         nativeMTPCanaryExecutor: NativeMTPCanaryExecutor? = nil,
         nativeMTPTupleDisableHandler: NativeMTPTupleDisableHandler? = nil,
+        computeScoreExecutor: ComputeScoreExecutor? = nil,
         catalogEnvelopeRefresher: CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorReadiness? = nil,
@@ -1051,6 +1057,13 @@ actor CoordinatorClient {
                 return nil
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
+        }
+        if let computeScoreExecutor {
+            self.computeScoreExecutor = computeScoreExecutor
+        } else if let runtime = modelRuntime as? ModelRuntime {
+            self.computeScoreExecutor = { request in await runtime.runComputeScore(request) }
+        } else {
+            self.computeScoreExecutor = nil
         }
         self.nativeMTPCanaryExecutor = nativeMTPCanaryExecutor ?? { request in
             if let runtime = modelRuntime as? ModelRuntime {
@@ -2710,6 +2723,8 @@ actor CoordinatorClient {
             try await handleNativeMTPCanaryRequest(dict)
         case "native_mtp_tuple_disable_v1":
             try await handleNativeMTPTupleDisable(dict)
+        case ComputeScoreProtocol.requestType:
+            try await handleComputeScoreRequest(dict)
         default:
             try await sendNAK(
                 inReplyTo: type,
@@ -3014,6 +3029,66 @@ actor CoordinatorClient {
             )
             try await send(failed.wireObject)
         }
+    }
+
+    /// SPEC-036 FR-21. The job runs off the receive loop so buyer frames keep
+    /// flowing; one job at a time, a second concurrent request is answered
+    /// `unavailable`. Nothing from the body or output is logged.
+    private func handleComputeScoreRequest(_ message: [String: Any]) async throws {
+        guard let executor = computeScoreExecutor else {
+            try await sendNAK(
+                inReplyTo: ComputeScoreProtocol.requestType,
+                code: "unknown_message_type",
+                message: "Unrecognized message type: '\(ComputeScoreProtocol.requestType)'"
+            )
+            return
+        }
+        let request: ComputeScoreProtocol.Request
+        do {
+            request = try ComputeScoreProtocol.decodeRequest(message)
+        } catch let error as ComputeScoreProtocol.DecodeError {
+            guard let echo = ComputeScoreProtocol.echoRequest(message), computeScoreSessionBound(echo) else {
+                try await sendNAK(
+                    inReplyTo: ComputeScoreProtocol.requestType,
+                    code: "invalid_message",
+                    message: "invalid \(ComputeScoreProtocol.requestType)"
+                )
+                return
+            }
+            let status: ComputeScoreProtocol.Status
+            if case .tooLong(_) = error { status = .tooLong } else { status = .invalid }
+            try await send(ComputeScoreProtocol.Result(request: echo, status: status).wireObject)
+            return
+        }
+        guard computeScoreSessionBound(request) else {
+            try await sendNAK(
+                inReplyTo: ComputeScoreProtocol.requestType,
+                code: "invalid_message",
+                message: "compute score session binding mismatch"
+            )
+            return
+        }
+        // The executor checks the served model and manifest hash itself.
+        guard !computeScoreInFlight else {
+            try await send(ComputeScoreProtocol.Result(request: request, status: .unavailable).wireObject)
+            return
+        }
+        computeScoreInFlight = true
+        Task {
+            let result = await executor(request)
+            await self.finishComputeScore(result)
+        }
+    }
+
+    private func computeScoreSessionBound(_ request: ComputeScoreProtocol.Request) -> Bool {
+        coordinatorSessionAccepted
+            && request.providerID == providerID
+            && request.assignedID == acceptedAssignedProviderID
+    }
+
+    private func finishComputeScore(_ result: ComputeScoreProtocol.Result) async {
+        computeScoreInFlight = false
+        try? await send(result.wireObject)
     }
 
     private static func inconclusiveNativeMTPCanaryResult(
@@ -7810,6 +7885,8 @@ actor CoordinatorClient {
                 // SPEC-001-R005: this build signs the SPEC-015 §N.13
                 // relay-blind-settlement-v1 receipt.
                 "relay_blind_settlement_receipt_v1": true,
+                // SPEC-036 FR-21: this runtime runs teacher-forced scoring jobs.
+                ComputeScoreProtocol.capability: computeScoreExecutor != nil,
             ],
         ]
         let resolvedCatalog: [String]
