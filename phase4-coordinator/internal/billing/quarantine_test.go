@@ -1063,14 +1063,26 @@ SELECT resolution_kind
 }
 
 // Admin rate-limit bucket — every response code path (200, 404,
-// 422) consumes one token. With a 60-token capacity and 60/sec
-// refill, a burst of 600 requests in a tight loop MUST produce a
-// significant number of 429s (the bucket cannot refill faster than
-// it drains under burst).
+// 422) consumes one token. The bucket clock is frozen so no refill can
+// happen however slowly the requests run (the race detector makes each
+// one ~100ms, slower than the 60/sec refill): a burst past capacity MUST
+// be rate-limited exactly by the overflow.
 func TestAdminRateLimitBucketConsumesFailures(t *testing.T) {
 	store := quarantineFixture(t)
-	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
-	const burst = 600
+	bucket := newAdminRateLimiter()
+	now := time.Unix(1_700_000_000, 0)
+	bucket.now = func() time.Time { return now }
+	bucket.last = now
+	handler := http.HandlerFunc((&handler{
+		store:                   store,
+		operatorKey:             "operator",
+		tokenStore:              fakeTokens{},
+		requireProviderTokens:   true,
+		earningsRateLimitPerMin: 60,
+		lastEarnings:            map[string][]time.Time{},
+		adminBucket:             bucket,
+	}).serveHTTP)
+	const burst = adminBucketCapacity + 72
 	var ok429 int64
 	for i := 0; i < burst; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
@@ -1081,11 +1093,8 @@ func TestAdminRateLimitBucketConsumesFailures(t *testing.T) {
 			ok429++
 		}
 	}
-	// With capacity 60 and a tight burst, expect at least 100 of the
-	// 600 calls to be rate-limited (defensive lower-bound — burst
-	// drain dominates timing-jitter refills).
-	if ok429 < 100 {
-		t.Fatalf("rate-limit fired only %d times in burst of %d — limiter is not consuming tokens", ok429, burst)
+	if ok429 != burst-adminBucketCapacity {
+		t.Fatalf("rate-limit fired %d times in burst of %d, want %d — limiter is not consuming tokens", ok429, burst, burst-adminBucketCapacity)
 	}
 }
 

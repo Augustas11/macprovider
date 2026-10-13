@@ -437,6 +437,7 @@ func TestAdmissionCeilingEventClockRegressionResetsWindow(t *testing.T) {
 	server := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
 		WithNow(func() time.Time { return now }),
 	)
+	awaitStartupSnapshots(t, server)
 
 	if _, ok := server.reserveAdmissionCeilingEvent("provider-a", providerevents.KindModelCeilingDrift); !ok {
 		t.Fatal("first event suppressed")

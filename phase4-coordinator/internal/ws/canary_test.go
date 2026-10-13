@@ -580,6 +580,7 @@ func TestRunCanarySweepSeedsJitteredDueTimesBeforeProbing(t *testing.T) {
 	cfg.Pool.CanaryTimeoutS = 1
 	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
 	s := NewServer(cfg, registry, zerolog.Nop())
+	awaitStartupSnapshots(t, s)
 	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 
@@ -656,6 +657,7 @@ func TestRunCanarySweepKeepsProviderDueAcrossReconnect(t *testing.T) {
 	cfg.Pool.CanaryTimeoutS = 1
 	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
 	s := NewServer(cfg, registry, zerolog.Nop())
+	awaitStartupSnapshots(t, s)
 	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 
@@ -710,6 +712,7 @@ func TestRunCanarySweepKeepsDueAfterInFlightReconnect(t *testing.T) {
 	sessionA := newProviderSession("p1", "s1", serverConnA, 1)
 	s.sessions.Store(sessionKey("p1", "s1"), sessionA)
 	go sessionA.runWriter()
+	awaitStartupSnapshots(t, s)
 	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	s.canaryDue.Store("p1", now.Add(-time.Second))

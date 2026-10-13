@@ -344,6 +344,11 @@ func TestProviderAuthV2RecordsCatalogMaterialHoldCapability(t *testing.T) {
 	})
 }
 
+// buyerRekeyEventWait bounds waits for events that must happen (rekey start,
+// relay entry, resume). It is generous because -race slows the buyer path
+// several-fold; it never delays a passing run (#1996).
+const buyerRekeyEventWait = 10 * time.Second
+
 func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
@@ -384,7 +389,7 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *t
 	case <-rekeyStarted:
 	case err := <-providerDone:
 		t.Fatalf("provider before request-threshold rekey: %v", err)
-	case <-time.After(time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("request-threshold rekey did not start")
 	}
 	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
@@ -393,7 +398,7 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *t
 	go func() { secondResult <- postBuyerRekeyChat(buyerServer) }()
 	select {
 	case <-relayEntered:
-	case <-time.After(time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("second buyer request did not enter DispatchInference")
 	}
 	select {
@@ -405,7 +410,7 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *t
 	select {
 	case second := <-secondResult:
 		assertBuyerRekeySuccess(t, second, assignedID)
-	case <-time.After(2 * time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("buyer request did not resume after request-threshold rekey")
 	}
 	if err := <-providerDone; err != nil {
@@ -452,12 +457,12 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossAgeThresholdRekey(t *testi
 	case <-rekeyStarted:
 	case err := <-providerDone:
 		t.Fatalf("provider before age-threshold rekey: %v", err)
-	case <-time.After(time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("age-threshold rekey did not start")
 	}
 	select {
 	case <-relayEntered:
-	case <-time.After(time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("age-threshold buyer request did not enter DispatchInference")
 	}
 	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
@@ -470,7 +475,7 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossAgeThresholdRekey(t *testi
 	select {
 	case response := <-result:
 		assertBuyerRekeySuccess(t, response, assignedID)
-	case <-time.After(2 * time.Second):
+	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("buyer request did not resume after age-threshold rekey")
 	}
 	if err := <-providerDone; err != nil {

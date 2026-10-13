@@ -261,6 +261,7 @@ func TestHeartbeatRefreshesPromotedAdmissionTelemetry(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := NewServer(capacityTestConfig(0), registry, zerolog.Nop(),
 		WithNow(func() time.Time { return now }))
+	awaitStartupSnapshots(t, server)
 
 	hello := capacityTestHello(4)
 	hello.BinaryVersion = "1.8.115"

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -296,6 +297,11 @@ func TestActiveRelayLivenessSuppressionEndsWhenRequestContextExpires(t *testing.
 	}
 	for time.Now().Before(until) {
 		if err := providerConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			// The server closed the socket between reads: the outcome this
+			// test waits for, observed on a slow (-race) runner (#1996).
+			if errors.Is(err, io.ErrClosedPipe) {
+				return
+			}
 			t.Fatalf("set provider read deadline: %v", err)
 		}
 		if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
@@ -2812,6 +2818,7 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 	registry := pool.NewRegistry(nil)
 	registry.Register(provider, serverConn)
 	s := NewServer(cfg, registry, logger)
+	awaitStartupSnapshots(t, s)
 	session := newProviderSession("p1", "s1", serverConn, 4)
 	session.useTier2Session(tier2Session)
 	session.onWriteFailure = s.handleProviderWriteFailure
