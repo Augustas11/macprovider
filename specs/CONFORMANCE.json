@@ -12251,7 +12251,8 @@
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreClampsAndThresholds",
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfSelfReportIsCappedPrior",
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEvictsStaleThenOldest",
-        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation"
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
       "evidence": [],
@@ -12282,7 +12283,8 @@
         "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionPrefersMeasuredFastProvider",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionFallsBackWithoutEvidence",
-        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRequestMaxOutputTokens"
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRequestMaxOutputTokens",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
       "evidence": [],
@@ -12308,7 +12310,8 @@
       "tests": [
         "phase4-coordinator/internal/routing/phase_test.go:TestRouteTraceHeaderGrammar",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRouteTracePinnedAndCounted",
-        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestRouteSelectionMetrics"
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestRouteSelectionMetrics",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
       "evidence": [],
@@ -12336,7 +12339,8 @@
         "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_InvalidValuesRejectedBeforeDispatch",
         "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_RelayBlindRequiredFailsClosed",
         "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_OwnedProviderNeedsPoolSelection",
-        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_EffectiveModeAndInternalLabel"
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyMode_EffectiveModeAndInternalLabel",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
       "evidence": [],
@@ -12356,7 +12360,8 @@
         "phase5-gateway/internal/router/server.go:copyCleanHeadersFiltered"
       ],
       "tests": [
-        "phase5-gateway/internal/router/privacy_mode_test.go:TestRouteTraceForwardingIsClosed"
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestRouteTraceForwardingIsClosed",
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
       "evidence": [],
