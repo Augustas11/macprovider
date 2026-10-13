@@ -41,7 +41,13 @@ var (
 	ErrStakeIdempotencyReused  = errors.New("stake: idempotency key reused with a different request")
 	ErrStakeInvalidIdempotency = errors.New("stake: invalid idempotency key")
 	ErrStakeInvalidAccount     = errors.New("stake: invalid account")
+	ErrStakeRateLimited        = errors.New("stake: too many stake changes in the last 24 hours")
 )
+
+// maxStakeEventsPerDay bounds how many lock and unlock events one account
+// may append in a rolling 24 hours, so the append-only ledger cannot be
+// grown without limit by one account.
+const maxStakeEventsPerDay = 200
 
 var (
 	stakeAmountPattern      = regexp.MustCompile(`^(0|[1-9][0-9]{0,10})(\.[0-9]{1,8})?$`)
@@ -298,6 +304,18 @@ func insertStakeEvent(ctx context.Context, tx *sql.Tx, ev StakeEvent, key, diges
 	return ev, nil
 }
 
+func (l *StakeLedger) checkStakeRate(ctx context.Context, tx *sql.Tx, accountID string) error {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM malibu_stake_events WHERE account_id = $1 AND created_at > $2`,
+		accountID, l.now().Add(-24*time.Hour)).Scan(&n); err != nil {
+		return fmt.Errorf("stake: rate check: %w", err)
+	}
+	if n >= maxStakeEventsPerDay {
+		return ErrStakeRateLimited
+	}
+	return nil
+}
+
 type stakeSlice struct {
 	ProviderID string
 	Units      int64
@@ -358,6 +376,9 @@ func (l *StakeLedger) Lock(ctx context.Context, req StakeRequest) (StakeResult, 
 	defer tx.Rollback()
 	if events, ok, err := replayStakeEvents(ctx, tx, req.AccountID, req.IdempotencyKey, digest); err != nil || ok {
 		return StakeResult{Events: events, Replayed: ok}, err
+	}
+	if err := l.checkStakeRate(ctx, tx, req.AccountID); err != nil {
+		return StakeResult{}, err
 	}
 	owned := sortedUniqueProviders(req.OwnedProviderIDs)
 	if len(owned) == 0 {
@@ -441,6 +462,9 @@ func (l *StakeLedger) Unlock(ctx context.Context, req StakeRequest) (StakeResult
 	defer tx.Rollback()
 	if events, ok, err := replayStakeEvents(ctx, tx, req.AccountID, req.IdempotencyKey, digest); err != nil || ok {
 		return StakeResult{Events: events, Replayed: ok}, err
+	}
+	if err := l.checkStakeRate(ctx, tx, req.AccountID); err != nil {
+		return StakeResult{}, err
 	}
 	stakes, err := accountStakeByProvider(ctx, tx, req.AccountID)
 	if err != nil {

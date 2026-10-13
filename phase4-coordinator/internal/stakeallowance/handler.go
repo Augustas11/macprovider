@@ -268,6 +268,8 @@ func (h *handler) writeStakeError(w http.ResponseWriter, err error) bool {
 		writeError(w, http.StatusConflict, "invalid_request_error", "no_owned_provider", "This account owns no provider with MALIBU")
 	case errors.Is(err, rewards.ErrStakeInsufficient):
 		writeError(w, http.StatusConflict, "invalid_request_error", "insufficient_malibu", "Not enough MALIBU for this request")
+	case errors.Is(err, rewards.ErrStakeRateLimited):
+		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "stake_rate_limited", "Too many stake changes in the last 24 hours")
 	case errors.Is(err, rewards.ErrStakeIdempotencyReused):
 		writeError(w, http.StatusConflict, "invalid_request_error", "idempotency_key_reused", "Idempotency-Key was already used for a different request")
 	default:

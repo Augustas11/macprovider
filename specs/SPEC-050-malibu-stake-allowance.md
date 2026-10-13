@@ -148,7 +148,9 @@ MUST be atomic per provider, so concurrent locks cannot lock the same MALIBU
 twice. An unlock MUST NOT exceed the account's current earning-or-maturing
 stake and is taken in descending `provider_id` order. Amounts are decimal
 MALIBU strings with at most 8 fractional digits, positive, at most
-10,000,000,000 per call.
+10,000,000,000 per call. One account MAY append at most 200 stake events in
+a rolling 24 hours; further changes are refused with `429
+stake_rate_limited`, and a replay of an applied key is still answered.
 
 ### SPEC-050-R003 - Locked MALIBU cannot be withdrawn
 
@@ -157,6 +159,8 @@ netted out of that provider's withdrawable MALIBU on every SPEC-021 read
 surface and by any withdrawal runner. Locked MALIBU becomes withdrawable again
 only when its unlock's release time has passed and the SPEC-021 predicate still
 holds. The provider accrual read reports the locked amount as `locked_malibu`.
+A withdrawal selector takes withdrawable rows oldest first only while their
+running total stays within withdrawable minus locked MALIBU.
 
 ### SPEC-050-R004 - Earning stake and the unlock cooldown
 

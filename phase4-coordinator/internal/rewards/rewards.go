@@ -316,16 +316,9 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 // (SPEC-050-R003). A database without the stake ledger (migration 032 not
 // applied yet) has no locks.
 func netStakeLocks(ctx context.Context, db *sql.DB, providerID, withdrawable string) (string, string, error) {
-	var present bool
-	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.malibu_stake_events') IS NOT NULL`).Scan(&present); err != nil {
-		return "", "", fmt.Errorf("stake ledger presence: %w", err)
-	}
-	if !present {
-		return "0", withdrawable, nil
-	}
-	var units int64
-	if err := db.QueryRowContext(ctx, lockedUnitsSQL, providerID, time.Now().UTC()).Scan(&units); err != nil {
-		return "", "", fmt.Errorf("stake locks: %w", err)
+	units, err := stakeLockedUnits(ctx, db, providerID)
+	if err != nil {
+		return "", "", err
 	}
 	if units <= 0 {
 		// No stake: the withdrawable figure is reported exactly as before.
@@ -338,6 +331,24 @@ func netStakeLocks(ctx context.Context, db *sql.DB, providerID, withdrawable str
 		return "", "", fmt.Errorf("stake net withdrawable: %w", err)
 	}
 	return FormatMALIBUUnits(units), net, nil
+}
+
+// stakeLockedUnits is MALIBU locked on a provider by SPEC-050 stakes now,
+// including MALIBU in an unlock cooldown. A database without the stake
+// ledger (migration 032 not applied yet) has no locks.
+func stakeLockedUnits(ctx context.Context, db *sql.DB, providerID string) (int64, error) {
+	var present bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.malibu_stake_events') IS NOT NULL`).Scan(&present); err != nil {
+		return 0, fmt.Errorf("stake ledger presence: %w", err)
+	}
+	if !present {
+		return 0, nil
+	}
+	var units int64
+	if err := db.QueryRowContext(ctx, lockedUnitsSQL, providerID, time.Now().UTC()).Scan(&units); err != nil {
+		return 0, fmt.Errorf("stake locks: %w", err)
+	}
+	return units, nil
 }
 
 func providerDailyCapActiveToday(ctx context.Context, db *sql.DB, providerID string, cap float64) (bool, error) {

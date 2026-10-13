@@ -88,11 +88,24 @@ func TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable(t *testing.T) {
 	if bal.LockedMALIBU != "10.00000000" || bal.WithdrawableMALIBU != "0.00000000" {
 		t.Fatalf("p_a locked=%s withdrawable=%s, want 10 locked and 0 withdrawable", bal.LockedMALIBU, bal.WithdrawableMALIBU)
 	}
+	// A withdrawal runner sees no row of the fully locked provider and only
+	// the rows of p_b that the 2 locked MALIBU do not cover.
+	if rows, err := rewards.SelectWithdrawableMALIBU(ctx, db, "p_a", 10); err != nil || len(rows) != 0 {
+		t.Fatalf("p_a withdrawable rows %v err %v", rows, err)
+	}
+	seedWithdrawableMALIBU(t, db, "p_b", "1")
+	seedWithdrawableMALIBU(t, db, "p_b", "10")
+	// p_b holds 5 + 1 + 10 = 16 with 2 locked: 14 may leave, so the 5 and
+	// 1 rows are selectable and the 10 row, which the lock partly covers,
+	// is not.
+	if rows, err := rewards.SelectWithdrawableMALIBU(ctx, db, "p_b", 10); err != nil || len(rows) != 2 || rows[0].AmountMALIBU != "5.00000000" || rows[1].AmountMALIBU != "1.00000000" {
+		t.Fatalf("p_b withdrawable rows %v err %v, want the 5 and 1 MALIBU rows", rows, err)
+	}
 	pos, err := ledger.Position(ctx, "acct_1", []string{"p_a", "p_b"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pos.StakedUnits != mustUnits(t, "12") || pos.AvailableUnits != mustUnits(t, "3") {
+	if pos.StakedUnits != mustUnits(t, "12") || pos.AvailableUnits != mustUnits(t, "14") {
 		t.Fatalf("position %+v", pos)
 	}
 }
@@ -239,5 +252,32 @@ func TestStakeLedgerIsAppendOnlyAndRoleBounded(t *testing.T) {
 		if can {
 			t.Fatalf("%s must not read malibu_stake_events", role)
 		}
+	}
+}
+
+func TestStakeChangesAreRateLimitedPerAccount(t *testing.T) {
+	fx, _ := startPostgres(t)
+	db := openRewardsWriter(t, fx)
+	ctx := context.Background()
+	seedWithdrawableMALIBU(t, db, "p_rate", "1")
+	ledger, err := rewards.NewStakeLedger(db, 168*time.Hour, staticOwner(map[string]int64{"p_rate": 3}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := func(i int) error {
+		_, err := ledger.Lock(ctx, rewards.StakeRequest{AccountID: "acct_rate", GitHubUserID: 3, OwnedProviderIDs: []string{"p_rate"}, AmountUnits: 1, IdempotencyKey: fmt.Sprintf("k%d", i)})
+		return err
+	}
+	for i := 0; i < 200; i++ {
+		if err := lock(i); err != nil {
+			t.Fatalf("lock %d: %v", i, err)
+		}
+	}
+	if err := lock(200); !errors.Is(err, rewards.ErrStakeRateLimited) {
+		t.Fatalf("lock past the daily bound err = %v", err)
+	}
+	// A replay of an applied key is still answered.
+	if err := lock(5); err != nil {
+		t.Fatalf("replay after the bound: %v", err)
 	}
 }

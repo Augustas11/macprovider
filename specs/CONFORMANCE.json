@@ -12454,7 +12454,8 @@
         "phase4-coordinator/internal/rewards/stake.go:allocateStake",
         "phase4-coordinator/internal/rewards/stake.go:replayStakeEvents",
         "phase4-coordinator/internal/rewards/stake.go:ParseMALIBUUnits",
-        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency"
+        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency",
+        "phase4-coordinator/internal/rewards/stake.go:checkStakeRate"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
@@ -12462,7 +12463,8 @@
         "phase4-coordinator/internal/rewards/stake_internal_test.go:TestParseMALIBUUnits",
         "phase4-coordinator/internal/rewards/stake_internal_test.go:TestAllocateStakeIsAllOrNothingInOrder",
         "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerLockUsesOwnedProvidersAndDerivedPrincipal",
-        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst"
+        "test/integration/stake_allowance_integration_test.go:TestStakeAllowancePlainRequestsSpendAllowanceFirst",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeChangesAreRateLimitedPerAccount"
       ],
       "journeys": [],
       "evidence": [],
@@ -12480,7 +12482,9 @@
       "implementation": [
         "phase4-coordinator/internal/rewards/rewards.go:netStakeLocks",
         "phase4-coordinator/internal/rewards/stake.go:providerLockedUnits",
-        "phase4-coordinator/internal/rewards/rewards.go:QueryAccrualBalance"
+        "phase4-coordinator/internal/rewards/rewards.go:QueryAccrualBalance",
+        "phase4-coordinator/internal/rewards/withdrawal.go:SelectWithdrawableMALIBU",
+        "phase4-coordinator/internal/rewards/rewards.go:stakeLockedUnits"
       ],
       "tests": [
         "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
@@ -12575,7 +12579,8 @@
         "phase5-gateway/internal/router/stake_allowance.go:noteAllowanceResponse",
         "phase5-gateway/internal/storage/sqlite/allowance_funding.go:MarkReservationAllowanceFunded",
         "phase5-gateway/internal/storage/sqlite/store.go:dailyUsageTx",
-        "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage"
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleOverage",
+        "phase4-coordinator/internal/billing/allowance_spend.go:allowanceOverage"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/allowance_spend_test.go:TestAdmitAllowanceSpendOrderingAndOverage",

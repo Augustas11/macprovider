@@ -3,6 +3,7 @@ package rewards
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -14,8 +15,11 @@ type WithdrawableRow struct {
 	AmountMALIBU string
 }
 
-// SelectWithdrawableMALIBU returns ledger rows with no withdrawal hold.
-// Used by the future MALIBU withdrawal runner per spec §4.5.
+// SelectWithdrawableMALIBU returns ledger rows with no withdrawal hold,
+// oldest first, leaving out MALIBU locked by SPEC-050 stakes
+// (SPEC-050-R003): rows are taken while their running total stays within
+// withdrawable minus locked, so a row only partly covered by the stake is
+// left out too. Used by the future MALIBU withdrawal runner per spec §4.5.
 func SelectWithdrawableMALIBU(ctx context.Context, db *sql.DB, providerID string, limit int) ([]WithdrawableRow, error) {
 	if limit <= 0 {
 		limit = 100
@@ -29,21 +33,45 @@ func SelectWithdrawableMALIBU(ctx context.Context, db *sql.DB, providerID string
            AND prl.withdrawal_hold_reason IS NULL
            AND NOT prl.epoch_disposition_blocked
          ORDER BY prl.id ASC
-         LIMIT $2
-    `, providerID, limit)
+    `, providerID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []WithdrawableRow
+	var all []WithdrawableRow
+	var units []int64
+	var total int64
 	for rows.Next() {
 		var row WithdrawableRow
 		if err := rows.Scan(&row.ID, &row.ProviderID, &row.UnixTS, &row.AmountMALIBU); err != nil {
 			return nil, err
 		}
+		u, err := ParseMALIBUUnits(row.AmountMALIBU)
+		if err != nil {
+			return nil, fmt.Errorf("withdrawable row %d amount %q: %w", row.ID, row.AmountMALIBU, err)
+		}
+		all = append(all, row)
+		units = append(units, u)
+		total += u
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	locked, err := stakeLockedUnits(ctx, db, providerID)
+	if err != nil {
+		return nil, err
+	}
+	available := total - locked
+	var out []WithdrawableRow
+	var running int64
+	for i, row := range all {
+		if len(out) >= limit || running+units[i] > available {
+			break
+		}
+		running += units[i]
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // SetTrustTier updates provider trust tier (unlock/demotion path).

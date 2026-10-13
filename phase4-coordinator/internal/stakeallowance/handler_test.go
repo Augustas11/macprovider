@@ -175,6 +175,7 @@ func TestStakeHandlerRefusals(t *testing.T) {
 		{"insufficient", &fakeLedger{err: rewards.ErrStakeInsufficient}, `{"amount_malibu":"1"}`, nil, 409, "insufficient_malibu"},
 		{"key reused", &fakeLedger{err: rewards.ErrStakeIdempotencyReused}, `{"amount_malibu":"1"}`, nil, 409, "idempotency_key_reused"},
 		{"no owned provider", &fakeLedger{err: rewards.ErrStakeNoOwnedProviders}, `{"amount_malibu":"1"}`, nil, 409, "no_owned_provider"},
+		{"rate limited", &fakeLedger{err: rewards.ErrStakeRateLimited}, `{"amount_malibu":"1"}`, nil, 429, "stake_rate_limited"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

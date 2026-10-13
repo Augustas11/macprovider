@@ -173,6 +173,26 @@ func (s *Store) AdmitAllowance(ctx context.Context, in AllowanceAdmission) (Allo
 	}
 	day := allowanceDay(in.Now)
 	decision := AllowanceDecision{ResetAt: NextAllowanceRefresh(in.Now)}
+	// Fast path, read-only: an account without an allowance today takes no
+	// write lock. Grants are append-only and fixed for the day, so the
+	// answer cannot change under a concurrent writer.
+	var granted int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT granted_credits FROM allowance_grants WHERE account_id = ? AND day = ?), 0)`,
+		in.AccountID, day).Scan(&granted); err != nil {
+		return AllowanceDecision{}, fmt.Errorf("allowance: grant: %w", err)
+	}
+	if granted <= 0 {
+		overage, err := allowanceOverage(ctx, s.db, in.AccountID)
+		if err != nil {
+			return AllowanceDecision{}, err
+		}
+		decision.OverageEnabled = overage
+		decision.Funding = AllowanceFundingRefused
+		if overage && !in.Required {
+			decision.Funding = AllowanceFundingPaid
+		}
+		return decision, nil
+	}
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 		overage, err := allowanceOverage(ctx, conn, in.AccountID)
 		if err != nil {
