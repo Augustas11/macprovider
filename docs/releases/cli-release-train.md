@@ -74,16 +74,19 @@ loopback coordinator, gateway and CLI; 1.8.240 vs final main; output-heavy at
 announced pause windows of at most 25 minutes). Cut only after it passes; any
 merge in between changes the SHA and re-runs it.
 
+**Version and timing (2026-10-13):** the cut is **1.8.242** (staging PR #1978; runtime v1.8.241 took the 241 tag first). It runs on or after 2026-10-18, when the Studio is reachable again for the pre-cut isolated e2e and the canary.
+
 | PR | Change | Status |
 |---|---|---|
 | #1953 | Hybrid 16-step decode window; stop-boundary rule; self-check keyed by decode window (SPEC-038 v0.3.16). Expected +17% hybrid CB throughput at 8 concurrent output-heavy | merged (`2bddd66d0`) |
 | #1960 (issue #1958) | CB self-check ladder bounded by the scheduler queue limit, ending at backpressure instead of a 320 s backoff, so grants above 16 slots become possible (+38% at 16 concurrent with #1953) | merged (`072f86a99`) |
-| decode isolation (CB session) | Per-row attention for unequal-length decode and verify rows (SPEC-038 FR-CB2) | in progress (CB session) |
-| #1962 | Native-MTP tuple offer / canary visibility; provider logs the offer always | in progress (audit) |
-| #1948 | Non-streamed stop-string requests stop counting tokens generated past the stop | in progress (Codex) |
-| #1949 | gpt-oss stop strings no longer match hidden reasoning text | in progress (Codex) |
-| #1961 | Watchdog grace window after an operator-pause resume | in progress (Codex) |
-| App Attest auto-trust (#1911) | Malibu.app App Attest signing + CLI challenge/submit subcommands; coordinator verifier fix | in progress (campaign PR) |
+| #1974 | Decode/verify isolation by kernel route class; per-forward decode row bound (SPEC-038 v0.3.18) | merged (`7663f463d`) |
+| #1962 | Native-MTP tuple offer / canary visibility; provider logs the offer always | merged |
+| #1948 | Non-streamed stop-string requests stop counting tokens generated past the stop | merged (#1966) |
+| #1949 | gpt-oss stop strings no longer match hidden reasoning text | merged (#1964) |
+| #1961 | Watchdog grace window after an operator-pause resume | merged (#1965) |
+| #1968 | Malibu.app App Attest signing + CLI challenge/submit subcommands (coordinator side live in v1.8.241) | merged (`f387e3841`) |
+| #1983 | Privacy in-band identity key rotation, provider side (`privacy-class rotate-identity`, SPEC-049-R031) | merged (`723ea9c5f`) |
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
