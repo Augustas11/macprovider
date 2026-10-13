@@ -2738,3 +2738,22 @@ INSERT INTO ledger_operator_credits (
 		t.Fatal(err)
 	}
 }
+
+// #1998: a sticky hit whose conversation_key was withheld from the provider
+// is not a creditable cache hit; a positive claim is quarantined exactly like
+// a keyless attempt that reports cached tokens.
+func TestWriteHotPath_WithheldConversationKeyQuarantinesCachedClaim(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	cached := int64(400)
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "hit"
+	input.ConversationKeyWithheld = true
+	input.RateEntry.PromptCacheHitCreditsPerMtok = 250000
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_cache' AND gross_credits = 0`, row.RequestID); got != 1 {
+		t.Fatalf("withheld-key cached claim rows=%d, want one ambiguous_cache quarantine", got)
+	}
+}

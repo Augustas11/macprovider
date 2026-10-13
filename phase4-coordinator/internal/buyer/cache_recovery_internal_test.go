@@ -188,3 +188,23 @@ func TestChatResponseWithCachedPromptTokensPreservesAbsentUsage(t *testing.T) {
 		t.Fatalf("coordinator synthesized partial usage: %s", string(updated))
 	}
 }
+
+// #1998: an attempt dispatched without its conversation_key cannot hold a
+// creditable prefix-cache hit, sticky hit or cache-only marker notwithstanding.
+func TestCachedPromptTokensNotCreditedWhenConversationKeyWithheld(t *testing.T) {
+	prompt, cached := int64(10), int64(4)
+	for _, state := range []*forwardState{
+		{stickyResult: "hit", conversationKeyWithheld: true},
+		{stickyResult: "miss", conversationCacheOnly: true, conversationKeyWithheld: true},
+	} {
+		if billed, observed := buyerCachedPair(&cached, &prompt, state, 0); billed != 0 || observed != 0 {
+			t.Fatalf("state=%+v billed/observed=%d/%d, want 0/0", *state, billed, observed)
+		}
+		if got, reason := requestLogCacheRecoveryFields(&cached, &prompt, state, 0); got != nil || reason != "ambiguous_cache" {
+			t.Fatalf("state=%+v recovery=%v/%q, want nil/ambiguous_cache", *state, got, reason)
+		}
+	}
+	if billed, _ := buyerCachedPair(&cached, &prompt, &forwardState{stickyResult: "miss", conversationCacheOnly: true}, 0); billed != 4 {
+		t.Fatalf("forwarded cache-only key billed=%d, want 4", billed)
+	}
+}

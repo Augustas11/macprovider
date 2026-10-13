@@ -586,6 +586,7 @@ func (b *billingRecorder) recordRow(
 			StickyResult:                 b.state.stickyResult,
 			StickyMissReason:             b.state.stickyMissReason,
 			ConversationCacheOnly:        b.state.conversationCacheOnly,
+			ConversationKeyWithheld:      b.state.conversationKeyWithheld,
 			ConfigSnapshotID:             economics.snapshotID,
 			RateEntry:                    economics.rateEntry,
 			MultiplierPPM:                economics.multiplierPPM,

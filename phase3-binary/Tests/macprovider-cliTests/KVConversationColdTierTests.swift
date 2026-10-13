@@ -833,6 +833,19 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.serveIteratorParameters(base, forceSimpleKV: false, reusedCache: false).maxKVSize, 4096)
     }
 
+    /// #1998 call-site pin: both serial serve sites hand the TokenIterator the
+    /// parameters chosen with the same forced-simple decision as their cache, and
+    /// no serve-cache iterator keeps the capped `parameters`.
+    func testSerialServeSitesUseServeIteratorParameters() throws {
+        let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
+        let wired = #"cache: kvCache,\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil\)\)"#
+        let matches = try NSRegularExpression(pattern: wired).numberOfMatches(
+            in: source, range: NSRange(source.startIndex..., in: source))
+        XCTAssertEqual(matches, 2, "non-streaming and streaming serial serve must use serveIteratorParameters")
+        XCTAssertFalse(source.contains("model: generationContext.model, cache: kvCache, parameters: parameters)"),
+                       "a serve-cache TokenIterator must not receive the capped serve parameters")
+    }
+
     /// #1998 end to end through the real TokenIterator: the capped serve parameters
     /// throw `incompatibleCapacity` before prefill on a keyed cache, and the
     /// `serveIteratorParameters` shape reaches prefill. Gated on KV_ENABLE_MLX_TESTS

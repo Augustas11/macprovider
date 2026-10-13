@@ -3887,6 +3887,10 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	// a bucket). Providers whose binary cannot serve a keyed request get no key
 	// (FR-SR-2 forwarding is a MAY; see providerAcceptsConversationKey).
 	acceptsKey := providerAcceptsConversationKey(provider.BinaryVersion)
+	if !acceptsKey && state != nil && hasForwardableConversationKey(r.Header) {
+		state.conversationKeyWithheld = true
+		state.conversationCacheOnly = false
+	}
 	if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); acceptsKey && strings.HasPrefix(key, "conv:") {
 		ctx = providerws.ContextWithConversationKey(ctx, key)
 	} else if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache")); acceptsKey && strings.HasPrefix(key, "conv:") {
@@ -6584,6 +6588,13 @@ const (
 	conversationKeyUnsafeFirstBinary = "1.8.238"
 	conversationKeyUnsafeLastBinary  = "1.8.240"
 )
+
+// hasForwardableConversationKey reports whether forwardWS would forward a
+// sticky or cache-only conversation_key for these headers.
+func hasForwardableConversationKey(h http.Header) bool {
+	return strings.HasPrefix(strings.TrimSpace(h.Get("X-MacProvider-Internal-Conv")), "conv:") ||
+		strings.HasPrefix(strings.TrimSpace(h.Get("X-MacProvider-Internal-Conv-Cache")), "conv:")
+}
 
 // providerAcceptsConversationKey reports whether a provider binary can serve
 // a request that carries a conversation_key. Unparseable versions keep the
@@ -10331,7 +10342,7 @@ func effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64
 		return 0
 	}
 	cached := *cachedPromptTokens
-	if cached < 0 || cached > *promptTokens || attemptN > 0 || state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
+	if cached < 0 || cached > *promptTokens || attemptN > 0 || !state.cacheCreditEligible() {
 		return 0
 	}
 	return cached
@@ -10345,7 +10356,7 @@ func observedCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64,
 	if cached < 0 || cached > *promptTokens || attemptN > 0 {
 		return 0
 	}
-	if state != nil && (state.stickyResult == "hit" || state.conversationCacheOnly) {
+	if state.cacheCreditEligible() {
 		return cached
 	}
 	return 0
@@ -10367,7 +10378,7 @@ func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, stat
 	if attemptN > 0 {
 		return nil, ""
 	}
-	if state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
+	if !state.cacheCreditEligible() {
 		if cached == 0 {
 			return nil, ""
 		}

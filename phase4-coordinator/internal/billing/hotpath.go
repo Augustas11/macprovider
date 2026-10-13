@@ -33,6 +33,9 @@ type HotPathInput struct {
 	StickyResult                 string
 	StickyMissReason             string
 	ConversationCacheOnly        bool
+	// ConversationKeyWithheld marks an attempt dispatched without its
+	// conversation_key (#1998); no cached prompt tokens are creditable.
+	ConversationKeyWithheld      bool
 	ConfigSnapshotID             int64
 	RateEntry                    RateCardEntry
 	RateCard                     map[string]RateCardEntry
@@ -440,6 +443,13 @@ func normalizeCachedPromptTokens(in *HotPathInput) string {
 	}
 	if in.AttemptN > 0 {
 		in.CachedPromptTokens = nil
+		return ""
+	}
+	if in.ConversationKeyWithheld {
+		in.CachedPromptTokens = nil
+		if cached > 0 {
+			return "ambiguous_cache"
+		}
 		return ""
 	}
 	if in.ConversationCacheOnly {
