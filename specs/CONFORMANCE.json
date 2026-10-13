@@ -12423,8 +12423,16 @@
       "requirement_id": "SPEC-050-R001",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:NewStakeLedger",
+        "phase4-coordinator/internal/rewards/stake.go:Lock",
+        "phase4-coordinator/internal/rewards/stake.go:providerWithdrawableUnits",
+        "phase4-coordinator/internal/stakeallowance/handler.go:handleStake"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRefusals"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12438,8 +12446,21 @@
       "requirement_id": "SPEC-050-R002",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:Lock",
+        "phase4-coordinator/internal/rewards/stake.go:Unlock",
+        "phase4-coordinator/internal/rewards/stake.go:allocateStake",
+        "phase4-coordinator/internal/rewards/stake.go:replayStakeEvents",
+        "phase4-coordinator/internal/rewards/stake.go:ParseMALIBUUnits",
+        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:malibu_stake_events_idempotency"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestConcurrentStakeLocksCannotLockTheSameMALIBUTwice",
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestParseMALIBUUnits",
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestAllocateStakeIsAllOrNothingInOrder",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerLockUsesOwnedProvidersAndDerivedPrincipal"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12453,8 +12474,15 @@
       "requirement_id": "SPEC-050-R003",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/rewards/rewards.go:netStakeLocks",
+        "phase4-coordinator/internal/rewards/stake.go:providerLockedUnits",
+        "phase4-coordinator/internal/rewards/rewards.go:QueryAccrualBalance"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLockIsBoundedIdempotentAndNettedFromWithdrawable",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12468,8 +12496,15 @@
       "requirement_id": "SPEC-050-R004",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/rewards/stake.go:EarningStakes",
+        "phase4-coordinator/internal/rewards/stake.go:computeEarningStakes",
+        "phase4-coordinator/internal/rewards/stake.go:Unlock"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_internal_test.go:TestComputeEarningStakes",
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeUnlockCooldownAndEarningStake"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -12603,8 +12638,14 @@
       "requirement_id": "SPEC-050-R013",
       "spec_id": "SPEC-050",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/stats/migrations/032_malibu_stake_ledger.up.sql:GRANT SELECT, INSERT ON malibu_stake_events TO rewards_writer",
+        "phase4-coordinator/internal/stakeallowance/handler.go:authenticate"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/stake_integration_test.go:TestStakeLedgerIsAppendOnlyAndRoleBounded",
+        "phase4-coordinator/internal/stakeallowance/handler_test.go:TestStakeHandlerRequiresServiceTokenAndPrincipal"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

@@ -192,9 +192,13 @@ func EnsureProviderState(ctx context.Context, db *sql.DB, providerID string) err
 
 // AccrualBalance returns total and withdrawable MALIBU for a provider.
 type AccrualBalance struct {
-	AccruedMALIBU       string
-	WithdrawableMALIBU  string
-	HeldMALIBU          string
+	AccruedMALIBU      string
+	WithdrawableMALIBU string
+	HeldMALIBU         string
+	// LockedMALIBU is MALIBU locked by SPEC-050 stakes, including MALIBU in
+	// an unlock cooldown. WithdrawableMALIBU is already net of it
+	// (SPEC-050-R003); HeldMALIBU is not affected.
+	LockedMALIBU        string
 	TrustTier           string
 	HoldReasons         []string
 	ProviderDailyCapped bool
@@ -291,16 +295,49 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 	}
 
 	held := subtractDecimalStrings(accrued, withdrawable)
+	locked, netWithdrawable, err := netStakeLocks(ctx, db, providerID, withdrawable)
+	if err != nil {
+		return AccrualBalance{}, err
+	}
 	return AccrualBalance{
 		AccruedMALIBU:       accrued,
-		WithdrawableMALIBU:  withdrawable,
+		WithdrawableMALIBU:  netWithdrawable,
 		HeldMALIBU:          held,
+		LockedMALIBU:        locked,
 		TrustTier:           tier,
 		HoldReasons:         holds,
 		ProviderDailyCapped: providerDailyCapped,
 		ProviderDailyCap:    cfg.ProviderDailyCapMALIBU,
 		WalletDailyCap:      cfg.WalletDailyCapMALIBU,
 	}, nil
+}
+
+// netStakeLocks nets SPEC-050 stake locks out of withdrawable MALIBU
+// (SPEC-050-R003). A database without the stake ledger (migration 032 not
+// applied yet) has no locks.
+func netStakeLocks(ctx context.Context, db *sql.DB, providerID, withdrawable string) (string, string, error) {
+	var present bool
+	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.malibu_stake_events') IS NOT NULL`).Scan(&present); err != nil {
+		return "", "", fmt.Errorf("stake ledger presence: %w", err)
+	}
+	if !present {
+		return "0", withdrawable, nil
+	}
+	var units int64
+	if err := db.QueryRowContext(ctx, lockedUnitsSQL, providerID, time.Now().UTC()).Scan(&units); err != nil {
+		return "", "", fmt.Errorf("stake locks: %w", err)
+	}
+	if units <= 0 {
+		// No stake: the withdrawable figure is reported exactly as before.
+		return "0", withdrawable, nil
+	}
+	var net string
+	if err := db.QueryRowContext(ctx,
+		`SELECT GREATEST($1::NUMERIC - $2::NUMERIC / 100000000, 0)::NUMERIC(24,8)::TEXT`,
+		withdrawable, units).Scan(&net); err != nil {
+		return "", "", fmt.Errorf("stake net withdrawable: %w", err)
+	}
+	return FormatMALIBUUnits(units), net, nil
 }
 
 func providerDailyCapActiveToday(ctx context.Context, db *sql.DB, providerID string, cap float64) (bool, error) {

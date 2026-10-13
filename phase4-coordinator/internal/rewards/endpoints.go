@@ -81,6 +81,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			"accrued_malibu":                 projection.Balance.AccruedMALIBU,
 			"withdrawable_malibu":            projection.Balance.WithdrawableMALIBU,
 			"held_malibu":                    projection.Balance.HeldMALIBU,
+			"locked_malibu":                  projection.Balance.LockedMALIBU,
 			"trust_tier":                     projection.Balance.TrustTier,
 			"daily_cap_malibu":               projection.Balance.ProviderDailyCap,
 			"provider_daily_capped":          projection.Balance.ProviderDailyCapped,

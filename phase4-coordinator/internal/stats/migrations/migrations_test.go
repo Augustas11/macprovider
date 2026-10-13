@@ -52,6 +52,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{29, "stats_billing_mirror_privacy_columns"},
 		{30, "stats_timeseries_daily"},
 		{31, "hardware_trust_app_attest_auto"},
+		{32, "malibu_stake_ledger"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))

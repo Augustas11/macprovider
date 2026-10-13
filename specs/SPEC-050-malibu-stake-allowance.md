@@ -149,7 +149,7 @@ MUST be atomic per provider, so concurrent locks cannot lock the same MALIBU
 twice. An unlock MUST NOT exceed the account's current earning-or-maturing
 stake and is taken in descending `provider_id` order. Amounts are decimal
 MALIBU strings with at most 8 fractional digits, positive, at most
-1,000,000,000,000.
+10,000,000,000 per call.
 
 ### SPEC-050-R003 - Locked MALIBU cannot be withdrawn
 
