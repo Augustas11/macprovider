@@ -300,7 +300,11 @@ type scenarioOpts struct {
 	// fake provider connects (control-plane setup); providerSetup adjusts
 	// each fake provider before it starts.
 	beforeProviders func(*scenario)
-	providerSetup   func(*fakeProvider)
+	// beforeCoordinator runs after the coordinator database exists (provider
+	// tokens issued) and before the coordinator process starts, so seeded
+	// rows are visible to its startup jobs.
+	beforeCoordinator func(*scenario)
+	providerSetup     func(*fakeProvider)
 	// gatewayServiceToken, when non-nil, overrides the gateway's
 	// coordinator.service_token config field. nil = use
 	// scenario.serviceToken. A pointer to the empty string is the only
@@ -562,6 +566,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	// proxies to it on first hit, so order matters for fast startup.
 	if opts.captureCoordLogs {
 		s.coordLogBuf = newLogBuffer()
+	}
+	if opts.beforeCoordinator != nil {
+		opts.beforeCoordinator(s)
 	}
 	s.startCoordinator(ctx)
 	s.waitForHealth(s.coordBuyerURL + "/healthz")
