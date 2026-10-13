@@ -30,19 +30,22 @@ func TestParseHeartbeatAcceptsEngineProfile(t *testing.T) {
 // heartbeat.
 func TestParseHeartbeatDropsInvalidEngineProfileWithoutRejecting(t *testing.T) {
 	for name, bad := range map[string]string{
-		"unknown member":  strings.Replace(validEngineProfile, `"version"`, `"extra":1,"version"`, 1),
-		"missing member":  strings.Replace(validEngineProfile, `"native_mtp_active":false,`, ``, 1),
-		"unknown version": strings.Replace(validEngineProfile, `engine-profile-v1`, `engine-profile-v2`, 1),
-		"unknown family":  strings.Replace(validEngineProfile, `continuous_batching`, `lily`, 1),
-		"slots range":     strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":257`, 1),
-		"negative ctx":    strings.Replace(validEngineProfile, `32768`, `-1`, 1),
-		"chip class":      strings.Replace(validEngineProfile, `m2_max`, `m2_maxi`, 1),
-		"chip gen":        strings.Replace(validEngineProfile, `m2_max`, `m0`, 1),
-		"ram class":       strings.Replace(validEngineProfile, `"ram_class_gb":96`, `"ram_class_gb":97`, 1),
-		"fractional":      strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":4.5`, 1),
-		"wrong type":      `"engine-profile-v1"`,
-		"null":            `null`,
-		"oversized":       strings.Replace(validEngineProfile, `"version"`, `"pad":"`+strings.Repeat("x", 600)+`","version"`, 1),
+		"unknown member":   strings.Replace(validEngineProfile, `"version"`, `"extra":1,"version"`, 1),
+		"missing member":   strings.Replace(validEngineProfile, `"native_mtp_active":false,`, ``, 1),
+		"unknown version":  strings.Replace(validEngineProfile, `engine-profile-v1`, `engine-profile-v2`, 1),
+		"unknown family":   strings.Replace(validEngineProfile, `continuous_batching`, `lily`, 1),
+		"slots range":      strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":257`, 1),
+		"negative ctx":     strings.Replace(validEngineProfile, `32768`, `-1`, 1),
+		"chip class":       strings.Replace(validEngineProfile, `m2_max`, `m2_maxi`, 1),
+		"chip gen":         strings.Replace(validEngineProfile, `m2_max`, `m0`, 1),
+		"ram class":        strings.Replace(validEngineProfile, `"ram_class_gb":96`, `"ram_class_gb":97`, 1),
+		"fractional":       strings.Replace(validEngineProfile, `"cb_granted_slots":4`, `"cb_granted_slots":4.5`, 1),
+		"wrong type":       `"engine-profile-v1"`,
+		"null":             `null`,
+		"mtp mismatch":     strings.Replace(validEngineProfile, `"native_mtp_active":false`, `"native_mtp_active":true`, 1),
+		"mtp family off":   strings.Replace(validEngineProfile, `continuous_batching`, `native_mtp`, 1),
+		"plain with slots": strings.Replace(validEngineProfile, `continuous_batching`, `general_mlx`, 1),
+		"oversized":        strings.Replace(validEngineProfile, `"version"`, `"pad":"`+strings.Repeat("x", 600)+`","version"`, 1),
 	} {
 		hb, _, field, err := ParseHeartbeat([]byte(engineProfileHeartbeatBase + `,"engine_profile":` + bad + `}`))
 		if err != nil {

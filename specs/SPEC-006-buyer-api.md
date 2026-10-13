@@ -417,7 +417,7 @@ changing them:
 - `SPEC-006-R020` — Route trace forwarding: the gateway forwards only an exact
   SPEC-002-R007 `X-MacProvider-Route-Trace` value (§5.4.4, v0.9.51).
 
-`requirement_id_migration` is `complete`. R004–R018 are not promoted from
+`requirement_id_migration` is `complete`. R004–R020 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -2179,9 +2179,14 @@ the SPEC-002-R007 `route_trace` line. It never changes coordinator routing.
 **SPEC-006-R020 — Route trace forwarding.** The gateway MUST forward the
 coordinator's `X-MacProvider-Route-Trace` header (SPEC-002-R007) to the buyer
 only when its value byte-exactly matches the SPEC-002-R007 grammar, and drop
-any other value. The header carries classes only (phase, basis, evidence
-freshness, engine family, latency class); it never names a provider, session,
-host or measured number. Buyer docs MUST describe it as an explanation of the
+any other value. It applies to responses the gateway relays from the
+coordinator; an error response the gateway writes itself (for example a
+transformed provider error) may omit it. The header carries classes only
+(phase, basis, evidence freshness, engine family, latency class); it never
+names a provider, session, host or measured number. Browser CORS responses
+allow the `X-MacProvider-Privacy-Mode` request header and expose
+`X-MacProvider-Privacy-Mode`, `X-MacProvider-Privacy-Mode-Disclosure` and
+`X-MacProvider-Route-Trace`. Buyer docs MUST describe it as an explanation of the
 routing choice, not a performance guarantee.
 
 ### 5.5 `GET /v1/usage`

@@ -34,9 +34,10 @@ func phaseTestServer(t *testing.T) (*Server, *pool.Registry) {
 
 func streamChatReq() chatRequest {
 	return chatRequest{
-		Model:  "model-a",
-		Stream: true,
-		raw:    []byte(`{"model":"model-a","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`),
+		Model:     "model-a",
+		Stream:    true,
+		maxTokens: 256,
+		raw:       []byte(`{"model":"model-a","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`),
 	}
 }
 
@@ -128,59 +129,101 @@ func (c *countingRouteMetrics) IncRouteSelection(phase, basis string) {
 	c.calls[phase+"/"+basis]++
 }
 
-// SPEC-002-R005: only streamed, successful, coordinator-timed, plaintext
-// attempts feed the store.
+// SPEC-002-R005: only streamed, cleanly completed, plaintext attempts with a
+// coordinator-timed first token feed the store, and every quantity is the
+// coordinator's own.
 func TestServedPerformanceObservation(t *testing.T) {
 	s, _ := phaseTestServer(t)
-	record := func(stream bool, status int, relayBlind bool) {
-		state := &forwardState{}
+	type attempt struct {
+		stream, relayBlind, firstToken bool
+		status                         int
+		errMsg, errCode, fault         string
+		cached                         int64
+	}
+	record := func(a attempt) {
+		state := &forwardState{estimatedTokens: 500}
 		state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-fast")
 		state.phaseTiming.markProviderDispatchDone(phaseTestNow)
-		state.phaseTiming.markProviderFirstByte(phaseTestNow.Add(50 * time.Millisecond))
+		// A role-only opening chunk is a first byte, not a first token.
+		state.phaseTiming.markProviderFirstByte(phaseTestNow.Add(time.Millisecond))
+		if a.firstToken {
+			state.phaseTiming.markProviderFirstToken(phaseTestNow.Add(50 * time.Millisecond))
+		}
 		state.phaseTiming.markProviderDone(phaseTestNow.Add(1050 * time.Millisecond))
-		rec := &billingRecorder{server: s, state: state, model: "model-a", stream: stream}
-		if relayBlind {
+		rec := &billingRecorder{server: s, state: state, model: "model-a", stream: a.stream}
+		if a.relayBlind {
 			rec.relayBlind = &relayBlindAuditFields{}
 		}
-		prompt, completion := int64(500), int64(101)
-		_ = rec.recordRow("s-fast", "fast", "", status, &prompt, nil, &completion, "", "", 0, nil, "", nil)
+		// Inflated provider usage must not matter.
+		prompt, completion, delivered := int64(1_000_000), int64(1_000_000), int64(101)
+		cached := a.cached
+		_ = rec.recordRow("s-fast", "fast", "", a.status, &prompt, &cached, &completion, a.errMsg, a.errCode, 0, &delivered, a.fault, nil)
 	}
-	record(false, http.StatusOK, false)
-	record(true, http.StatusBadGateway, false)
-	record(true, http.StatusOK, true)
-	if s.perf.Len() != 0 {
-		t.Fatalf("non-stream, failed or relay-blind attempts were recorded: %d", s.perf.Len())
+	ok := attempt{stream: true, firstToken: true, status: http.StatusOK, fault: "none"}
+	for name, a := range map[string]attempt{
+		"non-stream":     {stream: false, firstToken: true, status: http.StatusOK},
+		"failed":         {stream: true, firstToken: true, status: http.StatusBadGateway},
+		"relay-blind":    {stream: true, firstToken: true, status: http.StatusOK, relayBlind: true},
+		"no first token": {stream: true, status: http.StatusOK},
+		"partial stream": {stream: true, firstToken: true, status: http.StatusOK, errMsg: "Provider disconnected during streaming"},
+		"error code":     {stream: true, firstToken: true, status: http.StatusOK, errCode: "malformed_tool_call"},
+		"breaker fault":  {stream: true, firstToken: true, status: http.StatusOK, fault: "breaker_qualifying"},
+	} {
+		record(a)
+		if s.perf.Len() != 0 {
+			t.Fatalf("%s attempt was recorded", name)
+		}
 	}
-	record(true, http.StatusOK, false)
-	e, ok := s.perf.Lookup("fast", "model-a")
-	if !ok || e.TTFTMs != 50 || e.PrefillTPS != 10000 || e.DecodeTPS != 100 || e.TTFTSamples != 1 {
-		t.Fatalf("evidence = %+v ok=%v", e, ok)
+	record(ok)
+	e, found := s.perf.Lookup("fast", "model-a")
+	if !found || e.TTFTMs != 50 || e.PrefillTPS != 10000 || e.DecodeTPS != 100 || e.TTFTSamples != 1 {
+		t.Fatalf("evidence = %+v found=%v", e, found)
+	}
+	// A reported cached prefix withholds the prefill sample only.
+	cachedAttempt := ok
+	cachedAttempt.cached = 400
+	record(cachedAttempt)
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.TTFTSamples != 2 || e.PrefillSamples != 1 || e.DecodeSamples != 2 {
+		t.Fatalf("cached prefix: %+v", e)
 	}
 	// A timing snapshot for another session is not this attempt's timing.
-	state := &forwardState{}
+	state := &forwardState{estimatedTokens: 500}
 	state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-other")
 	state.phaseTiming.markProviderDispatchDone(phaseTestNow)
-	state.phaseTiming.markProviderFirstByte(phaseTestNow.Add(time.Millisecond))
+	state.phaseTiming.markProviderFirstToken(phaseTestNow.Add(time.Millisecond))
 	rec := &billingRecorder{server: s, state: state, model: "model-a", stream: true}
-	prompt, completion := int64(500), int64(101)
-	_ = rec.recordRow("s-fast", "fast", "", http.StatusOK, &prompt, nil, &completion, "", "", 0, nil, "", nil)
-	if e, _ := s.perf.Lookup("fast", "model-a"); e.TTFTSamples != 1 {
+	delivered := int64(101)
+	_ = rec.recordRow("s-fast", "fast", "", http.StatusOK, nil, nil, nil, "", "", 0, &delivered, "", nil)
+	if e, _ := s.perf.Lookup("fast", "model-a"); e.TTFTSamples != 2 {
 		t.Fatalf("foreign timing recorded: %+v", e)
 	}
 }
 
-func TestRequestMaxOutputTokens(t *testing.T) {
-	for raw, want := range map[string]int{
-		`{"max_tokens":256}`:  256,
-		`{}`:                  0,
-		`{"max_tokens":0}`:    0,
-		`{"max_tokens":-5}`:   0,
-		`{"max_tokens":"x"}`:  0,
-		`{"max_tokens":1e12}`: 2147483647,
-		`not json`:            0,
-	} {
-		if got := requestMaxOutputTokens([]byte(raw)); got != want {
-			t.Errorf("%s: got %d want %d", raw, got, want)
-		}
+// The first-token mark fires on the first delivered event that carries
+// generated content, not on a role-only opening event.
+func TestFirstTokenMarkedOnFirstContent(t *testing.T) {
+	s, _ := phaseTestServer(t)
+	state := &forwardState{}
+	state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-fast")
+	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
+	acct.written([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"))
+	if !state.phaseTiming.snapshot().providerFirstToken.IsZero() {
+		t.Fatal("role-only event marked a first token")
+	}
+	acct.written([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+	if state.phaseTiming.snapshot().providerFirstToken.IsZero() {
+		t.Fatal("content event did not mark a first token")
+	}
+}
+
+func TestValidateChatRequestCapturesMaxTokens(t *testing.T) {
+	req, status, _, _, _ := validateChatRequestDetailed([]byte(`{"model":"m","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`))
+	if status != 0 || req.maxTokens != 256 {
+		t.Fatalf("status=%d maxTokens=%d", status, req.maxTokens)
+	}
+	req, status, _, _, _ = validateChatRequestDetailed([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if status != 0 || req.maxTokens != 0 {
+		t.Fatalf("absent: status=%d maxTokens=%d", status, req.maxTokens)
 	}
 }

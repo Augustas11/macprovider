@@ -5304,32 +5304,36 @@ rather than replacing it with a protocol-shape error.
 ## SPEC-002-R005 — Measured-performance store
 
 The coordinator MUST keep an in-memory performance record per
-(`provider_id`, requested model) built only from requests it served and timed
-itself. An observation is recorded once per provider attempt, when the attempt
-was streamed (a non-streamed response's first byte follows the whole
-generation, so its TTFT is not a prefill time), completed with a 2xx status,
-names its provider, carries a provider-reported
-`completion_tokens` (not the coordinator estimate), and has a coordinator
-TTFT measured for that same attempt (SPEC-006 phase timing: provider dispatch
-done to first provider byte). Relay-blind and privacy-class attempts MUST NOT
-be recorded, because their token counts are upper bounds.
+(`provider_id`, requested model) built only from requests it served and
+measured itself. An observation is recorded once per provider attempt, when
+the attempt was streamed (a non-streamed response's first byte follows the
+whole generation), completed with a 2xx status and no recorded error, error
+code or fault, names its provider, and has a coordinator first-token time for
+that same attempt. Relay-blind and privacy-class attempts MUST NOT be
+recorded.
 
-From one observation the coordinator derives, using only its own wall clock
-for every duration:
+The first-token time is when the first delivered event carrying generated
+content or a tool call reaches the buyer side of the coordinator; an opening
+role-only event does not count. Every quantity is the coordinator's own; no
+provider usage count enters a rate:
 
-- `ttft_ms`, clamped to 1..600000;
-- a prefill rate, uncached prompt tokens divided by TTFT, only when at least 64
-  uncached prompt tokens were sent, clamped to at most 50000 tokens/s;
-- a decode rate, `completion_tokens - 1` divided by the first-byte-to-done
-  time, only when `completion_tokens` is at least 8 and that time is positive,
-  clamped to at most 2000 tokens/s.
+- `ttft_ms`, provider dispatch done to first token, clamped to 1..600000;
+- a prefill rate, the coordinator's token estimate of the request body divided
+  by TTFT, only when that estimate is at least 64 tokens and the provider
+  reported no cached prompt prefix (a cache hit is not a prefill measurement),
+  clamped to at most 50000 tokens/s;
+- a decode rate, the coordinator's delivered-bytes completion estimate minus 1
+  divided by the first-token-to-done time, only when that estimate is at least
+  8 and the time is positive, clamped to at most 2000 tokens/s.
 
 Each metric is an exponentially weighted moving average with weight 0.2 for
 the new sample, with its own sample count and the time of the last
 observation. A record is **fresh** when it has at least 3 TTFT samples and its
 last observation is at most 15 minutes old; anything else is **unmeasured**.
-The token counts are the provider's usage, the same counts billing settles on;
-the clamps bound what an inflated count can do to a rate.
+A provider can still shape its own timing, for example by emitting an early
+content token; that moves time from TTFT into decode, which the interactive
+score also weighs, and the bounds in SPEC-002-R006 limit what any score can
+win.
 
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior worth 2 samples and capped at 1.25 times the measured decode
@@ -5350,7 +5354,7 @@ or remove candidates. Pinned routes (`X-MacProvider-Session`,
 `X-MacProvider-Provider`), the busy-provider slot queue, and relay-blind and
 privacy-class selection (SPEC-041, SPEC-049) keep their own ordering.
 
-**Phase.** `max_out` is the request body's `max_tokens`, else 512. The input
+**Phase.** `max_out` is the request body's validated `max_tokens`, else 512. The input
 estimate is the coordinator's existing token estimate of the request body.
 
 - `long_input`: input estimate at least 2048 and at least 4 times `max_out`;
@@ -5397,9 +5401,13 @@ for unmeasured providers whenever any exist.
 For every successful plaintext selection, the coordinator MUST write one
 operator log line `event=route_trace` with `request_id`, `provider_id`,
 `model`, `phase`, `basis` (`measured`, `explore`, `fallback` or `pinned`),
-`candidates`, `fresh`, the chosen provider's `samples`, `evidence_age_s`
-(or `-1`), `score`, `engine` and `latency`, and increment
-`coordinator_route_selections_total{phase,basis}`.
+`scope` (`ranked`, `pinned` or `slot_queue`), `candidates`, `fresh`, the
+chosen provider's `samples`, `evidence_age_s` (or `-1`), `score` (or `-1` when
+not scored), `engine`, `latency` and `privacy_mode` (the gateway's
+SPEC-006-R019 effective mode, or `unset`), and increment
+`coordinator_route_selections_total{phase,basis}`. A pinned selection counts
+one candidate; a slot-queue selection counts the busy candidates it waited on
+and reports basis `fallback`, because the queue keeps its own order.
 
 The response MUST carry `X-MacProvider-Route-Trace` with exactly this grammar
 and member order, and no provider identity:
@@ -5409,9 +5417,11 @@ and member order, and no provider identity:
 `evidence` is `fresh` when the chosen provider's record is fresh. `engine` is
 the chosen provider's SPEC-001-R006 `engine_family`, or `unknown` without a
 valid profile. `latency` is the expected time to first token for the chosen
-provider: uncached input over the prefill average for `long_input` when one
-exists, else the TTFT average; `low` below 0.5 s, `medium` below 2 s, `high`
+provider: the coordinator's input estimate over the prefill average for
+`long_input` when one exists, else the TTFT average; `low` below 0.5 s, `medium` below 2 s, `high`
 otherwise, `unknown` when the record is not fresh. The header describes the
-first selection of the request; a failover does not rewrite it. Relay-blind
+first selection of the request; a failover does not rewrite it. It rides every
+response the coordinator writes after that selection, including its error
+responses. Relay-blind
 and privacy-class responses MUST NOT carry it. The gateway forwards it under
 SPEC-006-R020.

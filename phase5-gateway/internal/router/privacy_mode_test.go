@@ -168,3 +168,17 @@ func TestRouteTraceForwardingIsClosed(t *testing.T) {
 		t.Fatalf("upstream privacy headers leaked: %v", dst)
 	}
 }
+
+// Browsers can send the privacy header and read the disclosure and trace.
+func TestPrivacyModeCORSHeaders(t *testing.T) {
+	if !strings.Contains(corsAllowedHeaders, privacyModeHeader) {
+		t.Fatalf("CORS preflight does not allow %s", privacyModeHeader)
+	}
+	h := http.Header{}
+	setCORSHeaders(h, "https://example.test")
+	for _, name := range []string{privacyModeHeader, privacyModeDisclosureHeader, routeTraceResponseHeader} {
+		if !strings.Contains(h.Get("Access-Control-Expose-Headers"), name) {
+			t.Fatalf("CORS does not expose %s", name)
+		}
+	}
+}

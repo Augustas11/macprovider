@@ -57,10 +57,15 @@ func TestPerfStoreClampsAndThresholds(t *testing.T) {
 	}
 	// Invalid observations are ignored.
 	s2.Observe(PerfObservation{ProviderID: "", Model: "m", PromptTokens: 1, CompletionTokens: 1, TTFTMs: 1, At: perfNow})
-	s2.Observe(PerfObservation{ProviderID: "z", Model: "m", PromptTokens: 1, CompletionTokens: 0, TTFTMs: 1, At: perfNow})
+	s2.Observe(PerfObservation{ProviderID: "z", Model: "m", PromptTokens: 1, CompletionTokens: -1, TTFTMs: 1, At: perfNow})
 	s2.Observe(PerfObservation{ProviderID: "z", Model: "m", PromptTokens: 1, CompletionTokens: 1, TTFTMs: math.NaN(), At: perfNow})
 	if s2.Len() != 1 {
 		t.Fatalf("invalid observations stored: %d", s2.Len())
+	}
+	// A zero-token completion still carries TTFT evidence.
+	s2.Observe(PerfObservation{ProviderID: "zero", Model: "m", PromptTokens: 100, CompletionTokens: 0, TTFTMs: 10, At: perfNow})
+	if e, ok := s2.Lookup("zero", "m"); !ok || e.TTFTSamples != 1 || e.PrefillSamples != 1 || e.DecodeSamples != 0 {
+		t.Fatalf("zero-token completion: %+v ok=%v", e, ok)
 	}
 	// Cached prompt tokens are not prefill work.
 	s3 := NewPerfStore()

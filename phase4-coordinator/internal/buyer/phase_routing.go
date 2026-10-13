@@ -1,12 +1,11 @@
 package buyer
 
 import (
-	"encoding/json"
-	"math"
 	mrand "math/rand"
 	"net/http"
 	"strings"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
@@ -33,8 +32,11 @@ func WithRouteSelectionMetrics(m RouteSelectionMetrics) Option {
 
 // routeDecision is the SPEC-002-R006 outcome of one plaintext selection.
 type routeDecision struct {
-	phase       routing.Phase
-	basis       routing.Basis
+	phase routing.Phase
+	basis routing.Basis
+	// scope is where the provider came from for the operator line:
+	// ranked, pinned or slot_queue.
+	scope       string
 	inputTokens int
 	candidates  int
 	fresh       int
@@ -42,30 +44,11 @@ type routeDecision struct {
 	evidence    map[string]routing.PerfEvidence
 }
 
-// requestMaxOutputTokens returns the body's max_tokens, or 0 when absent or
-// unusable (the phase classifier then uses its default).
-func requestMaxOutputTokens(raw json.RawMessage) int {
-	var body struct {
-		MaxTokens *float64 `json:"max_tokens"`
-	}
-	if err := json.Unmarshal(raw, &body); err != nil || body.MaxTokens == nil {
-		return 0
-	}
-	v := *body.MaxTokens
-	if math.IsNaN(v) || v <= 0 {
-		return 0
-	}
-	if v > math.MaxInt32 {
-		return math.MaxInt32
-	}
-	return int(v)
-}
-
 // applyPhaseOrder runs the SPEC-002-R006 reorder on the objective-sorted
 // candidates. Draws come from the request seed so a decision is reproducible
 // within the day.
 func (s *Server) applyPhaseOrder(requestID string, req chatRequest, estimatedTokens int, candidates []pool.Provider, dailyKey string) routeDecision {
-	phase := routing.ClassifyPhase(estimatedTokens, requestMaxOutputTokens(req.raw), req.Stream)
+	phase := routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream)
 	if dailyKey == "" {
 		dailyKey = defaultDailyKey()
 	}
@@ -75,21 +58,21 @@ func (s *Server) applyPhaseOrder(requestID string, req chatRequest, estimatedTok
 	_ = rng.Float64()
 	exploreDraw, bandDraw := rng.Float64(), rng.Float64()
 	d := routing.PhaseOrder(candidates, req.Model, phase, s.perf, s.now(), exploreDraw, bandDraw)
-	return routeDecision{phase: d.Phase, basis: d.Basis, inputTokens: estimatedTokens, candidates: d.Candidates, fresh: d.Fresh, scores: d.Scores, evidence: d.Evidence}
+	return routeDecision{phase: d.Phase, basis: d.Basis, scope: "ranked", inputTokens: estimatedTokens, candidates: d.Candidates, fresh: d.Fresh, scores: d.Scores, evidence: d.Evidence}
 }
 
 // noteRouteTrace records the SPEC-002-R007 operator line and counter for the
 // first selection of a plaintext request and returns the buyer header value.
 func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.Header, provider pool.Provider, decision *routeDecision, estimatedTokens int) string {
-	d := routeDecision{basis: routing.BasisFallback, inputTokens: estimatedTokens}
+	d := routeDecision{basis: routing.BasisFallback, scope: "ranked", inputTokens: estimatedTokens}
 	if decision != nil {
 		d = *decision
 	}
 	if d.phase == "" {
-		d.phase = routing.ClassifyPhase(estimatedTokens, requestMaxOutputTokens(req.raw), req.Stream)
+		d.phase = routing.ClassifyPhase(estimatedTokens, req.maxTokens, req.Stream)
 	}
 	if hasPinnedRoute(headers) {
-		d.basis = routing.BasisPinned
+		d.basis, d.scope, d.candidates = routing.BasisPinned, "pinned", 1
 	}
 	evidence, ok := d.evidence[provider.SortKey()]
 	if !ok {
@@ -97,6 +80,9 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 	}
 	now := s.now()
 	fresh := ok && evidence.Fresh(now)
+	if d.scope != "ranked" && fresh {
+		d.fresh = 1
+	}
 	ageS := int64(-1)
 	if ok && !evidence.LastObserved.IsZero() {
 		ageS = int64(now.Sub(evidence.LastObserved).Seconds())
@@ -111,6 +97,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		Str("model", sanitizeRequestLogText(req.Model)).
 		Str("phase", string(d.phase)).
 		Str("basis", string(d.basis)).
+		Str("scope", d.scope).
 		Int("candidates", d.candidates).
 		Int("fresh", d.fresh).
 		Int("samples", evidence.TTFTSamples).
@@ -145,22 +132,38 @@ func internalPrivacyMode(headers http.Header) string {
 	}
 }
 
-// observeServedPerformance feeds one streamed, successful, coordinator-timed
-// attempt into the SPEC-002-R005 store. Relay-blind attempts are skipped:
-// their token counts are upper bounds.
-func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, promptTok, cachedPromptTok, completionTok *int64) {
+// markFirstTokenOnContent marks the SPEC-002-R005 first-token time when the
+// first delivered event carries generated content or a tool call.
+func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *forwardState) {
+	if acct == nil || state == nil {
+		return
+	}
+	acct.onFirstContent = func() {
+		state.phaseTiming.markProviderFirstToken(phaseTimingNow(s))
+	}
+}
+
+// observeServedPerformance feeds one streamed, cleanly completed, plaintext
+// attempt into the SPEC-002-R005 store. Every quantity is the coordinator's
+// own: its clock for TTFT and decode time, its token estimate of the request
+// body for prefill, and its delivered-bytes estimate for decode. Provider
+// usage only withholds a prefill sample when it reports a cached prefix.
+func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok, estimatedCompTokens *int64, errMsg, errCode, faultFlag string) {
 	s := b.server
 	if s == nil || s.perf == nil || b.relayBlind != nil || !b.stream || status < 200 || status >= 300 {
 		return
 	}
-	if providerAssignedID == "" || promptTok == nil || completionTok == nil || b.model == "" || b.state == nil {
+	if errMsg != "" || errCode != "" || (faultFlag != "" && faultFlag != billing.FaultNone) {
+		return
+	}
+	if providerAssignedID == "" || b.model == "" || b.state == nil {
 		return
 	}
 	timing := b.state.phaseTiming.snapshot()
 	if !timing.matchesProviderAssignedID(providerAssignedID) {
 		return
 	}
-	ttft, decode := timing.requestLogTTFTMs(), timing.requestLogDecodeMs()
+	ttft, decode := timing.routingTTFTMs(), timing.routingDecodeMs()
 	if ttft == nil {
 		return
 	}
@@ -172,22 +175,25 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 			}
 		}
 	}
-	var cached int64
-	if cachedPromptTok != nil {
-		cached = *cachedPromptTok
+	prompt := int64(b.state.estimatedTokens)
+	if cachedPromptTok != nil && *cachedPromptTok > 0 {
+		prompt = 0
+	}
+	var completion int64
+	if estimatedCompTokens != nil && *estimatedCompTokens > 0 {
+		completion = *estimatedCompTokens
 	}
 	var decodeMs float64
 	if decode != nil {
 		decodeMs = *decode
 	}
 	s.perf.Observe(routing.PerfObservation{
-		ProviderID:         providerID,
-		Model:              b.model,
-		PromptTokens:       *promptTok,
-		CachedPromptTokens: cached,
-		CompletionTokens:   *completionTok,
-		TTFTMs:             *ttft,
-		DecodeMs:           decodeMs,
-		At:                 s.now(),
+		ProviderID:       providerID,
+		Model:            b.model,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TTFTMs:           *ttft,
+		DecodeMs:         decodeMs,
+		At:               s.now(),
 	})
 }

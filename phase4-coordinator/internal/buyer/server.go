@@ -2445,6 +2445,9 @@ type chatRequest struct {
 	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
 	// selection, which keeps selection byte-identical.
 	engineClass string
+	// maxTokens is the body's validated max_tokens (0 = absent), read by the
+	// SPEC-002-R006 phase classifier.
+	maxTokens int
 	// multiTurnToolHistory records SPEC-018 §3.8 tool history (role:"tool"
 	// or non-empty assistant tool_calls) so class selection can drop
 	// members without a multi-turn prompt profile.
@@ -4209,6 +4212,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	// acct is the attempt's single source of delivered bytes, usage, and
 	// settlement evidence (deliveredSSEAccounting).
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
@@ -4993,6 +4997,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// settlement evidence (deliveredSSEAccounting). streamProbe sees every
 	// block first, only to validate it.
 	acct := newDeliveredSSEAccounting()
+	s.markFirstTokenOnContent(acct, state)
 	streamProbe := newSettlementStreamOutputTracker()
 	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
@@ -6495,6 +6500,9 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 	}
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
+	}
+	if v, ok := raw["max_tokens"]; ok {
+		_ = json.Unmarshal(v, &req.maxTokens)
 	}
 	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
 		return req, status, code, msg, ""
@@ -9029,6 +9037,8 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				state.queuedSlotProviderID = provider.ProviderID
 				state.stickyResult = stickyResult
 				state.stickyMissReason = stickyMissReason
+				// SPEC-002-R007: the slot queue keeps its own order.
+				state.routeDecision = &routeDecision{basis: routing.BasisFallback, scope: "slot_queue", inputTokens: estimatedTokens, candidates: len(candidates)}
 				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
 				return selected, nil, true
 			case queuedProviderTerminal:

@@ -22,8 +22,9 @@ const (
 )
 
 // PerfObservation is one coordinator-timed served attempt. Durations come
-// from the coordinator's wall clock only; token counts are the provider's
-// usage, the same counts billing settles on.
+// from the coordinator's wall clock; PromptTokens is the coordinator's token
+// estimate of the request body (0 withholds a prefill sample) and
+// CompletionTokens its delivered-bytes estimate, never provider usage.
 type PerfObservation struct {
 	ProviderID         string
 	Model              string
@@ -105,7 +106,7 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	if s == nil || o.ProviderID == "" || o.Model == "" || o.At.IsZero() {
 		return
 	}
-	if o.CompletionTokens < 1 || o.PromptTokens < 0 || math.IsNaN(o.TTFTMs) || math.IsInf(o.TTFTMs, 0) || o.TTFTMs < 0 {
+	if o.CompletionTokens < 0 || o.PromptTokens < 0 || math.IsNaN(o.TTFTMs) || math.IsInf(o.TTFTMs, 0) || o.TTFTMs < 0 {
 		return
 	}
 	ttft := clampFloat(o.TTFTMs, 1, PerfMaxTTFTMs)

@@ -12244,7 +12244,10 @@
         "phase4-coordinator/internal/routing/perf.go:DecodeWithPrior",
         "phase4-coordinator/internal/routing/perf.go:evictLocked",
         "phase4-coordinator/internal/buyer/phase_routing.go:observeServedPerformance",
-        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow",
+        "phase4-coordinator/internal/buyer/phase_routing.go:markFirstTokenOnContent",
+        "phase4-coordinator/internal/buyer/phase_timing.go:routingTTFTMs",
+        "phase4-coordinator/internal/buyer/delivered_sse_accounting.go:notifyFirstContent"
       ],
       "tests": [
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
@@ -12252,7 +12255,8 @@
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfSelfReportIsCappedPrior",
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEvictsStaleThenOldest",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestServedPerformanceObservation",
-        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestFirstTokenMarkedOnFirstContent"
       ],
       "journeys": [],
       "evidence": [],
@@ -12272,7 +12276,7 @@
         "phase4-coordinator/internal/routing/phase.go:PhaseOrder",
         "phase4-coordinator/internal/routing/phase.go:scorePhase",
         "phase4-coordinator/internal/buyer/phase_routing.go:applyPhaseOrder",
-        "phase4-coordinator/internal/buyer/phase_routing.go:requestMaxOutputTokens",
+        "phase4-coordinator/internal/buyer/server.go:validateChatRequestDetailed",
         "phase4-coordinator/internal/buyer/server.go:selectProviderExcluding"
       ],
       "tests": [
@@ -12283,7 +12287,7 @@
         "phase4-coordinator/internal/routing/phase_test.go:TestPhaseOrderBandSharesNearEqualProvidersAndLoadDemotesBusy",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionPrefersMeasuredFastProvider",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestPhaseAwareSelectionFallsBackWithoutEvidence",
-        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestRequestMaxOutputTokens",
+        "phase4-coordinator/internal/buyer/phase_routing_test.go:TestValidateChatRequestCapturesMaxTokens",
         "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
       ],
       "journeys": [],
@@ -12357,11 +12361,13 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/privacy_mode.go:buyerVisibleRouteTraceHeader",
-        "phase5-gateway/internal/router/server.go:copyCleanHeadersFiltered"
+        "phase5-gateway/internal/router/server.go:copyCleanHeadersFiltered",
+        "phase5-gateway/internal/router/cors.go:setCORSHeaders"
       ],
       "tests": [
         "phase5-gateway/internal/router/privacy_mode_test.go:TestRouteTraceForwardingIsClosed",
-        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider"
+        "test/integration/phase_routing_integration_test.go:TestPhaseAwareRoutingPrefersMeasuredFastProvider",
+        "phase5-gateway/internal/router/privacy_mode_test.go:TestPrivacyModeCORSHeaders"
       ],
       "journeys": [],
       "evidence": [],

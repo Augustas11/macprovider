@@ -22,7 +22,7 @@ func TestCORSAllowedOriginHeaders(t *testing.T) {
 	if got := resp.Header().Get("Access-Control-Allow-Credentials"); got != "false" {
 		t.Fatalf("allow-credentials=%q", got)
 	}
-	if got := resp.Header().Get("Access-Control-Expose-Headers"); got != "X-Request-ID" {
+	if got := resp.Header().Get("Access-Control-Expose-Headers"); got != "X-Request-ID, X-MacProvider-Privacy-Mode, X-MacProvider-Privacy-Mode-Disclosure, X-MacProvider-Route-Trace" {
 		t.Fatalf("expose-headers=%q", got)
 	}
 	if !strings.Contains(resp.Header().Get("Vary"), "Origin") {

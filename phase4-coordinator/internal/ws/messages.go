@@ -1649,6 +1649,11 @@ func parseEngineProfile(v json.RawMessage) *pool.EngineProfile {
 	default:
 		return nil
 	}
+	// Cross-field invariants: the family is native_mtp exactly when native
+	// MTP is active, and plain MLX grants no continuous-batching slots.
+	if (*wire.EngineFamily == "native_mtp") != *wire.NativeMTPActive || (*wire.EngineFamily == "general_mlx" && *wire.CBGrantedSlots != 0) {
+		return nil
+	}
 	if *wire.CBGrantedSlots < 0 || *wire.CBGrantedSlots > 256 || *wire.MaxStableContextTokens < 0 || *wire.MaxStableContextTokens > 10_000_000 {
 		return nil
 	}
