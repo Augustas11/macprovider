@@ -182,10 +182,17 @@ Rollout: a provider CLI built before v0.3.0 still rejects explicit
 `strict` with a non-subset schema with the §3 code, before inference. Through
 the coordinator relay a provider-side 4xx surfaces as a retryable 502
 (`provider_error`), because the SPEC-001 end-frame statuses carry no
-request-validation class. Deploy order is therefore provider CLI first, then
-coordinator: while the coordinator still rejects non-strict requests with a
-clean 400, no request reaches a pre-v0.3.0 provider in non-strict mode. No
-per-version admission rule is added.
+request-validation class. The coordinator therefore routes a non-strict request
+only to providers whose `binary_version` is 1.8.242 or later, the first
+provider CLI that implements this section. A provider whose version does not
+parse as a dotted numeric version is treated as not supporting it. The gate
+applies to every selection attempt, failover and pinned routes included. When
+no supporting provider serves the requested model, the coordinator returns the
+pre-v0.3.0 coordinator response before dispatch: HTTP 400
+`json_schema_non_strict_unsupported` for explicit `strict:false`, and the §3
+code and message for an absent `strict` with a non-subset schema. Strict-mode
+requests are not gated. The coordinator and the provider CLI can therefore
+deploy in either order.
 
 Buyer-side validation obligation: the provider validates syntax and schema
 conformance for the returned assistant `content`; it does not validate whether
@@ -1148,7 +1155,7 @@ not the normative structured-output validation-timeout authority.
 |---|---:|---|---|---|
 | `json_schema_missing_name` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.name`. |
 | `json_schema_missing_schema` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.schema`. |
-| `json_schema_non_strict_unsupported` | 400 | pre-inference request validation | false | Retired in v0.3.0. Emitted only by provider CLIs built before v0.3.0 (§1a rollout). |
+| `json_schema_non_strict_unsupported` | 400 | pre-inference request validation | false | Retired in v0.3.0 for supporting providers. Emitted by provider CLIs built before v0.3.0, and by the coordinator when no provider that supports non-strict mode serves the model (§1a rollout). |
 | `streaming_json_schema_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_schema` with `stream:true`; deleted from active v0.2. |
 | `streaming_json_object_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_object` with `stream:true`; deleted from active v0.2. |
 | `json_schema_unsupported_keyword` | 400 | pre-inference request validation | false | Unsupported schema keyword. |
