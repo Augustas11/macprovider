@@ -1371,8 +1371,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
+	//
+	// #1570: the decode-idle deadline is armed by the first content-bearing
+	// frame, not at stream open. Before that frame the provider is in
+	// admission/prefill, which the first-token phase (and the ceiling) bound.
+	// Arming decode-idle at open made a long prefill expire as decode_idle,
+	// so production had to raise streaming_idle_ms to the prefill budget and
+	// lost decode-idle protection.
 	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
-	progressDeadline := streamingProgressDeadline(idleTimeout)
+	var progressDeadline time.Time
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage

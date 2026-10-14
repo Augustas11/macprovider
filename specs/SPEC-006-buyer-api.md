@@ -17,6 +17,14 @@
   estimate that stays at or below the tokenizer count on realistic text.
 - The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
   unchanged.
+- Streaming deadlines. The gateway decode-idle deadline (`streaming_idle_ms`)
+  MUST be armed by the first content-bearing frame, not when the coordinator
+  commits headers. Before that frame the provider is in admission and prefill,
+  which the first-token deadline (`first_token_seconds`) and the stream ceiling
+  bound. Arming decode-idle at commit made a long prefill expire as
+  `decode_idle`, so a prefill-sized `streaming_idle_ms` was needed and
+  decode-idle protection was lost. Operators size `first_token_seconds` for the
+  longest prompt served and keep `streaming_idle_ms` at its bounded default.
 
 **Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
 - §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
