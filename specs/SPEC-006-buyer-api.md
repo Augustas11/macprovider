@@ -1,7 +1,22 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.53 (2026-10-13, SPEC-050 stake allowance)
+**Version:** 0.9.54 (2026-10-14, #1570 OpenRouter readiness: prompt-token bounds)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.54 (2026-10-14, issue #1570 — OpenRouter readiness):**
+- Prompt-token estimates (§7.2.1). `ceil(bytes/4)` under-counted token-dense
+  prompts (digits, code, JSON, emoji), so honest provider counts above the
+  reservation were clamped and the buyer was charged less than the provider's
+  count. It over-counted Cyrillic, CJK and indented code, so the coordinator
+  context check rejected prompts a provider could serve.
+- The prompt reservation (gateway) and the provider `prompt_tokens` bound
+  (coordinator) are now the larger of `ceil(bytes/4)` and a class-weighted
+  upper estimate, plus 64. No hold shrinks; prose and code holds grow to about
+  1.8x the tokenizer count.
+- Coordinator routing and provider preflight use a class-weighted central
+  estimate that stays at or below the tokenizer count on realistic text.
+- The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
+  unchanged.
 
 **Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
 - §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
@@ -2827,6 +2842,50 @@ canonicalization. The coordinator and provider apply the out-of-band ceiling
 before inference as specified by SPEC-001 v1.9.27 and SPEC-002 v1.6.4.
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the symmetric streaming clamp policy below.
+
+#### 7.2.1 Prompt-token estimates (v0.9.54)
+
+The gateway and coordinator have no tokenizer. Three prompt-token estimates
+exist, and they MUST NOT be conflated.
+
+Both class-weighted estimates walk the decoded JSON text of the request body
+(every string, object key and scalar literal; no quotes, separators or escape
+sequences) and price each character in milli-tokens. A run of ASCII letters
+costs `ceil(run * 1000 / letter_divisor)`; every other character costs its
+class weight. The sum is rounded up to whole tokens.
+
+| Class | Upper weight | Central weight |
+|---|---:|---:|
+| ASCII letter run divisor | 2.5 letters per token | 4.5 letters per token |
+| ASCII digit | 1.2 | 0.9 |
+| Space | 0.25 | 0.1 |
+| `\n`, `\r`, `\t` | 1.0 | 0.5 |
+| Other ASCII (punctuation, controls) | 1.0 | 0.5 |
+| 2-byte UTF-8 character | 0.6 | 0.22 |
+| 3-byte UTF-8 character | 1.0 | 0.45 |
+| 4-byte UTF-8 character | 3.0 | 2.0 |
+
+The weights were calibrated against the Qwen3.6 tokenizer (the OpenRouter
+listing model) on prose, Go, Swift and Python code, JSON, digits, CSV, hex,
+base64, Chinese, Russian, emoji, indented code and punctuation. The upper
+estimate is at or above the tokenizer count on every corpus except random
+letter strings and base64 (about 0.6-0.75x), and about 1.8x on prose and code.
+The central estimate is at or below the tokenizer count on every corpus, and
+0.9-1.0x on prose, code, JSON, Chinese and Russian. The gateway and the
+coordinator MUST use identical weights; a shared golden table pins them.
+
+1. **Prompt reservation** (gateway quota hold and usage validation cap;
+   coordinator independent bound on a provider's reported `prompt_tokens`):
+   `max(ceil(bytes/4), upper estimate) + 64`. A provider-reported count above
+   it is charged at it, as before. The reservation is never smaller than the
+   pre-v0.9.54 `ceil(bytes/4) + 64`.
+2. **Context-fit estimate** (coordinator routing and provider preflight): the
+   central estimate, minimum 1, or `floor(bytes/4)` when the body is not valid
+   JSON. It decides whether a provider's advertised context can hold the
+   prompt. The provider's tokenized `context_length_exceeded` check remains
+   authoritative.
+3. **Billed fallback estimate**: `ceil(bytes/4)` when the provider reports no
+   usage (gateway) or the coordinator's byte estimate, unchanged.
 
 #### Streaming completion-token symmetric clamp (#255 downward, #278 upward)
 

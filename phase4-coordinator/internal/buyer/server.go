@@ -7679,7 +7679,7 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 
 func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
-	estimatedTokens := estimateTokens(req.raw)
+	estimatedTokens := routingPromptTokenEstimate(req.raw)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()
 	classResolution := s.classForRequestWithBYOMContext(req.Model, providers, admissionCtx)
@@ -11094,8 +11094,36 @@ func (s *Server) startRecoveryProbe(provider pool.Provider) {
 // a tokenizer count or a quantity to bill automatically.
 const promptHeadroomTokens = 64
 
+// promptTokenUpperBound is the SPEC-006 §7.2.1 independent bound on a
+// provider's reported prompt_tokens, the same formula as the gateway's prompt
+// reservation: the larger of the bytes/4 estimate and the class-weighted upper
+// estimate, plus headroom. #1570: bytes/4 alone charged token-dense prompts
+// less than the provider's honest count.
 func promptTokenUpperBound(raw json.RawMessage) int64 {
-	return int64(estimateTokens(raw)) + promptHeadroomTokens
+	bound := int64(estimateTokens(raw))
+	if upper, ok := promptTokenClassEstimate(raw, promptTokenUpperWeights); ok && upper > bound {
+		bound = upper
+	}
+	return bound + promptHeadroomTokens
+}
+
+// routingPromptTokenEstimate is the SPEC-006 §7.2.1 context-fit estimate used
+// for routing and provider preflight: the class-weighted central estimate,
+// which stays at or below the tokenizer count on realistic text. Raw bytes/4
+// over-counted Cyrillic, CJK and indented code and rejected prompts a
+// provider could serve. The provider's tokenized check stays authoritative.
+func routingPromptTokenEstimate(raw json.RawMessage) int {
+	central, ok := promptTokenClassEstimate(raw, promptTokenCentralWeights)
+	if !ok {
+		return estimateTokens(raw)
+	}
+	if central < 1 {
+		return 1
+	}
+	if central > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(central)
 }
 
 func estimateTokens(raw json.RawMessage) int {
