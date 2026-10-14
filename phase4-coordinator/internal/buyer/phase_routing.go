@@ -187,7 +187,7 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 			}
 		}
 	}
-	prompt := int64(b.state.estimatedTokens)
+	prompt := int64(b.state.routingEstimatedTokens)
 	if cachedPromptTok != nil && *cachedPromptTok > 0 {
 		prompt = 0
 	}

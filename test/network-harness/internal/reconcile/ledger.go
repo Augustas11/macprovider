@@ -660,8 +660,13 @@ func sseErrorCorroboratesOutcome(code, outcome string) bool {
 	if code == outcome {
 		return true
 	}
-	// Named mapping exception per SPEC-006 §17.7.1:
+	// Named mapping exceptions per SPEC-006 §17.7.1:
 	if code == "provider_disconnected" && outcome == "stream_truncated" {
+		return true
+	}
+	// #1570: coordinator post-commit terminal frames keep their code at the
+	// buyer and settle as stream_malformed (coordinatorStreamTerminalError).
+	if (code == "upstream_provider_error" || code == "provider_disconnected") && outcome == "stream_malformed" {
 		return true
 	}
 	return false

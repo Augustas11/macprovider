@@ -2781,6 +2781,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
 	state.estimatedTokens = estimateTokens(req.raw)
+	state.routingEstimatedTokens = routingPromptTokenEstimate(req.raw)
 	rec.setPromptTokenUpperBound(promptTokenUpperBound(req.raw))
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
@@ -2798,7 +2799,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
 	// SPEC-002-R007: trace the first selection for operators and the buyer.
-	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.estimatedTokens))
+	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.routingEstimatedTokens))
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
@@ -3059,7 +3060,7 @@ func (s *Server) forwardStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "streaming_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -3269,7 +3270,7 @@ func (s *Server) forwardWSNonStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "ws_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return !state.provider.IsWSTunneled()
@@ -3780,7 +3781,7 @@ func (s *Server) forwardHTTPSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "http_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -11100,7 +11101,9 @@ const promptHeadroomTokens = 64
 // estimate, plus headroom. #1570: bytes/4 alone charged token-dense prompts
 // less than the provider's honest count.
 func promptTokenUpperBound(raw json.RawMessage) int64 {
-	bound := int64(estimateTokens(raw))
+	// ceil(bytes/4), matching the gateway reservation; estimateTokens floors
+	// and stays the billed fallback.
+	bound := int64((len(raw) + 3) / 4)
 	if upper, ok := promptTokenClassEstimate(raw, promptTokenUpperWeights); ok && upper > bound {
 		bound = upper
 	}

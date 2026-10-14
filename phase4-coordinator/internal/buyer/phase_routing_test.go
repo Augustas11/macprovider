@@ -142,7 +142,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 		cached                         int64
 	}
 	record := func(a attempt) {
-		state := &forwardState{estimatedTokens: 500}
+		state := &forwardState{estimatedTokens: 500, routingEstimatedTokens: 500}
 		state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-fast")
 		state.phaseTiming.markProviderDispatchDone(phaseTestNow)
 		// A role-only opening chunk is a first byte, not a first token.
@@ -189,7 +189,7 @@ func TestServedPerformanceObservation(t *testing.T) {
 		t.Fatalf("cached prefix: %+v", e)
 	}
 	// A timing snapshot for another session is not this attempt's timing.
-	state := &forwardState{estimatedTokens: 500}
+	state := &forwardState{estimatedTokens: 500, routingEstimatedTokens: 500}
 	state.phaseTiming.markProviderDispatchStart(phaseTestNow, "s-other")
 	state.phaseTiming.markProviderDispatchDone(phaseTestNow)
 	state.phaseTiming.markProviderFirstToken(phaseTestNow.Add(time.Millisecond))

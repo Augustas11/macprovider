@@ -8,11 +8,16 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/config"
 )
 
-// #1570: a coordinator post-commit terminal error frame (no choices) keeps
-// its code at the buyer instead of being rewritten to stream_malformed. The
-// upstream message text is not forwarded, and settlement is unchanged.
+// #1570: a coordinator post-commit terminal error frame (no choices) reaches
+// the buyer as its SPEC-006 code instead of stream_malformed. The upstream
+// message text is not forwarded, and settlement is unchanged (a SPEC-006
+// §17.7.1 named mapping).
 func TestStreamingCoordinatorTerminalErrorKeepsCode(t *testing.T) {
-	for _, code := range []string{"provider_error", "provider_disconnected"} {
+	for _, tc := range []struct{ code, wantCode, wantType string }{
+		{"provider_error", "upstream_provider_error", "api_error"},
+		{"provider_disconnected", "provider_disconnected", "server_error"},
+	} {
+		code := tc.code
 		t.Run(code, func(t *testing.T) {
 			body := `{"model":"llama","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"long prompt"}]}`
 			accountID := "acct_stream_terminal_" + code
@@ -32,8 +37,8 @@ func TestStreamingCoordinatorTerminalErrorKeepsCode(t *testing.T) {
 
 			resp := postChat(t, h, fullKey, body, nil)
 			got := resp.Body.String()
-			if !strings.Contains(got, `"code":"`+code+`"`) || strings.Contains(got, "stream_malformed") {
-				t.Fatalf("terminal code not preserved: %s", got)
+			if !strings.Contains(got, `"code":"`+tc.wantCode+`"`) || !strings.Contains(got, `"type":"`+tc.wantType+`"`) || strings.Contains(got, "stream_malformed") {
+				t.Fatalf("terminal %s: want code %s type %s: %s", code, tc.wantCode, tc.wantType, got)
 			}
 			if !strings.Contains(got, `"retryable":true`) {
 				t.Fatalf("terminal %s must stay retryable: %s", code, got)

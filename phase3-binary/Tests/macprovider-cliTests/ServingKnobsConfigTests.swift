@@ -1459,6 +1459,14 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "model": harmony, "temperature": 0, "response_format": jsonSchema
         ])))
+        // SPEC-019 v0.3.0 §1a: non-strict json_schema skips validation but is
+        // still structured output, so Harmony keeps it serial (#1570).
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "model": harmony, "temperature": 0, "response_format": [
+                "type": "json_schema",
+                "json_schema": ["name": "loose", "strict": false, "schema": ["type": "object"]],
+            ] as [String: Any],
+        ])))
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "model": harmony, "temperature": 0
         ])))

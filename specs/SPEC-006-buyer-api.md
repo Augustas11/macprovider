@@ -11,8 +11,9 @@
   context check rejected prompts a provider could serve.
 - The prompt reservation (gateway) and the provider `prompt_tokens` bound
   (coordinator) are now the larger of `ceil(bytes/4)` and a class-weighted
-  upper estimate, plus 64. No hold shrinks; prose and code holds grow to about
-  1.8x the tokenizer count.
+  upper estimate, plus 64. No hold shrinks. Prompt holds grow to about 1.8x
+  the tokenizer count on prose and code and about 4.5-5x on Chinese and
+  Russian prose, in exchange for a bound that covers every calibration corpus.
 - Coordinator routing and provider preflight use a class-weighted central
   estimate that stays at or below the tokenizer count on realistic text.
 - The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
@@ -20,11 +21,12 @@
 - OpenRouter document (§5.3.2): `max_context_length` is the largest context a
   ready or busy provider grants. Unavailable and draining providers no longer
   raise it.
-- Streaming terminal errors. A coordinator post-commit terminal frame with
-  code `provider_error` or `provider_disconnected` reaches the buyer with that
-  code and a gateway-owned message, instead of being rewritten to
-  `stream_malformed`. Settlement is unchanged. Unknown codes stay
-  `stream_malformed`.
+- Streaming terminal errors (§17.7.1 named mappings). A coordinator
+  post-commit terminal frame with code `provider_error` reaches the buyer as
+  `upstream_provider_error` (`api_error`), and `provider_disconnected` keeps
+  its code (`server_error`), with gateway-owned messages, instead of being
+  rewritten to `stream_malformed`. Settlement is unchanged
+  (`stream_malformed`). Unknown codes stay `stream_malformed`.
 - Streaming deadlines. The gateway decode-idle deadline (`streaming_idle_ms`)
   MUST be armed by the first content-bearing frame, not when the coordinator
   commits headers. Before that frame the provider is in admission and prefill,
@@ -2867,35 +2869,46 @@ exist, and they MUST NOT be conflated.
 
 Both class-weighted estimates walk the decoded JSON text of the request body
 (every string, object key and scalar literal; no quotes, separators or escape
-sequences) and price each character in milli-tokens. A run of ASCII letters
-costs `ceil(run * 1000 / letter_divisor)`; every other character costs its
-class weight. The sum is rounded up to whole tokens.
+sequences) and price each character in milli-tokens. A run of ASCII letters and
+digits is priced as one unit: a letters-only run costs `ceil(n * 1000 /
+letter_divisor)` for its first `long_run` letters plus `ceil(rest * 1000 /
+long_divisor)`; a digits-only run costs the digit weight per digit; a run with
+both letters and digits (identifiers, hex, base64) costs the mixed weight per
+character. Every other character costs its class weight. The sum is rounded up
+to whole tokens.
 
 | Class | Upper weight | Central weight |
 |---|---:|---:|
-| ASCII letter run divisor | 2.5 letters per token | 4.5 letters per token |
-| ASCII digit | 1.2 | 0.9 |
+| Letters-only run divisor | 2.5 letters per token | 4.5 letters per token |
+| Letters beyond the first 12 of a run (upper only) | 1.5 letters per token | n/a |
+| Mixed letter-digit run, per character | 1.0 | 0.5 |
+| Digit in a digits-only run | 1.2 | 0.9 |
 | Space | 0.25 | 0.1 |
 | `\n`, `\r`, `\t` | 1.0 | 0.5 |
 | Other ASCII (punctuation, controls) | 1.0 | 0.5 |
-| 2-byte UTF-8 character | 0.6 | 0.22 |
-| 3-byte UTF-8 character | 1.0 | 0.45 |
+| 2-byte UTF-8 character | 1.1 | 0.22 |
+| 3-byte UTF-8 character | 2.2 | 0.45 |
 | 4-byte UTF-8 character | 3.0 | 2.0 |
 
 The weights were calibrated against the Qwen3.6 tokenizer (the OpenRouter
-listing model) on prose, Go, Swift and Python code, JSON, digits, CSV, hex,
-base64, Chinese, Russian, emoji, indented code and punctuation. The upper
-estimate is at or above the tokenizer count on every corpus except random
-letter strings and base64 (about 0.6-0.75x), and about 1.8x on prose and code.
-The central estimate is at or below the tokenizer count on every corpus, and
-0.9-1.0x on prose, code, JSON, Chinese and Russian. The gateway and the
-coordinator MUST use identical weights; a shared golden table pins them.
+listing model) on 23 corpora: prose, Go, Swift and Python code, JSON, digits,
+CSV, hex, base64, random letters, common and rare Chinese, Russian, emoji,
+indented code, punctuation, and random Cyrillic, Greek, Arabic, Hangul,
+hiragana, Latin-1 and letter-punctuation strings. The upper estimate, taken as
+`max(ceil(bytes/4), upper)`, is at or above the tokenizer count on every
+corpus: about 1.7-2x on prose, code and JSON, 1.0-1.5x on digits, hex, base64
+and random strings, and about 4.5-5x on Chinese and Russian prose, whose holds
+grow accordingly. The central estimate is at or below the tokenizer count on
+every corpus, and 0.9-1.0x on prose, code, JSON, Chinese and Russian. The
+gateway and the coordinator MUST use identical weights; a test fails when the
+two copies of the estimator or its golden table differ.
 
 1. **Prompt reservation** (gateway quota hold and usage validation cap;
    coordinator independent bound on a provider's reported `prompt_tokens`):
-   `max(ceil(bytes/4), upper estimate) + 64`. A provider-reported count above
-   it is charged at it, as before. The reservation is never smaller than the
-   pre-v0.9.54 `ceil(bytes/4) + 64`.
+   `max(ceil(bytes/4), upper estimate) + 64`, the same formula at the gateway
+   and the coordinator. A provider-reported count above it is charged at it,
+   as before. The reservation is never smaller than the pre-v0.9.54
+   `ceil(bytes/4) + 64`.
 2. **Context-fit estimate** (coordinator routing and provider preflight): the
    central estimate, minimum 1, or `floor(bytes/4)` when the body is not valid
    JSON. It decides whether a provider's advertised context can hold the
@@ -4029,6 +4042,7 @@ Constraints on the envelope:
    - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
    - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
      - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+     - (v0.9.54, #1570) `error.code = "upstream_provider_error"` ↔ `usage_events.outcome = "stream_malformed"` and `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_malformed"`. Reference: `coordinatorStreamTerminalError` in `phase5-gateway/internal/router/chat_proxy.go`. A coordinator post-commit terminal frame with code `provider_error` (normalized per §17 to `upstream_provider_error`) or `provider_disconnected` is emitted with that code, while the gateway settles the stream exactly as before, as `stream_malformed`.
    - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
 3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
 4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.

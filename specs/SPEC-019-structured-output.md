@@ -1152,7 +1152,7 @@ not the normative structured-output validation-timeout authority.
 | `json_schema_invalid_const_or_enum_type` | 400 | pre-inference request validation | false | `const` or `enum` value conflicts with `type`. |
 | `json_schema_invalid_name` | 400 | pre-inference request validation | false | `json_schema.name` outside machine-name constraint. |
 | `json_schema_too_large` | 413 | pre-inference request validation | false | Schema JSON value over `16_384` raw UTF-8 bytes. |
-| `json_schema_too_deep` | 400 | pre-inference request validation | false | Schema nesting exceeds 32 levels. |
+| `json_schema_too_deep` | 400 | pre-inference request validation | false | Strict: schema nesting exceeds 32 levels. Non-strict (§1a): object/array nesting exceeds 64. |
 | `request_content_encoding_unsupported` | 415 | gateway + coordinator pre-validation | false | v0.1.0 rejects compressed request bodies. |
 | `malformed_json_response` | 502 | post-inference output validation | true* | Output not valid JSON text, duplicate keys, empty content, or invalid `json_object` root. |
 | `json_schema_validation_failed` | 502 | post-inference output validation | true | Parsed JSON does not satisfy schema or output depth. |
@@ -1623,9 +1623,9 @@ Audit lanes should probe:
    strings inside schema text.
 3. Whether the `json_object` top-level object-or-array rule is sufficient for
    OpenAI compatibility or should narrow to object-only before lock.
-4. Whether `strict:false` should be rejected as specified or accepted as a
-   synonym for `strict:true`; v0.1.0 currently rejects to avoid silent semantic
-   drift.
+4. (Resolved in v0.3.0 §1a.) Whether `strict:false` should be rejected as
+   specified or accepted as a synonym for `strict:true`; v0.1.0 rejected it.
+   v0.3.0 accepts it as a distinct non-enforcing mode, never as `strict:true`.
 5. Whether scalar root schemas should remain allowed in v0.1.0 or be deferred
    until SDK compatibility evidence exists.
 6. Model-quality regression: structured-output system prompt injection MUST NOT
@@ -1675,9 +1675,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.6 (2026-09-28, streaming cleanup-prefix holdback clarified)
+**Version:** 0.3.0 (2026-10-14, non-strict `json_schema` mode)
 
-**Status:** LOCKED. v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
+**Status:** LOCKED. v0.3.0 adds the §1a non-strict mode; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.

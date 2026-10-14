@@ -2,6 +2,8 @@ package buyer
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -66,6 +68,33 @@ func TestPromptTokenClassEstimateGolden(t *testing.T) {
 		central, ok := promptTokenClassEstimate([]byte(tc.body), promptTokenCentralWeights)
 		if !ok || central != tc.central {
 			t.Errorf("%s central=%d ok=%v want %d", tc.name, central, ok, tc.central)
+		}
+	}
+}
+
+// The estimator and its golden table are duplicated in the gateway module
+// (phase5-gateway/internal/router). The copies MUST stay byte-identical below
+// the package clause, so the gateway reservation and the coordinator bound
+// cannot drift.
+func TestPromptTokenEstimatorMatchesGatewayCopy(t *testing.T) {
+	for _, name := range []string{"prompt_token_estimate.go", "prompt_token_golden_test.go"} {
+		local, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		gateway, err := os.ReadFile(filepath.Join("..", "..", "..", "phase5-gateway", "internal", "router", name))
+		if err != nil {
+			t.Fatalf("read gateway %s: %v", name, err)
+		}
+		stripPackage := func(b []byte) string {
+			s := string(b)
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				return s[i+1:]
+			}
+			return s
+		}
+		if stripPackage(local) != stripPackage(gateway) {
+			t.Fatalf("%s differs between phase4-coordinator/internal/buyer and phase5-gateway/internal/router", name)
 		}
 	}
 }

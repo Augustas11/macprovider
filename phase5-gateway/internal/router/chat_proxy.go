@@ -1748,8 +1748,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					// #1570: a coordinator terminal error frame keeps its
 					// code. Rewriting provider_error to stream_malformed hid
 					// the real failure. Settlement is unchanged.
-					if message, ok := coordinatorStreamTerminalErrorMessage(terminalCode); ok {
-						writeSSEError(w, message, "api_error", terminalCode)
+					if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
+						writeSSEError(w, message, errType, code)
 					} else {
 						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					}
@@ -3986,18 +3986,22 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 	}
 }
 
-// coordinatorStreamTerminalErrorMessage names the coordinator's post-commit
-// terminal SSE error codes the gateway forwards with their own code instead of
-// stream_malformed. The message is the gateway's, never the upstream text.
-// provider_timeout already passes through as a SPEC-019 terminal code.
-func coordinatorStreamTerminalErrorMessage(code string) (string, bool) {
+// coordinatorStreamTerminalError maps a coordinator post-commit terminal SSE
+// error code to the buyer-visible envelope the gateway emits instead of
+// stream_malformed (#1570). Codes, types and messages are the gateway's own,
+// never the upstream text: coordinator provider_error is normalized to
+// upstream_provider_error (SPEC-006 §17), provider_disconnected keeps the
+// SPEC-002 FR-B6 server_error envelope. Both settle as stream_malformed, a
+// SPEC-006 §17.7.1 named mapping. provider_timeout already passes through as
+// a SPEC-019 terminal code.
+func coordinatorStreamTerminalError(code string) (string, string, string, bool) {
 	switch code {
 	case "provider_error":
-		return "Provider failed during streaming", true
+		return "upstream_provider_error", "api_error", "Upstream provider error", true
 	case "provider_disconnected":
-		return "Provider disconnected during streaming", true
+		return "provider_disconnected", "server_error", "Provider disconnected during streaming", true
 	default:
-		return "", false
+		return "", "", "", false
 	}
 }
 
