@@ -13,7 +13,7 @@ MoE promotion review (flag stays false):
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** non-production test drive; no coordinator join, no buyer traffic, no receipts
 - **Binary:** `feat/spec038-frcb15-leftovers` built on-box (Swift release), run from `run/` co-located with candidate v1.8.170 `mlx.metallib`
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1, AC power

@@ -158,8 +158,8 @@ command and result.
 
 ## Git Workflow
 
-Never do write-heavy work in canonical `/Users/augstar/macprovider-poc` unless
-the user explicitly says to use that checkout. Start from a fresh sibling
+Never do write-heavy work in the canonical checkout (the primary clone of this
+repo on the operator Mac) unless the user explicitly says to use that checkout. Start from a fresh sibling
 worktree:
 
 ```bash
@@ -209,9 +209,9 @@ bytes. A mixed change is a PR. Do not smuggle code into a docs push.
 After any PR squash-merge or direct docs push, sync canonical main:
 
 ```bash
-git -C /Users/augstar/macprovider-poc fetch origin
-git -C /Users/augstar/macprovider-poc checkout main
-git -C /Users/augstar/macprovider-poc reset --hard origin/main
+git -C <canonical-checkout> fetch origin
+git -C <canonical-checkout> checkout main
+git -C <canonical-checkout> reset --hard origin/main
 ```
 
 Do not force-push `main`, admin-merge, bypass branch protection, or merge with

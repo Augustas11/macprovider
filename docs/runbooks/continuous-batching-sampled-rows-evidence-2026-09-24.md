@@ -3,7 +3,7 @@
 Before this change, continuous batching admitted only greedy requests
 (`temperature 0`, `top_p 1`). Ordinary sampled buyer traffic always
 serial-routed. With 8 advertised seats it then queued behind the serial path:
-an AntSeed stress test on live v1.8.192 saw first-token waits up to 140 s.
+an external marketplace stress test on live v1.8.192 saw first-token waits up to 140 s.
 
 This change lets sampled rows share the batched forward. Each row samples with
 the serial path's own sampler (`GenerateParameters(temperature:topP:).sampler()`)

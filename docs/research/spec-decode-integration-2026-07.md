@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Branch:** `research/spec-decode-serve`
-**Requested by:** `specs/RESEARCH_SPEC_DECODE_PROMPT.md` from `/Users/augstar/macprovider-poc-spec-decode-prompt`
+**Requested by:** `specs/RESEARCH_SPEC_DECODE_PROMPT.md` from `<repo>-spec-decode-prompt`
 
 ## Summary
 

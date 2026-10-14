@@ -6,7 +6,7 @@ No secrets, tokens, or raw completions are recorded here.
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** `<studio-provider-id>`
 - **Installed RC:** signed `v1.8.172` @ `c512d342b1df6c495afeabbe49eaca74a98107c4`
   ([run 35512582454](https://github.com/Augustas11/macprovider/actions/runs/35512582454)

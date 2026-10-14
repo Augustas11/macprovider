@@ -4,7 +4,7 @@ Date: 2026-06-26
 Branch: `impl/spec-017-step-1`
 HEAD swept: `5ceb230` (Step 4.C LOCKED).
 Sweep operator: Claude Code (Opus 4.7) in worktree
-`/Users/augstar/macprovider-spec017-step1/`.
+`~/macprovider-spec017-step1/`.
 
 ## Method
 

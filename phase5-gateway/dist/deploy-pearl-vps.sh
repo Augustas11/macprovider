@@ -28,7 +28,7 @@
 #
 # Environment:
 #   SSH_KEY          default: ~/.ssh/pearl_operator_ed25519
-#   VPS_HOST         default: 159.223.165.194
+#   VPS_HOST         required: Pearl VPS address
 #   VPS_USER         default: root
 #   DOMAIN           default: api.malibu.tech
 #   EMAIL            default: augstar@gmail.com
@@ -70,7 +70,7 @@ for arg in "$@"; do
 done
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-api.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"

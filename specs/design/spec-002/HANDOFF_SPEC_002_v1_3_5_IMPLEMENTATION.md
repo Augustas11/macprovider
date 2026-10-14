@@ -7,7 +7,7 @@ that picks up the Phase 2 coordinator implementation work after PR #5
 **Date:** 2026-06-07.
 
 **Operator:** Augustas (handle: `Augustas11`, commit identity:
-`a11 <augstar@gmail.com>`).
+`a11 <operator@example.com>`).
 
 **Methodology:** Draft-build-audit loop — Claude Opus drafts BUILD
 prompts + audits, Codex GPT-5 implements via `omc ask codex`. Human

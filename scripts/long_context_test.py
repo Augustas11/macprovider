@@ -20,7 +20,7 @@ from mlx_lm import load
 
 MODEL_ID = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 SERVER_URL = "http://127.0.0.1:8090/v1/chat/completions"
-RESULTS_DIR = "/Users/augstar/macprovider-poc/results/stress"
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "stress")
 TARGETS = [8000, 16000, 32000]  # tokens
 
 # Realistic filler — actual sentences, not repeated phrase, to mimic real

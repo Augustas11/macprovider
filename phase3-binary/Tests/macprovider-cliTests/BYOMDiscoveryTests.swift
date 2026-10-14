@@ -646,7 +646,7 @@ final class BYOMDiscoveryTests: XCTestCase {
         let body = """
         {"models":[
           {"name":"Tiny-Ollama-1B-Q4","details":{"family":"llama","quantization_level":"Q4_0"}},
-          {"name":"/Users/augstar/\(secret)<script>","details":{"family":"bad"}},
+          {"name":"~/\(secret)<script>","details":{"family":"bad"}},
           {"name":"http://127.0.0.1:11434/\(secret)?api_key=hidden","details":{"family":"bad"}},
           {"name":"127.0.0.1:11434","details":{"family":"bad"}},
           {"name":"127.0.0.1","details":{"family":"bad"}},
@@ -691,7 +691,7 @@ final class BYOMDiscoveryTests: XCTestCase {
         }
         XCTAssertFalse(encoded.contains(leakedEndpoint))
         XCTAssertFalse(encoded.contains(secret))
-        XCTAssertFalse(encoded.contains("/Users/augstar"))
+        XCTAssertFalse(encoded.contains("/Users/alice"))
         XCTAssertFalse(encoded.contains("api_key"))
         XCTAssertFalse(encoded.contains("ghp_"))
         XCTAssertFalse(encoded.contains("eyJhbGci"))

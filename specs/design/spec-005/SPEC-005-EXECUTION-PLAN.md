@@ -43,7 +43,7 @@ These are already decided by the existing spec corpus. The SCOPE session respect
 
 ## STEP 1 — SCOPE analysis [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -191,7 +191,7 @@ Open `specs/SPEC-005-operator-decisions.md`. Fill the "Operator Decision" column
 
 ## STEP 2 — Claude writes BUILD prompt [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -268,12 +268,12 @@ Do NOT draft SPEC-005 itself. Only produce the BUILD prompt file.
 
 ## STEP 3 — Codex: BUILD + R1 self-audit + FIX prompt draft [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 ## Phase A — Draft the spec
 
@@ -365,12 +365,12 @@ If edits needed: edit the file directly. Commit the edited version before Step 4
 
 ## STEP 4 — Codex: Execute FIX → v0.2 [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 Read specs/FIX_SPEC_005_V0_2_PROMPT.md in full. Execute the prompt
 exactly as written to produce specs/SPEC-005-billing.md v0.2.
@@ -394,7 +394,7 @@ When done, commit:
 
 ## STEP 5 — Claude R2 audit + cross-spec coherence [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -522,12 +522,12 @@ Edit directly if needed. Commit. Then proceed.
 
 ## STEP 6 — Codex: FIX → v0.3 + regression + lock [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 ## Phase A — Execute FIX
 

@@ -2,7 +2,7 @@
 
 Date pulled: 2026-06-30  
 Scope: strategy research memo, not a code audit  
-Repo: `/Users/augstar/macprovider-poc`  
+Repo: `<repo>`  
 Related prior memo: `.omc/artifacts/ask/codex-research-prompt-issue-222-beta-campaign-pricing-decision-run-2026-06-30T05-03-00-134Z.md`
 
 ## Executive recommendation

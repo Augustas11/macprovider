@@ -8,7 +8,7 @@ identity. No prompts, no conversation keys, no bearer headers.
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1, AC power
 - **Topology:** isolated local HTTP `127.0.0.1:18080`, `--no-join`,
   `credential_store: protected_file`, `continuous_batching: off`,

@@ -1,4 +1,4 @@
-# Production coordinator config — Pearl VPS deployment (159.223.165.194)
+# Production coordinator config — Pearl VPS deployment (coordinator.malibu.tech)
 # Binds loopback only; nginx terminates TLS at coordinator.malibu.tech
 # and reverse-proxies /v1/* to buyer_port and /ws/provider + /admin/* + /poolz
 # + /healthz to provider_port.

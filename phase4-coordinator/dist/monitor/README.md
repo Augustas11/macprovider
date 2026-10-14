@@ -29,8 +29,8 @@ Always logged to journald (`journalctl -u macprovider-monitor`). Email is sent
 additionally when `/etc/macprovider/monitor.env` has Gmail submission creds:
 
 ```
-ALERT_EMAIL=augstar@gmail.com
-GMAIL_USER=augstar@gmail.com
+ALERT_EMAIL=operator@example.com
+GMAIL_USER=operator@example.com
 GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
 ```
 

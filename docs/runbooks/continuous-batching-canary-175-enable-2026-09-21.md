@@ -6,7 +6,7 @@ Studio-only enable. Fleet stayed on 1.8.123. Slots stayed 4. Mode is
 ## Header
 
 - **Date:** 2026-09-21
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** `<studio-provider-id>`
 - **Installed RC:** signed `v1.8.175` @ `d02798dbe0482b4454cc25bf497959da59242faa`
   ([run 35569340744](https://github.com/Augustas11/macprovider/actions/runs/35569340744)

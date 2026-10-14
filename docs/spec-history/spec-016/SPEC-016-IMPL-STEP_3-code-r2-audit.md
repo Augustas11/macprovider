@@ -16,8 +16,8 @@
 ### Issues
 
 [MEDIUM] Stale PAGE event field set is still incomplete on the runner sync path, and `run_id` is missing on both PAGE emitters  
-File: `/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/orphans.go:491`  
-File: `/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/reaper.go:192`  
+File: `<repo>/phase4-coordinator/internal/payout/orphans.go:491`  
+File: `<repo>/phase4-coordinator/internal/payout/reaper.go:192`  
 Confidence: HIGH  
 Issue: `payout_cancel_self_transfer_reconfirm_stale` from the runner sync path emits `event_id`, payout fields, `reorg_reactivated_at_utc`, and `ts_utc`, but not `updated_at_utc`. The reaper path adds `updated_at_utc`, but both paths still omit spec-required `run_id` from `SPEC-016` §7.1. Current outbox schema also does not persist `run_id`, so the reaper cannot reconstruct it.  
 Fix: Thread `run_id` into `ProduceStaleOutboxRows`, persist it in `cancel_reconfirm_stale_outbox` via an idempotent migration, and emit `run_id` + `updated_at_utc` from both sync and reaper paths. Add log-field assertions for both emitters.
@@ -25,7 +25,7 @@ Fix: Thread `run_id` into `ProduceStaleOutboxRows`, persist it in `cancel_reconf
 ### Open Questions
 
 [MEDIUM] Per-cycle stale-outbox producer may be unbounded at scale  
-File: `/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/orphans.go:370`  
+File: `<repo>/phase4-coordinator/internal/payout/orphans.go:370`  
 Confidence: LOW  
 Issue: `ProduceStaleOutboxRows` scans every stale cancel candidate before the normal §4.3 ready-payout query, with no batch limit and no index tailored to the full predicate. This may be fine if cancel rows remain tiny, but the regression prompt explicitly asks whether the new pre-run DB scan can affect `payout_run_started` → `payout_run_finished` latency.  
 Fix: If expected cardinality is non-trivial, add a partial index on the stale-cancel predicate keyed by `updated_at_utc`, and/or cap rows per cycle.

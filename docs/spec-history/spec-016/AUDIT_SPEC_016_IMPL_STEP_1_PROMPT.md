@@ -42,11 +42,11 @@ blind spots; the audit-loop discipline depends on diverse-model lens.
 | `1df0235` | Step 1 — payout package skeleton, migrations 0001–0008, §3.3 registration handler, §3.2 EIP-712 verification, startup invariants, DSN durability bump |
 
 Full coordinator test suite is green
-(`go test ./... && go vet ./...` from `/Users/augstar/macprovider-poc/phase4-coordinator`).
+(`go test ./... && go vet ./...` from `<repo>/phase4-coordinator`).
 32 new payout tests pass; no existing test regressed.
 
 Run via `omc ask codex` from session root
-`/Users/augstar/macprovider-poc`. Expected wall-clock: ~40–60 minutes
+`<repo>`. Expected wall-clock: ~40–60 minutes
 (Step 1 lands ~1.5k net production LOC + 11 schema files + 7 test
 files; SPEC §§3–3.4 + §3.5 + §4.1 + §4.5 + §4.7 + §4.8 + §4.8a +
 §4.8b + §4.8c + §4.9 are all in scope).
@@ -62,7 +62,7 @@ not commit, do not push, do not create branches.
 You are performing an adversarial mid-stream review of commit
 `1df0235` on branch `impl/spec-016` in the Augustas11/macprovider
 repository. The branch is already checked out at
-`/Users/augstar/macprovider-poc`. Steps 2 / 3 / 4 of the IMPL have
+`<repo>`. Steps 2 / 3 / 4 of the IMPL have
 NOT landed yet — your scope is exclusively Step 1. The operator has
 chosen to land all four steps on a SINGLE branch + SINGLE PR (Steps
 2 / 3 / 4 will be additional commits on this same branch); your

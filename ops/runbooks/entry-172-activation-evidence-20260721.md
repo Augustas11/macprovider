@@ -109,9 +109,9 @@ Buyer / settlement evidence (Pearl):
 Operator-local evidence pointers (path names only; not committed):
 
 - Scratchpad:
-  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-fresh-referred-journey-20260721.md`
+  `~/macprovider-entry172-ops/scratchpad/air5-fresh-referred-journey-20260721.md`
 - Buyer-proof artifact dir:
-  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-buyer-proof-qwen-20260721T142102Z`
+  `~/macprovider-entry172-ops/scratchpad/air5-buyer-proof-qwen-20260721T142102Z`
 
 Register follow-up:
 

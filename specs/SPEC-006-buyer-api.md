@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.54 (2026-10-14, #1570 OpenRouter readiness: prompt-token bounds)
+**Version:** 0.9.55 (2026-10-15, public-repo cleanup)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.55 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
 
 **Change log v0.9.54 (2026-10-14, issue #1570 — OpenRouter readiness):**
 - Prompt-token estimates (§7.2.1). `ceil(bytes/4)` under-counted token-dense
@@ -35,6 +37,8 @@
   `decode_idle`, so a prefill-sized `streaming_idle_ms` was needed and
   decode-idle protection was lost. Operators size `first_token_seconds` for the
   longest prompt served and keep `streaming_idle_ms` at its bounded default.
+
+**Change log v0.9.54 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; drops the removed phase5-onboarding directory from a naming note.
 
 **Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
 - §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
@@ -681,7 +685,7 @@ SPEC-004 v0.2 defines the routing-side contract for smart routing and sticky aff
 
 SPEC-005 rewards, payouts, provider contribution economics, and any payment-adjacent flows remain out of scope.
 
-SPEC-007 marketplace or Antseed integration remains out of scope.
+SPEC-007 marketplace or third-party marketplace seller integration remains out of scope.
 
 SPEC-006 MAY record data that later specs use, such as provider contribution counters and user feedback ratings.
 
@@ -751,7 +755,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 
 ### 2.1 Architecture
 
-- **Separate Go gateway service** at `phase5-gateway/` (consistent with the existing `phase3-binary/`, `phase4-coordinator/`, `phase5-onboarding/` naming). Binds its own port; separate systemd unit; its own deployment artifact.
+- **Separate Go gateway service** at `phase5-gateway/` (consistent with the existing `phase3-binary/` and `phase4-coordinator/` naming). Binds its own port; separate systemd unit; its own deployment artifact.
 - **Coordinator stays router-only.** SPEC-002 v1.1.3's "coordinator is a router" charter is preserved. Coordinator's buyer port (currently bound `0.0.0.0:8443`) MUST be rebound to `127.0.0.1:8443` as part of this migration. All public `/v1/*` traffic goes through gateway.
 - **Designed for 10K-Mac scale.** Specifically:
   - Stateless request handlers. No in-process rate-limit counters, no in-process session caches, no in-process quota state.
