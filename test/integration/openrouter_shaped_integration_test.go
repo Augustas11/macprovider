@@ -27,7 +27,11 @@ func openRouterShapedErrorCode(t *testing.T, body []byte) string {
 // strict:false, with optional fields, anyOf and $defs) are accepted; a
 // strict:true request with the same schema still fails closed with a 400.
 func TestOpenRouterShapedJSONSchemaModes(t *testing.T) {
-	s := newScenario(t, scenarioOpts{seedAccount: true})
+	// Non-strict requests route only to provider CLI 1.8.242+ (SPEC-019 §1a
+	// rollout).
+	s := newScenario(t, scenarioOpts{seedAccount: true, providerSetup: func(fp *fakeProvider) {
+		fp.binaryVersion = "1.8.242"
+	}})
 	schema := `{"type":"object","properties":{"name":{"type":"string"},"nick":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["name"],"$defs":{"x":{"type":"string"}}}`
 	request := func(strictField string) string {
 		return `{"model":"llama-3.2-3b-instruct","max_tokens":32,"messages":[{"role":"user","content":"name a person"}],` +

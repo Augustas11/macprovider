@@ -7872,6 +7872,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.engineClass = engineClass
 		state.requestedModel = req.Model
 		state.multiTurnToolHistory = req.multiTurnToolHistory
+		state.nonStrictJSONSchema = req.nonStrictSchemaLegacyRejection != nil
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7907,7 +7908,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
 				}
-				if req.nonStrictSchemaLegacyRejection != nil && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
 				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
@@ -7944,7 +7945,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned provider does not serve the selected engine")
 				}
-				if req.nonStrictSchemaLegacyRejection != nil && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
 				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
@@ -9333,6 +9334,11 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
 		if state != nil && state.engineClass != "" && providerEngineClass(provider) != state.engineClass {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		// SPEC-019 §1a: a same-ID reconnect on a CLI without non-strict
+		// json_schema support is terminal.
+		if state != nil && state.nonStrictJSONSchema && !providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if s.poolSettlementModeUnsatisfied(state) {

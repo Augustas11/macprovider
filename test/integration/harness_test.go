@@ -1710,7 +1710,7 @@ type fakeProvider struct {
 	admissionPriv      ed25519.PrivateKey
 	trustedPoolV1      bool
 	omitCatalogRelease bool
-	binaryVersion      string // "" = "1.6.0-fake"
+	binaryVersion      string // "" = "1.6.0-fake" (receipt hello) or "1.0.0-fake" (legacy hello)
 	// reconnectRequests makes runWS close its session and hello again on
 	// the same receipt key, as a restarted provider CLI does.
 	reconnectRequests chan struct{}
@@ -2648,6 +2648,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			return
 		}
 	} else {
+		binaryVersion := "1.0.0-fake"
+		if p.binaryVersion != "" {
+			binaryVersion = p.binaryVersion
+		}
 		hello := map[string]any{
 			"type":                    "hello",
 			"version":                 1,
@@ -2660,7 +2664,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"max_context_tokens":      p.maxContextTokensOrDefault(),
 			"max_concurrency":         2,
 			"throughput_tps_estimate": 20.0,
-			"binary_version":          "1.0.0-fake",
+			"binary_version":          binaryVersion,
 			"attestation":             nil,
 			"endpoint_url":            endpointURL,
 		}

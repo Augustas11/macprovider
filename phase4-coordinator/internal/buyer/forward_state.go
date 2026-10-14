@@ -69,6 +69,10 @@ type forwardState struct {
 	// tool-history gate against the fresh provider session.
 	requestedModel       string
 	multiTurnToolHistory bool
+	// nonStrictJSONSchema records a SPEC-019 §1a non-strict json_schema
+	// request so a queued same-ID reconnect is re-checked against the CLI
+	// capability gate.
+	nonStrictJSONSchema bool
 	// poolRequiresSettlementEnforce is captured from the selected pool
 	// snapshot. It is re-checked at the dispatch boundary so a coordinator
 	// settlement-mode hot reload cannot downgrade an enforce-required pool

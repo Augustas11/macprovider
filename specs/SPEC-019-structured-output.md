@@ -186,9 +186,9 @@ request-validation class. The coordinator therefore routes a non-strict request
 only to providers whose `binary_version` is 1.8.242 or later, the first
 provider CLI that implements this section. A provider whose version does not
 parse as a dotted numeric version is treated as not supporting it. The gate
-applies to every selection attempt, failover and pinned routes included. When
-no supporting provider serves the requested model, the coordinator returns the
-pre-v0.3.0 coordinator response before dispatch: HTTP 400
+applies to every selection attempt, failover, pinned routes and slot-queue
+waiters included. When no supporting provider serves the requested model, the
+coordinator returns the pre-v0.3.0 coordinator response before dispatch: HTTP 400
 `json_schema_non_strict_unsupported` for explicit `strict:false`, and the §3
 code and message for an absent `strict` with a non-subset schema. Strict-mode
 requests are not gated. The coordinator and the provider CLI can therefore
