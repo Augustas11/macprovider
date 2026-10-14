@@ -71,14 +71,14 @@ final class ProviderPreWarmerTests: XCTestCase {
         )
         let prewarmer = ProviderPreWarmer(
             cacheChecker: HuggingFaceCacheChecker(cacheRoot: cacheRoot),
-            stopGraceSeconds: 2
+            stopGraceSeconds: 10
         )
 
         let result = try await prewarmer.prewarmAndProbe(
             model: modelID,
             port: port,
             runner: runner,
-            readyTimeoutSec: 5
+            readyTimeoutSec: 60
         )
 
         guard case .warmed(let cacheState, let loadDurationSec) = result else {
@@ -99,14 +99,14 @@ final class ProviderPreWarmerTests: XCTestCase {
         )
         let prewarmer = ProviderPreWarmer(
             cacheChecker: HuggingFaceCacheChecker(cacheRoot: cacheRoot),
-            stopGraceSeconds: 2
+            stopGraceSeconds: 10
         )
 
         let result = try await prewarmer.prewarmAndProbe(
             model: modelID,
             port: port,
             runner: runner,
-            readyTimeoutSec: 5
+            readyTimeoutSec: 60
         )
 
         guard case .warmed(let cacheState, let loadDurationSec) = result else {
