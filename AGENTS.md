@@ -97,7 +97,9 @@ governed by `specs/AUTHORITY.json`, `specs/CONFORMANCE.json`, and the matching
 - `specs/` - normative specs and generated governance indexes.
 - `docs/` and `ops/` - documentation, runbooks, operations notes, and
   deployment helpers.
-- `audits/` - durable audit evidence and historical review artifacts.
+- `docs/evidence/` - evidence files that `specs/CONFORMANCE.json` or tests
+  read. Audit prompts and findings live in the private `macprovider-internal`
+  repo.
 
 ## Setup And Build
 
@@ -193,7 +195,6 @@ Docs-only means markdown and agent-instruction files:
 
 - `docs/` (runbooks, research, release-train narrative)
 - `AGENTS.md`, `CLAUDE.md`
-- `audits/` markdown (prompts, evidence writeups)
 - `beta/` narrative markdown that does not flip a runtime default
 
 The tree must be clean, local `main` must match `origin/main`, then commit
@@ -273,6 +274,11 @@ INFO findings may be carried explicitly.
 Review the full combined fix, not only a follow-up slice. When needed, find the
 base commit before the first fix commit and diff that base to the working tree,
 scoped to the fix files.
+
+Audit prompts, findings, dispositions, and evidence write-ups live in the
+private `macprovider-internal` repo under `audits/<date>-<topic>/`. Do not
+commit them to this public repo. Evidence that code or `specs/CONFORMANCE.json`
+reads goes in `docs/evidence/`.
 
 ## Release Verification
 

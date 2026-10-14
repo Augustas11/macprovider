@@ -1,6 +1,6 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.3.7
+**Status:** v0.3.8
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
 **Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
@@ -653,7 +653,7 @@ floor. Requirements below assume that stronger predicate:
 > shared-fingerprint re-dispatch, FR-CAN12 window resolve, strict-majority discard +
 > FR-CAN29a log, commit via `RecordCanaryResult`, and `LastBuyerSuccessAt` observed-serving
 > residual. Sole-provider outcomes remain immediate. See
-> `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md` and
+> `docs/design/fr-can23-correlation-epoch.md` and
 > `internal/ws/canary_correlation.go`. **Still Gap:** full FR-CAN26 hot-reload generation
 > (interim bank generation only); complete `relay_error` hard/status/soft wire split;
 > runtime coordinator-attribution of truncation (provider-forgeable). Pearl canary
@@ -907,7 +907,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
 | FR-CAN22 sole-provider floor | **Implemented** (v0.2) | `RecordCanaryResult` spares the **sole buyer-serving provider** on **any** canary-only signal: it returns `CanaryTripFloorHeld` (no state change, keeps accruing the counter) instead of degrading/banning, and the caller emits `canary_floor_held` / `pool_redundancy_low` redundancy telemetry (`hasOtherBuyerServingForModelLocked`). The **injected predicate** (`canaryBuyerServing`) applies the coordinator's **request-independent** routability gates: `RoutingEligible` (state ready AND `SlotsFree>0` AND auth/catalog/receipt gates) AND transport-reachable (a WS-tunneled peer needs a live stored session; else a non-empty `EndpointURL`) AND `MaxContextTokens>0` (sanity, excludes the degenerate zero) AND not Tier-2-excluded (hash/encryption/attestation), keyed on the **active** model (case-folded `ModelID`, not declared-but-cold `SupportedModels`). Excluded: declared-only, degraded, Tier-2-excluded, **busy** (`SlotsFree==0`), **negative** free slots, and transport-unreachable (`HTTPForwardingOnly` with no endpoint) peers. Excluding a genuinely-busy real peer is **over-protective** — the safe direction; it re-counts when a slot frees. **Request-DEPENDENT eligibility is deliberately NOT evaluated** and cannot be, because the floor runs without a request in hand: per-request **context sufficiency** (`MaxContextTokens ≥ the request's token estimate`, so a peer advertising a tiny positive window like 1 passes yet is filtered per request) and **provisional quota** (checking `admission.CheckQuota` under `pool.mu` would couple the registry lock to the admission-DB mutex — an availability convoy). A same-model peer that passes the request-independent gates but is filtered per-request (tiny context, exhausted quota) can therefore still lift the floor, and — because buyer routing **skips** such a peer *without* recording an FR-P11a breaker fault — the breaker is not a universal backstop for that case. **This is not a regression:** the floor only ever *spares* a provider the pre-floor canary would have removed; it never removes one the old code kept, so the adversarial-peer empty-pool outcome is *identical to the pre-floor baseline*. Adversarial-safe multi-provider peer-genuineness (full request-aware / coordinator-observed-serving eligibility) is **deferred to FR-CAN23**, with no current-prod impact (single provider, canary disabled). Applies to both tiers (precedes the tier branch). Removing a sole provider still requires evidence independent of the canary — the FR-P11a buyer-path breaker (on real failing requests), a confirmed transport death, or item-9 weight evidence. |
-| FR-CAN23 correlated-fault epoch (multi-provider) | **Partial** (wired 2026-07-23) | Pure package `internal/canarycorr` + live wiring in `ws` canary path: multi-provider correctness failures (`nonce_mismatch`/`incomplete`) with ≥2 buyer-serving peers open a staged epoch, re-dispatch the same challenge fingerprint to snapshot members, resolve on full stage or FR-CAN12 window (`expireCanaryCorrelationWindows`), suspicion → discard + FR-CAN29a log (no durable containment), commit → `RecordCanaryResult` (FloorHeld still accrues counters). `Provider.LastBuyerSuccessAt` + buyer 2xx stamp feed observed-serving residual. Sole-provider and non-correctness outcomes stay on the immediate path. **Still Gap:** full FR-CAN26 hot-reload generation (interim `canaryBankGeneration` only); wire-path `relay_error` hard/status/soft split incomplete; Pearl canary remains **disabled** under #584 — wiring is inert until re-enable. Design: `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`. |
+| FR-CAN23 correlated-fault epoch (multi-provider) | **Partial** (wired 2026-07-23) | Pure package `internal/canarycorr` + live wiring in `ws` canary path: multi-provider correctness failures (`nonce_mismatch`/`incomplete`) with ≥2 buyer-serving peers open a staged epoch, re-dispatch the same challenge fingerprint to snapshot members, resolve on full stage or FR-CAN12 window (`expireCanaryCorrelationWindows`), suspicion → discard + FR-CAN29a log (no durable containment), commit → `RecordCanaryResult` (FloorHeld still accrues counters). `Provider.LastBuyerSuccessAt` + buyer 2xx stamp feed observed-serving residual. Sole-provider and non-correctness outcomes stay on the immediate path. **Still Gap:** full FR-CAN26 hot-reload generation (interim `canaryBankGeneration` only); wire-path `relay_error` hard/status/soft split incomplete; Pearl canary remains **disabled** under #584 — wiring is inert until re-enable. Design: `docs/design/fr-can23-correlation-epoch.md`. |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -1140,6 +1140,9 @@ before the breaker and canary coexist under load.
 
 ## 18. Changelog
 
+- **v0.3.8 (2026-10-14):** Editorial: the FR-CAN23 correlation-epoch design
+  memo moved to `docs/design/fr-can23-correlation-epoch.md`. No normative
+  change.
 - **v0.3.7 (2026-10-10):** FR-CAN33 notes SPEC-048 v0.1.32: the native-MTP
   canary's expected-value comparison stays a failure; a release that changes
   MLX numerics re-baselines the signed challenge bank on the new runtime.
@@ -1218,7 +1221,7 @@ before the breaker and canary coexist under load.
     fencing. Package-first Partial; wiring followed in v0.2.2.
   - **Ops papers:** `ops/runbooks/584-emergency-disable-drill.md`,
     `ops/runbooks/584-physical-baseline-matrix.md`.
-  - Design memo: `audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`.
+  - Design memo: `docs/design/fr-can23-correlation-epoch.md`.
 - **v0.1-draft (2026-07-11):** Initial reconstructed baseline (runbook item 8,
   Wave C), then **R1 codex three-lane audit absorbed** (code / security /
   architect; each returned 1 CRITICAL + HIGH/MEDIUM). Key absorptions:

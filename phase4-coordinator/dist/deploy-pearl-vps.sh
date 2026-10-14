@@ -313,7 +313,7 @@ _coordinator_verify_deployed_version() {
     echo "           This almost certainly means the deployed binary predates the" >&2
     echo "           M0-5 instrumentation (PR #18) and the rollback gate is bypassed." >&2
     echo "           Expected was: $expected_version" >&2
-    echo "           See audits/2026-06-10/ROLLBACK_PROCEDURE.md to replace the live binary." >&2
+    echo "           See docs/runbooks/coordinator-rollback.md to replace the live binary." >&2
     return 7
   elif [ "$deployed_version" = "$expected_version" ]; then
     echo "  provenance OK: deployed=$deployed_version | expected=$expected_version"
@@ -4580,7 +4580,7 @@ printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
 # exact release tag validated before any production SSH mutation. Missing and
 # mismatched versions are fatal while rollback is still armed; otherwise a clean
 # tag checkout could still commit a stale ignored dist/coordinator-linux-amd64.
-# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
+# See docs/runbooks/coordinator-rollback.md for the rollback path.
 EXPECTED_VERSION="$COORDINATOR_RELEASE_VERSION"
 _coordinator_verify_deployed_version "$HEALTHZ_BODY" "$EXPECTED_VERSION" || exit $?
 

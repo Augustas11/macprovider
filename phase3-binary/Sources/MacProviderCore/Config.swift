@@ -286,7 +286,7 @@ public struct AppConfig: Equatable, Sendable {
     public var idlePrewarmPrompt: String
     public var idlePrewarmRunOnBattery: Bool
     // SPEC-001: provider authentication token (closes XSEC-1 from
-    // audits/2026-06-10/REPO_AUDIT.md). When set, the binary sends
+    // the 2026-06-10 repo audit). When set, the binary sends
     // "Authorization: Bearer <token>" on the WS connect and the
     // coordinator validates against its store when
     // auth.require_provider_tokens=true. Triple-exposed per house

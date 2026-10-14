@@ -3,7 +3,7 @@ package buyer
 // Seam-hardening e2e harness — coordinator-side scenarios H3 and H4.
 // Companion to the gateway suite in
 // phase5-gateway/internal/router/seam_harness_test.go and the risk register in
-// audits/seam-hardening/. These live in phase4-coordinator because provider-health
+// the seam-hardening risk register. These live in phase4-coordinator because provider-health
 // attribution and terminal ordering are the coordinator's job.
 //
 // Run: go test ./internal/buyer/ -run TestSeamH -count=1 -v

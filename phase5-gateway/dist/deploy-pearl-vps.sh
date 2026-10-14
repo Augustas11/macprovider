@@ -5,7 +5,7 @@
 # config gate as step 0, .prev binary snapshot for one-command rollback,
 # version-stamped provenance check on /healthz. The previous gateway deploy
 # was an .md runbook with no scripted automation — DEVE-4 in the
-# audits/2026-06-10/REPO_AUDIT.md.
+# 2026-06-10 repo audit.
 #
 # Run this from the operator's Mac. It SSHes into Pearl VPS, installs the
 # gateway behind the existing nginx + Let's Encrypt for api.malibu.tech,

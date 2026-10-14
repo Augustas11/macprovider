@@ -74,7 +74,7 @@ LIVE_WRITER_RE = re.compile(
     r'|kill -s HUP|kill -HUP|"HUP"'
 )
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|test-support|fixtures)/|(^|/)test[-_]|_test\.|\.test\.sh$")
-SKIP_PREFIXES = (".omc/", "audits/", "journeys/", "docs/", ".git/")
+SKIP_PREFIXES = (".omc/", "journeys/", "docs/", ".git/")
 SKIP_SUFFIXES = (".md", ".html", ".json", ".go", ".example", ".service", ".conf",
                  ".yaml", ".txt", ".png", ".patch")
 

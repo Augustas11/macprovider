@@ -11,8 +11,8 @@ import (
 // ARCH-5: this helper deliberately mirrors the gateway SQLite DSN shape while
 // remaining coordinator-owned. The duplication is intentional — coordinator
 // and gateway are deployed as independent Go modules, and introducing a shared
-// library would re-couple them on every DSN tweak. See audits/2026-06-10/
-// REPO_AUDIT.md (ARCH-5) for the conscious-debt reasoning.
+// library would re-couple them on every DSN tweak. The 2026-06-10
+// repo audit (ARCH-5) records the conscious-debt reasoning.
 //
 // SPEC-016 §3.1 requires synchronous=FULL on every connection
 // touching provider_payout_addresses or payout_attempts. Because

@@ -284,7 +284,7 @@ the following physical and operational evidence is reviewed and signed:
 
 FR-CAN23 multi-provider correlation is a software Partial in
 `phase4-coordinator/internal/canarycorr` (design:
-`audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md`). It is **not** wired
+`docs/design/fr-can23-correlation-epoch.md`). It is **not** wired
 into live canary dispatch and does not authorize re-enable.
 
 The coordinator's internal sanction loop is independently governed by

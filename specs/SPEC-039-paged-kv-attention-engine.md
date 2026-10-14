@@ -1,7 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.15
-Status: draft (normative design). v0.1.15 (follows SPEC-038 v0.3.15) turns
+Version: v0.1.16
+Status: draft (normative design). v0.1.16 is editorial: the FR-PKV12
+gpt-oss-120b evidence record moved to `docs/evidence/`. v0.1.15 (follows SPEC-038 v0.3.15) turns
 paged KV on by default for a coordinator-joined provider unless
 `paged_kv.enabled` is set explicitly or the CB emergency off is set, and
 moves the FR-PKV13 overhead ceiling from per-tuple signed acceptance to each
@@ -57,7 +58,7 @@ Owner: provider runtime / inference engine
 Change log v0.1.14 (2026-10-01): FR-PKV12 admits the exact
 `openai/gpt-oss-120b` identity with `GptOssForCausalLM` in the artifact's
 `config.json` architectures. Evidence is recorded in
-`audits/2026-10-01-1780-gpt-oss-120b-evidence.md`: Mac Studio (`Mac15,14`),
+`docs/evidence/2026-10-01-1780-gpt-oss-120b-evidence.md`: Mac Studio (`Mac15,14`),
 isolated lab binary, 1024-token prefill, 48-token parity,
 `standalone=[true,true]`, `batched=[true,true]`, isolation pass, replay pass,
 drain pass. stdout SHA-256:

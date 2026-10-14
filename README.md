@@ -183,7 +183,6 @@ current map of normative and draft surfaces.
 | `ops/` | Production operations scripts, exception register, and runbooks |
 | `scripts/` | Release, governance, pricing, test, and CI helper scripts |
 | `test/` and `testdata/` | Integration harnesses, e2e checks, fixtures |
-| `audits/` | Durable audit evidence and historical review artifacts |
 
 Local-only scratch work, editor state, orchestration logs, secrets, build
 outputs, and generated runtime artifacts are intentionally excluded from the

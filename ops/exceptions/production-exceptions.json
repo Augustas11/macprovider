@@ -165,7 +165,7 @@
         "phase4-coordinator/internal/canarycorr/epoch.go",
         "ops/runbooks/584-emergency-disable-drill.md",
         "ops/runbooks/584-physical-baseline-matrix.md",
-        "audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md",
+        "docs/design/fr-can23-correlation-epoch.md",
         "phase4-coordinator/internal/ws/canary_correlation.go"
       ],
       "partial_progress": [

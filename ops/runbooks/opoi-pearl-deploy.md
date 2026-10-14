@@ -201,7 +201,7 @@ Do not restore `/opt/macprovider/coordinator` by copying local or `.prev`
 bytes. Use the signed Pearl runtime updater/rollback path for binary rollback,
 then rerun the guarded deploy validation if an overlay remains enabled.
 
-See `OPS.md` §2 and `audits/2026-06-10/ROLLBACK_PROCEDURE.md`.
+See `OPS.md` §2 and `docs/runbooks/coordinator-rollback.md`.
 
 ---
 

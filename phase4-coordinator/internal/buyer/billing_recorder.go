@@ -48,7 +48,7 @@ var quarantineUndeliveredErrForTest error
 
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
-// (audits/2026-06-10/REPO_AUDIT.md ARCH-6) hoisted the closure into
+// (2026-06-10 repo audit, ARCH-6) hoisted the closure into
 // this struct so the per-request orchestration of request_log +
 // billing-ledger writes is no longer hidden inside a handler closure.
 //
