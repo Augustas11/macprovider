@@ -1,6 +1,6 @@
 # Runbook: run the #1816 fake-Pearl VM acceptance (Lima, this Mac)
 
-**Audience:** any agent session on Augustas's Mac that has to continue #1816 VM work. Read `docs/handoffs/1816-pool-scoped-models.md` first: it says where the work stands and which failures to chase. This file explains how to drive the VM.
+**Audience:** any agent session on the operator's Mac that has to continue #1816 VM work. Read the #1816 handoff in the private engineering archive first: it says where the work stands and which failures to chase. This file explains how to drive the VM.
 
 **Rule for this campaign:** no further audit rounds. The VM run is the only gate that raises bugs. Merge requires two consecutive full passes with no FAIL, or each remaining failure filed with a repro in `docs/testing/1816-vm-acceptance-plan.md` (Findings).
 

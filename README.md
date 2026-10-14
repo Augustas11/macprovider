@@ -219,8 +219,11 @@ Buyer-side frameworks must validate tool calls before execution. MacProvider
 transports model output in an OpenAI-compatible shape; it does not decide
 whether a tool name or argument payload is safe for an agent policy.
 
-## Legacy Material
+## Engineering Records
 
-The original Phase 1 PoC runbooks and reports are archived under
-[docs/legacy/phase1/](docs/legacy/phase1/). They are retained for audit history,
-not as current operating instructions.
+Historical engineering records (Phase 1 PoC reports, audit rounds, beta-program
+notes, session handoffs, and raw lab evidence) live in a private archive that
+mirrors this repository's layout. Specs and docs that cite paths such as
+`audits/...`, `beta/...`, `docs/legacy/phase1/...`, or `docs/handoffs/...`
+refer to that archive. Evidence that code or `specs/CONFORMANCE.json` reads is
+kept in this repository.

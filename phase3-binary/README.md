@@ -70,6 +70,6 @@ Quick reference for Mac owners running `macprovider-cli`:
 - **Pinning:** promotional tier is operator-discretionary; no automatic promotion path exists today.
 
 See
-[`docs/legacy/phase1/provider-economics.md`](../docs/legacy/phase1/provider-economics.md)
-for the full reference with source citations, the complete credit formula,
-worked example, earnings endpoint response shape, and lifecycle detail.
+[`specs/SPEC-005-billing.md`](../specs/SPEC-005-billing.md) for the normative
+credit formula, earnings endpoint response shape, settlement, and payout
+lifecycle.

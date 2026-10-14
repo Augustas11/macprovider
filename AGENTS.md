@@ -41,7 +41,8 @@ while sessions regenerated evidence instead of deploying. Each is binding.
    evidence.
 6. **Two sessions without a live change means stop.** Write a one-paragraph
    blocker diagnosis to the operator instead of starting a third session.
-7. **Handoffs are committed and point at paths that exist.** One session at a
+7. **Handoffs are committed to the private `macprovider-internal` repo and
+   point at paths that exist.** One session at a
    time mutates Pearl or a Studio provider. Handback is written, naming what
    changed live.
 8. **Releases and live changes go through `scripts/ops/` only.** CLI release,
