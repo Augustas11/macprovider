@@ -1698,6 +1698,11 @@ type fakeProvider struct {
 	// its first chunk, so the coordinator measures it as time to first token
 	// (SPEC-002-R005 phase-aware routing journey).
 	streamFirstByteDelay time.Duration
+	// streamDecodeDelay holds a streamed response between its first content
+	// chunk and the rest. The coordinator records decode time in whole
+	// milliseconds and skips a 0ms sample, so without it a burst-written
+	// stream yields a decode sample only when the runner happens to stall.
+	streamDecodeDelay time.Duration
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -2365,6 +2370,12 @@ func (p *fakeProvider) start(ctx context.Context) {
 				time.Sleep(p.streamFirstByteDelay)
 			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
+			if p.streamDecodeDelay > 0 {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				time.Sleep(p.streamDecodeDelay)
+			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12,\"total_tokens\":20},\"choices\":[]}\n\n"))

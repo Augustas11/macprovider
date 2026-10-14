@@ -27,6 +27,11 @@ func TestPhaseAwareRoutingPrefersMeasuredFastProvider(t *testing.T) {
 			cfg["routing"].(map[string]any)["tiebreak_randomize"] = true
 		},
 		providerSetup: func(fp *fakeProvider) {
+			// Interactive scoring weighs decode rate as much as TTFT. An
+			// equal, always-measurable decode phase keeps that half equal for
+			// both providers; otherwise a runner stall gave one provider the
+			// only decode sample and outranked the TTFT difference.
+			fp.streamDecodeDelay = 50 * time.Millisecond
 			fp.streamFirstByteDelay = 20 * time.Millisecond
 			if strings.HasSuffix(fp.providerID, "-1") {
 				fp.streamFirstByteDelay = 400 * time.Millisecond
