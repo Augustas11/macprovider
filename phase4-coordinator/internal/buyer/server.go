@@ -6813,13 +6813,19 @@ func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string
 	if !validJSONSchemaName(name) {
 		return http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
 	}
-	if rawStrict, ok := spec["strict"]; ok {
+	// SPEC-019 v0.3.0 §1a: strict is tri-state. Explicit true enforces the
+	// strict subset; explicit false is non-strict; absent is strict when the
+	// schema fits the subset and non-strict otherwise.
+	strictMode := 0 // 0 absent, 1 true, -1 false
+	// An explicit null is absent, matching the provider parser.
+	if rawStrict, ok := spec["strict"]; ok && !bytes.Equal(bytes.TrimSpace(rawStrict), []byte("null")) {
 		var strict bool
 		if err := json.Unmarshal(rawStrict, &strict); err != nil {
 			return http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
 		}
-		if !strict {
-			return http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
+		strictMode = -1
+		if strict {
+			strictMode = 1
 		}
 	}
 	rawSchema, ok := spec["schema"]
@@ -6829,10 +6835,62 @@ func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string
 	if len(rawSchema) > maxJSONSchemaBytes {
 		return http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
 	}
-	if err := validateJSONSchemaRaw(rawSchema, "", 1); err != nil {
+	if strictMode >= 0 {
+		err := validateJSONSchemaRaw(rawSchema, "", 1)
+		if err == nil {
+			return 0, "", ""
+		}
+		if strictMode == 1 {
+			return err.status, err.code, err.message
+		}
+	}
+	if err := validateNonStrictJSONSchemaRaw(rawSchema); err != nil {
 		return err.status, err.code, err.message
 	}
 	return 0, "", ""
+}
+
+// validateNonStrictJSONSchemaRaw is the SPEC-019 v0.3.0 §1a non-strict shape
+// check: the schema is an object no deeper than 2*maxJSONSchemaDepth nested
+// object/array values (each strict schema level is a schema object plus a
+// properties object). Keywords are not restricted because non-strict output
+// is never validated against the schema.
+func validateNonStrictJSONSchemaRaw(raw json.RawMessage) *schemaValidationError {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	depth, maxDepth := 0, 0
+	first := true
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+		}
+		delim, isDelim := tok.(json.Delim)
+		if first {
+			first = false
+			if !isDelim || delim != '{' {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+			}
+		}
+		if !isDelim {
+			continue
+		}
+		switch delim {
+		case '{', '[':
+			depth++
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+			if maxDepth > 2*maxJSONSchemaDepth {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_too_deep", "response_format.json_schema.schema exceeds maximum depth"}
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return nil
 }
 
 type schemaValidationError struct {

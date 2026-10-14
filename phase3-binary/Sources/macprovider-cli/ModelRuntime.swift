@@ -11569,8 +11569,11 @@ actor ModelRuntime: ModelRuntimeServing {
         switch responseFormat {
         case .text:
             return false
-        case .jsonObject, .jsonSchema:
+        case .jsonObject:
             return true
+        case .jsonSchema(let spec):
+            // SPEC-019 v0.3.0 §1a: non-strict output is not validated.
+            return spec.strict
         }
     }
 
@@ -11633,6 +11636,9 @@ actor ModelRuntime: ModelRuntimeServing {
             _ = try parseStructuredJSONContent(completion.content, requireObjectOrArray: true)
             return completion
         case .jsonSchema(let spec):
+            guard spec.strict else {
+                return completion
+            }
             let parsed = try parseStructuredJSONContent(completion.content, requireObjectOrArray: false)
             do {
                 try JSONSchemaValidator.validateInstance(parsed, against: spec.schema)

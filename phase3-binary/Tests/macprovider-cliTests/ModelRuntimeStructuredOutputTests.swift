@@ -99,6 +99,29 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         XCTAssertEqual(visible.value, #"{"name":"Ada","age":"old"}"#)
     }
 
+    // SPEC-019 v0.3.0 §1a: non-strict output is returned unchanged, in both
+    // the non-streaming and streaming paths, even when it does not match the
+    // schema or is not JSON at all.
+    func testNonStrictJsonSchemaDoesNotValidateOutput() async throws {
+        for content in [#"{"name":"Ada","age":"old"}"#, "not json", ""] {
+            let runtime = Self.runtimeReturning(CompletionResult(content: content, finishReason: "stop", promptTokens: 1, completionTokens: 2, settlementDisposition: .eligibleOwner))
+            let result = try await runtime.complete(Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat()))
+            XCTAssertEqual(result.content, content)
+
+            let request = try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat(), stream: true)
+            let handle = try await runtime.acquireRequestHandle(request)
+            let visible = LockedString()
+            _ = try await runtime.stream(request, with: handle) { chunk in
+                if case .content(let text) = chunk {
+                    visible.append(text)
+                }
+            }
+            XCTAssertEqual(visible.value, content)
+        }
+        XCTAssertFalse(ModelRuntime.requiresStructuredValidation(try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat()).responseFormat))
+        XCTAssertTrue(ModelRuntime.requiresStructuredValidation(try Self.request(responseFormat: Self.jsonSchemaResponseFormat()).responseFormat))
+    }
+
     func testStreamingJsonSchemaPreservesKVCacheReuseTelemetry() async throws {
         let runtime = Self.runtimeReturning(CompletionResult(
             content: #"{"name":"Ada","age":37}"#,
@@ -187,6 +210,24 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
             "stream": stream,
         ]
         return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+    }
+
+    private static func nonStrictJsonSchemaResponseFormat() -> [String: Any] {
+        [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "person-v1",
+                "strict": false,
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "name": ["type": "string"],
+                        "nick": ["anyOf": [["type": "string"], ["type": "null"]]],
+                    ],
+                    "required": ["name"],
+                ],
+            ],
+        ]
     }
 
     private static func jsonSchemaResponseFormat() -> [String: Any] {
