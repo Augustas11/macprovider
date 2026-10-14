@@ -603,16 +603,6 @@ func encodeTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-func countReady(providers []pool.Provider) int {
-	n := 0
-	for _, p := range providers {
-		if p.State == pool.StateReady {
-			n++
-		}
-	}
-	return n
-}
-
 func findProvider(providers []pool.Provider, providerID string) (pool.Provider, bool) {
 	for _, p := range providers {
 		if p.ProviderID == providerID {

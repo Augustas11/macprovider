@@ -548,32 +548,6 @@ SELECT provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, sha
 	return nil
 }
 
-func (s *Store) ValidateSocialChallenge(ctx context.Context, policy ReferralPolicy, providerID, challenge string, now time.Time) error {
-	if err := policy.Validate(); err != nil {
-		return err
-	}
-	if !policy.EnableSocialBonus {
-		return ErrSocialDisabled
-	}
-	digest := sha256.Sum256([]byte(strings.TrimSpace(challenge)))
-	var expiresAt string
-	var consumedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-SELECT c.expires_at, c.consumed_at
-  FROM referral_social_challenges c
-  JOIN referral_serving_qualifications q ON q.issuer_id = c.issuer_id AND q.provider_id = c.provider_id AND q.campaign = c.campaign
-  JOIN referral_issuers i ON i.issuer_id = q.issuer_id AND i.revoked_at IS NULL
- WHERE c.challenge_hash = ? AND c.provider_id = ? AND c.campaign = ?`, fmt.Sprintf("%x", digest[:]), providerID, policy.Campaign).Scan(&expiresAt, &consumedAt)
-	if err != nil {
-		return ErrSocialChallenge
-	}
-	expires, err := time.Parse(time.RFC3339, expiresAt)
-	if err != nil || consumedAt.Valid || !expires.After(now.UTC()) {
-		return ErrSocialChallenge
-	}
-	return nil
-}
-
 // PreflightSocialVerification authorizes a challenge before any external X
 // request. An exact response-loss retry is recovered from durable state and
 // audited without spending external verifier quota.
