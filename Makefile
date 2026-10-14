@@ -5,14 +5,14 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
+.PHONY: test test-coordinator test-coordinator-billing-race test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt fmt-check verify-autotune-catalog
 
-test: test-coordinator test-gateway test-integration test-dist
+test: test-coordinator test-coordinator-billing-race test-gateway test-integration test-dist
 
 # BYOM CLI onboarding process E2E. This is MANUAL macOS release evidence, not
 # part of `make test` / required PR coverage: it builds the Swift macprovider-cli
@@ -37,13 +37,21 @@ test-byom-discovery-journey:
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify
 
-# -race (#1996) on every package except internal/billing, whose timing-
-# sensitive tests are not yet race-tolerant (the detector instruments the
-# pure-Go SQLite driver, ~15x slower); billing runs without -race. -timeout
-# lifts go test's 10m per-package default for the slow SQLite packages.
+# -race (#1996) on every package. internal/billing runs at native speed
+# here and under -race in test-coordinator-billing-race, a separate CI job:
+# the detector instruments the pure-Go SQLite driver, and billing alone
+# would otherwise set this job's critical path. -timeout lifts go test's
+# 10m per-package default for the slow SQLite packages.
 test-coordinator:
 	cd phase4-coordinator && go test -race -timeout 30m $$(go list ./... | grep -v '/internal/billing$$')
 	cd phase4-coordinator && go test ./internal/billing
+
+# -race turns on checkptr everywhere; in the transpiled modernc SQLite C
+# code it was over half of billing's runtime (query planning). The race
+# detector itself still instruments every package, modernc included.
+# -timeout stays below the CI job's 26 minutes so a hang still dumps stacks.
+test-coordinator-billing-race:
+	cd phase4-coordinator && go test -race -gcflags='modernc.org/...=-d=checkptr=0' -timeout 24m ./internal/billing
 
 # SPEC-017 Step 1 and provider-onboarding Postgres integration tests.
 # Tagged with `integration` so

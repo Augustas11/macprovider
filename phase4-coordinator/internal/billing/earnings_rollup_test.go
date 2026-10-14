@@ -1140,8 +1140,20 @@ func TestProviderEarningsRollupMaturityDuringReadIsCoherent(t *testing.T) {
 // A reset between a recompute's read and its publish must not let the old
 // figures become trusted under the new epoch (generation ABA).
 func TestProviderEarningsRollupResetBetweenReadAndPublishIsRejected(t *testing.T) {
-	reqStore, store := newRequestAndBillingStores(t)
+	_, store := newRequestAndBillingStores(t)
 	insertRollupCredit(t, store.db, rollupCredit{requestID: "r", provider: "p", ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 10})
+	// The reset runs inside the bucket's slice. Start the bucket at the
+	// maximum slice (as after two overruns, not deferred) so a slow -race
+	// runner still reaches the publish instead of overrunning.
+	var hour string
+	if err := store.db.QueryRow(`SELECT bucket_hour FROM provider_earnings_rollup_buckets WHERE provider_id = 'p'`).Scan(&hour); err != nil {
+		t.Fatal(err)
+	}
+	key := earningsBucketKey{provider: "p", hour: hour}
+	store.earningsRollupSched.backoff = map[earningsBucketKey]earningsRollupBackoff{key: {failures: 2}}
+	if got := store.earningsRollupSched.slice(key); got != earningsRollupBucketSliceMax {
+		t.Fatalf("bucket slice=%s want %s", got, earningsRollupBucketSliceMax)
+	}
 	fired := false
 	store.earningsRollupAfterRead = func(string, string) {
 		if fired {
@@ -1151,7 +1163,11 @@ func TestProviderEarningsRollupResetBetweenReadAndPublishIsRejected(t *testing.T
 		if _, err := store.db.Exec(`UPDATE provider_earnings_rollup_state SET fingerprint = 'other'`); err != nil {
 			t.Error(err)
 		}
-		if _, err := NewStore(reqStore.DB()); err != nil {
+		// The startup reset itself, not a whole NewStore: the hook runs
+		// inside the bucket's time slice, and rerunning every billing
+		// migration there overran it under -race (SlowOrFailed, not a
+		// conflict).
+		if err := store.ensureProviderEarningsRollup(context.Background()); err != nil {
 			t.Error(err)
 		}
 	}
@@ -1444,15 +1460,25 @@ func TestProviderEarningsRollupDeadlineCutPassesReachEveryBucket(t *testing.T) {
 		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("q-%d", i), provider: fmt.Sprintf("p-%02d", i), ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 1})
 	}
 	attempted := map[string]bool{}
+	reads := 0
 	store.earningsRollupAfterRead = func(provider, hour string) {
 		attempted[provider] = true
+		reads++
 		time.Sleep(60 * time.Millisecond)
 		// Every attempt loses to a write, so nothing ever leaves the queue.
 		if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = ?`, provider); err != nil {
 			t.Error(err)
 		}
 	}
-	for pass := 0; pass < 20 && len(attempted) < n; pass++ {
+	// Twenty passes that reach a bucket read without reaching a new bucket
+	// fail the test. A pass whose deadline expires before any bucket read
+	// (selection alone can take 150ms under -race) says nothing either way
+	// and is not counted; the pass cap only stops a run that never reads.
+	for pass, stalled := 0, 0; len(attempted) < n && stalled < 20; pass++ {
+		if pass >= 2000 {
+			t.Fatalf("no bucket read in %d deadline-cut passes", pass)
+		}
+		before, readsBefore := len(attempted), reads
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		got, err := store.RefreshProviderEarningsRollup(ctx, n)
 		cancel()
@@ -1461,6 +1487,13 @@ func TestProviderEarningsRollupDeadlineCutPassesReachEveryBucket(t *testing.T) {
 		}
 		if got.Recomputed != 0 {
 			t.Fatalf("pass %d recomputed %d; fixture expects only conflicts", pass, got.Recomputed)
+		}
+		switch {
+		case reads == readsBefore:
+		case len(attempted) == before:
+			stalled++
+		default:
+			stalled = 0
 		}
 	}
 	if len(attempted) != n {
