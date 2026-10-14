@@ -1,7 +1,7 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
 **Version:** 0.9.54 (2026-10-14, #1570 OpenRouter readiness: prompt-token bounds)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
 
 **Change log v0.9.54 (2026-10-14, issue #1570 — OpenRouter readiness):**
 - Prompt-token estimates (§7.2.1). `ceil(bytes/4)` under-counted token-dense
