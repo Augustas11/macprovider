@@ -58,8 +58,7 @@ type anthropicMessagesAdapter struct {
 	replayBody         bool
 	writeErr           error
 	dedupeCapture      []byte
-	thinkPending       string
-	thinkInBlock       bool
+	streamThinkFilter
 }
 
 type anthropicStreamToolCall struct {
@@ -1672,43 +1671,6 @@ func anthropicStripThinkBlocks(s string) string {
 		s = s[:start]
 	}
 	return s
-}
-
-func (a *anthropicMessagesAdapter) filterThinkContent(s string) string {
-	input := a.thinkPending + s
-	a.thinkPending = ""
-	var out strings.Builder
-	for input != "" {
-		if a.thinkInBlock {
-			if end := strings.Index(input, "</think>"); end >= 0 {
-				input = input[end+len("</think>"):]
-				a.thinkInBlock = false
-				continue
-			}
-			a.thinkPending = longestSuffixThatPrefixes(input, "</think>")
-			return out.String()
-		}
-		if start := strings.Index(input, "<think>"); start >= 0 {
-			out.WriteString(input[:start])
-			input = input[start+len("<think>"):]
-			a.thinkInBlock = true
-			continue
-		}
-		a.thinkPending = longestSuffixThatPrefixes(input, "<think>")
-		out.WriteString(input[:len(input)-len(a.thinkPending)])
-		return out.String()
-	}
-	return out.String()
-}
-
-func (a *anthropicMessagesAdapter) flushThinkRemainder() string {
-	if a.thinkInBlock {
-		a.thinkPending = ""
-		return ""
-	}
-	remainder := a.thinkPending
-	a.thinkPending = ""
-	return remainder
 }
 
 func anthropicResponseContentToText(v any) (string, error) {
