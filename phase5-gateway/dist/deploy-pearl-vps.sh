@@ -791,7 +791,7 @@ echo "  binary cannot safely read. After any deploy that crosses schema"
 echo "  versions, restore BOTH the binary AND the pre-deploy DB snapshot:"
 echo
 echo "    ssh $VPS_USER@$VPS_HOST '"
-echo "      # #290 R6 convergent CODE+ARCH MED — mirror the OPS.md"
+echo "      # #290 R6 convergent CODE+ARCH MED — mirror the operator runbook"
 echo "      # canonical rollback recipe: validate snapshot AND .prev"
 echo "      # binary BEFORE stopping the service, use sudo -u macprovider"
 echo "      # consistently for reader validation on 0750 daemon-owned"

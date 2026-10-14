@@ -55,7 +55,7 @@ Daily check via systemd timer (mirrors `macprovider-monitor`). Check is cheap (`
 | `phase5-gateway/cmd/gateway/main.go` | Go | Optional: register the rotation job inside the gateway process so it runs in-process. Or keep it external. |
 | `phase5-gateway/dist/archive-rotate.sh` | bash | The actual rotation script. Mirrors `deploy-pearl-vps.sh` shape (M1-6). |
 | `phase5-gateway/dist/macprovider-archive-rotate.service` + `.timer` | systemd | Daily timer. |
-| `OPS.md` §3.x | docs | Rotation cadence + restore procedure. |
+| Operator runbook | docs | Rotation cadence + restore procedure. |
 | `docs/design/gateway-archive-rotate.md` | this doc | Updated to reflect actual implementation when it lands. |
 
 Estimated effort: ~1 week including operator testing on a Pearl replica.

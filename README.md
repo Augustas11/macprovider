@@ -96,7 +96,7 @@ malibu-cli update
 ```
 
 Provider implementation details live in [phase3-binary/](phase3-binary/).
-Production operations live in [OPS.md](OPS.md) and [ops/runbooks/](ops/runbooks/).
+Production operations live in [ops/runbooks/](ops/runbooks/) and [docs/runbooks/](docs/runbooks/).
 
 ## Buyer Quickstart
 

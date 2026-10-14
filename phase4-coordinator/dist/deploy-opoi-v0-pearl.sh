@@ -21,7 +21,7 @@
 # Rollback:
 #   ssh pearl 'sudo rm /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf \
 #     && sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator'
-#   # Binary rollback: /opt/macprovider/coordinator.prev → coordinator (see OPS.md)
+#   # Binary rollback: /opt/macprovider/coordinator.prev → coordinator (see docs/runbooks/coordinator-rollback.md)
 
 set -euo pipefail
 
