@@ -6,6 +6,11 @@
 
 ## Quick orientation
 
+> Historical (v0.1.0). The "Quick orientation" and "Current code state"
+> sections describe the v0.1.0 starting point. The active contract is the
+> version header plus §1 (including §1a, v0.3.0), the v0.2 streaming
+> amendment and §2 onward.
+
 SPEC-019 v0.1 is the provider-side structured-output contract for OpenAI-wire
 `response_format`. Buyers can send `response_format:
 {"type":"json_schema", ...}` to `/v1/chat/completions` and receive assistant

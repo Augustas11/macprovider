@@ -232,6 +232,8 @@ func TestValidateResponseFormatNonStrictModes(t *testing.T) {
 		{"strict true missing additionalProperties stays 400", requestWithStrictField(`,"strict":true`, `{"type":"object","properties":{},"required":[]}`), http.StatusBadRequest, "json_schema_strict_requires_additional_properties_false"},
 		{"strict null is absent", requestWithStrictField(`,"strict":null`, openAIShaped), 0, ""},
 		{"strict non boolean", requestWithStrictField(`,"strict":"no"`, subset), http.StatusBadRequest, "invalid_request"},
+		{"strict number", requestWithStrictField(`,"strict":1`, subset), http.StatusBadRequest, "invalid_request"},
+		{"strict number zero", requestWithStrictField(`,"strict":0`, openAIShaped), http.StatusBadRequest, "invalid_request"},
 		{"strict false array schema", requestWithStrictField(`,"strict":false`, `[]`), http.StatusBadRequest, "json_schema_missing_schema"},
 		{"absent string schema", requestWithStrictField(``, `"x"`), http.StatusBadRequest, "json_schema_missing_schema"},
 		{"strict false null schema", requestWithStrictField(`,"strict":false`, `null`), http.StatusBadRequest, "json_schema_missing_schema"},

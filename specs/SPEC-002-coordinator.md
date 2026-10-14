@@ -7,6 +7,10 @@ estimation heuristic (§5) use the SPEC-006 v0.9.54 §7.2.1 context-fit (central
 estimate instead of `bytes/4`. `bytes/4` over-counted Cyrillic, CJK and indented
 code and excluded providers that could serve the prompt. The provider's
 tokenized check stays authoritative. Billing fallback estimates are unchanged.
+`/poolz` rows gain `serving_eligible`: `routing_eligible` apart from the
+free-slot term, so the gateway can advertise the context of a provider that is
+serving but full (SPEC-006 §5.3.2). Buyer routing still uses
+`routing_eligible`.
 
 **Change log v1.6.16 (2026-10-13, issue #1355):** Adds SPEC-002-R005
 (measured-performance store built only from coordinator-observed timings of

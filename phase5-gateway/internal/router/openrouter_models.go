@@ -175,8 +175,22 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			ReadySlotsTotal:    model.ReadySlotsTotal,
 			ReadySlotsFree:     model.ReadySlotsFree,
 			// #1570: only a serving provider's granted context is servable.
-			MaxContextTokens: model.ServingMaxContextTokens,
+			MaxContextTokens: status.ServingMaxContextTokens[model.ID],
 		})
+	}
+	// A model whose only serving providers are busy with no free slot has no
+	// routable status row but still has a servable context.
+	for id, contextTokens := range status.ServingMaxContextTokens {
+		found := false
+		for _, model := range status.Models {
+			if model.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			pool = append(pool, openRouterPoolSnapshot{ID: id, MaxContextTokens: contextTokens})
+		}
 	}
 	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())
 	if err != nil {

@@ -19,8 +19,8 @@
 - The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
   unchanged.
 - OpenRouter document (§5.3.2): `max_context_length` is the largest context a
-  ready or busy provider grants. Unavailable and draining providers no longer
-  raise it.
+  serving provider grants, including one that is full. Unavailable, draining
+  and otherwise ineligible providers no longer raise it.
 - Streaming terminal errors (§17.7.1 named mappings). A coordinator
   post-commit terminal frame with code `provider_error` reaches the buyer as
   `upstream_provider_error` (`api_error`), and `provider_disconnected` keeps
@@ -1736,7 +1736,7 @@ Normative rules:
 - A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
 - `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
-- `supported_inputs.max_context_length` (v0.9.54) MUST be the largest `max_context_tokens` granted by a provider of that pool id in `ready` or `busy` state: a context the coordinator's routing can place a request on. Unavailable and draining providers, catalog maxima and RAM-tier defaults of providers not serving MUST NOT raise it. With no serving provider the row keeps the 8192 placeholder and `is_ready: false`.
+- `supported_inputs.max_context_length` (v0.9.54) MUST be the largest `max_context_tokens` granted by a serving provider of that pool id: one in `ready` or `busy` state that the coordinator reports `serving_eligible` on `/poolz` (routing-eligible apart from free slots, SPEC-002 v1.6.17), so a provider that is full still counts. Unavailable and draining providers, providers failing any other routing gate, catalog maxima and RAM-tier defaults of providers not serving MUST NOT raise it. Against a coordinator without `serving_eligible` the gateway uses `routing_eligible`. With no serving provider the row keeps the 8192 placeholder and `is_ready: false`.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
 - Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.
 - `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
