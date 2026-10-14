@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -185,6 +186,10 @@ class Build1NarrowMVPEvidenceCollectorTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            # CI checks out a detached merge ref, so the collector records the
+            # PR branch from GITHUB_HEAD_REF; a branch name such as
+            # "ci/ops-..." trips the redaction validator. Pin a neutral one.
+            env={**os.environ, "GITHUB_HEAD_REF": "evidence-test", "GITHUB_REF_NAME": "evidence-test"},
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
