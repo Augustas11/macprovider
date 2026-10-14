@@ -174,8 +174,7 @@ A **hardware campaign** (Studio / real-Mac e2e) is one task: one draft PR,
 local `swift build -c release` on the box, isolated loopback, iterate by
 commit, audit once at freeze, merge once, then one signed CLI cut. Do not
 open a new PR per e2e finding. Runbook:
-`docs/runbooks/lab-campaign-loop.md`. Cursor rule:
-`.cursor/rules/lab-campaign-loop.mdc`. The Pearl serial-ship rule does
+`docs/runbooks/lab-campaign-loop.md`. The Pearl serial-ship rule does
 **not** apply to these campaigns. Auto-merge-when-CI-green does **not**
 apply until the campaign PR is ready and the lab e2e listed in its body
 PASSed.
@@ -193,7 +192,6 @@ Docs-only means markdown and agent-instruction files:
 
 - `docs/` (runbooks, research, release-train narrative)
 - `AGENTS.md`, `CLAUDE.md`
-- `.cursor/rules/`
 - `audits/` markdown (prompts, evidence writeups)
 - `beta/` narrative markdown that does not flip a runtime default
 

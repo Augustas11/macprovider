@@ -7,9 +7,7 @@ __pycache__/
 # IDE / editor
 .idea/
 .vscode/
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
+.cursor/
 .claude/
 *.swp
 *.swo
