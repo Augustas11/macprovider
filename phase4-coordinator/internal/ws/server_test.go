@@ -457,6 +457,8 @@ func TestBuyerHTTPMaintainsOneProviderContinuityAcrossAgeThresholdRekey(t *testi
 	case <-rekeyStarted:
 	case err := <-providerDone:
 		t.Fatalf("provider before age-threshold rekey: %v", err)
+	case early := <-result:
+		t.Fatalf("buyer request returned before age-threshold rekey started: status=%d body=%s", early.Code, early.Body.String())
 	case <-time.After(buyerRekeyEventWait):
 		t.Fatal("age-threshold rekey did not start")
 	}
@@ -4535,9 +4537,14 @@ func authenticateBuyerRekeyProvider(t *testing.T, h providerHarness) (net.Conn, 
 		conn.Close()
 		t.Fatalf("write ready heartbeat: %v", err)
 	}
+	// RoutingEligible, not just State/SlotsFree: registration holds the
+	// session out of routing (HandshakeAckPending) until the goroutine that
+	// sent auth_response releases it, which can trail the provider's
+	// heartbeat. A buyer request in that window got no_provider_available
+	// and the rekey the test waits for never started (#1996).
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
-		return ok && provider.State == pool.StateReady && provider.SlotsFree == 1 && provider.Tier2Session != nil
+		return ok && provider.RoutingEligible() && provider.SlotsFree == 1 && provider.Tier2Session != nil
 	})
 	return conn, challenge.AssignedID, epoch
 }
