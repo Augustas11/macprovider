@@ -1,11 +1,13 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.18
+Version: v0.3.19
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.19 (2026-10-14, #1570 — relay preflight before the opening chunk):** The coordinator commits a buyer's streaming response on the provider's first chunk, and the relay sent its opening role chunk before tokenizing the prompt. A prompt over the served context therefore failed after commit, as a mid-stream `provider_error`, although v0.3.5 specifies a pre-commit 413. The relay now runs the runtime's full preflight (tokenization, the `context_length_exceeded` check and the paged-KV attach check) before the opening chunk, as the direct HTTP path already did, so that rejection ends as `error_context_exceeded` with `chunks_sent: 0` (coordinator 413 `context_exceeds_capacity`, not retried, not breaker-qualifying). Rejections that only the scheduler can make (a prompt that leaves no room for one output token, pool capacity, queue-wait timeout) still happen after the opening chunk; making them pre-commit needs an admission signal from the scheduler to the relay and is not in this version.
+
 **Change log v0.3.18 (2026-10-11, decode and verification row isolation):**
 FR-CB2: the kernel-route rule now also covers shared decode and packed MTP
 verification. Rows of different lengths share one KV buffer padded to the

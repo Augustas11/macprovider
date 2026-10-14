@@ -20,6 +20,11 @@
 - OpenRouter document (§5.3.2): `max_context_length` is the largest context a
   ready or busy provider grants. Unavailable and draining providers no longer
   raise it.
+- Streaming terminal errors. A coordinator post-commit terminal frame with
+  code `provider_error` or `provider_disconnected` reaches the buyer with that
+  code and a gateway-owned message, instead of being rewritten to
+  `stream_malformed`. Settlement is unchanged. Unknown codes stay
+  `stream_malformed`.
 - Streaming deadlines. The gateway decode-idle deadline (`streaming_idle_ms`)
   MUST be armed by the first content-bearing frame, not when the coordinator
   commits headers. Before that frame the provider is in admission and prefill,

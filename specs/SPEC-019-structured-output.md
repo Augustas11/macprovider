@@ -173,10 +173,14 @@ Buyers who need enforcement MUST send `strict:true`; that request still fails
 closed on any schema outside the subset.
 
 Rollout: a provider CLI built before v0.3.0 still rejects explicit
-`strict:false` with 400 `json_schema_non_strict_unsupported`, and an absent
-`strict` with a non-subset schema with the §3 code, before inference. Both are
-clean pre-inference 4xx responses. They disappear as the fleet updates to a
-CLI that implements v0.3.0. No per-version admission rule is added.
+`strict:false` with `json_schema_non_strict_unsupported`, and an absent
+`strict` with a non-subset schema with the §3 code, before inference. Through
+the coordinator relay a provider-side 4xx surfaces as a retryable 502
+(`provider_error`), because the SPEC-001 end-frame statuses carry no
+request-validation class. Deploy order is therefore provider CLI first, then
+coordinator: while the coordinator still rejects non-strict requests with a
+clean 400, no request reaches a pre-v0.3.0 provider in non-strict mode. No
+per-version admission rule is added.
 
 Buyer-side validation obligation: the provider validates syntax and schema
 conformance for the returned assistant `content`; it does not validate whether

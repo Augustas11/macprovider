@@ -1744,8 +1744,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						line = nil
 					}
 				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
-					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r), "upstream_error_code", terminalCode)
+					// #1570: a coordinator terminal error frame keeps its
+					// code. Rewriting provider_error to stream_malformed hid
+					// the real failure. Settlement is unchanged.
+					if message, ok := coordinatorStreamTerminalErrorMessage(terminalCode); ok {
+						writeSSEError(w, message, "api_error", terminalCode)
+					} else {
+						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -3976,6 +3983,21 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// coordinatorStreamTerminalErrorMessage names the coordinator's post-commit
+// terminal SSE error codes the gateway forwards with their own code instead of
+// stream_malformed. The message is the gateway's, never the upstream text.
+// provider_timeout already passes through as a SPEC-019 terminal code.
+func coordinatorStreamTerminalErrorMessage(code string) (string, bool) {
+	switch code {
+	case "provider_error":
+		return "Provider failed during streaming", true
+	case "provider_disconnected":
+		return "Provider disconnected during streaming", true
+	default:
+		return "", false
 	}
 }
 

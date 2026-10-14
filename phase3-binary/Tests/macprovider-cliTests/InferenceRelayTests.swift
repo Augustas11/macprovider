@@ -1430,6 +1430,52 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(end["chunks_sent"] as? Int, 0)
     }
 
+    // #1570: an over-context prompt is rejected by the tokenizing preflight
+    // before the opening role chunk, so the coordinator sees a pre-commit
+    // error_context_exceeded (413) rather than a mid-stream failure.
+    func testRelayStreamingContextExceededRejectsBeforeOpeningChunk() async throws {
+        let runtime = FakePreflightRejectRuntime(preflightError: APIError(
+            status: 413,
+            message: "Prompt length exceeds this provider's safe capacity.",
+            type: "context_length_exceeded",
+            code: "context_length_exceeded",
+            param: "messages"
+        ))
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-context-preflight",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "inference_response_chunk" })
+        let end = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["status"] as? String, "error_context_exceeded")
+        XCTAssertEqual(end["chunks_sent"] as? Int, 0)
+    }
+
     // Issue #1695: loopback and fixture runtimes never sign a relay receipt,
     // on complete and stream, even with a receipt key, a provider id and v0.4
     // settlement metadata that match the request.
@@ -2177,6 +2223,12 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
 }
 
 private actor FakePreflightRejectRuntime: ModelRuntimeServing {
+    private let preflightError: APIError
+
+    init(preflightError: APIError = APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")) {
+        self.preflightError = preflightError
+    }
+
     var loadedModelHash: String? { nil }
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
@@ -2211,10 +2263,12 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
     }
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
-        throw APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")
+        throw preflightError
     }
 
-    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        throw preflightError
+    }
 
     func stream(
         _ request: ChatCompletionRequest,
