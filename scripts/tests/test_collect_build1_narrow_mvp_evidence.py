@@ -3,10 +3,12 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from scripts.tests.test_build1_narrow_mvp_evidence import valid_evidence
@@ -117,6 +119,12 @@ class Build1NarrowMVPEvidenceCollectorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="build1-mvp-collector-")
         self.capture_root = Path(self.temp.name)
+        # CI checks out a detached merge ref, so the collector records the PR
+        # branch from GITHUB_HEAD_REF; a branch name such as "ci/ops-..." trips
+        # the redaction validator. Pin a neutral one for every test here.
+        env = mock.patch.dict(os.environ, {"GITHUB_HEAD_REF": "evidence-test", "GITHUB_REF_NAME": "evidence-test"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -185,6 +193,7 @@ class Build1NarrowMVPEvidenceCollectorTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            env=dict(os.environ),
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)

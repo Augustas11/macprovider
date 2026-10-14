@@ -61,6 +61,19 @@ jobs:
           while IFS='|' read -r workflow max_age flags; do
             workflow="$(echo "$workflow" | xargs)"
             [ -n "$workflow" ] || continue
+            # A workflow an operator disabled on purpose is paused, not broken:
+            # report it as healthy so its alarm clears instead of paging.
+            state="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow" --jq .state)"
+            if [ "$state" != "active" ]; then
+              echo "$workflow: skipped (workflow state: $state)"
+              ALARM_KEY="watch-${workflow%.yml}" \
+              ALARM_TITLE="$workflow is cancelled, stuck, parked on approval, or not running" \
+              ALARM_RESULT="success" \
+              ALARM_BODY="" \
+              ALARM_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                bash scripts/ops-alarm.sh || failed=1
+              continue
+            fi
             gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --limit 20 \
               --json databaseId,event,status,conclusion,createdAt,url > "$runs"
             # shellcheck disable=SC2086 # flags is a single optional switch
