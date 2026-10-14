@@ -174,7 +174,8 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			ReadyProviderCount: model.ReadyProviderCount,
 			ReadySlotsTotal:    model.ReadySlotsTotal,
 			ReadySlotsFree:     model.ReadySlotsFree,
-			MaxContextTokens:   model.MaxContextTokens,
+			// #1570: only a serving provider's granted context is servable.
+			MaxContextTokens: model.ServingMaxContextTokens,
 		})
 	}
 	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())

@@ -1051,10 +1051,15 @@ type statusModel struct {
 	SlotsFree          int    `json:"slots_free"`
 	ReadySlotsTotal    int    `json:"-"`
 	ReadySlotsFree     int    `json:"-"`
-	MaxContextTokens   int    `json:"max_context_tokens"`
-	Degraded           bool   `json:"degraded"`
-	Available          bool   `json:"available"`
-	Availability       string `json:"availability"`
+	// ServingMaxContextTokens is the largest context a ready or busy provider
+	// of this model grants (#1570): the servable context the OpenRouter
+	// document advertises. MaxContextTokens also counts unavailable and
+	// draining providers.
+	ServingMaxContextTokens int    `json:"-"`
+	MaxContextTokens        int    `json:"max_context_tokens"`
+	Degraded                bool   `json:"degraded"`
+	Available               bool   `json:"available"`
+	Availability            string `json:"availability"`
 	// SPEC-002 v1.3.5 §7.4 R-7.4.1 / SPEC-010 v1.5 R-3.3.3 — per
 	// SPEC-006 v0.8.1 §5.6 anonymization, the buyer-facing
 	// /v1/status surfaces supported_models as a per-model UNION
@@ -1204,6 +1209,9 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 			m.ReadyProviderCount++
 			m.ReadySlotsTotal += p.SlotsTotal
 			m.ReadySlotsFree += p.SlotsFree
+		}
+		if (p.State == "ready" || p.State == "busy") && p.MaxContextTokens > m.ServingMaxContextTokens {
+			m.ServingMaxContextTokens = p.MaxContextTokens
 		}
 		if p.MaxContextTokens > m.MaxContextTokens {
 			m.MaxContextTokens = p.MaxContextTokens
