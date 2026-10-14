@@ -209,7 +209,7 @@ func TestProviderPartnerDocsIncludeLateReceiptDeadlineDisclosure(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join("..", "..", "..", "phase3-binary", "README.md"),
 		filepath.Join("..", "..", "..", "phase3-binary", "dist", "README-partner.md"),
-		filepath.Join("..", "..", "..", "docs", "legacy", "phase1", "provider-economics.md"),
+		filepath.Join("..", "..", "..", "docs", "provider-economics.md"),
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
