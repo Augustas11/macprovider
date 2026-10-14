@@ -43,7 +43,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 CATALOG="$SCRIPT_DIR/catalog.tsv"
 SPEC_REF="SPEC-016 §9 item 6 synthetic-alert verification"
-NOTE="SYNTHETIC verification emission - NOT a real incident - see dist/synthetic-alerts/README.md"
+NOTE="SYNTHETIC verification emission - NOT a real incident - see phase4-coordinator/dist/synthetic-alerts/README.md"
 RESERVED_NOTE="RESERVED event - the coordinator does NOT emit this yet - NOT part of pre-enablement verification; wire the emission before relying on its matcher. SYNTHETIC."
 
 if [ ! -f "$CATALOG" ]; then

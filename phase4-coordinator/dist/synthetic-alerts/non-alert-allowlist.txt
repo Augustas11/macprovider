@@ -5,7 +5,7 @@
 # phase4-coordinator/cmd/coordinator/ for identifier-shaped string literals
 # matching ^(payout_|provider_payout_)[a-z0-9_]+$. EVERY such literal must be
 # classified as exactly one of:
-#   (a) a catalogued ALERT event  -> dist/synthetic-alerts/catalog.tsv, or
+#   (a) a catalogued ALERT event  -> phase4-coordinator/dist/synthetic-alerts/catalog.tsv, or
 #   (b) a reviewed NON-ALERT string -> this file.
 # Any literal that is neither FAILS the test (fail-closed): a new alert event
 # cannot ship without a catalog entry (and thus a BetterStack matcher + a

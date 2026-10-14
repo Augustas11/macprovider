@@ -1,7 +1,7 @@
 # SPEC-016 payout PAGE/WARN synthetic-alert catalog
 #
 # Single source of truth shared by:
-#   - dist/synthetic-alerts/emit.sh            (the synthetic-alert emitter)
+#   - phase4-coordinator/dist/synthetic-alerts/emit.sh            (the synthetic-alert emitter)
 #   - phase4-coordinator/internal/payout/synthetic_alerts_catalog_test.go
 #     (the completeness test that keeps this file in lock-step with the code)
 #
