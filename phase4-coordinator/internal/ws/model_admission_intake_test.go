@@ -203,7 +203,7 @@ func TestModelAdmissionIntakeAggregate(t *testing.T) {
 	}
 
 	// Staleness: two cadences after the build the snapshot is unavailable.
-	f.clock.Set(f.now.Add(modelAdmissionIntakeStaleAfter + time.Minute))
+	s.now = func() time.Time { return f.now.Add(modelAdmissionIntakeStaleAfter + time.Minute) }
 	if code, body := c.do(http.MethodGet, intakePath, "alice-secret", nil); code != http.StatusServiceUnavailable || errorCode(body) != "intake_unavailable" {
 		t.Fatalf("stale snapshot: code=%d body=%v", code, body)
 	}
