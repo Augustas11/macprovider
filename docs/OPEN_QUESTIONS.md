@@ -162,7 +162,7 @@ All five OQs were gated on the same "in-flight air5 n=3 replication run."
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-013/OQ-A | closed | — | — | `TPS_TIE_EPSILON` default (0.02). **2026-06-26 triage:** Closed — frozen at v0.3 placeholder. The air5 n=3 run never landed in `beta/DECISION_CRITERIA.md` and SPEC-013 IMPL shipped (PR #109) without it. Production has not signalled the placeholder is wrong. Revisit only if a real provider reports the keep-best decision flapping. |
+| SPEC-013/OQ-A | closed | — | — | `TPS_TIE_EPSILON` default (0.02). **2026-06-26 triage:** Closed — frozen at v0.3 placeholder. The air5 n=3 run never landed in `docs/decision-log.md` and SPEC-013 IMPL shipped (PR #109) without it. Production has not signalled the placeholder is wrong. Revisit only if a real provider reports the keep-best decision flapping. |
 | SPEC-013/OQ-B | closed | — | — | `stage2_replicates` default (3). **2026-06-26 triage:** Closed — same reasoning as OQ-A; frozen at v0.3. |
 | SPEC-013/OQ-C | closed | — | — | Whether `kv_bits` stays a search axis. **2026-06-26 triage:** Closed — frozen at v0.3 (kept as axis). Premature fixation risk (future MLX-swift versions changing the trade-off) > cost of one extra cell, per the original SPEC-013 §9 rationale. |
 | SPEC-013/OQ-D | closed | — | — | Whether Stage 1 needs N>1 replicates. **2026-06-26 triage:** Closed — frozen at v0.3 (N=1). No false-fit/false-reject reports from production autotune runs. |

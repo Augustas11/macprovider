@@ -7,7 +7,7 @@ hardware gates PASS — KVS-01a/b/02/03 all PASS on isolated Mac Studio 18080, e
 gate; SPEC-036 compute-integrity SPEC merged #390, IMPL pending). Ranks research/e2e threads by expected impact on buyer UX
 (time-to-first-token, tokens/sec, reliability) and provider UX (model selection,
 earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
-`audits/_prompts/RESEARCH_2*`, `beta/DECISION_CRITERIA.md`.
+`audits/_prompts/RESEARCH_2*`, `docs/decision-log.md`.
 
 ## Delivered (research complete; at decision/impl/campaign gates)
 
@@ -36,7 +36,7 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
      (Phase C). This is Path-A groundwork, not throwaway.
    - **Only the engine flip is gated — a later, separate step,** not something the
      current build must solve. Register **PR #263** in
-     `beta/throughput-engineering/UPSTREAM_WATCH.json` (same pattern as the
+     `scripts/data/upstream-watch.json` (same pattern as the
      Cluster-F PR #371 watch) so the flip is tracked.
    - **Turning batching ON = pick a path when the engine exists:** **(A)** upstream
      #263 lands (or macprovider drives it) → pin + flip; or **(B)** the memo's
@@ -144,7 +144,7 @@ stack?" question is **no longer the blocker**. The real gates are all
 
 **Recommendation & next actions (do these, in order — none is "start building"):**
 1. **Register the upstream watch** — add `mlx_swift_371_distributed_communication`
-   under `blockers` in `beta/throughput-engineering/UPSTREAM_WATCH.json` (mirror the
+   under `blockers` in `scripts/data/upstream-watch.json` (mirror the
    existing `mlx_swift_lm_364_*` entries) → PR #371 surfaces on each watch refresh.
 2. **Keep 237 as a placeholder, not a campaign** — it has a spike but no
    measurement campaign and no demand signal, so it stays a named thread, not a

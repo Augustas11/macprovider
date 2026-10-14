@@ -28,7 +28,7 @@ Engineering robustness arc parallel to Phase 6 front-door work.
 - `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`
 - `specs/SPEC-002-coordinator.md`
 - `specs/PHASE3_BINARY_KEEPALIVE_ROOT_CAUSE.md`
-- `beta/DECISION_CRITERIA.md`
+- `docs/decision-log.md`
 
 ## Manual Gates
 

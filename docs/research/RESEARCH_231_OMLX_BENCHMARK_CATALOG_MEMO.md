@@ -347,7 +347,7 @@ Per SPEC-023 v0.2–v0.5: `min_sustained_tps` / `max_4k_ttft_ms` are **advisory 
 
 ### 5.2 UPSTREAM_WATCH addition
 
-Added to `beta/throughput-engineering/UPSTREAM_WATCH.json`:
+Added to `scripts/data/upstream-watch.json`:
 
 ```json
 "omlx": {
@@ -499,7 +499,7 @@ Protocol: P1-01 clean-machine autotune, `--stage1-replicates 3`, `--drain`, port
 
 ## Decision log cross-reference
 
-Append to `beta/DECISION_CRITERIA.md` when acting on this memo:
+Append to `docs/decision-log.md` when acting on this memo:
 
 - **Entry TBD:** RESEARCH_231 oMLX calibration adopted; engine_delta=0.85; P0 gate changes gated on FB-01..FB-03 local repro.
 - RESEARCH_227 linkage: `qwen3.6-35b-a3b` P1 requires rate-card row before recommendable publish.

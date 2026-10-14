@@ -135,7 +135,7 @@ resulting cells in the Part 3 table, and state who pays the gap.
 
 ### Part 5 — DECISION_CRITERIA.md entry (ready to commit)
 
-Drop a numbered entry suitable for appending to `beta/DECISION_CRITERIA.md`.
+Drop a numbered entry suitable for appending to `docs/decision-log.md`.
 House style is established through Entries 1-21. The entry must contain:
 
 - **Decision** — what changed and to what value(s)
@@ -301,7 +301,7 @@ resulting cells in the Part 3 table, and state who pays the gap.
 
 ### Part 5 — DECISION_CRITERIA.md entry (ready to commit)
 
-Drop a numbered entry suitable for appending to `beta/DECISION_CRITERIA.md`.
+Drop a numbered entry suitable for appending to `docs/decision-log.md`.
 House style is established through Entries 1-21. The entry must contain:
 
 - **Decision** — what changed and to what value(s)

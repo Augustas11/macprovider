@@ -264,7 +264,7 @@ git reset --hard origin/main
 git branch -D <dead-branch>
 ```
 Skipping this reset is what causes the "parallel-universe local main"
-divergence — see Entry 50 / 56 / 57 / 58 in `beta/DECISION_CRITERIA.md`
+divergence — see Entry 50 / 56 / 57 / 58 in `docs/decision-log.md`
 for context.
 
 ### 6.3 Spec corpus
@@ -274,7 +274,7 @@ for context.
   consumed by Codex
 - `specs/AUDIT_SPEC_*_PROMPT.md` — operator-paste audit prompts
   consumed by Codex
-- `beta/DECISION_CRITERIA.md` — running decision log; append entries
+- `docs/decision-log.md` — running decision log; append entries
   as decisions land. PR #5 = Entry 58.
 
 ### 6.4 d-inference clean-room
@@ -383,7 +383,7 @@ production v1.3.4 coordinator would see degraded heartbeat handling).
 
 - All 159 PR #5 tests passing. `cd phase3-binary && swift test`
   validates the implementation end-to-end.
-- The `beta/DECISION_CRITERIA.md` file has an UNSTAGED Entry 58
+- The `docs/decision-log.md` file has an UNSTAGED Entry 58
   edit in the operator's working tree. Operator may commit that
   separately or as part of your Phase 2 final PR — ask before
   staging it.

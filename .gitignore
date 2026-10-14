@@ -27,8 +27,6 @@ scratchpad-*.log
 # Runtime state
 state/
 
-# Beta runtime artifacts are covered by beta/.gitignore
-
 # Phase 4 coordinator build artifacts
 phase4-coordinator/coordinator
 phase4-coordinator/coordinator-cli

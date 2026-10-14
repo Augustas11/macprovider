@@ -339,7 +339,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
         root = Path(__file__).parents[2]
         script = (root / "scripts" / "check-upstream-throughput-blockers.sh").read_text()
         baseline = json.loads(
-            (root / "beta" / "throughput-engineering" / "UPSTREAM_WATCH.json").read_text()
+            (root / "scripts" / "data" / "upstream-watch.json").read_text()
         )
         record = baseline["native_mtp_immutable_dependency_exception"]
         for field in ("review_due_at", "removal_trigger", "replacement_tracker"):
@@ -357,9 +357,9 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
     def test_checked_in_watch_baseline_is_valid_and_complete(self):
         watch_path = (
             Path(__file__).parents[2]
-            / "beta"
-            / "throughput-engineering"
-            / "UPSTREAM_WATCH.json"
+            / "scripts"
+            / "data"
+            / "upstream-watch.json"
         )
         baseline = json.loads(watch_path.read_text())
 

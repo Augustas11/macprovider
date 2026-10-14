@@ -40,8 +40,8 @@ class SpecPRDeclarationTests(unittest.TestCase):
         expected = [
             ".github/CODEOWNERS",
             "AGENTS.md",
-            "beta/DECISION_CRITERIA.md",
             "CLAUDE.md",
+            "docs/decision-log.md",
             "docs/spec-governance-foundation.md",
             "docs/spec-history/**",
             "schemas/spec-*",

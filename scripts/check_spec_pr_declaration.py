@@ -45,8 +45,8 @@ CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
     ".github/CODEOWNERS",
     "AGENTS.md",
-    "beta/DECISION_CRITERIA.md",
     "CLAUDE.md",
+    "docs/decision-log.md",
     "docs/evidence/",
     "docs/spec-governance-foundation.md",
     "docs/spec-history/",

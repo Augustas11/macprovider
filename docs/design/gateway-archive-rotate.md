@@ -1,6 +1,6 @@
 # Q4 / M2-4 Part C — Archive-Rotate Design Sketch
 
-**Status:** RULING — `archive-rotate to cold storage`. Implementation deferred. See `beta/DECISION_CRITERIA.md` Entry 77 (2026-06-11) for the decision.
+**Status:** RULING — `archive-rotate to cold storage`. Implementation deferred. See `docs/decision-log.md` Entry 77 (2026-06-11) for the decision.
 
 **Audit refs:** `audits/2026-06-10/REPO_AUDIT.md` §3.6 PERF-1, §6 Open Q4.
 
@@ -46,7 +46,7 @@ Daily check via systemd timer (mirrors `macprovider-monitor`). Check is cheap (`
 1. `aws s3 cp s3://macprovider-archives/gateway.db.YYYY-MM-DD.bak.zst /tmp/`
 2. `zstd -d /tmp/gateway.db.YYYY-MM-DD.bak.zst`
 3. Open via `sqlite3 gateway.db.YYYY-MM-DD.bak` for read-only forensic queries.
-4. Document the restore as an incident in `beta/DECISION_CRITERIA.md` if used.
+4. Document the restore as an incident in `docs/decision-log.md` if used.
 
 ### Implementation surface (when the work is scheduled)
 

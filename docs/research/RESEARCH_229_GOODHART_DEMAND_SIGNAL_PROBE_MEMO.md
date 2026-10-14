@@ -2,7 +2,7 @@
 
 # SPEC-018 v0.1 Goodhart Probe Memo
 
-Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md](/Users/augstar/macprovider-poc/CLAUDE.md:1), [RESEARCH_229 prompt](/Users/augstar/macprovider-poc/specs/RESEARCH_229_GOODHART_DEMAND_SIGNAL_PROBE_PROMPT.md:1), Entry 92/93/94 in [beta/DECISION_CRITERIA.md](/Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md:394), and supporting rate-card research in [RESEARCH_226](/Users/augstar/macprovider-poc/specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_MEMO.md:1) / [RESEARCH_227](/Users/augstar/macprovider-poc/specs/RESEARCH_227_RATE_CARD_V3_MEMO.md:1).
+Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md](/Users/augstar/macprovider-poc/CLAUDE.md:1), [RESEARCH_229 prompt](/Users/augstar/macprovider-poc/specs/RESEARCH_229_GOODHART_DEMAND_SIGNAL_PROBE_PROMPT.md:1), Entry 92/93/94 in [docs/decision-log.md](/Users/augstar/macprovider-poc/docs/decision-log.md:394), and supporting rate-card research in [RESEARCH_226](/Users/augstar/macprovider-poc/specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_MEMO.md:1) / [RESEARCH_227](/Users/augstar/macprovider-poc/specs/RESEARCH_227_RATE_CARD_V3_MEMO.md:1).
 
 ## Part 1 — Failure-Mode Catalog
 
@@ -300,7 +300,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 OpenAI Codex v0.142.2
 # SPEC-018 v0.1 Goodhart Probe Memo
 
-Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md](/Users/augstar/macprovider-poc/CLAUDE.md:1), [RESEARCH_229 prompt](/Users/augstar/macprovider-poc/specs/RESEARCH_229_GOODHART_DEMAND_SIGNAL_PROBE_PROMPT.md:1), Entry 92/93/94 in [beta/DECISION_CRITERIA.md](/Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md:394), and supporting rate-card research in [RESEARCH_226](/Users/augstar/macprovider-poc/specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_MEMO.md:1) / [RESEARCH_227](/Users/augstar/macprovider-poc/specs/RESEARCH_227_RATE_CARD_V3_MEMO.md:1).
+Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md](/Users/augstar/macprovider-poc/CLAUDE.md:1), [RESEARCH_229 prompt](/Users/augstar/macprovider-poc/specs/RESEARCH_229_GOODHART_DEMAND_SIGNAL_PROBE_PROMPT.md:1), Entry 92/93/94 in [docs/decision-log.md](/Users/augstar/macprovider-poc/docs/decision-log.md:394), and supporting rate-card research in [RESEARCH_226](/Users/augstar/macprovider-poc/specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_MEMO.md:1) / [RESEARCH_227](/Users/augstar/macprovider-poc/specs/RESEARCH_227_RATE_CARD_V3_MEMO.md:1).
 
 ## Part 1 — Failure-Mode Catalog
 

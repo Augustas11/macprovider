@@ -167,7 +167,7 @@ var spec015V03ACs = []acceptanceCriterion{
 			// catalog.go fails closed only on mismatch/invalid.
 			{"phase4-coordinator/internal/config/config.go", "RequireHashVerified"},
 			{"phase4-coordinator/internal/tier2/catalog.go", "IsHashPredicateFailure"},
-			{"beta/DECISION_CRITERIA.md", "Entry 80"},
+			{"docs/decision-log.md", "Entry 80"},
 		},
 	},
 	{
