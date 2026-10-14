@@ -158,13 +158,13 @@ curl -fsSL https://get.malibu.tech/install.sh | \
   bash
 ```
 
-For the current live pool, the provider IDs must remain `air5` and `air8gb`.
-The expected models are:
+For the current live pool, the provider IDs must remain the ones the operator
+runbook lists for the two pilot Macs. The expected models are:
 
 | Provider | Expected model |
 |---|---|
-| `air5` | `mlx-community/Qwen2.5-7B-Instruct-4bit` |
-| `air8gb` | `mlx-community/Llama-3.2-3B-Instruct-4bit` |
+| pilot Mac A | `mlx-community/Qwen2.5-7B-Instruct-4bit` |
+| pilot Mac B | `mlx-community/Llama-3.2-3B-Instruct-4bit` |
 
 If the installed provider is already running and the operator prefers the
 self-update path, use the same public release API as the installer:

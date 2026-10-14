@@ -42,6 +42,7 @@ class SpecPRDeclarationTests(unittest.TestCase):
             "AGENTS.md",
             "CLAUDE.md",
             "docs/decision-log.md",
+            "docs/evidence/**",
             "docs/spec-governance-foundation.md",
             "docs/spec-history/**",
             "schemas/spec-*",

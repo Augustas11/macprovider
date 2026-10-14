@@ -60,7 +60,7 @@ because request telemetry has landed.
    unserved and capacity-constrained requests.
 2. Validate `Qwen3.5-9B-4bit` on 16GB and
    `Ministral-3-3B-Instruct-2512-4bit` on 8GB on the designated Mac Studio.
-   Do not run the hardware campaign on `Augustas-Air.local`, and do not connect
+   Do not run the hardware campaign on the operator's primary Mac, and do not connect
    an unreleased local CLI to the live Malibu coordinator.
 3. Preserve limited Llama coverage during the trial:
    keep Llama 3.1 8B on part of the 16GB fleet, keep minimal Llama 3.2 3B

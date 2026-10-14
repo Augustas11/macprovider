@@ -43,7 +43,7 @@ Daily check via systemd timer (mirrors `macprovider-monitor`). Check is cheap (`
 
 ### Restore procedure
 
-1. `aws s3 cp s3://macprovider-archives/gateway.db.YYYY-MM-DD.bak.zst /tmp/`
+1. `aws s3 cp s3://<archive-bucket>/gateway.db.YYYY-MM-DD.bak.zst /tmp/`
 2. `zstd -d /tmp/gateway.db.YYYY-MM-DD.bak.zst`
 3. Open via `sqlite3 gateway.db.YYYY-MM-DD.bak` for read-only forensic queries.
 4. Document the restore as an incident in `docs/decision-log.md` if used.

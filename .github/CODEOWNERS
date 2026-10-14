@@ -50,6 +50,7 @@ schemas/spec-conformance-v1.schema.json @Augustas11
 schemas/spec-pr-governance-v1.schema.json @Augustas11
 schemas/spec-* @Augustas11
 docs/decision-log.md @Augustas11
+docs/evidence/** @Augustas11
 scripts/check_spec_governance.py @Augustas11
 scripts/check_spec_pr_declaration.py @Augustas11
 scripts/gen_spec_index.py @Augustas11

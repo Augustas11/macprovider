@@ -19,8 +19,7 @@ Useful details:
 - the impact you expect (for example credential exposure, billing or
   settlement manipulation, receipt forgery, or provider impersonation).
 
-We acknowledge each report and keep the reporter updated through the private
-advisory until a fix ships.
+We review each report and follow up through the private advisory.
 
 ## Scope
 
@@ -40,8 +39,8 @@ Out of scope:
 
 ## Supported versions
 
-Security fixes land on `main` and ship in the next provider CLI and
-service release. Providers on autoupdate receive them automatically.
+Security fixes land on `main` and are intended to ship in a following provider
+CLI or service release; fixes target the latest release.
 
 ## Handling secrets
 

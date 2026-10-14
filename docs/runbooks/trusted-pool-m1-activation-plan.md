@@ -42,7 +42,7 @@ the earlier one passes.
 The plan ran on Pearl v1.8.218 with CLI 1.8.217 (`71f22d36c`) on the member.
 Pool `G2Nr74KPQN_FxLrrrAhtXQ` (manifest v1, core digest `c9e7b76a…`, v2 core,
 `enforce`, `runtime_allowlist: [llamacpp_loopback]`) is `active` and routeable,
-with member `mp-efd40f26117ac30554a00c6432e6e65e` and one first-party buyer.
+with member `mp-<provider-c>` and one first-party buyer.
 These steps differed from the text below. Each one was verified in code or on
 Pearl:
 

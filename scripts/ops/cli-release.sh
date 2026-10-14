@@ -862,6 +862,9 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
       elif [ -z "${MALIBU_DOWNLOAD_SSH_KEY:-}" ]; then
         set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
           "MALIBU_DOWNLOAD_SSH_KEY is unset; set it in the ops env (see scripts/ops/README.md)"
+      elif [ -z "${MALIBU_DOWNLOAD_VPS_HOST:-}" ]; then
+        set_next mirror_latest blocked "Promote the release mirror pointer to v$V" "" \
+          "MALIBU_DOWNLOAD_VPS_HOST is unset; set it in the ops env (see scripts/ops/README.md)"
       else
         set_next mirror_latest mutate "Point the release mirror latest.json at v$V" \
 "GH_TOKEN=\"\${GH_TOKEN:-\$(gh auth token -u Augustas11)}\" \\

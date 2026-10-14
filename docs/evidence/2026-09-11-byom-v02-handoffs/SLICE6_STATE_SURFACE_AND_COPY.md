@@ -1,6 +1,6 @@
 # BYOM v0.2 slice 6 — admission-state surface + disclosure copy (operator deliverable)
 
-**For:** #1485 (slice 6, @erikHtoo). **Author/owner:** @Augustas11. **Grounding:**
+**For:** #1485 (slice 6, @erikHtoo). **Author/owner:** repo owner. **Grounding:**
 SPEC-001 §6.14a (earning-verdict-first), SPEC-046-R003 (closed enums, localization
 keys), SPEC-047-R004 (no earning implication), SPEC-044-R006/R007 (action gating).
 
@@ -76,7 +76,7 @@ test reference only — the wire value is authoritative and is what the verdict 
   are the en source values. They MUST NOT carry raw prompts, completions, paths,
   endpoints, or secrets.
 - If a state's real wire `earning_path_class` disagrees with the "expected" column here,
-  trust the wire and flag it to @Augustas11 — do not hard-code the mapping in Malibu.
+  trust the wire and flag it to the repo owner — do not hard-code the mapping in Malibu.
 - Localization and accessibility tests cover every earning verdict and both
   source-aware `not_offered` meanings in every shipped locale. They reject
   current-income, current-serving, guaranteed-demand, and guaranteed-settlement

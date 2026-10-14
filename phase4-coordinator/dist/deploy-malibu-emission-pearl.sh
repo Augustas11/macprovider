@@ -39,7 +39,7 @@ DROPIN="$DIST_DIR/systemd/malibu-emission.conf.example"
 MERGE_PY="$DIST_DIR/merge-yaml-overlay.py"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
+VPS_HOST="${VPS_HOST:-}"  # required before any SSH; checked where SSH is built
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 FORCE_RESTART="${FORCE_RESTART:-0}"
@@ -79,6 +79,7 @@ if [ "$SKIP_BUILD" != "1" ]; then
   fi
 fi
 
+: "${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 SSH=(ssh -i "$SSH_KEY" -o ConnectTimeout=10 -p 22 "$VPS_USER@$VPS_HOST")
 SCP=(scp -i "$SSH_KEY" -P 22)
 

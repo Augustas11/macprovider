@@ -667,6 +667,7 @@ class ActivationWriterRefusalTests(unittest.TestCase):
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "SSH_BIN": str(bin_dir / "ssh"),
             "SSH_KEY": str(self.root / "key"),
+            "VPS_HOST": "fake-pearl.invalid",
             "VERIFY_SCRIPT": str(bin_dir / "verify"),
             "REMOTE_CONFIG": str(self.config),
             "DEMO_TOKEN": "demo",
