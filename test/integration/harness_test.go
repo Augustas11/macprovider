@@ -1600,21 +1600,41 @@ func (s *scenario) waitForHealth(url string) {
 // waitForProviderReady polls the coordinator's /poolz endpoint until
 // the named provider appears in a routable state. /poolz needs operator
 // auth; we send the operator key.
+//
+// A fake provider that authenticates with a receipt key (v2 auth) reads
+// "state":"ready" with free slots as soon as auth is accepted, but its key
+// stays pending, and the session unroutable, until its state_update lands.
+// A buyer request in that window got 503 no_provider_available, so for such
+// a provider the published receipt_pubkey is part of ready.
 func (s *scenario) waitForProviderReady(providerID string) {
 	s.t.Helper()
+	needsReceiptKey := false
+	for _, fp := range s.fakeProvs {
+		if fp.providerID == providerID && (fp.receiptEnabled || fp.settlementEnabled) {
+			needsReceiptKey = true
+		}
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest(http.MethodGet, s.coordProvURL+"/poolz", nil)
 		req.Header.Set("Authorization", "Bearer "+s.operatorKey)
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
+			var poolz struct {
+				Pool []struct {
+					ProviderID    string  `json:"provider_id"`
+					State         string  `json:"state"`
+					SlotsFree     int     `json:"slots_free"`
+					ReceiptPubkey *string `json:"receipt_pubkey"`
+				} `json:"pool"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&poolz)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.Contains(string(body), providerID) {
-				// Also need provider in ready state — the response
-				// includes `"state":"ready"` once heartbeat lands.
-				if strings.Contains(string(body), `"state":"ready"`) {
-					return
+			if resp.StatusCode == http.StatusOK && decodeErr == nil {
+				for _, p := range poolz.Pool {
+					if p.ProviderID == providerID && p.State == "ready" && p.SlotsFree > 0 && (!needsReceiptKey || p.ReceiptPubkey != nil) {
+						return
+					}
 				}
 			}
 		}
@@ -1698,6 +1718,11 @@ type fakeProvider struct {
 	// its first chunk, so the coordinator measures it as time to first token
 	// (SPEC-002-R005 phase-aware routing journey).
 	streamFirstByteDelay time.Duration
+	// streamDecodeDelay holds a streamed response between its first content
+	// chunk and the rest. The coordinator records decode time in whole
+	// milliseconds and skips a 0ms sample, so without it a burst-written
+	// stream yields a decode sample only when the runner happens to stall.
+	streamDecodeDelay time.Duration
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -2365,6 +2390,12 @@ func (p *fakeProvider) start(ctx context.Context) {
 				time.Sleep(p.streamFirstByteDelay)
 			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
+			if p.streamDecodeDelay > 0 {
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				time.Sleep(p.streamDecodeDelay)
+			}
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12,\"total_tokens\":20},\"choices\":[]}\n\n"))

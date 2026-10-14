@@ -416,7 +416,7 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 		t.Fatalf("pending: %d %v", code, pending)
 	}
 	later := f.now.Add(25 * time.Hour)
-	s.now = func() time.Time { return later }
+	f.clock.Set(later)
 	if code, resp := c.do(http.MethodPost, decisions+"/"+pendingID+"/approve", "bob-secret", approveRequest("p1", offer.CandidateID, pendingID, pricedHead, "a1")); code != http.StatusConflict || errorCode(resp) != "pending_expired" {
 		t.Fatalf("expired pending: %d %v", code, resp)
 	}
@@ -444,7 +444,7 @@ func TestModelAdmissionOperatorDualControlSecretsAndReservedKeys(t *testing.T) {
 		}
 	}
 	// A heartbeat that changes nothing keeps the binding generation.
-	s.now = func() time.Time { return f.now }
+	f.clock.Set(f.now)
 	before, _ := s.pool.Resolve("p1", "")
 	s.withProviderSection("p1", func(section *providerSection) {
 		s.refreshModelAdmissionBindingLocked(context.Background(), "p1", section)

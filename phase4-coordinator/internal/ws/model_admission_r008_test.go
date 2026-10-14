@@ -433,7 +433,7 @@ func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 	// The feed goes stale (15 days): the feed path resolves nothing at match
 	// time and the recorded feed member is catalog_match_stale at decision time.
 	stale := f.now.Add(15 * 24 * time.Hour)
-	s.now = func() time.Time { return stale }
+	f.clock.Set(stale)
 	staleOffer := f.offer(t, "p1", "h", "ollama_loopback", map[string]string{modelidentity.GGUFFileV1: f.gguf})
 	if staleOffer.CatalogMatchState != "unmatched" || staleOffer.CatalogMatchReason != "no_artifact_match" {
 		t.Fatalf("stale feed must resolve nothing on the feed path: %+v", staleOffer)
