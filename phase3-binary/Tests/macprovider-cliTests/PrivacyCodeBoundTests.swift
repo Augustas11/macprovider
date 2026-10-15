@@ -109,14 +109,43 @@ final class PrivacyCodeBoundTests: XCTestCase {
             let fd = accept(listener, nil, nil)
             guard fd >= 0 else { return }
             defer { close(fd) }
-            if let object = try? PrivacyCodeBoundFrame.read(from: fd) {
+            if let object = try? PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 2) {
                 received.request = try? PrivacyCodeBoundRequest(object: object)
             }
-            try? PrivacyCodeBoundFrame.write(PrivacyCodeBoundReply.asserted(statement: statement, assertion: assertion).wireObject, to: fd)
+            try? PrivacyCodeBoundFrame.write(PrivacyCodeBoundReply.asserted(statement: statement, assertion: assertion).wireObject, to: fd, deadline: .now() + 2)
         }
         let reply = await PrivacyCodeBoundSocketAttestor(socketURL: socketURL, timeout: 2).assert(request)
         XCTAssertEqual(reply, .asserted(statement: statement, assertion: assertion))
         XCTAssertEqual(received.request, request)
+    }
+
+    /// SPEC-049-R035 item 4: a peer that drips its reply cannot stretch the
+    /// exchange past the deadline.
+    func testSocketAttestorKeepsOneTotalDeadline() async throws {
+        let directory = try makeCodeBoundStateRoot()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketURL = directory.appendingPathComponent("d.sock")
+        let listener = try bindTestListener(socketURL)
+        defer { close(listener) }
+        DispatchQueue.global().async {
+            let fd = accept(listener, nil, nil)
+            guard fd >= 0 else { return }
+            defer { close(fd) }
+            _ = try? PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 2)
+            // A frame header promising 100 bytes, then one byte every 300 ms.
+            var header = Data()
+            header.cbAppendUnsigned32(100)
+            _ = header.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, header.count) }
+            for _ in 0..<20 {
+                usleep(300_000)
+                var byte: UInt8 = 0x20
+                if Darwin.write(fd, &byte, 1) <= 0 { return }
+            }
+        }
+        let started = Date()
+        let reply = await PrivacyCodeBoundSocketAttestor(socketURL: socketURL, timeout: 1).assert(sampleRequest())
+        XCTAssertNil(reply)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5)
     }
 
     func testSocketAttestorFailsFastWithoutTheApp() async throws {

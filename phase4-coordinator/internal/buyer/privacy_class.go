@@ -204,19 +204,12 @@ func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider,
 	if quarantined {
 		return reject(relayblind.PrivacyRejectProviderQuarantined, privacyClassUnavailable)
 	}
-	eligibility := s.privacyAuthority.QuickEligibilityReason
-	if explain {
-		eligibility = s.privacyAuthority.EligibilityReason
-	}
-	verifiedAt, reason := eligibility(current.ProviderID, current.AssignedID, keyDigest, s.now())
+	verifiedAt, reason := s.privacyAuthority.EligibilityReasonFor(current.ProviderID, current.AssignedID, keyDigest, assurance, s.now(), !explain)
 	if reason != "" {
 		return reject(reason, privacyClassUnavailable)
 	}
 	if verifiedAt.Unix() <= 0 {
 		return reject(relayblind.PrivacyRejectPostureUnverified, privacyClassUnavailable)
-	}
-	if assurance == relayblind.PrivacyAssuranceCodeBound && s.privacyAuthority.SessionAssurance(current.ProviderID, current.AssignedID, s.now()) != relayblind.PrivacyAssuranceCodeBound {
-		return reject(relayblind.PrivacyRejectAssuranceUnavailable, privacyClassUnavailable)
 	}
 	return verifiedAt, "", ""
 }

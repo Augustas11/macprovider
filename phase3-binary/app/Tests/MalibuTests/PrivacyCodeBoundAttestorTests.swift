@@ -115,11 +115,29 @@ final class PrivacyCodeBoundAttestorTests: XCTestCase {
         XCTAssertNotEqual(lstat(socketURL.path, &info), 0, "stop removes the socket")
     }
 
+    /// A stalled assertion is answered within the bound and blocks further
+    /// assertions until it returns, instead of holding the socket queue.
+    func testStalledAssertionDoesNotHoldTheQueue() async throws {
+        store.setKeyID(keyID, for: providerID)
+        let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent("mp-st-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketURL = directory.appendingPathComponent("a.sock")
+        let server = PrivacyCodeBoundAttestorServer(core: makeCore(keys: StallingKeyService()), inspector: RecordingInspector(peer: genuinePeer()), socketURL: socketURL)
+        try server.start()
+        defer { server.stop() }
+        let started = Date()
+        let first = try await Task.detached { try Self.exchange(self.sampleRequest(), socketURL: socketURL) }.value
+        XCTAssertEqual(first, .unavailable(reason: "assertion_failed"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3.5)
+        let second = try await Task.detached { try Self.exchange(self.sampleRequest(), socketURL: socketURL) }.value
+        XCTAssertEqual(second, .unavailable(reason: "rate_limited"))
+    }
+
     // MARK: - helpers
 
     private var store: AppAttestEnrollmentStore { AppAttestEnrollmentStore(defaults: defaults) }
 
-    private func makeCore(keys: AssertingKeyService) -> PrivacyCodeBoundAttestorCore {
+    private func makeCore(keys: any AppAttestKeyService) -> PrivacyCodeBoundAttestorCore {
         PrivacyCodeBoundAttestorCore(teamID: team, keyService: keys, store: store, now: { Date(timeIntervalSince1970: 1_700_000_000) })
     }
 
@@ -156,8 +174,8 @@ final class PrivacyCodeBoundAttestorTests: XCTestCase {
             }
         }
         guard connected == 0 else { throw PrivacyCodeBoundWireError.invalid }
-        try PrivacyCodeBoundFrame.write(request.wireObject, to: fd)
-        return try PrivacyCodeBoundReply(object: try PrivacyCodeBoundFrame.read(from: fd))
+        try PrivacyCodeBoundFrame.write(request.wireObject, to: fd, deadline: .now() + 5)
+        return try PrivacyCodeBoundReply(object: try PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 5))
     }
 }
 
@@ -184,6 +202,16 @@ private final class AssertingKeyService: AppAttestKeyService, @unchecked Sendabl
         lock.withLock { recorded.append((keyID, clientDataHash)) }
         if let error { throw error }
         return Self.assertion
+    }
+}
+
+private final class StallingKeyService: AppAttestKeyService, @unchecked Sendable {
+    let isSupported = true
+    func generateKey() async throws -> String { throw POSIXError(.ENOTSUP) }
+    func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data { throw POSIXError(.ENOTSUP) }
+    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        return Data([1])
     }
 }
 

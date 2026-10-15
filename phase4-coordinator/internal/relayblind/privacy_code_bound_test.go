@@ -152,7 +152,7 @@ func (f *codeBoundFixture) requireLabel(want string) {
 	if _, ok := f.auth.Eligible(f.providerID, f.session, f.record.KeyRecord.KeyRecordDigest, f.now); !ok {
 		f.t.Fatal("posture is not eligible")
 	}
-	if got := f.auth.SessionAssurance(f.providerID, f.session, f.now); got != want {
+	if got := sessionAssurance(f.privacyFixture, f.now); got != want {
 		f.t.Fatalf("session assurance = %q, want %q", got, want)
 	}
 }
@@ -179,7 +179,7 @@ func TestCodeBoundPostureEarnsTheLabel(t *testing.T) {
 	if outcome, err := f.postureWith(3, f.validEvidence); err != nil || outcome.Assurance != PrivacyAssuranceCodeBound {
 		t.Fatalf("third posture: %+v %v", outcome, err)
 	}
-	if got := f.auth.SessionAssurance(f.providerID, f.session, f.now.Add(151*time.Second)); got != "" {
+	if got := sessionAssurance(f.privacyFixture, f.now.Add(151*time.Second)); got != "" {
 		t.Fatalf("assurance after max age = %q", got)
 	}
 }
@@ -385,7 +385,7 @@ func TestCodeBoundEvidenceNeverChangesPostureVerdict(t *testing.T) {
 	if _, err := f.auth.VerifyPostureWithEvidence(context.Background(), f.providerID, f.session, nonce, f.response(statement), evidence, nil, f.now); err == nil {
 		t.Fatal("a skewed posture verified because it carried evidence")
 	}
-	if got := f.auth.SessionAssurance(f.providerID, f.session, f.now); got != "" {
+	if got := sessionAssurance(f.privacyFixture, f.now); got != "" {
 		t.Fatalf("assurance of an unverified session = %q", got)
 	}
 }
@@ -400,8 +400,8 @@ func TestCodeBoundEvidenceIsClosed(t *testing.T) {
 	if _, err := ParseCodeBoundEvidence(valid); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := CodeBoundEvidenceNonce(valid); !ok || got != nonce {
-		t.Fatalf("nonce = %q ok=%v", got, ok)
+	if parsed, err := ParseCodeBoundEvidence(valid); err != nil || parsed.Statement.Nonce != nonce {
+		t.Fatalf("nonce = %q err=%v", parsed.Statement.Nonce, err)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(valid, &fields); err != nil {
@@ -492,5 +492,49 @@ func TestPrivacyCodeBoundVector(t *testing.T) {
 	}
 	if !bytes.Equal(got, codeBoundFixtureBytes(t)) {
 		t.Fatal("privacy-code-bound-v1.json drifted from the Go framing")
+	}
+}
+
+// sessionAssurance is the label the gate would grant the fixture's key now:
+// code-bound, device-bound, or "" when the posture is not eligible at all.
+func sessionAssurance(f *privacyFixture, now time.Time) string {
+	digest := f.record.KeyRecord.KeyRecordDigest
+	if _, reason := f.auth.EligibilityReasonFor(f.providerID, f.session, digest, PrivacyAssuranceCodeBound, now, true); reason == "" {
+		return PrivacyAssuranceCodeBound
+	}
+	if _, ok := f.auth.Eligible(f.providerID, f.session, digest, now); ok {
+		return PrivacyAssurance
+	}
+	return ""
+}
+
+// SPEC-049-R034: the label and the listed key come from one posture. A
+// posture replaced while the store checks run is not mixed with the old one.
+func TestCodeBoundGateUsesOnePosture(t *testing.T) {
+	f := newCodeBoundFixture(t)
+	if outcome, err := f.postureWith(1, f.validEvidence); err != nil || outcome.Assurance != PrivacyAssuranceCodeBound {
+		t.Fatalf("code-bound posture: %+v %v", outcome, err)
+	}
+	digest := f.record.KeyRecord.KeyRecordDigest
+	replaced := false
+	f.auth.afterEligibilitySnapshot = func() {
+		if replaced {
+			return
+		}
+		replaced = true
+		f.now = f.now.Add(time.Second)
+		if outcome, err := f.postureWith(2, nil); err != nil || outcome.Assurance != PrivacyAssurance {
+			t.Errorf("replacement posture: %+v %v", outcome, err)
+		}
+	}
+	if _, reason := f.auth.EligibilityReasonFor(f.providerID, f.session, digest, PrivacyAssuranceCodeBound, f.now, true); reason != PrivacyRejectPostureUnverified {
+		t.Fatalf("reason across a posture replacement = %q", reason)
+	}
+	f.auth.afterEligibilitySnapshot = nil
+	if _, reason := f.auth.EligibilityReasonFor(f.providerID, f.session, digest, PrivacyAssuranceCodeBound, f.now, true); reason != PrivacyRejectAssuranceUnavailable {
+		t.Fatalf("reason for the device-bound posture = %q", reason)
+	}
+	if _, reason := f.auth.EligibilityReasonFor(f.providerID, f.session, digest, PrivacyAssurance, f.now, true); reason != "" {
+		t.Fatalf("device-bound request refused: %q", reason)
 	}
 }

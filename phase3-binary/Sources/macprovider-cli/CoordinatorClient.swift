@@ -8145,21 +8145,27 @@ actor CoordinatorClient {
             return
         }
         let request = reply.codeBoundRequest
+        let socket = webSocket
         Task { [weak self] in
             let evidence = await PrivacyCodeBoundEvidence.fetch(request: request, attestor: attestor)
-            await self?.sendPrivacyPosture(response, evidence: evidence, assignedSession: assigned)
+            await self?.sendPrivacyPosture(response, evidence: evidence, assignedSession: assigned, socket: socket)
         }
     }
 
-    /// Sends the evidence and the posture back to back on the session that
-    /// was challenged; a session that changed meanwhile gets neither.
-    private func sendPrivacyPosture(_ response: Data, evidence: Data?, assignedSession: String) async {
-        guard coordinatorSessionAccepted, acceptedAssignedProviderID == assignedSession,
-              let posture = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else {
+    /// Sends the evidence and the posture back to back on the connection
+    /// and session that were challenged. Both are re-checked before each
+    /// frame, because a reconnect can happen while a send is suspended; a
+    /// connection that changed gets nothing.
+    private func sendPrivacyPosture(_ response: Data, evidence: Data?, assignedSession: String, socket: ProviderWebSocketTask?) async {
+        func stillChallenged() -> Bool {
+            coordinatorSessionAccepted && acceptedAssignedProviderID == assignedSession && webSocket === socket
+        }
+        guard stillChallenged(), let posture = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else {
             return
         }
         if let evidence, let message = (try? JSONSerialization.jsonObject(with: evidence)) as? [String: Any] {
             try? await send(message)
+            guard stillChallenged() else { return }
         }
         try? await send(posture)
         try? await sendPrivacyKeyRotationRequestIfDue()

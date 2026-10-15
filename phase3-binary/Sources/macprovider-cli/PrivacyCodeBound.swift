@@ -53,10 +53,10 @@ struct PrivacyCodeBoundSocketAttestor: PrivacyCodeBoundAttesting {
         defer { close(fd) }
         var noSigPipe: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        let seconds = max(1, Int(timeout.rounded(.up)))
-        var interval = timeval(tv_sec: seconds, tv_usec: 0)
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
-        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &interval, socklen_t(MemoryLayout<timeval>.size))
+        // One deadline for the whole exchange: connect, request, and reply.
+        let deadline = DispatchTime.now() + timeout
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { return nil }
         address.sun_family = sa_family_t(AF_UNIX)
         address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
         withUnsafeMutableBytes(of: &address.sun_path) { raw in
@@ -67,10 +67,11 @@ struct PrivacyCodeBoundSocketAttestor: PrivacyCodeBoundAttesting {
                 Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        // A non-blocking Unix connect either completes at once or fails.
         guard connected == 0 else { return nil }
         do {
-            try PrivacyCodeBoundFrame.write(request.wireObject, to: fd)
-            return try PrivacyCodeBoundReply(object: try PrivacyCodeBoundFrame.read(from: fd))
+            try PrivacyCodeBoundFrame.write(request.wireObject, to: fd, deadline: deadline)
+            return try PrivacyCodeBoundReply(object: try PrivacyCodeBoundFrame.read(from: fd, deadline: deadline))
         } catch {
             return nil
         }

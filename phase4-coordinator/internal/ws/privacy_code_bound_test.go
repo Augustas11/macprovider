@@ -163,7 +163,7 @@ func TestPrivacyCodeBoundEvidenceRoundTrip(t *testing.T) {
 	}
 
 	probe(1, 1, true)
-	if got := material.auth.SessionAssurance(provider.ProviderID, provider.AssignedID, clock); got != relayblind.PrivacyAssuranceCodeBound {
+	if got := wsSessionAssurance(material, clock); got != relayblind.PrivacyAssuranceCodeBound {
 		t.Fatalf("assurance = %q, want code-bound", got)
 	}
 	if _, held := s.privacyCodeBoundEvidence.Load(sessionKey(provider.ProviderID, provider.AssignedID)); held {
@@ -171,7 +171,7 @@ func TestPrivacyCodeBoundEvidenceRoundTrip(t *testing.T) {
 	}
 	// A posture without evidence is device-bound and still eligible.
 	probe(2, 0, false)
-	if got := material.auth.SessionAssurance(provider.ProviderID, provider.AssignedID, clock); got != relayblind.PrivacyAssurance {
+	if got := wsSessionAssurance(material, clock); got != relayblind.PrivacyAssurance {
 		t.Fatalf("assurance = %q, want device-bound", got)
 	}
 	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, clock); !ok {
@@ -179,10 +179,20 @@ func TestPrivacyCodeBoundEvidenceRoundTrip(t *testing.T) {
 	}
 	// A replayed counter withholds the label only.
 	probe(3, 1, true)
-	if got := material.auth.SessionAssurance(provider.ProviderID, provider.AssignedID, clock); got != relayblind.PrivacyAssurance {
+	if got := wsSessionAssurance(material, clock); got != relayblind.PrivacyAssurance {
 		t.Fatalf("assurance after a replayed counter = %q", got)
 	}
 	if _, ok := material.auth.Eligible(provider.ProviderID, provider.AssignedID, material.digest, clock); !ok {
 		t.Fatal("a replayed counter made the posture ineligible")
 	}
+}
+
+func wsSessionAssurance(material wsPrivacyMaterial, now time.Time) string {
+	if _, reason := material.auth.EligibilityReasonFor("provider-a", "session-a", material.digest, relayblind.PrivacyAssuranceCodeBound, now, true); reason == "" {
+		return relayblind.PrivacyAssuranceCodeBound
+	}
+	if _, ok := material.auth.Eligible("provider-a", "session-a", material.digest, now); ok {
+		return relayblind.PrivacyAssurance
+	}
+	return ""
 }

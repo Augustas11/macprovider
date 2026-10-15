@@ -135,6 +135,7 @@ final class PrivacyPostureResponderTests: XCTestCase {
             attestationGenerator: ManagedDeviceAttestationGenerator(),
             privacyPostureProbeOverride: probe,
             privacySESignerOverride: signer,
+            privacyCodeBoundAttestorOverride: AbsentCodeBoundAttestor(),
             sleepAssertionFactory: { nil },
             installedCompatibilityManifest: { _, _ in nil },
             watchdogExitHook: { _ in }
@@ -475,6 +476,12 @@ final class PrivacyPostureResponderTests: XCTestCase {
         let identitySignature = try RelayBlindBase64URL.decode(try XCTUnwrap(response["identity_signature"] as? String), exactCount: 64)
         XCTAssertTrue(identityKey.isValidSignature(identitySignature, for: framing))
     }
+}
+
+/// No Malibu.app attestor: the posture goes out at once, device-bound.
+private struct AbsentCodeBoundAttestor: PrivacyCodeBoundAttesting {
+    var mayBeAvailable: Bool { false }
+    func assert(_ request: PrivacyCodeBoundRequest) async -> PrivacyCodeBoundReply? { nil }
 }
 
 /// An attestor that vouches for whatever it is asked, as Malibu.app would for

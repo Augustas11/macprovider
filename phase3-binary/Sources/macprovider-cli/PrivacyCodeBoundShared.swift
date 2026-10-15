@@ -362,40 +362,57 @@ enum PrivacyCodeBoundFrame {
         return object
     }
 
-    /// Blocking whole-frame I/O on a stream socket. The caller sets
-    /// SO_RCVTIMEO and SO_SNDTIMEO; a timeout or short read is an error.
-    static func write(_ object: [String: Any], to fd: Int32) throws {
+    /// Whole-frame I/O on a stream socket within one monotonic deadline
+    /// (SPEC-049-R035 item 4): every read and write first polls for the time
+    /// left, so a peer that drips bytes cannot stretch the exchange.
+    static func write(_ object: [String: Any], to fd: Int32, deadline: DispatchTime) throws {
         let frame = try encode(object)
         var offset = 0
         try frame.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { throw PrivacyCodeBoundWireError.invalid }
             while offset < frame.count {
+                try waitUntil(fd, events: Int16(POLLOUT), deadline: deadline)
                 let count = Darwin.write(fd, base.advanced(by: offset), frame.count - offset)
-                if count < 0 && errno == EINTR { continue }
+                if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
                 guard count > 0 else { throw PrivacyCodeBoundWireError.invalid }
                 offset += count
             }
         }
     }
 
-    static func read(from fd: Int32) throws -> [String: Any] {
-        let header = try readExactly(fd, count: headerBytes)
-        return try decodeBody(try readExactly(fd, count: try bodyLength(header: header)))
+    static func read(from fd: Int32, deadline: DispatchTime) throws -> [String: Any] {
+        let header = try readExactly(fd, count: headerBytes, deadline: deadline)
+        return try decodeBody(try readExactly(fd, count: try bodyLength(header: header), deadline: deadline))
     }
 
-    private static func readExactly(_ fd: Int32, count: Int) throws -> Data {
+    private static func readExactly(_ fd: Int32, count: Int, deadline: DispatchTime) throws -> Data {
         var data = Data(count: count)
         var offset = 0
         try data.withUnsafeMutableBytes { raw in
             guard let base = raw.baseAddress else { throw PrivacyCodeBoundWireError.invalid }
             while offset < count {
+                try waitUntil(fd, events: Int16(POLLIN), deadline: deadline)
                 let read = Darwin.read(fd, base.advanced(by: offset), count - offset)
-                if read < 0 && errno == EINTR { continue }
+                if read < 0 && (errno == EINTR || errno == EAGAIN) { continue }
                 guard read > 0 else { throw PrivacyCodeBoundWireError.invalid }
                 offset += read
             }
         }
         return data
+    }
+
+    /// Polls fd for events until the deadline; throws when it passes.
+    private static func waitUntil(_ fd: Int32, events: Int16, deadline: DispatchTime) throws {
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline.uptimeNanoseconds else { throw PrivacyCodeBoundWireError.invalid }
+            let remaining = Int32(min(Int64(Int32.max), max(1, Int64((deadline.uptimeNanoseconds - now) / 1_000_000))))
+            var descriptor = pollfd(fd: fd, events: events, revents: 0)
+            let ready = poll(&descriptor, 1, remaining)
+            if ready < 0 && errno == EINTR { continue }
+            guard ready > 0 else { throw PrivacyCodeBoundWireError.invalid }
+            return
+        }
     }
 }
 

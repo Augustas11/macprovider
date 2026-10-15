@@ -148,6 +148,10 @@ final class PrivacyCodeBoundAttestorCore: @unchecked Sendable {
     private let now: @Sendable () -> Date
     private let lock = NSLock()
     private var lastAssertion: Date?
+    /// An assertion that has not returned yet. DCAppAttestService calls
+    /// cannot be cancelled, so a stalled one blocks new assertions instead of
+    /// stacking them up.
+    private var assertionInFlight = false
 
     init(teamID: String, keyService: any AppAttestKeyService, store: AppAttestEnrollmentStore, now: @escaping @Sendable () -> Date = { Date() }) {
         self.teamID = teamID
@@ -177,11 +181,14 @@ final class PrivacyCodeBoundAttestorCore: @unchecked Sendable {
         }
         let checkedAt = now()
         let admitted: Bool = lock.withLock {
+            if assertionInFlight { return false }
             if let last = lastAssertion, checkedAt.timeIntervalSince(last) < Self.minimumInterval { return false }
             lastAssertion = checkedAt
+            assertionInFlight = true
             return true
         }
         guard admitted else { return .unavailable(reason: "rate_limited") }
+        defer { lock.withLock { assertionInFlight = false } }
         let statement = PrivacyCodeBoundStatement(
             request: request,
             appAttestKeyID: wireKeyID,
@@ -275,27 +282,34 @@ final class PrivacyCodeBoundAttestorServer: @unchecked Sendable {
     private func serve(_ fd: Int32) {
         var noSigPipe: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
-        var timeout = timeval(tv_sec: 3, tv_usec: 0)
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        guard let object = try? PrivacyCodeBoundFrame.read(from: fd) else { return }
+        // The runtime gives up after 3 s, so nothing here waits longer: one
+        // deadline for the request, one bounded wait for the assertion, one
+        // for the reply. A slow or silent client cannot hold the queue.
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0,
+              let object = try? PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 2) else { return }
         // The peer is read from the kernel after the request arrived, never
         // from the message.
         let peer = inspector.inspect(socket: fd, teamID: core.teamID)
-        let reply = Self.wait { [core] in await core.handle(object, peer: peer) }
-        try? PrivacyCodeBoundFrame.write(reply.wireObject, to: fd)
+        let reply = Self.wait(timeout: 3) { [core] in await core.handle(object, peer: peer) }
+        try? PrivacyCodeBoundFrame.write(reply.wireObject, to: fd, deadline: .now() + 1)
     }
 
-    /// Bridges the async core to this dedicated, non-cooperative queue.
-    private static func wait(_ operation: @escaping @Sendable () async -> PrivacyCodeBoundReply) -> PrivacyCodeBoundReply {
+    /// Bridges the async core to this dedicated, non-cooperative queue. A
+    /// stalled assertion is answered unavailable after timeout; the core
+    /// refuses new assertions until it returns.
+    private static func wait(timeout: TimeInterval, _ operation: @escaping @Sendable () async -> PrivacyCodeBoundReply) -> PrivacyCodeBoundReply {
         let box = ReplyBox()
         let done = DispatchSemaphore(value: 0)
         Task {
-            box.value = await operation()
+            let reply = await operation()
+            box.set(reply)
             done.signal()
         }
-        done.wait()
-        return box.value ?? .unavailable(reason: "assertion_failed")
+        guard done.wait(timeout: .now() + timeout) == .success else {
+            return .unavailable(reason: "assertion_failed")
+        }
+        return box.get() ?? .unavailable(reason: "assertion_failed")
     }
 
     /// A 0700 directory owned by this user.
@@ -349,5 +363,9 @@ final class PrivacyCodeBoundAttestorServer: @unchecked Sendable {
 }
 
 private final class ReplyBox: @unchecked Sendable {
-    var value: PrivacyCodeBoundReply?
+    private let lock = NSLock()
+    private var value: PrivacyCodeBoundReply?
+
+    func set(_ reply: PrivacyCodeBoundReply) { lock.withLock { value = reply } }
+    func get() -> PrivacyCodeBoundReply? { lock.withLock { value } }
 }

@@ -64,8 +64,9 @@ struct AppAttestEnrollmentStore: @unchecked Sendable {
         defaults.object(forKey: key("nextAttemptAt", providerID)) as? Date
     }
 
-    func markDone(_ providerID: String) {
+    func markDone(_ providerID: String, clearingBackoff: Bool = true) {
         defaults.set(true, forKey: key("done", providerID))
+        guard clearingBackoff else { return }
         defaults.removeObject(forKey: key("failures", providerID))
         defaults.removeObject(forKey: key("nextAttemptAt", providerID))
     }
@@ -141,9 +142,13 @@ struct AppAttestEnrollment: Sendable {
         }
         do {
             let outcome = try await enroll(providerID: providerID)
-            store.markDone(providerID)
             if store.keyID(providerID) == nil {
+                // Recorded, but the key id is still unknown (an older
+                // coordinator names none): keep growing the backoff.
+                store.markDone(providerID, clearingBackoff: false)
                 store.recordFailure(providerID, now: now())
+            } else {
+                store.markDone(providerID)
             }
             NSLog("[malibu] app_attest_enrollment outcome=%@", String(describing: outcome))
             return outcome

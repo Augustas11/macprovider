@@ -100,6 +100,19 @@ final class AppAttestEnrollmentTests: XCTestCase {
         XCTAssertEqual(store.keyID(providerID), recordedKeyID)
     }
 
+    func testMissingKeyIDRecoveryBacksOffFurtherEachTime() async {
+        let clock = Clock(Date(timeIntervalSince1970: 3_000_000))
+        let noKeyID = ok(#"{"status":"already_recorded","provider_id":"\#(providerID)"}"#)
+        let cli = FakeCLI(responses: [noKeyID, noKeyID])
+        let enrollment = makeEnrollment(keys: FakeKeyService(), cli: cli, clock: clock)
+        _ = await enrollment.run(providerID: providerID)
+        let first = try? XCTUnwrap(store.nextAttempt(providerID))
+        XCTAssertEqual(first, clock.now.addingTimeInterval(AppAttestEnrollmentStore.backoff[0]))
+        clock.now = first!
+        _ = await enrollment.run(providerID: providerID)
+        XCTAssertEqual(store.nextAttempt(providerID), clock.now.addingTimeInterval(AppAttestEnrollmentStore.backoff[1]))
+    }
+
     func testMalformedKeyIDIsNotKept() {
         store.setKeyID("not-base64", for: providerID)
         store.setKeyID(Data(repeating: 1, count: 16).base64EncodedString(), for: providerID)

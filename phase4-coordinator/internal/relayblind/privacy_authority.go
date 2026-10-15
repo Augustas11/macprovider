@@ -62,6 +62,9 @@ type PrivacyAuthority struct {
 	// codeBound is the SPEC-049-R033 verifier; nil means every posture is
 	// device-bound.
 	codeBound atomic.Pointer[codeBoundVerifier]
+	// afterEligibilitySnapshot is a test seam run between the eligibility
+	// snapshot and its store checks; nil in production.
+	afterEligibilitySnapshot func()
 
 	mu                sync.Mutex
 	pendingQuarantine map[string]pendingQuarantine
@@ -786,7 +789,7 @@ func (a *PrivacyAuthority) verifyPosture(ctx context.Context, providerID, sessio
 }
 
 func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now time.Time) (time.Time, bool) {
-	verifiedAt, reason := a.eligibilityReason(providerID, session, keyDigest, now, false)
+	verifiedAt, reason := a.eligibilityReason(providerID, session, keyDigest, "", now, false)
 	return verifiedAt, reason == ""
 }
 
@@ -794,19 +797,28 @@ func (a *PrivacyAuthority) Eligible(providerID, session, keyDigest string, now t
 // SPEC-049-R030 reason. No provider identity, key, or request data is
 // included; callers must not expose the reason to the buyer.
 func (a *PrivacyAuthority) EligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
-	return a.eligibilityReason(providerID, session, keyDigest, now, true)
+	return a.eligibilityReason(providerID, session, keyDigest, "", now, true)
+}
+
+// EligibilityReasonFor is EligibilityReason for a request that needs the
+// SPEC-049-R034 label assurance: the label, the listed key, and the code
+// identity all come from one posture, which must still be current when the
+// store checks finish. quick skips the not-enrolled split, as
+// QuickEligibilityReason does.
+func (a *PrivacyAuthority) EligibilityReasonFor(providerID, session, keyDigest, assurance string, now time.Time, quick bool) (time.Time, string) {
+	return a.eligibilityReason(providerID, session, keyDigest, assurance, now, !quick)
 }
 
 // QuickEligibilityReason is EligibilityReason without the store lookup that
 // splits an unverified session: it reports posture_unverified for both.
 // Selection uses it per candidate and explains once with UnverifiedReason.
 func (a *PrivacyAuthority) QuickEligibilityReason(providerID, session, keyDigest string, now time.Time) (time.Time, string) {
-	return a.eligibilityReason(providerID, session, keyDigest, now, false)
+	return a.eligibilityReason(providerID, session, keyDigest, "", now, false)
 }
 
 // eligibilityReason is the gate. explain adds the store lookup that splits an
 // unverified session into not enrolled and posture unverified.
-func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest string, now time.Time, explain bool) (time.Time, string) {
+func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest, assurance string, now time.Time, explain bool) (time.Time, string) {
 	if a == nil || a.store == nil {
 		return time.Time{}, PrivacyRejectClassNotConfigured
 	}
@@ -826,7 +838,11 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 	verifiedAt := entry.verifiedAt
 	teamID, signingID, cdhash, binary := entry.teamID, entry.signingID, entry.cdhash, entry.binary
 	_, listed := entry.digests[keyDigest]
+	label := entry.assurance
 	a.mu.Unlock()
+	if a.afterEligibilitySnapshot != nil {
+		a.afterEligibilitySnapshot()
+	}
 	if !listed {
 		return time.Time{}, PrivacyRejectKeyNotInPosture
 	}
@@ -857,6 +873,20 @@ func (a *PrivacyAuthority) eligibilityReason(providerID, session, keyDigest stri
 	}
 	if !fresh {
 		return time.Time{}, PrivacyRejectKeyStaleOrRevoked
+	}
+	if assurance == PrivacyAssuranceCodeBound {
+		// SPEC-049-R034: the label must belong to the same posture that
+		// listed the key, so that posture must still be the current one.
+		a.mu.Lock()
+		current := a.sessions[id]
+		same := current != nil && current.verified && current.verifiedAt.Equal(verifiedAt) && current.assurance == label
+		a.mu.Unlock()
+		if !same {
+			return time.Time{}, PrivacyRejectPostureUnverified
+		}
+		if label != PrivacyAssuranceCodeBound {
+			return time.Time{}, PrivacyRejectAssuranceUnavailable
+		}
 	}
 	return verifiedAt, ""
 }

@@ -129,7 +129,7 @@ func (s *Server) runPrivacyPostureProbe(provider pool.Provider) {
 		// replaced session can never write an enrollment (SPEC-049-R025).
 		// The provider sends its evidence immediately before the posture on
 		// the same ordered connection, so it is already held here.
-		evidence := s.takePrivacyCodeBoundEvidence(pendingKey, nonce)
+		evidence := s.takePrivacyCodeBoundEvidence(pendingKey)
 		var (
 			err     error
 			outcome relayblind.CodeBoundOutcome
@@ -164,9 +164,9 @@ func (s *Server) handlePrivacyPostureResponse(providerID, assignedID string, pay
 }
 
 // handlePrivacyCodeBoundEvidence holds the SPEC-049 §4.13 evidence a session
-// sends right before its posture response. It is kept only while a posture
-// challenge is outstanding for that session, at most one per session, and
-// only when it names that challenge's nonce.
+// sends right before its posture response: at most one per session, and only
+// while a posture challenge is outstanding for it. The posture check decides
+// whether it fits that posture and records why when it does not.
 func (s *Server) handlePrivacyCodeBoundEvidence(providerID, assignedID string, payload []byte) {
 	if s == nil || s.privacyAuthority == nil {
 		return
@@ -179,33 +179,23 @@ func (s *Server) handlePrivacyCodeBoundEvidence(providerID, assignedID string, p
 	if _, outstanding := s.privacyPostureChans.Load(key); !outstanding {
 		return
 	}
-	nonce, ok := relayblind.CodeBoundEvidenceNonce(payload)
-	if !ok {
-		// Malformed evidence is still held so the posture records why it
-		// stayed device-bound; it never affects the posture itself.
-		nonce = ""
+	s.privacyCodeBoundEvidence.Store(key, append([]byte(nil), payload...))
+	// The challenge may have ended between the check and the store; its
+	// cleanup already ran, so drop what was just stored.
+	if _, outstanding := s.privacyPostureChans.Load(key); !outstanding {
+		s.privacyCodeBoundEvidence.Delete(key)
 	}
-	s.privacyCodeBoundEvidence.Store(key, heldCodeBoundEvidence{nonce: nonce, payload: append([]byte(nil), payload...)})
-}
-
-type heldCodeBoundEvidence struct {
-	nonce   string
-	payload []byte
 }
 
 // takePrivacyCodeBoundEvidence removes and returns the held evidence of a
-// session when it names nonce or did not parse; evidence for another nonce
-// is dropped.
-func (s *Server) takePrivacyCodeBoundEvidence(key, nonce string) []byte {
+// session, or nil.
+func (s *Server) takePrivacyCodeBoundEvidence(key string) []byte {
 	v, ok := s.privacyCodeBoundEvidence.LoadAndDelete(key)
 	if !ok {
 		return nil
 	}
-	held, ok := v.(heldCodeBoundEvidence)
-	if !ok || (held.nonce != "" && held.nonce != nonce) {
-		return nil
-	}
-	return held.payload
+	payload, _ := v.([]byte)
+	return payload
 }
 
 func (s *Server) deliverPrivacyPostureResponse(providerID, assignedID string, payload []byte) {

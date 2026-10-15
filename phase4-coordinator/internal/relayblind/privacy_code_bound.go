@@ -208,17 +208,6 @@ func ParseCodeBoundEvidence(raw []byte) (CodeBoundEvidence, error) {
 	return CodeBoundEvidence{Statement: parsed, Assertion: assertion}, nil
 }
 
-// CodeBoundEvidenceNonce returns the nonce a raw evidence message names, so
-// the session can hold it for the posture with that nonce. ok is false for a
-// message that does not parse.
-func CodeBoundEvidenceNonce(raw []byte) (string, bool) {
-	evidence, err := ParseCodeBoundEvidence(raw)
-	if err != nil {
-		return "", false
-	}
-	return evidence.Statement.Nonce, true
-}
-
 // AppAttestKeyLookup reads a provider's SPEC-033 App Attest record: the key
 // id and the attested 65-byte uncompressed P-256 public key (nil for a row
 // recorded before SPEC-033 v0.9.0). ok is false when the provider has none.
@@ -380,25 +369,6 @@ func (a *PrivacyAuthority) evaluateCodeBound(ctx context.Context, providerID, se
 		return deviceBound(CodeBoundRejectCounterNotIncreasing)
 	}
 	return CodeBoundOutcome{Assurance: PrivacyAssuranceCodeBound}
-}
-
-// SessionAssurance is the label of the session's latest verified posture,
-// while that posture is current (SPEC-049-R005). It is empty when the
-// session has no current verified posture.
-func (a *PrivacyAuthority) SessionAssurance(providerID, session string, now time.Time) string {
-	if a == nil {
-		return ""
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	entry := a.sessions[privacySessionID{providerID: providerID, session: session}]
-	if entry == nil || !entry.verified || now.Sub(entry.verifiedAt) > time.Duration(a.maxAge)*time.Second {
-		return ""
-	}
-	if entry.assurance == "" {
-		return PrivacyAssurance
-	}
-	return entry.assurance
 }
 
 // AdvanceAppAttestCounter durably records counter as the last App Attest
