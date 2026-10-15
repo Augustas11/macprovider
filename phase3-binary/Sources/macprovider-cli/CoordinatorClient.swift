@@ -530,6 +530,8 @@ actor CoordinatorClient {
     private let relayBlindRuntime: RelayBlindProviderRuntime?
     private let privacyPostureProbe: (any PrivacyPostureProbe)?
     private let privacyPostureResponder: PrivacyPostureResponder?
+    /// SPEC-049-R035: Malibu.app's local attestor for code-bound postures.
+    private let privacyCodeBoundAttestor: any PrivacyCodeBoundAttesting
     private var tier2Session: Tier2ProviderSession?
     private var pendingAEADRekey: PendingAEADRekey?
     private var preparingAEADRekeyID: String?
@@ -753,6 +755,7 @@ actor CoordinatorClient {
         seLivenessSignerOverride: (any SELivenessSigning)? = nil,
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
+        privacyCodeBoundAttestorOverride: (any PrivacyCodeBoundAttesting)? = nil,
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
@@ -813,6 +816,7 @@ actor CoordinatorClient {
             Darwin.exit(1)
         }
     ) {
+        self.privacyCodeBoundAttestor = privacyCodeBoundAttestorOverride ?? PrivacyCodeBoundSocketAttestor()
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
         }
@@ -8119,15 +8123,52 @@ actor CoordinatorClient {
               !assigned.isEmpty else {
             return
         }
-        let response: [String: Any]?
+        let reply: PrivacyPostureReply?
         do {
-            response = try privacyPostureResponder.respond(to: dict, assignedSession: assigned)
+            reply = try privacyPostureResponder.respondWithCodeBound(to: dict, assignedSession: assigned)
         } catch {
             return
         }
-        guard let response else { return }
-        try await send(response)
-        try await sendPrivacyKeyRotationRequestIfDue()
+        guard let reply else { return }
+        // Without a Malibu.app attestor the posture goes out at once, alone,
+        // and stays device-bound (the CLI-only install).
+        let attestor = privacyCodeBoundAttestor
+        guard attestor.mayBeAvailable else {
+            try await send(reply.response)
+            try await sendPrivacyKeyRotationRequestIfDue()
+            return
+        }
+        // SPEC-049-R035 item 4: ask the attestor off the receive loop (it may
+        // take up to 3 s), then send its evidence immediately before the
+        // posture. Without evidence the posture goes alone.
+        guard let response = try? JSONSerialization.data(withJSONObject: reply.response, options: [.withoutEscapingSlashes]) else {
+            return
+        }
+        let request = reply.codeBoundRequest
+        let socket = webSocket
+        Task { [weak self] in
+            let evidence = await PrivacyCodeBoundEvidence.fetch(request: request, attestor: attestor)
+            await self?.sendPrivacyPosture(response, evidence: evidence, assignedSession: assigned, socket: socket)
+        }
+    }
+
+    /// Sends the evidence and the posture back to back on the connection
+    /// and session that were challenged. Both are re-checked before each
+    /// frame, because a reconnect can happen while a send is suspended; a
+    /// connection that changed gets nothing.
+    private func sendPrivacyPosture(_ response: Data, evidence: Data?, assignedSession: String, socket: ProviderWebSocketTask?) async {
+        func stillChallenged() -> Bool {
+            coordinatorSessionAccepted && acceptedAssignedProviderID == assignedSession && webSocket === socket
+        }
+        guard stillChallenged(), let posture = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else {
+            return
+        }
+        if let evidence, let message = (try? JSONSerialization.jsonObject(with: evidence)) as? [String: Any] {
+            try? await send(message)
+            guard stillChallenged() else { return }
+        }
+        try? await send(posture)
+        try? await sendPrivacyKeyRotationRequestIfDue()
     }
 
     /// SPEC-049-R031: offers a staged identity key after session accept, a

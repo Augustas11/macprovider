@@ -297,6 +297,20 @@ func TestPrivacyReservationVersionClosed(t *testing.T) {
 	if _, err := ParseReservationResponse(mustJSON(t, stripped)); err == nil {
 		t.Fatal("privacy version without extension accepted")
 	}
+	// SPEC-049-R034: both assurance labels parse; any other value does not.
+	codeBound := privacy
+	codeBound.PrivacyAssurance = PrivacyAssuranceCodeBound
+	if _, err := ParseReservationResponse(mustJSON(t, codeBound)); err != nil {
+		t.Fatalf("code-bound reservation rejected: %v", err)
+	}
+	unknownLabel := privacy
+	unknownLabel.PrivacyAssurance = "code_bound"
+	if _, err := ParseReservationResponse(mustJSON(t, unknownLabel)); err == nil {
+		t.Fatal("unknown assurance label accepted")
+	}
+	if !PrivacyAssuranceKnown(PrivacyAssurance) || !PrivacyAssuranceKnown(PrivacyAssuranceCodeBound) || PrivacyAssuranceKnown("") {
+		t.Fatal("PrivacyAssuranceKnown is not the two-label set")
+	}
 	badDigest := privacy
 	clone := *privacy.PrivacyKeyAttestation
 	clone.KeyRecordDigest = encodeBase64URL(bytes.Repeat([]byte{0xab}, 32))

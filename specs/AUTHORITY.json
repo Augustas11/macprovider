@@ -574,7 +574,8 @@
         "SPEC-044",
         "SPEC-046",
         "SPEC-047",
-        "SPEC-048"
+        "SPEC-048",
+        "SPEC-049"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
