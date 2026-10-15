@@ -128,11 +128,14 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
         // SPEC-008 key-agreement attempt the harness completes over its
         // auth_request handshake. Debug/test builds only.
         var settlementReceiptBuilder: ReceiptBuilder?
+        var settlementReceiptKey: Curve25519.Signing.PrivateKey?
         var settlementReceiptPublicKey: Data?
         var tier2Attempt: Tier2AuthAttempt?
         if settlementModelHash != nil {
             let keyStore = InMemoryReceiptKeyStore()
-            settlementReceiptPublicKey = try keyStore.loadOrGenerate(providerId: privacyProviderID).publicKey.rawRepresentation
+            let key = try keyStore.loadOrGenerate(providerId: privacyProviderID)
+            settlementReceiptKey = key
+            settlementReceiptPublicKey = key.publicKey.rawRepresentation
             settlementReceiptBuilder = ReceiptBuilder(keyStore: keyStore)
             tier2Attempt = Tier2AuthAttempt()
         }
@@ -143,7 +146,6 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
             capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
         )
         let fixtureRuntime: any ModelRuntimeServing
-        var blindRuntime: RelayBlindFixtureRuntime?
         let replayObserver: RelayReplayFixtureObserver?
         let receiptBuilder: ReceiptBuilder?
         let receiptProviderID: String?
@@ -163,7 +165,6 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                 modelHash: settlementModelHash
             )
             fixtureRuntime = runtime
-            blindRuntime = runtime
             replayObserver = nil
             receiptBuilder = settlementReceiptBuilder
             receiptProviderID = settlementReceiptBuilder == nil ? nil : privacyProviderID
@@ -304,18 +305,18 @@ struct RelayBlindFixtureCommand: AsyncParsableCommand {
                     continue
                 }
                 if object["type"] as? String == "relay_fixture_tamper_receipts" {
-                    // Later handles pin a model hash other than the catalog
-                    // hash the session advertised, so each receipt is validly
-                    // signed over a tuple the relay-blind verifier must
-                    // quarantine (SPEC-022 R-14.5 model-hash equality).
-                    guard settlementReceiptBuilder != nil, let blindRuntime else {
+                    // Tamper after normal receipt construction. Changing the
+                    // runtime hash instead makes ReceiptBuilder omit the receipt,
+                    // which only exercises missing-receipt quarantine.
+                    guard let settlementReceiptKey, let settlementModelHash, let tier2Session else {
                         try await writer.write([
                             "type": "relay_blind_fixture_error",
                             "code": "fixture_input_invalid",
                         ])
                         continue
                     }
-                    await blindRuntime.substituteModelHash(String(repeating: "0", count: 64))
+                    let tamper = RelayBlindFixtureReceiptTamper(key: settlementReceiptKey, modelHash: settlementModelHash)
+                    tier2Session.setResponseEndTransformForTest { try tamper.transform($0) }
                     try await writer.write(["type": "relay_fixture_tamper_receipts_ack"])
                     continue
                 }
@@ -598,6 +599,46 @@ private actor RelayBlindFixtureWriter {
     }
 }
 
+/// Test-only malicious provider: keep a valid signature but violate the
+/// route-time model binding after the production builder has accepted it.
+struct RelayBlindFixtureReceiptTamper: Sendable {
+    let key: Curve25519.Signing.PrivateKey
+    let modelHash: String
+
+    func transform(_ frame: [String: Any]) throws -> [String: Any] {
+        guard let envelope = frame["relay_blind_settlement_receipt"] as? String else {
+            throw ValidationError("tamper fixture requires a constructed settlement receipt")
+        }
+        var output = frame
+        output["relay_blind_settlement_receipt"] = try resign(envelope)
+        return output
+    }
+
+    func resign(_ envelope: String) throws -> String {
+        let parts = envelope.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let tuple = Data(base64Encoded: String(parts[0])),
+              let signature = Data(base64Encoded: String(parts[1])),
+              key.publicKey.isValidSignature(signature, for: tuple),
+              let canonical = String(data: tuple, encoding: .utf8),
+              ReceiptBuilder.isValidModelHash(modelHash) else {
+            throw ValidationError("tamper fixture requires a valid signed settlement receipt")
+        }
+        // Replacing exactly one fixed-width hex value preserves the builder's
+        // canonical JSON bytes everywhere else, including the expected hash.
+        let member = "\"model_hash\":\"\(modelHash)\""
+        guard canonical.components(separatedBy: member).count == 2 else {
+            throw ValidationError("tamper fixture receipt does not contain the pinned model hash")
+        }
+        let zeroHash = String(repeating: "0", count: 64)
+        let wrongHash = modelHash == zeroHash ? String(repeating: "1", count: 64) : zeroHash
+        let tampered = Data(canonical.replacingOccurrences(
+            of: member, with: "\"model_hash\":\"\(wrongHash)\""
+        ).utf8)
+        return tampered.base64EncodedString() + "." + (try key.signature(for: tampered)).base64EncodedString()
+    }
+}
+
 actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     private let model: String
     private let promptTokens = 5
@@ -606,7 +647,7 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     /// The catalog model hash the fixture handle pins. Only the debug/test
     /// settlement fixture sets it; nil keeps the handle hashless, so no
     /// SPEC-015 §N.13 receipt is signed.
-    private var modelHash: String?
+    private let modelHash: String?
 
     init(model: String, streamDelayMs: Int, completionText: String? = nil, modelHash: String? = nil) {
         self.model = model
@@ -617,10 +658,6 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
 
     var loadedModelHash: String? { modelHash }
 
-    /// Debug/test fixture seam: later handles pin `hash` instead.
-    func substituteModelHash(_ hash: String) {
-        modelHash = hash
-    }
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }

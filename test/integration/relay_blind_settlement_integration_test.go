@@ -366,8 +366,8 @@ func TestRelayBlindEnforceSettlesSwiftReceipts(t *testing.T) {
 	st.assertRelayBlindSettled(t, 1, false, false)
 	st.assertRelayBlindSettled(t, 2, true, false)
 
-	// A validly signed receipt whose tuple was tampered (the handle pins a
-	// model hash other than the snapshot's catalog hash) is a trust failure:
+	// A normally constructed receipt is tampered and re-signed after the
+	// builder's checks, with a model hash different from the catalog pin:
 	// quarantined, buyer refunded, no provider credit.
 	st.fixture.tamperReceipts(t)
 	// The buyer response may fail closed once the receipt is quarantined;
@@ -375,8 +375,10 @@ func TestRelayBlindEnforceSettlesSwiftReceipts(t *testing.T) {
 	_, _, _ = st.tryClient(t, "relay-blind settlement tampered", false, false)
 	requestID := st.latestGatewayReservation(t, 3)
 	verdict := waitForNthClosedVerdict(t, st.s, 3)
-	if verdict.SettlementOutcome != "quarantined" || verdict.ReceiptResult == "valid" {
-		t.Fatalf("tampered receipt verdict=%+v, want quarantined", verdict)
+	if verdict.SettlementOutcome != "quarantined" || verdict.ReceiptResult != "invalid" ||
+		verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid ||
+		verdict.ReceiptVersion.String != "relay-blind-settlement-v1" || verdict.Reason != "model_hash_mismatch" {
+		t.Fatalf("tampered receipt verdict=%+v, want a present relay-blind-settlement-v1 receipt rejected for model_hash_mismatch", verdict)
 	}
 	refund, ok := waitForQuotaStatus(t, st.s, requestID, "refunded")
 	if !ok || refund.SettledTokens != 0 {
