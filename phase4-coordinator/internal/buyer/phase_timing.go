@@ -372,6 +372,14 @@ func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerDone)
 }
 
+// routingEndToEndServiceMs is dispatch start to done: the service time of an
+// attempt without a first-token time. It starts before dispatch completes, so
+// a provider that withholds its response headers until it is done cannot
+// shorten it.
+func (snap requestPhaseTimingSnapshot) routingEndToEndServiceMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerDispatchStart, snap.providerDone)
+}
+
 func (snap requestPhaseTimingSnapshot) routingDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstToken, snap.providerDone)
 }

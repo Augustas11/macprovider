@@ -51,7 +51,8 @@ func ClassifyPhase(inputTokens, maxOut int, stream bool) Phase {
 }
 
 // PhaseDecision is the outcome of PhaseOrder. Scores and Evidence are keyed
-// by pool.Provider.SortKey(); only fresh candidates appear in them.
+// by pool.Provider.SortKey(); only candidates fresh for the phase appear in
+// them.
 type PhaseDecision struct {
 	Phase      Phase
 	Basis      Basis
@@ -75,7 +76,7 @@ func PhaseOrder(candidates []pool.Provider, model string, phase Phase, store *Pe
 	records := store.LookupMany(model, ids)
 	var fresh, unmeasured []pool.Provider
 	for _, p := range candidates {
-		if e, ok := records[p.ProviderID]; ok && e.Fresh(now) {
+		if e, ok := records[p.ProviderID]; ok && e.FreshFor(phase, now) {
 			fresh = append(fresh, p)
 			decision.Evidence[p.SortKey()] = e
 			continue
@@ -86,7 +87,7 @@ func PhaseOrder(candidates []pool.Provider, model string, phase Phase, store *Pe
 	if len(fresh) == 0 {
 		return decision
 	}
-	scorePhase(fresh, phase, decision.Evidence, decision.Scores)
+	scorePhase(fresh, phase, decision.Evidence, decision.Scores, now)
 	sort.SliceStable(fresh, func(i, j int) bool {
 		return decision.Scores[fresh[i].SortKey()] > decision.Scores[fresh[j].SortKey()]
 	})
@@ -127,18 +128,22 @@ func freeShare(p pool.Provider) float64 {
 	return clampFloat(float64(p.SlotsFree)/float64(p.SlotsTotal), 0, 1)
 }
 
-func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvidence, scores map[string]float64) {
+// scorePhase scores candidates that are fresh for phase. A secondary signal
+// not observed within PerfFreshMaxAge contributes 0, never a favourable value.
+func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvidence, scores map[string]float64, now time.Time) {
 	decode := make(map[string]float64, len(fresh))
+	prefill := make(map[string]float64, len(fresh))
 	var minTTFT, maxDecode, maxPrefill, maxSlotDecode float64
 	for i, p := range fresh {
 		e := evidence[p.SortKey()]
-		d := e.DecodeWithPrior(p.ThroughputTPSEstimate)
+		d := e.decodeAt(now, p.ThroughputTPSEstimate)
 		decode[p.SortKey()] = d
+		prefill[p.SortKey()] = e.prefillAt(now)
 		if i == 0 || e.TTFTMs < minTTFT {
 			minTTFT = e.TTFTMs
 		}
 		maxDecode = math.Max(maxDecode, d)
-		maxPrefill = math.Max(maxPrefill, e.PrefillTPS)
+		maxPrefill = math.Max(maxPrefill, prefill[p.SortKey()])
 		maxSlotDecode = math.Max(maxSlotDecode, float64(max(p.SlotsFree, 0))*d)
 	}
 	ratio := func(v, best float64) float64 {
@@ -154,7 +159,7 @@ func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvid
 		var s float64
 		switch phase {
 		case PhaseLongInput:
-			s = (0.8*ratio(e.PrefillTPS, maxPrefill) + 0.2*ratio(decode[key], maxDecode)) * load
+			s = (0.8*ratio(prefill[key], maxPrefill) + 0.2*ratio(decode[key], maxDecode)) * load
 		case PhaseThroughput:
 			s = ratio(float64(max(p.SlotsFree, 0))*decode[key], maxSlotDecode)
 		default:
@@ -168,14 +173,19 @@ func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvid
 	}
 }
 
-// LatencyClass buckets the expected time to first token (SPEC-002-R007).
-func LatencyClass(phase Phase, inputTokens int, e PerfEvidence, fresh bool) string {
-	if !fresh {
-		return "unknown"
-	}
-	ms := e.TTFTMs
-	if phase == PhaseLongInput && e.PrefillSamples > 0 && e.PrefillTPS > 0 {
+// LatencyClass buckets the expected time to first token (SPEC-002-R007):
+// input over the prefill average for long_input when prefill is fresh, else
+// the TTFT average when TTFT is fresh, else unknown. Decode-only evidence
+// says nothing about the first token.
+func LatencyClass(phase Phase, inputTokens int, e PerfEvidence, now time.Time) string {
+	var ms float64
+	switch {
+	case phase == PhaseLongInput && e.PrefillFresh(now) && e.PrefillTPS > 0:
 		ms = float64(inputTokens) / e.PrefillTPS * 1000
+	case e.TTFTFresh(now):
+		ms = e.TTFTMs
+	default:
+		return "unknown"
 	}
 	switch {
 	case ms < 500:

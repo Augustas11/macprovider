@@ -1,6 +1,23 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.20 (2026-10-15, qualified native image routing)
+**Version:** 1.6.21 (2026-10-15, non-streamed performance evidence)
+
+**Change log v1.6.21 (2026-10-15, issue #1355):** SPEC-002-R005 now learns
+from non-streamed traffic. An attempt without a coordinator first-token time
+(non-streamed, or a buffered stream) is an end-to-end observation: it yields
+prefill and decode samples over the service time from provider dispatch start
+to done, and never a TTFT sample. The decode token count for every attempt is
+the coordinator's estimate of the generated content and tool calls it
+delivered (bytes / 4), replacing the delivered-SSE-bytes estimate, so streamed
+and end-to-end samples share one scale; the prefill gate moves from 4 to 32
+times that output so it keeps excluding decode-dominated attempts. A reported
+completion far above the generated output withholds whole-service rates.
+Freshness is per signal, and each SPEC-002-R006 phase ranks only on its own
+fresh signal: `throughput` on decode, `interactive` on TTFT, `long_input` on
+prefill or TTFT. A record without TTFT is never fresh for `interactive` and its
+latency class is `unknown`. SPEC-002-R007 adds `prefill_samples` and
+`decode_samples` to the route_trace line. No eligibility, admission, pricing,
+settlement or buyer-visible grammar changes.
 
 **Change log v1.6.20 (2026-10-15, Related: #2016):**
 The user-content contract admits the bounded SPEC-006-R022 native inline-image
@@ -5375,35 +5392,56 @@ rather than replacing it with a protocol-shape error.
 The coordinator MUST keep an in-memory performance record per
 (`provider_id`, requested model) built only from requests it served and
 measured itself. An observation is recorded once per provider attempt, when
-the attempt was streamed (a non-streamed response's first byte follows the
-whole generation), completed with a 2xx status and no recorded error, error
-code or fault, names its provider, and has a coordinator first-token time for
-that same attempt. Relay-blind and privacy-class attempts MUST NOT be
-recorded.
+the attempt completed with a 2xx status and no recorded error, error code or
+fault, names its provider, and has coordinator timing for that same attempt.
+Relay-blind and privacy-class attempts MUST NOT be recorded.
 
 The first-token time is when the first delivered event carrying generated
 content or a tool call reaches the buyer side of the coordinator; an opening
 role-only event does not count. Only incrementally relayed streams carry a
-first-token time: a stream the coordinator buffers or renders from a whole
-JSON response delivers everything at once and yields no sample. Every quantity is the coordinator's own; no
-provider usage count enters a rate:
+first-token time. An attempt with a first-token time is **timed**; any other
+attempt (a non-streamed response, or a stream the coordinator buffers or
+renders from a whole JSON response) is **end-to-end**: its first byte follows
+the whole generation, so it MUST NOT yield a TTFT sample. Every quantity is
+the coordinator's own; no provider usage count enters a rate:
 
-- `ttft_ms`, provider dispatch done to first token, clamped to 1..600000;
+- the output estimate is the byte length of the generated content and tool
+  calls (name and arguments) the coordinator delivered, from its own
+  settlement output, divided by 4 and rounded up; reasoning that was not
+  delivered as content is not counted, for either kind;
+- the service time is provider dispatch done to done for a timed attempt and
+  provider dispatch start to done for an end-to-end attempt, so a provider
+  that holds its response headers until it is done cannot shorten it;
+- `ttft_ms` (timed only), provider dispatch done to first token, clamped to
+  1..600000;
 - a prefill rate, the coordinator's token estimate of the request body divided
-  by the whole service time (provider dispatch done to done), only on
-  prefill-dominated attempts: the estimate is at least 64 tokens and at least
-  4 times the delivered completion estimate, and the provider reported no
-  cached prompt prefix (a cache hit is not a prefill measurement); clamped to
-  at most 50000 tokens/s. Using the service time, not TTFT, means an early
-  content token cannot inflate it;
-- a decode rate, the coordinator's delivered-bytes completion estimate minus 1
-  divided by the first-token-to-done time, only when that estimate is at least
-  8 and the time is positive, clamped to at most 2000 tokens/s.
+  by the service time, only on prefill-dominated attempts: the estimate is at
+  least 64 tokens and at least 32 times the output estimate (prefill runs
+  roughly 20 to 50 times faster per token than decode, so below that the
+  service time is mostly decode), and the provider reported no cached prompt
+  prefix (a cache hit is not a prefill measurement); clamped to at most 50000
+  tokens/s. Using the service time, not TTFT, means an early content token
+  cannot inflate it;
+- a decode rate, for a timed attempt the output estimate minus 1 divided by
+  the first-token-to-done time; for an end-to-end attempt the output estimate
+  divided by the service time, only when the coordinator's estimate of the
+  whole request (cached or not) is at most 4 times the output estimate, so
+  prefill stays a small share of that time. Either needs an output estimate of
+  at least 8 and a positive time, and is clamped to at most 2000 tokens/s.
+
+Provider usage may only withhold samples: a reported cached prefix withholds
+the prefill sample, and a reported completion above 2 times the output
+estimate plus 8 (generation the coordinator did not see, such as reasoning)
+withholds the prefill sample and, for an end-to-end attempt, the whole
+observation. An end-to-end attempt that yields no sample creates no record.
 
 Each metric is an exponentially weighted moving average with weight 0.2 for
-the new sample, with its own sample count and the time of the last
-observation. A record is **fresh** when it has at least 3 TTFT samples and its
-last observation is at most 15 minutes old; anything else is **unmeasured**.
+the new sample, with its own sample count and the time of its own last
+observation. A signal is **fresh** when it has at least 3 samples and its last
+observation is at most 15 minutes old; a record is fresh for a phase when the
+signal that phase is judged on (SPEC-002-R006) is fresh, and is otherwise
+**unmeasured** for it. Samples of one signal never refresh another, so a
+missing or stale TTFT is never read as zero or as fast.
 A provider can still shape its own TTFT, for example by emitting an early
 content token; that moves time from TTFT into decode, which the interactive
 score weighs equally, it cannot change the prefill rate, and the bounds in
@@ -5415,8 +5453,8 @@ average, so a self-report never outranks measurements. The SPEC-001-R006
 engine profile MUST NOT be read as a measurement. The store holds at most
 65536 records and at most 64 per provider; a provider at its budget replaces
 its own least recently observed record, so it never displaces another
-provider's, and a full store evicts records that are not fresh first, then the
-least recently observed. It is not persisted: after a coordinator restart every
+provider's, and a full store evicts records with no fresh signal first, then
+the least recently observed. It is not persisted: after a coordinator restart every
 provider is unmeasured until traffic rebuilds it. The store never changes
 eligibility, admission, trust tier, pricing or settlement.
 
@@ -5437,16 +5475,23 @@ estimate is the coordinator's existing token estimate of the request body.
 - `interactive`: otherwise, when `stream` is true;
 - `throughput`: otherwise.
 
-**Score.** Only fresh candidates (SPEC-002-R005) are scored. With values
-normalized by the best value among fresh candidates (so each term is in 0..1),
-and `free_share` the provider's free slots over its total slots:
+**Score.** Only candidates fresh for the phase (SPEC-002-R005) are scored.
+A candidate is fresh for `interactive` when its TTFT is fresh, for
+`throughput` when its decode is fresh, and for `long_input` when its prefill
+or its TTFT is fresh. With values normalized by the best value among those
+candidates (so each term is in 0..1), and `free_share` the provider's free
+slots over its total slots:
 
 - `interactive`: 0.5 × (lowest TTFT / TTFT) + 0.5 × (decode / highest decode),
   times (0.5 + 0.5 × `free_share`);
 - `long_input`: 0.8 × (prefill / highest prefill) + 0.2 × (decode / highest
-  decode), times (0.5 + 0.5 × `free_share`); a candidate without a prefill
-  average contributes 0 to the prefill term;
+  decode), times (0.5 + 0.5 × `free_share`);
 - `throughput`: (free slots × decode) / highest (free slots × decode).
+
+A secondary term (decode for `interactive` and `long_input`, prefill for
+`long_input`) whose signal has no sample from the last 15 minutes contributes
+0, never a favourable value. Timed and end-to-end decode samples share one
+average, because both divide the same output estimate by generation time.
 
 **Order.** With two or more fresh candidates, the fresh candidates whose score
 is at least 0.85 of the best score form the band; one band member chosen by a
@@ -5479,7 +5524,8 @@ For every successful plaintext selection, the coordinator MUST write one
 operator log line `event=route_trace` with `request_id`, `provider_id`,
 `model`, `phase`, `basis` (`measured`, `explore`, `fallback` or `pinned`),
 `scope` (`ranked`, `sticky`, `pinned` or `slot_queue`), `candidates`, `fresh`, the
-chosen provider's `samples`, `evidence_age_s` (or `-1`), `score` (or `-1` when
+chosen provider's `samples` (TTFT samples), `prefill_samples`,
+`decode_samples`, `evidence_age_s` (or `-1`), `score` (or `-1` when
 not scored), `engine`, `latency` and `privacy_mode` (the gateway's
 SPEC-006-R019 effective mode, or `unset`), and increment
 `coordinator_route_selections_total{phase,basis}`. A pinned selection counts
@@ -5491,12 +5537,14 @@ and member order, and no provider identity:
 
 `v=1; phase=<interactive|long_input|throughput>; basis=<measured|explore|fallback|pinned>; evidence=<fresh|none>; engine=<general_mlx|continuous_batching|native_mtp|unknown>; latency=<low|medium|high|unknown>`
 
-`evidence` is `fresh` when the chosen provider's record is fresh. `engine` is
-the chosen provider's SPEC-001-R006 `engine_family`, or `unknown` without a
-valid profile. `latency` is the expected time to first token for the chosen
-provider: the coordinator's input estimate over the prefill average for
-`long_input` when one exists, else the TTFT average; `low` below 0.5 s, `medium` below 2 s, `high`
-otherwise, `unknown` when the record is not fresh. The header describes the
+`evidence` is `fresh` when the chosen provider's record is fresh for the
+request's phase. `engine` is the chosen provider's SPEC-001-R006
+`engine_family`, or `unknown` without a valid profile. `latency` is the
+expected time to first token for the chosen provider: the coordinator's input
+estimate over the prefill average for `long_input` when prefill is fresh, else
+the TTFT average when TTFT is fresh; `low` below 0.5 s, `medium` below 2 s,
+`high` otherwise, and `unknown` without either, including a record that holds
+only decode evidence. The header describes the
 first selection of the request; a failover does not rewrite it. It rides every
 response the coordinator writes after that selection, including its error
 responses. Relay-blind

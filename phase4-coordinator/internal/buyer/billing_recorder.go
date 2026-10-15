@@ -424,7 +424,7 @@ func (b *billingRecorder) recordRow(
 	// failed-over attempt's latch must not skip the ingest of, or refund, the
 	// attempt that later succeeds.
 	b.settlementOutputMissingAfterCredit = false
-	b.observeServedPerformance(providerAssignedID, providerID, status, cachedPromptTok, estimatedCompTokens, errMsg, errCode, faultFlag)
+	b.observeServedPerformance(providerAssignedID, providerID, status, cachedPromptTok, completionTok, settlementOutput, errMsg, errCode, faultFlag)
 	if s.reqLog == nil {
 		return nil
 	}

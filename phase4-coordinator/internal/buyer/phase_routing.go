@@ -91,7 +91,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		evidence, ok = s.perf.Lookup(provider.ProviderID, req.Model)
 	}
 	now := s.now()
-	fresh := ok && evidence.Fresh(now)
+	fresh := ok && evidence.FreshFor(d.phase, now)
 	if d.scope != "ranked" && fresh {
 		d.fresh = 1
 	}
@@ -100,7 +100,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		ageS = int64(now.Sub(evidence.LastObserved).Seconds())
 	}
 	engine := routing.EngineClass(provider)
-	latency := routing.LatencyClass(d.phase, d.inputTokens, evidence, fresh)
+	latency := routing.LatencyClass(d.phase, d.inputTokens, evidence, now)
 	score, scored := d.scores[provider.SortKey()]
 	event := s.log.Info().
 		Str("event", "route_trace").
@@ -113,6 +113,8 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		Int("candidates", d.candidates).
 		Int("fresh", d.fresh).
 		Int("samples", evidence.TTFTSamples).
+		Int("prefill_samples", evidence.PrefillSamples).
+		Int("decode_samples", evidence.DecodeSamples).
 		Int64("evidence_age_s", ageS).
 		Str("engine", engine).
 		Str("latency", latency).
@@ -155,14 +157,18 @@ func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *fo
 	}
 }
 
-// observeServedPerformance feeds one streamed, cleanly completed, plaintext
-// attempt into the SPEC-002-R005 store. Every quantity is the coordinator's
-// own: its clock for TTFT, decode and service time, its token estimate of the
-// request body for prefill, and its delivered-bytes estimate for decode. Provider
-// usage only withholds a prefill sample when it reports a cached prefix.
-func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok, estimatedCompTokens *int64, errMsg, errCode, faultFlag string) {
+// observeServedPerformance feeds one cleanly completed plaintext attempt into
+// the SPEC-002-R005 store. Every rate is the coordinator's own: its clock, its
+// token estimate of the request body for prefill, and its estimate of the
+// generated output for decode. An attempt with a coordinator first-token time
+// gives TTFT, prefill and decode samples; any other attempt (non-streamed or
+// buffered) is end-to-end and gives only prefill and decode samples. Provider
+// usage only withholds samples: a reported cached prefix withholds prefill,
+// and a reported completion well above the generated output (hidden
+// reasoning) withholds every rate that spans the whole service time.
+func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok, reportedCompTok *int64, output *billing.SettlementOutput, errMsg, errCode, faultFlag string) {
 	s := b.server
-	if s == nil || s.perf == nil || b.relayBlind != nil || !b.stream || status < 200 || status >= 300 {
+	if s == nil || s.perf == nil || b.relayBlind != nil || status < 200 || status >= 300 {
 		return
 	}
 	if errMsg != "" || errCode != "" || (faultFlag != "" && faultFlag != billing.FaultNone) {
@@ -175,10 +181,6 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if !timing.matchesProviderAssignedID(providerAssignedID) {
 		return
 	}
-	ttft, decode := timing.routingTTFTMs(), timing.routingDecodeMs()
-	if ttft == nil {
-		return
-	}
 	if providerID == "" && s.pool != nil {
 		for _, p := range s.pool.Snapshot() {
 			if p.AssignedID == providerAssignedID {
@@ -187,29 +189,61 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 			}
 		}
 	}
+	generated := generatedOutputTokens(output)
+	hidden := reportedCompTok != nil && *reportedCompTok > perfHiddenOutputFactor*generated+routing.PerfMinDecodeTokens
 	prompt := int64(b.state.routingEstimatedTokens)
-	if cachedPromptTok != nil && *cachedPromptTok > 0 {
+	if (cachedPromptTok != nil && *cachedPromptTok > 0) || hidden {
 		prompt = 0
 	}
-	var completion int64
-	if estimatedCompTokens != nil && *estimatedCompTokens > 0 {
-		completion = *estimatedCompTokens
-	}
-	var decodeMs, serviceMs float64
-	if decode != nil {
-		decodeMs = *decode
-	}
-	if service := timing.routingServiceMs(); service != nil {
-		serviceMs = *service
-	}
-	s.perf.Observe(routing.PerfObservation{
+	obs := routing.PerfObservation{
 		ProviderID:       providerID,
 		Model:            b.model,
 		PromptTokens:     prompt,
-		CompletionTokens: completion,
-		TTFTMs:           *ttft,
-		DecodeMs:         decodeMs,
-		ServiceMs:        serviceMs,
+		CompletionTokens: generated,
 		At:               s.now(),
-	})
+	}
+	if ttft := timing.routingTTFTMs(); ttft != nil {
+		obs.TTFTMs = *ttft
+		if decode := timing.routingDecodeMs(); decode != nil {
+			obs.DecodeMs = *decode
+		}
+		if service := timing.routingServiceMs(); service != nil {
+			obs.ServiceMs = *service
+		}
+	} else {
+		if hidden {
+			return
+		}
+		service := timing.routingEndToEndServiceMs()
+		if service == nil {
+			return
+		}
+		obs.EndToEnd = true
+		obs.ServiceMs = *service
+		obs.RequestTokens = int64(b.state.routingEstimatedTokens)
+	}
+	s.perf.Observe(obs)
+}
+
+// perfHiddenOutputFactor: a reported completion above this many times the
+// generated-output estimate (plus PerfMinDecodeTokens) means generation the
+// coordinator did not see, such as reasoning.
+const perfHiddenOutputFactor = 2
+
+// perfOutputBytesPerToken converts generated bytes into the SPEC-002-R005
+// output token estimate.
+const perfOutputBytesPerToken = 4
+
+// generatedOutputTokens estimates the tokens of the content and tool calls the
+// coordinator delivered for an attempt, from its own settlement output: the
+// same quantity for streamed and non-streamed responses.
+func generatedOutputTokens(output *billing.SettlementOutput) int64 {
+	if output == nil || output.RelayBlindResponseSHA256 != "" {
+		return 0
+	}
+	n := int64(len(output.Content))
+	for _, call := range output.ToolCalls {
+		n += int64(len(call.Name) + len(call.Arguments))
+	}
+	return (n + perfOutputBytesPerToken - 1) / perfOutputBytesPerToken
 }

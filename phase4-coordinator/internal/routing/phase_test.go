@@ -16,12 +16,12 @@ func phaseProvider(id string, free, total int) pool.Provider {
 // decode rates.
 func warm(s *PerfStore, id string, ttftMs, prefillTPS, decodeTPS float64) {
 	decodeMs := 1000.0
-	serviceMs := ttftMs + decodeMs
-	// Prefill is input over service time; prompts here are prefill-dominated.
-	prompt := int64(prefillTPS * serviceMs / 1000)
 	completion := int64(decodeTPS) + 1
 	for i := 0; i < PerfFreshMinSamples; i++ {
-		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: prompt, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: serviceMs, At: perfNow})
+		// A short-prompt attempt gives TTFT and decode; a prefill-dominated one
+		// with no output gives prefill as input over the service time.
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: perfNow})
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: int64(prefillTPS), TTFTMs: ttftMs, ServiceMs: 1000, At: perfNow})
 	}
 }
 
@@ -174,17 +174,72 @@ func TestRouteTraceHeaderGrammar(t *testing.T) {
 		t.Fatal("no profile must be unknown")
 	}
 	p.EngineProfile = &pool.EngineProfile{EngineFamily: "continuous_batching"}
-	h := RouteTraceHeader(PhaseLongInput, BasisMeasured, true, EngineClass(p), LatencyClass(PhaseLongInput, 20000, PerfEvidence{TTFTMs: 100, PrefillTPS: 5000, PrefillSamples: 3}, true))
+	ttft := func(ms float64) PerfEvidence {
+		return PerfEvidence{TTFTMs: ms, TTFTSamples: PerfFreshMinSamples, TTFTLastObserved: perfNow}
+	}
+	prefill := PerfEvidence{TTFTMs: 100, PrefillTPS: 5000, PrefillSamples: PerfFreshMinSamples, PrefillLastObserved: perfNow}
+	h := RouteTraceHeader(PhaseLongInput, BasisMeasured, true, EngineClass(p), LatencyClass(PhaseLongInput, 20000, prefill, perfNow))
 	if !grammar.MatchString(h) || h != "v=1; phase=long_input; basis=measured; evidence=fresh; engine=continuous_batching; latency=high" {
 		t.Fatalf("header %q", h)
 	}
-	if got := LatencyClass(PhaseInteractive, 10, PerfEvidence{TTFTMs: 100}, true); got != "low" {
+	if got := LatencyClass(PhaseInteractive, 10, ttft(100), perfNow); got != "low" {
 		t.Fatalf("latency %s", got)
 	}
-	if got := LatencyClass(PhaseInteractive, 10, PerfEvidence{TTFTMs: 1000}, true); got != "medium" {
+	if got := LatencyClass(PhaseInteractive, 10, ttft(1000), perfNow); got != "medium" {
 		t.Fatalf("latency %s", got)
 	}
-	if got := LatencyClass(PhaseInteractive, 10, PerfEvidence{TTFTMs: 100}, false); got != "unknown" {
+	if got := LatencyClass(PhaseInteractive, 10, ttft(100), perfNow.Add(PerfFreshMaxAge+time.Second)); got != "unknown" {
 		t.Fatalf("latency %s", got)
+	}
+	// Decode-only evidence (non-streamed traffic) says nothing about the
+	// first token: no TTFT is never read as fast.
+	decodeOnly := PerfEvidence{DecodeTPS: 80, DecodeSamples: PerfFreshMinSamples, DecodeLastObserved: perfNow, LastObserved: perfNow}
+	for _, phase := range []Phase{PhaseInteractive, PhaseThroughput, PhaseLongInput} {
+		if got := LatencyClass(phase, 10, decodeOnly, perfNow); got != "unknown" {
+			t.Fatalf("%s decode-only latency %s", phase, got)
+		}
+	}
+}
+
+// warmEndToEnd gives provider id fresh decode-only evidence, as non-streamed
+// traffic does.
+func warmEndToEnd(s *PerfStore, id string, decodeTPS float64) {
+	for i := 0; i < PerfFreshMinSamples; i++ {
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", EndToEnd: true, RequestTokens: 10, PromptTokens: 10, CompletionTokens: int64(decodeTPS), ServiceMs: 1000, At: perfNow})
+	}
+}
+
+// Non-streamed evidence ranks the throughput phase, alone or mixed with
+// streamed evidence, and never ranks a phase that needs a first-token time.
+func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
+	s := NewPerfStore()
+	warmEndToEnd(s, "slow", 20)
+	warmEndToEnd(s, "fast", 80)
+	candidates := []pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}
+	d := PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
+	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
+		t.Fatalf("throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
+	}
+	// Mixed: a streamed provider's decode competes with a non-streamed one's.
+	warm(s, "streamed", 50, 1000, 40)
+	candidates = []pool.Provider{phaseProvider("streamed", 1, 1), phaseProvider("fast", 1, 1)}
+	d = PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
+	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
+		t.Fatalf("mixed throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
+	}
+	// Interactive: decode-only records are unmeasured, not fast. With one
+	// TTFT-fresh candidate the objective order is kept.
+	candidates = []pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1), phaseProvider("streamed", 1, 1)}
+	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, 0.99, 0)
+	if d.Basis != BasisFallback || d.Fresh != 1 || ids(candidates)[0] != "slow" {
+		t.Fatalf("interactive: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
+	}
+	if _, scored := d.Scores["fast"]; scored {
+		t.Fatal("a decode-only record was scored for interactive")
+	}
+	// Long input needs prefill or TTFT evidence.
+	d = PhaseOrder([]pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}, "m", PhaseLongInput, s, perfNow, 0.99, 0)
+	if d.Basis != BasisFallback || d.Fresh != 0 {
+		t.Fatalf("long input: basis=%s fresh=%d", d.Basis, d.Fresh)
 	}
 }
