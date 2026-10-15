@@ -154,6 +154,35 @@ SELECT id, 'force_credit', 'alice', 'matured credit', ?, '2000-01-01T00:00:00.00
 	}
 }
 
+// SPEC-022 R-15.11: lifetime totals and the fault count add the rolled-up
+// ledger aggregates.
+func TestStoreOverviewAddsLedgerRollups(t *testing.T) {
+	_, db := newTestExplorer(t, nil)
+	now := fixedExplorerTime()
+	base, err := Store{}.Overview(context.Background(), db, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO ledger_settled_rollups (
+    settlement_id, provider_id, hour_utc, model, fault_flag, credit_count,
+    gross_credits, provider_credits, operator_credits, min_ts_utc, max_ts_utc
+) VALUES (1, 'provider_seed', '2026-01-05T10', 'llama', 'breaker_qualifying', 3, 100, 90, 10,
+          '2026-01-05T10:00:00.000000000Z', '2026-01-05T10:59:00.000000000Z')`); err != nil {
+		t.Fatalf("insert rollup: %v", err)
+	}
+	overview, err := Store{}.Overview(context.Background(), db, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	was, got := base["ledger"].(map[string]any), overview["ledger"].(map[string]any)
+	for key, add := range map[string]int64{"total_gross_credits": 100, "total_provider_credits": 90, "total_operator_credits": 10, "fault_count": 3, "current_window_provider_credits": 0} {
+		if got[key].(int64) != was[key].(int64)+add {
+			t.Fatalf("%s=%v want %v+%d", key, got[key], was[key], add)
+		}
+	}
+}
+
 func TestStoreActivitySinceCursorOnlyReturnsNewerRows(t *testing.T) {
 	_, db := newTestExplorer(t, nil)
 	result, err := Store{}.Activity(context.Background(), db, fixedExplorerTime().Add(-time.Hour), fixedExplorerTime().Add(time.Hour), "", "", "", 10)

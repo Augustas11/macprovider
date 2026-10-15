@@ -1,11 +1,30 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.5
+Version: v0.4.6
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.6
+
+Issue #1793 (slice 8): settled ledger rollup. R-15.1 no longer keeps every
+settled ledger detail row hot: new R-15.11 rolls a request's credits,
+operator credits, provider identity snapshots, and evidence tombstones up
+into per-payout, per-provider, per-hour, per-model, per-fault-flag
+aggregates (`ledger_settled_rollups`) once its evidence is archived and
+every credit settled into a live payout whose window is
+`billing.ledger_rollup.min_settlement_cycles` (default 5) completed windows
+old and older than the `request_log` window. The rows go to a verified
+archive first (R-15.3, R-15.4). Payout rows, settlement windows, quarantine
+resolutions, ceiling restatements, and frozen finality stay hot; every
+reader of payable totals, payouts, and earnings adds the aggregates, so
+their totals do not change. Evidence tombstones and rollup rows keep the
+credit's pool binding, so creator earnings keep counting archived credits
+(they lost them once the route snapshot left). R-15.9 adds billing contract
+6, recorded in the first rollup transaction. The `request_log` window is now 14 days by default
+(SPEC-005 §2.1b). This version follows v0.4.5.
 
 ### v0.4.5
 
@@ -2066,7 +2085,11 @@ hot coordinator database: `settlement_route_snapshots`,
 route snapshots in the route-snapshot journal database. It MUST NOT delete
 `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`,
 `ledger_settlement_windows`, `ledger_quarantine_resolutions`, or any other
-settlement or payout row. The money record stays hot.
+settlement or payout row. The money record stays hot. (v0.4.6) Only the
+R-15.11 ledger rollup may later replace settled credit, operator credit,
+provider identity, and tombstone rows by their per-payout aggregates; payout,
+settlement-window, quarantine-resolution, and ceiling-restatement rows are
+never deleted.
 
 R-15.2. Finality point. Retention works on whole requests. A request is
 eligible only when every one of the following holds:
@@ -2229,7 +2252,11 @@ records:
 
 - a tombstone row for each archived ledger credit, in
   `settlement_evidence_archived_credits`. It holds the archive id and whether
-  the credit had a literal closed, valid, `verified` verdict.
+  the credit had a literal closed, valid, `verified` verdict, and (v0.4.6)
+  the `pool_id` of the first route snapshot of its attempt that carries one,
+  so the SPEC-043-R010 creator earnings read keeps the credit's pool binding
+  after its route snapshot leaves. Tombstones written before v0.4.6 carry no
+  pool binding.
 - per-provider counts of archived verdicts by outcome and receipt result, in
   `settlement_evidence_archived_verdict_counts`.
 
@@ -2305,6 +2332,10 @@ leave a credit tombstoned before settlement unpaid and could quarantine it.
 Contract 5 is recorded in the delete transaction that first tombstones an
 unsettled credit, so from that commit a contract-4 release refuses the
 database at open. Until then the database stays readable by contract 4.
+(v0.4.6) A contract-5 coordinator does not add `ledger_settled_rollups` to
+payable totals or payout revalidation, so it would under-report earnings and
+void a `ready` payout whose credits rolled up. Contract 6 is recorded in the
+first rollup transaction.
 
 R-15.10. Hot footprint. Evidence that is already held elsewhere leaves the
 hot databases early, and no column or index holds what another already
@@ -2364,6 +2395,51 @@ holds:
    written and verified as R-15.3 and R-15.4 archives are, and the archives
    hold the audit history for `storage.audit_log_retention_days`
    (SPEC-002 R-7.10.2a).
+
+R-15.11. (v0.4.6) Settled ledger rollup. A request's ledger detail rows
+(`ledger_request_credits`, `ledger_operator_credits`,
+`ledger_provider_identity_snapshots`, and its
+`settlement_evidence_archived_credits` tombstones) MAY leave the hot store
+when every credit of the request:
+
+- is tombstoned by an evidence archive whose status is `deleted`;
+- is payable, unquarantined, with no quarantine resolution and no ceiling
+  restatement; and
+- settled into a `ready` or `consumed` payout whose `window_end_utc` is at or
+  before the end of the window that has
+  `billing.ledger_rollup.min_settlement_cycles` (default 5, at least 2, and
+  at least 31 days at the cadence) completed windows after it, and at or
+  before now minus `storage.request_log_retention_days` minus a day.
+
+The rows are written to an archive verified as R-15.3 and R-15.4 require, with
+the request's payout rows as reference copies. Deletion runs in short
+`BEGIN IMMEDIATE` transactions that re-check every condition and refuse a
+request whose hot rows are not exactly the archived ones. In the same
+transaction each deleted credit is added to `ledger_settled_rollups`, keyed
+by `(settlement_id, provider_id, hour_utc, model, fault_flag, pool_id)`
+(the tombstone's pool binding, empty when none): credit count, gross,
+provider, and operator sums, first and last timestamp, and the greatest
+attestation class. Rollup rows only grow and are never deleted. A
+tombstone may be deleted only after its credit is.
+
+Readers MUST add the rollup rows, so their totals do not change:
+
+- payout revalidation counts a payout's rolled-up credits as payable source
+  credits of that payout, so a `ready` payout still claims;
+- payable totals, provider totals, the provider earnings figures and their
+  rollup buckets, reconcile provider gross, the explorer overview, and the
+  SPEC-043-R010 creator earnings add the rollup rows of the provider, pool,
+  and whole hours they cover;
+- recovery never creates a credit for a `request_log` row older than the
+  newest payout window a rollup deleted credits from.
+
+The frozen settlement finality (R-15.6) of a rolled-up request stays hot, so
+a held buyer reservation still settles. The rollup runs after the nightly
+retention run with its run budget, batch size, pause, archive directory, and
+free-space floor; `billing.ledger_rollup.enabled: false` (SIGHUP-reloadable)
+stops it at the next batch. It walks payouts from a persisted cursor and
+reads each payout's credits through the provider's time index, so it never
+walks the whole ledger.
 
 R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
 row already pruned under items 1 or 2 is neither a reason to keep a request
@@ -2700,6 +2776,14 @@ hot nor a mismatch at deletion.
   evidence; nightly reconcile does not quarantine such an enforce credit;
   its money columns are immutable; and the deletion records billing contract
   5.
+- **AC-022-78 (v0.4.6):** After a ledger rollup, the admin summary, provider
+  listing, provider earnings (rollup and view paths), earnings buckets,
+  explorer overview, and payable sums are unchanged; the ready payout still
+  revalidates and claims; recovery does not re-credit a rolled-up request; a
+  request changed after export stays hot; and two identical ledgers, one kept
+  hot and one archived early and rolled up, settle and claim identical
+  payouts. Folding `request_log` into `wholesale_usage_daily` leaves every
+  D1a statement unchanged.
 
 ## Implementation sequencing
 

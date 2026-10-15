@@ -410,6 +410,39 @@ These run without the nightly job and need no operator step:
   (SPEC-022 R-11.1.2): the ingested event carries the attempt and receipt
   identity only, and verifier checks are reduced to `unmet_checks`.
 
+## 8. Ledger rollup and the request_log window (SPEC-022 R-15.11, SPEC-005 §2.1b, §7.8)
+
+These run without an operator step once the release is deployed.
+
+- **Ledger rollup.** After each nightly retention run, the rollup walks
+  payouts from a persisted cursor. A request rolls up when its evidence is
+  archived and every credit settled into a `ready` or `consumed` payout whose
+  window is `billing.ledger_rollup.min_settlement_cycles` (default 5)
+  completed windows old and older than the `request_log` window. Its credits,
+  operator credits, provider identity snapshots, and tombstones go to a
+  verified `ledger-rollup-*.jsonl.gz` archive in the retention archive
+  directory. They are then replaced in short transactions by per-payout,
+  per-hour, per-model rows in `ledger_settled_rollups`. Payout rows,
+  settlement windows, quarantine resolutions, and frozen finality stay hot.
+  The log line is `nightly ledger rollup finished`, with `rolled_requests`,
+  `rolled_credits`, `kept_requests`, and `payout_cursor`. The kill switch is
+  `billing.ledger_rollup.enabled: false` plus SIGHUP. Verify a rollup archive
+  from the file alone with
+  `coordinator-cli ledger-rollup-archive verify --archive <file>`.
+- **Rollback.** The first rollup transaction records billing contract 6. A
+  release from before it refuses the database from then on: it would not add
+  the rollup rows to payable totals and would void a ready payout whose
+  credits rolled up.
+- **`request_log` window.** `storage.request_log_retention_days` defaults to
+  14 (it must exceed `settlement.nightly_reconcile_window_days`). Check the
+  live `coordinator.yaml`: a value pinned to 90 there keeps the old window
+  until it is changed. Rows with an account leave only through the wholesale
+  fold into `wholesale_usage_daily`, a whole request at a time, so D1a
+  statements keep their totals. Pruning runs off the startup path in hourly
+  passes of at most five minutes. The first passes after lowering the window
+  drain the backlog in that many passes, which is why a large backlog does
+  not delay startup.
+
 ## Done criteria
 
 Issue #1793 counts as done when both of these hold:

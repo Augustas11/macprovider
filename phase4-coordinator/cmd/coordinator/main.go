@@ -441,6 +441,7 @@ func runCoordinator() (exitCode int) {
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	billingStore.SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
+	billingStore.SetLedgerRollupOptions(billing.LedgerRollupOptionsFromConfig(cfg.Billing.LedgerRollup, cfg.Billing.Retention, cfg.Settlement, cfg.Storage.RequestLogRetentionDays))
 	billingStore.SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
 	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
 		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
@@ -1667,9 +1668,25 @@ func runCoordinator() (exitCode int) {
 			Int64("archive_id", report.ArchiveID).
 			Str("archive_sha256", report.ArchiveSHA256).
 			Msg("nightly settlement evidence retention finished")
+	}, func(report billing.LedgerRollupReport, err error) {
+		event := logger.Info()
+		if err != nil {
+			event = logger.Error().Err(err)
+		}
+		event.Str("event", "ledger_rollup").
+			Str("status", report.Status).
+			Str("cutoff_window_end_utc", report.CutoffWindowEndUTC).
+			Int64("payout_cursor", report.PayoutCursor).
+			Int("archives", report.Archives).
+			Int("rolled_requests", report.RolledRequests).
+			Int64("rolled_credits", report.RolledCredits).
+			Int("kept_requests", report.KeptRequests).
+			Str("archive_sha256", report.ArchiveSHA256).
+			Str("reason", report.Error).
+			Msg("nightly ledger rollup finished")
 	})
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, time.Duration(cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours)*time.Hour, metricsHandle, moneySQLiteActivity, logger)
-	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
+	startRequestLogRetentionPruner(shutdownCtx, foldingRequestLogPruner{fold: billingStore, log: reqLogStore}, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startAuditLogRotation(shutdownCtx, settlementReceiptAuditStore, auditLogRotationOptions(cfg), logger)
@@ -2880,28 +2897,57 @@ func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB
 	return store, nil
 }
 
+// foldingRequestLogPruner prunes request_log in two steps (SPEC-005 §2.1b):
+// the billing wholesale fold folds and deletes the rows that have an
+// account, a request at a time; the request-log pruner deletes the rest.
+type foldingRequestLogPruner struct {
+	fold interface {
+		FoldWholesaleRequestLog(context.Context, time.Time) (int64, error)
+	}
+	log requestLogPruner
+}
+
+func (p foldingRequestLogPruner) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	folded, err := p.fold.FoldWholesaleRequestLog(ctx, cutoff)
+	if err != nil {
+		return folded, err
+	}
+	pruned, err := p.log.PruneBefore(ctx, cutoff)
+	return folded + pruned, err
+}
+
+// requestLogPrunePassBudget bounds one request_log prune pass; a pass that
+// runs out continues an hour later, so a lowered retention window drains in
+// bounded passes instead of one long delete.
+const requestLogPrunePassBudget = 5 * time.Minute
+
 func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
 	prune := func() {
 		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
-		deleted, err := store.PruneBefore(ctx, cutoff)
-		if err != nil {
-			logger.Warn().Err(err).Time("cutoff", cutoff).Msg("request_log retention prune failed")
+		passCtx, cancel := context.WithTimeout(ctx, requestLogPrunePassBudget)
+		defer cancel()
+		deleted, err := store.PruneBefore(passCtx, cutoff)
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn().Err(err).Time("cutoff", cutoff).Int64("deleted_rows", deleted).Msg("request_log retention prune failed")
 			return
 		}
 		if deleted > 0 {
-			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
+			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Bool("pass_budget_spent", err != nil).Msg("request_log retention pruned rows")
 		}
 	}
-	if pruneOnStartup {
-		prune()
-	} else {
+	if !pruneOnStartup {
 		logger.Info().Int("retention_days", retentionDays).Msg("request_log startup retention prune skipped; scheduled pruner armed")
 	}
 	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
+		// The startup pass runs here, off the startup path, so a lowered
+		// retention window never delays the listeners.
+		if pruneOnStartup {
+			prune()
+		}
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
@@ -4737,6 +4783,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		billingSnapshotCommitted, billingSnapshotID = true, snapshotID
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		billingStores[0].SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
+		billingStores[0].SetLedgerRollupOptions(billing.LedgerRollupOptionsFromConfig(cfg.Billing.LedgerRollup, cfg.Billing.Retention, cfg.Settlement, cfg.Storage.RequestLogRetentionDays))
 		if err := billingStores[0].SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "sighup"); err != nil {
 			logger.Error().Err(err).Msg("billing ceiling-restatement flag reload rejected")
 		}

@@ -1,7 +1,18 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.23 (2026-10-15, settlement through evidence tombstones)
+**Version:** 0.6.24 (2026-10-15, bounded request_log and settled ledger rollup)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.24 (2026-10-15, issue #1793):** New §2.1b bounds
+`request_log` to `storage.request_log_retention_days` (default 14, down from
+90; it must exceed the nightly reconcile window) and keeps D1a statements
+exact: rows with an account leave only through a fold into
+`wholesale_usage_daily`, a request at a time, and a statement reads the folded
+days and the live rows. New §7.8 rolls settled ledger detail rows up into
+per-payout aggregates once their payout window is
+`billing.ledger_rollup.min_settlement_cycles` (default 5) completed windows
+old; payouts, earnings views, admin totals, and statements read the same
+totals (SPEC-022 R-15.11).
 
 **Change log v0.6.23 (2026-10-15, issue #1793):** The §7 settlement sweep's
 run-local eligible set now matches `spec022_payable_request_credits` for a
@@ -777,6 +788,35 @@ It is read-only except for the v0.6.7 **D3 storage and authoring-path** reopen (
 - Billing logic MUST stay in `phase4-coordinator/internal/billing`. The Phase 5 gateway MUST NOT grow a billing package.
 **Reference discipline:** Later sections may cite D1a; they MUST NOT extend it to public buyers or introduce Stripe.
 **SPEC-050 allowance (v0.6.21).** Requests funded by a SPEC-050 MALIBU stake allowance are not partner-paid usage and are left off wholesale statements; SPEC-050-R008 owns that rule. Their provider credits follow D3/D5 unchanged (SPEC-050-R009).
+
+### 2.1b request_log retention and the D1a usage fold (v0.6.24)
+
+`request_log` keeps `storage.request_log_retention_days` (default 14). The
+value MUST exceed `settlement.nightly_reconcile_window_days` and the startup
+reconcile window, so every reconcile that reads a row still finds it. Pruning
+runs off the startup path in bounded hourly passes.
+
+Rows without an account leave at the window. Rows with an account leave only
+through the D1a usage fold, a whole `(account_id, request_id)` at a time and
+only once every row of the request is past the window, so no row's attempt
+ordinal changes while it can still be priced:
+
+- In one transaction, each status-200 row that §2.1a would price (not
+  allowance-funded) is added to `wholesale_usage_daily`, keyed by account,
+  UTC day, model, the config snapshot linked at its persisted attempt
+  ordinal, the one linked at its id ordinal, and (when neither is linked)
+  the snapshot in effect at its timestamp; the request's rows are then
+  deleted.
+- A statement prices the account's live rows in the month and its folded
+  days in the month exactly as it priced the rows: each folded key resolves
+  to the same generation, and its token sums join the same (model, rate row,
+  multiplier) group. A key whose generations conflict or do not resolve fails
+  the statement closed, as the row did.
+- `wholesale_usage_daily` rows are permanent; they hold no request id,
+  prompt, or output.
+
+Buyer receipt retrieval and the operator explorer read `request_log` and see
+the same window (SPEC-006 §5.10).
 
 ### 2.2 D2 - Settlement cadence
 
@@ -1914,6 +1954,49 @@ backfill MAY populate that column on pre-existing rows — e.g. the `charged_pro
 `provider_reported_prompt_tokens` backfill (`store.go`) — but it MUST NOT alter any credit amount
 (`gross_credits`/`provider_credits`/`operator_credits`) or the priced `prompt_tokens`. Any OTHER
 process updating tokens/rates/credits remains forbidden.
+
+### 7.8 Settled ledger rollup (v0.6.24)
+
+Settled ledger detail rows leave the hot store into per-payout aggregates
+(SPEC-022 R-15.11). A request rolls up only when every one of its credits:
+
+- settled into a `ready` or `consumed` payout (never `voided`) whose window
+  ended at or before the end of the window that has
+  `billing.ledger_rollup.min_settlement_cycles` (default 5, at least 2, and at
+  least 31 days at the configured cadence) completed windows after it, and
+  before the `request_log` window minus a day;
+- is payable, unquarantined, with no quarantine resolution and no ceiling
+  restatement; and
+- had its evidence archived by SPEC-022 R-15 (a tombstone of a deleted
+  evidence archive).
+
+Its `ledger_request_credits`, `ledger_operator_credits`,
+`ledger_provider_identity_snapshots`, and evidence tombstones are written to a
+verified archive (the R-15.3/R-15.4 mechanism) and, in one transaction per
+batch that re-checks every condition and requires every hot row to equal its
+archived copy, deleted and added to `ledger_settled_rollups` keyed by
+`(settlement_id, provider_id, hour_utc, model, fault_flag, pool_id)` with the
+credit count, gross, provider, and operator sums. Rollup rows only grow and are never
+deleted. The money record stays complete: each payout row, each settlement
+window, and the per-payout sums are kept, and every reader adds the rollup
+rows:
+
+- payout revalidation (§7.4.1) counts a payout's rolled-up credits as its
+  source credits;
+- the admin summary, provider listing, reconcile provider gross, provider
+  earnings (rollup and view paths, lifetime and ranged, models, faults), the
+  explorer overview totals, the earnings rollup buckets, and the creator
+  pool earnings add the rollup rows of their providers, pools, and whole
+  hours;
+- recovery never re-credits a `request_log` row older than the newest payout
+  window a rollup deleted credits from.
+
+Per-request listings (explorer ledger and session detail) cover hot rows only;
+the archive holds the rolled-up rows. The frozen settlement finality of a
+rolled-up request stays hot (SPEC-022 R-15.6). The run follows the nightly
+evidence retention run under its run budget, batch size, pause, archive
+directory, and free-space floor; `billing.ledger_rollup.enabled: false`
+(SIGHUP-reloadable) stops it.
 
 ## 8. Multi-attempt attribution (D10)
 

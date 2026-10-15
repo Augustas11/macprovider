@@ -520,6 +520,37 @@ SELECT `+hk+`, model, COUNT(*)
 		}
 		out.add(hour, model, func(a *earningsBucketAgg) { a.faultCount = count })
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// SPEC-022 R-15.11: rolled-up credits were payable and keep their hour
+	// and model in ledger_settled_rollups.
+	rwhere, rargs := ledgerRollupWhere(providerID, loHour, hiHour)
+	rows, err = q.QueryContext(ctx, `
+SELECT hour_utc, model, SUM(credit_count), SUM(provider_credits),
+       SUM(CASE WHEN fault_flag != 'none' THEN credit_count ELSE 0 END)
+  FROM ledger_settled_rollups
+ WHERE `+rwhere+`
+ GROUP BY 1, 2`, rargs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hour, model string
+		var count, credits, faults int64
+		if err := rows.Scan(&hour, &model, &count, &credits, &faults); err != nil {
+			return nil, err
+		}
+		out.add(hour, model, func(a *earningsBucketAgg) {
+			a.payableCount += count
+			a.payableCredits += credits
+			a.faultCount += faults
+		})
+	}
 	return out, rows.Err()
 }
 

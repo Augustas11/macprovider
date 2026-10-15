@@ -371,6 +371,29 @@ type evidenceRetentionRuntime struct {
 	mu         sync.Mutex
 	settings   *EvidenceRetentionOptions
 	lastReport *EvidenceRetentionReport
+	// rollup holds the SPEC-022 R-15.11 ledger rollup settings; the nightly
+	// job runs the rollup after retention.
+	rollup *LedgerRollupOptions
+}
+
+// SetLedgerRollupOptions installs the effective ledger rollup settings.
+func (s *Store) SetLedgerRollupOptions(opts LedgerRollupOptions) {
+	if s == nil {
+		return
+	}
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	copied := opts
+	s.evidenceRetention.rollup = &copied
+}
+
+func (s *Store) ledgerRollupOptions() (LedgerRollupOptions, bool) {
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	if s.evidenceRetention.rollup == nil {
+		return LedgerRollupOptions{}, false
+	}
+	return *s.evidenceRetention.rollup, true
 }
 
 // SetEvidenceRetentionOptions installs the effective retention settings for
@@ -492,6 +515,9 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
 		{"settlement_evidence_retention_state", "last_lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
 		{"settlement_evidence_retention_state", "lap_holds_cursor", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_holds_cursor INTEGER NOT NULL DEFAULT 0`},
 		{"settlement_evidence_archives", "min_credit_id", `ALTER TABLE settlement_evidence_archives ADD COLUMN min_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(min_credit_id >= 0)`},
+		// #1793: the pool binding of the credit's attempt, so SPEC-043-R010
+		// creator earnings keep counting it after its route snapshot leaves.
+		{"settlement_evidence_archived_credits", "pool_id", `ALTER TABLE settlement_evidence_archived_credits ADD COLUMN pool_id TEXT NULL`},
 	}
 	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS settlement_evidence_retention_holds (
@@ -2451,8 +2477,8 @@ VALUES (?, ?, ?, ?, ?)`, f.scopeHash, req.RequestID, archiveID, f.json, stamp); 
 		for _, c := range b.credits {
 			verified := archivedCreditVerified(c, b.evidence["settlement_receipt_verdicts"])
 			if _, err := conn.ExecContext(ctx, `
-INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc)
-VALUES (?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stamp); err != nil {
+INSERT INTO settlement_evidence_archived_credits (request_credit_id, request_id, archive_id, spec022_verified, archived_at_utc, pool_id)
+VALUES (?, ?, ?, ?, ?, ?)`, c.id, req.RequestID, archiveID, boolInt(verified), stamp, archivedCreditPoolID(c, b.evidence["settlement_route_snapshots"])); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -2542,6 +2568,27 @@ SELECT finality_json FROM settlement_evidence_archived_finality
 		return RequestSettlementFinality{}, false, fmt.Errorf("decode archived settlement finality: %w", err)
 	}
 	return finality, true, nil
+}
+
+// archivedCreditPoolID is the pool binding creator earnings read for the
+// credit: the pool_id of the first route snapshot (by id) of its attempt
+// that carries one, or nil.
+func archivedCreditPoolID(c retentionCredit, snapshots []archiveRow) any {
+	var best int64 = -1
+	var pool any
+	for _, srs := range snapshots {
+		a, _ := srs.int64("attempt_n")
+		p, _ := srs.str("provider_id")
+		id, _ := srs.int64("id")
+		poolID, ok := srs.str("pool_id")
+		if a != c.attemptN || p != c.providerID || !ok {
+			continue
+		}
+		if best < 0 || id < best {
+			best, pool = id, poolID
+		}
+	}
+	return pool
 }
 
 func requestHasUnsettledCredit(b requestEvidenceBundle) bool {
@@ -2765,9 +2812,10 @@ func evidenceRetentionLogLine(report EvidenceRetentionReport) string {
 }
 
 // StartEvidenceRetention runs retention daily at 03:00 UTC, away from the
-// 00:00 nightly reconcile and the Monday 00:00 weekly settlement. It reads
-// the installed options on each tick and does nothing while disabled.
-func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRetentionReport, error)) {
+// 00:00 nightly reconcile and the Monday 00:00 weekly settlement, and then
+// the ledger rollup. It reads the installed options on each tick and skips
+// whichever is disabled.
+func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRetentionReport, error), rollupLogf ...func(LedgerRollupReport, error)) {
 	go func() {
 		for {
 			now := time.Now().UTC()
@@ -2782,14 +2830,20 @@ func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRe
 				return
 			case <-timer.C:
 			}
-			opts, ok := s.evidenceRetentionOptions()
-			if !ok || !opts.Enabled {
-				continue
+			if opts, ok := s.evidenceRetentionOptions(); ok && opts.Enabled {
+				report, err := s.RunEvidenceRetention(ctx, opts)
+				log.Print(evidenceRetentionLogLine(report))
+				if logf != nil {
+					logf(report, err)
+				}
 			}
-			report, err := s.RunEvidenceRetention(ctx, opts)
-			log.Print(evidenceRetentionLogLine(report))
-			if logf != nil {
-				logf(report, err)
+			if ropts, ok := s.ledgerRollupOptions(); ok && ropts.Enabled {
+				report, err := s.RunLedgerRollup(ctx, ropts)
+				for _, f := range rollupLogf {
+					if f != nil {
+						f(report, err)
+					}
+				}
 			}
 		}
 	}()

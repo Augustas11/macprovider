@@ -373,7 +373,11 @@ func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error
 	if err := pruneBatched(ctx, s.db, `DELETE FROM request_idempotency_keys WHERE rowid IN (SELECT rowid FROM request_idempotency_keys WHERE julianday(created_at_utc) < julianday(?) LIMIT ?)`, cutoffText); err != nil {
 		return 0, err
 	}
-	return pruneBatchedCounting(ctx, s.db, `DELETE FROM request_log WHERE rowid IN (SELECT rowid FROM request_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`, cutoffText)
+	// SPEC-005 §2.1b: rows with an account leave through the billing
+	// wholesale fold (billing.Store.FoldWholesaleRequestLog), a request at a
+	// time, so a D1a statement keeps their usage and no attempt ordinal
+	// shifts under a row still to be priced.
+	return pruneBatchedCounting(ctx, s.db, `DELETE FROM request_log WHERE rowid IN (SELECT rowid FROM request_log WHERE account_id IS NULL AND julianday(ts_utc) < julianday(?) LIMIT ?)`, cutoffText)
 }
 
 // pruneBatchYieldMs is the sleep between full batches so concurrent

@@ -100,7 +100,10 @@ CREATE TABLE IF NOT EXISTS wholesale_statement_line_items (
 );
 CREATE INDEX IF NOT EXISTS idx_wsli_statement ON wholesale_statement_line_items(wholesale_statement_id);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.ensureWholesaleUsageDailyTable(ctx)
 }
 
 // wholesaleUSDPeg is the process-global credits→USD peg. Rates never come

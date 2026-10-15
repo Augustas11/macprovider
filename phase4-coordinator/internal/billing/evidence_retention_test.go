@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -22,6 +23,7 @@ import (
 // requests whose settlement window is two completed cycles old.
 type retentionFixture struct {
 	store       *Store
+	reqStore    *requestlog.Store
 	base        SettlementVerifyInput
 	windowStart time.Time
 	windowEnd   time.Time
@@ -36,8 +38,8 @@ func newRetentionFixture(t *testing.T, withJournal bool) *retentionFixture {
 	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
 	base := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
 	base.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
-	_, store := newRequestAndBillingStores(t)
-	f := &retentionFixture{store: store, base: base, inputs: map[string]SettlementVerifyInput{}}
+	reqStore, store := newRequestAndBillingStores(t)
+	f := &retentionFixture{store: store, reqStore: reqStore, base: base, inputs: map[string]SettlementVerifyInput{}}
 	f.windowStart, f.windowEnd = settlementWindowForInput(base)
 	now := f.windowEnd.AddDate(0, 0, 40)
 	store.now = func() time.Time { return now }
@@ -1358,6 +1360,18 @@ func TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal(t 
 	}
 	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id = ? AND finality_at_utc IS NOT NULL`, snapshotID); got != 1 {
 		t.Fatalf("archived attempt left the pool-proven rollup: rows=%d", got)
+	}
+	// #1793: the tombstone keeps the pool binding, so creator earnings still
+	// count both pool credits after their route snapshots left.
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE pool_id = 'pool-a'`); got != 2 {
+		t.Fatalf("tombstones with the pool binding=%d want 2", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_id = ? AND pool_id IS NULL`, f.inputs["plain"].RequestID); got != 1 {
+		t.Fatal("a global request's tombstone carries a pool binding")
+	}
+	earnings, err := f.store.CreatorPoolEarnings(ctx, []string{f.base.ProviderID}, []string{"pool-a"}, time.Time{}, time.Time{})
+	if err != nil || len(earnings) != 1 || earnings[0].PayableRequests != 2 {
+		t.Fatalf("creator earnings after archive=%+v err=%v", earnings, err)
 	}
 }
 

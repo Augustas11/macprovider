@@ -50,22 +50,50 @@ func (s *Store) CreatorPoolEarnings(ctx context.Context, providerIDs, poolIDs []
 	// The route snapshot is the immutable pool binding of a settled attempt
 	// (SPEC-043-R010); a credit without a pool-bound snapshot is not pool
 	// earnings.
+	// SPEC-022 R-15.6/R-15.11 (#1793): an archived credit keeps its pool
+	// binding on its tombstone, and a rolled-up credit in its rollup row.
+	rollupRange := ""
+	var rollupArgs []any
+	if rangeSQL != "" {
+		rollupRange = " AND hour_utc >= ? AND hour_utc < ?"
+		rollupArgs = append(rollupArgs, earningsHourKey(from.Truncate(time.Hour)), earningsHourKey(to.Add(time.Hour-time.Nanosecond).Truncate(time.Hour)))
+	}
+	for _, id := range providerIDs {
+		rollupArgs = append(rollupArgs, id)
+	}
+	for _, id := range poolIDs {
+		rollupArgs = append(rollupArgs, id)
+	}
+	args = append(args, rollupArgs...)
 	query := `
-SELECT pool_id, COUNT(*), COALESCE(SUM(provider_credits), 0)
+SELECT pool_id, SUM(n), COALESCE(SUM(provider_credits), 0)
   FROM (
-    SELECT p.provider_credits AS provider_credits,
-           (SELECT srs.pool_id
-              FROM settlement_route_snapshots srs
-             WHERE srs.request_id = p.request_id
-               AND srs.attempt_n = p.attempt_n
-               AND srs.provider_id = p.provider_id
-               AND srs.pool_id IS NOT NULL
-             ORDER BY srs.id
-             LIMIT 1) AS pool_id
-      FROM spec022_payable_request_credits p
-     WHERE p.provider_id IN (` + sqlPlaceholders(len(providerIDs)) + `)` + rangeSQL + `
+    SELECT pool_id, COUNT(*) AS n, COALESCE(SUM(provider_credits), 0) AS provider_credits
+      FROM (
+        SELECT p.provider_credits AS provider_credits,
+               COALESCE((SELECT srs.pool_id
+                  FROM settlement_route_snapshots srs
+                 WHERE srs.request_id = p.request_id
+                   AND srs.attempt_n = p.attempt_n
+                   AND srs.provider_id = p.provider_id
+                   AND srs.pool_id IS NOT NULL
+                 ORDER BY srs.id
+                 LIMIT 1),
+                 (SELECT a.pool_id FROM settlement_evidence_archived_credits a
+                   WHERE a.request_credit_id = p.id)) AS pool_id
+          FROM spec022_payable_request_credits p
+         WHERE p.provider_id IN (` + sqlPlaceholders(len(providerIDs)) + `)` + rangeSQL + `
+      )
+     WHERE pool_id IN (` + sqlPlaceholders(len(poolIDs)) + `)
+     GROUP BY pool_id
+    UNION ALL
+    SELECT pool_id, SUM(credit_count), SUM(provider_credits)
+      FROM ledger_settled_rollups
+     WHERE pool_id != ''` + rollupRange + `
+       AND provider_id IN (` + sqlPlaceholders(len(providerIDs)) + `)
+       AND pool_id IN (` + sqlPlaceholders(len(poolIDs)) + `)
+     GROUP BY pool_id
   )
- WHERE pool_id IN (` + sqlPlaceholders(len(poolIDs)) + `)
  GROUP BY pool_id
  ORDER BY pool_id`
 	rows, err := s.reader().QueryContext(ctx, query, args...)

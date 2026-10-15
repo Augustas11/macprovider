@@ -75,37 +75,9 @@ func (s *Store) wholesaleLineTotals(ctx context.Context, accountID, startText, e
 	// looked up independently; an identity with a NULL config_snapshot_id
 	// counts as absent. UNIQUE(request_id, attempt_n, provider_assigned_id)
 	// makes each lookup return at most one identity.
-	identityAt := func(ordinal string) string {
-		return `FROM ledger_provider_identity_snapshots lpis
-         WHERE lpis.request_id = r.request_id
-           AND lpis.provider_assigned_id = r.provider_assigned_id
-           AND lpis.attempt_n = r.` + ordinal
-	}
-	rows, err := s.db.QueryContext(ctx, `
-WITH r AS (
-SELECT rl.id, rl.request_id, rl.provider_assigned_id, rl.model, rl.ts_utc, rl.prompt_tokens, rl.completion_tokens,
-       `+requestLogAttemptOrdinalSQL("rl")+` AS attempt_ordinal,
-       `+requestLogIDOrdinalSQL("rl")+` AS id_ordinal
-  FROM request_log rl
- WHERE rl.account_id = ?
-   AND rl.status = 200
+	rows, err := s.db.QueryContext(ctx, wholesaleRowsSQL(`rl.account_id = ?
    AND julianday(rl.ts_utc) >= julianday(?)
-   AND julianday(rl.ts_utc) < julianday(?)
-   -- SPEC-050-R008: allowance-funded requests are not partner-paid usage.
-   AND NOT EXISTS (
-       SELECT 1 FROM allowance_reservations ar
-        WHERE ar.account_id = rl.account_id
-          AND ar.request_id = rl.external_request_id
-          AND ar.funding = 'allowance')
-)
-SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
-       (SELECT lpis.config_snapshot_id `+identityAt("attempt_ordinal")+`) AS exact_snapshot_id,
-       CASE
-         WHEN r.id_ordinal > r.attempt_ordinal
-           THEN (SELECT lpis.config_snapshot_id `+identityAt("id_ordinal")+`)
-       END AS derived_snapshot_id
-  FROM r
- ORDER BY r.id`, accountID, startText, endText)
+   AND julianday(rl.ts_utc) < julianday(?)`), accountID, startText, endText)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +88,11 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 		completion sql.NullInt64
 		exact      sql.NullInt64
 		derived    sql.NullInt64
+		// folded rows (SPEC-005 §2.1b) carry their request count and the
+		// generation in effect at their timestamps.
+		folded     bool
+		count      int64
+		tsSnapshot int64
 	}
 	var scan []scanned
 	for rows.Next() {
@@ -131,6 +108,19 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 		return nil, err
 	}
 	rows.Close()
+	folded, err := s.foldedWholesaleRows(ctx, accountID, startText, endText)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range folded {
+		scan = append(scan, scanned{
+			model: f.model, tsText: f.day,
+			prompt:     sql.NullInt64{Int64: f.prompt, Valid: true},
+			completion: sql.NullInt64{Int64: f.completion, Valid: true},
+			exact:      f.exact, derived: f.derived,
+			folded: true, count: f.count, tsSnapshot: f.tsSnapshot,
+		})
+	}
 
 	generations := map[int64]wholesaleGeneration{}
 	generation := func(id int64) (wholesaleGeneration, error) {
@@ -148,7 +138,21 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 
 	lines := map[string]*wholesaleLineSums{}
 	for _, r := range scan {
-		rate, err := s.wholesaleRowRate(ctx, r.model, r.tsText, r.exact, r.derived, generation)
+		var fallback func() (wholesaleRate, error)
+		if r.folded {
+			model, tsSnapshot, day := r.model, r.tsSnapshot, r.tsText
+			fallback = func() (wholesaleRate, error) {
+				if tsSnapshot == wholesaleNoSnapshot {
+					return wholesaleRate{}, fmt.Errorf("model %q on %s: %w", model, day, ErrWholesaleNoGeneration)
+				}
+				g, err := generation(tsSnapshot)
+				if err != nil {
+					return wholesaleRate{}, err
+				}
+				return g.rateFor(model), nil
+			}
+		}
+		rate, err := s.wholesaleRowRate(ctx, r.model, r.tsText, r.exact, r.derived, generation, fallback)
 		if err != nil {
 			return nil, err
 		}
@@ -158,7 +162,11 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 			line = &wholesaleLineSums{prompt: new(big.Int), completion: new(big.Int), groups: map[wholesaleRate]*wholesaleGroup{}}
 			lines[r.model] = line
 		}
-		line.requestCount++
+		if r.folded {
+			line.requestCount += r.count
+		} else {
+			line.requestCount++
+		}
 		line.prompt.Add(line.prompt, prompt)
 		line.completion.Add(line.completion, completion)
 		group := line.groups[rate]
@@ -205,7 +213,7 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 // ids must resolve to the same (rate row, multiplier) or the statement fails
 // closed with ErrWholesaleConflictingGenerations. With neither, the snapshot
 // in effect at ts_utc prices the row.
-func (s *Store) wholesaleRowRate(ctx context.Context, model, tsText string, exact, derived sql.NullInt64, generation func(int64) (wholesaleGeneration, error)) (wholesaleRate, error) {
+func (s *Store) wholesaleRowRate(ctx context.Context, model, tsText string, exact, derived sql.NullInt64, generation func(int64) (wholesaleGeneration, error), fallback func() (wholesaleRate, error)) (wholesaleRate, error) {
 	rateAt := func(id int64) (wholesaleRate, error) {
 		g, err := generation(id)
 		if err != nil {
@@ -231,6 +239,9 @@ func (s *Store) wholesaleRowRate(ctx context.Context, model, tsText string, exac
 		return rateAt(exact.Int64)
 	case derived.Valid:
 		return rateAt(derived.Int64)
+	}
+	if fallback != nil {
+		return fallback()
 	}
 	ts, err := time.Parse(time.RFC3339Nano, tsText)
 	if err != nil {
