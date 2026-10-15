@@ -1,11 +1,35 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.4
+Version: v0.4.5
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.5
+
+Issue #1793 (slice 7): evidence leaves the hot store at verdict close plus a
+grace period instead of after two completed settlement windows. R-15.2 now
+takes the finality point T as the earlier of now minus
+`billing.retention.verdict_close_grace_hours` (default 48, 24 to 720, and at
+least the startup-scan window plus one hour) and the start of the newest
+completed nightly reconcile, but never earlier than the reconcile horizon
+before now. A request is eligible once every verdict closed and every credit
+was created before T. A credit no longer has to be settled: an unsettled,
+unquarantined, payable credit is archived with its tombstone like a settled
+one. R-15.6 makes the tombstone the settlement input for such a credit: the
+weekly settlement selects it through the tombstone exactly as the payable
+view does, so the same credits settle into the same payouts with the same
+sums, and its money columns are immutable once tombstoned. Nightly
+reconcile treats a tombstoned enforce credit as matched (the archive is its
+rederivation source, R-15.7), and the ceiling restatement never selects one.
+`billing.retention.min_settlement_cycles` still loads and is still
+validated, but no longer gates evidence retention. R-15.9 adds billing
+compatibility contract 5, recorded in the delete transaction that first
+tombstones an unsettled credit: a contract-4 coordinator neither settles
+through tombstones nor skips them in reconcile, so it refuses such a database
+at open. This version follows v0.4.4.
 
 ### v0.4.4
 
@@ -2048,18 +2072,24 @@ R-15.2. Finality point. Retention works on whole requests. A request is
 eligible only when every one of the following holds:
 
 - it has at least one ledger credit;
-- every ledger credit for the request is `settled = 1` and `quarantined = 0`;
+- every ledger credit for the request has `quarantined = 0`;
 - every credit is in `spec022_payable_request_credits`;
 - every credit has no `ledger_quarantine_resolutions` row (no force-credit
   hold and no force-void);
-- every credit's `settlement_id` names a `ledger_payout_ready` row whose
-  status is `ready` or `consumed` (never `voided`) and whose `window_end_utc`
-  is at or before the end of the settlement window that is
-  `min_settlement_cycles` completed windows (at least 2) older than the
-  newest completed window in `ledger_settlement_windows` for the configured
-  cadence;
-- every credit's `ts_utc` is older than the nightly-reconcile and
-  startup-scan horizons plus the recovery grace;
+- every credit is either unsettled with no `settlement_id`, or settled with a
+  `settlement_id` that names a `ledger_payout_ready` row whose status is
+  `ready` or `consumed` (never `voided`);
+- every credit's `ts_utc` is before the finality point T (v0.4.5), and every
+  verdict for the request closed before T: its close time, the later of its
+  `created_at_utc` and `updated_at_utc`, is before T. T is the earlier of:
+  - now minus `billing.retention.verdict_close_grace_hours` (default 48; at
+    least 24 and at least `settlement.startup_reconcile_window_hours` plus
+    one, at most 720); and
+  - the `started_at_utc` of the newest `complete` nightly reconcile run, so a
+    full reconcile pass began after the verdict closed; when no run started
+    later than the reconcile horizon before now (the nightly and startup
+    windows plus the recovery grace and one day), the reconcile horizon
+    itself, past which no reconcile reads the credit;
 - every verdict for the request is closed, and none is `pending` or
   `quarantined`;
 - every audit outbox row for the request is drained and not poisoned;
@@ -2160,8 +2190,8 @@ written to the holds table, and every lap MUST first re-check the holds
 below its start. A hold that only the deletion re-check refused because its
 settlement finality was open MUST have its finality read before it is
 archived again, so it is neither re-archived nor counted as eligible while
-the finality stays open. A too-young credit (inside the reconcile horizon, or in a
-settlement window fewer than `min_settlement_cycles` cycles old), a request
+the finality stays open. A too-young credit (created at or after the R-15.2 finality
+point T), a request
 the lap selected, and a request in a pending or failed archive keep the
 watermark below them. When a lap completes, the watermark moves to the
 lap's end or below the lowest such credit, and the run stops. A request
@@ -2211,11 +2241,26 @@ Readers MUST degrade gracefully on archived requests:
   depend on the `settled` stamp. The tombstone table is an input of the
   provider earnings rollup: its inserts, like the evidence deletions, mark
   the affected rollup hours for recompute.
+- (v0.4.5) Weekly settlement selects a tombstoned, unsettled credit through
+  its tombstone, under the same predicate the payable view applies, so a
+  credit archived before it settled settles into the same payout with the
+  same sums as it would have from live evidence. Settlement reads only
+  ledger rows, quarantine resolutions, and tombstones for such a credit;
+  removing its evidence never changes a payable sum.
+- (v0.4.5) A tombstoned credit's money columns (the columns the settled
+  money trigger protects) are immutable whether or not it settled, so the
+  archived reference copy stays the rederivation source. The ceiling
+  restatement never selects a tombstoned credit.
 - The billing mirror keeps `spec022_verified` from the tombstone.
 - Reward unlock verified-receipt counts and unranged provider receipt
   summaries add the archived verdict counts.
 - Ledger reconciliation never reports a mismatch on a settled, tombstoned
-  credit whose receipt evidence was archived.
+  credit whose receipt evidence was archived, nor (v0.4.5) on an unsettled,
+  tombstoned enforce-mode credit: its receipt-bound usage left with the
+  archive, and the archive is its rederivation source (R-15.7). An
+  unsettled, tombstoned credit of another mode is reconciled from
+  `request_log` as before; a mismatch quarantines it, which removes it from
+  the payable view as it would have before archival.
 - The settlement-finality lookup never treats an archived credit as missing
   evidence. The finality the lookup returned for each account scope of the
   request is computed just before the delete transaction, and the
@@ -2227,8 +2272,9 @@ Readers MUST degrade gracefully on archived requests:
   fully archived request returns not found; the archive is the authority for
   its receipt.
 
-R-15.7. Rederivation. The operator procedure MUST rederive a settled credit
-from the archive alone. It checks that the archived verdict is closed and
+R-15.7. Rederivation. The operator procedure MUST rederive an archived
+credit, settled or not, from the archive alone; a settlement dispute about an
+archived credit is answered from the archive the same way. It checks that the archived verdict is closed and
 payable, recomputes the credit from the archived attempt output's usage under
 the archived credit's rate contract, and checks that the result equals the
 hot ledger credit.
@@ -2253,6 +2299,12 @@ against such a database. Once a retention-capable release has opened the
 database, the coordinator rolls forward only. A rollback that restores a
 database snapshot taken before that release first opened it, together with
 the release that wrote the snapshot, stays valid. No path may lower the floor.
+(v0.4.5) A contract-4 coordinator settles only through live evidence and
+reconciles an unsettled credit only against live evidence, so it would
+leave a credit tombstoned before settlement unpaid and could quarantine it.
+Contract 5 is recorded in the delete transaction that first tombstones an
+unsettled credit, so from that commit a contract-4 release refuses the
+database at open. Until then the database stays readable by contract 4.
 
 R-15.10. Hot footprint. Evidence that is already held elsewhere leaves the
 hot databases early, and no column or index holds what another already
@@ -2587,10 +2639,13 @@ hot nor a mismatch at deletion.
   bound to the relay-blind entrypoint, basis, and profile is not payable.
 - **AC-022-70 (v0.3.0):** No artifact of an R-14 attempt contains a plaintext
   prompt or output hash. Disclosure never reports the request as `verified`.
-- **AC-022-71 (v0.4.0):** Retention never selects a request with:
-  - an unsettled, quarantined, held, or force-resolved credit;
-  - a credit settled into a voided payout, or into a window fewer than
-    `min_settlement_cycles` completed cycles old;
+- **AC-022-71 (v0.4.0, v0.4.5):** Retention never selects a request with:
+  - a quarantined, held, or force-resolved credit;
+  - a credit settled into a voided payout, or a settlement link that is
+    inconsistent (settled without a payout id, or a payout id on an
+    unsettled credit);
+  - a credit created, or a verdict closed, at or after the R-15.2 finality
+    point;
   - an open, pending, or quarantined verdict;
   - an undrained or poisoned outbox row;
   - an unmaterialized output journal row;
@@ -2631,6 +2686,20 @@ hot nor a mismatch at deletion.
   backlog. A request that can still become eligible stays in a holds table
   that every lap re-checks, or, when too young, below the watermark. A run that would write a new archive below the archive
   filesystem's free-space floor exports and deletes nothing.
+- **AC-022-76 (v0.4.4):** A verdict audit payload carries every R-11.1 field
+  once and no `attempt_id`, `receipt_verification_outcome`,
+  `pending_deadline_unix_ms`, `quarantine_zero_settle_reason`, or full
+  verifier checks. An audit row an earlier release wrote for the same outbox
+  id is accepted as delivered when the new payload's scalars match it. The
+  audit database rotation deletes nothing without a verified archive, keeps
+  any row that changed after export, refuses below the free-space floor, and
+  removes an archive only after its last day leaves the retention window.
+- **AC-022-77 (v0.4.5):** Evidence of an unsettled, payable request leaves
+  the hot store at the finality point. Weekly settlement after that produces
+  the same payouts, sums, and settlement links as settlement from live
+  evidence; nightly reconcile does not quarantine such an enforce credit;
+  its money columns are immutable; and the deletion records billing contract
+  5.
 
 ## Implementation sequencing
 

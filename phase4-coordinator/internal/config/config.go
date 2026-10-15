@@ -1786,9 +1786,16 @@ type BillingRetentionConfig struct {
 	// means "retention-archive" in the directory of the coordinator database
 	// file (storage.db_path); an explicit value must be absolute.
 	ArchiveDir string `yaml:"archive_dir"`
-	// MinSettlementCycles is how many completed settlement windows must
-	// follow the window a credit settled in. Floor 2.
+	// MinSettlementCycles still loads and is validated (floor 2) so existing
+	// configurations keep working; since SPEC-022 v0.4.5 it no longer gates
+	// evidence retention (VerdictCloseGraceHours does).
 	MinSettlementCycles int `yaml:"min_settlement_cycles"`
+	// VerdictCloseGraceHours is the SPEC-022 R-15.2 grace: a request's
+	// evidence may leave the hot store once every verdict closed and every
+	// credit was created at least this long ago (and before the start of
+	// the newest completed nightly reconcile). Default 48, in [24, 720], and
+	// at least settlement.startup_reconcile_window_hours + 1.
+	VerdictCloseGraceHours int `yaml:"verdict_close_grace_hours"`
 	// BatchSize is the number of requests deleted per short transaction.
 	BatchSize int `yaml:"batch_size"`
 	// BatchPauseMS is the pause between delete batches that yields the
@@ -2071,6 +2078,7 @@ func Default() Config {
 			Retention: BillingRetentionConfig{
 				Enabled:                     true,
 				MinSettlementCycles:         2,
+				VerdictCloseGraceHours:      48,
 				BatchSize:                   50,
 				BatchPauseMS:                200,
 				MaxRequestsPerRun:           20000,
@@ -4729,6 +4737,12 @@ func (c Config) validateBillingRetention() error {
 	r := c.Billing.Retention
 	if r.MinSettlementCycles < 2 {
 		return fmt.Errorf("billing.retention.min_settlement_cycles must be >= 2")
+	}
+	if g := r.VerdictCloseGraceHours; g < 24 || g > 720 {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must be in [24, 720]")
+	}
+	if r.VerdictCloseGraceHours <= c.Settlement.StartupReconcileWindowHours {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must exceed settlement.startup_reconcile_window_hours")
 	}
 	if r.BatchSize < 1 || r.BatchSize > 1000 {
 		return fmt.Errorf("billing.retention.batch_size must be in [1, 1000]")

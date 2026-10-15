@@ -2172,3 +2172,27 @@ func TestStorageAuditLogHotDaysDefaultAndValidation(t *testing.T) {
 		t.Fatalf("absolute audit_log_archive_dir should pass: %v", err)
 	}
 }
+
+func TestBillingRetentionVerdictCloseGraceDefaultAndValidation(t *testing.T) {
+	if got := Default().Billing.Retention.VerdictCloseGraceHours; got != 48 {
+		t.Fatalf("verdict close grace default=%d want 48", got)
+	}
+	for _, bad := range []int{0, 23, 721} {
+		cfg := validTestConfig()
+		cfg.Billing.Retention.VerdictCloseGraceHours = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verdict_close_grace_hours") {
+			t.Fatalf("verdict_close_grace_hours=%d should fail; err=%v", bad, err)
+		}
+	}
+	cfg := validTestConfig()
+	cfg.Settlement.StartupReconcileWindowHours = 48
+	cfg.Billing.Retention.VerdictCloseGraceHours = 48
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "startup_reconcile_window_hours") {
+		t.Fatalf("grace not past the startup scan window should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Billing.Retention.VerdictCloseGraceHours = 720
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("verdict_close_grace_hours=720 should pass: %v", err)
+	}
+}

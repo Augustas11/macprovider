@@ -1,7 +1,16 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.22 (2026-10-14, public-repo cleanup)
+**Version:** 0.6.23 (2026-10-15, settlement through evidence tombstones)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.23 (2026-10-15, issue #1793):** The §7 settlement sweep's
+run-local eligible set now matches `spec022_payable_request_credits` for a
+credit whose evidence SPEC-022 R-15 retention archived before it settled: the
+sweep selects it through its archived-credit tombstone, as the projection
+does (SPEC-022 v0.4.5 R-15.6). Settlement of such a credit reads only ledger
+rows, quarantine resolutions, and the tombstone, so its payout, sums, and
+settlement link are the ones live evidence would have produced. No rate,
+credit, or payout rule changes.
 
 **Change log v0.6.22 (2026-10-14, public-repo cleanup):** Editorial, no normative change: the provider economics reference moved to docs/provider-economics.md.
 

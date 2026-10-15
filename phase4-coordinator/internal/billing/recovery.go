@@ -1133,17 +1133,18 @@ INSERT OR IGNORE INTO ledger_request_credits (
 
 func reconcileExistingCreditTx(ctx context.Context, tx *sql.Tx, input HotPathInput, expected BilledRow, now string) (int64, int64, bool, bool, error) {
 	var id, gross, providerCredits, promptRate, completionRate, multiplier, share int64
-	var usageSource, faultFlag string
+	var usageSource, faultFlag, policyMode string
 	var cached, estimated sql.NullInt64
 	var quarantined, settled int
 	var settlementID sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
 SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, estimated_completion_tokens,
        prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm,
-       provider_share_bps, fault_flag, quarantined, settled, settlement_id
+       provider_share_bps, fault_flag, quarantined, settled, settlement_id,
+       COALESCE(settlement_policy_mode, 'legacy')
   FROM ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
- LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &cached, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
+ LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &cached, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID, &policyMode)
 	if err == sql.ErrNoRows {
 		return 0, 0, false, false, nil
 	}
@@ -1187,15 +1188,18 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	if err != nil {
 		return 0, 0, true, false, err
 	}
-	if !hasVerifiedReceipt && (settled == 1 || settlementID.Valid) {
+	if !hasVerifiedReceipt && (settled == 1 || settlementID.Valid || policyMode == RouteSnapshotModeEnforce) {
 		archived, err := creditEvidenceArchivedTx(ctx, tx, id)
 		if err != nil {
 			return 0, 0, true, false, err
 		}
 		if archived {
-			// SPEC-022 R-15.6: retention archived this settled credit's
-			// receipt-bound evidence; the settled ledger row stands and the
-			// archive is its rederivation source (R-15.7).
+			// SPEC-022 R-15.6: retention archived this credit's
+			// receipt-bound evidence; the ledger row stands and the archive
+			// is its rederivation source (R-15.7). Since v0.4.5 that holds
+			// for an unsettled enforce credit too, whose money columns are
+			// immutable once tombstoned. Other unsettled credits never
+			// depended on evidence and reconcile from request_log as before.
 			return gross, gross, true, false, nil
 		}
 	}

@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.22",
+      "version": "0.6.23",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.4",
+      "version": "v0.4.5",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -7369,7 +7369,10 @@
         "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig",
         "phase4-coordinator/internal/audit/rotate.go:func (s *Store) RotateClosedPeriods",
         "phase4-coordinator/internal/verifiedarchive/archive.go:func Verify",
-        "phase4-coordinator/cmd/coordinator/main.go:func startAuditLogRotation"
+        "phase4-coordinator/cmd/coordinator/main.go:func startAuditLogRotation",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) evidenceRetentionCutoffsAt",
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
+        "phase4-coordinator/internal/billing/recovery.go:func reconcileExistingCreditTx"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
@@ -7409,7 +7412,10 @@
         "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRefusesTamperedArchive",
         "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsKeepsRowChangedAfterExportAndResumes",
         "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRemovesArchivesPastRetention",
-        "phase4-coordinator/internal/verifiedarchive/archive_test.go:TestWriterRoundTripVerifiesAndDetectsTampering"
+        "phase4-coordinator/internal/verifiedarchive/archive_test.go:TestWriterRoundTripVerifiesAndDetectsTampering",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestEarlyArchivedEvidenceSettlesIntoIdenticalPayouts",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityPointFollowsGraceAndReconcile",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesUnsettledButKeepsQuarantinedHot"
       ],
       "journeys": [],
       "evidence": [],

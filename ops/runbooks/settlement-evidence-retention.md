@@ -24,14 +24,21 @@ tell the operator the expected downtime. Live changes go through
 The job works on whole requests. A request leaves hot storage only when every
 one of these is true:
 
-- Every ledger credit for the request is settled and not quarantined.
+- No ledger credit for the request is quarantined.
 - Every credit is payable (`spec022_payable_request_credits`).
 - No credit has a force-credit hold or any other quarantine resolution.
-- Every credit settled into a `ready` or `consumed` (never `voided`) payout
-  whose window is at least `min_settlement_cycles` (minimum 2) completed weekly
-  windows old.
-- Every credit is older than the nightly-reconcile and startup-scan horizons
-  plus one day.
+- Every credit is either unsettled with no payout id, or settled into a
+  `ready` or `consumed` (never `voided`) payout. Since SPEC-022 v0.4.5 a
+  credit does not have to be settled: its tombstone keeps it payable, and the
+  weekly settlement settles it through the tombstone into the same payout
+  with the same sums.
+- Every credit was created, and every verdict closed, before the finality
+  point T (`cutoff_window_end_utc` / `credit_age_cutoff_utc` in the report).
+  T is the earlier of now minus `verdict_close_grace_hours` (default 48) and
+  the start of the newest completed nightly reconcile, but never earlier than
+  the reconcile horizon (nightly and startup windows plus the recovery grace
+  and a day). With the nightly reconcile running, evidence leaves about two
+  days after its verdict closed instead of after two settlement windows.
 - Every verdict is closed, and none is pending or quarantined.
 - Every audit-outbox row is drained, and none is poisoned.
 - Every attempt-output journal row is materialized.
@@ -60,7 +67,8 @@ one of these is true:
 | `archive_dir` | empty | Absolute directory for `settlement-evidence-*.jsonl.gz` archives and their `.manifest.json` files. Empty means `retention-archive/` in the directory of the coordinator database file (for a database at `/var/lib/macprovider/coordinator.db`: `/var/lib/macprovider/retention-archive/`). Created with mode `0700` on first use. |
 | `archive_min_free_bytes` | `21474836480` (20 GiB) | A run that would write a new archive is refused (`refused_archive_disk_low`) while the archive filesystem has less free space. `0` disables this bound. |
 | `archive_min_free_percent` | `10` | Same, as a percentage of the archive filesystem. `0` disables this bound. |
-| `min_settlement_cycles` | `2` | Completed settlement windows that must follow the credit's window. Floor: 2. |
+| `verdict_close_grace_hours` | `48` | Grace after verdict close before evidence may leave (SPEC-022 R-15.2), in `[24, 720]` and above `settlement.startup_reconcile_window_hours`. |
+| `min_settlement_cycles` | `2` | Still loads and is validated (floor 2); no longer gates evidence retention since SPEC-022 v0.4.5. |
 | `batch_size` | `50` | Requests deleted per short `BEGIN IMMEDIATE` transaction. |
 | `batch_pause_ms` | `200` | Pause between delete batches and between vacuum steps. |
 | `max_requests_per_run` | `20000` | Requests per archive (the key keeps its old name so existing configs load). A run drains: it writes, verifies, and deletes archive after archive along a scan lap (below) until the lap completes, `max_scan_rows_per_run` is reached, or `run_budget_minutes` is spent. Memory does not grow with it: requests are streamed into the archive one at a time, and deletion re-reads the archive one batch at a time (at most `batch_size` requests; a batch is also flushed once it reaches 16 MiB of archived payload, so it can exceed 16 MiB by at most one request). |
@@ -344,8 +352,15 @@ restore into a scratch copy of the database, never into the live one.
   ```
 
   Never lower it by hand.
+- Since SPEC-022 v0.4.5 the first deletion that tombstones an unsettled
+  credit records contract 5 in the same transaction. A contract-4 release
+  would neither settle such a credit through its tombstone nor skip it in the
+  nightly reconcile, so it refuses the database from that commit on. Until
+  the first such deletion (the first nightly run after the deploy), the
+  previous release can still open the database.
 - Tombstones (`settlement_evidence_archived_credits`) are permanent: a trigger
-  refuses updates and deletes.
+  refuses updates and deletes. A tombstoned credit's money columns are
+  immutable (`trg_lrc_archived_money_immutable`), settled or not.
 
 ## 7. Hot footprint (SPEC-022 R-15.10)
 
