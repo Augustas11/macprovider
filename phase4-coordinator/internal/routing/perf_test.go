@@ -14,17 +14,17 @@ func observe(s *PerfStore, provider string, prompt, completion int64, ttftMs, de
 
 func TestPerfStoreEWMAAndFreshness(t *testing.T) {
 	s := NewPerfStore()
-	observe(s, "p", 1000, 101, 100, 1000, perfNow)
+	observe(s, "p", 4000, 101, 100, 1000, perfNow)
 	e, ok := s.Lookup("p", "m")
-	// Prefill is input over the whole service time: 1000 / 1.1 s.
-	if !ok || e.TTFTMs != 100 || math.Abs(e.PrefillTPS-1000/1.1) > 1e-9 || e.DecodeTPS != 100 {
+	// Prefill is input over the whole service time: 4000 / 1.1 s.
+	if !ok || e.TTFTMs != 100 || math.Abs(e.PrefillTPS-4000/1.1) > 1e-9 || e.DecodeTPS != 100 {
 		t.Fatalf("first sample: %+v", e)
 	}
 	if e.Fresh(perfNow) {
 		t.Fatal("one sample must not be fresh")
 	}
-	observe(s, "p", 1000, 101, 200, 1000, perfNow)
-	observe(s, "p", 1000, 101, 200, 1000, perfNow)
+	observe(s, "p", 4000, 101, 200, 1000, perfNow)
+	observe(s, "p", 4000, 101, 200, 1000, perfNow)
 	e, _ = s.Lookup("p", "m")
 	// 100 -> 120 -> 136 with weight 0.2.
 	if math.Abs(e.TTFTMs-136) > 1e-9 || e.TTFTSamples != 3 {
@@ -44,7 +44,7 @@ func TestPerfStoreEWMAAndFreshness(t *testing.T) {
 func TestPerfStoreClampsAndThresholds(t *testing.T) {
 	s := NewPerfStore()
 	// Inflated usage cannot push rates past the clamps.
-	observe(s, "p", 10_000_000, 1_000_000, 1, 1, perfNow)
+	observe(s, "p", 100_000_000, 1_000_000, 1, 1, perfNow)
 	e, _ := s.Lookup("p", "m")
 	if e.PrefillTPS != PerfMaxPrefillTPS || e.DecodeTPS != PerfMaxDecodeTPS {
 		t.Fatalf("clamps: %+v", e)
@@ -155,5 +155,92 @@ func TestPerfPrefillUsesServiceTime(t *testing.T) {
 	}
 	if got := s.LookupMany("m", []string{"gamer", "absent"}); len(got) != 1 || got["gamer"].PrefillTPS != 2000 {
 		t.Fatalf("LookupMany = %+v", got)
+	}
+}
+
+// SPEC-002-R005: an end-to-end (non-streamed) attempt gives service
+// throughput (generated output over dispatch start to done) and prefill, and
+// never a TTFT or decode sample.
+func TestPerfStoreEndToEndObservation(t *testing.T) {
+	s := NewPerfStore()
+	e2e := func(id string, request, prompt, completion int64, serviceMs float64) {
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", EndToEnd: true, RequestTokens: request, PromptTokens: prompt, CompletionTokens: completion, TTFTMs: math.NaN(), DecodeMs: 1, ServiceMs: serviceMs, At: perfNow})
+	}
+	// 200 tokens in 4 s: 50 tokens/s, every token counted.
+	e2e("ns", 300, 300, 200, 4000)
+	e, ok := s.Lookup("ns", "m")
+	if !ok || e.ServiceTPS != 50 || e.ServiceSamples != 1 || e.DecodeSamples != 0 || e.TTFTSamples != 0 || e.TTFTMs != 0 || e.PrefillSamples != 0 || !e.TTFTLastObserved.IsZero() {
+		t.Fatalf("end-to-end service: %+v ok=%v", e, ok)
+	}
+	// A prompt-ingestion attempt is not a throughput measurement.
+	e2e("ns", PerfServiceMaxInputRatio*200+1, PerfServiceMaxInputRatio*200+1, 200, 4000)
+	if e, _ := s.Lookup("ns", "m"); e.ServiceSamples != 1 {
+		t.Fatalf("prompt-heavy attempt gave a service sample: %+v", e)
+	}
+	// The gate reads the whole request, so a cached prompt cannot hide it.
+	e2e("ns", PerfServiceMaxInputRatio*200+1, 0, 200, 4000)
+	if e, _ := s.Lookup("ns", "m"); e.ServiceSamples != 1 {
+		t.Fatalf("cached prompt-heavy attempt gave a service sample: %+v", e)
+	}
+	// A prefill-dominated end-to-end attempt gives prefill only.
+	e2e("pf", 8000, 8000, 10, 2000)
+	if e, _ := s.Lookup("pf", "m"); e.PrefillTPS != 4000 || e.PrefillSamples != 1 || e.ServiceSamples != 0 || e.TTFTSamples != 0 {
+		t.Fatalf("end-to-end prefill: %+v", e)
+	}
+	// An end-to-end attempt that yields no sample creates no record.
+	e2e("none", 50, 50, 4, 1000)
+	e2e("none", 300, 300, 200, 0)
+	if _, ok := s.Lookup("none", "m"); ok {
+		t.Fatal("an end-to-end attempt without a sample created a record")
+	}
+	// The clamp still applies.
+	e2e("fast", 10, 10, 1_000_000, 1)
+	if e, _ := s.Lookup("fast", "m"); e.ServiceTPS != PerfMaxDecodeTPS {
+		t.Fatalf("clamp: %+v", e)
+	}
+	// Streamed attempts never give service throughput (their done follows
+	// the buyer writes), timed or buffered, so the response mode never
+	// decides which provider looks faster.
+	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", Streamed: true, RequestTokens: 100, CompletionTokens: 101, TTFTMs: 9000, DecodeMs: 1000, ServiceMs: 10000, At: perfNow})
+	s.Observe(PerfObservation{ProviderID: "buffered", Model: "m", Streamed: true, EndToEnd: true, RequestTokens: 100, CompletionTokens: 101, ServiceMs: 10000, At: perfNow})
+	if timed, _ := s.Lookup("timed", "m"); timed.ServiceSamples != 0 || timed.DecodeTPS != 100 || timed.TTFTSamples != 1 {
+		t.Fatalf("timed stream: %+v", timed)
+	}
+	if _, ok := s.Lookup("buffered", "m"); ok {
+		t.Fatal("a buffered stream without a sample created a record")
+	}
+}
+
+// Freshness is per signal: service-only evidence ranks throughput and nothing
+// that depends on the first token.
+func TestPerfFreshnessIsPerSignal(t *testing.T) {
+	s := NewPerfStore()
+	for i := 0; i < PerfFreshMinSamples; i++ {
+		s.Observe(PerfObservation{ProviderID: "ns", Model: "m", EndToEnd: true, RequestTokens: 100, PromptTokens: 100, CompletionTokens: 100, ServiceMs: 2000, At: perfNow})
+	}
+	e, _ := s.Lookup("ns", "m")
+	if !e.ServiceFresh(perfNow) || e.DecodeFresh(perfNow) || e.TTFTFresh(perfNow) || e.PrefillFresh(perfNow) || !e.Fresh(perfNow) {
+		t.Fatalf("service-only freshness: %+v", e)
+	}
+	if !e.FreshFor(PhaseThroughput, perfNow) || e.FreshFor(PhaseInteractive, perfNow) || e.FreshFor(PhaseLongInput, perfNow) {
+		t.Fatalf("service-only phase freshness: %+v", e)
+	}
+	// TTFT samples from long ago do not stay fresh because service is recent.
+	old := perfNow.Add(-PerfFreshMaxAge - time.Minute)
+	for i := 0; i < PerfFreshMinSamples; i++ {
+		observe(s, "mixed", 0, 0, 50, 0, old)
+		s.Observe(PerfObservation{ProviderID: "mixed", Model: "m", EndToEnd: true, RequestTokens: 100, CompletionTokens: 100, ServiceMs: 2000, At: perfNow})
+	}
+	e, _ = s.Lookup("mixed", "m")
+	if e.TTFTSamples != PerfFreshMinSamples || e.TTFTFresh(perfNow) || e.FreshFor(PhaseInteractive, perfNow) || !e.FreshFor(PhaseThroughput, perfNow) {
+		t.Fatalf("stale TTFT with recent service: %+v", e)
+	}
+	if !e.LastObserved.Equal(perfNow) || !e.TTFTLastObserved.Equal(old) {
+		t.Fatalf("observation times: %+v", e)
+	}
+	// A stale secondary signal contributes nothing.
+	stale := PerfEvidence{DecodeTPS: 100, DecodeSamples: 5, DecodeLastObserved: old, PrefillTPS: 900, PrefillSamples: 5, PrefillLastObserved: old}
+	if stale.decodeAt(perfNow, 50) != 0 || stale.prefillAt(perfNow) != 0 {
+		t.Fatal("stale secondary signal contributed")
 	}
 }
