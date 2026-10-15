@@ -176,6 +176,13 @@ INSERT INTO ledger_settled_rollups (
 		t.Fatalf("Overview: %v", err)
 	}
 	was, got := base["ledger"].(map[string]any), overview["ledger"].(map[string]any)
+	windowed, err := Store{}.Overview(context.Background(), db, time.Date(2026, 1, 5, 9, 30, 0, 0, time.UTC), time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if w := windowed["ledger"].(map[string]any)["current_window_provider_credits"]; w != int64(90) {
+		t.Fatalf("window holding the rolled-up hour=%v want 90", w)
+	}
 	for key, add := range map[string]int64{"total_gross_credits": 100, "total_provider_credits": 90, "total_operator_credits": 10, "fault_count": 3, "current_window_provider_credits": 0} {
 		if got[key].(int64) != was[key].(int64)+add {
 			t.Fatalf("%s=%v want %v+%d", key, got[key], was[key], add)

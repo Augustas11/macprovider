@@ -453,17 +453,6 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 	defer rows.Close()
 	scanned, created, quarantined := int64(0), int64(0), int64(0)
 	buyerEquivalent, providerGross := int64(0), int64(0)
-	// SPEC-022 R-15.11: a request_log row older than the newest payout window
-	// a ledger rollup deleted credits from is never re-credited; its credit,
-	// if it had one, now lives in ledger_settled_rollups.
-	var rolledBefore time.Time
-	if text, err := ledgerRolledBefore(ctx, tx); err != nil {
-		return recoveryStats{}, err
-	} else if text != "" {
-		if rolledBefore, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(text)); err != nil {
-			return recoveryStats{}, fmt.Errorf("parse ledger rollup horizon: %w", err)
-		}
-	}
 	for rows.Next() {
 		var rlID int64
 		var tsText, requestID, model, assignedID string
@@ -476,9 +465,6 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		scanned++
 		ts, err := time.Parse(time.RFC3339Nano, tsText)
-		if err == nil && !rolledBefore.IsZero() && ts.Before(rolledBefore) {
-			continue
-		}
 		if err != nil {
 			// Unparseable ts_utc must not select a rate-card snapshot from
 			// wall-clock now — that is nondeterministic across recovery runs.

@@ -26,6 +26,9 @@ const (
 	// wholesaleFoldGroupsPerTx bounds the requests one fold transaction
 	// holds the writer for.
 	wholesaleFoldGroupsPerTx = 50
+	// wholesaleFoldRowsPerTx bounds the request_log rows one fold
+	// transaction deletes (a request's rows always leave together).
+	wholesaleFoldRowsPerTx = 500
 	// wholesaleNoSnapshot marks a generation column that does not apply
 	// (identity) or did not resolve (timestamp: the statement fails closed
 	// with ErrWholesaleNoGeneration, as it did on the row).
@@ -102,20 +105,24 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 // FoldWholesaleRequestLog folds and deletes the request_log rows of every
 // (account, request) whose rows are all older than cutoff, in short
 // transactions, until none is left or ctx ends. Rows without an account are
-// left to the request-log pruner. It returns the rows deleted.
+// left to the request-log pruner. The scan walks the ts_utc index by
+// (ts_utc, rowid) keyset, so a pass reads only rows older than cutoff once.
+// It returns the rows deleted.
 func (s *Store) FoldWholesaleRequestLog(ctx context.Context, cutoff time.Time) (int64, error) {
-	cutoffText := cutoff.UTC().Format(time.RFC3339Nano)
+	cutoffText := sqliteTimeText(cutoff)
 	var deleted int64
-	var cursor int64
+	lastTS, lastRow := "", int64(0)
 	for {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
 		rows, err := s.db.QueryContext(ctx, `
-SELECT rowid, account_id, request_id FROM request_log
- WHERE rowid > ? AND account_id IS NOT NULL AND julianday(ts_utc) < julianday(?)
- ORDER BY rowid
- LIMIT ?`, cursor, cutoffText, wholesaleFoldScanChunk)
+SELECT rowid, ts_utc, account_id, request_id FROM request_log
+ WHERE ts_utc >= ? AND ts_utc < ?
+   AND NOT (ts_utc = ? AND rowid <= ?)
+   AND account_id IS NOT NULL
+ ORDER BY ts_utc, rowid
+ LIMIT ?`, lastTS, cutoffText, lastTS, lastRow, wholesaleFoldScanChunk)
 		if err != nil {
 			return deleted, err
 		}
@@ -124,13 +131,14 @@ SELECT rowid, account_id, request_id FROM request_log
 		n := 0
 		for rows.Next() {
 			var rowid int64
+			var ts string
 			var g wholesaleFoldGroup
-			if err := rows.Scan(&rowid, &g.account, &g.request); err != nil {
+			if err := rows.Scan(&rowid, &ts, &g.account, &g.request); err != nil {
 				rows.Close()
 				return deleted, err
 			}
 			n++
-			cursor = rowid
+			lastTS, lastRow = ts, rowid
 			if !seen[g] {
 				seen[g] = true
 				groups = append(groups, g)
@@ -145,13 +153,12 @@ SELECT rowid, account_id, request_id FROM request_log
 		// Short transactions with a pause between them, so the hot-path
 		// writer is never starved.
 		for len(groups) > 0 {
-			n := min(len(groups), wholesaleFoldGroupsPerTx)
-			got, err := s.foldWholesaleGroups(ctx, cutoffText, groups[:n])
+			got, done, err := s.foldWholesaleGroups(ctx, sqliteTimeText(cutoff), groups[:min(len(groups), wholesaleFoldGroupsPerTx)])
 			deleted += got
 			if err != nil {
 				return deleted, err
 			}
-			groups = groups[n:]
+			groups = groups[done:]
 			if len(groups) > 0 {
 				select {
 				case <-ctx.Done():
@@ -174,14 +181,17 @@ SELECT rowid, account_id, request_id FROM request_log
 // wholesaleFoldGroup is one (account, request): its rows leave together.
 type wholesaleFoldGroup struct{ account, request string }
 
-func (s *Store) foldWholesaleGroups(ctx context.Context, cutoffText string, groups []wholesaleFoldGroup) (int64, error) {
+// foldWholesaleGroups folds groups in one transaction until it has deleted
+// wholesaleFoldRowsPerTx rows; it returns the rows deleted and the groups it
+// got through (at least one).
+func (s *Store) foldWholesaleGroups(ctx context.Context, cutoffText string, groups []wholesaleFoldGroup) (int64, int, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	committed := false
 	defer func() {
@@ -190,12 +200,17 @@ func (s *Store) foldWholesaleGroups(ctx context.Context, cutoffText string, grou
 		}
 	}()
 	var deleted int64
+	done := 0
 	for _, g := range groups {
+		if done > 0 && deleted >= wholesaleFoldRowsPerTx {
+			break
+		}
+		done++
 		var young int
 		if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM request_log
  WHERE account_id = ? AND request_id = ? AND julianday(ts_utc) >= julianday(?)`, g.account, g.request, cutoffText).Scan(&young); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if young > 0 {
 			// A row of the request is still inside the window: the whole
@@ -204,19 +219,19 @@ SELECT COUNT(*) FROM request_log
 		}
 		rows, err := conn.QueryContext(ctx, wholesaleRowsSQL(`rl.account_id = ? AND rl.request_id = ?`), g.account, g.request)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		var fold []wholesaleFoldRow
 		for rows.Next() {
 			var r wholesaleFoldRow
 			if err := rows.Scan(&r.model, &r.tsText, &r.prompt, &r.completion, &r.exact, &r.derived); err != nil {
 				rows.Close()
-				return 0, err
+				return 0, 0, err
 			}
 			fold = append(fold, r)
 		}
 		if err := rows.Close(); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		for _, r := range fold {
 			tsSnapshot := wholesaleNoSnapshot
@@ -228,7 +243,7 @@ SELECT COUNT(*) FROM request_log
 						tsSnapshot = id
 					case errors.Is(serr, ErrNoSnapshot):
 					default:
-						return 0, serr
+						return 0, 0, serr
 					}
 				}
 			}
@@ -247,21 +262,21 @@ ON CONFLICT(account_id, day_utc, model, exact_snapshot_id, derived_snapshot_id, 
     completion_tokens = completion_tokens + excluded.completion_tokens`,
 				g.account, day, r.model, nullSnapshot(r.exact), nullSnapshot(r.derived), tsSnapshot,
 				r.prompt.Int64, r.completion.Int64); err != nil {
-				return 0, fmt.Errorf("fold wholesale usage: %w", err)
+				return 0, 0, fmt.Errorf("fold wholesale usage: %w", err)
 			}
 		}
 		res, err := conn.ExecContext(ctx, `DELETE FROM request_log WHERE account_id = ? AND request_id = ?`, g.account, g.request)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		n, _ := res.RowsAffected()
 		deleted += n
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	committed = true
-	return deleted, nil
+	return deleted, done, nil
 }
 
 func nullSnapshot(v sql.NullInt64) int64 {

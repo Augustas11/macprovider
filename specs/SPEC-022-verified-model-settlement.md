@@ -2277,7 +2277,10 @@ Readers MUST degrade gracefully on archived requests:
 - (v0.4.5) A tombstoned credit's money columns (the columns the settled
   money trigger protects) are immutable whether or not it settled, so the
   archived reference copy stays the rederivation source. The ceiling
-  restatement never selects a tombstoned credit.
+  restatement never selects a tombstoned credit, and a late
+  undelivered-output callback never quarantines or re-marks one: its
+  verdict closed payable before it was archived, and the callback reports
+  the tombstone's verified state.
 - The billing mirror keeps `spec022_verified` from the tombstone.
 - Reward unlock verified-receipt counts and unranged provider receipt
   summaries add the archived verdict counts.
@@ -2430,8 +2433,18 @@ Readers MUST add the rollup rows, so their totals do not change:
   rollup buckets, reconcile provider gross, the explorer overview, and the
   SPEC-043-R010 creator earnings add the rollup rows of the provider, pool,
   and whole hours they cover;
-- recovery never creates a credit for a `request_log` row older than the
-  newest payout window a rollup deleted credits from.
+- no `request_log` row of a rolled-up request remains: a request whose
+  `request_log` rows are still there (not yet pruned or folded, SPEC-005
+  §2.1b) does not roll up, so no reconcile, recovery, or wholesale fold can
+  meet a row whose credit or identity snapshot left.
+
+A request the walk skips for a reason that can clear (evidence not yet
+archived, a credit not yet settled or in a too-recent window, `request_log`
+rows remaining, rows changed after export) is kept in `ledger_rollup_holds`,
+and every run re-checks the held requests before it walks payouts, so the
+payout cursor moving on never strands one. A request kept hot for good (a
+quarantine resolution or restatement, a quarantined credit, a voided payout,
+or evidence that retention keeps hot) is not held.
 
 The frozen settlement finality (R-15.6) of a rolled-up request stays hot, so
 a held buyer reservation still settles. The rollup runs after the nightly
@@ -2773,14 +2786,15 @@ hot nor a mismatch at deletion.
 - **AC-022-77 (v0.4.5):** Evidence of an unsettled, payable request leaves
   the hot store at the finality point. Weekly settlement after that produces
   the same payouts, sums, and settlement links as settlement from live
-  evidence; nightly reconcile does not quarantine such an enforce credit;
-  its money columns are immutable; and the deletion records billing contract
-  5.
+  evidence; nightly reconcile and a late undelivered-output callback do not
+  quarantine such an enforce credit; its money columns are immutable; and
+  the deletion records billing contract 5.
 - **AC-022-78 (v0.4.6):** After a ledger rollup, the admin summary, provider
   listing, provider earnings (rollup and view paths), earnings buckets,
   explorer overview, and payable sums are unchanged; the ready payout still
-  revalidates and claims; recovery does not re-credit a rolled-up request; a
-  request changed after export stays hot; and two identical ledgers, one kept
+  revalidates and claims; a request with `request_log` rows, or changed
+  after export, is held and rolled up by a later run once it clears; and two
+  identical ledgers, one kept
   hot and one archived early and rolled up, settle and claim identical
   payouts. Folding `request_log` into `wholesale_usage_daily` leaves every
   D1a statement unchanged.

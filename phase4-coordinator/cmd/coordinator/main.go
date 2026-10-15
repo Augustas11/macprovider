@@ -442,6 +442,7 @@ func runCoordinator() (exitCode int) {
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	billingStore.SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
 	billingStore.SetLedgerRollupOptions(billing.LedgerRollupOptionsFromConfig(cfg.Billing.LedgerRollup, cfg.Billing.Retention, cfg.Settlement, cfg.Storage.RequestLogRetentionDays))
+	billingStore.SetRequestLogRetention(time.Duration(cfg.Storage.RequestLogRetentionDays) * 24 * time.Hour)
 	billingStore.SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
 	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
 		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
@@ -1676,7 +1677,7 @@ func runCoordinator() (exitCode int) {
 		event.Str("event", "ledger_rollup").
 			Str("status", report.Status).
 			Str("cutoff_window_end_utc", report.CutoffWindowEndUTC).
-			Int64("payout_cursor", report.PayoutCursor).
+			Int64("rollup_cursor", report.PayoutCursor).
 			Int("archives", report.Archives).
 			Int("rolled_requests", report.RolledRequests).
 			Int64("rolled_credits", report.RolledCredits).

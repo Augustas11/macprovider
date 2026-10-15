@@ -108,6 +108,17 @@ type Store struct {
 	// evidenceRetentionRun makes runs single-flight.
 	evidenceRetention    evidenceRetentionRuntime
 	evidenceRetentionRun sync.Mutex
+	// requestLogRetention is storage.request_log_retention_days
+	// (SetRequestLogRetention); zero means unknown.
+	requestLogRetention atomic.Int64
+}
+
+// SetRequestLogRetention records the request_log window, which bounds how far
+// back the admin reconcile can compare buyer and provider totals.
+func (s *Store) SetRequestLogRetention(d time.Duration) {
+	if s != nil {
+		s.requestLogRetention.Store(int64(d))
+	}
 }
 
 type SQLiteMetrics interface {

@@ -171,3 +171,33 @@ SELECT a.file_name FROM settlement_evidence_archives a
 		t.Fatal("reconcile quarantined an archived unsettled credit")
 	}
 }
+
+// A late undelivered-output callback never quarantines a credit whose
+// evidence retention archived (SPEC-022 v0.4.5 R-15.6): the archived credit
+// stays payable and the callback reports its verified verdict.
+func TestLateUndeliveredQuarantineLeavesArchivedCreditPayable(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	for _, suffix := range []string{"first", "b"} {
+		f.seed(t, suffix)
+	}
+	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil)); err != nil {
+		t.Fatal(err)
+	}
+	in := f.inputs["b"]
+	if f.hotRows(t, "b") != 0 {
+		t.Fatal("b was not archived")
+	}
+	if marked, err := f.store.MarkSettlementOutputMissing(ctx, in.RequestID, int(in.AttemptN), in.ProviderID); err != nil || marked {
+		t.Fatalf("output-missing mark on an archived credit: marked=%v err=%v", marked, err)
+	}
+	result, err := f.store.QuarantineUndeliveredSettlementCredit(ctx, in.AccountScope, in.RequestID, int(in.AttemptN), in.ProviderID, "settlement_output_missing_after_credit")
+	if err != nil || result != UndeliveredQuarantineVerified {
+		t.Fatalf("late quarantine result=%v err=%v", result, err)
+	}
+	id := f.creditID(t, "b")
+	if scalar(t, f.store.db, `SELECT quarantined FROM ledger_request_credits WHERE id = ?`, id) != 0 ||
+		scalar(t, f.store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE id = ?`, id) != 1 {
+		t.Fatal("a late callback quarantined an archived credit")
+	}
+}

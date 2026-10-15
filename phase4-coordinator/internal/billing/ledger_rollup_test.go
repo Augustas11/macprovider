@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -167,21 +166,6 @@ func TestLedgerRollupKeepsEveryTotalAndPayout(t *testing.T) {
 	if again := snapshotLedgerReaders(t, f, providerID); !reflect.DeepEqual(before, again) {
 		t.Fatalf("readers changed on the second run:\nbefore %+v\nafter  %+v", before, again)
 	}
-	// Recovery never re-credits a rolled request whose request_log row
-	// reappears inside a reconcile range.
-	rs := f.reqStore
-	in := f.inputs["a"]
-	prompt, completion := int64(10), int64(20)
-	if err := rs.Insert(ctx, requestlog.Row{TSUtc: f.windowStart.Add(time.Hour), RequestID: in.RequestID, Model: "m", Status: 200,
-		ProviderAssignedID: "pa", PromptTokens: &prompt, CompletionTokens: &completion, BuyerIP: "127.0.0.1"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.RecoverLedger(ctx, RecoverInput{ScanFrom: f.windowStart, ScanTo: f.windowEnd, Source: "nightly_reconcile"}); err != nil && !strings.Contains(err.Error(), "settled") {
-		t.Fatal(err)
-	}
-	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, in.RequestID); n != 0 {
-		t.Fatalf("recovery re-created %d credits for a rolled-up request", n)
-	}
 	// The ready payout still revalidates against its rolled-up credits.
 	claimed, err := f.store.ClaimPayoutReady(ctx, payoutID, payoutGross, "ext-1", "USDC")
 	if err != nil || !claimed {
@@ -234,11 +218,68 @@ func TestLedgerRollupKeepsRequestChangedAfterExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.RolledRequests != 1 || scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, f.inputs["b"].RequestID) != 1 {
-		t.Fatalf("changed request rolled up: %+v", report)
+	// The stale archive rolls up only a; b is held, re-checked, and rolled up
+	// from a fresh archive that holds its rows as they now are.
+	if report.RolledRequests != 2 || report.Archives != 2 {
+		t.Fatalf("report=%+v", report)
 	}
-	if got := scalar(t, f.store.db, `SELECT COALESCE(SUM(credit_count), 0) FROM ledger_settled_rollups`); got != 1 {
-		t.Fatalf("rollup counted %d credits, want 1", got)
+	if got := scalar(t, f.store.db, `SELECT COALESCE(SUM(credit_count), 0) FROM ledger_settled_rollups`); got != 2 {
+		t.Fatalf("rollup counted %d credits, want 2 (each once)", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_rollup_holds`); got != 0 {
+		t.Fatalf("%d holds left", got)
+	}
+}
+
+// A request skipped for a reason that can clear is held and rolled up by a
+// later run once it clears; the cursor moving past its payout never strands
+// it. A request whose request_log rows remain is one such reason.
+func TestLedgerRollupRetriesHeldRequests(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	for _, suffix := range []string{"first", "a", "b"} {
+		f.seed(t, suffix)
+	}
+	f.settle(t)
+	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil)); err != nil {
+		t.Fatal(err)
+	}
+	f.addLaterWindows(t, 6)
+	in := f.inputs["b"]
+	prompt, completion := int64(10), int64(20)
+	if err := f.reqStore.Insert(ctx, requestlog.Row{TSUtc: f.windowStart.Add(time.Hour), RequestID: in.RequestID, AccountID: "acct", Model: "m", Status: 200,
+		ProviderAssignedID: "pa", PromptTokens: &prompt, CompletionTokens: &completion, BuyerIP: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	report, err := f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 1 {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	if reason := scalarText(t, f.store.db, `SELECT reason FROM ledger_rollup_holds WHERE request_id = ?`, in.RequestID); reason != "request_log_present" {
+		t.Fatalf("hold reason=%q", reason)
+	}
+	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, in.RequestID); n != 1 {
+		t.Fatal("a request with request_log rows was rolled up")
+	}
+	// The first verified request is kept hot for good: no hold.
+	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_rollup_holds WHERE request_id = ?`, f.inputs["first"].RequestID); n != 0 {
+		t.Fatal("a request kept hot for good was held")
+	}
+	// Its request_log rows leave through the fold; the next run, with the
+	// cursor already past the payout, rolls it up from the holds table.
+	if _, err := f.store.FoldWholesaleRequestLog(ctx, f.store.nowUTC()); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 1 {
+		t.Fatalf("second run=%+v err=%v", report, err)
+	}
+	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, in.RequestID); n != 0 {
+		t.Fatal("held request not rolled up after it cleared")
+	}
+	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_rollup_holds`); n != 0 {
+		t.Fatalf("%d holds left", n)
 	}
 }
 

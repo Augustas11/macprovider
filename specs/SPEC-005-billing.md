@@ -816,7 +816,10 @@ ordinal changes while it can still be priced:
   prompt, or output.
 
 Buyer receipt retrieval and the operator explorer read `request_log` and see
-the same window (SPEC-006 §5.10).
+the same window (SPEC-006 §5.10). The admin reconcile (§11.3) compares buyer
+and provider totals from `request_log`, so it refuses a range that starts
+before the window. The fold scans the `ts_utc` index by keyset, and each fold
+transaction deletes at most about 500 rows (whole requests).
 
 ### 2.2 D2 - Settlement cadence
 
@@ -1988,8 +1991,11 @@ rows:
   explorer overview totals, the earnings rollup buckets, and the creator
   pool earnings add the rollup rows of their providers, pools, and whole
   hours;
-- recovery never re-credits a `request_log` row older than the newest payout
-  window a rollup deleted credits from.
+- a request whose `request_log` rows remain does not roll up, so no
+  reconcile, recovery, or fold meets a row whose credit left.
+
+A request skipped for a reason that can clear is held in
+`ledger_rollup_holds` and re-checked by every run before the payout walk.
 
 Per-request listings (explorer ledger and session detail) cover hot rows only;
 the archive holds the rolled-up rows. The frozen settlement finality of a

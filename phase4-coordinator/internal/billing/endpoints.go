@@ -928,6 +928,13 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "reconcile range must be > 0 and <= 31 days")
 		return
 	}
+	// SPEC-005 §2.1b: the buyer side of a reconcile is request_log, which
+	// keeps storage.request_log_retention_days; a range reaching past it
+	// would report a delta that is only pruned rows.
+	if keep := time.Duration(h.store.requestLogRetention.Load()); keep > 0 && from.Before(time.Now().UTC().Add(-keep)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "reconcile range must start inside the request_log window (storage.request_log_retention_days)")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	rowsScanned, err := h.sumErr(ctx, `SELECT COUNT(*) FROM request_log WHERE `+sqliteTimeRange("ts_utc"), sqliteTimeText(from), sqliteTimeText(to))

@@ -7417,7 +7417,10 @@
         "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestSettlementLifecycleAcrossEarlyArchiveAndRollupMatchesHotLedger",
         "phase4-coordinator/internal/billing/wholesale_usage_fold_test.go:TestWholesaleFoldKeepsStatementsIdentical",
         "phase4-coordinator/internal/explorer/store_test.go:TestStoreOverviewAddsLedgerRollups",
-        "phase4-coordinator/internal/billing/creator_earnings_test.go:TestCreatorPoolEarningsCountArchivedAndRolledUpCredits"
+        "phase4-coordinator/internal/billing/creator_earnings_test.go:TestCreatorPoolEarningsCountArchivedAndRolledUpCredits",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupRetriesHeldRequests",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestLateUndeliveredQuarantineLeavesArchivedCreditPayable",
+        "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow"
       ],
       "journeys": [],
       "evidence": [],

@@ -284,7 +284,9 @@ func (Store) Overview(ctx context.Context, q ReadDB, from, to time.Time) (map[st
 	// matured force-credit rows count while force-void and held
 	// force-credit rows remain excluded.
 	ledgerRows, err := queryMaps(ctx, q, `
-		SELECT COALESCE((SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ? AND ts_utc < ?), 0) AS current_window_provider_credits,
+		SELECT COALESCE((SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ? AND ts_utc < ?), 0)
+		         -- SPEC-022 R-15.11: rolled-up hours wholly inside the window.
+		         + COALESCE((SELECT SUM(provider_credits) FROM ledger_settled_rollups WHERE hour_utc >= ? AND hour_utc < ?), 0) AS current_window_provider_credits,
 		       -- SPEC-022 R-15.11: lifetime totals add the rolled-up credits.
 		       COALESCE((SELECT SUM(gross_credits) FROM spec022_payable_request_credits), 0)
 		         + COALESCE((SELECT SUM(gross_credits) FROM ledger_settled_rollups), 0) AS total_gross_credits,
@@ -302,7 +304,7 @@ func (Store) Overview(ctx context.Context, q ReadDB, from, to time.Time) (map[st
 		       ) THEN 1 ELSE 0 END), 0) AS quarantined_count,
 		       COALESCE(SUM(CASE WHEN lrc.fault_flag != '' AND lrc.fault_flag != 'none' THEN 1 ELSE 0 END), 0)
 		         + COALESCE((SELECT SUM(credit_count) FROM ledger_settled_rollups WHERE fault_flag != '' AND fault_flag != 'none'), 0) AS fault_count
-		FROM ledger_request_credits lrc`, encodeTime(from), encodeTime(to))
+		FROM ledger_request_credits lrc`, encodeTime(from), encodeTime(to), rollupHourCeil(from), rollupHourFloor(to))
 	if err != nil {
 		return nil, err
 	}
@@ -615,4 +617,19 @@ func findProvider(providers []pool.Provider, providerID string) (pool.Provider, 
 		}
 	}
 	return pool.Provider{}, false
+}
+
+// rollupHourCeil and rollupHourFloor bound the ledger rollup hours (keys
+// "YYYY-MM-DDTHH") that lie wholly inside [from, to).
+func rollupHourCeil(t time.Time) string {
+	t = t.UTC()
+	h := t.Truncate(time.Hour)
+	if h.Before(t) {
+		h = h.Add(time.Hour)
+	}
+	return h.Format("2006-01-02T15")
+}
+
+func rollupHourFloor(t time.Time) string {
+	return t.UTC().Truncate(time.Hour).Format("2006-01-02T15")
 }

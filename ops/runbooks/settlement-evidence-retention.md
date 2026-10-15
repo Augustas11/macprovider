@@ -424,8 +424,12 @@ These run without an operator step once the release is deployed.
   directory. They are then replaced in short transactions by per-payout,
   per-hour, per-model rows in `ledger_settled_rollups`. Payout rows,
   settlement windows, quarantine resolutions, and frozen finality stay hot.
-  The log line is `nightly ledger rollup finished`, with `rolled_requests`,
-  `rolled_credits`, `kept_requests`, and `payout_cursor`. The kill switch is
+  A request skipped for a reason that can clear (evidence not archived yet,
+  `request_log` rows still present, rows changed after export) is kept in
+  `ledger_rollup_holds` and re-checked by every run, so the cursor never
+  strands it. The log line is `nightly ledger rollup finished`, with
+  `rolled_requests`, `rolled_credits`, `kept_requests` (the run's skips), and
+  `rollup_cursor`. The kill switch is
   `billing.ledger_rollup.enabled: false` plus SIGHUP. Verify a rollup archive
   from the file alone with
   `coordinator-cli ledger-rollup-archive verify --archive <file>`.
@@ -440,8 +444,9 @@ These run without an operator step once the release is deployed.
   fold into `wholesale_usage_daily`, a whole request at a time, so D1a
   statements keep their totals. Pruning runs off the startup path in hourly
   passes of at most five minutes. The first passes after lowering the window
-  drain the backlog in that many passes, which is why a large backlog does
-  not delay startup.
+  drain the backlog over several hours, which is why a large backlog does
+  not delay startup. The admin reconcile refuses a range that starts before
+  the window, because its buyer side is gone.
 
 ## Done criteria
 

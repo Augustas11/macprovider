@@ -39,7 +39,51 @@ const (
 	ledgerRollupStatusBudget     = "run_budget_spent"
 
 	ledgerRollupPayoutChunk = 200
+	// ledgerRollupHoldsPerRun bounds the holds one export re-checks.
+	ledgerRollupHoldsPerRun = 2000
+
+	// Reasons that keep a request hot for good: no hold is kept.
+	ledgerRollupSkipNoCredit         = "no_ledger_credit"
+	ledgerRollupSkipResolution       = "credit_resolution_or_restatement"
+	ledgerRollupSkipQuarantined      = "credit_quarantined"
+	ledgerRollupSkipPayoutVoided     = "payout_voided"
+	ledgerRollupSkipEvidenceKeptHot  = "evidence_kept_hot"
+	ledgerRollupSkipChangedAfterCopy = "changed_since_export"
 )
+
+// ledgerRollupPermanentSkip reports whether a skip reason never clears. Any
+// other reason holds the request for a later re-check.
+func ledgerRollupPermanentSkip(reason string) bool {
+	switch reason {
+	case ledgerRollupSkipNoCredit, ledgerRollupSkipResolution, ledgerRollupSkipQuarantined,
+		ledgerRollupSkipPayoutVoided, ledgerRollupSkipEvidenceKeptHot:
+		return true
+	}
+	return false
+}
+
+func maxInt64(ids []int64) int64 {
+	var m int64
+	for _, id := range ids {
+		if id > m {
+			m = id
+		}
+	}
+	return m
+}
+
+// recordLedgerRollupSkip keeps a request skipped for a reason that can clear
+// in the holds table, and drops it from there otherwise.
+func recordLedgerRollupSkip(ctx context.Context, e evidenceExecer, requestID, reason, stamp string) error {
+	if ledgerRollupPermanentSkip(reason) {
+		_, err := e.ExecContext(ctx, `DELETE FROM ledger_rollup_holds WHERE request_id = ?`, requestID)
+		return err
+	}
+	_, err := e.ExecContext(ctx, `
+INSERT INTO ledger_rollup_holds (request_id, reason, held_at_utc) VALUES (?, ?, ?)
+ON CONFLICT(request_id) DO UPDATE SET reason = excluded.reason, held_at_utc = excluded.held_at_utc`, requestID, reason, stamp)
+	return err
+}
 
 // ledgerRollupDetailTables are deleted in this order: operator credits and
 // tombstones reference the credit; identity snapshots are per request.
@@ -191,9 +235,17 @@ CREATE TABLE IF NOT EXISTS ledger_rollup_state (
     -- request id an archive took from it.
     partial_payout_id INTEGER NOT NULL DEFAULT 0 CHECK(partial_payout_id >= 0),
     partial_request_cursor TEXT NOT NULL DEFAULT '',
-    rolled_before_utc TEXT NOT NULL DEFAULT '',
     updated_at_utc TEXT NOT NULL
 );
+-- Requests the walk passed for a reason that can clear; every run re-checks
+-- them before walking payouts, so none stays hot only because the cursor
+-- moved on.
+CREATE TABLE IF NOT EXISTS ledger_rollup_holds (
+    request_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    held_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lrh_held ON ledger_rollup_holds(held_at_utc);
 -- SPEC-022 R-15.11: a tombstone leaves only with its credit, in the rollup
 -- transaction that deletes the credit first.
 DROP TRIGGER IF EXISTS trg_seac_no_delete;
@@ -204,18 +256,6 @@ BEGIN
     SELECT RAISE(ABORT, 'settlement evidence archived credit is permanent');
 END;`)
 	return err
-}
-
-// ledgerRolledBefore is the end of the newest payout window a rollup deleted
-// credits from ("" when none): no ledger credit before it may be re-created
-// by recovery.
-func ledgerRolledBefore(ctx context.Context, q evidenceQueryer) (string, error) {
-	var before string
-	err := q.QueryRowContext(ctx, `SELECT rolled_before_utc FROM ledger_rollup_state WHERE id = 1`).Scan(&before)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return before, err
 }
 
 // ledgerRollupCutoff is the end of the settlement window that has at least
@@ -266,7 +306,7 @@ func collectLedgerRollupBundle(ctx context.Context, q evidenceQueryer, requestID
 		return b, "", err
 	}
 	if len(credits) == 0 {
-		return b, "no_ledger_credit", nil
+		return b, ledgerRollupSkipNoCredit, nil
 	}
 	b.rows["ledger_request_credits"] = credits
 	var settlementIDs []int64
@@ -280,7 +320,7 @@ func collectLedgerRollupBundle(ctx context.Context, q evidenceQueryer, requestID
 			return b, "credit_unsettled", nil
 		}
 		if quarantined != 0 {
-			return b, "credit_quarantined", nil
+			return b, ledgerRollupSkipQuarantined, nil
 		}
 		settlementIDs = append(settlementIDs, *sid)
 	}
@@ -298,11 +338,36 @@ SELECT (SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_
 	}
 	switch {
 	case blockers > 0:
-		return b, "credit_resolution_or_restatement", nil
+		return b, ledgerRollupSkipResolution, nil
 	case payable != int64(len(credits)):
 		return b, "credit_not_payable", nil
 	case tombstoned != int64(len(credits)):
-		return b, "evidence_not_archived", nil
+		// Evidence retention either has not reached the request yet (it is
+		// held there, above the retention watermark, or in an archive still
+		// being deleted) or keeps it hot for good.
+		var pending int64
+		if err := q.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM settlement_evidence_retention_holds WHERE request_id = ?)
+    OR EXISTS (SELECT 1 FROM settlement_evidence_archived_credits WHERE request_credit_id IN (`+ph+`))
+    OR ? > COALESCE((SELECT archived_low_watermark_credit_id FROM settlement_evidence_retention_state WHERE id = 1), 0)`,
+			append(append([]any{requestID}, args...), maxInt64(b.creditIDs))...).Scan(&pending); err != nil {
+			return b, "", err
+		}
+		if pending != 0 {
+			return b, "evidence_not_archived", nil
+		}
+		return b, ledgerRollupSkipEvidenceKeptHot, nil
+	}
+	// SPEC-022 R-15.11: a request whose request_log rows remain (not yet
+	// pruned or folded) stays until they leave, so no reconcile, recovery,
+	// or wholesale fold can meet a request_log row whose credit or identity
+	// was rolled up.
+	var logged int64
+	if err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM request_log WHERE request_id = ?)`, requestID).Scan(&logged); err != nil {
+		return b, "", err
+	}
+	if logged != 0 {
+		return b, "request_log_present", nil
 	}
 	sph, sargs := int64Placeholders(settlementIDs)
 	if b.payouts, err = queryArchiveRows(ctx, q, `SELECT * FROM ledger_payout_ready WHERE id IN (`+sph+`) ORDER BY id`, sargs...); err != nil {
@@ -320,7 +385,7 @@ SELECT (SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_
 		}
 		status, _ := p.str("status")
 		if status != "ready" && status != "consumed" {
-			return b, "payout_voided", nil
+			return b, ledgerRollupSkipPayoutVoided, nil
 		}
 		endText, _ := p.str("window_end_utc")
 		end, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(endText))
@@ -529,6 +594,58 @@ func (s *Store) exportLedgerRollupArchive(ctx context.Context, opts LedgerRollup
 	}
 	seen := map[string]bool{}
 	selected, kept := 0, 0
+	stamp := sqliteTimeText(s.nowUTC())
+	var skips [][2]string
+	consider := func(requestID string) error {
+		if seen[requestID] {
+			return nil
+		}
+		seen[requestID] = true
+		b, reason, err := collectLedgerRollupBundle(ctx, s.reader(), requestID, cutoff)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			kept++
+			skips = append(skips, [2]string{requestID, reason})
+			return nil
+		}
+		if w == nil {
+			if w, err = verifiedarchive.NewWriter(opts.ArchiveDir, ledgerRollupNamePrefix, ledgerRollupFormat, s.nowUTC(), sqliteTimeText(cutoff)); err != nil {
+				return err
+			}
+			w.SetSpaceGuard(evidenceArchiveSpaceCheckBytes, spaceGuard)
+		}
+		if err := w.WriteGroup(requestID, b.creditIDs, b.tables()); err != nil {
+			return err
+		}
+		selected++
+		return nil
+	}
+	// Phase 1: re-check the oldest holds; a request that cleared joins this
+	// archive, one that never will leaves the holds table.
+	holds, err := s.reader().QueryContext(ctx, `SELECT request_id FROM ledger_rollup_holds ORDER BY held_at_utc, request_id LIMIT ?`, min(ledgerRollupHoldsPerRun, opts.MaxRequestsPerArchive))
+	if err != nil {
+		return nil, 0, err
+	}
+	var held []string
+	for holds.Next() {
+		var r string
+		if err := holds.Scan(&r); err != nil {
+			holds.Close()
+			return nil, 0, err
+		}
+		held = append(held, r)
+	}
+	if err := holds.Close(); err != nil {
+		return nil, 0, err
+	}
+	for _, requestID := range held {
+		if err := consider(requestID); err != nil {
+			abort()
+			return nil, kept, err
+		}
+	}
 	state := ledgerRollupWalk{cursor: cursor, partialPayout: partialPayout, partialRequest: partialRequest}
 walk:
 	for selected < opts.MaxRequestsPerArchive {
@@ -596,30 +713,10 @@ SELECT DISTINCT request_id FROM ledger_request_credits
 				return nil, kept, err
 			}
 			for _, requestID := range requests {
-				if seen[requestID] {
-					continue
-				}
-				seen[requestID] = true
-				b, reason, err := collectLedgerRollupBundle(ctx, s.reader(), requestID, cutoff)
-				if err != nil {
+				if err := consider(requestID); err != nil {
 					abort()
 					return nil, kept, err
 				}
-				if reason != "" {
-					kept++
-					continue
-				}
-				if w == nil {
-					if w, err = verifiedarchive.NewWriter(opts.ArchiveDir, ledgerRollupNamePrefix, ledgerRollupFormat, s.nowUTC(), sqliteTimeText(cutoff)); err != nil {
-						return nil, kept, err
-					}
-					w.SetSpaceGuard(evidenceArchiveSpaceCheckBytes, spaceGuard)
-				}
-				if err := w.WriteGroup(requestID, b.creditIDs, b.tables()); err != nil {
-					abort()
-					return nil, kept, err
-				}
-				selected++
 			}
 			if len(requests) == limit {
 				// The archive is full inside this payout: the next archive
@@ -630,11 +727,29 @@ SELECT DISTINCT request_id FROM ledger_request_credits
 			state = ledgerRollupWalk{cursor: id}
 		}
 	}
-	if w == nil {
-		if state != (ledgerRollupWalk{cursor: cursor, partialPayout: partialPayout, partialRequest: partialRequest}) {
-			return nil, kept, s.saveLedgerRollupWalk(ctx, s.db, state)
+	saveSkips := func(e evidenceExecer) error {
+		for _, sk := range skips {
+			if err := recordLedgerRollupSkip(ctx, e, sk[0], sk[1], stamp); err != nil {
+				return err
+			}
 		}
-		return nil, kept, nil
+		return nil
+	}
+	if w == nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, kept, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := saveSkips(tx); err != nil {
+			return nil, kept, err
+		}
+		if state != (ledgerRollupWalk{cursor: cursor, partialPayout: partialPayout, partialRequest: partialRequest}) {
+			if err := s.saveLedgerRollupWalk(ctx, tx, state); err != nil {
+				return nil, kept, err
+			}
+		}
+		return nil, kept, tx.Commit()
 	}
 	manifest, _, err := w.Finish()
 	if err != nil {
@@ -649,7 +764,6 @@ SELECT DISTINCT request_id FROM ledger_request_credits
 		return nil, kept, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	stamp := sqliteTimeText(s.nowUTC())
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO ledger_rollup_archives (
     file_name, sha256, size_bytes, request_count, row_counts_json, cutoff_window_end_utc,
@@ -665,6 +779,9 @@ INSERT INTO ledger_rollup_archives (
 		return nil, kept, err
 	}
 	if err := s.saveLedgerRollupWalk(ctx, tx, state); err != nil {
+		return nil, kept, err
+	}
+	if err := saveSkips(tx); err != nil {
 		return nil, kept, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -690,17 +807,6 @@ ON CONFLICT(id) DO UPDATE SET
     partial_payout_id = excluded.partial_payout_id,
     partial_request_cursor = excluded.partial_request_cursor,
     updated_at_utc = excluded.updated_at_utc`, w.cursor, w.partialPayout, w.partialRequest, sqliteTimeText(s.nowUTC()))
-	return err
-}
-
-// recordLedgerRolledBefore raises the recovery guard to rolledBefore; it
-// never moves back.
-func (s *Store) recordLedgerRolledBefore(ctx context.Context, e evidenceExecer, rolledBefore string) error {
-	_, err := e.ExecContext(ctx, `
-INSERT INTO ledger_rollup_state (id, rolled_before_utc, updated_at_utc) VALUES (1, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-    rolled_before_utc = MAX(rolled_before_utc, excluded.rolled_before_utc),
-    updated_at_utc = excluded.updated_at_utc`, rolledBefore, sqliteTimeText(s.nowUTC()))
 	return err
 }
 
@@ -779,15 +885,26 @@ func (s *Store) applyLedgerRollupBatch(ctx context.Context, archiveID int64, bat
 	rolled := 0
 	var credits int64
 	floorRecorded := false
-	rolledBefore := ""
+	stamp := sqliteTimeText(s.nowUTC())
 	for _, g := range batch {
 		b, reason, err := collectLedgerRollupBundle(ctx, conn, g.ID, cutoff)
 		if err != nil {
 			return 0, 0, err
 		}
-		if reason != "" || !ledgerRollupRowsMatch(b, g) {
-			// Already rolled up (no credit left), or changed since export:
-			// the request stays as it is.
+		if reason == "" && !ledgerRollupRowsMatch(b, g) {
+			reason = ledgerRollupSkipChangedAfterCopy
+		}
+		if reason != "" {
+			// Already rolled up (no credit left), or no longer eligible, or
+			// changed since export: the request stays as it is, held for a
+			// re-check when the reason can clear.
+			if reason == ledgerRollupSkipChangedAfterCopy {
+				if err := recordLedgerRollupSkip(ctx, conn, g.ID, "changed_since_export_recheck", stamp); err != nil {
+					return 0, 0, err
+				}
+			} else if err := recordLedgerRollupSkip(ctx, conn, g.ID, reason, stamp); err != nil {
+				return 0, 0, err
+			}
 			continue
 		}
 		if !floorRecorded {
@@ -842,10 +959,8 @@ ON CONFLICT(settlement_id, provider_id, hour_utc, model, fault_flag, pool_id) DO
 		if _, err := conn.ExecContext(ctx, `DELETE FROM ledger_provider_identity_snapshots WHERE request_id = ?`, g.ID); err != nil {
 			return 0, 0, err
 		}
-		for _, p := range b.payouts {
-			if end, _ := p.str("window_end_utc"); end > rolledBefore {
-				rolledBefore = end
-			}
+		if _, err := conn.ExecContext(ctx, `DELETE FROM ledger_rollup_holds WHERE request_id = ?`, g.ID); err != nil {
+			return 0, 0, err
 		}
 		rolled++
 		credits += int64(len(b.creditIDs))
@@ -854,9 +969,6 @@ ON CONFLICT(settlement_id, provider_id, hour_utc, model, fault_flag, pool_id) DO
 		if _, err := conn.ExecContext(ctx, `
 UPDATE ledger_rollup_archives SET deleted_requests = deleted_requests + ?, updated_at_utc = ? WHERE id = ?`,
 			rolled, sqliteTimeText(s.nowUTC()), archiveID); err != nil {
-			return 0, 0, err
-		}
-		if err := s.recordLedgerRolledBefore(ctx, conn, rolledBefore); err != nil {
 			return 0, 0, err
 		}
 	}
