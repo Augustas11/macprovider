@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.56",
+      "version": "0.9.57",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.6",
+      "version": "v0.4.7",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1205,7 +1205,7 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1240,7 +1240,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.42",
+      "version": "0.0.43",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1521,7 +1521,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11932,6 +11932,48 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1911",
         "rationale": "SPEC-049 v0.3.0 in-band identity key rotation (#1911) is implemented in the coordinator and the provider CLI with unit tests and a shared framing vector. The coordinator side ships in a later runtime train and the provider side in the next CLI release; a real-provider rotation through the gateway is still needed. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R032",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_pool.go:relayBlindPoolScope",
+        "phase4-coordinator/internal/buyer/privacy_pool.go:privacyPoolGate",
+        "phase4-coordinator/internal/buyer/privacy_pool.go:privacyPoolMemberEligible",
+        "phase4-coordinator/internal/buyer/privacy_pool.go:privacyPoolFence",
+        "phase4-coordinator/internal/buyer/privacy_pool.go:bindPrivacyPoolRoute",
+        "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
+        "phase4-coordinator/internal/relayblind/store.go:CreateReservation",
+        "phase4-coordinator/internal/relayblind/types.go:ParseReservationResponse",
+        "phase5-gateway/internal/router/privacy_class.go:resolvePrivacyPool",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadata",
+        "phase5-gateway/internal/router/privacy_mode.go:setPoolScopedPrivacyModeHeaders",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyDisclosureAgrees"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolMemberEnrolledIsServed",
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolEnrolledNonMemberIsRejected",
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolMemberNotEnrolledIsRejectedWithClosedReason",
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolGateRefusesBeforeSelection",
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolBindingMismatchIsADowngrade",
+        "phase4-coordinator/internal/buyer/privacy_pool_test.go:TestPrivacyPoolRevocationBetweenPhasesIsStale",
+        "phase5-gateway/internal/router/privacy_pool_test.go:TestPrivacyPoolScopedRequestForwardsAuthorizedPool",
+        "phase5-gateway/internal/router/privacy_pool_test.go:TestPrivacyPoolDisclosureExactStrings",
+        "phase5-gateway/internal/router/privacy_pool_test.go:TestPrivacyPoolUnauthorizedSelectionNeverForwarded",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyPoolClientVerifiesPoolBinding",
+        "test/integration/privacy_pool_integration_test.go:TestPrivacyClassPoolMemberEnrolledIsServedAndSettles",
+        "test/integration/privacy_pool_integration_test.go:TestPrivacyClassPoolMemberNotEnrolledIsRejected",
+        "test/integration/privacy_pool_integration_test.go:TestPrivacyClassPoolEnrolledNonMemberIsRejected"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1985",
+        "rationale": "SPEC-049 v0.4.0 Trusted Pool composition (#1985) is implemented in the coordinator, gateway, and reference client with unit and integration tests. It needs no provider change. It ships in a later runtime train; the requirement stays pending until deployed and a live pool-scoped privacy-class request is observed through the gateway."
       }
     },
     {

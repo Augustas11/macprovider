@@ -1,13 +1,13 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.6
+Version: v0.4.7
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
 
-### v0.4.6
+### v0.4.7
 
 Issue #1793 (slice 8): settled ledger rollup. R-15.1 no longer keeps every
 settled ledger detail row hot: new R-15.11 rolls a request's credits,
@@ -24,9 +24,9 @@ their totals do not change. Evidence tombstones and rollup rows keep the
 credit's pool binding, so creator earnings keep counting archived credits
 (they lost them once the route snapshot left). R-15.9 adds billing contract
 6, recorded in the first rollup transaction. The `request_log` window is now 14 days by default
-(SPEC-005 §2.1b). This version follows v0.4.5.
+(SPEC-005 §2.1b). This version follows v0.4.6.
 
-### v0.4.5
+### v0.4.6
 
 Issue #1793 (slice 7): evidence leaves the hot store at verdict close plus a
 grace period instead of after two completed settlement windows. R-15.2 now
@@ -48,9 +48,9 @@ validated, but no longer gates evidence retention. R-15.9 adds billing
 compatibility contract 5, recorded in the delete transaction that first
 tombstones an unsettled credit: a contract-4 coordinator neither settles
 through tombstones nor skips them in reconcile, so it refuses such a database
-at open. This version follows v0.4.4.
+at open. This version follows v0.4.5.
 
-### v0.4.4
+### v0.4.5
 
 Issue #1793 (slice 6): the audit database footprint. R-11.1.2 fixes the
 audit payload of the two settlement receipt events. The verdict event keeps
@@ -66,7 +66,17 @@ rest. An outbox row delivered by an earlier release and re-delivered after
 an interrupted drain is accepted as the same event. R-15.10 item 6 bounds
 the audit database to its active period by rotation into verified closed
 period archives (SPEC-002 R-7.10.2a). No settlement, payability, or
-retention eligibility rule changes. This version follows v0.4.3.
+retention eligibility rule changes. This version follows v0.4.4.
+
+### v0.4.4
+
+Issue #1985: R-14.1 covers SPEC-049 privacy-class executions scoped to a
+Trusted Pool under SPEC-049-R032. Their R-14 route snapshot carries the
+reservation's SPEC-042-R006 pool labels in its digest, and the verdict row is
+stamped with the R006 pool label through the plaintext pool-route path.
+The outcome is still `relay_blind_settled`, never `verified`; the usage source
+is unchanged; R-14.2 to R-14.7 apply unchanged. The conformance state of
+`SPEC-022-R014` does not change.
 
 ### v0.4.3
 
@@ -1505,7 +1515,7 @@ sample age. Retention deletes only drained rows, in bounded indexed batches,
 after the R-15.10 window; pending and poison evidence is never pruned by that
 path.
 
-R-11.1.2. (v0.4.4) Audit payload. The `settlement_receipt_verdict` payload
+R-11.1.2. (v0.4.5) Audit payload. The `settlement_receipt_verdict` payload
 carries the R-11.1 fields under one name each: `route_snapshot_policy_version`,
 `route_snapshot_mode`, `paid_entrypoint`, `request_id`, `attempt_n`,
 `account_scope_hash`, `provider_id`, `provider_receipt_key_fingerprint`,
@@ -1915,8 +1925,15 @@ are its conformance obligations.
 R-14.1. Scope. The paid entrypoint is
 `coordinator_buyer_v1_relay_blind_chat_completions`. It covers every SPEC-041
 relay-blind `chat_completions` execution on the global pool, with or without
-the SPEC-049 marker. SPEC-042-R009 is unchanged, so pool-scoped relay-blind
-requests are still rejected. A relay-blind snapshot's R-13 expected
+the SPEC-049 marker, and (v0.4.4) every SPEC-049 privacy-class execution
+scoped to a Trusted Pool under SPEC-049-R032. A pool-scoped relay-blind
+snapshot carries the reservation's SPEC-042-R006 labels (`pool_id`,
+`manifest_version`, `manifest_core_digest`), which enter its digest only
+when non-empty, exactly as on a plaintext pool route, and the verdict row is
+stamped with the R006 pool label after the verdict is written. Its
+`runtime_source` is always empty (native), so `pool_operator_attested`
+never applies. A plain SPEC-041 request without the SPEC-049 class is still
+global-pool only (SPEC-042-R009). A relay-blind snapshot's R-13 expected
 model-hash source is therefore always `catalog`, and a session bound to a
 SPEC-047-R011 pool model entry is never selected for relay-blind work. Under
 `enforce`, relay-blind traffic is admitted only through R-14. Under `observe`, R-14 MAY run to compute verdicts and MUST
@@ -2085,7 +2102,7 @@ hot coordinator database: `settlement_route_snapshots`,
 route snapshots in the route-snapshot journal database. It MUST NOT delete
 `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`,
 `ledger_settlement_windows`, `ledger_quarantine_resolutions`, or any other
-settlement or payout row. The money record stays hot. (v0.4.6) Only the
+settlement or payout row. The money record stays hot. (v0.4.7) Only the
 R-15.11 ledger rollup may later replace settled credit, operator credit,
 provider identity, and tombstone rows by their per-payout aggregates; payout,
 settlement-window, quarantine-resolution, and ceiling-restatement rows are
@@ -2102,7 +2119,7 @@ eligible only when every one of the following holds:
 - every credit is either unsettled with no `settlement_id`, or settled with a
   `settlement_id` that names a `ledger_payout_ready` row whose status is
   `ready` or `consumed` (never `voided`);
-- every credit's `ts_utc` is before the finality point T (v0.4.5), and every
+- every credit's `ts_utc` is before the finality point T (v0.4.6), and every
   verdict for the request closed before T: its close time, the later of its
   `created_at_utc` and `updated_at_utc`, is before T. T is the earlier of:
   - now minus `billing.retention.verdict_close_grace_hours` (default 48; at
@@ -2252,10 +2269,10 @@ records:
 
 - a tombstone row for each archived ledger credit, in
   `settlement_evidence_archived_credits`. It holds the archive id and whether
-  the credit had a literal closed, valid, `verified` verdict, and (v0.4.6)
+  the credit had a literal closed, valid, `verified` verdict, and (v0.4.7)
   the `pool_id` of the first route snapshot of its attempt that carries one,
   so the SPEC-043-R010 creator earnings read keeps the credit's pool binding
-  after its route snapshot leaves. Tombstones written before v0.4.6 carry no
+  after its route snapshot leaves. Tombstones written before v0.4.7 carry no
   pool binding.
 - per-provider counts of archived verdicts by outcome and receipt result, in
   `settlement_evidence_archived_verdict_counts`.
@@ -2268,13 +2285,13 @@ Readers MUST degrade gracefully on archived requests:
   depend on the `settled` stamp. The tombstone table is an input of the
   provider earnings rollup: its inserts, like the evidence deletions, mark
   the affected rollup hours for recompute.
-- (v0.4.5) Weekly settlement selects a tombstoned, unsettled credit through
+- (v0.4.6) Weekly settlement selects a tombstoned, unsettled credit through
   its tombstone, under the same predicate the payable view applies, so a
   credit archived before it settled settles into the same payout with the
   same sums as it would have from live evidence. Settlement reads only
   ledger rows, quarantine resolutions, and tombstones for such a credit;
   removing its evidence never changes a payable sum.
-- (v0.4.5) A tombstoned credit's money columns (the columns the settled
+- (v0.4.6) A tombstoned credit's money columns (the columns the settled
   money trigger protects) are immutable whether or not it settled, so the
   archived reference copy stays the rederivation source. The ceiling
   restatement never selects a tombstoned credit, and a late
@@ -2285,7 +2302,7 @@ Readers MUST degrade gracefully on archived requests:
 - Reward unlock verified-receipt counts and unranged provider receipt
   summaries add the archived verdict counts.
 - Ledger reconciliation never reports a mismatch on a settled, tombstoned
-  credit whose receipt evidence was archived, nor (v0.4.5) on an unsettled,
+  credit whose receipt evidence was archived, nor (v0.4.6) on an unsettled,
   tombstoned enforce-mode credit: its receipt-bound usage left with the
   archive, and the archive is its rederivation source (R-15.7). An
   unsettled, tombstoned credit of another mode is reconciled from
@@ -2329,13 +2346,13 @@ against such a database. Once a retention-capable release has opened the
 database, the coordinator rolls forward only. A rollback that restores a
 database snapshot taken before that release first opened it, together with
 the release that wrote the snapshot, stays valid. No path may lower the floor.
-(v0.4.5) A contract-4 coordinator settles only through live evidence and
+(v0.4.6) A contract-4 coordinator settles only through live evidence and
 reconciles an unsettled credit only against live evidence, so it would
 leave a credit tombstoned before settlement unpaid and could quarantine it.
 Contract 5 is recorded in the delete transaction that first tombstones an
 unsettled credit, so from that commit a contract-4 release refuses the
 database at open. Until then the database stays readable by contract 4.
-(v0.4.6) A contract-5 coordinator does not add `ledger_settled_rollups` to
+(v0.4.7) A contract-5 coordinator does not add `ledger_settled_rollups` to
 payable totals or payout revalidation, so it would under-report earnings and
 void a `ready` payout whose credits rolled up. Contract 6 is recorded in the
 first rollup transaction.
@@ -2399,7 +2416,7 @@ holds:
    hold the audit history for `storage.audit_log_retention_days`
    (SPEC-002 R-7.10.2a).
 
-R-15.11. (v0.4.6) Settled ledger rollup. A request's ledger detail rows
+R-15.11. (v0.4.7) Settled ledger rollup. A request's ledger detail rows
 (`ledger_request_credits`, `ledger_operator_credits`,
 `ledger_provider_identity_snapshots`, and its
 `settlement_evidence_archived_credits` tombstones) MAY leave the hot store
@@ -2738,7 +2755,7 @@ hot nor a mismatch at deletion.
   bound to the relay-blind entrypoint, basis, and profile is not payable.
 - **AC-022-70 (v0.3.0):** No artifact of an R-14 attempt contains a plaintext
   prompt or output hash. Disclosure never reports the request as `verified`.
-- **AC-022-71 (v0.4.0, v0.4.5):** Retention never selects a request with:
+- **AC-022-71 (v0.4.0, v0.4.6):** Retention never selects a request with:
   - a quarantined, held, or force-resolved credit;
   - a credit settled into a voided payout, or a settlement link that is
     inconsistent (settled without a payout id, or a payout id on an
@@ -2785,7 +2802,7 @@ hot nor a mismatch at deletion.
   backlog. A request that can still become eligible stays in a holds table
   that every lap re-checks, or, when too young, below the watermark. A run that would write a new archive below the archive
   filesystem's free-space floor exports and deletes nothing.
-- **AC-022-76 (v0.4.4):** A verdict audit payload carries every R-11.1 field
+- **AC-022-76 (v0.4.5):** A verdict audit payload carries every R-11.1 field
   once and no `attempt_id`, `receipt_verification_outcome`,
   `pending_deadline_unix_ms`, `quarantine_zero_settle_reason`, or full
   verifier checks. An audit row an earlier release wrote for the same outbox
@@ -2793,13 +2810,13 @@ hot nor a mismatch at deletion.
   audit database rotation deletes nothing without a verified archive, keeps
   any row that changed after export, refuses below the free-space floor, and
   removes an archive only after its last day leaves the retention window.
-- **AC-022-77 (v0.4.5):** Evidence of an unsettled, payable request leaves
+- **AC-022-77 (v0.4.6):** Evidence of an unsettled, payable request leaves
   the hot store at the finality point. Weekly settlement after that produces
   the same payouts, sums, and settlement links as settlement from live
   evidence; nightly reconcile and a late undelivered-output callback do not
   quarantine such an enforce credit; its money columns are immutable; and
   the deletion records billing contract 5.
-- **AC-022-78 (v0.4.6):** After a ledger rollup, the admin summary, provider
+- **AC-022-78 (v0.4.7):** After a ledger rollup, the admin summary, provider
   listing, provider earnings (rollup and view paths), earnings buckets,
   explorer overview, and payable sums are unchanged; the ready payout still
   revalidates and claims; a request with `request_log` rows, or changed

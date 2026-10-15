@@ -42,7 +42,7 @@ func (s *Server) handlePrivacyDirectory(w http.ResponseWriter, r *http.Request) 
 		writePrivacyClassError(w, privacyClassDisabled, "")
 		return
 	}
-	resp, err := s.relayBlindUpstream(r, http.MethodGet, privacyDirectoryRoute, accountID, "", nil, false)
+	resp, err := s.relayBlindUpstream(r, http.MethodGet, privacyDirectoryRoute, accountID, "", nil, false, "")
 	if err != nil {
 		writePrivacyClassError(w, privacyClassUnavailable, "")
 		return

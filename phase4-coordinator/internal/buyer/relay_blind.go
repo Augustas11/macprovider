@@ -445,12 +445,8 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require the global pool and trusted account context")
 		return
 	}
-	if present && relayBlindPoolIntent(r) {
-		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseReservation, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
-		return
-	}
-	if relayBlindPoolIntent(r) {
-		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require the global pool and trusted account context")
+	poolID, ok := s.relayBlindPoolScope(w, r, relayblind.PrivacyRejectPhaseReservation, present, valid, walletSession, "Relay-blind requests require the global pool and trusted account context")
+	if !ok {
 		return
 	}
 	if present && !valid {
@@ -458,7 +454,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if present {
-		s.handlePrivacyClassReservation(w, r, account.ID(), walletSession)
+		s.handlePrivacyClassReservation(w, r, account.ID(), walletSession, poolID)
 		return
 	}
 	if s.relayBlind == nil || !s.relayBlind.cfg.Enabled {
@@ -796,12 +792,8 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require trusted global-pool context")
 		return
 	}
-	if present && relayBlindPoolIntent(r) {
-		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
-		return
-	}
-	if relayBlindPoolIntent(r) {
-		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind requests require trusted global-pool context")
+	poolID, poolOK := s.relayBlindPoolScope(w, r, relayblind.PrivacyRejectPhaseConsume, present, valid, walletSession, "Relay-blind requests require trusted global-pool context")
+	if !poolOK {
 		return
 	}
 	if s.relayBlind == nil || s.relayBlind.store == nil {
@@ -853,6 +845,12 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, code, s.privacyConflictReason(r.Context(), code))
 		return
 	}
+	// SPEC-049-R012 / R032 item 5: the forwarded pool is part of the binding.
+	if heldErr == nil && held.PrivacyClass && held.PoolID != poolID {
+		_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, privacyClassDowngrade, s.now())
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
+		return
+	}
 	response, err := s.relayBlind.store.Consume(r.Context(), relayblind.ConsumeInput{AccountID: account.ID(), WalletSession: walletSession, Envelope: envelope, EnvelopeDigest: digest, Now: s.now()})
 	if err != nil {
 		if errors.Is(err, relayblind.ErrReplay) && heldErr == nil && held.AccountID == account.ID() && held.WalletSession == walletSession {
@@ -891,6 +889,11 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 			observed := privacyObservedCode(code, false)
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, observed, s.now())
 			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, observed, reason)
+			return
+		}
+		if _, fresh := s.privacyPoolFence(reservation); !fresh {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseConsume, privacyClassStale, relayblind.PrivacyRejectPoolStateStale)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -934,12 +937,8 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution requires trusted global-pool context")
 		return
 	}
-	if present && relayBlindPoolIntent(r) {
-		s.writePrivacyRouteErrorMessage(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectPoolScopedRequest, "Privacy class does not accept pool-scoped requests")
-		return
-	}
-	if relayBlindPoolIntent(r) {
-		writeRelayBlindError(w, "relay_blind_downgrade_rejected", "Relay-blind execution requires trusted global-pool context")
+	poolID, poolOK := s.relayBlindPoolScope(w, r, relayblind.PrivacyRejectPhaseDispatch, present, valid, walletSession, "Relay-blind execution requires trusted global-pool context")
+	if !poolOK {
 		return
 	}
 	if s.relayBlind == nil || s.relayBlind.store == nil {
@@ -992,6 +991,12 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, code, s.privacyConflictReason(r.Context(), code))
 		return
 	}
+	// SPEC-049-R012 / R032 item 5: the forwarded pool is part of the binding.
+	if heldErr == nil && held.PrivacyClass && held.PoolID != poolID {
+		_ = s.relayBlind.store.RejectPredispatch(r.Context(), held.ProviderBinding, privacyClassDowngrade, s.now())
+		s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassDowngrade, relayblind.PrivacyRejectMarkerMismatch)
+		return
+	}
 	reservation, err := s.relayBlind.store.LookupConsumedAuthorization(r.Context(), account.ID(), walletSession, authorization, s.now())
 	if err != nil || subtle.ConstantTimeCompare([]byte(reservation.EnvelopeDigest), []byte(digest)) != 1 || reservation.RequestID != envelope.RequestID {
 		if errors.Is(err, relayblind.ErrReplay) {
@@ -1035,6 +1040,13 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, reason)
 			return
 		}
+		poolSnap, fresh := s.privacyPoolFence(reservation)
+		if !fresh {
+			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, privacyClassStale, s.now())
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, relayblind.PrivacyRejectPoolStateStale)
+			return
+		}
+		bindPrivacyPoolRoute(rec.state, reservation, poolSnap)
 	} else {
 		if !s.relayBlind.cfg.Enabled {
 			_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_disabled", s.now())
@@ -1257,6 +1269,34 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		privacyVerifiedAt = verifiedAt
+	}
+	if reservation.PoolID != "" {
+		// SPEC-049-R032 item 5: the last pool fence and the delivery counter
+		// are one registry decision, and a revoke_immediate of the member
+		// cancels the dispatched attempt.
+		endPoolDelivery, delivering := func() {}, false
+		if _, fresh := s.privacyPoolFence(reservation); fresh && s.trustPools != nil {
+			endPoolDelivery, delivering = s.trustPools.BeginPoolDeliveryAtGeneration(reservation.PoolID, reservation.PoolGeneration)
+		}
+		var stopRevocationWatch func()
+		revoked := func() bool { return false }
+		if delivering {
+			ctx, stopRevocationWatch, revoked = s.withPoolProviderRevocationCancel(ctx, rec.state, provider.ProviderID)
+			defer stopRevocationWatch()
+			defer endPoolDelivery()
+		}
+		// A member revoked before the watcher was armed, or a session that a
+		// model-admission refresh bound to a pool model since the fence, is
+		// never dispatched (SPEC-049-R032 item 3).
+		current, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+		if !delivering || revoked() || ctx.Err() != nil || !live || current.ModelAdmissionPoolModelID != "" {
+			s.rejectArmedDurably(r, reservation.ProviderBinding, privacyClassStale)
+			if quotaMetered {
+				s.admission.RefundRequest(provider)
+			}
+			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, relayblind.PrivacyRejectPoolStateStale)
+			return
+		}
 	}
 	if r.Context().Err() != nil {
 		s.rejectArmedDurably(r, reservation.ProviderBinding, "relay_blind_provider_unsupported")

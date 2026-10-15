@@ -12,6 +12,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
 const (
@@ -196,7 +197,10 @@ type privacySelection struct {
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key. On failure it returns the §4.9 code and the SPEC-049-R030
 // reason of the candidate that came closest to serving the request.
-func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string) (privacySelection, string, string) {
+//
+// scope, when set, is the SPEC-049-R032 pool snapshot: only members that pass
+// its pool predicates are walked, so the result is the intersection.
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot) (privacySelection, string, string) {
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled, reason
@@ -211,8 +215,16 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
 	incapable := false
+	if scope != nil {
+		closest = relayblind.PrivacyRejectPoolNoEligibleMember
+	}
 	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
+			continue
+		}
+		// SPEC-022 R-14.1: a session bound to a pool model entry serves only
+		// that pool's pool-model route, never privacy-class work.
+		if provider.ModelAdmissionPoolModelID != "" || (scope != nil && !privacyPoolMemberEligible(*scope, provider)) {
 			continue
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
@@ -303,8 +315,10 @@ func (s *Server) keylessPrivacyReason(ctx context.Context, keyless []pool.Provid
 	return closest
 }
 
-func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession string) {
+func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession, poolID string) {
 	const phase = relayblind.PrivacyRejectPhaseReservation
+	// Wall time: writePoolUnavailable measures the timing floor with time.Since.
+	startedAt := time.Now()
 	if reason := s.privacyDisabledReason(r.Context()); reason != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyClassDisabled, reason)
 		return
@@ -327,9 +341,20 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
+	// SPEC-049-R032 item 2: the pool is gated, and its snapshot captured,
+	// before any privacy candidate is evaluated.
+	var scope *trustpool.Snapshot
+	if poolID != "" {
+		snap, code := s.privacyPoolGate(r.Context(), poolID, accountID, request.Model)
+		if code != "" {
+			s.writePrivacyPoolRefusal(w, r, phase, code, startedAt)
+			return
+		}
+		scope = &snap
+	}
 	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
 	defer func() { unlockSelection() }()
-	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires)
+	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope)
 	if code == relayBlindCapabilityRefusalCode {
 		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
 		return
@@ -358,14 +383,20 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	if selected.key.ExpiresAtUnix < expires {
 		expires = selected.key.ExpiresAtUnix
 	}
-	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), relayblind.ReservationCreate{
+	create := relayblind.ReservationCreate{
 		AccountID: accountID, WalletSession: walletSession, ProviderID: selected.provider.ProviderID, AssignedSession: selected.provider.AssignedID,
 		KeyRecord: selected.key, Model: request.Model, ProviderModel: selected.provider.ModelID, Stream: request.Stream,
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
 		Requires: request.Requires,
-	}, s.now())
+	}
+	if scope != nil {
+		// SPEC-049-R032 item 4: the reservation row binds the captured pool
+		// snapshot; the AAD binds this row through provider_binding.
+		create.PoolID, create.PoolManifestVersion, create.PoolManifestCoreDigest, create.PoolGeneration = scope.PoolID, scope.ManifestVersion, scope.ManifestCoreDigest, scope.Generation
+	}
+	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), create, s.now())
 	if err != nil {
 		if errors.Is(err, relayblind.ErrCapacity) {
 			writeRelayBlindError(w, "relay_blind_metadata_rate_limited", "Could not create relay-blind reservation")
@@ -386,6 +417,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		CachePolicy: relayblind.CachePolicyNoStore, FailoverPolicy: relayblind.FailoverPolicyDisabled,
 		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: relayblind.PrivacyAssurance,
 		PrivacyKeyAttestation: &attestation, PrivacyKeyAttestationSignature: signature, PrivacyPostureVerifiedAtUnix: verifiedAt.Unix(),
+		PoolID: reservation.PoolID, PoolManifestVersion: reservation.PoolManifestVersion, PoolManifestCoreDigest: reservation.PoolManifestCoreDigest,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)

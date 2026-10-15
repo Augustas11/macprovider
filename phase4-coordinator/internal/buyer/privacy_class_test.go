@@ -27,6 +27,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
@@ -121,6 +122,9 @@ type privacyHarnessConfig struct {
 	quota          int
 	relay          RelayBlindRelayFunc
 	requestLog     bool
+	// trustPools wires a SPEC-042 registry and marks the provider as
+	// advertising trusted_pool_v1 (SPEC-049-R032 tests).
+	trustPools *trustpool.Registry
 }
 
 func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
@@ -207,6 +211,7 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	if cfg.quota > 0 {
 		h.provider.Tier = pool.TierProvisional
 	}
+	h.provider.TrustedPoolV1 = cfg.trustPools != nil
 	if _, registered := registry.RegisterAt(&h.provider, nil, now); !registered {
 		t.Fatal("provider registration rejected")
 	}
@@ -224,6 +229,9 @@ func newPrivacyHarness(t *testing.T, cfg privacyHarnessConfig) *privacyHarness {
 	opts := []Option{WithGatewayServiceToken("gateway-token"), WithRequireGatewayContext(true), WithRelayBlind(relayCfg, store, cfg.relay)}
 	if h.authority != nil {
 		opts = append(opts, WithPrivacyAuthority(h.authority))
+	}
+	if cfg.trustPools != nil {
+		opts = append(opts, WithPoolMembership(cfg.trustPools), WithTrustPoolStatusStore(poolIsolationTrustPoolStore(t)))
 	}
 	if cfg.quota > 0 {
 		h.admission = providerws.NewAdmissionManager(config.AdmissionConfig{ProvisionalQuotaPerHour: cfg.quota}, clock.Now)

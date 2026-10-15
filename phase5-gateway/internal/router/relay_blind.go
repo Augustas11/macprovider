@@ -107,7 +107,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 	}
 	present, valid := privacyRequested(r)
 	accountID := relayBlindAccountID(authn)
-	if present && privacyBuyerIntentDenied(r, accountID, authn.Demo) {
+	if present && privacyPoolIntentDenied(r, accountID, authn.Demo) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, authn.Demo))
 		return
 	}
@@ -192,7 +192,7 @@ func relayBlindRequiresValid(raw json.RawMessage) bool {
 
 func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *http.Request, body []byte, accountID string, walletSession *walletSessionAuth) bool {
 	present, valid := privacyRequested(r)
-	if present && privacyBuyerIntentDenied(r, accountID, false) {
+	if present && privacyPoolIntentDenied(r, accountID, false) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, false))
 		return true
 	}
