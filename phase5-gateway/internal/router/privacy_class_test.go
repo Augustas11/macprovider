@@ -219,7 +219,7 @@ func TestPrivacyClassConstantsMatchSharedPackage(t *testing.T) {
 	if len(privacyProtects) != 9 || len(privacyDoesNotProtect) != 6 || len(privacyResidualRisks) != 13 {
 		t.Fatalf("list lengths protects=%d does_not=%d residual=%d", len(privacyProtects), len(privacyDoesNotProtect), len(privacyResidualRisks))
 	}
-	copied := privacyUsageMetadata(7)
+	copied := privacyUsageMetadata(7, "")
 	copied.Protects[0] = "mutated"
 	if privacyProtects[0] == "mutated" {
 		t.Fatal("usage lists alias the package slices")
@@ -669,7 +669,7 @@ func TestPrivacyUsageMetadataExactStrings(t *testing.T) {
 			if parsed.Usage.Macprovider.Scope != relayBlindScope {
 				t.Fatalf("outer scope replaced: %s", parsed.Usage.Macprovider.Scope)
 			}
-			want := privacyUsageMetadata(privacyCoordinatorVerifiedAt)
+			want := privacyUsageMetadata(privacyCoordinatorVerifiedAt, "")
 			if !reflect.DeepEqual(parsed.Usage.Macprovider.Privacy, want) || parsed.Usage.Macprovider.Privacy.PostureVerifiedAtUnix == res.PrivacyPostureVerifiedAtUnix {
 				t.Fatalf("privacy usage %+v want %+v reservation %d", parsed.Usage.Macprovider.Privacy, want, res.PrivacyPostureVerifiedAtUnix)
 			}
@@ -744,8 +744,10 @@ func TestPrivacyPoolAndDemoDowngradeRejected(t *testing.T) {
 		c.Coordinator.BuyerURL = upstream.URL
 	})
 	key := createAccountAndKey(t, store, cfg, "privacy-pool")
+	// SPEC-049-R032: the buyer pool selector is resolved and authorized; a
+	// buyer-supplied internal pool header is still a downgrade.
 	resp := postPrivacy(h, key, "/v1/relay-blind/route-reservations", []byte(`{`), map[string]string{
-		privacyClassHeader: privacyClassV1, poolSelectHeader: "pool",
+		privacyClassHeader: privacyClassV1, poolEmitHeader: "pool",
 	})
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("pool status %d %s", resp.Code, resp.Body.String())

@@ -614,6 +614,8 @@ type privacyClientSpec struct {
 	directorySigner ed25519.PrivateKey
 	directoryEdit   func(*relayblind.IdentityDirectory)
 	directoryBytes  func([]byte) []byte
+	// pool runs the client with --pool (SPEC-049-R032).
+	pool string
 }
 
 var cliDirectoryKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, ed25519.SeedSize))
@@ -685,6 +687,9 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 		if got := r.Header.Values("X-MacProvider-Privacy-Class"); len(got) != 1 || got[0] != relayblind.PrivacyClassV1 {
 			t.Errorf("privacy header=%v path=%s", got, r.URL.Path)
 		}
+		if got := r.Header.Get("X-MacProvider-Pool-Select"); got != spec.pool {
+			t.Errorf("pool select=%q want %q path=%s", got, spec.pool, r.URL.Path)
+		}
 		switch r.URL.Path {
 		case "/v1/relay-blind/route-reservations":
 			request, err := relayblind.ParseReservationRequest(body)
@@ -694,6 +699,9 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 				return
 			}
 			response := privacyReservationResponse(t, record, identity, request, now)
+			if spec.pool != "" {
+				response.PoolID, response.PoolManifestVersion, response.PoolManifestCoreDigest = spec.pool, 3, strings.Repeat("c", 64)
+			}
 			if spec.reservation != nil {
 				response = spec.reservation(response)
 			}
@@ -708,7 +716,7 @@ func runPrivacyClient(t *testing.T, spec privacyClientSpec) (string, string, int
 	opts := options{
 		baseURL: server.URL, identityPin: pinPath, model: "model-a", input: "-",
 		maxOutputTokens: 32, inputTokenUpperBound: 96, stream: spec.stream, privacyClass: true,
-		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute,
+		apiKeyEnv: "TEST_API_KEY", walletSessionKeyEnv: "TEST_WALLET_KEY", timeout: time.Minute, pool: spec.pool,
 	}
 	if spec.wallet {
 		opts.walletSessionID = "wallet-session-fixture"
@@ -1038,3 +1046,84 @@ func assertPrivacyFailure(t *testing.T, err error, stderr string, calls, wantCal
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// poolScopedUsage turns the clear usage into the SPEC-049-R020 pool-scoped
+// disclosure for pool.
+func poolScopedUsage(pool string) func(map[string]any) map[string]any {
+	return func(usage map[string]any) map[string]any {
+		object := privacyObject(usage)
+		object["does_not_protect"] = privacyDoesNotProtect[:5]
+		object["pool"] = map[string]any{
+			"pool_id": pool, "scope": privacyPoolScope,
+			"pool_operator_sees": privacyPoolOperatorSees, "pool_operator_does_not_see": privacyPoolOperatorDoesNotSee,
+		}
+		return usage
+	}
+}
+
+func TestPrivacyPoolClientVerifiesPoolBinding(t *testing.T) {
+	t.Run("served", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{stream: stream, pool: "pool-a", content: privacyContent(stream), alterUsage: poolScopedUsage("pool-a")})
+			if err != nil || calls != 2 || stdout != string(privacyContent(stream)) {
+				t.Fatalf("stream=%v err=%v calls=%d", stream, err, calls)
+			}
+			for _, want := range []string{"pool_id: pool-a", "pool_manifest_version: 3", "pool_scope: " + privacyPoolScope, "pool_operator_sees: aggregate_payable_request_counts_and_provider_credits", "pool_operator_does_not_see: per_request_metadata_and_buyer_attribution_through_pool_surfaces"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr lacks %q", want)
+				}
+			}
+		}
+	})
+	t.Run("reservation_without_pool", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID, r.PoolManifestVersion, r.PoolManifestCoreDigest = "", 0, ""
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("reservation_for_another_pool", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID = "pool-b"
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("global_reservation_with_pool_fields", func(t *testing.T) {
+		_, _, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), reservation: func(r relayblind.ReservationResponse) relayblind.ReservationResponse {
+			r.PoolID, r.PoolManifestVersion, r.PoolManifestCoreDigest = "pool-a", 3, strings.Repeat("c", 64)
+			return r
+		}})
+		if err == nil || !strings.Contains(err.Error(), "reservation pool rejected") || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+	t.Run("global_disclosure_on_pool_response", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false)})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("pool_disclosure_names_another_pool", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-b")})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("pool_disclosure_on_global_response", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{content: privacyContent(false), alterUsage: poolScopedUsage("pool-a")})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+	})
+	t.Run("pool_needs_privacy_class_and_api_key", func(t *testing.T) {
+		for _, opts := range []options{
+			{baseURL: "http://127.0.0.1:1", identityPin: "/tmp/pin.json", model: "model-a", pool: "pool-a"},
+			{baseURL: "http://127.0.0.1:1", model: "model-a", pool: "pool-a", privacyClass: true, walletSessionID: "wallet"},
+			{baseURL: "http://127.0.0.1:1", model: "model-a", pool: "pool a", privacyClass: true},
+		} {
+			err := run(context.Background(), opts, strings.NewReader("{}"), io.Discard, io.Discard, func(string) string { return "" })
+			if err == nil || !strings.Contains(err.Error(), "--pool requires") {
+				t.Fatalf("opts=%+v err=%v", opts, err)
+			}
+		}
+	})
+}

@@ -13,6 +13,7 @@ import (
 // that came closest to serving it.
 var privacyRejectRank = map[string]int{
 	relayblind.PrivacyRejectModelNotServed:         0,
+	relayblind.PrivacyRejectPoolNoEligibleMember:   0,
 	relayblind.PrivacyRejectModelNotPrivateCapable: 1,
 	relayblind.PrivacyRejectLiveSessionUnavailable: 2,
 	relayblind.PrivacyRejectSettlementPrerequisite: 3,

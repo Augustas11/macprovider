@@ -130,6 +130,11 @@ type ReservationResponse struct {
 	PrivacyKeyAttestation          *PrivacyKeyAttestation `json:"privacy_key_attestation,omitempty"`
 	PrivacyKeyAttestationSignature string                 `json:"privacy_key_attestation_signature,omitempty"`
 	PrivacyPostureVerifiedAtUnix   int64                  `json:"privacy_posture_verified_at_unix,omitempty"`
+	// SPEC-049-R032: present, all three, only on a pool-scoped privacy-class
+	// reservation; a global reservation never carries them.
+	PoolID                 string `json:"pool_id,omitempty"`
+	PoolManifestVersion    uint64 `json:"pool_manifest_version,omitempty"`
+	PoolManifestCoreDigest string `json:"pool_manifest_core_digest,omitempty"`
 }
 
 type ConsumeResponse struct {
@@ -212,6 +217,9 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 	case ReservationVersion:
 	case PrivacyReservationVersion:
 		fields = append(append([]string{}, fields...), "privacy_class", "privacy_assurance", "privacy_key_attestation", "privacy_key_attestation_signature", "privacy_posture_verified_at_unix")
+		if closedObjectHasField(raw, "pool_id") {
+			fields = append(fields, "pool_id", "pool_manifest_version", "pool_manifest_core_digest")
+		}
 	default:
 		return ReservationResponse{}, ErrInvalidReservation
 	}
@@ -223,6 +231,17 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 		return value, err
 	}
 	return value, nil
+}
+
+// closedObjectHasField reports a top-level member of a JSON object. It only
+// chooses the closed field set; decodeClosed still rejects everything else.
+func closedObjectHasField(raw []byte, name string) bool {
+	var members map[string]json.RawMessage
+	if json.Unmarshal(raw, &members) != nil {
+		return false
+	}
+	_, ok := members[name]
+	return ok
 }
 
 func closedObjectVersion(raw []byte) (string, error) {
@@ -322,12 +341,15 @@ func (r ReservationRequest) Validate() error {
 func (r ReservationResponse) Validate() error {
 	switch r.Version {
 	case ReservationVersion:
-		if r.privacyExtensionPresent() {
+		if r.privacyExtensionPresent() || r.poolExtensionPresent() {
 			return ErrInvalidReservation
 		}
 	case PrivacyReservationVersion:
 		if err := r.validatePrivacyExtension(); err != nil {
 			return err
+		}
+		if r.poolExtensionPresent() && (!visibleASCII(r.PoolID, 128) || r.PoolManifestVersion == 0 || !visibleASCII(r.PoolManifestCoreDigest, 128)) {
+			return ErrInvalidReservation
 		}
 	default:
 		return ErrInvalidReservation
@@ -355,6 +377,10 @@ func (r ReservationResponse) Validate() error {
 		return ErrInvalidReservation
 	}
 	return nil
+}
+
+func (r ReservationResponse) poolExtensionPresent() bool {
+	return r.PoolID != "" || r.PoolManifestVersion != 0 || r.PoolManifestCoreDigest != ""
 }
 
 func (r ConsumeResponse) Validate() error {

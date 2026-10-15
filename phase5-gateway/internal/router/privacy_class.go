@@ -54,6 +54,19 @@ var privacyDoesNotProtect = []string{
 	"pool_scoped_requests",
 }
 
+// SPEC-049-R020 pool-scoped disclosure, copied verbatim.
+const privacyPoolScope = "served_only_by_current_trusted_pool_members_enrolled_in_this_class; pool_membership_is_administrative_trust_not_content_privacy; a_pool_operator_running_a_member_mac_is_its_provider_operator"
+
+var privacyPoolOperatorSees = []string{
+	"pool_policy_membership_and_buyer_grants",
+	"aggregate_payable_request_counts_and_provider_credits",
+}
+
+var privacyPoolOperatorDoesNotSee = []string{
+	"request_and_response_content_through_pool_surfaces",
+	"per_request_metadata_and_buyer_attribution_through_pool_surfaces",
+}
+
 var privacyResidualRisks = []string{
 	"modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
 	"root_sip_bypass_kernel_or_firmware_compromise",
@@ -76,6 +89,8 @@ var privacyResidualRisks = []string{
 type privacyUsageContext struct {
 	PostureVerifiedAtUnix int64
 	Model                 string
+	// PoolID is the SPEC-049-R032 pool of a pool-scoped request; "" global.
+	PoolID string
 }
 
 // privacyUsageObject is the closed SPEC-049-R020 usage.macprovider.privacy
@@ -88,6 +103,17 @@ type privacyUsageObject struct {
 	DoesNotProtect        []string `json:"does_not_protect"`
 	ResidualRisks         []string `json:"residual_risks"`
 	PostureVerifiedAtUnix int64    `json:"posture_verified_at_unix"`
+	// Pool is present only on a pool-scoped response (SPEC-049-R020).
+	Pool *privacyPoolDisclosure `json:"pool,omitempty"`
+}
+
+// privacyPoolDisclosure is the closed SPEC-049-R020 pool member: what the
+// pool operator can and cannot see.
+type privacyPoolDisclosure struct {
+	PoolID                 string   `json:"pool_id"`
+	Scope                  string   `json:"scope"`
+	PoolOperatorSees       []string `json:"pool_operator_sees"`
+	PoolOperatorDoesNotSee []string `json:"pool_operator_does_not_see"`
 }
 
 type operatorConstrainedPrivacyDisclosure struct {
@@ -174,6 +200,40 @@ func privacyBuyerIntentDenied(r *http.Request, accountID string, demo bool) bool
 	return demo || strings.HasPrefix(accountID, "demo:") || relayBlindPoolSelected(r)
 }
 
+// privacyPoolIntentDenied is privacyBuyerIntentDenied for the reservation and
+// chat hops of SPEC-049-R032: the buyer pool selector is resolved and
+// authorized there instead of refused. Demo traffic, a buyer-supplied
+// internal pool header, and an engine selector are still refused.
+func privacyPoolIntentDenied(r *http.Request, accountID string, demo bool) bool {
+	if demo || strings.HasPrefix(accountID, "demo:") {
+		return true
+	}
+	for _, name := range []string{poolEmitHeader, engineSelectHeader} {
+		for _, v := range r.Header.Values(name) {
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolvePrivacyPool is SPEC-049-R032 item 1 at the gateway: the pool of a
+// privacy-class request is resolved and authorized exactly as for plaintext.
+// A wallet session or demo account cannot select one. A refusal keeps the
+// SPEC-042-R010 timing floor and generic pool_unavailable.
+func (s *Server) resolvePrivacyPool(w http.ResponseWriter, r *http.Request, accountID string, walletSession bool) (string, bool) {
+	startedAt := s.now()
+	allowed := !walletSession && !strings.HasPrefix(accountID, "demo:")
+	poolID, poolErr := s.resolvePoolSelection(r.Context(), r.Header, accountID, allowed)
+	if poolErr != nil {
+		s.enforcePoolRejectionTimingFloor(startedAt)
+		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
+		return "", false
+	}
+	return poolID, true
+}
+
 func privacyIntentDowngradeMessage(r *http.Request, accountID string, demo bool) string {
 	if relayBlindPoolSelected(r) {
 		return privacyPoolDowngradeText
@@ -254,8 +314,8 @@ func privacyPostureVerifiedAt(h http.Header) (int64, bool) {
 	return parsed, true
 }
 
-func privacyUsageMetadata(verifiedAt int64) privacyUsageObject {
-	return privacyUsageObject{
+func privacyUsageMetadata(verifiedAt int64, poolID string) privacyUsageObject {
+	object := privacyUsageObject{
 		Class:                 privacyClassV1,
 		Assurance:             privacyAssuranceV1,
 		Scope:                 privacyScope,
@@ -264,6 +324,17 @@ func privacyUsageMetadata(verifiedAt int64) privacyUsageObject {
 		ResidualRisks:         append([]string(nil), privacyResidualRisks...),
 		PostureVerifiedAtUnix: verifiedAt,
 	}
+	if poolID != "" {
+		// The pool-scoped list drops the trailing pool_scoped_requests item.
+		object.DoesNotProtect = object.DoesNotProtect[:len(object.DoesNotProtect)-1]
+		object.Pool = &privacyPoolDisclosure{
+			PoolID:                 poolID,
+			Scope:                  privacyPoolScope,
+			PoolOperatorSees:       append([]string(nil), privacyPoolOperatorSees...),
+			PoolOperatorDoesNotSee: append([]string(nil), privacyPoolOperatorDoesNotSee...),
+		}
+	}
+	return object
 }
 
 func privacyEchoConfirmed(h http.Header) bool {
@@ -327,4 +398,22 @@ func newOperatorConstrainedPrivacyDisclosure(models map[string]privacyProviderCo
 		out.Models = filtered
 	}
 	return out
+}
+
+// privacyPoolRefusal maps the SPEC-042-R010 codes a coordinator returns for a
+// pool refused before privacy selection (SPEC-049-R032 item 2). Every other
+// code keeps the existing relay-blind mapping.
+func privacyPoolRefusal(code string) (int, string, string, bool) {
+	switch code {
+	case "pool_unavailable":
+		return http.StatusServiceUnavailable, "service_unavailable", "Pool unavailable", true
+	case "pool_policy_stale":
+		return http.StatusServiceUnavailable, "service_unavailable", "Pool policy/status freshness is stale", true
+	case "pool_settlement_mode_unsatisfied":
+		return http.StatusServiceUnavailable, "service_unavailable", "Pool requires enforce-mode settlement", true
+	case "pool_model_not_allowed":
+		return http.StatusBadRequest, "invalid_request_error", "Requested model is not allowed by the selected pool", true
+	default:
+		return 0, "", "", false
+	}
 }

@@ -29,6 +29,16 @@ var privacyModeDisclosures = map[string]string{
 	privacyModeOwnedProvider:      "served_only_by_selected_trusted_pool_members; content_visible_to_serving_member_and_network_relays",
 }
 
+// privacyModePoolScopedDisclosure is the SPEC-006-R019 string for a
+// pool-scoped privacy-class envelope (SPEC-049-R032); its effective mode is
+// relay_blind_required.
+const privacyModePoolScopedDisclosure = "content_hidden_from_network_relays_and_pool_surfaces; served_only_by_selected_trusted_pool_members; serving_member_runtime_reads_plaintext; metadata_visible_to_relays"
+
+func setPoolScopedPrivacyModeHeaders(h http.Header) {
+	h.Set(privacyModeHeader, privacyModeRelayBlindRequired)
+	h.Set(privacyModeDisclosureHeader, privacyModePoolScopedDisclosure)
+}
+
 // requestedPrivacyMode parses the closed buyer header. Absent means pool.
 func requestedPrivacyMode(r *http.Request) (string, bool) {
 	values := r.Header.Values(privacyModeHeader)
@@ -69,7 +79,8 @@ func gatePrivacyModeBeforeRelayBlind(w http.ResponseWriter, r *http.Request, bod
 	_, envelope, malformed := parseRelayBlindEnvelopeProbe(body)
 	switch mode {
 	case privacyModeRelayBlindRequired:
-		if len(r.Header.Values(poolSelectHeader)) > 0 {
+		// SPEC-049-R032: only a privacy-class envelope may be pool-scoped.
+		if len(r.Header.Values(poolSelectHeader)) > 0 && len(r.Header.Values(privacyClassHeader)) == 0 {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", privacyModeUnsatisfied, "relay_blind_required is not available for pool-scoped requests")
 			return "", false
 		}
