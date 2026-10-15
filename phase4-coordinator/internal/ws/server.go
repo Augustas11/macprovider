@@ -284,6 +284,9 @@ type Server struct {
 	privacyAuthority       *relayblind.PrivacyAuthority
 	privacyPostureChans    sync.Map
 	privacyPostureInFlight sync.Map
+	// privacyCodeBoundEvidence holds at most one SPEC-049 §4.13 evidence
+	// message per session while its posture challenge is outstanding.
+	privacyCodeBoundEvidence sync.Map
 	// SPEC-049-R031 identity key rotation exchanges, one per session.
 	privacyRotationChans    sync.Map
 	privacyRotationInFlight sync.Map
@@ -4954,6 +4957,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleSELivenessResponse(providerID, assignedID, payload)
 	case "privacy_posture_response":
 		s.handlePrivacyPostureResponse(providerID, assignedID, payload)
+	case "privacy_code_bound_evidence":
+		s.handlePrivacyCodeBoundEvidence(providerID, assignedID, payload)
 	case "privacy_key_rotation_request":
 		s.handlePrivacyKeyRotationRequest(providerID, assignedID, payload)
 	case "privacy_key_rotation":

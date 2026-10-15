@@ -1122,6 +1122,20 @@ func runCoordinator() (exitCode int) {
 				logger.Fatal().Err(err).Msg("privacy class authority rejected")
 			}
 			privacyAuthority.UseMetrics(metricsHandle)
+			// SPEC-049-R033: the code-bound label needs the SPEC-033 App
+			// Attest record, read through the recorder connection. Without
+			// it every posture stays device-bound; nothing else changes.
+			if onboardingStore != nil && onboardingStore.AppAttestRecorderConfigured() {
+				if err := privacyAuthority.UseCodeBound(relayblind.CodeBoundConfig{
+					Lookup:   appAttestRecordLookup(onboardingStore),
+					TeamID:   cfg.Onboarding.AppleTeamID,
+					BundleID: cfg.Onboarding.BundleID,
+				}); err != nil {
+					logger.Warn().Str("event", "privacy_code_bound_unavailable").Str("reason", "configuration_incomplete").Msg("privacy postures stay device-bound")
+				}
+			} else {
+				logger.Info().Str("event", "privacy_code_bound_unavailable").Str("reason", "app_attest_record_unavailable").Msg("privacy postures stay device-bound")
+			}
 			wsOpts = append(wsOpts, providerws.WithPrivacyAuthority(privacyAuthority))
 		}
 	}
@@ -4285,6 +4299,18 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	}
 	mux.Handle("/", base)
 	return mux
+}
+
+// appAttestRecordLookup reads a provider's SPEC-033 App Attest record for
+// SPEC-049-R033 through the recorder connection, with a short bound because
+// posture verification runs under the provider's session lock.
+func appAttestRecordLookup(store *onboarding.PGStore) relayblind.AppAttestKeyLookup {
+	return func(ctx context.Context, providerID string) ([]byte, []byte, bool, error) {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		key, ok, err := store.RecordedAppAttestKey(ctx, providerID)
+		return key.KeyID, key.PublicKey, ok, err
+	}
 }
 
 // withProviderAppAttest mounts the SPEC-033 §5.7.1 provider App Attest

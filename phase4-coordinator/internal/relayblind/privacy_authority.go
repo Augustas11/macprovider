@@ -59,6 +59,9 @@ type PrivacyAuthority struct {
 	directory  *IdentityDirectoryService
 
 	metrics atomic.Pointer[privacyMetricsRef]
+	// codeBound is the SPEC-049-R033 verifier; nil means every posture is
+	// device-bound.
+	codeBound atomic.Pointer[codeBoundVerifier]
 
 	mu                sync.Mutex
 	pendingQuarantine map[string]pendingQuarantine
@@ -155,6 +158,7 @@ type privacySession struct {
 	signingID    string
 	binary       string
 	digests      map[string]struct{}
+	assurance    string // SPEC-049-R033 label of the verified posture
 	seq          uint64
 	hasSeq       bool
 	nonce        string
@@ -622,6 +626,23 @@ func (a *PrivacyAuthority) DropSession(providerID, session string) {
 }
 
 func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, session, nonce string, raw []byte, sessionSEKey []byte, now time.Time) error {
+	_, err := a.VerifyPostureWithEvidence(ctx, providerID, session, nonce, raw, nil, sessionSEKey, now)
+	return err
+}
+
+// VerifyPostureWithEvidence is VerifyPosture with the SPEC-049-R033
+// code-bound evidence the session sent for this posture (nil when none). The
+// evidence only decides the label of a posture that verifies on its own; it
+// never makes a posture fail.
+func (a *PrivacyAuthority) VerifyPostureWithEvidence(ctx context.Context, providerID, session, nonce string, raw, evidence []byte, sessionSEKey []byte, now time.Time) (CodeBoundOutcome, error) {
+	var outcome CodeBoundOutcome
+	if err := a.verifyPosture(ctx, providerID, session, nonce, raw, evidence, sessionSEKey, now, &outcome); err != nil {
+		return CodeBoundOutcome{}, err
+	}
+	return outcome, nil
+}
+
+func (a *PrivacyAuthority) verifyPosture(ctx context.Context, providerID, session, nonce string, raw, evidence []byte, sessionSEKey []byte, now time.Time, outcome *CodeBoundOutcome) error {
 	if a == nil || a.store == nil {
 		return ErrStoreUnavailable
 	}
@@ -756,7 +777,9 @@ func (a *PrivacyAuthority) VerifyPosture(ctx context.Context, providerID, sessio
 			return err
 		}
 	}
-	if !a.commitPosture(id, snap, statement, now) {
+	// SPEC-049-R033: the label of a posture that passed every check above.
+	*outcome = a.evaluateCodeBound(ctx, providerID, session, statement, framing, sePin, idPub, evidence, now)
+	if !a.commitPosture(id, snap, statement, outcome.Assurance, now) {
 		return a.reject("posture_closed")
 	}
 	return nil
@@ -1131,7 +1154,7 @@ func (a *PrivacyAuthority) postureStillCurrent(id privacySessionID, snap posture
 		entry.epoch == snap.epoch && a.epochs[id.providerID] == snap.epoch && a.closedGen[id] == snap.boundGen
 }
 
-func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, now time.Time) bool {
+func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapshot, statement PostureStatement, assurance string, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	entry := a.sessions[id]
@@ -1143,6 +1166,7 @@ func (a *PrivacyAuthority) commitPosture(id privacySessionID, snap postureSnapsh
 	}
 	entry.verified = true
 	entry.verifiedAt = now
+	entry.assurance = assurance
 	entry.cdhash = statement.CodeCDHash
 	entry.hasCDHash = true
 	entry.teamID = statement.TeamID

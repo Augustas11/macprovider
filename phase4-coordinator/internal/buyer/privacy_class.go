@@ -18,6 +18,9 @@ import (
 const (
 	privacyClassHeader             = "X-MacProvider-Privacy-Class"
 	privacyPostureVerifiedAtHeader = "X-MacProvider-Privacy-Posture-Verified-At"
+	// privacyAssuranceHeader carries the reservation's SPEC-049-R034 label
+	// to the gateway on a successful privacy-class chat response.
+	privacyAssuranceHeader = "X-MacProvider-Privacy-Assurance"
 
 	privacyClassDisabled    = "privacy_class_disabled"
 	privacyClassUnavailable = "privacy_class_unavailable"
@@ -48,6 +51,32 @@ func privacyRequested(r *http.Request) (present, valid bool) {
 		return true, false
 	}
 	return true, value == relayblind.PrivacyClassV1
+}
+
+// privacyAssuranceRequested reads the SPEC-049-R034 requirement header. A
+// missing header asks for nothing; one exact code_bound_attested value is the
+// only valid request; anything else is present and invalid.
+func privacyAssuranceRequested(r *http.Request) (present bool, label string, valid bool) {
+	if r == nil {
+		return false, "", false
+	}
+	values := r.Header.Values(relayblind.PrivacyAssuranceRequiredHeader)
+	if len(values) == 0 {
+		return false, relayblind.PrivacyAssurance, true
+	}
+	if len(values) != 1 || strings.TrimSpace(values[0]) != relayblind.PrivacyAssuranceCodeBound {
+		return true, "", false
+	}
+	return true, relayblind.PrivacyAssuranceCodeBound, true
+}
+
+// reservationAssurance is the label a privacy-class row was reserved under;
+// a row written before SPEC-049 v0.5.0 is device-bound.
+func reservationAssurance(reservation relayblind.Reservation) string {
+	if reservation.PrivacyAssurance == "" {
+		return relayblind.PrivacyAssurance
+	}
+	return reservation.PrivacyAssurance
 }
 
 func privacyErrorMessage(code string) string {
@@ -137,14 +166,18 @@ func privacyObservedCode(code string, beforeConsume bool) string {
 // privacyGate re-checks the SPEC-049 conditions for one live session. It
 // does not select a different provider. It returns the verification time, the
 // §4.9 code, and the SPEC-049-R030 reason of a failure.
-func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest string) (time.Time, string, string) {
-	return s.privacyGateExplain(ctx, provider, keyDigest, true)
+//
+// assurance is the label the request needs (SPEC-049-R034): a
+// code_bound_attested request also needs the session's latest verified
+// posture to be code-bound.
+func (s *Server) privacyGate(ctx context.Context, provider pool.Provider, keyDigest, assurance string) (time.Time, string, string) {
+	return s.privacyGateExplain(ctx, provider, keyDigest, assurance, true)
 }
 
 // privacyGateExplain is privacyGate; explain false skips the store lookup
 // that splits an unverified posture into not enrolled, for per-candidate
 // selection, which explains once after it fails.
-func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider, keyDigest string, explain bool) (time.Time, string, string) {
+func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider, keyDigest, assurance string, explain bool) (time.Time, string, string) {
 	reject := func(reason, code string) (time.Time, string, string) {
 		s.logPrivacyGateRejection(reason)
 		return time.Time{}, code, reason
@@ -182,6 +215,9 @@ func (s *Server) privacyGateExplain(ctx context.Context, provider pool.Provider,
 	if verifiedAt.Unix() <= 0 {
 		return reject(relayblind.PrivacyRejectPostureUnverified, privacyClassUnavailable)
 	}
+	if assurance == relayblind.PrivacyAssuranceCodeBound && s.privacyAuthority.SessionAssurance(current.ProviderID, current.AssignedID, s.now()) != relayblind.PrivacyAssuranceCodeBound {
+		return reject(relayblind.PrivacyRejectAssuranceUnavailable, privacyClassUnavailable)
+	}
 	return verifiedAt, "", ""
 }
 
@@ -200,7 +236,10 @@ type privacySelection struct {
 //
 // scope, when set, is the SPEC-049-R032 pool snapshot: only members that pass
 // its pool predicates are walked, so the result is the intersection.
-func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot) (privacySelection, string, string) {
+//
+// assurance is the requested SPEC-049-R034 label; a code-bound request ranks
+// only sessions whose latest verified posture is code-bound.
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot, assurance string) (privacySelection, string, string) {
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled, reason
@@ -240,7 +279,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 			continue
 		}
 		for _, record := range records {
-			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, false)
+			verifiedAt, code, reason := s.privacyGateExplain(ctx, provider, record.KeyRecordDigest, assurance, false)
 			if code != "" {
 				if reason == relayblind.PrivacyRejectPostureUnverified && !unverifiedSeen[provider.ProviderID] {
 					unverifiedSeen[provider.ProviderID] = true
@@ -315,7 +354,7 @@ func (s *Server) keylessPrivacyReason(ctx context.Context, keyless []pool.Provid
 	return closest
 }
 
-func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession, poolID string) {
+func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Request, accountID, walletSession, poolID, assurance string) {
 	const phase = relayblind.PrivacyRejectPhaseReservation
 	// Wall time: writePoolUnavailable measures the timing floor with time.Since.
 	startedAt := time.Now()
@@ -354,7 +393,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	}
 	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
 	defer func() { unlockSelection() }()
-	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope)
+	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance)
 	if code == relayBlindCapabilityRefusalCode {
 		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
 		return
@@ -365,7 +404,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	}
 	// One more gate immediately before the row is written. A failure here
 	// does not try another provider.
-	verifiedAt, code, reason := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest)
+	verifiedAt, code, reason := s.privacyGate(r.Context(), selected.provider, selected.key.KeyRecordDigest, assurance)
 	if code != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyObservedCode(code, true), reason)
 		return
@@ -389,7 +428,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
-		Requires: request.Requires,
+		Requires: request.Requires, PrivacyAssurance: assurance,
 	}
 	if scope != nil {
 		// SPEC-049-R032 item 4: the reservation row binds the captured pool
@@ -415,7 +454,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxOutputTokens: request.MaxOutputTokens, InputTokenUpperBound: request.InputTokenUpperBound,
 		ReservationTokenCap: request.InputTokenUpperBound + request.MaxOutputTokens, ExpiresAtUnix: expires,
 		CachePolicy: relayblind.CachePolicyNoStore, FailoverPolicy: relayblind.FailoverPolicyDisabled,
-		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: relayblind.PrivacyAssurance,
+		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: assurance,
 		PrivacyKeyAttestation: &attestation, PrivacyKeyAttestationSignature: signature, PrivacyPostureVerifiedAtUnix: verifiedAt.Unix(),
 		PoolID: reservation.PoolID, PoolManifestVersion: reservation.PoolManifestVersion, PoolManifestCoreDigest: reservation.PoolManifestCoreDigest,
 	}

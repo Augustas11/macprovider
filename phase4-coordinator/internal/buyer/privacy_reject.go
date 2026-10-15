@@ -26,8 +26,9 @@ var privacyRejectRank = map[string]int{
 	relayblind.PrivacyRejectKillSwitch:             10,
 	relayblind.PrivacyRejectKeyStaleOrRevoked:      11,
 	relayblind.PrivacyRejectKeyAttestationMismatch: 12,
-	relayblind.PrivacyRejectRelayBlindUnavailable:  13,
-	relayblind.PrivacyRejectStoreUnavailable:       14,
+	relayblind.PrivacyRejectAssuranceUnavailable:   13,
+	relayblind.PrivacyRejectRelayBlindUnavailable:  14,
+	relayblind.PrivacyRejectStoreUnavailable:       15,
 }
 
 // closerPrivacyReject returns the reason that ranks closer to serving.
