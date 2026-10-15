@@ -21,6 +21,8 @@ import (
 )
 
 type Hello struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+
 	Type                   string                             `json:"type"`
 	Version                int                                `json:"version"`
 	Tier                   int                                `json:"tier"`
@@ -105,6 +107,8 @@ type HelloAck struct {
 }
 
 type AuthRequest struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+
 	Type                           string                             `json:"type"`
 	Version                        int                                `json:"version"`
 	Stage                          string                             `json:"stage"`
@@ -320,6 +324,8 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
+	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+
 	Type                    string                             `json:"type"`
 	Status                  string                             `json:"status"`
 	ModelID                 string                             `json:"model_id"`
@@ -787,6 +793,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	}
 
 	var h Hello
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &h.ToolSelectionCapabilities); err != nil {
+			return Hello{}, "tool_selection_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &h.Type); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -936,6 +947,11 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 		return AuthRequest{}, Spec010Presence{}, "json", err
 	}
 	var req AuthRequest
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &req.ToolSelectionCapabilities); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "tool_selection_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &req.Type); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -1250,13 +1266,16 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 
 func (r AuthRequest) Hello() Hello {
 	return Hello{
-		Type:                   "hello",
-		Version:                1,
-		Tier:                   1,
-		ProviderID:             r.ProviderID,
-		Hostname:               r.Hostname,
-		ModelID:                r.ModelID,
-		RuntimeSource:          r.RuntimeSource,
+		Type:          "hello",
+		Version:       1,
+		Tier:          1,
+		ProviderID:    r.ProviderID,
+		Hostname:      r.Hostname,
+		ModelID:       r.ModelID,
+		RuntimeSource: r.RuntimeSource,
+
+		ToolSelectionCapabilities: r.ToolSelectionCapabilities,
+
 		ModelHash:              r.ModelHash,
 		ModelHashAlgorithm:     r.ModelHashAlgorithm,
 		WeightsManifestSHA256:  r.WeightsManifestSHA256,
@@ -1721,6 +1740,11 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		return Heartbeat{}, HeartbeatPresence{}, "json", err
 	}
 	var hb Heartbeat
+	if v, ok := raw["tool_selection_capabilities"]; ok {
+		if err := json.Unmarshal(v, &hb.ToolSelectionCapabilities); err != nil {
+			return Heartbeat{}, HeartbeatPresence{}, "tool_selection_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &hb.Type); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}

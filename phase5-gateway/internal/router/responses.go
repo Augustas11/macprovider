@@ -693,7 +693,7 @@ func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (an
 	}
 	m, ok := choice.(map[string]any)
 	if !ok {
-		return choice, nil
+		return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice must be a supported string or function selection"}
 	}
 	if typ, _ := m["type"].(string); typ == "function" {
 		if name, _ := m["name"].(string); name != "" {

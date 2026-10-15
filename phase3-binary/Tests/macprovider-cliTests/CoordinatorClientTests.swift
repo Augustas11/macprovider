@@ -4695,8 +4695,19 @@ final class CoordinatorClientTests: XCTestCase {
         )
         XCTAssertNotNil(UUID(uuidString: serviceInstanceID), "service_instance_id must be a UUID: \(serviceInstanceID)")
         XCTAssertNil(heartbeatWithoutHardware["last_supervisor_event"], "no beacon → last_supervisor_event omitted")
+        // SPEC-001-R007: status metadata alone cannot claim a loaded runtime's
+        // tool-selection support. This fixture's runtime has no loaded model.
+        let heartbeatCapabilities = try XCTUnwrap(
+            heartbeatWithoutHardware.removeValue(forKey: "tool_selection_capabilities") as? [[String: Any]]
+        )
+        XCTAssertTrue(heartbeatCapabilities.isEmpty)
+        var helloWithoutCapabilities = await client.helloMessage()
+        let helloCapabilities = try XCTUnwrap(
+            helloWithoutCapabilities.removeValue(forKey: "tool_selection_capabilities") as? [[String: Any]]
+        )
+        XCTAssertTrue(helloCapabilities.isEmpty)
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
-        let helloJSON = Self.jsonString(await client.helloMessage())
+        let helloJSON = Self.jsonString(helloWithoutCapabilities)
         let expectedHeartbeat = """
         {"avg_latency_ms_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
         """

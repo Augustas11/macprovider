@@ -194,12 +194,16 @@ var spec018RetryableByCode = map[string]bool{
 	// three emitted but present in neither this map nor the round-2
 	// completeness test's inventory (autotune_feeds.go:120's sibling
 	// rate_limited entry above was already covered; :124 was not).
-	"autotune_feed_not_found": false, // Tier-2 feed disabled/unconfigured, permanent
-	"invalid_tools":           false, // client request-shape validation, permanent
-	"pool_status_not_found":   false, // pool status lookup is non-enumerating for unknown/unauthorized pools
-	"pool_status_unavailable": true,  // transient durable status reconstruction/read fault
-	"pool_policy_not_found":   false, // pool policy lookup is non-enumerating for unknown/unauthorized pools
-	"pool_policy_unavailable": true,  // transient durable policy reconstruction/read fault
+	"autotune_feed_not_found":          false, // Tier-2 feed disabled/unconfigured, permanent
+	"invalid_tools":                    false,
+	"invalid_tool_choice":              false,
+	"unsupported_tool_choice":          false,
+	"unsupported_tool_schema":          false,
+	"tool_selection_validation_failed": false, // client request-shape validation, permanent
+	"pool_status_not_found":            false, // pool status lookup is non-enumerating for unknown/unauthorized pools
+	"pool_status_unavailable":          true,  // transient durable status reconstruction/read fault
+	"pool_policy_not_found":            false, // pool policy lookup is non-enumerating for unknown/unauthorized pools
+	"pool_policy_unavailable":          true,  // transient durable policy reconstruction/read fault
 	// route_snapshot_failed is a pre-dispatch durable-store write failure
 	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
 	// unlike the other internal-fault codes above which are left false.
@@ -2416,10 +2420,11 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 }
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
-	raw      json.RawMessage
+	toolSelection *toolSelectionPolicy
+	Model         string        `json:"model"`
+	Messages      []chatMessage `json:"messages"`
+	Stream        bool          `json:"stream"`
+	raw           json.RawMessage
 	// poolID is the SPEC-042 Trusted Pool selected for this request (from
 	// the authorized X-MacProvider-Pool header). "" means global (poolless)
 	// routing — the default — which keeps selection byte-identical.
@@ -2919,6 +2924,10 @@ func (s *Server) forwardStreamSequence(
 				tr = classifyStreamResult(result, status, attempt)
 				nativeResult = result
 			}
+			if tr.attempt.ErrorCode == "tool_selection_validation_failed" {
+				tr.retryable = false
+				tr.failoverEligible = false
+			}
 			// Pre-refactor streaming gated the failoverCandidate
 			// same-attempt re-route on `tr.failoverEligible && wsTunneled`
 			// (server.go:1337). The classifier sets failoverEligible for
@@ -3020,6 +3029,10 @@ func (s *Server) forwardStreamSequence(
 			}
 			if state.capacityRefused && (dispatched.nativeResult == wsForwardQueueFull || dispatched.nativeResult == wsForwardUnavailable) {
 				writeRouteError(w, buyerRouteError(capacityShedRouteErrorWithLegacy(state.requestedModel, "Selected provider is not reachable"), state))
+				return
+			}
+			if dispatched.tr.attempt.ErrorCode == "tool_selection_validation_failed" {
+				writeToolSelectionError(w)
 				return
 			}
 			writeStreamForwardError(w, dispatched.nativeResult)
@@ -3418,6 +3431,16 @@ func (s *Server) forwardHTTPSequence(
 						return dispatchedAttempt{}, false
 					}
 					writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
+					return dispatchedAttempt{}, false
+				}
+				if validateToolSelectionOutput(state.toolSelection, respBody, false) != nil || validateToolSelectionOutput(state.toolSelection, checkedBody, false) != nil {
+					cancelAttempt()
+					attempt := toolSelectionFailureAttempt()
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, attempt.Status, nil, nil, nil, attempt.Error, attempt.ErrorCode, state.explicitRetries, nil, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					writeToolSelectionError(w)
 					return dispatchedAttempt{}, false
 				}
 				bodyMutatedByGuard := !bytes.Equal(checkedBody, respBody)
@@ -4067,6 +4090,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: blockReason, FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
+			if state != nil && (validateToolSelectionOutput(state.toolSelection, originalBody, false) != nil || validateToolSelectionOutput(state.toolSelection, checkedBody, false) != nil) {
+				attempt := toolSelectionFailureAttempt()
+				writeToolSelectionError(w)
+				return wsForwardFailed, attempt
+			}
 			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
 			// completion. The provider signed end.Receipt over the original
 			// bytes; if we forward the truncated body alongside the receipt,
@@ -4129,7 +4157,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if recordBeforeWrite {
 				w.WriteHeader(http.StatusOK)
-				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+				if state == nil || state.toolSelection == nil {
+					checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+				}
 				_, _ = w.Write(checkedBody)
 				return wsForwardComplete, attempt
 			}
@@ -4138,7 +4168,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			// travels as MAC'd trailers.
 			declareOutcomeTrailers(w.Header())
 			w.WriteHeader(http.StatusOK)
-			checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+			if state == nil || state.toolSelection == nil {
+				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+			}
 			if !writeDelivered(w, checkedBody) {
 				// A non-streaming body is usable only whole: the buyer
 				// received nothing and nothing bills.
@@ -4250,6 +4282,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	setStreamFailureAttempt := func(status int, message string, code string) {
 		streamFailureAttempt = requestLogAttempt{Status: status, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 		hasStreamFailureAttempt = true
+	}
+	if state != nil && state.toolSelection != nil {
+		streamingMode = streamingModeToolSelectionHoldback
 	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer, state, billingAttemptN)
@@ -4662,15 +4697,25 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: "tier2_output_encoding_invalid", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) {
+			if state != nil && state.toolSelection != nil && checked != chunk.Data {
+				relay.Cancel("tool_selection_output_transformed")
+				markProviderDone()
+				return wsForwardFailed, toolSelectionFailureAttempt()
+			}
+			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) || (state != nil && state.toolSelection != nil && raw.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data)) {
 				relay.Cancel("buffered_stream_too_large")
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", ErrorCode: "provider_stream_too_large", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				checked = string(sanitized)
+			if state == nil || state.toolSelection == nil {
+				if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
+					checked = string(sanitized)
+				}
 			}
-			rewritten, err := toolFinal.rewriteAndObserve(checked)
+			rewritten := checked
+			if state == nil || state.toolSelection == nil {
+				rewritten, err = toolFinal.rewriteAndObserve(checked)
+			}
 			if err != nil {
 				relay.Cancel("malformed_tool_call_stream")
 				if s.streamingDowngrade != nil {
@@ -4679,14 +4724,43 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			raw.WriteString(rewritten)
+			if state != nil && state.toolSelection != nil {
+				raw.WriteString(chunk.Data)
+			} else {
+				raw.WriteString(rewritten)
+			}
 			if stop {
 				relay.Cancel("tier2_output_truncated")
 				markProviderDone()
 				// Nothing of the truncated buffered stream was written.
+				if state != nil && state.toolSelection != nil {
+					return wsForwardFailed, toolSelectionFailureAttempt()
+				}
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
+			// The relay can queue its end while response chunks are still buffered.
+			// Drain the already-published tail before deciding a guaranteed outcome.
+			if state != nil && state.toolSelection != nil {
+			drainGuaranteedTail:
+				for {
+					select {
+					case tail, ok := <-relay.Chunks:
+						if !ok {
+							break drainGuaranteedTail
+						}
+						acct.provider([]byte(tail.Data))
+						checked, stop, err := guard.CheckStreamingChunk(tail.Data)
+						if err != nil || stop || checked != tail.Data || raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) || raw.Len() > int(maxUpstreamResponseBodyBytes)-len(tail.Data) {
+							markProviderDone()
+							return wsForwardFailed, toolSelectionFailureAttempt()
+						}
+						raw.WriteString(tail.Data)
+					default:
+						break drainGuaranteedTail
+					}
+				}
+			}
 			if end.Status == "error_context_exceeded" {
 				// Nothing of a buffered stream reached the buyer; the
 				// request exceeded the provider's context.
@@ -4705,20 +4779,29 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				}
 				return wsForwardFailed, attempt
 			}
-			if !toolFinal.finalCloseOK() {
+			if (state == nil || state.toolSelection == nil) && !toolFinal.finalCloseOK() {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider closed before tool-call stream completed", ErrorCode: "tool_call_final_close_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			out, err := consolidatedToolCallSSE(raw.Bytes())
+			if state != nil && validateToolSelectionOutput(state.toolSelection, raw.Bytes(), true) != nil {
+				markProviderDone()
+				return wsForwardFailed, toolSelectionFailureAttempt()
+			}
+			out, err := consolidatedToolCallSSEForSelection(raw.Bytes(), state != nil && state.toolSelection != nil)
 			if err != nil {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+			}
+			if state != nil && state.toolSelection != nil {
+				if sanitized, p, cached, c := sseBlockWithCachedPromptTokens(out, state, billingAttemptN); p != nil || cached != nil || c != nil {
+					out = sanitized
+				}
 			}
 			if err := acct.validate(out); err != nil {
 				if s.streamingDowngrade != nil {
@@ -4740,7 +4823,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			w.Header().Set(streamingModeHeader, streamingMode)
-			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+			if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
@@ -4818,8 +4901,14 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 		markProviderDone()
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 	}
+	if state != nil && validateToolSelectionOutput(state.toolSelection, raw, false) != nil {
+		markProviderDone()
+		return wsForwardFailed, http.StatusBadGateway, toolSelectionFailureAttempt()
+	}
 	providerRaw := raw
-	raw = maybeRecoverQwenXMLToolCalls(raw, state)
+	if state == nil || state.toolSelection == nil {
+		raw = maybeRecoverQwenXMLToolCalls(raw, state)
+	}
 	// The rendered SSE is both the provider side of the accounting (the
 	// provider's JSON, event by event) and the buyer-facing bytes.
 	acct := newDeliveredSSEAccounting()
@@ -4843,7 +4932,7 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 	}
 	_ = billingAttemptN
 	markProviderDone()
-	if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+	if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 		return wsForwardCancelled, 0, requestLogAttempt{}
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -4971,6 +5060,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 	if chatRequestDeclaresTools(body) && !strings.Contains(ct, "text/event-stream") {
 		return s.forwardStreamingJSONAsBuyerSSE(w, r, resp, provider, state, billingAttemptN, started, markProviderDone)
+	}
+	if state != nil && state.toolSelection != nil {
+		streamingMode = streamingModeToolSelectionHoldback
 	}
 	if streamingMode != streamingModeIncremental {
 		return s.forwardStreamingBuffered(w, r, requestID, resp, provider, modelScope, streamingMode, streamingBuyer, state, billingAttemptN)
@@ -5467,16 +5559,22 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	acct := newDeliveredSSEAccounting()
 	acct.provider(raw)
 	receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
+	if state != nil && validateToolSelectionOutput(state.toolSelection, raw, true) != nil {
+		return wsForwardFailed, http.StatusBadGateway, toolSelectionFailureAttempt()
+	}
 	validator := newStreamToolCallFinalValidator()
-	rewrittenRaw, err := validator.rewriteAndObserve(string(raw))
-	if err != nil || !validator.finalCloseOK() {
+	rewrittenRaw := string(raw)
+	if state == nil || state.toolSelection == nil {
+		rewrittenRaw, err = validator.rewriteAndObserve(string(raw))
+	}
+	if err != nil || ((state == nil || state.toolSelection == nil) && !validator.finalCloseOK()) {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 		}
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 	}
 	raw = []byte(rewrittenRaw)
-	out, err := consolidatedToolCallSSE(raw)
+	out, err := consolidatedToolCallSSEForSelection(raw, state != nil && state.toolSelection != nil)
 	if err != nil {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -5499,6 +5597,9 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingMode)
+	if r.Context().Err() != nil || s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", SettlementOutput: settlementOutputForContent("", nil, nil, billing.TerminalStateBuyerCancel)}
+	}
 	w.WriteHeader(http.StatusOK)
 	acct.render(out)
 	if n, err := w.Write(out); err != nil {
@@ -5533,7 +5634,17 @@ type bufferedToolCall struct {
 }
 
 func consolidatedToolCallSSE(raw []byte) ([]byte, error) {
-	calls, err := collectStreamingToolCalls(raw)
+	return consolidatedToolCallSSEForSelection(raw, false)
+}
+
+func consolidatedToolCallSSEForSelection(raw []byte, guaranteed bool) ([]byte, error) {
+	var calls []bufferedToolCall
+	var err error
+	if guaranteed {
+		calls, err = strictToolSelectionCalls(raw)
+	} else {
+		calls, err = collectStreamingToolCalls(raw)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -6502,6 +6613,11 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 			return req, http.StatusBadRequest, "invalid_request", "Invalid stream", ""
 		}
 	}
+	policy, selectionErr := validateToolSelection(body, raw)
+	if selectionErr != nil {
+		return req, http.StatusBadRequest, selectionErr.code, selectionErr.message, "tool_choice"
+	}
+	req.toolSelection = policy
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
 	}
@@ -6512,7 +6628,9 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 		}
 		req.nonStrictSchemaLegacyRejection = legacy
 	}
-	if v, ok := raw["max_tokens"]; ok {
+	if v, ok := raw["max_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		_ = json.Unmarshal(v, &req.maxTokens)
+	} else if v, ok := raw["max_completion_tokens"]; ok {
 		_ = json.Unmarshal(v, &req.maxTokens)
 	}
 	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
@@ -6651,7 +6769,10 @@ func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	return neutralizeUnsupportedToolChoice(body), nil
+	if !providerSupportsToolSelection(provider, req.toolSelection) {
+		return nil, errors.New("unsupported_tool_choice")
+	}
+	return body, nil
 }
 
 func chatRequestDeclaresTools(raw json.RawMessage) bool {
@@ -6729,31 +6850,6 @@ func rewriteJSONRawField(rawBody []byte, field string, replacement []byte) ([]by
 	out = append(out, replacement...)
 	out = append(out, rawBody[end:]...)
 	return out, nil
-}
-
-func neutralizeUnsupportedToolChoice(body []byte) []byte {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	raw, ok := obj["tool_choice"]
-	if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return body
-	}
-	var choice string
-	if err := json.Unmarshal(raw, &choice); err == nil {
-		if choice == "auto" {
-			return body
-		}
-		if choice != "required" {
-			return body
-		}
-	}
-	rewritten, err := rewriteJSONRawField(body, "tool_choice", []byte(`"auto"`))
-	if err != nil {
-		return body
-	}
-	return rewritten
 }
 
 func jsonValueStartForRewrite(raw []byte, keyEnd int) (int, error) {
@@ -7852,6 +7948,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.requestedModel = req.Model
 		state.multiTurnToolHistory = req.multiTurnToolHistory
 		state.nonStrictJSONSchema = req.nonStrictSchemaLegacyRejection != nil
+		state.toolSelection = req.toolSelection
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7886,6 +7983,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
+				}
+				if !providerSupportsToolSelection(p, req.toolSelection) {
+					return pool.Provider{}, unsupportedToolChoiceRouteError()
 				}
 				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
@@ -7923,6 +8023,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned provider does not serve the selected engine")
+				}
+				if !providerSupportsToolSelection(p, req.toolSelection) {
+					return pool.Provider{}, unsupportedToolChoiceRouteError()
 				}
 				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
@@ -7963,6 +8066,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// providers whose CLI implements non-strict mode. With none left for the
 	// model it gets the pre-v0.3.0 400, so the coordinator and the provider CLI
 	// can deploy in either order.
+	if req.toolSelection != nil {
+		compatible := make([]pool.Provider, 0, len(providers))
+		for _, p := range providers {
+			if providerSupportsToolSelection(p, req.toolSelection) {
+				compatible = append(compatible, p)
+			}
+		}
+		if len(compatible) == 0 {
+			return pool.Provider{}, unsupportedToolChoiceRouteError()
+		}
+		providers = compatible
+	}
 	var nonStrictRejected bool
 	if providers, nonStrictRejected = s.filterNonStrictJSONSchemaCandidates(req, providers, class); nonStrictRejected {
 		return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
@@ -9303,6 +9418,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		}
 		// SPEC-019 §1a: a same-ID reconnect on a CLI without non-strict
 		// json_schema support is terminal.
+		if state != nil && !providerSupportsToolSelection(provider, state.toolSelection) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if state != nil && state.nonStrictJSONSchema && !providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -10701,7 +10819,7 @@ func spec001StatusFromBody(body []byte) string {
 
 func spec001EndStatus(status string) string {
 	switch status {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return status
 	default:
 		return ""
@@ -10714,7 +10832,7 @@ func isSpec019ProviderDetailCode(code string) bool {
 	// Asymmetry across provider WS, coordinator SSE, and gateway SSE
 	// allow-lists is a money-path violation.
 	switch code {
-	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -10723,7 +10841,7 @@ func isSpec019ProviderDetailCode(code string) bool {
 
 func isSpec019TerminalSSEErrorCode(code string) bool {
 	switch code {
-	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -10952,6 +11070,9 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
 		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
+	case "tool_selection_validation_failed":
+		retry := false
+		writeProviderStructuredOutputError(w, http.StatusBadGateway, end.Status, end.Error, &retry)
 	case "malformed_json_response", "json_schema_validation_failed":
 		writeProviderStructuredOutputError(w, wsEndHTTPStatus(end.Status), end.Status, end.Error, end.Retryable)
 	case "cancelled":
@@ -11055,7 +11176,7 @@ func spec018ErrorType(code, fallback string) string {
 		return "invalid_request_error"
 	case "byte_cap_exceeded", "response_byte_cap_exceeded", "malformed_tool_call_final_json":
 		return "upstream_provider_error"
-	case "malformed_json_response", "json_schema_validation_failed":
+	case "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed":
 		return "upstream_provider_error"
 	case "provider_timeout":
 		return "api_error"

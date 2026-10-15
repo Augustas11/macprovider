@@ -1,7 +1,19 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.57 (2026-10-15, 14-day request metadata retention)
+**Version:** 0.9.58 (2026-10-15, capability-bound tool selection)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.58 (2026-10-15, capability-bound tool selection, Related: #2014):**
+- §5.4 tool selection (`SPEC-006-R021`) preserves `none`, `required` and named
+  requests through translation and dispatch, filters by loaded model/runtime
+  capability, and fails unsupported requests explicitly. It no longer rewrites
+  `required` or a named selection to `auto`.
+- §5.6 status exposes per-model `tool_choice_modes` from eligible provider
+  capability claims; §5.3.2's OpenRouter string enum adds `none`/`required`
+  only when backed by that compatible capability. A named function remains an
+  object selection, not an enum string. Legacy providers preserve only the
+  pre-existing `auto` behavior. These fields do not establish hardware
+  qualification, deployment or released-provider acceptance.
 
 **Change log v0.9.57 (2026-10-15, issue #1793 — request metadata retention):**
 - §5.10 `/privacy` now names the shipped 14-day default of the coordinator
@@ -120,7 +132,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 **Change log v0.9.40 (2026-09-30, OpenRouter Qwen3.6-only listing):**
 - `GET /v1/openrouter/models` publishes the operator-chosen OpenRouter listing set, not every recommendable catalog row. The set is exactly `mlx-community/Qwen3.6-35B-A3B-4bit` (slug `qwen/qwen3.6-35b-a3b`), paid only, with no free alias. This supersedes the v0.9.29 "every live recommendable catalog model" rule. Reason: the operator lists only Qwen3.6-35B-A3B on OpenRouter. Llama 3.2 3B has low demand at its price, and a listed row that cannot serve tool traffic hurts OpenRouter tool routing. Every catalog row stays routable on `POST /v1/chat/completions`.
-- Tool descriptors: a text output modality MUST declare `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) only for a row whose modelID matches a SPEC-018 §3.1 family that also has a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). Other rows MUST omit both. `tool_choice` omits `"required"` because the coordinator rewrites it to `"auto"`, and omits `"none"` because providers reject it.
+- Historical tool descriptors were `tools` (`boolean`) and `tool_choice` (`enum` `["auto"]`) for SPEC-018 §3.8 families only. v0.9.58 supersedes that auto-only description: §5.3.2 keeps the family predicate and derives additional string modes from compatible live provider claims; §5.4 forbids weakening `required` or named selections to `auto`.
 - Structured-output descriptors: a text output modality MUST declare `structured_outputs` (`boolean`) and `response_format` only for a row whose modelID matches the SPEC-019 §4 family-rendering predicate (today the same `qwen2.5` / `qwen3` / `llama-3.3` substrings; the two predicates are kept separate because SPEC-018 and SPEC-019 govern them independently). Other rows MUST omit both. `response_format` is an object on the wire, so it uses the OpenRouter schema-2.4 `object` descriptor: `{"type":"object","properties":{"type":{"type":"enum","values":["text","json_object","json_schema"]},"json_schema":{"type":"unknown"}}}`. The OpenRouter provider guide defines `object` as "Nested object with per-key descriptors" and `unknown` as accepted but not machine-described. The guide's own example declares `tools` and `structured_outputs` as `boolean`.
 - `response_format.json_schema` stays SPEC-019 strict-only. This change does not relax that.
 - The dual paid/free projection rule stays for a listing that declares a free alias. The current set declares none. `SPEC-006-R010` stays pending.
@@ -423,7 +435,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.51 registers `SPEC-006-R001`..`SPEC-006-R020` in
+SPEC-006 v0.9.58 registers `SPEC-006-R001`..`SPEC-006-R021` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -476,8 +488,10 @@ changing them:
   codes, and the effective-mode disclosure headers (§5.4.4, v0.9.51).
 - `SPEC-006-R020` — Route trace forwarding: the gateway forwards only an exact
   SPEC-002-R007 `X-MacProvider-Route-Trace` value (§5.4.4, v0.9.51).
+- `SPEC-006-R021` — Selection-preserving tool dispatch and model/runtime
+  capability projection (§5.4, §5.3.2, §5.6; SPEC-018-R006).
 
-`requirement_id_migration` is `complete`. R004–R020 are not promoted from
+`requirement_id_migration` is `complete`. R004–R021 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1749,7 +1763,7 @@ Normative rules:
 
 - The document publishes exactly the gateway's OpenRouter listing set (v0.9.40: `mlx-community/Qwen3.6-35B-A3B-4bit` only, paid, no free alias). Catalog rows outside the set MUST NOT appear, even when served.
 - A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
-- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
+- `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The descriptor shapes are those in the example above; the `tool_choice.values` strings are `auto` plus `none` and/or `required` only when the eligible live capability projection in §5.6 supports them for that model. `named` MUST NOT be added to this string enum: named selection uses the function object defined by SPEC-018 §3.11. Other rows MUST omit these descriptors.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
 - `supported_inputs.max_context_length` (v0.9.54) MUST be the largest `max_context_tokens` granted by a serving provider of that pool id: one in `ready` or `busy` state that the coordinator reports `serving_eligible` on `/poolz` (routing-eligible apart from free slots, SPEC-002 v1.6.17), so a provider that is full still counts. Unavailable and draining providers, providers failing any other routing gate, catalog maxima and RAM-tier defaults of providers not serving MUST NOT raise it. Against a coordinator without `serving_eligible` the gateway uses `routing_eligible`. With no serving provider the row keeps the 8192 placeholder and `is_ready: false`.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
@@ -1792,8 +1806,49 @@ Supported request fields:
 - `user`
 - `response_format`
 - `logprobs`
-- `tools` syntactically only
-- `tool_choice` syntactically only
+- `tools` (SPEC-018)
+- `tool_choice` (selection-preserving behavior below)
+
+**SPEC-006-R021 — Selection-preserving dispatch and capability projection.**
+The gateway and coordinator MUST preserve the selected mode after translating
+its endpoint-specific representation. `required` and a named function MUST
+NOT be rewritten to `auto`, nor retried on an incompatible provider or runtime.
+Chat Completions uses the SPEC-018 §3.11 shapes; Responses function selection
+is translated to that same named function object. Messages maps
+`tool_choice.type:"auto"` to `auto`, `"none"` to `none`, `"any"` to
+`required`, and `{"type":"tool","name":"NAME"}` to the named function.
+The existing Messages feature flag is unchanged. Cleartext requests across
+all three endpoints use the same routing and provider guarantees, including
+when `stream:true`. Relay-blind/encrypted envelopes do not negotiate these
+explicit modes; SPEC-018 §3.11 excludes them from the capability claim, and
+the coordinator cannot infer hidden selections in legacy ciphertext.
+
+SPEC-018-R006 owns the support matrix, strict tool-schema subset, complete
+output validation, serial/parallel cardinality and full generated-output
+holdback, including the explicit 1–16,384-token completion budget and finite
+`2^53 - 1` numeric-magnitude domain for required/named modes. The coordinator
+MUST enforce the same request bounds before dispatch and dispatch non-auto
+requests only to a provider
+whose capability matches the resolved model identity, runtime and mode.
+A capability for another model, a family match, a legacy provider without a
+claim, or an external runtime's OpenAI-compatible API MUST NOT establish
+support. The provider MUST recheck against its actual loaded model/runtime
+before inference. Unsupported requests fail explicitly before generation
+with HTTP 400
+`unsupported_tool_choice`. Malformed selection syntax or an unavailable named
+function at the coordinator boundary is HTTP 400 `invalid_tool_choice`;
+unsupported/malformed guaranteed parameter schemas are HTTP 400
+`unsupported_tool_schema`. The provider-local boundary uses
+`unsupported_tool_choice` for unavailable names and unsupported selection
+syntax. Invalid generated output is a distinct
+`tool_selection_validation_failed` failure, never a successful prose fallback or repaired call. Provider-local
+native serving applies the same provider checks; external loopback adapters
+reject non-auto selections until an enforcement implementation exists.
+
+Buyer status and OpenRouter capability fields are discovery hints; routing
+rechecks support for every request. They MUST NOT promise a successful model
+generation, released-provider acceptance or live qualification. Missing claims
+preserve legacy `auto` behavior, without adding any non-auto guarantee.
 
 `n` is accepted for OpenAI SDK compatibility and MUST be 1 in v1. Values greater than 1 MUST be rejected with HTTP 400, `type: "invalid_request_error"`, and `code: "n_must_be_1"`.
 
@@ -1937,9 +1992,9 @@ The documented response-pass-through allowlist is:
 - `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
   streaming-mode diagnostic set by the coordinator on streaming `200`
   responses. The gateway MUST forward it only when its value is one of
-  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
-  or `buffered_provider_downgrade` — and MUST drop any other value rather
-  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  the four canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  `buffered_provider_downgrade`, or `buffered_tool_selection` — and MUST drop
+  any other value rather than forward it verbatim (defense-in-depth: the value is coordinator-set,
   but the allowlist prevents a compromised or misconfigured upstream from
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
@@ -2489,6 +2544,21 @@ Per-model rows MUST include:
 - `availability`: one of `available`, `no_awake_provider`, or `no_free_slots`.
 
 A model with `availability: "no_awake_provider"` is known to the coordinator but currently has no awake ready provider. A model with `availability: "no_free_slots"` has at least one ready provider but no immediate free slot. Front doors MUST use these fields rather than deriving availability from top-level status alone.
+
+Per-model `tool_choice_modes` (v0.9.58, SPEC-006-R021) projects the union
+of compatible modes from eligible providers currently serving that model.
+Modes use the closed vocabulary `auto`, `none`, `required`, `named`;
+`named` describes support for the function object rather than the string
+`"named"` as a request value. The internal source is
+`tool_selection_capabilities` entries with `model_id`, `runtime`, `modes`,
+and `validation:"schema-holdback-v1"`. Only entries matching the serving
+model and runtime may add non-auto modes. Unavailable/ineligible providers,
+foreign model entries and missing/unknown validation methods MUST NOT raise
+the advertised guarantees. A legacy provider contributes only legacy `auto`.
+The gateway MUST expose only the per-model aggregate, never these internal
+per-provider entries. The projection follows the existing `/poolz` cache
+bounds and is not a reservation; support and free capacity may change before
+a request is dispatched.
 
 The endpoint MUST NOT expose:
 
@@ -3153,9 +3223,9 @@ The documented response-pass-through allowlist is:
 - `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
   streaming-mode diagnostic set by the coordinator on streaming `200`
   responses. The gateway MUST forward it only when its value is one of
-  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
-  or `buffered_provider_downgrade` — and MUST drop any other value rather
-  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  the four canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  `buffered_provider_downgrade`, or `buffered_tool_selection` — and MUST drop
+  any other value rather than forward it verbatim (defense-in-depth: the value is coordinator-set,
   but the allowlist prevents a compromised or misconfigured upstream from
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for

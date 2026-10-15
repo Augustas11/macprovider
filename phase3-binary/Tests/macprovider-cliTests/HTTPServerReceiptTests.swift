@@ -412,7 +412,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(argumentObject["city"] as? String, "Vilnius")
     }
 
-    func testHTTPRejectsUnsupportedToolChoiceForV1Slice() async throws {
+    func testHTTPNativeNoneReturnsTextWithoutToolCalls() async throws {
         let response = try await roundTripChatCompletion(
             body: [
                 "model": "fixture-model",
@@ -430,11 +430,51 @@ final class HTTPServerReceiptTests: XCTestCase {
                 "tool_choice": "none",
             ],
             receiptBuilder: nil,
-            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+            completion: CompletionResult(content: "The weather is sunny.", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         )
 
-        XCTAssertEqual(response.status, .badRequest, response.body)
-        XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_choice""#), response.body)
+        XCTAssertEqual(response.status, .ok, response.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
+        let choices = try XCTUnwrap(json["choices"] as? [[String: Any]])
+        let first = try XCTUnwrap(choices.first)
+        XCTAssertEqual(first["finish_reason"] as? String, "stop")
+        let message = try XCTUnwrap(first["message"] as? [String: Any])
+        XCTAssertEqual(message["content"] as? String, "The weather is sunny.")
+        XCTAssertNil(message["tool_calls"])
+    }
+
+    func testHTTPRejectsRequiredAndNamedForUnsupportedNativeModelBeforeInference() async throws {
+        let selections: [Any] = [
+            "required",
+            ["type": "function", "function": ["name": "get_weather"]],
+        ]
+        for selection in selections {
+            let response = try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "What is the weather in Vilnius?"]],
+                    "max_tokens": 100,
+                    "tools": [[
+                        "type": "function",
+                        "function": [
+                            "name": "get_weather",
+                            "parameters": [
+                                "type": "object",
+                                "properties": ["city": ["type": "string"]],
+                                "required": ["city"],
+                                "additionalProperties": false,
+                            ],
+                        ],
+                    ]],
+                    "tool_choice": selection,
+                ],
+                receiptBuilder: nil,
+                completionError: HTTPReceiptFixtureError.inferenceFailed
+            )
+
+            XCTAssertEqual(response.status, .badRequest, response.body)
+            XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_choice""#), response.body)
+        }
     }
 
     func testHTTPAcceptsMultiTurnToolMessagesForV2Slice() async throws {

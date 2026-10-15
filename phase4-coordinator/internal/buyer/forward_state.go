@@ -73,6 +73,7 @@ type forwardState struct {
 	// request so a queued same-ID reconnect is re-checked against the CLI
 	// capability gate.
 	nonStrictJSONSchema bool
+	toolSelection       *toolSelectionPolicy
 	// poolRequiresSettlementEnforce is captured from the selected pool
 	// snapshot. It is re-checked at the dispatch boundary so a coordinator
 	// settlement-mode hot reload cannot downgrade an enforce-required pool

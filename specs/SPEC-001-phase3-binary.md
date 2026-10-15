@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.34 (2026-10-14, public-repo cleanup)
+**Version:** 1.9.35 (2026-10-15, tool-selection capability extension)
+
+**Change log v1.9.35 (2026-10-15, Related: #2014):**
+Adds `SPEC-001-R007` (§6.5): optional loaded-model/runtime-bound
+`tool_selection_capabilities` on hello, v2 auth initial and heartbeat frames,
+and the `tool_selection_validation_failed` terminal status. SPEC-018-R006
+owns mode support and validation semantics; SPEC-006-R021 owns buyer routing
+and projection. These are capability assertions, not a trust-tier or released
+hardware acceptance claim. AC-18.11 retains the historical v1.3/v1.2.4
+comparison and permits this explicit additive extension on current frames.
 
 **Change log v1.9.34 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
 
@@ -1326,6 +1335,7 @@ Inference errors map to `status` values in `inference_response_end`:
 | Context length exceeded | `"error_context_exceeded"` |
 | WS capacity overflow (active requests already equal advertised relay capacity; no queue exists — FR-25) | `"error_queue_full"` |
 | Continuous-batching scheduler queue pressure before admission: `continuous_batching_stream_backpressure` or `continuous_batching_queue_wait_timeout` (SPEC-038 API-visible lifecycle overlay; no inference ran, nothing reached the buyer) | `"error_queue_full"` |
+| Tool-selection output validation failure (SPEC-018-R006) | `"tool_selection_validation_failed"` (`retryable:false`) |
 | Internal inference error | `"error_internal"` |
 
 Post-token continuous-batching delivery backpressure
@@ -2459,6 +2469,38 @@ distinguishes the state.
 
 All messages are JSON. Direction indicated as C->P (coordinator to
 provider) or P->C (provider to coordinator).
+
+#### Tool-selection capability extension (v1.9.35)
+
+**SPEC-001-R007 — Tool-selection capability and failure wire shape.** Provider
+`hello`, v2 initial `auth_request`, and `heartbeat` frames MAY carry
+`tool_selection_capabilities`, an array of objects whose members are
+`model_id` (string), `runtime` (string), `modes` (array of strings) and
+`validation` (string). The implemented enforcement method is
+`validation:"schema-holdback-v1"`; its model/runtime/mode matrix and
+validation behavior are owned by SPEC-018-R006. Mode vocabulary is `auto`,
+`none`, `required`, `named`; `named` describes an object selection, not a
+request string. A capability MUST bind the session's current loaded model and
+runtime, and MUST NOT survive a heartbeat that omits it or a change to an
+incompatible serving identity. Missing claims preserve legacy auto behavior
+and MUST NOT enable a non-auto guarantee. Old receivers ignore this additive
+field; new receivers MUST fail closed on absent, mismatched or unknown
+capabilities for guaranteed-mode dispatch, per SPEC-006-R021. The field grants
+no model admission, attestation, receipt or settlement authority.
+
+On legacy `hello`, this field is an explicit additive exception to the current
+frame comparison in AC-18.11. Removing only `tool_selection_capabilities` MUST
+leave the pre-existing legacy fields and values unchanged; the extension MUST
+NOT add warm-swap fields when warm swap is disabled. Its presence does not
+authorize unrelated new keys or change the legacy handshake version.
+
+An `inference_response_end` with generated-output tool-selection failure uses
+`status:"tool_selection_validation_failed"` and `retryable:false`. It MUST
+NOT be represented as `complete`, ordinary assistant prose, a successful
+`tool_calls` finish, or a fabricated/repaired call. SPEC-018-R006 defines the
+full holdback requirement; SPEC-006-R021 defines the corresponding buyer
+failure. Request validation remains a pre-inference rejection and MUST NOT
+be reclassified as this generated-output failure.
 
 #### Handshake (P->C) — sent on WebSocket open
 ```json
@@ -5068,6 +5110,15 @@ handshake) is byte-identical to SPEC-001 v1.2.4 §6.5. v1.3 adds the v2
 handshake as a new §6.7; it does NOT modify the legacy `hello`
 documentation. Verifiable by `diff` of the two versions' §6.5 sections.
 Traces to SPEC-011 v0.5 AC-18 and SPEC-010 v1.5 AC-16.
+
+**Current-frame reconciliation (v1.9.35).** The version-to-version documentation
+comparison above remains historical. Current legacy `hello` frames MAY include
+the optional `tool_selection_capabilities` extension defined by SPEC-001-R007.
+For this extension, compatibility is checked by validating that field against
+R007 and comparing the remaining legacy fields and values to their pre-extension
+behavior. In particular, warm-swap-disabled frames MUST still omit
+`supported_models`, `publishes_supported_models` and `loading`. This exception
+does not permit other field or value drift.
 
 **AC-18.12. Control-socket detection precedence — ECONNREFUSED.**
 A v1.3 binary `serve --enable-warm-swap` running with a stale socket

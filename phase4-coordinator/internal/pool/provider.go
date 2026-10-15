@@ -105,7 +105,18 @@ const (
 	AuthMintFailed AuthState = "mint_failed"
 )
 
+// ToolSelectionCapability binds guarantees to the session's exact loaded model
+// and adapter. It is a provider assertion; the buyer boundary also checks output.
+type ToolSelectionCapability struct {
+	ModelID    string   `json:"model_id"`
+	Runtime    string   `json:"runtime"`
+	Modes      []string `json:"modes"`
+	Validation string   `json:"validation"`
+}
+
 type Provider struct {
+	ToolSelectionCapabilities []ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+
 	ProviderID              string  `json:"provider_id"`
 	AssignedID              string  `json:"assigned_id"`
 	Hostname                string  `json:"hostname"`
@@ -2911,6 +2922,8 @@ type ReceiptRotationEvent struct {
 type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
+	ToolSelectionCapabilities []ToolSelectionCapability
+
 	Status                  State
 	ModelID                 string
 	ModelParamsB            float64
@@ -3018,6 +3031,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
+	// Absence withdraws guarantees, including after a runtime/model change.
+	p.ToolSelectionCapabilities = hb.ToolSelectionCapabilities
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
 	if modelIDChanged {

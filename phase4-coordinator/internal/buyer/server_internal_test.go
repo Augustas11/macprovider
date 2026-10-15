@@ -974,6 +974,8 @@ var coordinatorEmittedErrorCodes = []string{
 	"pool_provider_capability_unsatisfied", "pool_settlement_mode_unsatisfied",
 	// SPEC-006-R016 / SPEC-042-R014 buyer engine selection.
 	"engine_unavailable", "invalid_engine_selection",
+	// SPEC-018 guaranteed tool selection preflight and generated-output failures.
+	"invalid_tool_choice", "unsupported_tool_choice", "unsupported_tool_schema", "tool_selection_validation_failed",
 	// SPEC-043 creator promise/status surface.
 	"pool_policy_not_found", "pool_policy_unavailable", "pool_status_not_found", "pool_status_unavailable",
 }

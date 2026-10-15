@@ -2540,9 +2540,9 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 // buyer-visible X-MacProvider-Streaming-Mode diagnostic — set by the
 // coordinator on streaming 200 responses — must survive the gateway's
 // blanket X-MacProvider-* strip and reach the buyer, while sibling
-// X-MacProvider-* headers stay stripped. Covers all three canonical values.
+// X-MacProvider-* headers stay stripped. Covers all canonical values.
 func TestStreamingModeHeaderForwarded(t *testing.T) {
-	for _, mode := range []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade"} {
+	for _, mode := range []string{"incremental", "buffered_kill_switch", "buffered_provider_downgrade", "buffered_tool_selection"} {
 		t.Run(mode, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`

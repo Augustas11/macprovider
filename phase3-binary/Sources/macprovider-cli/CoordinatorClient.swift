@@ -7169,6 +7169,17 @@ actor CoordinatorClient {
         return catalogModelIDForCoordinator
     }
 
+    static func toolSelectionCapabilities(wireModelID: String, loadedModelID: String?, runtimeSource: String?) -> [[String: Any]] {
+        guard !wireModelID.isEmpty, loadedModelID != nil else { return [] }
+        let runtime = runtimeSource ?? "mlx_cache"
+        return [[
+            "model_id": wireModelID,
+            "runtime": runtime,
+            "modes": ToolSelectionPolicy.modes(modelID: loadedModelID, runtime: runtime),
+            "validation": "schema-holdback-v1",
+        ]]
+    }
+
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
@@ -7193,6 +7204,10 @@ actor CoordinatorClient {
         // SPEC-038 v0.3.15: the on-device CB self-check state, for the release
         // canary and operators. Absent until a self-check exists.
         let engineRuntimeSnapshot = await modelRuntime.currentSnapshot()
+        payload["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
+            loadedModelID: engineRuntimeSnapshot.modelID, runtimeSource: runtimeSource
+        )
         if let selfCheck = engineRuntimeSnapshot.continuousBatching?.selfCheck {
             payload["cb_self_check"] = selfCheck.jsonObject
         }
@@ -7857,6 +7872,10 @@ actor CoordinatorClient {
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
         }
+        message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: wireModelID, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            runtimeSource: runtimeSource
+        )
         // SPEC-047 v0.1.6 auth `runtime_source` (#1690 M6): the WS-tunneled
         // session must declare its SPEC-046 loopback adapter exactly as the
         // legacy hello does, or the coordinator records it as a native session
@@ -7957,6 +7976,10 @@ actor CoordinatorClient {
             message["weights_manifest_sha256"] = weightsManifestForHello
             message["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
+        message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
+            wireModelID: wireModelIDForHello, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            runtimeSource: runtimeSource
+        )
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID

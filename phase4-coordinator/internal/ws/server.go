@@ -3624,11 +3624,14 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
 	entry := &pool.Provider{
-		ProviderID:             hello.ProviderID,
-		AssignedID:             assignedID,
-		Hostname:               hello.Hostname,
-		ModelID:                hello.ModelID,
-		RuntimeSource:          hello.RuntimeSource,
+		ProviderID:    hello.ProviderID,
+		AssignedID:    assignedID,
+		Hostname:      hello.Hostname,
+		ModelID:       hello.ModelID,
+		RuntimeSource: hello.RuntimeSource,
+
+		ToolSelectionCapabilities: hello.ToolSelectionCapabilities,
+
 		ModelParamsB:           hello.ModelParamsB,
 		RAMGB:                  hello.RAMGB,
 		MaxContextTokens:       hello.MaxContextTokens,
@@ -6495,7 +6498,10 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			priorBinding, hadPriorBinding = before.ModelAdmissionBinding()
 		}
 		heartbeatResult = s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
-			Status:                    state,
+			Status: state,
+
+			ToolSelectionCapabilities: hb.ToolSelectionCapabilities,
+
 			ModelID:                   hb.ModelID,
 			ModelParamsB:              hb.ModelParamsB,
 			RAMGB:                     hb.RAMGB,
