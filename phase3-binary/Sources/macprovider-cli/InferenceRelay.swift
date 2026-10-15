@@ -1494,7 +1494,24 @@ actor InferenceRelay {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
             }
-            try await modelRuntime.pagedKVPreflight(request, with: handle)
+            // #1570 / SPEC-038 v0.3.19: the role frame commits the buyer's
+            // stream at the coordinator, so every pre-inference rejection
+            // must happen before it. The full preflight tokenizes the prompt
+            // and runs the context check, so an over-context prompt ends as
+            // a clean pre-commit error_context_exceeded (coordinator 413)
+            // instead of a mid-stream provider_error. A relay-blind request
+            // was already tokenized and context-checked by relayBlindPrepare
+            // on this handle, so it keeps the paged-KV check only.
+            if preparedHandle != nil {
+                try await modelRuntime.pagedKVPreflight(request, with: handle)
+            } else {
+                try await modelRuntime.preflight(request, with: handle)
+            }
+            // A cancel_request that arrived during preflight ends the request
+            // here, before the opening chunk and a second prompt preparation.
+            if state.isCancelled {
+                throw CancellationError()
+            }
             batcher.enqueueDelta(["role": "assistant", "content": ""])
 
             let streamedToolArgs = StreamedToolCallArgs()

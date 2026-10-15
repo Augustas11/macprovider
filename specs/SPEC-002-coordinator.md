@@ -1,6 +1,16 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.16 (2026-10-13, phase-aware selection)
+**Version:** 1.6.17 (2026-10-14, context-fit token estimate)
+
+**Change log v1.6.17 (2026-10-14, issue #1570):** FR-P7, FR-R5 and the token
+estimation heuristic (§5) use the SPEC-006 v0.9.54 §7.2.1 context-fit (central)
+estimate instead of `bytes/4`. `bytes/4` over-counted Cyrillic, CJK and indented
+code and excluded providers that could serve the prompt. The provider's
+tokenized check stays authoritative. Billing fallback estimates are unchanged.
+`/poolz` rows gain `serving_eligible`: `routing_eligible` apart from the
+free-slot term, so the gateway can advertise the context of a provider that is
+serving but full (SPEC-006 §5.3.2). Buyer routing still uses
+`routing_eligible`.
 
 **Change log v1.6.16 (2026-10-13, issue #1355):** Adds SPEC-002-R005
 (measured-performance store built only from coordinator-observed timings of
@@ -1196,7 +1206,7 @@ On receiving a `drain_status` message (SPEC-001 section 6.5), the coordinator:
 
 **FR-P7. Send preflight queries before routing context-heavy requests.**
 Before forwarding, the coordinator sends a `preflight` message with the
-estimated token count (bytes/4 heuristic). Preflight is REQUIRED for
+estimated token count (the SPEC-006 §7.2.1 context-fit estimate, v1.6.17). Preflight is REQUIRED for
 `estimated_tokens > 4096`; skipped for smaller requests (latency).
 Coordinator waits up to 5s for `preflight_ack`. Timeout: skip provider
 for this request, try next candidate. Timeout does NOT mark provider
@@ -2125,8 +2135,8 @@ to only include providers where:
 - `model_id` matches the request's `model` field
 
 **FR-R5. Context length check.**
-The coordinator estimates the request's token count (bytes / 4
-heuristic) and excludes providers whose `max_context_tokens` is less
+The coordinator estimates the request's token count (the SPEC-006 §7.2.1
+context-fit estimate, v1.6.17) and excludes providers whose `max_context_tokens` is less
 than the estimated count. For requests where `estimated_tokens > 4096`,
 the authoritative check is the preflight (FR-P7) — but the coordinator
 pre-filters to avoid sending preflights to providers that will
@@ -2551,15 +2561,12 @@ logs.
 ### Token estimation heuristic
 
 The coordinator does NOT have access to the model's tokenizer (it does
-not load models). It uses a byte-based heuristic:
-
-```
-estimated_tokens = total_bytes(serialize(request.messages)) / 4
-```
-
-This is intentionally conservative (overestimates for English text,
-roughly accurate for code). The provider's preflight check uses the
-real tokenizer and is authoritative. The coordinator's estimate is
+not load models). Since v1.6.17 it uses the SPEC-006 §7.2.1 context-fit
+(central) estimate: a character-class-weighted count over the decoded JSON
+text of the request body, calibrated to stay at or below the tokenizer count on
+realistic text. The earlier `total_bytes / 4` heuristic over-counted Cyrillic,
+CJK and indented code and excluded providers that could serve the prompt. The
+provider's preflight check uses the real tokenizer and is authoritative. The coordinator's estimate is
 only used for:
 1. Pre-filtering providers by `max_context_tokens` (avoid obvious
    mismatches).

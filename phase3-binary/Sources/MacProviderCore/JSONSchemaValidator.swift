@@ -26,6 +26,29 @@ public enum JSONSchemaValidator {
         try validateSchemaNode(schema, pointer: "", depth: 1)
     }
 
+    /// SPEC-019 v0.3.0 §1a non-strict shape check: the schema is an object
+    /// no deeper than `2 * maxDepth` nested object/array values. Keywords are
+    /// not restricted because non-strict output is never validated.
+    public static func validateNonStrictSchemaShape(schema: JSONValue) throws {
+        guard case .object = schema else {
+            throw APIError(status: 400, message: "response_format.json_schema.schema must be a JSON object", code: "json_schema_missing_schema", param: "response_format.json_schema.schema")
+        }
+        guard containerDepth(schema) <= 2 * maxDepth else {
+            throw APIError(status: 400, message: "response_format.json_schema.schema exceeds maximum depth", code: "json_schema_too_deep", param: "response_format.json_schema.schema")
+        }
+    }
+
+    private static func containerDepth(_ value: JSONValue) -> Int {
+        switch value {
+        case .object(let object):
+            return 1 + (object.values.map(containerDepth).max() ?? 0)
+        case .array(let array):
+            return 1 + (array.map(containerDepth).max() ?? 0)
+        default:
+            return 0
+        }
+    }
+
     public static func validateInstance(_ instance: JSONValue, against schema: JSONValue) throws {
         guard jsonDepth(instance) <= maxDepth else {
             throw validationError("Structured output JSON exceeds maximum depth", pointer: "")

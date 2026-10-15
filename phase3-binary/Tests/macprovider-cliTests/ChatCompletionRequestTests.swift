@@ -219,9 +219,52 @@ final class ChatCompletionRequestTests: XCTestCase {
         missingSchema.removeValue(forKey: "schema")
         XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": missingSchema]), status: 400, code: "json_schema_missing_schema")
 
-        var strictFalse = Self.jsonSchemaObject()
-        strictFalse["strict"] = false
-        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": strictFalse]), status: 400, code: "json_schema_non_strict_unsupported")
+        var strictNonBool = Self.jsonSchemaObject()
+        strictNonBool["strict"] = "no"
+        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": strictNonBool]), status: 400, code: "invalid_request")
+    }
+
+    // SPEC-019 v0.3.0 §1a: strict is tri-state; the mode is a pure function
+    // of the raw body and mirrors the coordinator's validateResponseFormatSchema.
+    func testJsonSchemaStrictModes() throws {
+        let subset: [String: Any] = Self.jsonSchemaObject()["schema"] as! [String: Any]
+        let openAIShaped: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string"],
+                "nick": ["anyOf": [["type": "string"], ["type": "null"]]],
+            ],
+            "required": ["name"],
+            "$defs": ["x": ["type": "string", "format": "email"]],
+        ]
+        func request(strict: Any?, schema: Any) throws -> ChatCompletionRequest {
+            var spec: [String: Any] = ["name": "person-v1", "schema": schema]
+            if let strict { spec["strict"] = strict }
+            return try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": spec])
+        }
+        func mode(strict: Any?, schema: Any) throws -> Bool {
+            let request = try request(strict: strict, schema: schema)
+            guard case .jsonSchema(let parsed) = request.responseFormat else {
+                XCTFail("expected json_schema")
+                return false
+            }
+            return parsed.strict
+        }
+        XCTAssertTrue(try mode(strict: true, schema: subset))
+        XCTAssertTrue(try mode(strict: nil, schema: subset))
+        XCTAssertTrue(try mode(strict: NSNull(), schema: subset))
+        XCTAssertFalse(try mode(strict: false, schema: subset))
+        XCTAssertFalse(try mode(strict: false, schema: openAIShaped))
+        XCTAssertFalse(try mode(strict: nil, schema: openAIShaped))
+        XCTAssertAPIError(try request(strict: true, schema: openAIShaped), status: 400, code: "json_schema_unsupported_keyword")
+        XCTAssertAPIError(try request(strict: false, schema: [Any]()), status: 400, code: "json_schema_missing_schema")
+        XCTAssertAPIError(try request(strict: nil, schema: "x"), status: 400, code: "json_schema_missing_schema")
+
+        func nested(_ depth: Int) -> [String: Any] {
+            depth == 1 ? [:] : ["a": nested(depth - 1)]
+        }
+        XCTAssertFalse(try mode(strict: false, schema: nested(64)))
+        XCTAssertAPIError(try request(strict: false, schema: nested(65)), status: 400, code: "json_schema_too_deep")
     }
 
     func testJsonSchemaNameRegex() throws {

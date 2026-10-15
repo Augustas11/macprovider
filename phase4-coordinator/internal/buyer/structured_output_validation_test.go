@@ -206,3 +206,48 @@ func nestedArraySchemaJSON(depth int) string {
 	}
 	return `{"type":"array","items":` + nestedArraySchemaJSON(depth-1) + `}`
 }
+
+func requestWithStrictField(strictField, schema string) string {
+	return `{"model":"m","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"person-v1"` + strictField + `,"schema":` + schema + `}}}`
+}
+
+// SPEC-019 v0.3.0 §1a: strict is tri-state and the effective mode is a pure
+// function of the raw body.
+func TestValidateResponseFormatNonStrictModes(t *testing.T) {
+	subset := `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}`
+	// OpenAI/Pydantic-shaped schema outside the strict subset: optional
+	// property, no additionalProperties, anyOf, $defs.
+	openAIShaped := `{"type":"object","properties":{"name":{"type":"string"},"nick":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["name"],"$defs":{"x":{"type":"string","format":"email"}}}`
+	cases := []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{"strict false subset", requestWithStrictField(`,"strict":false`, subset), 0, ""},
+		{"strict false openai shaped", requestWithStrictField(`,"strict":false`, openAIShaped), 0, ""},
+		{"absent subset", requestWithStrictField(``, subset), 0, ""},
+		{"absent openai shaped", requestWithStrictField(``, openAIShaped), 0, ""},
+		{"strict true openai shaped stays 400", requestWithStrictField(`,"strict":true`, openAIShaped), http.StatusBadRequest, "json_schema_unsupported_keyword"},
+		{"strict true missing additionalProperties stays 400", requestWithStrictField(`,"strict":true`, `{"type":"object","properties":{},"required":[]}`), http.StatusBadRequest, "json_schema_strict_requires_additional_properties_false"},
+		{"strict null is absent", requestWithStrictField(`,"strict":null`, openAIShaped), 0, ""},
+		{"strict non boolean", requestWithStrictField(`,"strict":"no"`, subset), http.StatusBadRequest, "invalid_request"},
+		{"strict number", requestWithStrictField(`,"strict":1`, subset), http.StatusBadRequest, "invalid_request"},
+		{"strict number zero", requestWithStrictField(`,"strict":0`, openAIShaped), http.StatusBadRequest, "invalid_request"},
+		{"strict false array schema", requestWithStrictField(`,"strict":false`, `[]`), http.StatusBadRequest, "json_schema_missing_schema"},
+		{"absent string schema", requestWithStrictField(``, `"x"`), http.StatusBadRequest, "json_schema_missing_schema"},
+		{"strict false null schema", requestWithStrictField(`,"strict":false`, `null`), http.StatusBadRequest, "json_schema_missing_schema"},
+		{"strict false too deep", requestWithStrictField(`,"strict":false`, strings.Repeat(`{"a":`, 65)+`1`+strings.Repeat(`}`, 65)), http.StatusBadRequest, "json_schema_too_deep"},
+		{"strict false depth cap", requestWithStrictField(`,"strict":false`, strings.Repeat(`{"a":`, 63)+`{}`+strings.Repeat(`}`, 63)), 0, ""},
+		{"strict false too large", requestWithStrictField(`,"strict":false`, `{"description":"`+strings.Repeat("x", maxJSONSchemaBytes)+`"}`), http.StatusRequestEntityTooLarge, "json_schema_too_large"},
+		{"strict false missing name", `{"model":"m","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"strict":false,"schema":{}}}}`, http.StatusBadRequest, "json_schema_missing_name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, status, code, msg := validateChatRequest([]byte(tc.body))
+			if status != tc.status || code != tc.code {
+				t.Fatalf("status=%d code=%s msg=%s, want status=%d code=%s", status, code, msg, tc.status, tc.code)
+			}
+		})
+	}
+}

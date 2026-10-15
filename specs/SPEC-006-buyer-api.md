@@ -1,7 +1,40 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.53 (2026-10-13, SPEC-050 stake allowance)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Version:** 0.9.54 (2026-10-14, #1570 OpenRouter readiness: prompt-token bounds)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.54 (2026-10-14, issue #1570 — OpenRouter readiness):**
+- Prompt-token estimates (§7.2.1). `ceil(bytes/4)` under-counted token-dense
+  prompts (digits, code, JSON, emoji), so honest provider counts above the
+  reservation were clamped and the buyer was charged less than the provider's
+  count. It over-counted Cyrillic, CJK and indented code, so the coordinator
+  context check rejected prompts a provider could serve.
+- The prompt reservation (gateway) and the provider `prompt_tokens` bound
+  (coordinator) are now the larger of `ceil(bytes/4)` and a class-weighted
+  upper estimate, plus 64. No hold shrinks. Prompt holds grow to about 1.8x
+  the tokenizer count on prose and code and about 4.5-5x on Chinese and
+  Russian prose, in exchange for a bound that covers every calibration corpus.
+- Coordinator routing and provider preflight use a class-weighted central
+  estimate that stays at or below the tokenizer count on realistic text.
+- The billed fallback estimates (`ceil(bytes/4)` with no provider usage) are
+  unchanged.
+- OpenRouter document (§5.3.2): `max_context_length` is the largest context a
+  serving provider grants, including one that is full. Unavailable, draining
+  and otherwise ineligible providers no longer raise it.
+- Streaming terminal errors (§17.7.1 named mappings). A coordinator
+  post-commit terminal frame with code `provider_error` reaches the buyer as
+  `upstream_provider_error` (`api_error`), and `provider_disconnected` keeps
+  its code (`server_error`), with gateway-owned messages, instead of being
+  rewritten to `stream_malformed`. Settlement is unchanged
+  (`stream_malformed`). Unknown codes stay `stream_malformed`.
+- Streaming deadlines. The gateway decode-idle deadline (`streaming_idle_ms`)
+  MUST be armed by the first content-bearing frame, not when the coordinator
+  commits headers. Before that frame the provider is in admission and prefill,
+  which the first-token deadline (`first_token_seconds`) and the stream ceiling
+  bound. Arming decode-idle at commit made a long prefill expire as
+  `decode_idle`, so a prefill-sized `streaming_idle_ms` was needed and
+  decode-idle protection was lost. Operators size `first_token_seconds` for the
+  longest prompt served and keep `streaming_idle_ms` at its bounded default.
 
 **Change log v0.9.53 (2026-10-13, issue #1062 — SPEC-050 stake allowance):**
 - §5.12 adds the `/v1/stake` account surface, a service-token proxy to the
@@ -1703,6 +1736,7 @@ Normative rules:
 - A listing that declares a free alias emits dual rows when that pool id has enough ready-slot capacity to split without double-counting: paid id equals the pool `ModelID`; free id is that string plus `-free` with `is_free: true` and `$0` cost. OpenRouter's catalog `:free` suffix is **their** display form, not the wire id.
 - `supported_parameters` MUST declare `tools` and `tool_choice` only for a row whose modelID matches a SPEC-018 §3.1 family with a §3.8 multi-turn profile (`qwen2.5`, `qwen3`, `llama-3.3`). It MUST declare `response_format` and `structured_outputs` only for a row matching the SPEC-019 §4 family-rendering predicate. The shapes are exactly those in the example above; other rows MUST omit them.
 - `is_ready` MUST be true only when that pool id currently has at least one free slot on a provider in `ready` state.
+- `supported_inputs.max_context_length` (v0.9.54) MUST be the largest `max_context_tokens` granted by a serving provider of that pool id: one in `ready` or `busy` state that the coordinator reports `serving_eligible` on `/poolz` (routing-eligible apart from free slots, SPEC-002 v1.6.17), so a provider that is full still counts. Unavailable and draining providers, providers failing any other routing gate, catalog maxima and RAM-tier defaults of providers not serving MUST NOT raise it. Against a coordinator without `serving_eligible` the gateway uses `routing_eligible`. With no serving provider the row keeps the 8192 placeholder and `is_ready: false`.
 - Modality-owned `pricing[].cost_usd` MUST be decimal per-token strings from the live rate card (`credits_per_mtok × usd_per_million_credits / 1e12`). Missing paid catalog keys, non-positive paid rates, and non-positive/non-finite USD conversion inputs MUST fail the document projection instead of emitting a paid `$0` row. Free rows MUST be `"0"`.
 - Root capacity MUST declare conservative request/minute and concurrency limits from live ready slots, and text modalities MUST declare prompt/completion token-per-minute capacity using a conservative generated-token filing cap rather than the maximum output length. Until the gateway carries coordinator per-provider throughput estimates into this projection, that filing cap is 10 generated tokens/second per ready slot. If multiple rows route to the same backing pool, their advertised per-row capacity MUST be split so the rows do not imply independent full-pool capacity.
 - `deployment_region` MUST be an honest volunteer-fleet descriptor. `datacenters` MUST be omitted unless the gateway has operator-verified country/region provenance for the live fleet. Neither field may invent a cloud datacenter region such as `us-east-1` or an unsupported country claim.
@@ -2827,6 +2861,61 @@ canonicalization. The coordinator and provider apply the out-of-band ceiling
 before inference as specified by SPEC-001 v1.9.27 and SPEC-002 v1.6.4.
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the symmetric streaming clamp policy below.
+
+#### 7.2.1 Prompt-token estimates (v0.9.54)
+
+The gateway and coordinator have no tokenizer. Three prompt-token estimates
+exist, and they MUST NOT be conflated.
+
+Both class-weighted estimates walk the decoded JSON text of the request body
+(every string, object key and scalar literal; no quotes, separators or escape
+sequences) and price each character in milli-tokens. A run of ASCII letters and
+digits is priced as one unit: a letters-only run costs `ceil(n * 1000 /
+letter_divisor)` for its first `long_run` letters plus `ceil(rest * 1000 /
+long_divisor)`; a digits-only run costs the digit weight per digit; a run with
+both letters and digits (identifiers, hex, base64) costs the mixed weight per
+character. Every other character costs its class weight. The sum is rounded up
+to whole tokens.
+
+| Class | Upper weight | Central weight |
+|---|---:|---:|
+| Letters-only run divisor | 2.5 letters per token | 4.5 letters per token |
+| Letters beyond the first 12 of a run (upper only) | 1.5 letters per token | n/a |
+| Mixed letter-digit run, per character | 1.0 | 0.5 |
+| Digit in a digits-only run | 1.2 | 0.9 |
+| Space | 0.25 | 0.1 |
+| `\n`, `\r`, `\t` | 1.0 | 0.5 |
+| Other ASCII (punctuation, controls) | 1.0 | 0.5 |
+| 2-byte UTF-8 character | 1.1 | 0.22 |
+| 3-byte UTF-8 character | 2.2 | 0.45 |
+| 4-byte UTF-8 character | 3.0 | 2.0 |
+
+The weights were calibrated against the Qwen3.6 tokenizer (the OpenRouter
+listing model) on 23 corpora: prose, Go, Swift and Python code, JSON, digits,
+CSV, hex, base64, random letters, common and rare Chinese, Russian, emoji,
+indented code, punctuation, and random Cyrillic, Greek, Arabic, Hangul,
+hiragana, Latin-1 and letter-punctuation strings. The upper estimate, taken as
+`max(ceil(bytes/4), upper)`, is at or above the tokenizer count on every
+corpus: about 1.7-2x on prose, code and JSON, 1.0-1.5x on digits, hex, base64
+and random strings, and about 4.5-5x on Chinese and Russian prose, whose holds
+grow accordingly. The central estimate is at or below the tokenizer count on
+every corpus, and 0.9-1.0x on prose, code, JSON, Chinese and Russian. The
+gateway and the coordinator MUST use identical weights; a test fails when the
+two copies of the estimator or its golden table differ.
+
+1. **Prompt reservation** (gateway quota hold and usage validation cap;
+   coordinator independent bound on a provider's reported `prompt_tokens`):
+   `max(ceil(bytes/4), upper estimate) + 64`, the same formula at the gateway
+   and the coordinator. A provider-reported count above it is charged at it,
+   as before. The reservation is never smaller than the pre-v0.9.54
+   `ceil(bytes/4) + 64`.
+2. **Context-fit estimate** (coordinator routing and provider preflight): the
+   central estimate, minimum 1, or `floor(bytes/4)` when the body is not valid
+   JSON. It decides whether a provider's advertised context can hold the
+   prompt. The provider's tokenized `context_length_exceeded` check remains
+   authoritative.
+3. **Billed fallback estimate**: `ceil(bytes/4)` when the provider reports no
+   usage (gateway) or the coordinator's byte estimate, unchanged.
 
 #### Streaming completion-token symmetric clamp (#255 downward, #278 upward)
 
@@ -3953,6 +4042,7 @@ Constraints on the envelope:
    - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
    - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
      - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+     - (v0.9.54, #1570) `error.code = "upstream_provider_error"` ↔ `usage_events.outcome = "stream_malformed"` and `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_malformed"`. Reference: `coordinatorStreamTerminalError` in `phase5-gateway/internal/router/chat_proxy.go`. A coordinator post-commit terminal frame with code `provider_error` (normalized per §17 to `upstream_provider_error`) or `provider_disconnected` is emitted with that code, while the gateway settles the stream exactly as before, as `stream_malformed`.
    - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
 3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
 4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.

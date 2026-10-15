@@ -2437,6 +2437,11 @@ type chatRequest struct {
 	// or non-empty assistant tool_calls) so class selection can drop
 	// members without a multi-turn prompt profile.
 	multiTurnToolHistory bool
+	// nonStrictSchemaLegacyRejection is set when response_format runs in
+	// SPEC-019 §1a non-strict mode. It holds the pre-inference 400 a coordinator
+	// and provider CLI before v0.3.0 returned for the same body, which selection
+	// returns when no provider that supports non-strict mode remains.
+	nonStrictSchemaLegacyRejection *schemaValidationError
 }
 
 type chatMessage struct {
@@ -2760,6 +2765,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
 	state.estimatedTokens = estimateTokens(req.raw)
+	state.routingEstimatedTokens = routingPromptTokenEstimate(req.raw)
 	rec.setPromptTokenUpperBound(promptTokenUpperBound(req.raw))
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
@@ -2777,7 +2783,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
 	// SPEC-002-R007: trace the first selection for operators and the buyer.
-	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.estimatedTokens))
+	w.Header().Set(routeTraceHeader, s.noteRouteTrace(routingRequestID, req, r.Header, provider, state.routeDecision, state.routingEstimatedTokens))
 	// SPEC-042 R005 generation fence is enforced centrally at the top of the
 	// forwardWithFailover dispatch loop (covering initial, retry, and failover
 	// dispatches) — see forward_with_failover.go.
@@ -3038,7 +3044,7 @@ func (s *Server) forwardStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "streaming_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -3248,7 +3254,7 @@ func (s *Server) forwardWSNonStreamSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "ws_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return !state.provider.IsWSTunneled()
@@ -3759,7 +3765,7 @@ func (s *Server) forwardHTTPSequence(
 					RetryCount:      state.explicitRetries,
 					Retried:         state.explicitRetries,
 					RetryReason:     "http_advance",
-					PreflightResult: s.preflightLabel(state.estimatedTokens),
+					PreflightResult: s.preflightLabel(state.routingEstimatedTokens),
 				},
 			)
 			return false
@@ -6499,6 +6505,13 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
 	}
+	if v, ok := raw["response_format"]; ok {
+		legacy, status, code, msg := validateResponseFormatSchema(v, req.Stream)
+		if status != 0 {
+			return req, status, code, msg, ""
+		}
+		req.nonStrictSchemaLegacyRejection = legacy
+	}
 	if v, ok := raw["max_tokens"]; ok {
 		_ = json.Unmarshal(v, &req.maxTokens)
 	}
@@ -6585,6 +6598,47 @@ func providerAcceptsConversationKey(binaryVersion string) bool {
 	}
 	beforeLast, _ := versionfloor.Compare(binaryVersion, conversationKeyUnsafeLastBinary)
 	return afterFirst < 0 || beforeLast > 0
+}
+
+// The first provider CLI that implements SPEC-019 v0.3.0 §1a non-strict
+// json_schema. Older CLIs reject the same body before inference.
+const nonStrictJSONSchemaFirstBinary = "1.8.242"
+
+// providerAcceptsNonStrictJSONSchema reports whether a provider binary can
+// serve a SPEC-019 §1a non-strict json_schema request. Unparseable versions
+// cannot.
+func providerAcceptsNonStrictJSONSchema(binaryVersion string) bool {
+	cmp, ok := versionfloor.Compare(binaryVersion, nonStrictJSONSchemaFirstBinary)
+	return ok && cmp >= 0
+}
+
+// filterNonStrictJSONSchemaCandidates drops providers that cannot serve the
+// request's non-strict json_schema. rejected is true when a provider serving
+// the requested model was dropped and no capable one serves it. Any other
+// request is returned unchanged.
+func (s *Server) filterNonStrictJSONSchemaCandidates(req chatRequest, providers []pool.Provider, class *config.ModelClassConfig) (out []pool.Provider, rejected bool) {
+	if req.nonStrictSchemaLegacyRejection == nil {
+		return providers, false
+	}
+	out = make([]pool.Provider, 0, len(providers))
+	droppedServes, capableServes := false, false
+	for _, provider := range providers {
+		serves := s.providerMatchesRequest(provider, req.Model, class)
+		if providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
+			out = append(out, provider)
+			capableServes = capableServes || serves
+			continue
+		}
+		droppedServes = droppedServes || serves
+	}
+	return out, droppedServes && !capableServes
+}
+
+// nonStrictJSONSchemaRouteError is the pre-v0.3.0 400 for a non-strict
+// json_schema request that no capable provider can serve.
+func nonStrictJSONSchemaRouteError(req chatRequest) *routeError {
+	legacy := req.nonStrictSchemaLegacyRejection
+	return &routeError{status: legacy.status, code: legacy.code, message: legacy.message}
 }
 
 // dispatchBodyForProvider delegates to routing.RewriteModel. The
@@ -6756,62 +6810,120 @@ func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, s
 			return http.StatusBadRequest, "invalid_request", "n must be 1", ""
 		}
 	}
-	if v, ok := raw["response_format"]; ok {
-		if status, code, msg := validateResponseFormatSchema(v, stream); status != 0 {
-			return status, code, msg, ""
-		}
-	}
 	return 0, "", "", ""
 }
 
-func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string, string) {
+// validateResponseFormatSchema returns the request-validation verdict and, for
+// a body that runs in SPEC-019 §1a non-strict mode, the 400 that the pre-v0.3.0
+// coordinator returned for it (nil in strict mode).
+func validateResponseFormatSchema(raw json.RawMessage, stream bool) (*schemaValidationError, int, string, string) {
 	var rf struct {
 		Type       string          `json:"type"`
 		JSONSchema json.RawMessage `json:"json_schema"`
 	}
 	if err := json.Unmarshal(raw, &rf); err != nil {
-		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+		return nil, http.StatusBadRequest, "invalid_request", "Invalid response_format"
 	}
 	switch rf.Type {
 	case "", "text":
-		return 0, "", ""
+		return nil, 0, "", ""
 	case "json_object":
-		return 0, "", ""
+		return nil, 0, "", ""
 	case "json_schema":
 	default:
-		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+		return nil, http.StatusBadRequest, "invalid_request", "Invalid response_format"
 	}
 	var spec map[string]json.RawMessage
 	if len(rf.JSONSchema) == 0 || json.Unmarshal(rf.JSONSchema, &spec) != nil {
-		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema must be an object"
+		return nil, http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema must be an object"
 	}
 	var name string
 	if rawName, ok := spec["name"]; !ok || json.Unmarshal(rawName, &name) != nil {
-		return http.StatusBadRequest, "json_schema_missing_name", "response_format.json_schema.name is required"
+		return nil, http.StatusBadRequest, "json_schema_missing_name", "response_format.json_schema.name is required"
 	}
 	if !validJSONSchemaName(name) {
-		return http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
+		return nil, http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
 	}
-	if rawStrict, ok := spec["strict"]; ok {
+	// SPEC-019 v0.3.0 §1a: strict is tri-state. Explicit true enforces the
+	// strict subset; explicit false is non-strict; absent is strict when the
+	// schema fits the subset and non-strict otherwise.
+	strictMode := 0 // 0 absent, 1 true, -1 false
+	// An explicit null is absent, matching the provider parser.
+	if rawStrict, ok := spec["strict"]; ok && !bytes.Equal(bytes.TrimSpace(rawStrict), []byte("null")) {
 		var strict bool
 		if err := json.Unmarshal(rawStrict, &strict); err != nil {
-			return http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
+			return nil, http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
 		}
-		if !strict {
-			return http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
+		strictMode = -1
+		if strict {
+			strictMode = 1
 		}
 	}
 	rawSchema, ok := spec["schema"]
 	if !ok || len(bytes.TrimSpace(rawSchema)) == 0 || bytes.Equal(bytes.TrimSpace(rawSchema), []byte("null")) {
-		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema is required"
+		return nil, http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema is required"
 	}
 	if len(rawSchema) > maxJSONSchemaBytes {
-		return http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
+		return nil, http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
 	}
-	if err := validateJSONSchemaRaw(rawSchema, "", 1); err != nil {
-		return err.status, err.code, err.message
+	legacy := &schemaValidationError{http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"}
+	if strictMode >= 0 {
+		err := validateJSONSchemaRaw(rawSchema, "", 1)
+		if err == nil {
+			return nil, 0, "", ""
+		}
+		if strictMode == 1 {
+			return nil, err.status, err.code, err.message
+		}
+		legacy = err
 	}
-	return 0, "", ""
+	if err := validateNonStrictJSONSchemaRaw(rawSchema); err != nil {
+		return nil, err.status, err.code, err.message
+	}
+	return legacy, 0, "", ""
+}
+
+// validateNonStrictJSONSchemaRaw is the SPEC-019 v0.3.0 §1a non-strict shape
+// check: the schema is an object no deeper than 2*maxJSONSchemaDepth nested
+// object/array values (each strict schema level is a schema object plus a
+// properties object). Keywords are not restricted because non-strict output
+// is never validated against the schema.
+func validateNonStrictJSONSchemaRaw(raw json.RawMessage) *schemaValidationError {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	depth, maxDepth := 0, 0
+	first := true
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+		}
+		delim, isDelim := tok.(json.Delim)
+		if first {
+			first = false
+			if !isDelim || delim != '{' {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema must be a JSON object"}
+			}
+		}
+		if !isDelim {
+			continue
+		}
+		switch delim {
+		case '{', '[':
+			depth++
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+			if maxDepth > 2*maxJSONSchemaDepth {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_too_deep", "response_format.json_schema.schema exceeds maximum depth"}
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return nil
 }
 
 type schemaValidationError struct {
@@ -7600,7 +7712,7 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 
 func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
-	estimatedTokens := estimateTokens(req.raw)
+	estimatedTokens := routingPromptTokenEstimate(req.raw)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()
 	classResolution := s.classForRequestWithBYOMContext(req.Model, providers, admissionCtx)
@@ -7739,6 +7851,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.engineClass = engineClass
 		state.requestedModel = req.Model
 		state.multiTurnToolHistory = req.multiTurnToolHistory
+		state.nonStrictJSONSchema = req.nonStrictSchemaLegacyRejection != nil
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7774,6 +7887,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
 				}
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
+				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
@@ -7808,6 +7924,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if engineClass != "" && providerEngineClass(p) != engineClass {
 					return pool.Provider{}, engineUnavailableRouteError("Pinned provider does not serve the selected engine")
 				}
+				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
+					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
+				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
@@ -7839,6 +7958,14 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if unsupportedNativeDropped > 0 && !anyProviderModelCandidate(providers, req.Model, poolModelClass) {
 			return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "unsupported_modelID_for_multi_turn", message: "Model does not support multi-turn tool history rendering"}
 		}
+	}
+	// SPEC-019 v0.3.0 §1a: a non-strict json_schema request reaches only
+	// providers whose CLI implements non-strict mode. With none left for the
+	// model it gets the pre-v0.3.0 400, so the coordinator and the provider CLI
+	// can deploy in either order.
+	var nonStrictRejected bool
+	if providers, nonStrictRejected = s.filterNonStrictJSONSchemaCandidates(req, providers, class); nonStrictRejected {
+		return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
 	}
 	exSet := routing.NewExcluded(len(excluded))
 	for k := range excluded {
@@ -9172,6 +9299,11 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		}
 		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
 		if state != nil && state.engineClass != "" && providerEngineClass(provider) != state.engineClass {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		// SPEC-019 §1a: a same-ID reconnect on a CLI without non-strict
+		// json_schema support is terminal.
+		if state != nil && state.nonStrictJSONSchema && !providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if s.poolSettlementModeUnsatisfied(state) {
@@ -11001,8 +11133,38 @@ func (s *Server) startRecoveryProbe(provider pool.Provider) {
 // a tokenizer count or a quantity to bill automatically.
 const promptHeadroomTokens = 64
 
+// promptTokenUpperBound is the SPEC-006 §7.2.1 independent bound on a
+// provider's reported prompt_tokens, the same formula as the gateway's prompt
+// reservation: the larger of the bytes/4 estimate and the class-weighted upper
+// estimate, plus headroom. #1570: bytes/4 alone charged token-dense prompts
+// less than the provider's honest count.
 func promptTokenUpperBound(raw json.RawMessage) int64 {
-	return int64(estimateTokens(raw)) + promptHeadroomTokens
+	// ceil(bytes/4), matching the gateway reservation; estimateTokens floors
+	// and stays the billed fallback.
+	bound := int64((len(raw) + 3) / 4)
+	if upper, ok := promptTokenClassEstimate(raw, promptTokenUpperWeights); ok && upper > bound {
+		bound = upper
+	}
+	return bound + promptHeadroomTokens
+}
+
+// routingPromptTokenEstimate is the SPEC-006 §7.2.1 context-fit estimate used
+// for routing and provider preflight: the class-weighted central estimate,
+// which stays at or below the tokenizer count on realistic text. Raw bytes/4
+// over-counted Cyrillic, CJK and indented code and rejected prompts a
+// provider could serve. The provider's tokenized check stays authoritative.
+func routingPromptTokenEstimate(raw json.RawMessage) int {
+	central, ok := promptTokenClassEstimate(raw, promptTokenCentralWeights)
+	if !ok {
+		return estimateTokens(raw)
+	}
+	if central < 1 {
+		return 1
+	}
+	if central > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(central)
 }
 
 func estimateTokens(raw json.RawMessage) int {
