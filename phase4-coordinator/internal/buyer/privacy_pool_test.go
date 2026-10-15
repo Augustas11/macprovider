@@ -283,3 +283,15 @@ func TestPrivacyPoolFenceRequiresTheLiveReservedSession(t *testing.T) {
 		t.Fatal("fence passed a reservation whose session is gone")
 	}
 }
+
+// SPEC-022 R-14.1: a session bound to a pool model entry never serves
+// privacy-class work, global or pool-scoped.
+func TestPrivacySelectionExcludesPoolModelBoundSession(t *testing.T) {
+	h, _ := newPrivacyPoolHarness(t, privacyHarnessConfig{privacyKey: true}, privacyPoolSnapshot([]string{"provider-a"}, 7))
+	h.provider.ModelAdmissionPoolModelID = "pool/" + privacyTestPoolID + "/model-a"
+	for _, poolID := range []string{"", privacyTestPoolID} {
+		if response := h.reservePool(t, poolID); response.Code == http.StatusOK {
+			t.Fatalf("pool=%q reservation bound a pool-model session: %s", poolID, response.Body.String())
+		}
+	}
+}

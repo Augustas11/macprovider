@@ -502,6 +502,9 @@ func (s *Store) CreateReservation(ctx context.Context, in ReservationCreate, now
 	if in.PoolID != "" && (!in.PrivacyClass || in.PoolManifestVersion == 0 || in.PoolManifestVersion > math.MaxInt64 || in.PoolManifestCoreDigest == "" || in.PoolGeneration > math.MaxInt64) {
 		return Reservation{}, ErrReservationMismatch
 	}
+	if in.PoolID == "" && (in.PoolManifestVersion != 0 || in.PoolManifestCoreDigest != "" || in.PoolGeneration != 0) {
+		return Reservation{}, ErrReservationMismatch
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class,requires_declaration,pool_id,pool_manifest_version,pool_manifest_core_digest,pool_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass), strings.Join(in.Requires, ","), in.PoolID, int64(in.PoolManifestVersion), in.PoolManifestCoreDigest, int64(in.PoolGeneration))
 	if err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)

@@ -63,6 +63,10 @@ var privacyDoesNotProtect = []string{
 	"pool_scoped_requests",
 }
 
+// privacyModePoolScopedDisclosure is the SPEC-006-R019 header string for a
+// pool-scoped privacy-class response.
+const privacyModePoolScopedDisclosure = "content_hidden_from_network_relays_and_pool_surfaces; served_only_by_selected_trusted_pool_members; serving_member_runtime_reads_plaintext; metadata_visible_to_relays"
+
 // privacyPoolDoesNotProtect is the SPEC-049-R020 pool-scoped list: items 1
 // to 5, without pool_scoped_requests.
 var privacyPoolDoesNotProtect = privacyDoesNotProtect[:5]
@@ -435,6 +439,13 @@ func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.R
 	}
 	if err := requirePrivacyResponseHeaders(response.Header); err != nil {
 		return err
+	}
+	// SPEC-006-R019: a pool-scoped privacy response carries the fourth
+	// fixed disclosure string.
+	if pool != "" {
+		if mode, disclosure := response.Header.Values("X-MacProvider-Privacy-Mode"), response.Header.Values("X-MacProvider-Privacy-Mode-Disclosure"); len(mode) != 1 || mode[0] != "relay_blind_required" || len(disclosure) != 1 || disclosure[0] != privacyModePoolScopedDisclosure {
+			return privacyDoNotResubmit("privacy mode disclosure rejected")
+		}
 	}
 	if stream {
 		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, model, inputCap, outputCap, pool, stdout)

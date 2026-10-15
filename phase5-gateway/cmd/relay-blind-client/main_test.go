@@ -1061,10 +1061,15 @@ func poolScopedUsage(pool string) func(map[string]any) map[string]any {
 	}
 }
 
+func poolModeHeaders(h http.Header) {
+	h.Set("X-MacProvider-Privacy-Mode", "relay_blind_required")
+	h.Set("X-MacProvider-Privacy-Mode-Disclosure", privacyModePoolScopedDisclosure)
+}
+
 func TestPrivacyPoolClientVerifiesPoolBinding(t *testing.T) {
 	t.Run("served", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {
-			stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{stream: stream, pool: "pool-a", content: privacyContent(stream), alterUsage: poolScopedUsage("pool-a")})
+			stdout, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{stream: stream, pool: "pool-a", content: privacyContent(stream), alterUsage: poolScopedUsage("pool-a"), headerHook: poolModeHeaders})
 			if err != nil || calls != 2 || stdout != string(privacyContent(stream)) {
 				t.Fatalf("stream=%v err=%v calls=%d", stream, err, calls)
 			}
@@ -1103,11 +1108,18 @@ func TestPrivacyPoolClientVerifiesPoolBinding(t *testing.T) {
 		}
 	})
 	t.Run("global_disclosure_on_pool_response", func(t *testing.T) {
-		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false)})
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), headerHook: poolModeHeaders})
 		assertPrivacyFailure(t, err, stderr, calls, 2)
 	})
+	t.Run("missing_pool_mode_disclosure_header", func(t *testing.T) {
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-a")})
+		assertPrivacyFailure(t, err, stderr, calls, 2)
+		if err == nil || !strings.Contains(err.Error(), "privacy mode disclosure rejected") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 	t.Run("pool_disclosure_names_another_pool", func(t *testing.T) {
-		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-b")})
+		_, stderr, calls, err := runPrivacyClient(t, privacyClientSpec{pool: "pool-a", content: privacyContent(false), alterUsage: poolScopedUsage("pool-b"), headerHook: poolModeHeaders})
 		assertPrivacyFailure(t, err, stderr, calls, 2)
 	})
 	t.Run("pool_disclosure_on_global_response", func(t *testing.T) {

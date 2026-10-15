@@ -222,7 +222,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
 		}
-		if scope != nil && !privacyPoolMemberEligible(*scope, provider) {
+		// SPEC-022 R-14.1: a session bound to a pool model entry serves only
+		// that pool's pool-model route, never privacy-class work.
+		if provider.ModelAdmissionPoolModelID != "" || (scope != nil && !privacyPoolMemberEligible(*scope, provider)) {
 			continue
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)

@@ -1278,7 +1278,18 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 		if _, fresh := s.privacyPoolFence(reservation); fresh && s.trustPools != nil {
 			endPoolDelivery, delivering = s.trustPools.BeginPoolDeliveryAtGeneration(reservation.PoolID, reservation.PoolGeneration)
 		}
-		if !delivering {
+		var stopRevocationWatch func()
+		revoked := func() bool { return false }
+		if delivering {
+			ctx, stopRevocationWatch, revoked = s.withPoolProviderRevocationCancel(ctx, rec.state, provider.ProviderID)
+			defer stopRevocationWatch()
+			defer endPoolDelivery()
+		}
+		// A member revoked before the watcher was armed, or a session that a
+		// model-admission refresh bound to a pool model since the fence, is
+		// never dispatched (SPEC-049-R032 item 3).
+		current, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+		if !delivering || revoked() || ctx.Err() != nil || !live || current.ModelAdmissionPoolModelID != "" {
 			s.rejectArmedDurably(r, reservation.ProviderBinding, privacyClassStale)
 			if quotaMetered {
 				s.admission.RefundRequest(provider)
@@ -1286,10 +1297,6 @@ func (s *Server) handleRelayBlindChat(w http.ResponseWriter, r *http.Request, re
 			s.writePrivacyRouteError(w, r, relayblind.PrivacyRejectPhaseDispatch, privacyClassStale, relayblind.PrivacyRejectPoolStateStale)
 			return
 		}
-		defer endPoolDelivery()
-		var stopRevocationWatch func()
-		ctx, stopRevocationWatch, _ = s.withPoolProviderRevocationCancel(ctx, rec.state, provider.ProviderID)
-		defer stopRevocationWatch()
 	}
 	if r.Context().Err() != nil {
 		s.rejectArmedDurably(r, reservation.ProviderBinding, "relay_blind_provider_unsupported")
