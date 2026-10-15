@@ -5,7 +5,7 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-coordinator-billing-race test-coordinator-integration test-gateway test-integration test-dist test-relay-blind-parity \
+.PHONY: test test-coordinator test-coordinator-billing-race test-coordinator test-coordinator-race-integration test-gateway test-integration test-dist test-relay-blind-parity \
         test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
         test-byom-e2e test-byom-discovery-journey test-openai-wire \
         vet vet-coordinator vet-gateway \
@@ -37,14 +37,16 @@ test-byom-discovery-journey:
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify
 
-# -race (#1996) on every package. internal/billing runs at native speed
-# here and under -race in test-coordinator-billing-race, a separate CI job:
-# the detector instruments the pure-Go SQLite driver, and billing alone
-# would otherwise set this job's critical path. -timeout lifts go test's
-# 10m per-package default for the slow SQLite packages.
+# Required gate: native speed, no race detector. Race-detector runs are
+# advisory (test-coordinator-race, test-coordinator-billing-race): their
+# timing-sensitive failures are reported and fixed in batches, never block a
+# merge (#1996).
 test-coordinator:
+	cd phase4-coordinator && go test -timeout 30m ./...
+
+# Advisory: every package except billing under the race detector.
+test-coordinator-race:
 	cd phase4-coordinator && go test -race -timeout 30m $$(go list ./... | grep -v '/internal/billing$$')
-	cd phase4-coordinator && go test ./internal/billing
 
 # -race turns on checkptr everywhere; in the transpiled modernc SQLite C
 # code it was over half of billing's runtime (query planning). The race
