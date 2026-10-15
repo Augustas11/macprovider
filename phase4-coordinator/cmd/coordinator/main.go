@@ -441,6 +441,8 @@ func runCoordinator() (exitCode int) {
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	billingStore.SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
+	billingStore.SetLedgerRollupOptions(billing.LedgerRollupOptionsFromConfig(cfg.Billing.LedgerRollup, cfg.Billing.Retention, cfg.Settlement, cfg.Storage.RequestLogRetentionDays))
+	billingStore.SetRequestLogRetention(time.Duration(cfg.Storage.RequestLogRetentionDays) * 24 * time.Hour)
 	billingStore.SetOutputBytesPerTokenCeiling(cfg.Tier2.OutputBytesPerTokenCeiling)
 	if err := billingStore.SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "startup"); err != nil {
 		fmt.Fprintf(os.Stderr, "billing ceiling-restatement flag init: %v\n", err)
@@ -631,6 +633,19 @@ func runCoordinator() (exitCode int) {
 		statsRollup.WithTickGate(newMoneySQLiteRollupGate(moneySQLiteActivity).ShouldYield)
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+
+	if statsPools != nil && statsPools.Rollup != nil {
+		// SPEC-022 R-15.11: the stats billing mirror copies live credits in id
+		// order, so the ledger rollup keeps every credit above the highest
+		// SQLite credit id the mirror holds. stats_rollup has SELECT on the
+		// mirrored table (dist/stats-billing-mirror-bootstrap.sql).
+		mirrorDB := statsPools.Rollup
+		billingStore.SetLedgerRollupMirrorWatermark(func(ctx context.Context) (int64, error) {
+			var watermark int64
+			err := mirrorDB.QueryRowContext(ctx, `SELECT COALESCE(MAX(sqlite_lrc_id), 0) FROM ledger_request_credits`).Scan(&watermark)
+			return watermark, err
+		})
 	}
 
 	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).
@@ -1667,11 +1682,30 @@ func runCoordinator() (exitCode int) {
 			Int64("archive_id", report.ArchiveID).
 			Str("archive_sha256", report.ArchiveSHA256).
 			Msg("nightly settlement evidence retention finished")
+	}, func(report billing.LedgerRollupReport, err error) {
+		event := logger.Info()
+		if err != nil {
+			event = logger.Error().Err(err)
+		}
+		event.Str("event", "ledger_rollup").
+			Str("status", report.Status).
+			Str("cutoff_window_end_utc", report.CutoffWindowEndUTC).
+			Int64("rollup_cursor", report.PayoutCursor).
+			Int("archives", report.Archives).
+			Int("rolled_requests", report.RolledRequests).
+			Int64("rolled_credits", report.RolledCredits).
+			Int("kept_requests", report.KeptRequests).
+			Str("archive_sha256", report.ArchiveSHA256).
+			Str("reason", report.Error).
+			Msg("nightly ledger rollup finished")
 	})
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, time.Duration(cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours)*time.Hour, metricsHandle, moneySQLiteActivity, logger)
-	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
+	startRequestLogRetentionPruner(shutdownCtx, foldingRequestLogPruner{fold: billingStore, log: reqLogStore}, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
-	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
+	// SPEC-002 R-7.10.2a: settlement receipt audit rows leave only through a
+	// verified closed period archive (startAuditLogRotation), never by the
+	// generic pruner.
+	startAuditLogRotation(shutdownCtx, settlementReceiptAuditStore, auditLogRotationOptions(cfg), logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
@@ -2879,28 +2913,57 @@ func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB
 	return store, nil
 }
 
+// foldingRequestLogPruner prunes request_log in two steps (SPEC-005 §2.1b):
+// the billing wholesale fold folds and deletes the rows that have an
+// account, a request at a time; the request-log pruner deletes the rest.
+type foldingRequestLogPruner struct {
+	fold interface {
+		FoldWholesaleRequestLog(context.Context, time.Time) (int64, error)
+	}
+	log requestLogPruner
+}
+
+func (p foldingRequestLogPruner) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	folded, err := p.fold.FoldWholesaleRequestLog(ctx, cutoff)
+	if err != nil {
+		return folded, err
+	}
+	pruned, err := p.log.PruneBefore(ctx, cutoff)
+	return folded + pruned, err
+}
+
+// requestLogPrunePassBudget bounds one request_log prune pass; a pass that
+// runs out continues an hour later, so a lowered retention window drains in
+// bounded passes instead of one long delete.
+const requestLogPrunePassBudget = 5 * time.Minute
+
 func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
 	prune := func() {
 		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
-		deleted, err := store.PruneBefore(ctx, cutoff)
-		if err != nil {
-			logger.Warn().Err(err).Time("cutoff", cutoff).Msg("request_log retention prune failed")
+		passCtx, cancel := context.WithTimeout(ctx, requestLogPrunePassBudget)
+		defer cancel()
+		deleted, err := store.PruneBefore(passCtx, cutoff)
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn().Err(err).Time("cutoff", cutoff).Int64("deleted_rows", deleted).Msg("request_log retention prune failed")
 			return
 		}
 		if deleted > 0 {
-			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
+			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Bool("pass_budget_spent", err != nil).Msg("request_log retention pruned rows")
 		}
 	}
-	if pruneOnStartup {
-		prune()
-	} else {
+	if !pruneOnStartup {
 		logger.Info().Int("retention_days", retentionDays).Msg("request_log startup retention prune skipped; scheduled pruner armed")
 	}
 	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
+		// The startup pass runs here, off the startup path, so a lowered
+		// retention window never delays the listeners.
+		if pruneOnStartup {
+			prune()
+		}
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
@@ -3326,6 +3389,77 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 			case <-ticker.C:
 				prune()
 			}
+		}
+	}()
+}
+
+// auditLogRotationOptions derives the SPEC-002 R-7.10.2 rotation settings:
+// the audit database keeps storage.audit_log_hot_days hot and the closed
+// period archives hold the rest of audit_log_retention_days. The archive
+// shares the settled-evidence retention free-space floor and pacing.
+func auditLogRotationOptions(cfg config.Config) audit.RotationOptions {
+	dir := cfg.Storage.AuditLogArchiveDir
+	if dir == "" {
+		dbPath := audit.DefaultDBPath(cfg.Storage.DBPath)
+		if abs, err := filepath.Abs(dbPath); err == nil {
+			dbPath = abs
+		}
+		dir = filepath.Join(filepath.Dir(dbPath), audit.AuditArchiveDirName)
+	}
+	rc := cfg.Billing.Retention
+	return audit.RotationOptions{
+		ArchiveDir:                dir,
+		HotDays:                   cfg.Storage.AuditLogHotDays,
+		RetentionDays:             cfg.Storage.AuditLogRetentionDays,
+		BatchPause:                time.Duration(rc.BatchPauseMS) * time.Millisecond,
+		RunBudget:                 time.Duration(rc.RunBudgetMinutes) * time.Minute,
+		MinFreeBytes:              rc.ArchiveMinFreeBytes,
+		MinFreePercent:            rc.ArchiveMinFreePercent,
+		IncrementalVacuumPages:    rc.IncrementalVacuumPages,
+		IncrementalVacuumMaxSteps: rc.IncrementalVacuumMaxSteps,
+	}
+}
+
+// startAuditLogRotation rotates the settlement receipt audit database daily
+// at 02:30 UTC, before the 03:00 settled-evidence retention run.
+func startAuditLogRotation(ctx context.Context, store *audit.Store, opts audit.RotationOptions, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 2, 30, 0, 0, time.UTC)
+			if !next.After(now) {
+				next = next.AddDate(0, 0, 1)
+			}
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			report, err := store.RotateClosedPeriods(ctx, opts, time.Now())
+			event := logger.Info()
+			if err != nil {
+				event = logger.Error().Err(err)
+			} else if report.Status == audit.RotationStatusDiskLow {
+				event = logger.Warn()
+			}
+			event.Str("event", "audit_log_rotation").
+				Str("status", report.Status).
+				Str("cutoff_day_utc", report.CutoffDayUTC).
+				Int("archives", report.Archives).
+				Int64("archived_rows", report.ArchivedRows).
+				Int64("deleted_rows", report.DeletedRows).
+				Int64("kept_rows", report.KeptRows).
+				Int("removed_archives", report.RemovedArchives).
+				Str("last_archive_file", report.LastArchiveFile).
+				Str("last_archive_sha256", report.LastArchiveSHA).
+				Str("auto_vacuum", report.AutoVacuumMode).
+				Str("reason", report.Error).
+				Msg("audit log rotation finished")
 		}
 	}()
 }
@@ -4666,6 +4800,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		billingSnapshotCommitted, billingSnapshotID = true, snapshotID
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		billingStores[0].SetEvidenceRetentionOptions(billing.EvidenceRetentionOptionsFromConfig(cfg.Billing.Retention, cfg.Settlement))
+		billingStores[0].SetLedgerRollupOptions(billing.LedgerRollupOptionsFromConfig(cfg.Billing.LedgerRollup, cfg.Billing.Retention, cfg.Settlement, cfg.Storage.RequestLogRetentionDays))
 		if err := billingStores[0].SetCeilingRestatementEnabled(context.Background(), cfg.Billing.CeilingRestatementEnabled, "sighup"); err != nil {
 			logger.Error().Err(err).Msg("billing ceiling-restatement flag reload rejected")
 		}

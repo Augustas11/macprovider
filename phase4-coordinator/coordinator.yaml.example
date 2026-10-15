@@ -233,7 +233,8 @@ auth:
 storage:
   db_path: "coordinator.db"
   snapshot_interval_s: 300
-  request_log_retention_days: 90
+  # SPEC-005 §2.1b: 14 days; must exceed settlement.nightly_reconcile_window_days.
+  request_log_retention_days: 14
 
 trusted_pools:
   enabled: false

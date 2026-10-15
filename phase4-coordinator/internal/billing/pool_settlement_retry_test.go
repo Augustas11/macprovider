@@ -68,8 +68,10 @@ func TestBillingCompatFloorRefusesNewerDatabase(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT contract FROM billing_compat_floor WHERE id = 1`).Scan(&floor); err != nil {
 		t.Fatal(err)
 	}
-	if floor != billingCompatContract {
-		t.Fatalf("recorded floor=%d, want %d", floor, billingCompatContract)
+	// Open records the retention floor; contract 5 (SPEC-022 v0.4.5) is
+	// recorded by the first deletion that tombstones an unsettled credit.
+	if floor != billingCompatContractEvidenceRetention {
+		t.Fatalf("recorded floor=%d, want %d", floor, billingCompatContractEvidenceRetention)
 	}
 	if _, err := store.db.Exec(`UPDATE billing_compat_floor SET contract = ? WHERE id = 1`, billingCompatContract+1); err != nil {
 		t.Fatal(err)
@@ -86,7 +88,7 @@ func TestBillingCompatFloorRefusesNewerDatabase(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT contract FROM billing_compat_floor WHERE id = 1`).Scan(&floor); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal(err)
 	}
-	if floor != billingCompatContract {
-		t.Fatalf("floor after re-open=%d, want raised to %d", floor, billingCompatContract)
+	if floor != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor after re-open=%d, want raised to %d", floor, billingCompatContractEvidenceRetention)
 	}
 }

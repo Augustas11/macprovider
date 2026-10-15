@@ -1428,14 +1428,18 @@ type GitHubOAuthConfig struct {
 }
 
 type StorageConfig struct {
-	DBPath                   string `yaml:"db_path"`
-	SnapshotIntervalS        int    `yaml:"snapshot_interval_s"`
-	RequestLogRetentionDays  int    `yaml:"request_log_retention_days"`
-	RequestLogPruneOnStartup bool   `yaml:"request_log_prune_on_startup"`
-	AuditLogPruneOnStartup   bool   `yaml:"audit_log_prune_on_startup"`
-	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the
-	// operator_model_swap audit_log table (and any future audit event
-	// types). Default 90 days mirrors request_log_retention_days.
+	DBPath            string `yaml:"db_path"`
+	SnapshotIntervalS int    `yaml:"snapshot_interval_s"`
+	// RequestLogRetentionDays bounds request_log (default 14, SPEC-005
+	// §2.1b); it must exceed the nightly reconcile window. Rows a D1a
+	// wholesale statement reads are folded into per-day usage aggregates
+	// before they leave.
+	RequestLogRetentionDays  int  `yaml:"request_log_retention_days"`
+	RequestLogPruneOnStartup bool `yaml:"request_log_prune_on_startup"`
+	AuditLogPruneOnStartup   bool `yaml:"audit_log_prune_on_startup"`
+	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the audit_log
+	// tables: a 90-day compliance floor, independent of
+	// request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
 	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
 	// already copied into the audit database, so it leaves the money
@@ -1447,6 +1451,14 @@ type StorageConfig struct {
 	// minutes after it was mirrored, once its primary row is verified to
 	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
 	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
+	// SPEC-002 R-7.10.2 (#1793): the settlement receipt audit database keeps
+	// this many whole UTC days hot. Older days move to verified closed period
+	// archives in AuditLogArchiveDir, which hold the audit history for
+	// audit_log_retention_days.
+	AuditLogHotDays int `yaml:"audit_log_hot_days"`
+	// AuditLogArchiveDir is the absolute directory of the closed period
+	// archives; empty means audit-archive next to the audit database.
+	AuditLogArchiveDir string `yaml:"audit_log_archive_dir"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -1765,6 +1777,28 @@ type BillingConfig struct {
 	// Retention is the SPEC-022 R-15 settled-evidence retention job
 	// (#1793). On by default; `enabled: false` is the kill switch.
 	Retention BillingRetentionConfig `yaml:"retention"`
+	// LedgerRollup rolls settled ledger detail rows up into per-payout
+	// aggregates (SPEC-022 R-15.11, SPEC-005 §7.8).
+	LedgerRollup LedgerRollupConfig `yaml:"ledger_rollup"`
+}
+
+// LedgerRollupConfig bounds the hot ledger: once a request's evidence is
+// archived and every credit settled into a live payout whose window is at
+// least MinSettlementCycles completed windows old, its detail rows move to a
+// verified archive and per-payout, per-hour aggregates replace them. The
+// archive directory, free-space floor, batch size, pause, and run budget are
+// billing.retention's.
+type LedgerRollupConfig struct {
+	// Enabled runs the rollup after each nightly retention run. Default
+	// true; false (SIGHUP-reloadable) is the kill switch.
+	Enabled bool `yaml:"enabled"`
+	// MinSettlementCycles is how many completed settlement windows must
+	// follow a payout's window before its credits roll up. Default 5; the
+	// span (cycles x cadence days) must be at least 31 days, past the
+	// pool-proven window and the admin reconcile range. A credit also never
+	// rolls up while storage.request_log_retention_days still holds its
+	// request_log row.
+	MinSettlementCycles int `yaml:"min_settlement_cycles"`
 }
 
 // BillingRetentionConfig moves settled SPEC-022 evidence rows out of the hot
@@ -1778,9 +1812,16 @@ type BillingRetentionConfig struct {
 	// means "retention-archive" in the directory of the coordinator database
 	// file (storage.db_path); an explicit value must be absolute.
 	ArchiveDir string `yaml:"archive_dir"`
-	// MinSettlementCycles is how many completed settlement windows must
-	// follow the window a credit settled in. Floor 2.
+	// MinSettlementCycles still loads and is validated (floor 2) so existing
+	// configurations keep working; since SPEC-022 v0.4.5 it no longer gates
+	// evidence retention (VerdictCloseGraceHours does).
 	MinSettlementCycles int `yaml:"min_settlement_cycles"`
+	// VerdictCloseGraceHours is the SPEC-022 R-15.2 grace: a request's
+	// evidence may leave the hot store once every verdict closed and every
+	// credit was created at least this long ago (and before the start of
+	// the newest completed nightly reconcile). Default 48, in [24, 720], and
+	// at least settlement.startup_reconcile_window_hours + 1.
+	VerdictCloseGraceHours int `yaml:"verdict_close_grace_hours"`
 	// BatchSize is the number of requests deleted per short transaction.
 	BatchSize int `yaml:"batch_size"`
 	// BatchPauseMS is the pause between delete batches that yields the
@@ -2014,12 +2055,13 @@ func Default() Config {
 		Storage: StorageConfig{
 			DBPath:                   "coordinator.db",
 			SnapshotIntervalS:        300,
-			RequestLogRetentionDays:  90,
+			RequestLogRetentionDays:  14,
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
 			AuditLogRetentionDays:    90,
 			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
 			RouteSnapshotJournalMirroredGraceMinutes:          60,
+			AuditLogHotDays:                                   7,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -2062,6 +2104,7 @@ func Default() Config {
 			Retention: BillingRetentionConfig{
 				Enabled:                     true,
 				MinSettlementCycles:         2,
+				VerdictCloseGraceHours:      48,
 				BatchSize:                   50,
 				BatchPauseMS:                200,
 				MaxRequestsPerRun:           20000,
@@ -2072,6 +2115,10 @@ func Default() Config {
 				ArchiveMinFreeBytes:         20 << 30,
 				ArchiveMinFreePercent:       10,
 				OffhostVerifyTimeoutSeconds: 300,
+			},
+			LedgerRollup: LedgerRollupConfig{
+				Enabled:             true,
+				MinSettlementCycles: 5,
 			},
 		},
 		Settlement: SettlementConfig{
@@ -3279,11 +3326,21 @@ func (c Config) Validate() error {
 	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
 		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
 	}
+	if d := c.Storage.AuditLogHotDays; d < 1 || d > c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_hot_days must be between 1 and audit_log_retention_days")
+	}
+	if dir := c.Storage.AuditLogArchiveDir; dir != "" && !filepath.IsAbs(dir) {
+		return fmt.Errorf("storage.audit_log_archive_dir must be an absolute path")
+	}
 	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
 		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)
 	}
-	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
-		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
+	// SPEC-005 §2.1b (#1793): request_log never leaves before every
+	// reconcile that reads it: the nightly window plus its recovery grace,
+	// and the startup scan window.
+	if c.Storage.RequestLogRetentionDays <= c.Settlement.NightlyReconcileWindowDays ||
+		c.Storage.RequestLogRetentionDays*24 <= c.Settlement.StartupReconcileWindowHours {
+		return fmt.Errorf("storage.request_log_retention_days must exceed settlement.nightly_reconcile_window_days and the startup reconcile window")
 	}
 	if c.Endpoints.ProviderEarnings.RateLimitPerMinute <= 0 {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
@@ -4715,6 +4772,12 @@ func (c Config) validateBillingRetention() error {
 	if r.MinSettlementCycles < 2 {
 		return fmt.Errorf("billing.retention.min_settlement_cycles must be >= 2")
 	}
+	if g := r.VerdictCloseGraceHours; g < 24 || g > 720 {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must be in [24, 720]")
+	}
+	if r.VerdictCloseGraceHours <= c.Settlement.StartupReconcileWindowHours {
+		return fmt.Errorf("billing.retention.verdict_close_grace_hours must exceed settlement.startup_reconcile_window_hours")
+	}
 	if r.BatchSize < 1 || r.BatchSize > 1000 {
 		return fmt.Errorf("billing.retention.batch_size must be in [1, 1000]")
 	}
@@ -4754,6 +4817,14 @@ func (c Config) validateBillingRetention() error {
 	}
 	if strings.TrimSpace(r.ArchiveDir) != "" && !filepath.IsAbs(r.ArchiveDir) {
 		return fmt.Errorf("billing.retention.archive_dir must be an absolute path")
+	}
+	lr := c.Billing.LedgerRollup
+	if lr.MinSettlementCycles < 2 {
+		return fmt.Errorf("billing.ledger_rollup.min_settlement_cycles must be >= 2")
+	}
+	span := lr.MinSettlementCycles * c.Settlement.CadenceDays
+	if span < 31 {
+		return fmt.Errorf("billing.ledger_rollup.min_settlement_cycles x settlement.cadence_days must be >= 31 days")
 	}
 	return nil
 }

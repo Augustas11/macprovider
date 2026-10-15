@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.15 (2026-10-10, catalog `expires_at` structural only, #1938; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.16 (2026-10-15, slim settlement receipt audit events, #1793; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.16 (2026-10-15, issue #1793):** §11 audit events: `settlement_receipt_ingested` carries the attempt identity and the receipt identity only; `settlement_receipt_verdict` carries the full field list, each field once, with verifier diagnostics redacted to the names of the unmet checks (SPEC-022 R-11.1.2). No receipt, tuple, or verification rule changes.
 
 **Change log v0.4.15 (2026-10-10, issue #1938 — no calendar expiry on live features):** §M.3.2 step 5 and AC-36 change: the receipt verifier no longer compares the Tier-2 catalog `expires_at` with its wall clock and never emits `catalog_expired` (the enum value stays for older output). `expires_at` stays signed and structural (`issued_at < expires_at`). §M.3.4 cache bands are unchanged. Matches SPEC-008 v0.7.1. The signed v0.4 tuple, including `catalog_expires_at_unix_ms`, is unchanged.
 
@@ -4801,21 +4803,25 @@ absorption; tracked locally for now):
   that verifies signatures, not from audit rows.
 - `settlement_receipt_ingested` (v0.4): emitted by the coordinator
   when a v0.4 receipt is ingested through an internal settlement
-  channel. Fields: `account_scope`, `request_id`, `attempt_n`,
-  `provider_id`, `receipt_version`, `terminal_state`,
-  `route_snapshot_digest`, `route_snapshot_policy_version`,
-  `route_snapshot_mode`, `catalog_id`, `catalog_body_digest`,
-  `provider_receipt_key_fingerprint`, `model_id`, `model_hash`,
-  `expected_catalog_model_hash`, `prompt_hash`, `output_hash`,
-  `usage_digest`, `received_at_unix_ms`. MUST NOT include raw receipt
+  channel. Fields (v0.4.16): the attempt identity (`account_scope` as its
+  redacted `account_scope_hash`, `request_id`, `attempt_n`,
+  `provider_id`), `receipt_version`, `receipt_profile`,
+  `route_snapshot_digest`, `provider_receipt_key_fingerprint`, and
+  `received_at_unix_ms`. The verdict event of the same attempt carries
+  every other field. MUST NOT include raw receipt
   signatures, raw receipt public keys, raw receipt envelopes, raw
   prompts, raw outputs, bearer tokens, receipt private keys, or
   provider-private state.
 - `settlement_receipt_verdict` (v0.4): emitted when a v0.4 settlement
   verifier maps a receipt or missing receipt to `pending`, `verified`,
-  `quarantined`, or `zero_settled`. Fields: all
-  `settlement_receipt_ingested` scalar fields plus `settlement_outcome`,
-  `reason`, `deadline_unix_ms`, and redacted verifier diagnostics. Raw
+  `quarantined`, or `zero_settled`. Fields: the ingested fields plus
+  `terminal_state`, `route_snapshot_policy_version`,
+  `route_snapshot_mode`, `catalog_id`, `catalog_body_digest`,
+  `model_id`, `model_hash`, `expected_catalog_model_hash`,
+  `prompt_hash`, `output_hash`, `usage_digest`, `settlement_outcome`,
+  `reason`, `deadline_unix_ms`, and redacted verifier diagnostics (the
+  names of the unmet checks). SPEC-022 R-11.1.2 is the complete field
+  list; no field is written twice under different names. Raw
   receipt material remains prohibited.
 
 `receipt_issued` is a high-cardinality event (one per response). Its

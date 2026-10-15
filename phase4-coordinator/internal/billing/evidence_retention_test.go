@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -22,6 +23,7 @@ import (
 // requests whose settlement window is two completed cycles old.
 type retentionFixture struct {
 	store       *Store
+	reqStore    *requestlog.Store
 	base        SettlementVerifyInput
 	windowStart time.Time
 	windowEnd   time.Time
@@ -36,8 +38,8 @@ func newRetentionFixture(t *testing.T, withJournal bool) *retentionFixture {
 	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
 	base := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
 	base.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
-	_, store := newRequestAndBillingStores(t)
-	f := &retentionFixture{store: store, base: base, inputs: map[string]SettlementVerifyInput{}}
+	reqStore, store := newRequestAndBillingStores(t)
+	f := &retentionFixture{store: store, reqStore: reqStore, base: base, inputs: map[string]SettlementVerifyInput{}}
 	f.windowStart, f.windowEnd = settlementWindowForInput(base)
 	now := f.windowEnd.AddDate(0, 0, 40)
 	store.now = func() time.Time { return now }
@@ -746,38 +748,76 @@ func TestEvidenceRetentionFinalityLookupStraddlingDeletion(t *testing.T) {
 	}
 }
 
-func TestEvidenceRetentionRespectsSettlementCycleFinality(t *testing.T) {
+// SPEC-022 v0.4.5 R-15.2: the finality point T is the earlier of now minus
+// the verdict-close grace and the start of the newest completed nightly
+// reconcile, never earlier than the reconcile horizon before now.
+func TestEvidenceRetentionFinalityPointFollowsGraceAndReconcile(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
+	now := f.store.nowUTC()
+	opts := retentionTestOptions(t.TempDir(), nil)
+	opts.VerdictCloseGrace = 48 * time.Hour
+	cutAt := func() time.Time {
+		t.Helper()
+		cut, err := f.store.evidenceRetentionCutoffsAt(ctx, opts, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cut.creditBefore
+	}
+	addRun := func(started time.Time, status string) {
+		t.Helper()
+		if _, err := f.store.db.Exec(`
+INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned, missing_credit_rows_created,
+    orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits,
+    reconciliation_delta_credits, started_at_utc, status, created_at_utc
+) VALUES ('nightly_reconcile', ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?)`,
+			sqliteTimeText(started.AddDate(0, 0, -7)), sqliteTimeText(started), sqliteTimeText(started), status, sqliteTimeText(started)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No completed nightly reconcile: the reconcile horizon.
+	if got, want := cutAt(), now.Add(-opts.ReconcileHorizon); !got.Equal(want) {
+		t.Fatalf("no reconcile run: T=%s want %s", got, want)
+	}
+	// A failed run does not count; a run older than the horizon neither.
+	addRun(now.Add(-time.Hour), "failed")
+	addRun(now.AddDate(0, 0, -20), "complete")
+	if got, want := cutAt(), now.Add(-opts.ReconcileHorizon); !got.Equal(want) {
+		t.Fatalf("failed or stale run: T=%s want %s", got, want)
+	}
+	// A completed run five days ago: T is its start.
+	addRun(now.AddDate(0, 0, -5), "complete")
+	if got, want := cutAt(), now.AddDate(0, 0, -5); !got.Equal(want) {
+		t.Fatalf("run five days ago: T=%s want %s", got, want)
+	}
+	// A completed run an hour ago: the grace binds.
+	addRun(now.Add(-time.Hour), "complete")
+	if got, want := cutAt(), now.Add(-48*time.Hour); !got.Equal(want) {
+		t.Fatalf("recent run: T=%s want now-48h %s", got, want)
+	}
+
+	// End to end: a request whose verdict closed before T is eligible; the
+	// grace moved past its close time keeps it hot.
 	f.seed(t, "first")
 	f.seed(t, "b")
-	if err := f.store.RunSettlement(ctx, SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, f.windowStart, f.windowEnd); err != nil {
-		t.Fatal(err)
+	dry, err := f.store.DryRunEvidenceRetention(ctx, opts)
+	if err != nil || dry.EligibleRequests != 1 {
+		t.Fatalf("closed before T: %+v %v", dry, err)
 	}
-	f.addLaterWindows(t, 1)
-	dry, err := f.store.DryRunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
+	closedAt := scalarText(t, f.store.db, `SELECT COALESCE(updated_at_utc, created_at_utc) FROM settlement_receipt_verdicts WHERE request_id = ?`, f.inputs["b"].RequestID)
+	closed, err := time.Parse(time.RFC3339Nano, closedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dry.EligibleRequests != 0 || dry.SkippedRequests[retentionSkipWindowTooRecent] == 0 {
-		t.Fatalf("one completed cycle: %+v", dry)
-	}
-	f.addLaterWindows(t, 2)
-	dry, err = f.store.DryRunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil))
-	if err != nil {
+	if _, err := f.store.db.Exec(`UPDATE ledger_reconciliation_runs SET status = 'failed'`); err != nil {
 		t.Fatal(err)
 	}
-	if dry.EligibleRequests != 1 {
-		t.Fatalf("two completed cycles: %+v", dry)
-	}
-	opts := retentionTestOptions(t.TempDir(), nil)
-	opts.ReconcileHorizon = 365 * 24 * time.Hour
+	opts.ReconcileHorizon = now.Sub(closed)
 	dry, err = f.store.DryRunEvidenceRetention(ctx, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dry.EligibleRequests != 0 {
-		t.Fatalf("inside reconcile horizon: %+v", dry)
+	if err != nil || dry.EligibleRequests != 0 {
+		t.Fatalf("verdict closed at T: %+v %v", dry, err)
 	}
 }
 
@@ -878,7 +918,7 @@ func TestEvidenceRetentionReadersTolerateArchivedRequests(t *testing.T) {
 
 func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	cut := evidenceRetentionCutoffs{windowEnd: now.AddDate(0, 0, -14), windowEndSet: true, creditBefore: now.AddDate(0, 0, -9)}
+	cut := evidenceRetentionCutoffs{windowEnd: now.AddDate(0, 0, -2), windowEndSet: true, creditBefore: now.AddDate(0, 0, -2)}
 	settlementID := int64(7)
 	eligible := func() requestEvidenceBundle {
 		return requestEvidenceBundle{
@@ -890,7 +930,7 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 			payouts: map[int64]archiveRow{7: {"id": int64(7), "status": "ready", "window_end_utc": sqliteTimeText(now.AddDate(0, 0, -21))}},
 			evidence: map[string][]archiveRow{
 				"settlement_route_snapshots":      {{"id": int64(3), "account_scope": "s", "request_id": "req", "attempt_n": int64(0), "provider_id": "p", "route_snapshot_digest": "d"}},
-				"settlement_receipt_verdicts":     {{"id": int64(10), "provider_id": "p", "account_scope_hash": SettlementAccountScopeHash("s"), "closed": int64(1), "settlement_outcome": "verified", "receipt_result": "valid"}},
+				"settlement_receipt_verdicts":     {{"id": int64(10), "provider_id": "p", "account_scope_hash": SettlementAccountScopeHash("s"), "closed": int64(1), "settlement_outcome": "verified", "receipt_result": "valid", "created_at_utc": sqliteTimeText(now.AddDate(0, 0, -29)), "updated_at_utc": sqliteTimeText(now.AddDate(0, 0, -28))}},
 				"settlement_receipt_audit_outbox": {{"id": int64(20), "drained_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
 			},
 			outputJournal: []archiveRow{{"id": int64(30), "materialized_at_utc": "2026-01-01T00:00:00Z", "poisoned_at_utc": nil}},
@@ -907,11 +947,11 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 		mutate func(b *requestEvidenceBundle, first map[string]int64, cut *evidenceRetentionCutoffs)
 	}{
 		{"no credit", retentionSkipNoCredit, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) { b.credits = nil }},
-		{"unsettled", retentionSkipUnsettled, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
-			b.credits[0].settled = false
-		}},
-		{"no settlement id", retentionSkipUnsettled, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+		{"settled without a payout id", retentionSkipSettlementLink, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.credits[0].settlementID = nil
+		}},
+		{"payout id on an unsettled credit", retentionSkipSettlementLink, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.credits[0].settled = false
 		}},
 		{"quarantined", retentionSkipQuarantined, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.credits[0].quarantined = true
@@ -922,20 +962,20 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 		{"not payable", retentionSkipNotPayable, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.credits[0].payable = false
 		}},
-		{"inside reconcile horizon", retentionSkipInsideReconcile, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+		{"credit created at the finality point", retentionSkipInsideReconcile, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.credits[0].tsUTC = now.AddDate(0, 0, -2)
+		}},
+		{"verdict closed inside the grace", retentionSkipVerdictGrace, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["updated_at_utc"] = sqliteTimeText(now.Add(-47 * time.Hour))
+		}},
+		{"verdict close time unreadable", retentionSkipVerdictGrace, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
+			b.evidence["settlement_receipt_verdicts"][0]["created_at_utc"] = "not a time"
 		}},
 		{"payout missing", retentionSkipPayoutMissing, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.payouts = map[int64]archiveRow{}
 		}},
 		{"payout voided", retentionSkipPayoutVoided, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.payouts[7]["status"] = "voided"
-		}},
-		{"window too recent", retentionSkipWindowTooRecent, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
-			b.payouts[7]["window_end_utc"] = sqliteTimeText(now.AddDate(0, 0, -7))
-		}},
-		{"fewer completed cycles than required", retentionSkipWindowTooRecent, func(_ *requestEvidenceBundle, _ map[string]int64, c *evidenceRetentionCutoffs) {
-			c.windowEndSet = false
 		}},
 		{"verdict open", retentionSkipVerdictOpen, func(b *requestEvidenceBundle, _ map[string]int64, _ *evidenceRetentionCutoffs) {
 			b.evidence["settlement_receipt_verdicts"][0]["closed"] = int64(0)
@@ -996,9 +1036,19 @@ func TestEvidenceRetentionEligibilityNeverTouchClasses(t *testing.T) {
 			}
 		})
 	}
+	// SPEC-022 v0.4.5: an unsettled, payable credit with no payout id is
+	// eligible; its tombstone keeps it payable and settles it later.
+	b := eligible()
+	b.credits[0].settled, b.credits[0].settlementID, b.payouts = false, nil, map[int64]archiveRow{}
+	if ok, reason := evaluateRetentionEligibility(b, cut, firstVerified, true); !ok {
+		t.Fatalf("unsettled payable credit not eligible: %s", reason)
+	}
 }
 
-func TestEvidenceRetentionKeepsUnsettledAndQuarantinedRequestsHot(t *testing.T) {
+// SPEC-022 v0.4.5: an unsettled, payable credit leaves its evidence at the
+// finality point; quarantined, undelivered, and first-verified requests stay
+// hot. The first such deletion records billing contract 5.
+func TestEvidenceRetentionArchivesUnsettledButKeepsQuarantinedHot(t *testing.T) {
 	ctx := context.Background()
 	f := newRetentionFixture(t, false)
 	f.seed(t, "first")
@@ -1012,14 +1062,20 @@ func TestEvidenceRetentionKeepsUnsettledAndQuarantinedRequestsHot(t *testing.T) 
 	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 1, quarantine_reason = 'operator' WHERE request_id = ?`, f.inputs["settled"].RequestID); err != nil {
 		t.Fatal(err)
 	}
+	if got := scalar(t, f.store.db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEvidenceRetention {
+		t.Fatalf("floor before any early archive = %d, want %d", got, billingCompatContractEvidenceRetention)
+	}
 	report, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), (&recordingVerifier{}).verify))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != EvidenceRetentionStatusNothingEligible {
+	if report.Status != EvidenceRetentionStatusDeleted || report.DeletedRequests != 1 {
 		t.Fatalf("report=%+v", report)
 	}
-	for _, suffix := range []string{"first", "settled", "undrained", "unsettled"} {
+	if f.hotRows(t, "unsettled") != 0 {
+		t.Fatal("unsettled request kept its evidence")
+	}
+	for _, suffix := range []string{"first", "settled", "undrained"} {
 		if f.hotRows(t, suffix) != 3 {
 			t.Fatalf("%s lost hot evidence", suffix)
 		}
@@ -1028,6 +1084,18 @@ func TestEvidenceRetentionKeepsUnsettledAndQuarantinedRequestsHot(t *testing.T) 
 		if report.SkippedRequests[reason] != 1 {
 			t.Fatalf("skipped=%v missing %s", report.SkippedRequests, reason)
 		}
+	}
+	id := f.creditID(t, "unsettled")
+	if scalar(t, f.store.db, `SELECT settled FROM ledger_request_credits WHERE id = ?`, id) != 0 ||
+		scalar(t, f.store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE id = ?`, id) != 1 {
+		t.Fatal("the archived unsettled credit is not payable through its tombstone")
+	}
+	if got := scalar(t, f.store.db, `SELECT contract FROM billing_compat_floor WHERE id = 1`); got != billingCompatContractEarlyArchive {
+		t.Fatalf("floor after an early archive = %d, want %d", got, billingCompatContractEarlyArchive)
+	}
+	// Its money columns are immutable once tombstoned.
+	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET gross_credits = gross_credits + 1 WHERE id = ?`, id); err == nil || !strings.Contains(err.Error(), "archived ledger_request_credits money fields are immutable") {
+		t.Fatalf("money update on a tombstoned credit: %v", err)
 	}
 }
 
@@ -1181,7 +1249,7 @@ func TestEvidenceRetentionRunDrainsBacklogAcrossArchives(t *testing.T) {
 
 	def := config.Default()
 	d := EvidenceRetentionOptionsFromConfig(def.Billing.Retention, def.Settlement)
-	if !d.Enabled || d.BatchSize != 50 || d.BatchPause != 200*time.Millisecond || d.MaxRequestsPerArchive != 20000 || d.RunBudget != 30*time.Minute || d.MaxScanRowsPerRun != 5000000 {
+	if !d.Enabled || d.BatchSize != 50 || d.BatchPause != 200*time.Millisecond || d.MaxRequestsPerArchive != 20000 || d.RunBudget != 30*time.Minute || d.MaxScanRowsPerRun != 5000000 || d.VerdictCloseGrace != 48*time.Hour {
 		t.Fatalf("default bounds=%+v", d)
 	}
 	if d.ArchiveDir != "" || d.OffhostVerifier != nil {
@@ -1292,6 +1360,18 @@ func TestEvidenceRetentionKeepsPoolScopedAttemptsUntilPoolProvenRollupIsFinal(t 
 	}
 	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM pool_proven_rollup_attempts WHERE route_snapshot_id = ? AND finality_at_utc IS NOT NULL`, snapshotID); got != 1 {
 		t.Fatalf("archived attempt left the pool-proven rollup: rows=%d", got)
+	}
+	// #1793: the tombstone keeps the pool binding, so creator earnings still
+	// count both pool credits after their route snapshots left.
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE pool_id = 'pool-a'`); got != 2 {
+		t.Fatalf("tombstones with the pool binding=%d want 2", got)
+	}
+	if got := scalar(t, f.store.db, `SELECT COUNT(*) FROM settlement_evidence_archived_credits WHERE request_id = ? AND pool_id IS NULL`, f.inputs["plain"].RequestID); got != 1 {
+		t.Fatal("a global request's tombstone carries a pool binding")
+	}
+	earnings, err := f.store.CreatorPoolEarnings(ctx, []string{f.base.ProviderID}, []string{"pool-a"}, time.Time{}, time.Time{})
+	if err != nil || len(earnings) != 1 || earnings[0].PayableRequests != 2 {
+		t.Fatalf("creator earnings after archive=%+v err=%v", earnings, err)
 	}
 }
 
@@ -1447,8 +1527,10 @@ func TestEvidenceRetentionHoldsDoNotPinTheWatermark(t *testing.T) {
 	// old credit that stays unsettled until a later settlement picks it up.
 	f.seed(t, "below-min")
 	opts := retentionTestOptions(t.TempDir(), nil)
+	belowMinCredits := scalar(t, f.store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, f.inputs["below-min"].RequestID)
+	// SPEC-022 v0.4.5: the unsettled credit leaves its evidence with b.
 	report, err := f.store.RunEvidenceRetention(ctx, opts)
-	if err != nil || report.DeletedRequests != 1 || report.StopReason != EvidenceRetentionStopLapComplete || report.HeldRequests != 3 {
+	if err != nil || report.DeletedRequests != 2 || report.StopReason != EvidenceRetentionStopLapComplete || report.HeldRequests != 2 || f.hotRows(t, "below-min") != 0 {
 		t.Fatalf("first run=%+v err=%v", report, err)
 	}
 	maxID := scalar(t, f.store.db, `SELECT MAX(id) FROM ledger_request_credits`)
@@ -1456,21 +1538,22 @@ func TestEvidenceRetentionHoldsDoNotPinTheWatermark(t *testing.T) {
 	if err != nil || !report.BacklogDrained || report.WatermarkCreditID != maxID {
 		t.Fatalf("second run=%+v err=%v; want drained with the watermark at %d", report, err, maxID)
 	}
-	for _, reason := range []string{retentionSkipOutboxUndelivered, retentionSkipQuarantined, retentionSkipUnsettled} {
+	for _, reason := range []string{retentionSkipOutboxUndelivered, retentionSkipQuarantined} {
 		if report.LastLapSkippedRequests[reason] != 1 {
 			t.Fatalf("last lap skipped=%v missing %s", report.LastLapSkippedRequests, reason)
 		}
 	}
-	if report.HeldRequests != 3 || report.BacklogCandidateCredits != 3 {
-		t.Fatalf("held=%d candidates=%d want 3 and 3", report.HeldRequests, report.BacklogCandidateCredits)
+	if report.HeldRequests != 2 || report.BacklogCandidateCredits != 2 {
+		t.Fatalf("held=%d candidates=%d want 2 and 2", report.HeldRequests, report.BacklogCandidateCredits)
 	}
 	// A drained lap re-reads nothing below the watermark.
 	report, err = f.store.RunEvidenceRetention(ctx, opts)
 	if err != nil || report.ScannedCredits != 0 || !report.BacklogDrained {
 		t.Fatalf("third run=%+v err=%v", report, err)
 	}
-	// The outbox delivers and the unsettled credit settles: the next lap's
-	// hold re-check archives both; the quarantined credit stays held.
+	// The outbox delivers and the archived, unsettled credit settles through
+	// its tombstone into the window's payout: the next lap's hold re-check
+	// archives the undelivered one; the quarantined credit stays held.
 	if _, err := f.store.db.Exec(`UPDATE settlement_receipt_audit_outbox SET drained_at_utc = ? WHERE request_id = ?`,
 		sqliteTimeText(f.windowEnd), f.inputs["undrained"].RequestID); err != nil {
 		t.Fatal(err)
@@ -1481,8 +1564,14 @@ func TestEvidenceRetentionHoldsDoNotPinTheWatermark(t *testing.T) {
 	if got := scalar(t, f.store.db, `SELECT settled FROM ledger_request_credits WHERE request_id = ?`, f.inputs["below-min"].RequestID); got != 1 {
 		t.Fatalf("below-min credit settled=%d after the later settlement", got)
 	}
+	if got := scalar(t, f.store.db, `
+SELECT p.provider_credits FROM ledger_payout_ready p
+  JOIN ledger_request_credits lrc ON lrc.settlement_id = p.id
+ WHERE lrc.request_id = ?`, f.inputs["below-min"].RequestID); got < belowMinCredits {
+		t.Fatalf("payout holding the tombstoned credit has %d provider credits, below its %d", got, belowMinCredits)
+	}
 	report, err = f.store.RunEvidenceRetention(ctx, opts)
-	if err != nil || report.DeletedRequests != 2 || f.hotRows(t, "undrained") != 0 || f.hotRows(t, "below-min") != 0 {
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "undrained") != 0 {
 		t.Fatalf("hold re-check run=%+v err=%v", report, err)
 	}
 	if f.hotRows(t, "quarantined") != 3 || f.hotRows(t, "first") != 3 || report.HeldRequests != 1 {
@@ -1654,4 +1743,13 @@ func TestEvidenceRetentionFinalityRefusalIsNotReArchived(t *testing.T) {
 	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "b") != 0 || report.HeldRequests != 0 {
 		t.Fatalf("closed-finality run=%+v err=%v", report, err)
 	}
+}
+
+func scalarText(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	var v string
+	if err := db.QueryRow(query, args...).Scan(&v); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return v
 }

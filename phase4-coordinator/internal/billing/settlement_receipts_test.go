@@ -1360,7 +1360,6 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 		"request_id":                       state.RequestID,
 		"provider_id":                      state.ProviderID,
 		"receipt_result":                   state.ReceiptResult,
-		"receipt_verification_outcome":     state.SettlementOutcome,
 		"settlement_outcome":               state.SettlementOutcome,
 		"reason":                           state.Reason,
 		"route_snapshot_policy_version":    state.RouteSnapshotPolicyVersion,
@@ -1398,15 +1397,15 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 	if got := int64(payload["attempt_n"].(float64)); got != state.AttemptN {
 		t.Fatalf("audit attempt_n=%d want %d", got, state.AttemptN)
 	}
-	if got := payload["attempt_id"]; got != settlementReceiptAttemptID(state) {
-		t.Fatalf("audit attempt_id=%v want %s", got, settlementReceiptAttemptID(state))
+	if got := int64(payload["deadline_unix_ms"].(float64)); got != state.PendingDeadlineUnixMS {
+		t.Fatalf("audit deadline_unix_ms=%d want %d", got, state.PendingDeadlineUnixMS)
 	}
-	if got := int64(payload["pending_deadline_unix_ms"].(float64)); got != state.PendingDeadlineUnixMS {
-		t.Fatalf("audit pending_deadline_unix_ms=%d want %d", got, state.PendingDeadlineUnixMS)
-	}
-	if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
-		if got := payload["quarantine_zero_settle_reason"]; got != state.Reason {
-			t.Fatalf("audit quarantine_zero_settle_reason=%v want %s", got, state.Reason)
+	// SPEC-022 R-11.1 (#1793 slice 6): fields that repeat another field or
+	// the attempt identity are not written, and the full verifier checks stay
+	// in the verdict row.
+	for _, dropped := range []string{"attempt_id", "receipt_verification_outcome", "pending_deadline_unix_ms", "quarantine_zero_settle_reason", "verifier_checks"} {
+		if _, ok := payload[dropped]; ok {
+			t.Fatalf("audit payload still carries %s: %#v", dropped, payload)
 		}
 	}
 }

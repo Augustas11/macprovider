@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.18",
+      "version": "1.6.19",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -120,7 +120,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.22",
+      "version": "0.6.24",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.56",
+      "version": "0.9.57",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.15",
+      "version": "0.4.16",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.4",
+      "version": "v0.4.7",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -6780,7 +6780,7 @@
     {
       "requirement_id": "SPEC-022-R001",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/config/config.go:SettlementConfig",
         "phase4-coordinator/internal/buyer/server.go:settlementEnforceMode"
@@ -6792,21 +6792,13 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:160d0e2ff62b0e40c65dd3741a35de4be322ea8e",
-          "source": null,
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        },
-        {
-          "artifact": "sha256:3ff2a7603caa0a3a28d71f5eba4852b60efb56d850b085a77f6e0e1742bda0a7",
-          "source": "journeys/evidence/buyer-paid-path-20260918T034532Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-09-18",
-          "expires_at": "2026-10-18"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1793",
+        "rationale": "The commit evidence of this row pinned config_test.go TestSpec005BillingDefaultsAndValidation, which asserts the shipped storage defaults; #1793 lowers the request_log_retention_days default from 90 to 14 days (SPEC-005 v0.6.24 section 2.1b), so the pinned fragment no longer matches, and the signed JOURNEY-BUYER-PAID-PATH envelope of 2026-09-18 expires on 2026-10-18. Implementation, tests, and journey mappings stay as local coverage. Restore conformant only after a fresh signed JOURNEY-BUYER-PAID-PATH envelope is produced by the protected workflow on main and consumed here."
+      }
     },
     {
       "requirement_id": "SPEC-022-R002",
@@ -7121,13 +7113,16 @@
         "phase4-coordinator/internal/billing/settlement_receipts.go:DrainSettlementReceiptAuditOutbox",
         "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) SettlementReceiptAuditOutboxStats",
         "phase4-coordinator/internal/billing/settlement_receipts.go:PruneSettlementReceiptAuditOutbox",
-        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer"
+        "phase4-coordinator/cmd/coordinator/main.go:startSettlementReceiptAuditOutboxDrainer",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func settlementReceiptAuditPayloadForAccountHash",
+        "phase4-coordinator/internal/audit/store.go:func legacySettlementReceiptPayloadMatches"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxDrainerRunsDuringContinuousTraffic",
         "phase4-coordinator/internal/billing/store_test.go:TestBillingMigrationAddsSettlementReceiptAuditOutboxPoisonColumnsAfterLegacyTable",
-        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains"
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestSettlementReceiptAuditOutboxShutdownFlushDrains",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestInsertSettlementReceiptOutboxAcceptsLegacyFormRedelivery"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
@@ -7363,7 +7358,17 @@
         "phase4-coordinator/internal/billing/route_snapshot_journal_prune.go:func RouteSnapshotCanonicalJSON",
         "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) PruneSettlementReceiptAuditOutbox",
         "phase4-coordinator/internal/billing/store.go:func (s *Store) dropRedundantEvidenceIndexes",
-        "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig"
+        "phase4-coordinator/cmd/coordinator/main.go:func startRouteSnapshotJournalPrunerWithConfig",
+        "phase4-coordinator/internal/audit/rotate.go:func (s *Store) RotateClosedPeriods",
+        "phase4-coordinator/internal/verifiedarchive/archive.go:func Verify",
+        "phase4-coordinator/cmd/coordinator/main.go:func startAuditLogRotation",
+        "phase4-coordinator/internal/billing/evidence_retention.go:func (s *Store) evidenceRetentionCutoffsAt",
+        "phase4-coordinator/internal/billing/settlement.go:func (s *Store) RunSettlement",
+        "phase4-coordinator/internal/billing/recovery.go:func reconcileExistingCreditTx",
+        "phase4-coordinator/internal/billing/ledger_rollup.go:func (s *Store) RunLedgerRollup",
+        "phase4-coordinator/internal/billing/ledger_rollup.go:func (s *Store) applyLedgerRollupBatch",
+        "phase4-coordinator/internal/billing/payout.go:func (s *Store) ClaimPayoutReady",
+        "phase4-coordinator/internal/billing/wholesale_usage_fold.go:func (s *Store) FoldWholesaleRequestLog"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionEligibilityNeverTouchClasses",
@@ -7398,7 +7403,26 @@
         "phase4-coordinator/internal/billing/route_snapshot_canonical_test.go:TestInsertRouteSnapshotStoresRecomputableCanonicalEmpty",
         "phase4-coordinator/internal/billing/settlement_verdict_diagnostics_test.go:TestSettlementVerdictStoresEmptyDiagnosticsAndKeepsFacts",
         "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestMigrateDropsRedundantEvidenceIndexes",
-        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes"
+        "phase4-coordinator/internal/billing/evidence_index_plan_test.go:TestEvidenceQueriesKeepIndexedPlansWithoutDroppedIndexes",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsArchivesVerifiesAndDeletesClosedDays",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRefusesTamperedArchive",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsKeepsRowChangedAfterExportAndResumes",
+        "phase4-coordinator/internal/audit/rotate_test.go:TestRotateClosedPeriodsRemovesArchivesPastRetention",
+        "phase4-coordinator/internal/verifiedarchive/archive_test.go:TestWriterRoundTripVerifiesAndDetectsTampering",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestEarlyArchivedEvidenceSettlesIntoIdenticalPayouts",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionFinalityPointFollowsGraceAndReconcile",
+        "phase4-coordinator/internal/billing/evidence_retention_test.go:TestEvidenceRetentionArchivesUnsettledButKeepsQuarantinedHot",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupKeepsEveryTotalAndPayout",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupKeepsRequestChangedAfterExport",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestSettlementLifecycleAcrossEarlyArchiveAndRollupMatchesHotLedger",
+        "phase4-coordinator/internal/billing/wholesale_usage_fold_test.go:TestWholesaleFoldKeepsStatementsIdentical",
+        "phase4-coordinator/internal/explorer/store_test.go:TestStoreOverviewAddsLedgerRollups",
+        "phase4-coordinator/internal/billing/creator_earnings_test.go:TestCreatorPoolEarningsCountArchivedAndRolledUpCredits",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupRetriesHeldRequests",
+        "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestLateUndeliveredQuarantineLeavesArchivedCreditPayable",
+        "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupWaitsForTheBillingMirror"
       ],
       "journeys": [],
       "evidence": [],
@@ -7406,7 +7430,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1793",
-        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements."
+        "rationale": "SPEC-022 v0.4.0 R-15 settled-evidence retention. The coordinator implements the R-15.2 selection predicate, the gzip JSONL archive with a SHA-256 manifest, local re-verification (checksum, size, row counts, row-for-row equality with the hot rows), an optional off-host confirmation command, an archive free-space floor, bounded batch deletion of archived rows only, tombstones that keep archived credits payable and verified and feed the provider earnings rollup, a pool-proven rollup guard, and bounded incremental vacuum. Since v0.4.3 a run drains archive after archive within a wall-clock budget along scan laps that start at a persisted archived low watermark (requests that can still become eligible go to a holds table every lap re-checks; too-young credits keep the watermark below them), derives backlog_drained from the last completed lap, reports the lap state and each database's auto_vacuum mode, and skips incremental vacuum on an auto_vacuum=NONE database; the one-time INCREMENTAL conversion is an ops entry-point step gated on the drain. It is on by default with enabled=false as the kill switch. Pending: the first live runs on the production database and a bounded hot database across two weekly settlements. Since v0.4.4-v0.4.6 (#1793 slices 6-8) the audit database rotates into verified closed period archives, evidence leaves at verdict close plus a 48-hour grace after a completed nightly reconcile (an unsettled credit settles through its tombstone), and settled ledger detail rows roll up into per-payout aggregates that every payable, payout, and earnings reader adds; the coordinator runtime that carries them is pending deployment."
       }
     },
     {

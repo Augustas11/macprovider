@@ -1,7 +1,15 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.56 (2026-10-15, pool-scoped privacy class)
+**Version:** 0.9.57 (2026-10-15, 14-day request metadata retention)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.57 (2026-10-15, issue #1793 — request metadata retention):**
+- §5.10 `/privacy` now names the shipped 14-day default of the coordinator
+  `storage.request_log_retention_days` (SPEC-005 §2.1b) and states that an
+  account's successful requests are kept as per-day, per-model totals for
+  wholesale partner statements, with no request ids, prompts, or outputs.
+- §5.5.1 receipt retrieval keeps following the `request_log` lifetime, now 14
+  days by default; an older request id answers 404, as an unknown one does.
 
 **Change log v0.9.56 (2026-10-15, issue #1985 — pool-scoped privacy class):**
 - §5.4.4 (`SPEC-006-R019`): a SPEC-049 privacy-class envelope with an authorized Trusted Pool selection satisfies both `relay_blind_required` and `owned_provider` (SPEC-049-R032). `relay_blind_required` with a pool selection stays refused for a plain SPEC-041 envelope. The effective mode is `relay_blind_required`, and a pool-scoped privacy-class response carries a fourth fixed disclosure string. The other three strings are unchanged.
@@ -2625,7 +2633,7 @@ Unauthenticated HTML page. MUST state honestly:
 - Prompts and completions are processed as plaintext on volunteer Apple Silicon Macs.
 - There is no zero-data-retention (ZDR) guarantee. `compliance.zdr` on the OpenRouter document is `false`.
 - MacProvider does not train foundation models on buyer prompts.
-- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 90 days by default, matching the shipped coordinator `storage.request_log_retention_days` value. If an operator changes that configuration, the public page MUST be updated in the same change.
+- Request metadata needed for routing, quota, settlement, and D1a wholesale statements is retained for 14 days by default, matching the shipped coordinator `storage.request_log_retention_days` value (SPEC-005 §2.1b). Before an account's rows leave, its successful requests are kept as per-day, per-model request and token totals that D1a statements read; they hold no request id, prompt, or output. If an operator changes that configuration, the public page MUST be updated in the same change.
 
 MUST NOT claim private inference, hardware attestation, or a US datacenter region.
 

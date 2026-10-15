@@ -50,7 +50,21 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // evidence; archived credits are payable only through the archived-credit
 // tombstones, which a contract-3 binary does not read. Recorded at open,
 // before any retention run, and again in every deletion transaction.
-const billingCompatContract = billingCompatContractEvidenceRetention
+// 5 = SPEC-022 v0.4.5 (R-15.9): retention may tombstone a credit before it
+// settles; weekly settlement and nightly reconcile then read the tombstone
+// instead of the evidence, which a contract-4 binary does not. Recorded in
+// the deletion transaction that first tombstones an unsettled credit.
+// 6 = SPEC-022 v0.4.6 (R-15.9, R-15.11): settled ledger detail rows may be
+// replaced by ledger_settled_rollups aggregates, which a contract-5 binary
+// does not add to payable totals or payout revalidation. Recorded in the
+// first rollup transaction.
+const billingCompatContract = billingCompatContractLedgerRollup
+
+// billingCompatContractEarlyArchive is contract 5 (SPEC-022 R-15.9, v0.4.5).
+const billingCompatContractEarlyArchive = 5
+
+// billingCompatContractLedgerRollup is contract 6 (SPEC-022 R-15.11, v0.4.6).
+const billingCompatContractLedgerRollup = 6
 
 // billingCompatContractRelayBlind is contract 3, the floor the relay-blind
 // outcome widening records.

@@ -333,6 +333,8 @@ chmod +x "$tmp/bin/flock"
 VDB="$tmp/vacuum/coordinator.db"
 sqlite3 "$VDB" "PRAGMA journal_mode=WAL; CREATE TABLE settlement_evidence_retention_state (id INTEGER PRIMARY KEY, laps_completed INTEGER, last_lap_eligible_requests INTEGER, last_lap_completed_at_utc TEXT); INSERT INTO settlement_evidence_retention_state VALUES (1, 3, 12, '2026-10-10T03:20:00Z'); CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(50000));" >/dev/null
 sqlite3 "$VDB.route-snapshots" "CREATE TABLE j (v BLOB); INSERT INTO j VALUES (randomblob(20000));" >/dev/null
+VAUDIT="$tmp/vacuum/coordinator-audit.db"
+sqlite3 "$VAUDIT" "CREATE TABLE audit_log (v BLOB); INSERT INTO audit_log VALUES (randomblob(20000));" >/dev/null
 # sqlite3 wrapper: FAKE_QUICK_CHECK_FAIL makes quick_check report damage.
 cat > "$tmp/bin/pearl-sqlite3" <<FAKESQLITE
 #!/usr/bin/env bash
@@ -369,9 +371,9 @@ if grep -q "EXPECTED DOWNTIME for convert" "$tmp/out"; then ok; else bad "downti
 for l in "$PEARL_UPDATER_LOCK" "$PEARL_DEPLOY_LOCK" "$PEARL_DEPLOY_OPERATION_LOCK"; do
   if [ "$(ls -l "$l" | cut -c1-10)" = "-rw-------" ]; then ok; else bad "lock $l is not a 0600 file: $(ls -l "$l")"; fi
 done
-if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VDB.route-snapshots" 'PRAGMA auto_vacuum;')" = 2 ]; then ok; else bad "files not converted"; fi
+if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VDB.route-snapshots" 'PRAGMA auto_vacuum;')" = 2 ] && [ "$(sqlite3 "$VAUDIT" 'PRAGMA auto_vacuum;')" = 2 ]; then ok; else bad "files not converted"; fi
 if [ "$(tr '\n' ' ' < "$tmp/svc/unit-actions")" = "stop start " ]; then ok; else bad "unit actions: $(cat "$tmp/svc/unit-actions" 2>/dev/null)"; fi
-for f in "$VDB" "$VDB.route-snapshots"; do
+for f in "$VDB" "$VDB.route-snapshots" "$VAUDIT"; do
   b="$(find "$tmp/vacuum" -name "$(basename "$f").pre-incremental-*" | head -n 1)"
   if [ -n "$b" ] && [ "$(sqlite3 "$b" 'PRAGMA quick_check;')" = ok ]; then ok; else bad "no fresh backup of $f"; fi
 done

@@ -744,11 +744,16 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
+	// SPEC-022 R-15.11: every total adds the rolled-up credits.
+	rolled := func(column, where string, args ...any) string {
+		return ` + COALESCE((SELECT SUM(` + column + `) FROM ledger_settled_rollups` + where + `), 0)`
+	}
+	currentHour := earningsHourKey(currentMondayUTC(time.Now().UTC()))
 	resp := map[string]any{
-		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits`),
-		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`),
-		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM spec022_payable_request_credits`),
-		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE `+sqliteTimeSince("ts_utc"), current),
+		"total_gross_credits":             h.sum(ctx, `SELECT COALESCE(SUM(gross_credits), 0)`+rolled("gross_credits", "")+` FROM spec022_payable_request_credits`),
+		"total_provider_credits":          h.sum(ctx, `SELECT COALESCE(SUM(provider_credits), 0)`+rolled("provider_credits", "")+` FROM spec022_payable_request_credits`),
+		"total_operator_credits":          h.sum(ctx, `SELECT COALESCE(SUM(gross_credits - provider_credits), 0)`+rolled("gross_credits - provider_credits", "")+` FROM spec022_payable_request_credits`),
+		"current_window_provider_credits": h.sum(ctx, `SELECT COALESCE(SUM(provider_credits), 0)`+rolled("provider_credits", " WHERE hour_utc >= ?")+` FROM spec022_payable_request_credits WHERE `+sqliteTimeSince("ts_utc"), currentHour, current),
 		"pending_payout_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
 		"pending_payout_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
 		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
@@ -759,7 +764,7 @@ SELECT COUNT(*) FROM ledger_request_credits lrc
  WHERE lrc.quarantined=1
    AND NOT EXISTS (SELECT 1 FROM ledger_quarantine_resolutions r
                     WHERE r.request_credit_id = lrc.id)`),
-		"fault_count":                       h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE fault_flag != 'none'`),
+		"fault_count":                       h.sum(ctx, `SELECT COUNT(*) + COALESCE((SELECT SUM(credit_count) FROM ledger_settled_rollups WHERE fault_flag != 'none'), 0) FROM ledger_request_credits WHERE fault_flag != 'none'`),
 		"last_reconciliation_delta_credits": h.sum(ctx, `SELECT reconciliation_delta_credits FROM ledger_reconciliation_runs ORDER BY started_at_utc DESC, id DESC LIMIT 1`),
 		"settlement_verdict_counters":       settlementVerdictCounters,
 	}
@@ -805,29 +810,54 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// consistent within the SQLite read transaction, errors propagate.
 	// The grouped subquery scans ledger_payout_ready once for the whole
 	// page, which is strictly cheaper than the per-provider sum loop.
+	// SPEC-022 R-15.11: rolled-up credits (all payable, none quarantined)
+	// join the detail rows per provider, so a provider whose history was
+	// rolled up keeps its totals and its place in the listing.
+	if !includeQuarantined {
+		havingClause = " HAVING SUM(payable_rows) > 0 "
+	}
 	rows, err := h.store.reader().QueryContext(ctx, `
-SELECT lrc.provider_id,
-       SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END),
-       SUM(CASE WHEN payable.id IS NOT NULL AND `+sqliteTimeSince("payable.ts_utc")+` THEN payable.provider_credits ELSE 0 END),
-       MAX(lrc.ts_utc),
-       SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
+WITH per_provider AS (
+SELECT lrc.provider_id AS provider_id,
+       SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END) AS total,
+       SUM(CASE WHEN payable.id IS NOT NULL AND `+sqliteTimeSince("payable.ts_utc")+` THEN payable.provider_credits ELSE 0 END) AS current_window,
+       MAX(lrc.ts_utc) AS last_activity,
+       SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END) AS faults,
        SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
              SELECT 1 FROM ledger_quarantine_resolutions r WHERE r.request_credit_id = lrc.id
-       ) THEN 1 ELSE 0 END),
-       MAX(lrc.attestation_class),
-       COALESCE(pp.pending_payout, 0) AS pending_payout
+       ) THEN 1 ELSE 0 END) AS quarantined,
+       MAX(lrc.attestation_class) AS attestation,
+       SUM(CASE WHEN payable.id IS NOT NULL THEN 1 ELSE 0 END) AS payable_rows
   FROM ledger_request_credits lrc
   LEFT JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
+ WHERE lrc.provider_id > ?
+ GROUP BY lrc.provider_id
+UNION ALL
+SELECT provider_id,
+       SUM(provider_credits),
+       SUM(CASE WHEN hour_utc >= ? THEN provider_credits ELSE 0 END),
+       MAX(max_ts_utc),
+       SUM(CASE WHEN fault_flag != 'none' THEN credit_count ELSE 0 END),
+       0,
+       MAX(max_attestation_class),
+       SUM(credit_count)
+  FROM ledger_settled_rollups
+ WHERE provider_id > ?
+ GROUP BY provider_id
+)
+SELECT pv.provider_id, SUM(pv.total), SUM(pv.current_window), MAX(pv.last_activity), SUM(pv.faults),
+       SUM(pv.quarantined), MAX(pv.attestation),
+       COALESCE(pp.pending_payout, 0) AS pending_payout
+  FROM per_provider pv
   LEFT JOIN (
         SELECT provider_id, SUM(provider_credits) AS pending_payout
           FROM ledger_payout_ready
          WHERE status = 'ready'
          GROUP BY provider_id
-  ) pp ON pp.provider_id = lrc.provider_id
- WHERE lrc.provider_id > ?
- GROUP BY lrc.provider_id`+havingClause+`
- ORDER BY lrc.provider_id
- LIMIT ?`, current, cursor, limit+1)
+  ) pp ON pp.provider_id = pv.provider_id
+ GROUP BY pv.provider_id`+havingClause+`
+ ORDER BY pv.provider_id
+ LIMIT ?`, current, cursor, earningsHourKey(currentMondayUTC(time.Now().UTC())), cursor, limit+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -898,6 +928,13 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "reconcile range must be > 0 and <= 31 days")
 		return
 	}
+	// SPEC-005 §2.1b: the buyer side of a reconcile is request_log, which
+	// keeps storage.request_log_retention_days; a range reaching past it
+	// would report a delta that is only pruned rows.
+	if keep := time.Duration(h.store.requestLogRetention.Load()); keep > 0 && from.Before(time.Now().UTC().Add(-keep)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "reconcile range must start inside the request_log window (storage.request_log_retention_days)")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	rowsScanned, err := h.sumErr(ctx, `SELECT COUNT(*) FROM request_log WHERE `+sqliteTimeRange("ts_utc"), sqliteTimeText(from), sqliteTimeText(to))
@@ -905,7 +942,11 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits WHERE `+sqliteTimeRange("ts_utc"), sqliteTimeText(from), sqliteTimeText(to))
+	// SPEC-022 R-15.11: rolled-up credits of the range (the range is whole
+	// days, so whole rollup hours) stay in the provider gross.
+	providerGross, err := h.sumErr(ctx, `SELECT COALESCE(SUM(gross_credits), 0)
+     + COALESCE((SELECT SUM(gross_credits) FROM ledger_settled_rollups WHERE hour_utc >= ? AND hour_utc < ?), 0)
+  FROM spec022_payable_request_credits WHERE `+sqliteTimeRange("ts_utc"), earningsHourKey(from), earningsHourKey(to), sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -1242,7 +1283,8 @@ func (h *handler) writeProviderEarnings(w http.ResponseWriter, r *http.Request, 
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider earnings temporarily unavailable")
 	}
-	known, err := sumOn(ctx, h.store.reader(), `SELECT EXISTS (SELECT 1 FROM ledger_request_credits WHERE provider_id=?)`, providerID)
+	known, err := sumOn(ctx, h.store.reader(), `SELECT EXISTS (SELECT 1 FROM ledger_request_credits WHERE provider_id=?)
+    OR EXISTS (SELECT 1 FROM ledger_settled_rollups WHERE provider_id=?)`, providerID, providerID)
 	if err != nil {
 		unavailable("provider_lookup", err)
 		return
@@ -1741,6 +1783,10 @@ func (h *handler) providerEarningsFiguresFromViewOnce(ctx context.Context, provi
 	}
 	out.faults, err = sumOnQ(ctx, tx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, append([]any{providerID}, rangeArgs...)...)
 	if err != nil {
+		return providerEarningsFigures{}, err
+	}
+	// SPEC-022 R-15.11: rolled-up credits stay in every figure.
+	if err := addLedgerRollupEarnings(ctx, tx, providerID, win, &out); err != nil {
 		return providerEarningsFigures{}, err
 	}
 	if raced, err := providerMaturedSince(ctx, tx, providerID, cutoff); err != nil {
