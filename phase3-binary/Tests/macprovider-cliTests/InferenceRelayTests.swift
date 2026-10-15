@@ -50,10 +50,13 @@ final class InferenceRelayTests: XCTestCase {
     }
 
     func testStrictFleetGenerationDecoding() throws {
-        XCTAssertEqual(InferenceRelay.strictUInt64(try Self.jsonValue("1")), 1)
-        XCTAssertEqual(InferenceRelay.strictUInt64(try Self.jsonValue("18446744073709551615")), UInt64.max)
+        func jsonValue(_ literal: String) throws -> Any {
+            try JSONSerialization.jsonObject(with: Data(literal.utf8), options: [.fragmentsAllowed])
+        }
+        XCTAssertEqual(InferenceRelay.strictUInt64(try jsonValue("1")), 1)
+        XCTAssertEqual(InferenceRelay.strictUInt64(try jsonValue("18446744073709551615")), UInt64.max)
         for literal in ["0.0", "1e3", "-1", "18446744073709551616", "true", #""1""#] {
-            XCTAssertNil(InferenceRelay.strictUInt64(try Self.jsonValue(literal)), literal)
+            XCTAssertNil(InferenceRelay.strictUInt64(try jsonValue(literal)), literal)
         }
     }
 

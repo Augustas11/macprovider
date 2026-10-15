@@ -74,14 +74,15 @@ const (
 // permanent/client (validation, capacity, shape) codes are retryable=false.
 var spec018RetryableByCode = map[string]bool{
 	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
-	"no_provider_available":      true,
-	"provider_error":             true,
-	"provider_timeout":           true,
-	"provider_disconnected":      true,
-	"provider_failed":            true,
-	"provisional_quota_exceeded": true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
-	"preflight_rejected":         true, // 503, all providers rejected/timed out during preflight
-	"idempotency_unavailable":    true, // 503, durable request logging unavailable
+	"no_provider_available":         true,
+	"provider_error":                true,
+	"provider_timeout":              true,
+	"provider_disconnected":         true,
+	"provider_failed":               true,
+	"provisional_quota_exceeded":    true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
+	"preflight_rejected":            true, // 503, all providers rejected/timed out during preflight
+	"idempotency_unavailable":       true, // 503, durable request logging unavailable
+	"fleet_cache_purge_unavailable": true, // 503, durable purge authority/status storage unavailable
 	// 503, #768: every candidate for the model is below its minimum binary
 	// version. Retryable — the fleet self-updates, so the same request can
 	// succeed once a provider upgrades and reconnects.

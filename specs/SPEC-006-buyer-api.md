@@ -1456,6 +1456,7 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
 - Route-snapshot durable-store availability: `route_snapshot_failed` — a pre-dispatch store write failure; a retry can succeed once storage recovers.
+- Conversation-cache purge authority availability: `fleet_cache_purge_unavailable` — the coordinator could not durably read or write account-scoped purge state; a retry can succeed once storage recovers.
 - Provider response-shape glitches where a re-attempt (possibly against a different provider) may not repeat the same defect: `malformed_tool_call_final_json`, `provider_stream_downgraded`, `malformed_json_response`, `json_schema_validation_failed`.
 
 **Permanent (`false`) — retrying the identical request cannot succeed:** validation errors (e.g. `invalid_request`, `invalid_json`, `invalid_tools`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, byte/schema-cap and stream-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, `stream_output_exceeded`, the `json_schema_*` cap/shape codes), Tier-2/config lookup failures (e.g. `autotune_feed_not_found`), and auth/admin/oauth-signup client errors. Any code not explicitly classified — on either service — defaults to `retryable: false`.
