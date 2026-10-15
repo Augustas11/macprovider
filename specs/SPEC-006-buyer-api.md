@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.55 (2026-10-15, public-repo cleanup)
+**Version:** 0.9.56 (2026-10-15, pool-scoped privacy class)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.56 (2026-10-15, issue #1985 — pool-scoped privacy class):**
+- §5.4.4 (`SPEC-006-R019`): a SPEC-049 privacy-class envelope with an authorized Trusted Pool selection satisfies both `relay_blind_required` and `owned_provider` (SPEC-049-R032). `relay_blind_required` with a pool selection stays refused for a plain SPEC-041 envelope. The effective mode is `relay_blind_required`, and a pool-scoped privacy-class response carries a fourth fixed disclosure string. The other three strings are unchanged.
 
 **Change log v0.9.55 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
 
@@ -2198,21 +2201,22 @@ reservation and dispatch with HTTP 400, `type: "invalid_request_error"`,
 | Mode | Maps onto | Unsatisfied request |
 |---|---|---|
 | `pool` (default when absent) | Today's routing, unchanged. | Never. |
-| `relay_blind_required` | The SPEC-041 relay-blind envelope in `required` mode, and through it the SPEC-049 privacy class when that class is also requested. Every SPEC-041/SPEC-049 rule and failure still applies; no-provider outcomes stay fail closed. | A plaintext body, or any Trusted Pool selection: 400 `privacy_mode_unsatisfied`. The request is never served as plaintext. |
-| `owned_provider` | The authorized Trusted Pool selection of SPEC-042-R002/R010 (`X-MacProvider-Pool-Select`), routed only to that pool's members with no spill to the network. | No pool selection: 400 `privacy_mode_unsatisfied`. An unauthorized or unknown pool keeps the existing generic `pool_unavailable`. |
+| `relay_blind_required` | The SPEC-041 relay-blind envelope in `required` mode, and through it the SPEC-049 privacy class when that class is also requested. Every SPEC-041/SPEC-049 rule and failure still applies; no-provider outcomes stay fail closed. A SPEC-049 privacy-class envelope MAY carry an authorized Trusted Pool selection (SPEC-049-R032). | A plaintext body, or a Trusted Pool selection on a request without the SPEC-049 privacy-class marker: 400 `privacy_mode_unsatisfied`. The request is never served as plaintext. |
+| `owned_provider` | The authorized Trusted Pool selection of SPEC-042-R002/R010 (`X-MacProvider-Pool-Select`), routed only to that pool's members with no spill to the network. A SPEC-049 privacy-class envelope with that selection satisfies it too (SPEC-049-R032). | No pool selection: 400 `privacy_mode_unsatisfied`. An unauthorized or unknown pool keeps the existing generic `pool_unavailable`. |
 
 Both new codes are `retryable: false`. The mode is resolved before the
 relay-blind gate, and the pool selection is still resolved before any pool
 error, so `privacy_mode_unsatisfied` reveals nothing about any pool.
-Pool-scoped relay-blind privacy is not defined by this version (#1985); a
-later version may extend the vocabulary or lift the `relay_blind_required` pool
-refusal, and until then that combination fails closed.
+Pool-scoped relay-blind privacy is defined only for the SPEC-049 privacy
+class (SPEC-049-R032, v0.9.56); a plain SPEC-041 envelope with a pool
+selection still fails closed.
 
 **Disclosure.** A response the gateway writes after the mode is resolved
 carries `X-MacProvider-Privacy-Mode` set to the effective mode and
 `X-MacProvider-Privacy-Mode-Disclosure` set to that mode's fixed string. The
 effective mode is `relay_blind_required` for a relay-blind envelope,
-`owned_provider` for a resolved Trusted Pool selection, and `pool` otherwise,
+including a pool-scoped privacy-class envelope, `owned_provider` for a
+resolved Trusted Pool selection on a plaintext request, and `pool` otherwise,
 whatever the buyer requested. The strings MUST be exactly:
 
 | Effective mode | `X-MacProvider-Privacy-Mode-Disclosure` |
@@ -2220,6 +2224,7 @@ whatever the buyer requested. The strings MUST be exactly:
 | `pool` | `content_visible_to_serving_provider_and_network_relays; no_confidentiality_claim` |
 | `relay_blind_required` | `content_hidden_from_network_relays; serving_provider_runtime_reads_plaintext; metadata_visible_to_relays` |
 | `owned_provider` | `served_only_by_selected_trusted_pool_members; content_visible_to_serving_member_and_network_relays` |
+| `relay_blind_required`, pool-scoped privacy class (SPEC-049-R032) | `content_hidden_from_network_relays_and_pool_surfaces; served_only_by_selected_trusted_pool_members; serving_member_runtime_reads_plaintext; metadata_visible_to_relays` |
 
 They never claim hardware isolation, attestation, end-to-end encryption that
 excludes the provider, or that the buyer owns the serving Mac. The SPEC-049

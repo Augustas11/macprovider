@@ -1,11 +1,21 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.3
+Version: v0.4.4
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.4
+
+Issue #1985: R-14.1 covers SPEC-049 privacy-class executions scoped to a
+Trusted Pool under SPEC-049-R032. Their R-14 route snapshot carries the
+reservation's SPEC-042-R006 pool labels in its digest, and the verdict row,
+including a missing-receipt verdict, is stamped with the R006 pool label.
+The outcome is still `relay_blind_settled`, never `verified`; the usage source
+is unchanged; R-14.2 to R-14.7 apply unchanged. The conformance state of
+`SPEC-022-R014` does not change.
 
 ### v0.4.3
 
@@ -1828,8 +1838,15 @@ are its conformance obligations.
 R-14.1. Scope. The paid entrypoint is
 `coordinator_buyer_v1_relay_blind_chat_completions`. It covers every SPEC-041
 relay-blind `chat_completions` execution on the global pool, with or without
-the SPEC-049 marker. SPEC-042-R009 is unchanged, so pool-scoped relay-blind
-requests are still rejected. A relay-blind snapshot's R-13 expected
+the SPEC-049 marker, and (v0.4.4) every SPEC-049 privacy-class execution
+scoped to a Trusted Pool under SPEC-049-R032. A pool-scoped relay-blind
+snapshot carries the reservation's SPEC-042-R006 labels (`pool_id`,
+`manifest_version`, `manifest_core_digest`), which enter its digest only
+when non-empty, exactly as on a plaintext pool route, and the verdict row is
+stamped with the R006 pool label after the verdict is written. Its
+`runtime_source` is always empty (native), so `pool_operator_attested`
+never applies. A plain SPEC-041 request without the SPEC-049 class is still
+global-pool only (SPEC-042-R009). A relay-blind snapshot's R-13 expected
 model-hash source is therefore always `catalog`, and a session bound to a
 SPEC-047-R011 pool model entry is never selected for relay-blind work. Under
 `enforce`, relay-blind traffic is admitted only through R-14. Under `observe`, R-14 MAY run to compute verdicts and MUST
