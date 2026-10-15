@@ -430,9 +430,10 @@ These run without an operator step once the release is deployed.
   `request_log` rows still present, rows changed after export) is kept in
   `ledger_rollup_holds` and re-checked by every run, so the cursor never
   strands it. With the stats Postgres configured, a credit rolls up only
-  after the stats billing mirror copied it (`billing_mirror_behind` holds),
-  and a mirror state the coordinator cannot read stops the run with an error
-  in the log line; check it after the first nightly run. The log line is
+  after the stats billing mirror copied it (`billing_mirror_behind` holds;
+  the coordinator reads `MAX(sqlite_lrc_id)` of the mirrored table through
+  the stats rollup pool), and a watermark it cannot read stops the run with
+  an error in the log line; check it after the first nightly run. The log line is
   `nightly ledger rollup finished`, with
   `rolled_requests`, `rolled_credits`, `kept_requests` (the run's skips), and
   `rollup_cursor`. The kill switch is

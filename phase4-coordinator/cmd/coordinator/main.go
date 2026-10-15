@@ -47,7 +47,6 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
-	"github.com/augstar/macprovider-coordinator/internal/stats/billingmirror"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
@@ -637,15 +636,15 @@ func runCoordinator() (exitCode int) {
 	}
 
 	if statsPools != nil && statsPools.Rollup != nil {
-		// SPEC-022 R-15.11: the stats billing mirror copies live credits by
-		// id, so the ledger rollup keeps every credit above its watermark.
+		// SPEC-022 R-15.11: the stats billing mirror copies live credits in id
+		// order, so the ledger rollup keeps every credit above the highest
+		// SQLite credit id the mirror holds. stats_rollup has SELECT on the
+		// mirrored table (dist/stats-billing-mirror-bootstrap.sql).
 		mirrorDB := statsPools.Rollup
 		billingStore.SetLedgerRollupMirrorWatermark(func(ctx context.Context) (int64, error) {
-			state, err := billingmirror.LoadState(ctx, mirrorDB)
-			if err != nil {
-				return 0, err
-			}
-			return state.LastRequestID, nil
+			var watermark int64
+			err := mirrorDB.QueryRowContext(ctx, `SELECT COALESCE(MAX(sqlite_lrc_id), 0) FROM ledger_request_credits`).Scan(&watermark)
+			return watermark, err
 		})
 	}
 
