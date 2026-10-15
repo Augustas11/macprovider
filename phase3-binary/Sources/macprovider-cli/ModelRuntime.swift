@@ -11660,13 +11660,21 @@ actor ModelRuntime: ModelRuntimeServing {
             messages.insert(ChatMessage(role: .system, content: "Do not call any function or tool. Respond with assistant text."), at: 0)
         case .auto: break
         }
+        let chat = try ToolPromptRenderer.renderMessages(messages, modelID: request.model)
+        let tools: [[String: Any]]?
+        if selection == .none {
+            tools = nil
+        } else {
+            tools = Self.mlxToolsForTemplate(from: request.promptSource.tools)
+        }
+        let additionalContext = Self.templateAdditionalContext(
+            supportsThinkingToggle: templateSupportsThinkingToggle,
+            supportsPreserveThinking: templateSupportsPreserveThinking
+        )
         return UserInput(
-            chat: try ToolPromptRenderer.renderMessages(messages, modelID: request.model),
-            tools: selection == .none ? nil : Self.mlxToolsForTemplate(from: request.promptSource.tools),
-            additionalContext: Self.templateAdditionalContext(
-                supportsThinkingToggle: templateSupportsThinkingToggle,
-                supportsPreserveThinking: templateSupportsPreserveThinking
-            )
+            chat: chat,
+            tools: tools,
+            additionalContext: additionalContext
         )
     }
 
@@ -11687,8 +11695,11 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        let validationCalls = (completion.toolCalls ?? []).map {
+            MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments)
+        }
         try ToolSelectionPolicy.validateOutput(
-            calls: completion.toolCalls ?? [], finishReason: completion.finishReason,
+            calls: validationCalls, finishReason: completion.finishReason,
             generatedTokens: completion.generatedCompletionTokens, request: request
         )
         if completion.toolCalls?.isEmpty == false {
