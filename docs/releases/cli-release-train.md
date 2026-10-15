@@ -91,6 +91,56 @@ Order on the cut day: (1) Studio validation + one verification audit for #1986 (
 | #1983 | Privacy in-band identity key rotation, provider side (`privacy-class rotate-identity`, SPEC-049-R031) | merged (`723ea9c5f`) |
 | #1987 | Per-Mac engine profile in the heartbeat (SPEC-001-R006) for capability-aware routing (#1355) | merged (`79abef361`) |
 | #1986 | Compute-integrity teacher-forced scoring job (SPEC-036 FR-21, #1644) | draft: Studio validation + one verification audit, then merge before freeze |
+| #2020 (issue #2014) | Enforced native tool selection, schema/cardinality validation, streaming holdback and loaded-model capability advertisement; details below | merged (`33b6a3238`); not in candidate 1.8.242; hardware and signed-candidate live acceptance deferred |
+
+### Tool selection — merged, awaiting a later candidate (2026-10-15)
+
+[PR #2020](https://github.com/Augustas11/macprovider/pull/2020), merge
+`33b6a3238c31b934ba2cef10e62814091092efbd`, changes the provider CLI as well as
+the coordinator and gateway. Candidate **1.8.242**, acceptance run
+[38702366766](https://github.com/Augustas11/macprovider/actions/runs/38702366766)
+at `27ae5dc84`, predates this change. Its signed bytes and CF-242-E2E record
+cannot establish tool-selection acceptance. Include this payload in a later
+reviewed candidate; this entry reserves no version and does not change the
+existing candidate's promotion scope.
+
+Provider changes carried by that later candidate:
+
+- Exact `mlx-community/Qwen3.6-35B-A3B-4bit` on native `mlx_cache` implements
+  `required` and named selection through full generation, strict tool-envelope
+  parsing, declared-function and argument-schema validation, and call-count
+  checks. Omitted/false parallel policy permits exactly one call; true permits
+  1–128. Malformed, wrong-name, zero-call, truncated or token-exhausted output
+  fails; calls are not fabricated, repaired or retried as `auto`.
+- Native `none` withholds output until no tool calls are present. Other native
+  model identities reject required/named; loopback adapters reject explicit
+  none/required/named. Existing supported `auto` behavior is preserved.
+- Guaranteed streams withhold all output until validation. Invalid generation
+  returns `tool_selection_validation_failed`, never ordinary successful prose.
+  Cancellation and disconnect paths retain their existing accounting behavior.
+- Auth/hello/heartbeat publish `schema-holdback-v1` capabilities bound to the
+  currently loaded model/runtime; unloaded runtimes advertise no explicit
+  capability. Relay-blind requests remain outside this contract, with explicit
+  non-auto modes defensively rejected after decryption.
+
+The [tool-selection contract](../tool-selection.md) records the exact schema,
+argument and completion-budget bounds and endpoint matrix. SPEC-001-R007,
+SPEC-006-R021 and SPEC-018-R006 define the reconciled wire/error/selection
+contract. The [coordinator release entry](coordinator-release-train.md#tool-selection--merged-awaiting-runtime-rollout-2026-10-15)
+records the matching routing and gateway payload; a provider-only upgrade does
+not establish end-to-end support.
+
+Required [implementation CI](https://github.com/Augustas11/macprovider/actions/runs/38712318356)
+and all three audit lanes passed. Hardware and signed-candidate live acceptance
+are **deferred at operator request**, not waived or complete. Before reporting
+issue #2014 complete, verify real required/named/none/auto turns, streaming and
+non-streaming, schema/cardinality/exhaustion failures and cancellation on the
+supported native model, then prove the same contract through the released
+gateway and compatible signed provider. Preserve release asset byte identity
+and previous-stable updater verification. Use `scripts/ops/cli-release.sh`
+(`status`, `next`, then one documented `next --run` step at a time). No CLI cut,
+provider restart, fleet recommendation change or live acceptance was performed
+for this entry; issue #2014 remains open.
 
 ## Earlier: net changes vs 1.8.232 (shipped in 1.8.238 / 1.8.240)
 
