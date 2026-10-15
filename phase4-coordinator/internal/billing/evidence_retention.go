@@ -374,6 +374,8 @@ type evidenceRetentionRuntime struct {
 	// rollup holds the SPEC-022 R-15.11 ledger rollup settings; the nightly
 	// job runs the rollup after retention.
 	rollup *LedgerRollupOptions
+	// mirrorWatermark gates the rollup on the stats billing mirror.
+	mirrorWatermark LedgerRollupMirrorWatermark
 }
 
 // SetLedgerRollupOptions installs the effective ledger rollup settings.

@@ -2414,6 +2414,13 @@ when every credit of the request:
   at least 31 days at the cadence) completed windows after it, and at or
   before now minus `storage.request_log_retention_days` minus a day.
 
+When the stats billing mirror is configured, a request also waits until the
+mirror's high watermark (`last_request_credit_id`) reaches every credit id of
+the request, because the mirror copies live credits by id and would never see
+a deleted one; a watermark that cannot be read rolls nothing up that run. The
+`request_log` window the horizon uses is the one the coordinator started
+with.
+
 The rows are written to an archive verified as R-15.3 and R-15.4 require, with
 the request's payout rows as reference copies. Deletion runs in short
 `BEGIN IMMEDIATE` transactions that re-check every condition and refuse a

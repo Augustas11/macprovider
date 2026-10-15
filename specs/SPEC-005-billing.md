@@ -1972,7 +1972,9 @@ Settled ledger detail rows leave the hot store into per-payout aggregates
 - is payable, unquarantined, with no quarantine resolution and no ceiling
   restatement; and
 - had its evidence archived by SPEC-022 R-15 (a tombstone of a deleted
-  evidence archive).
+  evidence archive); and
+- has been copied by the stats billing mirror, when one is configured (its
+  watermark is at or above the credit id).
 
 Its `ledger_request_credits`, `ledger_operator_credits`,
 `ledger_provider_identity_snapshots`, and evidence tombstones are written to a

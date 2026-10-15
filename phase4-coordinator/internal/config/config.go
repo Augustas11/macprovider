@@ -1437,9 +1437,9 @@ type StorageConfig struct {
 	RequestLogRetentionDays  int  `yaml:"request_log_retention_days"`
 	RequestLogPruneOnStartup bool `yaml:"request_log_prune_on_startup"`
 	AuditLogPruneOnStartup   bool `yaml:"audit_log_prune_on_startup"`
-	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the
-	// operator_model_swap audit_log table (and any future audit event
-	// types). Default 90 days mirrors request_log_retention_days.
+	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the audit_log
+	// tables: a 90-day compliance floor, independent of
+	// request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
 	// SPEC-022 R-15.10: a drained settlement_receipt_audit_outbox row is
 	// already copied into the audit database, so it leaves the money

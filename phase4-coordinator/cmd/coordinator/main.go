@@ -47,6 +47,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
+	"github.com/augstar/macprovider-coordinator/internal/stats/billingmirror"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
@@ -633,6 +634,19 @@ func runCoordinator() (exitCode int) {
 		statsRollup.WithTickGate(newMoneySQLiteRollupGate(moneySQLiteActivity).ShouldYield)
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+
+	if statsPools != nil && statsPools.Rollup != nil {
+		// SPEC-022 R-15.11: the stats billing mirror copies live credits by
+		// id, so the ledger rollup keeps every credit above its watermark.
+		mirrorDB := statsPools.Rollup
+		billingStore.SetLedgerRollupMirrorWatermark(func(ctx context.Context) (int64, error) {
+			state, err := billingmirror.LoadState(ctx, mirrorDB)
+			if err != nil {
+				return 0, err
+			}
+			return state.LastRequestID, nil
+		})
 	}
 
 	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).

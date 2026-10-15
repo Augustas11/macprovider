@@ -547,6 +547,10 @@ SELECT id, file_name FROM audit_log_archives
 		}
 		list = append(list, e)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}

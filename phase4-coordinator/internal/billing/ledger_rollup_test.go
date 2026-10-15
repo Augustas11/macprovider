@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
@@ -415,5 +416,40 @@ func TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout(t *testing.T) {
 	}
 	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, f.inputs["late"].RequestID); n != 0 {
 		t.Fatal("late credit not rolled up")
+	}
+}
+
+// A credit the stats billing mirror has not copied yet stays hot, and an
+// unreadable watermark rolls nothing up (SPEC-022 R-15.11).
+func TestLedgerRollupWaitsForTheBillingMirror(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	for _, suffix := range []string{"first", "a"} {
+		f.seed(t, suffix)
+	}
+	f.settle(t)
+	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil)); err != nil {
+		t.Fatal(err)
+	}
+	f.addLaterWindows(t, 6)
+	dir := t.TempDir()
+	id := f.creditID(t, "a")
+	f.store.SetLedgerRollupMirrorWatermark(func(context.Context) (int64, error) { return 0, errors.New("stats unreachable") })
+	if _, err := f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir)); err == nil {
+		t.Fatal("rollup ran without a readable mirror watermark")
+	}
+	watermark := id - 1
+	f.store.SetLedgerRollupMirrorWatermark(func(context.Context) (int64, error) { return watermark, nil })
+	report, err := f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 0 {
+		t.Fatalf("rollup ahead of the mirror=%+v err=%v", report, err)
+	}
+	if reason := scalarText(t, f.store.db, `SELECT reason FROM ledger_rollup_holds WHERE request_id = ?`, f.inputs["a"].RequestID); reason != "billing_mirror_behind" {
+		t.Fatalf("hold reason=%q", reason)
+	}
+	watermark = id
+	report, err = f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 1 {
+		t.Fatalf("rollup once mirrored=%+v err=%v", report, err)
 	}
 }

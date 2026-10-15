@@ -429,7 +429,11 @@ These run without an operator step once the release is deployed.
   A request skipped for a reason that can clear (evidence not archived yet,
   `request_log` rows still present, rows changed after export) is kept in
   `ledger_rollup_holds` and re-checked by every run, so the cursor never
-  strands it. The log line is `nightly ledger rollup finished`, with
+  strands it. With the stats Postgres configured, a credit rolls up only
+  after the stats billing mirror copied it (`billing_mirror_behind` holds),
+  and a mirror state the coordinator cannot read stops the run with an error
+  in the log line; check it after the first nightly run. The log line is
+  `nightly ledger rollup finished`, with
   `rolled_requests`, `rolled_credits`, `kept_requests` (the run's skips), and
   `rollup_cursor`. The kill switch is
   `billing.ledger_rollup.enabled: false` plus SIGHUP. Verify a rollup archive

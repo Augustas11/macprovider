@@ -56,7 +56,12 @@ func (s *Store) CreatorPoolEarnings(ctx context.Context, providerIDs, poolIDs []
 	var rollupArgs []any
 	if rangeSQL != "" {
 		rollupRange = " AND hour_utc >= ? AND hour_utc < ?"
-		rollupArgs = append(rollupArgs, earningsHourKey(from.Truncate(time.Hour)), earningsHourKey(to.Add(time.Hour-time.Nanosecond).Truncate(time.Hour)))
+		// Rollup hours wholly inside [from, to).
+		lo := from.UTC().Truncate(time.Hour)
+		if lo.Before(from.UTC()) {
+			lo = lo.Add(time.Hour)
+		}
+		rollupArgs = append(rollupArgs, earningsHourKey(lo), earningsHourKey(to.UTC().Truncate(time.Hour)))
 	}
 	for _, id := range providerIDs {
 		rollupArgs = append(rollupArgs, id)

@@ -278,12 +278,41 @@ SELECT window_end_utc FROM ledger_settlement_windows
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("parse settlement window end: %w", err)
 	}
-	if opts.RequestLogRetention > 0 {
-		if horizon := s.nowUTC().Add(-opts.RequestLogRetention - 24*time.Hour); horizon.Before(end) {
+	keep := opts.RequestLogRetention
+	// The request_log window the process runs with is set at start
+	// (SetRequestLogRetention); a reloaded value does not move the horizon
+	// until the pruner and the reconcile guard move with it.
+	if startup := time.Duration(s.requestLogRetention.Load()); startup > 0 {
+		keep = startup
+	}
+	if keep > 0 {
+		if horizon := s.nowUTC().Add(-keep - 24*time.Hour); horizon.Before(end) {
 			end = horizon
 		}
 	}
 	return end.UTC(), true, nil
+}
+
+// LedgerRollupMirrorWatermark reports the highest ledger credit id the stats
+// billing mirror has copied. A credit above it is not rolled up: the mirror
+// copies live rows by id and would never see it.
+type LedgerRollupMirrorWatermark func(ctx context.Context) (int64, error)
+
+// SetLedgerRollupMirrorWatermark installs the stats billing mirror gate; nil
+// (no stats mirror configured) means no gate.
+func (s *Store) SetLedgerRollupMirrorWatermark(f LedgerRollupMirrorWatermark) {
+	if s == nil {
+		return
+	}
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	s.evidenceRetention.mirrorWatermark = f
+}
+
+func (s *Store) ledgerRollupMirrorWatermark() LedgerRollupMirrorWatermark {
+	s.evidenceRetention.mu.Lock()
+	defer s.evidenceRetention.mu.Unlock()
+	return s.evidenceRetention.mirrorWatermark
 }
 
 // ledgerRollupBundle is one request's detail rows.
@@ -596,6 +625,17 @@ func (s *Store) exportLedgerRollupArchive(ctx context.Context, opts LedgerRollup
 	selected, kept := 0, 0
 	stamp := sqliteTimeText(s.nowUTC())
 	var skips [][2]string
+	// The stats billing mirror copies live credits by id; a credit it has
+	// not copied yet stays hot. A watermark that cannot be read rolls
+	// nothing up this run.
+	mirrored := int64(-1)
+	if f := s.ledgerRollupMirrorWatermark(); f != nil {
+		w, err := f(ctx)
+		if err != nil {
+			return nil, 0, fmt.Errorf("read the stats billing mirror watermark: %w", err)
+		}
+		mirrored = w
+	}
 	consider := func(requestID string) error {
 		if seen[requestID] {
 			return nil
@@ -604,6 +644,9 @@ func (s *Store) exportLedgerRollupArchive(ctx context.Context, opts LedgerRollup
 		b, reason, err := collectLedgerRollupBundle(ctx, s.reader(), requestID, cutoff)
 		if err != nil {
 			return err
+		}
+		if reason == "" && mirrored >= 0 && maxInt64(b.creditIDs) > mirrored {
+			reason = "billing_mirror_behind"
 		}
 		if reason != "" {
 			kept++
