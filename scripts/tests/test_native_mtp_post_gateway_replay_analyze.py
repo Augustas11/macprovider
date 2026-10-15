@@ -59,7 +59,7 @@ class NativeMTPPostGatewayReplayAnalyzeTests(unittest.TestCase):
         self.assertTrue(any("raw_conversation_key_field" in f for f in result["block_failures"][0]["failures"]))
         result = self._run_case(shape_overrides={"prompt": "hello from a user"})
         self.assertTrue(any("raw_text_field" in f for f in result["block_failures"][0]["failures"]))
-        result = self._run_case(shape_overrides={"shape_id": "/Users/augstar/private/prompt.txt"})
+        result = self._run_case(shape_overrides={"shape_id": "~/private/prompt.txt"})
         self.assertTrue(any("private_path_value" in f for f in result["block_failures"][0]["failures"]))
 
     def test_policy_digest_mismatch(self):

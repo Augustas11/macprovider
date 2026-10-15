@@ -8,14 +8,14 @@
 # Prerequisites done in Stage 1:
 #   - coordinator-linux-amd64 cross-compiled into dist/
 #   - coordinator.yaml + service unit + nginx site config drafted in dist/
-#   - DNS A record coordinator.malibu.tech -> 159.223.165.194 (DNS-only)
+#   - DNS A record coordinator.malibu.tech -> $VPS_HOST (DNS-only)
 #
 # Usage:
 #   bash deploy-pearl-vps.sh
 #
 # Environment:
 #   SSH_KEY          default: ~/.ssh/pearl_operator_ed25519
-#   VPS_HOST         default: 159.223.165.194
+#   VPS_HOST         required: Pearl VPS address
 #   VPS_USER         default: root
 #   DOMAIN           default: coordinator.malibu.tech  (PRIMARY money-path hostname)
 #   STATS_DOMAIN     default: stats.malibu.tech        (SPEC-017 first-class hostname)
@@ -146,7 +146,7 @@ _PEARL_TLS_SCRIPT_DIR="$(_pearl_resolve_symlink "${BASH_SOURCE[0]}")"
 . "$_PEARL_TLS_SCRIPT_DIR/lib/pearl_tls.sh"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 STATS_DOMAIN="${STATS_DOMAIN:-stats.malibu.tech}"
@@ -313,7 +313,7 @@ _coordinator_verify_deployed_version() {
     echo "           This almost certainly means the deployed binary predates the" >&2
     echo "           M0-5 instrumentation (PR #18) and the rollback gate is bypassed." >&2
     echo "           Expected was: $expected_version" >&2
-    echo "           See audits/2026-06-10/ROLLBACK_PROCEDURE.md to replace the live binary." >&2
+    echo "           See docs/runbooks/coordinator-rollback.md to replace the live binary." >&2
     return 7
   elif [ "$deployed_version" = "$expected_version" ]; then
     echo "  provenance OK: deployed=$deployed_version | expected=$expected_version"
@@ -4580,7 +4580,7 @@ printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
 # exact release tag validated before any production SSH mutation. Missing and
 # mismatched versions are fatal while rollback is still armed; otherwise a clean
 # tag checkout could still commit a stale ignored dist/coordinator-linux-amd64.
-# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
+# See docs/runbooks/coordinator-rollback.md for the rollback path.
 EXPECTED_VERSION="$COORDINATOR_RELEASE_VERSION"
 _coordinator_verify_deployed_version "$HEALTHZ_BODY" "$EXPECTED_VERSION" || exit $?
 

@@ -9,7 +9,8 @@
 # Pearl SSH uses the `pearl` alias from ~/.ssh/config — no env var needed.
 # Provider chaos targets THIS Mac via launchctl — no env var needed.
 #
-# Optional overrides via env (or .env.harness at repo root, buyer-fleet only):
+# Optional overrides via env (or test/network-harness/.env.harness, buyer-fleet
+# only; a legacy .env.harness at the repo root is still read when present):
 #   BUYER_TOKEN
 #
 # Usage:
@@ -31,7 +32,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${here}/../.." && pwd)"
-env_file="${repo_root}/.env.harness"
+env_file="${here}/.env.harness"
+if [[ ! -f "${env_file}" && -f "${repo_root}/.env.harness" ]]; then
+  env_file="${repo_root}/.env.harness"
+fi
 
 scenario_arg="${1:-}"
 if [[ -z "${scenario_arg}" ]]; then

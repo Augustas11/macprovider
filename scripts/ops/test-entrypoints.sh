@@ -165,7 +165,7 @@ mkdir -p "$tmp/pearl/root" "$tmp/proc"
 systemctl _init
 PEARL_RELEASE_IDENTITY_OWNER="$(id -un)" PEARL_RELEASE_IDENTITY_GROUP="$(id -gn)"
 export PEARL_RELEASE_IDENTITY_OWNER PEARL_RELEASE_IDENTITY_GROUP PEARL_COORDINATOR_METRICS_URL="http://127.0.0.1:$PORT/metrics"
-unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY
+unset MACPROVIDER_OPS_OWNER PEARL_RUNTIME_VERSION MACPROVIDER_OPS_ENTRYPOINT GH_TOKEN MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 fixture() { printf '%s' "$1" > "$tmp/gh/fixture.json"; rm -f "$tmp/gh"/count-*; }
 # health: a repository-admission runtime (its /healthz reports the running
@@ -890,7 +890,11 @@ expect_err_or_reason "MALIBU_DOWNLOAD_SSH_KEY is unset"
 MACPROVIDER_OPS_OWNER=t run_rc 3 "mirror_latest refuses without the mirror key" scripts/ops/cli-release.sh next --run
 expect_lock_free
 export MALIBU_DOWNLOAD_SSH_KEY="$tmp/mirror-key"
-run_rc 0 "mirror latest.json lags, key set" scripts/ops/cli-release.sh status
+run_rc 0 "mirror latest.json lags, key set, host unset" scripts/ops/cli-release.sh status
+expect_next mirror_latest:blocked
+expect_err_or_reason "MALIBU_DOWNLOAD_VPS_HOST is unset"
+export MALIBU_DOWNLOAD_VPS_HOST="mirror.invalid"
+run_rc 0 "mirror latest.json lags, key and host set" scripts/ops/cli-release.sh status
 expect_next mirror_latest:mutate
 case "$(next_field command)" in
   *"scripts/publish-release-mirror.sh --tag v$CAND --promote-latest"*) ok ;; *) bad "mirror command: $(next_field command)" ;;
@@ -905,7 +909,7 @@ if [ "$(cat "$tmp/svc/mirror-env")" = "token=stub-gh-token key=$tmp/mirror-key" 
 run_rc 0 "mirror latest.json matches" scripts/ops/cli-release.sh status
 if [ "$(state_of mirror_latest)" = "done" ]; then ok; else bad "mirror_latest not done once latest.json matches"; fi
 if [ "$(next_field id)" != "mirror_latest" ]; then ok; else bad "mirror_latest still next after it matches"; fi
-unset MALIBU_DOWNLOAD_SSH_KEY
+unset MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 # ==== cli-release revoked-build rollback (SPEC-020-R007) ======================
 # The candidate is live (target + recommendation). The rollback recommends the

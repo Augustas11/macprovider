@@ -5124,7 +5124,7 @@ class Updater:
         return self.install_root / STATS_INVENTORY_PARITY_MARKER_NAME
 
     def release_stats_inventory_parity_hold(self) -> None:
-        # beta/DECISION_CRITERIA.md Entry 187 holds the pre-migration-019
+        # docs/decision-log.md Entry 187 holds the pre-migration-019
         # inventory binary until a signed matching-binary promotion; this
         # install is that promotion. The timer stays held here, so the full
         # deploy's parity-absent path migrates, runs the new binary once, and

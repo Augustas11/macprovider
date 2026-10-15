@@ -131,7 +131,7 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
 // TIMESTAMPTZ in the SPEC-005 OLTP mirror (the live production
 // store is SQLite TEXT but Step 2's rollup queries the
 // Postgres mirror per the operator-side migration plan; see
-// the trust-source decision record + OPS.md).
+// the trust-source decision record + operator runbook).
 //
 // `prompt_tokens` and `completion_tokens` map to `tokens_in`
 // and `tokens_out` per SPEC §5.1.1 + SPEC-005 §11.4 tokens-out

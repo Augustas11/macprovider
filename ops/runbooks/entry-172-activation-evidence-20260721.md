@@ -76,8 +76,8 @@ provider bearers are omitted.
 
 Provider and model:
 
-- Host: Air5 (`MacBook-Air-5.local`)
-- `provider_id`: `mp-90542c0bcf7c4d303795cd10bda3830d`
+- Host: Air5 (lab MacBook Air)
+- `provider_id`: `mp-<provider-a>`
 - Model: `mlx-community/Qwen3-8B-4bit`
 - Model hash:
   `1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877`
@@ -109,9 +109,9 @@ Buyer / settlement evidence (Pearl):
 Operator-local evidence pointers (path names only; not committed):
 
 - Scratchpad:
-  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-fresh-referred-journey-20260721.md`
+  `~/macprovider-entry172-ops/scratchpad/air5-fresh-referred-journey-20260721.md`
 - Buyer-proof artifact dir:
-  `/Users/augstar/macprovider-entry172-ops/scratchpad/air5-buyer-proof-qwen-20260721T142102Z`
+  `~/macprovider-entry172-ops/scratchpad/air5-buyer-proof-qwen-20260721T142102Z`
 
 Register follow-up:
 

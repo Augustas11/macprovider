@@ -1,7 +1,7 @@
 # Security Review Report
 
 **Scope:** SPEC-016 Step 2 security review, round 3, focused on `phase4-coordinator/cmd/coordinator/main.go` and `phase4-coordinator/internal/payout/`. Prompt expected `c761e55`; local HEAD was `efa1385`, and `c761e55` is an ancestor.  
-**Artifact:** [SPEC-016-IMPL-STEP_2-security-r3-audit.md](/Users/augstar/macprovider-poc/specs/SPEC-016-IMPL-STEP_2-security-r3-audit.md)  
+**Artifact:** [SPEC-016-IMPL-STEP_2-security-r3-audit.md](/specs/SPEC-016-IMPL-STEP_2-security-r3-audit.md)  
 **Risk Level:** LOW
 
 ## Summary

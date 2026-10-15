@@ -1,5 +1,6 @@
-# Pearl VPS host key for download.malibu.tech (159.223.165.194).
+# Pearl VPS host key for download.malibu.tech. The host field is hashed
+# (ssh-keygen -H); check an address with: ssh-keygen -F <address> -f <this file>.
 # Before changing this pin, verify the replacement fingerprint independently
 # through the VPS provider console/control plane; ssh-keyscan alone is not a
 # trust source.
-159.223.165.194 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6BDJCMyc+Jw2+U3D+i4clQCGMgBRYri++4jUE3mY+p
+|1|M95HlP3I7jSQeYk/R7S9KIwdCQc=|QBD9XU2pFs9PpYOu7erWw3DcP8o= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6BDJCMyc+Jw2+U3D+i4clQCGMgBRYri++4jUE3mY+p

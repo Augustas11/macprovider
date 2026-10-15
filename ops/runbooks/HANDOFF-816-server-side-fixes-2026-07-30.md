@@ -63,12 +63,12 @@ Before the fixes this returned intermittent `503 no_provider_available` and `Pro
   - (a) **Re-run autotune locally on this Mac** to submit fresh hardware evidence for the current config (keychain is fine locally). This was blocked earlier by an evidence-submission **HTTP 429** rate-limit — retry (it likely cleared). Example:
     `malibu-cli autotune --recommend --candidate-models mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit --target-context 12000 --max-context-axis 12000 --max-batch-axis 1 --submit-hardware-evidence --apply --recover-hardware-admission --max-duration 1500` (drains the provider ~15–25 min; `--recover-hardware-admission` restores it), **or**
   - (b) revert the provider to a config that already has valid evidence.
-  - Confirm cleared: `curl -s -H "Authorization: Bearer $(cat ~/.config/macprovider/buyer-api-key)" https://api.malibu.tech/v1/models` shows the 30B present with `max_context_tokens`, and Pearl coordinator logs show no `pow_telemetry_drift_detected` for provider `mp-26592d710fc97aa7c07b260665c67cf6`.
+  - Confirm cleared: `curl -s -H "Authorization: Bearer $(cat ~/.config/macprovider/buyer-api-key)" https://api.malibu.tech/v1/models` shows the 30B present with `max_context_tokens`, and Pearl coordinator logs show no `pow_telemetry_drift_detected` for provider `mp-<provider-b>`.
 - Keep `idle_prewarm` enabled (low TTFT).
 
 ### Fleet state at handoff (2026-07-30)
-- **This Mac** (`mp-26592d710fc97aa7c07b260665c67cf6`): 30B, `max_context_override=12000`, concurrency 1, `idle_prewarm` enabled — **hand-edited / drifted**.
-- **air5** (`mp-90542c0bcf7c4d303795cd10bda3830d`, `admin@<lan-ip>`, key `~/.ssh/macprovider_prebeta_newmac_ed25519`): Qwen3-8B hand-edited to 12k — also drifted. **air5 autotune must be run from air5's GUI** (headless SSH can't unlock its login keychain — `keychainReadFailed`).
+- **This Mac** (`mp-<provider-b>`): 30B, `max_context_override=12000`, concurrency 1, `idle_prewarm` enabled — **hand-edited / drifted**.
+- **air5** (`mp-<provider-a>`, `admin@<lan-ip>`, key `~/.ssh/macprovider_prebeta_newmac_ed25519`): Qwen3-8B hand-edited to 12k — also drifted. **air5 autotune must be run from air5's GUI** (headless SSH can't unlock its login keychain — `keychainReadFailed`).
 - Same-day related issue: **#815** (gpt-oss-20b autotune SIGTRAP + a fail-unsafe drain that strands the provider).
 
 ## Done when

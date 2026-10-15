@@ -4,17 +4,17 @@
 # context capped at 32768, MLX cache capped at 2 GB. Stops the serve at the end.
 set -uo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
-LAB=/Users/a1/lab-cb-sampling; OUT=$LAB/out; BIN=$LAB/bin
-SRC=/Users/a1/macprovider-cb-sampling/phase3-binary/.build/release/macprovider-cli
+LAB=$HOME/lab-cb-sampling; OUT=$LAB/out; BIN=$LAB/bin
+SRC=$HOME/macprovider-cb-sampling/phase3-binary/.build/release/macprovider-cli
 mkdir -p $BIN $OUT
 if lsof -nP -iTCP:18080 -sTCP:LISTEN -t >/dev/null 2>&1; then echo "port 18080 busy"; exit 3; fi
 rm -f $BIN/macprovider-cli $BIN/mlx.metallib
 cp $SRC $BIN/macprovider-cli
-cp /Users/a1/lab-ac25-m2/mlx.metallib $BIN/mlx.metallib
+cp $HOME/lab-ac25-m2/mlx.metallib $BIN/mlx.metallib
 MSHA=$(shasum -a 256 $BIN/mlx.metallib | cut -d' ' -f1)
 /usr/bin/python3 - "$BIN/config.yaml" "$MSHA" <<'PY'
-import re, sys
-src = open("/Users/a1/lab-ac25-m2/q36/config.yaml").read()
+import os, re, sys
+src = open(os.path.expanduser("~/lab-ac25-m2/q36/config.yaml")).read()
 src = re.sub(r"^port: .*$", "port: 18080", src, flags=re.M)
 src = re.sub(r"^max_context_override: .*$", "max_context_override: 32768", src, flags=re.M)
 src = re.sub(r"^continuous_batch_queue_wait_timeout_ms: .*\n", "", src, flags=re.M)

@@ -1,6 +1,6 @@
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 Read `specs/SPEC-007-explorer.md` (v0.2, ~2,600 lines) in full before
 writing any code. Pay special attention to:

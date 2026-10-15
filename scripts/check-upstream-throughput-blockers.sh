@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WATCH_FILE="${WATCH_FILE:-$ROOT/beta/throughput-engineering/UPSTREAM_WATCH.json}"
+WATCH_FILE="${WATCH_FILE:-$ROOT/scripts/data/upstream-watch.json}"
 COMPARE="${COMPARE:-$WATCH_FILE}"
 JSON_ONLY=false
 

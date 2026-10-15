@@ -66,4 +66,4 @@ There is no model that buyers asked for and native cannot run. The demand signal
 
 - Attempt 1: the provider refused the pause (`drain_timeout`, 30 s drain window). Attempt 2: llama-server rejected `--no-mmap`, which b11149 renamed to `--load-mode none`. Attempt 3 is the run reported above.
 - The live provider was operator-paused during attempts 2 and 3, about 05:03-05:20Z and 05:31-05:45Z. Coordinator `request_log` shows no Qwen3.6 buyer requests in those windows. The operator did not explicitly approve these pauses. The runner now never pauses unless told to, and live-provider actions need per-action approval.
-- Raw results on the Studio: `/Users/a1/bench-1690/results/20260924T053142Z`, `/Users/a1/bench-1690/results/ppl-20260924T103352Z`.
+- Raw results on the Studio: `~/bench-1690/results/20260924T053142Z`, `~/bench-1690/results/ppl-20260924T103352Z`.

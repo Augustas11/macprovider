@@ -8,9 +8,9 @@ This task is **spec editing only**. Do NOT modify code under `phase4-coordinator
 
 ## Repo orientation
 
-- Repo root: `/Users/augstar/macprovider-poc`
+- Repo root: `<repo>`
 - Spec corpus lives in `specs/`. House style: `SPEC-NNN-*.md` normative docs; `BUILD_SPEC_*` and `FIX_SPEC_*_VX_Y` for prompts.
-- Decision log: `beta/DECISION_CRITERIA.md` (append, do not rewrite existing entries).
+- Decision log: `docs/decision-log.md` (append, do not rewrite existing entries).
 - Files you will edit:
   - `specs/SPEC-007-explorer.md` — primary, ~2,485 lines, v0.1 → v0.2.
   - `specs/SPEC-007-operator-decisions.md` — add D15 (gateway bearer model).

@@ -9,7 +9,7 @@ usage: scripts/enforce-tier2-hash.sh [--plan|--apply]
 
 Environment:
   SSH_KEY             default: ~/.ssh/pearl_operator_ed25519
-  VPS_HOST            default: 159.223.165.194
+  VPS_HOST            required: Pearl VPS address
   VPS_USER            default: root
   SSH_PORT            default: 22
   SSH_KNOWN_HOSTS     default: ~/.ssh/known_hosts
@@ -51,7 +51,7 @@ esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 VPS_USER="${VPS_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"

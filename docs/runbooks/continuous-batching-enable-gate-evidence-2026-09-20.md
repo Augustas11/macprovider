@@ -7,7 +7,7 @@ Sanitized: token counts and tokens/sec only; no tokens, keys, or bearer headers.
 ## Header (runbook Evidence Template)
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** non-production test drive; no coordinator join, no buyer traffic, no receipts
 - **Measurement seam:** `macprovider-cli msb-throughput` (drives `PagedKVSharedForwardBackend`
   directly, mirroring `ContinuousBatchScheduler.runDecodeStep`; NOT the buyer-serve path)

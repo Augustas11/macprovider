@@ -1,7 +1,7 @@
 package buyer_test
 
 // M2-1c regression suite — pins the attempt_n / logAttempt row sequence
-// in the four scenarios called out in audits/2026-06-10/REPO_AUDIT.md
+// in the four scenarios called out in the 2026-06-10 repo audit
 // §3.1 item 3 (ARCH-1 / CODE-1) as the highest-risk billing-ledger
 // invariants for the strangler refactor that collapses the three
 // transport loops into three transport-typed sequence helpers

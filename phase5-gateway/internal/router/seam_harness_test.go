@@ -1,13 +1,13 @@
 package router
 
 // Seam-hardening e2e harness — executable regression tests for the buyer↔gateway↔
-// coordinator↔provider seam risks documented in audits/seam-hardening/ (scenarios
+// coordinator↔provider seam risks documented in the seam-hardening risk register (scenarios
 // H1–H7), driving phase5-gateway as if it were an OpenRouter upstream. The
 // "mock-upstream" is a controllable roundTripFunc transport injected via
 // WithHTTPClient — it stands in for coordinator.buyer_url with per-scenario injection
 // (slow drip, buyer disconnect, usage over-report, id-less retry, etc.).
 //
-// Each test maps to a finding in audits/seam-hardening/findings.md and carries its
+// Each test maps to a finding in the seam-hardening findings register and carries its
 // EXPECTED verdict. Tests whose subject is a confirmed FAIL assert the buggy-today
 // behavior (so a fix flips them red); PASS tests certify a real strength.
 //

@@ -57,7 +57,7 @@ does not accept non-release coordinator versions.
 
 ## Deployment
 
-Deployment is operator-driven. See `dist/deploy-pearl-vps.sh` for the scripted path (drift check, snapshot, restart, post-restart provenance assertion) and root [`OPS.md`](../OPS.md) for production topology, safe-restart procedure, settlement, and incident response.
+Deployment is operator-driven. See `dist/deploy-pearl-vps.sh` for the scripted path (drift check, snapshot, restart, post-restart provenance assertion), [`docs/runbooks/coordinator-rollback.md`](../docs/runbooks/coordinator-rollback.md) for rollback, and [`docs/runbooks/pearl-coordinator-rollout.md`](../docs/runbooks/pearl-coordinator-rollout.md) for production rollout.
 
 ## Layout
 

@@ -12,8 +12,8 @@ import (
 // ARCH-5: this helper mirrors the coordinator SQLite helper where the
 // deployment constraints match. The duplication is intentional: gateway and
 // coordinator are independent Go modules, and introducing a shared library
-// would re-couple them on every DSN tweak. See audits/2026-06-10/REPO_AUDIT.md
-// (ARCH-5) for the conscious-debt reasoning.
+// would re-couple them on every DSN tweak. The 2026-06-10 repo audit
+// (ARCH-5) records the conscious-debt reasoning.
 func sqliteDSN(path string) string {
 	values := url.Values{}
 	for _, pragma := range []string{

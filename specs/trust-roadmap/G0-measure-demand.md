@@ -48,7 +48,7 @@ G0-consuming brief (B3/B4/B8) is scheduled**.
 Source: read-only SQLite query over Pearl
 `/var/lib/macprovider/coordinator.db` using `scripts/trust-g0-demand.sql`.
 The earlier local run against
-`/Users/augstar/macprovider-poc/phase4-coordinator/coordinator.db` produced
+`<repo>/phase4-coordinator/coordinator.db` produced
 zeros only because that local developer DB had an empty `request_log`; it was
 not live-network evidence.
 

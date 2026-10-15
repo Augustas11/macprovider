@@ -264,7 +264,7 @@ Link **rate-card tier multiplier** to liveness streak:
 
 ## 8. Decision log entry (template)
 
-Append to `beta/DECISION_CRITERIA.md`:
+Append to `docs/decision-log.md`:
 
 > **Entry N — OPoI v0 for mining liveness (2026-07-08)**  
 > PoM tier gating failed Apple Silicon microbench (~4× @ 75% held). Adopt Keryx **OPoI liveness shape** via existing pool canaries (v0), explicit WS (v1), tier multiplier (v1.1). PoM audit-only.

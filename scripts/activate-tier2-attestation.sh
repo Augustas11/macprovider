@@ -13,7 +13,7 @@ usage: scripts/activate-tier2-attestation.sh [--plan|--apply]
 
 Environment:
   SSH_KEY             default: ~/.ssh/pearl_operator_ed25519
-  VPS_HOST            default: 159.223.165.194
+  VPS_HOST            required: Pearl VPS address
   VPS_USER            default: root
   SSH_PORT            default: 22
   REMOTE_CONFIG       default: /opt/macprovider/coordinator.yaml
@@ -60,7 +60,7 @@ CCG_LIB="$SCRIPT_DIR/lib/coordinator-config-guard.sh"
 . "$CCG_LIB"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:-}"  # required before any SSH; checked where SSH is built
 VPS_USER="${VPS_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 REMOTE_CONFIG="${REMOTE_CONFIG:-/opt/macprovider/coordinator.yaml}"
@@ -476,6 +476,7 @@ apply_changes() {
   [ -n "${DEMO_TOKEN:-}" ] || die "DEMO_TOKEN is required by --apply"
   [ -n "${OPERATOR_KEY:-}" ] || die "OPERATOR_KEY is required by --apply"
 
+  : "${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
   SSH=("$SSH_BIN" -i "$SSH_KEY" -o ConnectTimeout=10 -p "$SSH_PORT" "$VPS_USER@$VPS_HOST")
 
   log "running attested readiness verifier before C4b activation"

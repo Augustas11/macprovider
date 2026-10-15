@@ -473,9 +473,9 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
 
     def test_governance_rejects_local_identity_metadata(self) -> None:
         for field, value in (
-            ("operator", "augstar@MacBook-Pro.local"),
-            ("operator", "augstar-mbp"),
-            ("hardware", "Users/augstar/laptop"),
+            ("operator", "alice@MacBook-Pro.local"),
+            ("operator", "alice-mbp"),
+            ("hardware", "Users/alice/laptop"),
             ("hardware", "MacBook-Pro"),
         ):
             result = ValidationResult()
@@ -524,7 +524,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
             "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
             "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
-            "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+            "operator_local_model": "mlx-community/alice-MacBook-Pro",
             "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
             "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
             "completion_phrase_model": "mlx-community/raw-completion-text",
@@ -551,9 +551,9 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
     def test_governance_rejects_operator_local_candidate_identity_metadata_when_source_matches_signed(self) -> None:
         cases = {
             "cli_version": "1.2.3-MacBook-Pro",
-            "model_id": "gpt-5augstar",
-            "sdk_name": "augstarLaptopSDK",
-            "sdk_version": "augstar-MacBook-Pro",
+            "model_id": "gpt-5alice",
+            "sdk_name": "aliceLaptopSDK",
+            "sdk_version": "alice-MacBook-Pro",
         }
         for field, value in cases.items():
             with tempfile.TemporaryDirectory() as directory:
@@ -616,7 +616,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             signed = complete_signed_payload()
             write_redacted_source(root, signed, source)
             payload = json.loads((root / source).read_text(encoding="utf-8"))
-            payload["review"]["reviewer_role"] = "augstar@MacBook-Pro.local"
+            payload["review"]["reviewer_role"] = "alice@MacBook-Pro.local"
             raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
             (root / source).write_bytes(raw)
             signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
@@ -636,7 +636,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             signed = complete_signed_payload()
             write_redacted_source(root, signed, source)
             payload = json.loads((root / source).read_text(encoding="utf-8"))
-            payload["review"]["reviewer_role"] = "augstar-mbp"
+            payload["review"]["reviewer_role"] = "alice-mbp"
             raw = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
             (root / source).write_bytes(raw)
             signed["artifacts"][0]["sha256"] = hashlib.sha256(raw).hexdigest()
@@ -1163,7 +1163,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
             "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
             "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
             "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
-            "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+            "operator_local_model": "mlx-community/alice-MacBook-Pro",
             "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
             "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
             "completion_phrase_model": "mlx-community/raw-completion-text",
@@ -1177,9 +1177,9 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         builder = load_builder()
         cases = {
             "cli_version": "1.2.3-MacBook-Pro",
-            "model_id": "gpt-5augstar",
-            "sdk_name": "augstarLaptopSDK",
-            "sdk_version": "augstar-MacBook-Pro",
+            "model_id": "gpt-5alice",
+            "sdk_name": "aliceLaptopSDK",
+            "sdk_version": "alice-MacBook-Pro",
         }
         for field, value in cases.items():
             identity = valid_signed()["candidate_identity"]
@@ -1189,16 +1189,16 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
 
     def test_builder_rejects_local_identity_metadata(self) -> None:
         builder = load_builder()
-        for value in ("augstar@MacBook-Pro.local", "augstar-mbp"):
+        for value in ("alice@MacBook-Pro.local", "alice-mbp"):
             with self.assertRaises(SystemExit):
                 builder.require_safe_metadata(value, "operator.role", local=True)
-        for value in ("Users/augstar/laptop", "MacBook-Pro"):
+        for value in ("Users/alice/laptop", "MacBook-Pro"):
             with self.assertRaises(SystemExit):
                 builder.require_safe_metadata(value, "environment.hardware_profile", local=True)
         with self.assertRaises(SystemExit):
             builder.require_review({
                 "reviewed_at": "2026-08-24T00:01:00Z",
-                "reviewer_role": "augstar@MacBook-Pro.local",
+                "reviewer_role": "alice@MacBook-Pro.local",
                 "support_artifacts_reviewed": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
                 "real_gateway_basis": "staging-or-production-gateway",
                 "sdk_client_basis": "openai-sdk-local-token-api-key",
@@ -1207,7 +1207,7 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             builder.require_review({
                 "reviewed_at": "2026-08-24T00:01:00Z",
-                "reviewer_role": "augstar-mbp",
+                "reviewer_role": "alice-mbp",
                 "support_artifacts_reviewed": ["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"],
                 "real_gateway_basis": "staging-or-production-gateway",
                 "sdk_client_basis": "openai-sdk-local-token-api-key",

@@ -81,7 +81,8 @@ export BUYER_TOKEN="..."         # committed YAML uses ${BUYER_TOKEN}
 ./harness run scenarios/smoke.yaml --out artifacts/smoke-run-1
 
 # Convenience wrapper: builds the binary, resolves scenario mode safely,
-# reads BUYER_TOKEN from .env.harness or ~/.config/macprovider/buyer-api-key,
+# reads BUYER_TOKEN from test/network-harness/.env.harness (template:
+# env.harness.example) or ~/.config/macprovider/buyer-api-key,
 # and writes a timestamped artifacts/<scenario>-<utc>/ bundle.
 ./run-scenario.sh smoke.yaml
 ```

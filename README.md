@@ -13,14 +13,17 @@
   <img src="https://img.shields.io/github/v/release/augustas11/macprovider?style=flat" alt="Latest release" />
   <img src="https://img.shields.io/badge/platform-Apple%20Silicon-000000?style=flat&logo=apple&logoColor=white" alt="Platform" />
   <img src="https://img.shields.io/badge/runtime-MLX%20%7C%20macOS%2014%2B-5a5a5a?style=flat" alt="Runtime" />
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License: MIT" />
 </p>
 
 # MacProvider
 
-MacProvider turns Apple Silicon Macs into remote-addressable MLX inference
-providers behind the Malibu network. Provider Macs run `macprovider-cli` over an
-outbound WebSocket connection, while buyers use an OpenAI-compatible API through
-`api.malibu.tech`.
+MacProvider is a pooled inference network built on Apple Silicon. Mac owners
+run a small provider (`macprovider-cli`, or the Malibu menu-bar app) that serves
+MLX models and earns for the work; developers call the pool through an
+OpenAI-compatible API at `api.malibu.tech`. Provider Macs only dial out over a
+WebSocket, so they need no open ports, and every response can carry a signed
+receipt that buyers verify themselves.
 
 The project includes the provider CLI and Malibu macOS app, the coordinator, the
 buyer gateway, receipt verification tooling, web front ends, signed release
@@ -96,7 +99,7 @@ malibu-cli update
 ```
 
 Provider implementation details live in [phase3-binary/](phase3-binary/).
-Production operations live in [OPS.md](OPS.md) and [ops/runbooks/](ops/runbooks/).
+Production operations live in [ops/runbooks/](ops/runbooks/) and [docs/runbooks/](docs/runbooks/).
 
 ## Buyer Quickstart
 
@@ -173,17 +176,20 @@ current map of normative and draft surfaces.
 
 | Path | Purpose |
 |---|---|
-| `phase3-binary/` | Swift provider CLI, Malibu app, installer, catalog, and release tooling |
-| `phase4-coordinator/` | Go coordinator, provider pool, routing, billing, auth, and operator APIs |
-| `phase5-gateway/` | Go buyer gateway, API keys, quotas, OpenAI-compatible HTTP surface |
-| `phase7-verify/` | Receipt verifier CLI and schemas |
-| `frontdoor/` | Console and provider portal web front ends |
-| `specs/` | Normative SPEC documents and governance manifests |
-| `docs/` | Public docs, runbooks, research, reports, and legacy archived material |
-| `ops/` | Production operations scripts, exception register, and runbooks |
-| `scripts/` | Release, governance, pricing, test, and CI helper scripts |
-| `test/` and `testdata/` | Integration harnesses, e2e checks, fixtures |
-| `audits/` | Durable audit evidence and historical review artifacts |
+| [`phase3-binary/`](phase3-binary/) | Swift provider CLI, Malibu app, installer, model catalog, and release tooling |
+| [`phase4-coordinator/`](phase4-coordinator/) | Go coordinator: provider pool, routing, billing ledger, auth, operator APIs |
+| [`phase5-gateway/`](phase5-gateway/) | Go buyer gateway: API keys, quotas, the OpenAI-compatible `/v1` surface |
+| [`phase7-verify/`](phase7-verify/) | `macprovider-verify` receipt verifier CLI and schemas |
+| [`frontdoor/`](frontdoor/) | Console and provider portal web front ends |
+| [`specs/`](specs/) | Normative SPEC documents, `AUTHORITY.json`, and `CONFORMANCE.json` |
+| [`journeys/`](journeys/) | End-to-end journey definitions and their signed evidence |
+| [`schemas/`](schemas/) | JSON schemas for release, journey, and governance artifacts |
+| [`security/`](security/) | Public signing keys and keyrings that releases are verified against |
+| [`docs/`](docs/) | Guides, runbooks, design notes, research, reports, and the decision log |
+| [`ops/`](ops/) | Production operations scripts, exception register, and runbooks |
+| [`scripts/`](scripts/) | Release, governance, pricing, test, and CI helper scripts |
+| [`test/`](test/), [`testdata/`](testdata/) | Integration harnesses, e2e checks, and fixtures |
+| [`examples/`](examples/), [`tools/`](tools/) | SDK examples and pinned tool versions |
 
 Local-only scratch work, editor state, orchestration logs, secrets, build
 outputs, and generated runtime artifacts are intentionally excluded from the
@@ -205,22 +211,29 @@ python3 scripts/gen_spec_index.py --check
 python3 scripts/check_spec_governance.py
 ```
 
-Agent and contributor rules are in [AGENTS.md](AGENTS.md). Claude-specific
-loading notes are in [CLAUDE.md](CLAUDE.md); the canonical repo contract remains
-`AGENTS.md`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, and pull request
+workflow, including the SPEC governance declaration every PR carries. The full
+repository manual for human and agent contributors is [AGENTS.md](AGENTS.md).
 
 ## Security
 
 Never commit API keys, private keys, payout keys, `.env` files, buyer prompts,
 provider tokens, or receipt bundles with private contents. Report security
-issues through GitHub private vulnerability reporting when possible.
+issues privately as described in [SECURITY.md](SECURITY.md).
 
 Buyer-side frameworks must validate tool calls before execution. MacProvider
 transports model output in an OpenAI-compatible shape; it does not decide
 whether a tool name or argument payload is safe for an agent policy.
 
-## Legacy Material
+## Engineering Records
 
-The original Phase 1 PoC runbooks and reports are archived under
-[docs/legacy/phase1/](docs/legacy/phase1/). They are retained for audit history,
-not as current operating instructions.
+Historical engineering records (Phase 1 PoC reports, audit rounds, beta-program
+notes, session handoffs, and raw lab evidence) live in a private archive that
+mirrors this repository's layout. Specs and docs that cite paths such as
+`audits/...`, `beta/...`, `docs/legacy/phase1/...`, or `docs/handoffs/...`
+refer to that archive. Evidence that code or `specs/CONFORMANCE.json` reads is
+kept in this repository.
+
+## License
+
+MacProvider is released under the [MIT License](LICENSE).

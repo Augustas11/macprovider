@@ -1,6 +1,8 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.17 (2026-10-14, context-fit token estimate)
+**Version:** 1.6.18 (2026-10-15, public-repo cleanup)
+
+**Change log v1.6.18 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; removes a historical host address.
 
 **Change log v1.6.17 (2026-10-14, issue #1570):** FR-P7, FR-R5 and the token
 estimation heuristic (§5) use the SPEC-006 v0.9.54 §7.2.1 context-fit (central)
@@ -794,7 +796,7 @@ live registry of available providers with their advertised capacity and
 health state, exposes an HTTPS API that accepts standard OpenAI chat
 completion requests from buyers, and routes each request to the
 best-matching provider in the pool based on model, capacity, and buyer
-preference. It is the single point of contact for Antseed seller
+preference. It is the single point of contact for third-party marketplace seller
 integration (SPEC-003, out of scope) and the future public buyer API
 (SPEC-006, out of scope). The coordinator does not perform inference
 itself — it is a stateful reverse proxy with provider-aware routing
@@ -866,7 +868,7 @@ insertion points for each. See Section 3 for hook-point locations.
 - Smart router with sticky single-tenant caching (SPEC-004)
 - Public direct buyer API with auth/billing (SPEC-006)
 - Contributor reward distribution (SPEC-005)
-- Antseed seller integration code (SPEC-003; the coordinator's buyer
+- Third-party marketplace seller integration code (SPEC-003; the coordinator's buyer
   HTTP API is wire-compatible with what SPEC-003 will need)
 - Buyer-side privacy stack (Tier 2)
 - TLS termination (deployment concern; Caddy or nginx in front)
@@ -2613,7 +2615,7 @@ token counts, headers) but not message bodies.
   coordinator (out of scope for the coordinator binary).
 - Provider WebSocket auth via bearer token (FR-P12).
 - Operator endpoints (/poolz, /admin/*) auth via operator API key.
-- No buyer auth in v1 (single-tenant, Antseed-only).
+- No buyer auth in v1 (single-tenant, marketplace-seller-only).
 - SQLite provider tokens stored as SHA-256 hashes.
 - No secrets in environment variables at runtime (tokens loaded from
   SQLite; operator key from config file).
@@ -4005,8 +4007,8 @@ this section.
 **Runtime requirements:** Go 1.22+, Linux amd64 (deployment target).
 Cross-compilation from macOS: `GOOS=linux GOARCH=amd64 go build`.
 
-**Deployment:** VPS at 165.22.182.207 (existing AntFeed VPS). The
-coordinator runs on a different port than the existing AntFeed services.
+**Deployment:** a shared single VPS (the v1 target). The coordinator runs
+on a different port than the services already on that host.
 Managed by systemd. TLS termination by Caddy reverse proxy.
 
 **These are the required v1.0.1 pins.** The build session may bump only
@@ -4869,7 +4871,7 @@ R-7.10.1 / R-7.10.2.
   random, hex-encoded. (See § 7.3.)
 - **SQLite backup:** daily file copy via cron + rsync to operator. (See
   § 7.3 storage + NFR-Reliability.)
-- **Buyer auth in v1:** none; trust delegated to Antseed seller
+- **Buyer auth in v1:** none; trust delegated to the marketplace seller
   integration (SPEC-003). Buyer API keys are SPEC-006 scope.
 
 No open questions remain from v1.0.x. v1.0.2 resolved all prior open items into
@@ -5193,7 +5195,7 @@ buyer never sees coordinator-managed retry in v1 per FR-B7.)
 | Source | What was taken |
 |---|---|
 | `specs/SPEC-001-phase3-binary.md` v1.1.1 | Full wire protocol (section 6.5), request schema (section 6.2), health states (FR-15), capacity fields (FR-17), handshake fields, preflight reasons, drain lifecycle |
-| `docs/legacy/phase1/HANDOFF.md` | Project context: pooled Mac network architecture, VPS at 165.22.182.207, Antseed seller integration, Darkbloom differentiation, coordinator design intent |
+| `docs/legacy/phase1/HANDOFF.md` | Project context: pooled Mac network architecture, VPS details, marketplace seller integration, Darkbloom differentiation, coordinator design intent |
 | `beta/PHASE2_UPGRADED_PLAN.md` | Routing mode evolution table (mirror -> specialization -> stress), pre-committed decision criteria concept |
 | `beta/DECISION_CRITERIA.md` | Decision log D1 (502/530 routing), D2 (post-wake dip), D4 (capacity-vs-quality routing), D5 (timeline compression), pre-launch baselines |
 | `beta/harness.py` | First buyer behavior: SSE parsing, workload runner, SQLite logging, the HTTP contract the coordinator must serve |

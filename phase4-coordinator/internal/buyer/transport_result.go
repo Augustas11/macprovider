@@ -11,7 +11,7 @@ import (
 // M2-1c will collapse those loops into a single failover skeleton
 // driven by this type.
 //
-// See audits/2026-06-10/M2-1B_DESIGN.md for the design rationale and
+// The 2026-06-10 M2-1B design record holds the design rationale and
 // the audit-flagged invariants this struct encodes as data.
 type transportResult struct {
 	// kind preserves the native forwardResult so transport-specific

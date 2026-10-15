@@ -231,22 +231,22 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 		signoffPathConfigured = sigPath
 		body, err := os.ReadFile(sigPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file cannot be read: %v. The SPEC §6.6.2 launch-sequencing precondition is BLOCKING for production issuance; record the sign-off per OPS.md §10.5 before retrying.\n", sigPath, err)
+			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file cannot be read: %v. The SPEC §6.6.2 launch-sequencing precondition is BLOCKING for production issuance; record the sign-off per the operator runbook §10.5 before retrying.\n", sigPath, err)
 			return 2
 		}
 		sig := strings.TrimSpace(string(body))
 		if sig == "" {
-			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file is empty. Record the SPEC §6.6.2 sign-off per OPS.md §10.5 before issuing production partner keys.\n", sigPath)
+			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file is empty. Record the SPEC §6.6.2 sign-off per the operator runbook §10.5 before issuing production partner keys.\n", sigPath)
 			return 2
 		}
 		hasSHA := regexp.MustCompile(`(?i)spec-014.*sha\s*=\s*[A-Fa-f0-9]{7,}`).MatchString(sig)
 		hasDate := regexp.MustCompile(`\b20\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b`).MatchString(sig)
 		if !hasSHA {
-			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must reference the SPEC-014 v0.9 commit SHA (e.g. \"SPEC-014 sha=abc1234 ...\"). See OPS.md §10.5 for the template.\n", sigPath)
+			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must reference the SPEC-014 v0.9 commit SHA (e.g. \"SPEC-014 sha=abc1234 ...\"). See the operator runbook §10.5 for the template.\n", sigPath)
 			return 2
 		}
 		if !hasDate {
-			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must include the date both disclosure surfaces went live in YYYY-MM-DD form. See OPS.md §10.5 for the template.\n", sigPath)
+			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must include the date both disclosure surfaces went live in YYYY-MM-DD form. See the operator runbook §10.5 for the template.\n", sigPath)
 			return 2
 		}
 		signoffContent = sig

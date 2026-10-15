@@ -1,7 +1,9 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.21 (2026-10-13, SPEC-050 allowance funding)
+**Version:** 0.6.22 (2026-10-14, public-repo cleanup)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.7, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.22 (2026-10-14, public-repo cleanup):** Editorial, no normative change: the provider economics reference moved to docs/provider-economics.md.
 
 **Change log v0.6.21 (2026-10-13, issue #1062):** §2.1a notes that requests
 funded by a SPEC-050 MALIBU stake allowance are left off D1a wholesale
@@ -3447,7 +3449,7 @@ Defaults are 24h startup and 7d nightly. Operator should confirm the operational
 
 ### OQ-4: Provider docs wording
 
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed. `docs/legacy/phase1/provider-economics.md:137-140` explicitly names this OQ ("v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision.") `phase3-binary/README.md` links readers to that doc for the full reference. The wording will need a fresh refresh once SPEC-016 USDC pipeline lands and changes the answer to "automatically paid" — but that's a v0.4 docs update, not this OQ._
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed. `docs/provider-economics.md:137-140` explicitly names this OQ ("v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision.") `phase3-binary/README.md` links readers to that doc for the full reference. The wording will need a fresh refresh once SPEC-016 USDC pipeline lands and changes the answer to "automatically paid" — but that's a v0.4 docs update, not this OQ._
 
 Provider-facing copy should say v1 accrues credits and payout requires SPEC-007/operator decision.
 

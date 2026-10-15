@@ -3,8 +3,8 @@ package payout_test
 // TestSyntheticAlertsCatalog is the load-bearing guard for SPEC-016 §9 cutover
 // prerequisite item 6: before `payout.enabled: true`, the operator must verify
 // ONE synthetic alert per ENUMERATED PAGE/WARN event name. The enumeration
-// lives in dist/synthetic-alerts/catalog.tsv, the single source of truth shared
-// with dist/synthetic-alerts/emit.sh.
+// lives in phase4-coordinator/dist/synthetic-alerts/catalog.tsv, the single source of truth shared
+// with phase4-coordinator/dist/synthetic-alerts/emit.sh.
 //
 // DESIGN: sound static enumeration of "which zerolog emissions are PAGE/WARN
 // alerts" from arbitrary Go is undecidable — an AST scanner can always be fooled
@@ -13,8 +13,8 @@ package payout_test
 //
 //   Every identifier-shaped string literal matching ^(payout_|provider_payout_)
 //   [a-z0-9_]+$ in the scanned source MUST be classified as exactly one of:
-//     (a) a catalogued alert event      -> dist/synthetic-alerts/catalog.tsv, or
-//     (b) a reviewed non-alert string   -> dist/synthetic-alerts/non-alert-allowlist.txt
+//     (a) a catalogued alert event      -> phase4-coordinator/dist/synthetic-alerts/catalog.tsv, or
+//     (b) a reviewed non-alert string   -> phase4-coordinator/dist/synthetic-alerts/non-alert-allowlist.txt
 //
 // It does not matter HOW an event is emitted; a new alert event necessarily
 // introduces a new event-name literal (or const literal) somewhere, and this
@@ -52,12 +52,12 @@ func findRepoRoot(t *testing.T) string {
 		t.Fatalf("Getwd: %v", err)
 	}
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "dist", "synthetic-alerts", "catalog.tsv")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "phase4-coordinator", "dist", "synthetic-alerts", "catalog.tsv")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("could not locate dist/synthetic-alerts/catalog.tsv walking up from working dir")
+			t.Fatalf("could not locate phase4-coordinator/dist/synthetic-alerts/catalog.tsv walking up from working dir")
 		}
 		dir = parent
 	}
@@ -65,7 +65,7 @@ func findRepoRoot(t *testing.T) string {
 
 func loadCatalog(t *testing.T, root string) map[string]catalogEntry {
 	t.Helper()
-	path := filepath.Join(root, "dist", "synthetic-alerts", "catalog.tsv")
+	path := filepath.Join(root, "phase4-coordinator", "dist", "synthetic-alerts", "catalog.tsv")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("open catalog: %v", err)
@@ -113,7 +113,7 @@ func loadCatalog(t *testing.T, root string) map[string]catalogEntry {
 
 func loadAllowlist(t *testing.T, root string) map[string]string {
 	t.Helper()
-	path := filepath.Join(root, "dist", "synthetic-alerts", "non-alert-allowlist.txt")
+	path := filepath.Join(root, "phase4-coordinator", "dist", "synthetic-alerts", "non-alert-allowlist.txt")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("open allowlist: %v", err)
@@ -838,8 +838,8 @@ func validate(res scanResult, catalog map[string]catalogEntry, allowlist map[str
 			errs = append(errs, lit+" is in BOTH catalog.tsv and the non-alert allowlist — pick one")
 		case !inCatalog && !inAllow:
 			errs = append(errs, pos+": unclassified payout literal "+strconv.Quote(lit)+
-				" — classify it as an ALERT event in dist/synthetic-alerts/catalog.tsv, "+
-				"or as a NON-ALERT string in dist/synthetic-alerts/non-alert-allowlist.txt")
+				" — classify it as an ALERT event in phase4-coordinator/dist/synthetic-alerts/catalog.tsv, "+
+				"or as a NON-ALERT string in phase4-coordinator/dist/synthetic-alerts/non-alert-allowlist.txt")
 		}
 	}
 

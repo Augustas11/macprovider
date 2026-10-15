@@ -41,7 +41,7 @@ Cline is the v0.2 release-gate framework. Other §1-listed frameworks (Aider, Op
 
 Provider accepts full `messages[]` replay each turn. No session-scoped state. Buyer is responsible for replaying conversation history. Provider validates only the in-request tool-call chain.
 
-### Code locations (live in `/Users/augstar/macprovider-spec-018-v0-2/`)
+### Code locations (live in `~/macprovider-spec-018-v0-2/`)
 
 **Current rejection paths to remove:**
 - `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909` `validateToolCallingV1Scope`

@@ -43,7 +43,7 @@ These are already decided by the existing spec corpus. The SCOPE session respect
 
 ## STEP 1 — SCOPE analysis [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -72,7 +72,7 @@ Read all of these before writing anything:
 - `specs/SPEC-004-smart-router.md` (attribution, FR-P11a, SPEC-005 references)
 - `specs/SPEC-006-buyer-api.md` (quota, D3 refund matrix, §1.8 boundary, H-005)
 - `specs/SPEC-008-tier2.md` (Tier 2 attestation surface)
-- `beta/DECISION_CRITERIA.md` (entries 17–37, especially Entry 22 five lessons
+- `docs/decision-log.md` (entries 17–37, especially Entry 22 five lessons
   and Entry 36 remaining pre-public gates)
 
 ## Pre-seeded locked constraints (do not re-open these)
@@ -191,7 +191,7 @@ Open `specs/SPEC-005-operator-decisions.md`. Fill the "Operator Decision" column
 
 ## STEP 2 — Claude writes BUILD prompt [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -207,7 +207,7 @@ that a separate Codex session will execute to draft SPEC-005 v0.1.
 4. `specs/SPEC-006-buyer-api.md` — use as quality bar for depth/format
 5. `specs/SPEC-002-coordinator.md` — especially §4 storage contracts,
    request_log schema, token table
-6. `beta/DECISION_CRITERIA.md` Entry 22 (five lessons, especially the
+6. `docs/decision-log.md` Entry 22 (five lessons, especially the
    SCOPE→BUILD two-stage pattern and locked-decisions discipline)
 
 ## What the BUILD prompt must include
@@ -268,12 +268,12 @@ Do NOT draft SPEC-005 itself. Only produce the BUILD prompt file.
 
 ## STEP 3 — Codex: BUILD + R1 self-audit + FIX prompt draft [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 ## Phase A — Draft the spec
 
@@ -365,12 +365,12 @@ If edits needed: edit the file directly. Commit the edited version before Step 4
 
 ## STEP 4 — Codex: Execute FIX → v0.2 [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 Read specs/FIX_SPEC_005_V0_2_PROMPT.md in full. Execute the prompt
 exactly as written to produce specs/SPEC-005-billing.md v0.2.
@@ -394,7 +394,7 @@ When done, commit:
 
 ## STEP 5 — Claude R2 audit + cross-spec coherence [CLAUDE]
 
-Open a **fresh Claude Code session** rooted at `/Users/augstar/macprovider-poc`. Paste everything between the markers.
+Open a **fresh Claude Code session** rooted at `<repo>`. Paste everything between the markers.
 
 ```
 === BEGIN PROMPT ===
@@ -522,12 +522,12 @@ Edit directly if needed. Commit. Then proceed.
 
 ## STEP 6 — Codex: FIX → v0.3 + regression + lock [CODEX /goal]
 
-Open a **fresh Codex session** rooted at `/Users/augstar/macprovider-poc`. Run this `/goal`:
+Open a **fresh Codex session** rooted at `<repo>`. Run this `/goal`:
 
 ```
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 ## Phase A — Execute FIX
 
@@ -574,7 +574,7 @@ If regression is CLEAN:
    Add row: | SPEC-005 | Billing / settlement / rewards | v0.3 |
    Build-ready | [SPEC-005-billing.md](SPEC-005-billing.md) |
 
-3. Append entry to beta/DECISION_CRITERIA.md:
+3. Append entry to docs/decision-log.md:
    Follow the table format from existing entries. Include:
    - What was built (spec corpus additions)
    - Key lessons from the arc
@@ -582,7 +582,7 @@ If regression is CLEAN:
 
 4. Commit everything:
    git add specs/SPEC-005-audit.md specs/README.md
-   git add beta/DECISION_CRITERIA.md
+   git add docs/decision-log.md
    git commit -m "feat(spec): SPEC-005 v0.3 locked — billing/settlement/rewards build-ready"
 ```
 

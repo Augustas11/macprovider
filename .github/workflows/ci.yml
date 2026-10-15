@@ -330,7 +330,7 @@ jobs:
     name: integration (cross-service)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Closes TEST-6 / M2-9 / M3-11 (audits/2026-06-10/REPO_AUDIT.md:117).
+    # Closes TEST-6 / M2-9 / M3-11 (2026-06-10 repo audit).
     # Builds REAL coordinator + gateway binaries and exercises the
     # gateway↔coordinator HTTP boundary that
     # phase5-gateway/internal/router/integration_test.go currently
