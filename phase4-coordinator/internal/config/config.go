@@ -1092,6 +1092,31 @@ type RoutingConfig struct {
 	StickyTTLS                    int                         `yaml:"sticky_ttl_s"`
 	StickyMaxEntries              int                         `yaml:"sticky_max_entries"`
 	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
+	// VisionQualifications is the operator-reviewed allowlist for native image
+	// inference. It is deliberately empty by default: provider self-report and a
+	// model name never establish qualified buyer capacity.
+	VisionQualifications []VisionQualificationConfig `yaml:"vision_qualifications"`
+}
+
+// VisionQualificationConfig pins every identity component that affects image
+// interpretation. Values are matched exactly against the active provider
+// session and its vision runtime capability.
+type VisionQualificationConfig struct {
+	ProviderID            string `yaml:"provider_id"`
+	BinaryVersion         string `yaml:"binary_version"`
+	HardwareChip          string `yaml:"hardware_chip"`
+	RAMGB                 int    `yaml:"ram_gb"`
+	MaxContextTokens      int    `yaml:"max_context_tokens"`
+	MaxConcurrency        int    `yaml:"max_concurrency"`
+	ModelID               string `yaml:"model_id"`
+	ModelHash             string `yaml:"model_hash"`
+	ModelHashAlgorithm    string `yaml:"model_hash_algorithm"`
+	WeightsManifestSHA256 string `yaml:"weights_manifest_sha256"`
+	ProcessorDigest       string `yaml:"processor_digest"`
+	Runtime               string `yaml:"runtime"`
+	RuntimeRevision       string `yaml:"runtime_revision"`
+	MediaProfile          string `yaml:"media_profile"`
+	QualificationDigest   string `yaml:"qualification_digest"`
 }
 
 type ModelClassConfig struct {
@@ -1964,7 +1989,7 @@ func Default() Config {
 			TimeoutS: 900,
 		},
 		Limits: LimitsConfig{
-			MaxChatRequestBodyBytes: 1 << 20,
+			MaxChatRequestBodyBytes: 4 << 20,
 		},
 		WS: WSConfig{
 			WriteBufferSize:             64,
@@ -3142,6 +3167,20 @@ func (c Config) Validate() error {
 		}
 		if len(class.Members) > 0 && len(class.Models) > 0 {
 			return fmt.Errorf("routing.model_classes.%s must not set both members and models", name)
+		}
+	}
+	for i, q := range c.Routing.VisionQualifications {
+		if q.ProviderID == "" || q.BinaryVersion == "" || q.HardwareChip == "" || q.RAMGB <= 0 || q.MaxContextTokens <= 0 || q.MaxConcurrency <= 0 ||
+			q.ModelID == "" || q.ModelHash == "" || q.ModelHashAlgorithm == "" ||
+			q.WeightsManifestSHA256 == "" || q.ProcessorDigest == "" || q.Runtime == "" ||
+			q.RuntimeRevision == "" || q.MediaProfile == "" || q.QualificationDigest == "" {
+			return fmt.Errorf("routing.vision_qualifications[%d] must bind provider, binary, hardware, capacity, model, weights, processor, runtime, media profile, and qualification evidence", i)
+		}
+		if !lowerHex64Pattern.MatchString(q.QualificationDigest) {
+			return fmt.Errorf("routing.vision_qualifications[%d].qualification_digest must be a lowercase sha256 hex digest", i)
+		}
+		if q.ModelID != "mlx-community/Qwen2-VL-2B-Instruct-4bit" || q.Runtime != "mlx_cache" || q.MediaProfile != "qwen2vl-inline-v1" {
+			return fmt.Errorf("routing.vision_qualifications[%d] must use the qualified qwen2vl-inline-v1 runtime tuple", i)
 		}
 	}
 	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {

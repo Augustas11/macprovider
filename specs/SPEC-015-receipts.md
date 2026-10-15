@@ -1,7 +1,12 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.16 (2026-10-15, slim settlement receipt audit events, #1793; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.17 (2026-10-15, immutable inline image binding; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.38, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.3.0 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12; R-14 for §N.13), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.17 (2026-10-15, Related: #2016):** §4.3.1 clarifies that
+SPEC-006-R022 native images consume the immutable bytes bound by ordered data
+URLs, and usage counts processor-expanded positions. The locked receipt tuple,
+canonical image shape and SPEC-022 settlement verification remain unchanged.
 
 **Change log v0.4.16 (2026-10-15, issue #1793):** §11 audit events: `settlement_receipt_ingested` carries the attempt identity and the receipt identity only; `settlement_receipt_verdict` carries the full field list, each field once, with verifier diagnostics redacted to the names of the unmet checks (SPEC-022 R-11.1.2). No receipt, tuple, or verification rule changes.
 
@@ -1409,6 +1414,17 @@ the buyer-supplied message are encoded as JSON `null`.
   - `{"type":"image_url","image_url":{"url":<string>,"detail":<string|null>}}`
   - `{"type":"input_audio","input_audio":{"data":<string>,"format":<string>}}`
   Each part object MUST contain EXACTLY the keys named for its type.
+
+For SPEC-006-R022 native image inference, the ordered `image_url` data URLs
+MUST be retained through coordinator normalization and provider dispatch.
+Canonicalization binds the exact admitted base64 string and `detail`, while the
+native processor decodes only those immutable bytes. It MUST NOT refetch a URL,
+re-encode the image for the receipt, or substitute the text projection. Changing
+image bytes or image/text order therefore changes `prompt_hash`. Native usage
+counts actual processor-expanded prompt positions, including visual positions,
+with zero cached prompt tokens. Accounting-only projections MUST NOT replace
+the canonical receipt input. No image bytes or private text are added to audit
+events or diagnostics by this extension.
 
 If the buyer sent `content: null` (legacy OpenAI shape for
 assistant tool-call messages), the canonical form is JSON `null`.

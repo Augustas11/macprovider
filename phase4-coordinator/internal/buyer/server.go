@@ -84,8 +84,9 @@ var spec018RetryableByCode = map[string]bool{
 	// 503, #768: every candidate for the model is below its minimum binary
 	// version. Retryable — the fleet self-updates, so the same request can
 	// succeed once a provider upgrades and reconnects.
-	"model_version_floor_unmet": true,
-	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	"model_version_floor_unmet":   true,
+	"vision_capacity_unavailable": true,
+	"rate_limited":                true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// SPEC-050-R007/R014 allowance admission. Exhaustion lasts until the
 	// next 00:00 UTC refresh (X-RateLimit-Reset); an unavailable admission
 	// store is transient.
@@ -268,6 +269,7 @@ type Server struct {
 	// critical section.
 	routingMu              sync.RWMutex
 	modelClasses           map[string]config.ModelClassConfig
+	visionQualifications   []config.VisionQualificationConfig
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
 	maxFaultedPerRequest   int
@@ -524,6 +526,7 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 			s.defaultObjective = cfg.DefaultObjective
 		}
 		s.modelClasses = cloneModelClasses(cfg.ModelClasses)
+		s.visionQualifications = append([]config.VisionQualificationConfig(nil), cfg.VisionQualifications...)
 		s.routingMu.Unlock()
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {
@@ -2424,6 +2427,7 @@ type chatRequest struct {
 	Model         string        `json:"model"`
 	Messages      []chatMessage `json:"messages"`
 	Stream        bool          `json:"stream"`
+	hasVision     bool
 	raw           json.RawMessage
 	// poolID is the SPEC-042 Trusted Pool selected for this request (from
 	// the authorized X-MacProvider-Pool header). "" means global (poolless)
@@ -2457,8 +2461,9 @@ type chatMessage struct {
 }
 
 type chatContentPart struct {
-	Type string          `json:"type"`
-	Text json.RawMessage `json:"text"`
+	Type     string          `json:"type"`
+	Text     json.RawMessage `json:"text"`
+	ImageURL json.RawMessage `json:"image_url"`
 }
 
 type requestToolCall struct {
@@ -2698,6 +2703,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the intake aggregator — whether or not a provider serves it. The
 	// aggregator retains neither the string nor the account.
 	s.observeUnmatchedModel(req.Model, accountID, hasAuthenticatedAccount)
+	if req.hasVision && req.Model != visionModelID {
+		rec.setModel("")
+		rec.logBuyerFailure(http.StatusBadRequest, "Image input is supported only by the qualified vision model")
+		writeError(w, http.StatusBadRequest, "unsupported_media", "Image input is supported only by the qualified vision model")
+		return
+	}
 	// SPEC-006-R018 / SPEC-042-R015: a pool/ model id exists only on its own
 	// authorized pool route; anywhere else it answers as an unknown model.
 	poolModelRequested := false
@@ -2711,6 +2722,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		poolModelRequested = true
 	}
 	if !poolModelRequested && !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
+		if req.hasVision {
+			writeError(w, http.StatusBadRequest, "unsupported_media", "Image input is supported only by the qualified vision model")
+			return
+		}
 		// The buyer-supplied string of an unserved model is never persisted:
 		// the request-log row carries a blank model and a constant message.
 		rec.setModel("")
@@ -2745,7 +2760,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = fallbackStatus
 		}
 		if attempt.PromptTokens == nil && attempt.ErrorCode == "" && (attempt.EstimatedCompTokens != nil || status == http.StatusBadGateway || status == http.StatusGatewayTimeout) {
-			estimatedPrompt := int64(estimateTokens(req.raw))
+			estimatedPrompt := int64(estimateRequestTokens(req.raw, req.hasVision))
 			attempt.PromptTokens = &estimatedPrompt
 		}
 		if attempt.SettlementOutput == nil {
@@ -2769,9 +2784,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// can derive PreflightResult ("accepted" vs "not_applicable") without
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
-	state.estimatedTokens = estimateTokens(req.raw)
-	state.routingEstimatedTokens = routingPromptTokenEstimate(req.raw)
-	rec.setPromptTokenUpperBound(promptTokenUpperBound(req.raw))
+	state.estimatedTokens = estimateRequestTokens(req.raw, req.hasVision)
+	state.routingEstimatedTokens = routingRequestPromptTokenEstimate(req.raw, req.hasVision)
+	rec.setPromptTokenUpperBound(requestPromptTokenUpperBound(req.raw, req.hasVision))
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
@@ -2873,8 +2888,13 @@ func (s *Server) forwardStreamSequence(
 	//     audit-explainability gap closed in this PR.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, requestID, _ string, _ time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logRow(state.provider.AssignedID, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -3112,8 +3132,13 @@ func (s *Server) forwardWSNonStreamSequence(
 	//     on state.provider.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, requestID, _ string, _ time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logRow(state.provider.AssignedID, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -3339,8 +3364,13 @@ func (s *Server) forwardHTTPSequence(
 	//     reads status/retryRequested from httpDispatchExtra.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, _, originalRequestID string, startedAt time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
-			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+			dispatchBody, err := s.dispatchBodyForProviderChecked(req, state.provider)
 			if err != nil {
+				if errors.Is(err, errVisionCapacityUnavailable) {
+					rec.logProviderRow(state.provider, http.StatusServiceUnavailable, nil, nil, "No qualified provider currently serves image input for the requested model", "", state.explicitRetries)
+					writeError(w, http.StatusServiceUnavailable, "vision_capacity_unavailable", "No qualified provider currently serves image input for the requested model")
+					return dispatchedAttempt{}, false
+				}
 				rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return dispatchedAttempt{}, false
@@ -3894,7 +3924,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	// Demo traffic never receives either key (unauthenticated IPs cannot poison
 	// a bucket). Providers whose binary cannot serve a keyed request get no key
 	// (FR-SR-2 forwarding is a MAY; see providerAcceptsConversationKey).
-	acceptsKey := providerAcceptsConversationKey(provider.BinaryVersion)
+	acceptsKey := (state == nil || !state.hasVision) && providerAcceptsConversationKey(provider.BinaryVersion)
 	if !acceptsKey && state != nil && hasForwardableConversationKey(r.Header) {
 		state.conversationKeyWithheld = true
 		state.conversationCacheOnly = false
@@ -6617,6 +6647,11 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 	if selectionErr != nil {
 		return req, http.StatusBadRequest, selectionErr.code, selectionErr.message, "tool_choice"
 	}
+	// Tool-selection duplicates keep their established precise error above;
+	// all other duplicate members are rejected before any content projection.
+	if duplicateJSONMember(body) {
+		return req, http.StatusBadRequest, "invalid_request", "Duplicate JSON fields are not supported", ""
+	}
 	req.toolSelection = policy
 	if status, code, msg, param := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg, param
@@ -6633,7 +6668,17 @@ func validateChatRequestDetailed(body []byte) (chatRequest, int, string, string,
 	} else if v, ok := raw["max_completion_tokens"]; ok {
 		_ = json.Unmarshal(v, &req.maxTokens)
 	}
-	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
+	// Validate media before text-array projection. A media request binds its
+	// original ordered content to provider inference and receipt hashing.
+	if hasVision, status, code, msg := validateVisionContent(req.Messages); status != 0 {
+		return req, status, code, msg, "messages"
+	} else {
+		req.hasVision = hasVision
+	}
+	if req.hasVision && chatRequestDeclaresTools(req.raw) {
+		return req, http.StatusBadRequest, "unsupported_media", "Image input does not support tool execution", "tools"
+	}
+	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages, req.hasVision); status != 0 {
 		return req, status, code, msg, ""
 	} else if normalized {
 		normalizedMessages, err := json.Marshal(rawMessages)
@@ -6773,6 +6818,20 @@ func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, e
 		return nil, errors.New("unsupported_tool_choice")
 	}
 	return body, nil
+}
+
+func (s *Server) dispatchBodyForProviderChecked(req chatRequest, provider pool.Provider) ([]byte, error) {
+	if !req.hasVision {
+		return dispatchBodyForProvider(req, provider)
+	}
+	live, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		return nil, errors.New("provider_session_ended")
+	}
+	if req.hasVision && (!sameVisionProviderIdentity(provider, live) || !s.providerSupportsVision(live)) {
+		return nil, errVisionCapacityUnavailable
+	}
+	return dispatchBodyForProvider(req, live)
 }
 
 func chatRequestDeclaresTools(raw json.RawMessage) bool {
@@ -7247,7 +7306,7 @@ func jsonSchemaNumberOperand(node map[string]json.RawMessage, keyword string) (f
 	return number, true, ""
 }
 
-func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage) (bool, int, string, string) {
+func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage, preserveContentArrays bool) (bool, int, string, string) {
 	allIDs := map[string]int{}
 	var parsedByMessage = make([][]requestToolCall, len(messages))
 	totalToolCalls := 0
@@ -7258,11 +7317,11 @@ func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawM
 	for i, m := range messages {
 		switch m.Role {
 		case "system", "user":
-			normalized, changed, status, code, msg := normalizeSystemUserContent(m.Content)
+			normalized, changed, status, code, msg := normalizeSystemUserContent(m.Content, m.Role == "user")
 			if status != 0 {
 				return false, status, code, msg
 			}
-			if changed {
+			if changed && !preserveContentArrays {
 				messages[i].Content = normalized
 				rawMessages[i]["content"] = normalized
 				normalizedContent = true
@@ -7515,7 +7574,7 @@ func hasMultiTurnToolData(messages []chatMessage) bool {
 	return false
 }
 
-func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int, string, string) {
+func normalizeSystemUserContent(raw json.RawMessage, allowImages bool) (json.RawMessage, bool, int, string, string) {
 	if rawStringNonEmpty(raw) {
 		return raw, false, 0, "", ""
 	}
@@ -7532,20 +7591,40 @@ func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content arrays must contain text parts in v1"
 	}
+	if !validChatContentPartShapes(raw) {
+		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content parts contain unsupported fields"
+	}
 	if len(parts) == 0 {
 		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
 	}
 
 	var b strings.Builder
+	hasImage := false
 	for _, part := range parts {
-		if part.Type != "text" {
+		switch part.Type {
+		case "text":
+			var text string
+			if err := json.Unmarshal(part.Text, &text); err != nil {
+				return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content text parts must contain string text"
+			}
+			b.WriteString(text)
+		case "image_url":
+			if !allowImages {
+				return nil, false, http.StatusBadRequest, "unsupported_content_shape", "image input is supported only in user messages"
+			}
+			// The media validator runs after message-shape validation. Preserve
+			// the ordered raw parts for dispatch and receipt binding instead of
+			// projecting them into text.
+			if len(bytes.TrimSpace(part.ImageURL)) == 0 || bytes.Equal(bytes.TrimSpace(part.ImageURL), []byte("null")) {
+				return nil, false, http.StatusBadRequest, "invalid_image_input", "image_url must be an object"
+			}
+			hasImage = true
+		default:
 			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "multimodal content arrays are not supported in v1; use text parts only"
 		}
-		var text string
-		if err := json.Unmarshal(part.Text, &text); err != nil {
-			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content text parts must contain string text"
-		}
-		b.WriteString(text)
+	}
+	if hasImage {
+		return raw, false, 0, "", ""
 	}
 	if b.Len() == 0 {
 		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
@@ -7555,6 +7634,45 @@ func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int
 		return nil, false, http.StatusBadRequest, "invalid_request", "Invalid message content"
 	}
 	return json.RawMessage(normalized), true, 0, "", ""
+}
+
+func validChatContentPartShapes(raw json.RawMessage) bool {
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil || len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		var typ string
+		if json.Unmarshal(part["type"], &typ) != nil {
+			return false
+		}
+		switch typ {
+		case "text":
+			if len(part) != 2 || part["text"] == nil {
+				return false
+			}
+			var text string
+			if json.Unmarshal(part["text"], &text) != nil {
+				return false
+			}
+		case "image_url":
+			if len(part) != 2 || part["image_url"] == nil {
+				return false
+			}
+			var imageURL map[string]json.RawMessage
+			if json.Unmarshal(part["image_url"], &imageURL) != nil || imageURL["url"] == nil || len(imageURL) > 2 {
+				return false
+			}
+			for key := range imageURL {
+				if key != "url" && key != "detail" {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateTools(raw map[string]json.RawMessage, messages []chatMessage) (int, string, string) {
@@ -7807,8 +7925,13 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 }
 
 func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
+	if req.hasVision {
+		headers = headers.Clone()
+		headers.Del("X-MacProvider-Internal-Conv")
+		headers.Del("X-MacProvider-Internal-Conv-Cache")
+	}
 	providers := s.pool.Snapshot()
-	estimatedTokens := routingPromptTokenEstimate(req.raw)
+	estimatedTokens := routingRequestPromptTokenEstimate(req.raw, req.hasVision)
 	admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 	defer admissionCancel()
 	classResolution := s.classForRequestWithBYOMContext(req.Model, providers, admissionCtx)
@@ -7949,6 +8072,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		state.multiTurnToolHistory = req.multiTurnToolHistory
 		state.nonStrictJSONSchema = req.nonStrictSchemaLegacyRejection != nil
 		state.toolSelection = req.toolSelection
+		state.hasVision = req.hasVision
 	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
@@ -7986,6 +8110,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if !providerSupportsToolSelection(p, req.toolSelection) {
 					return pool.Provider{}, unsupportedToolChoiceRouteError()
+				}
+				if req.hasVision && !s.providerSupportsVision(p) {
+					return pool.Provider{}, visionCapacityUnavailableRouteError()
 				}
 				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
@@ -8026,6 +8153,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if !providerSupportsToolSelection(p, req.toolSelection) {
 					return pool.Provider{}, unsupportedToolChoiceRouteError()
+				}
+				if req.hasVision && !s.providerSupportsVision(p) {
+					return pool.Provider{}, visionCapacityUnavailableRouteError()
 				}
 				if req.nonStrictSchemaLegacyRejection != nil && s.providerMatchesRequest(p, req.Model, class) && !providerAcceptsNonStrictJSONSchema(p.BinaryVersion) {
 					return pool.Provider{}, nonStrictJSONSchemaRouteError(req)
@@ -8075,6 +8205,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		if len(compatible) == 0 {
 			return pool.Provider{}, unsupportedToolChoiceRouteError()
+		}
+		providers = compatible
+	}
+	if req.hasVision {
+		compatible := make([]pool.Provider, 0, len(providers))
+		for _, p := range providers {
+			if s.providerSupportsVision(p) {
+				compatible = append(compatible, p)
+			}
+		}
+		if len(compatible) == 0 {
+			return pool.Provider{}, visionCapacityUnavailableRouteError()
 		}
 		providers = compatible
 	}
@@ -9419,6 +9561,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		// SPEC-019 §1a: a same-ID reconnect on a CLI without non-strict
 		// json_schema support is terminal.
 		if state != nil && !providerSupportsToolSelection(provider, state.toolSelection) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if state != nil && state.hasVision && !s.providerSupportsVision(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if state != nil && state.nonStrictJSONSchema && !providerAcceptsNonStrictJSONSchema(provider.BinaryVersion) {
@@ -11294,6 +11439,30 @@ func estimateTokens(raw json.RawMessage) int {
 		return 1
 	}
 	return n
+}
+
+func estimateRequestTokens(raw json.RawMessage, hasVision bool) int {
+	if !hasVision {
+		return estimateTokens(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return estimateTokens(accounting) + images*visionMediaTokenAllowance
+}
+
+func routingRequestPromptTokenEstimate(raw json.RawMessage, hasVision bool) int {
+	if !hasVision {
+		return routingPromptTokenEstimate(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return routingPromptTokenEstimate(accounting) + images*visionMediaTokenAllowance
+}
+
+func requestPromptTokenUpperBound(raw json.RawMessage, hasVision bool) int64 {
+	if !hasVision {
+		return promptTokenUpperBound(raw)
+	}
+	accounting, images := visionAccountingBody(raw)
+	return promptTokenUpperBound(accounting) + int64(images*visionMediaTokenAllowance)
 }
 
 func copyReceiptHeaderForProvider(dst, src http.Header, provider pool.Provider) {

@@ -4572,7 +4572,60 @@ func estimatePromptTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(math.Ceil(float64(len(body)) / 4.0))
+	accounting, images := visionAccountingBody(body)
+	return int64(math.Ceil(float64(len(accounting))/4.0)) + int64(images*visionMediaTokenAllowance)
+}
+
+const visionMediaTokenAllowance = 1024
+
+// visionAccountingBody removes only validated-shape image payloads from
+// estimates; the original body is still forwarded and bound by receipts.
+func visionAccountingBody(body []byte) ([]byte, int) {
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return body, 0
+	}
+	count := 0
+	messages, _ := request["messages"].([]any)
+	for _, message := range messages {
+		m, _ := message.(map[string]any)
+		parts, _ := m["content"].([]any)
+		for _, part := range parts {
+			p, _ := part.(map[string]any)
+			if p["type"] == "image_url" {
+				if len(p) != 2 {
+					continue
+				}
+				image, ok := p["image_url"].(map[string]any)
+				if !ok || len(image) < 1 || len(image) > 2 {
+					continue
+				}
+				if _, ok := image["url"].(string); !ok {
+					continue
+				}
+				validShape := true
+				for key := range image {
+					if key != "url" && key != "detail" {
+						validShape = false
+						break
+					}
+				}
+				if !validShape {
+					continue
+				}
+				count++
+				p["image_url"] = map[string]any{"url": "[inline-image]"}
+			}
+		}
+	}
+	if count == 0 {
+		return body, 0
+	}
+	accounting, err := json.Marshal(request)
+	if err != nil {
+		return body, 0
+	}
+	return accounting, count
 }
 
 // promptHeadroomTokens absorbs the chat-template overhead that the
@@ -4592,8 +4645,12 @@ const promptHeadroomTokens = 64
 // its pre-#1570 size.
 func promptCapTokens(body []byte) int64 {
 	reservation := estimatePromptTokens(body)
-	if upper, ok := promptTokenClassEstimate(body, promptTokenUpperWeights); ok && upper > reservation {
-		reservation = upper
+	accounting, images := visionAccountingBody(body)
+	if upper, ok := promptTokenClassEstimate(accounting, promptTokenUpperWeights); ok {
+		upper += int64(images * visionMediaTokenAllowance)
+		if upper > reservation {
+			reservation = upper
+		}
 	}
 	return reservation + promptHeadroomTokens
 }

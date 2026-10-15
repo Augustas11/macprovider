@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.58 (2026-10-15, capability-bound tool selection)
+**Version:** 0.9.59 (2026-10-15, bounded native image input)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.59 (2026-10-15, Related: #2016):**
+Registers `SPEC-006-R022` (§5.4.5): bounded inline images for native Qwen2-VL
+Chat Completions, ordered content preservation, exact qualified-capacity
+routing, and media accounting. Responses, Messages, encrypted requests and
+unsupported combinations retain explicit rejection. Implementation support
+is not hardware qualification or live buyer acceptance.
 
 **Change log v0.9.58 (2026-10-15, capability-bound tool selection, Related: #2014):**
 - §5.4 tool selection (`SPEC-006-R021`) preserves `none`, `required` and named
@@ -435,7 +442,7 @@ not enforce it, so the money-path gate is not complete until all three are live.
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.58 registers `SPEC-006-R001`..`SPEC-006-R021` in
+SPEC-006 v0.9.59 registers `SPEC-006-R001`..`SPEC-006-R022` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -491,7 +498,10 @@ changing them:
 - `SPEC-006-R021` — Selection-preserving tool dispatch and model/runtime
   capability projection (§5.4, §5.3.2, §5.6; SPEC-018-R006).
 
-`requirement_id_migration` is `complete`. R004–R021 are not promoted from
+- `SPEC-006-R022` — Native inline-image Chat Completions, exact qualified
+  capacity, immutable media binding and accounting (§5.4.5).
+
+`requirement_id_migration` is `complete`. R004–R022 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1305,10 +1315,9 @@ Known v1 divergences include:
 - No tool execution.
 - Tool fields may be syntactically accepted but are not executed.
 - Strict schema-enforced structured outputs are not guaranteed.
-- Multimodal `messages[].content` parts are not supported in v1. For `system`
-  and `user` messages, text-only structured content arrays are accepted and
-  normalized to a single string; non-text parts such as `image_url` return
-  `unsupported_content_shape`.
+- Image-bearing Chat Completions are limited to the exact native profile and
+  qualified capacity in §5.4.5. Other media and endpoints reject explicitly.
+  Text-only structured content arrays retain their existing normalization.
 - Provider availability can yield 503 immediately.
 - Model lineup is live-pool dependent.
 - Usage accounting may be gateway-estimated when provider token fields are absent.
@@ -1873,9 +1882,10 @@ Inbound tool-call identifiers that OpenAI-compatible clients actually send (shor
 For `system` and `user` messages, `content` MAY be a non-empty JSON string
 or a text-only structured content array such as
 `[{"type":"text","text":"hello"}]`. The buyer boundary MUST normalize
-text-only arrays into a single string before provider dispatch. Multimodal or
-otherwise non-text content parts MUST be rejected with HTTP 400,
-`type: "invalid_request_error"`, and `code: "unsupported_content_shape"`.
+text-only arrays into a single string before provider dispatch. Image-bearing
+Chat Completions follow §5.4.5; every other non-text content shape MUST be
+rejected explicitly before inference. Text-only validation MUST NOT be relaxed
+for unsupported models, roles or endpoints.
 
 Gateway request caps:
 
@@ -1884,6 +1894,88 @@ Gateway request caps:
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
 The gateway MUST match model IDs ASCII case-insensitively when interpreting coordinator availability.
+
+### 5.4.5 Native inline-image Chat Completions
+
+**SPEC-006-R022.** The first native image profile is `qwen2vl-inline-v1`, using
+`mlx-community/Qwen2-VL-2B-Instruct-4bit` at revision
+`01af461cdb9574acc09084a0ef94e216e142b085` with the existing pinned MLX runtime
+and `Qwen2VLProcessor`. Its local artifact identity includes weights, model
+configuration, image processor, tokenizer and chat template. The loader MUST
+verify those bytes before creating a VLM container and keep the processor,
+weights and template in the same immutable request-handle generation through
+replacement. A model label, parser support or text-only qualification MUST
+NOT establish image qualification.
+
+1. **Endpoints and content.** Provider-local and plaintext buyer
+   `POST /v1/chat/completions` support streaming and non-streaming images.
+   User messages may contain ordered `text` and `image_url` parts; image-only
+   user input is valid. Text/image interleaving, message order and image order
+   MUST reach the native vision processor without a text projection. System
+   and assistant messages remain text-only. Audio, video, image tool results,
+   remote URLs, Responses and Messages media, encrypted media, and combinations
+   with tool calls or structured output are unsupported and MUST fail before
+   generation. Existing text-only tool selection is unchanged.
+2. **Immutable bounded media.** Only `data:image/png;base64,` and
+   `data:image/jpeg;base64,` with strict canonical base64 are accepted. The raw
+   JSON body remains at most 4 MiB.
+   Every native request body MUST reject duplicate JSON members and nesting
+   deeper than 128 before ordinary JSON decoding, including bodies whose
+   duplicate members would conceal an image as text-only content.
+   At most two images are accepted per request;
+   compressed decoded bytes are at most 1 MiB per image and 2 MiB aggregate;
+   each axis is at most 2048 pixels and aggregate decoded pixels at most
+   4,194,304. Headers and dimensions MUST be validated before pixel allocation;
+   malformed/truncated images, MIME/format mismatches and animation/multiple
+   frames are rejected. PNG `iCCP`, `zTXt` and `iTXt` ancillary chunks are
+   unsupported to prevent metadata decompression before pixel bounds apply;
+   PNG IHDR dimensions MUST be checked before ImageIO metadata parsing.
+   Native decode MUST remain within these bounds. Before processor input, axes
+   smaller than 28 pixels are deterministically expanded to 28 within the
+   existing pixel budget. No
+   network fetch occurs. `detail` is absent, null or `auto`; other values are
+   unsupported. Errors and logs MUST NOT include image bytes or request text.
+3. **Routing and qualification.** SPEC-001 image capability is an implementation
+   assertion bound to the current artifact and runtime, not qualification.
+   The coordinator MUST additionally match an operator-reviewed qualification
+   tuple for that exact profile, artifact, processor and runtime, and exact
+   provider ID, binary version, hardware chip, RAM, context limit and concurrency. Qualification
+   records identify acceptance evidence; they MUST NOT be invented from a name
+   or provider count. Missing qualification/capability fails closed. Filtering
+   applies to initial selection, pinned routes, queued/reconnected sessions,
+   retry and immediately before dispatch. A text-only provider MUST never be
+   selected for images. Model replacement or omitted/mismatched capability
+   withdraws eligibility. No new trust tier, catalog admission or settlement
+   authority is granted. Qualification is deployment state, with no calendar
+   expiry. Hardware qualification and approved released-provider buyer
+   acceptance remain separate post-merge gates.
+4. **Execution and resources.** Native generation MUST pass the processor's
+   complete `LMInput`, including visual tensors, to the model. Image requests
+   MUST NOT enter text-only prefix/conversation/disk caches, continuous batching,
+   paged KV, speculative decoding or MTP. Existing scheduling, cancellation,
+   disconnect handling and request-handle ownership MUST bound work and release
+   resources. This profile uses unquantized KV, a fixed 512-token prefill step
+   and the standard rotating KV policy, independent of text-serving overrides.
+   Actual processor-expanded prompt positions count as prompt tokens;
+   cached prompt tokens are zero. Image base64 bytes are never text tokens.
+5. **Accounting and receipts.** Gateway reservations and coordinator routing
+   bounds use 1024 positions per image (the processor is capped at 512 visual
+   positions per image, plus template delimiters) plus the existing text
+   estimates over a media-free accounting projection. This projection MUST NOT
+   replace the forwarded request, receipt input or idempotency body. Reported
+   native usage is the processor-expanded input count plus generated tokens,
+   under the existing SPEC-005 caps and SPEC-022 settlement rules. SPEC-015
+   §4.3.1 binds the exact ordered content and immutable data URLs; neither
+   decoding/re-encoding nor URL refetch may change what inference consumes.
+   Existing receipt schema, route identity, billing rates and privacy contracts
+   remain unchanged. Input images MUST NOT enter diagnostics or durable caches.
+6. **Acceptance.** Paired fixtures with identical questions and different
+   images MUST produce image-dependent answers through the real native
+   processor, locally and through the gateway. Acceptance also covers image-only
+   and interleaved multiple-image input, stream/non-stream, cancellation,
+   disconnect, repetition, replacement, hostile image bounds, exact capability
+   selection, receipt binding and unchanged text/tool behavior. CI mocks do not
+   substitute for Studio or approved released-provider live acceptance.
 
 ### 5.4a `POST /v1/messages` experimental facade
 

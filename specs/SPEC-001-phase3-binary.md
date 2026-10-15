@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.35 (2026-10-15, tool-selection capability extension)
+**Version:** 1.9.36 (2026-10-15, native image capability extension)
+
+**Change log v1.9.36 (2026-10-15, Related: #2016):**
+Adds `SPEC-001-R008`: exact loaded native-image implementation identity on
+hello/auth/heartbeat, consumed only with SPEC-006-R022 qualification. Native
+media must reach the VLM processor or fail explicitly before generation.
+No trust-tier or settlement authority is added.
 
 **Change log v1.9.35 (2026-10-15, Related: #2014):**
 Adds `SPEC-001-R007` (§6.5): optional loaded-model/runtime-bound
@@ -2238,7 +2244,7 @@ Each entry in `messages` must satisfy:
 | Role | Required fields | Rules |
 |---|---|---|
 | `"system"` | `content` (string) | Must be non-empty string. |
-| `"user"` | `content` (string) | Must be non-empty string. No multimodal content arrays in Tier 1. |
+| `"user"` | `content` (string) | Text-only content must be non-empty. The bounded native image profile and ordered user content in SPEC-006-R022 are the only native media exception. |
 | `"assistant"` | `content` (string) or `tool_calls` (array) | At least one must be present and non-null. `content` may be null if `tool_calls` is present. Both null/absent -> 400. |
 | `"tool"` | `tool_call_id` (string), `content` (string) | Both required. |
 
@@ -2469,6 +2475,31 @@ distinguishes the state.
 
 All messages are JSON. Direction indicated as C->P (coordinator to
 provider) or P->C (provider to coordinator).
+
+#### Native image capability extension (v1.9.36)
+
+**SPEC-001-R008 — Native image implementation identity.** Provider `hello`,
+v2 initial `auth_request`, and `heartbeat` frames MAY carry
+`vision_runtime_capabilities`. Each entry binds `model_id`, `model_hash`,
+`model_hash_algorithm`, `weights_manifest_sha256`, `processor_digest`,
+`runtime`, `runtime_revision`, and `media_profile`. Values are strings; the
+first profile is `qwen2vl-inline-v1` on `mlx_cache`. The runtime revision is
+the full pinned MLX dependency revision. The processor digest binds the pinned
+image processor; the model snapshot hash binds weights, tokenizer and template.
+The provider MUST derive this assertion from the loaded and verified container
+captured with the same runtime snapshot, never solely from the requested name.
+Absent identity, a different artifact, a loopback runtime or an unloaded/swapping
+container MUST NOT emit a vision entry. An omitted capability on heartbeat
+withdraws prior eligibility. The extension does not authorize image dispatch
+without the additional coordinator qualification in SPEC-006-R022.
+
+This field is an additive exception to the legacy hello comparison in
+AC-18.11. Omitting the new field when no vision tuple is loaded preserves old
+text-provider frames. Receivers that do not implement R008 ignore it; a new
+receiver MUST fail closed rather than infer capability from legacy metadata.
+Native media on unsupported models, endpoints or combinations MUST fail before
+processor preparation or generation, including mixed text/image input. The
+complete prepared visual input stays with the request's captured generation.
 
 #### Tool-selection capability extension (v1.9.35)
 

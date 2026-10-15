@@ -3631,6 +3631,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		RuntimeSource: hello.RuntimeSource,
 
 		ToolSelectionCapabilities: hello.ToolSelectionCapabilities,
+		VisionRuntimeCapabilities: hello.VisionRuntimeCapabilities,
 
 		ModelParamsB:           hello.ModelParamsB,
 		RAMGB:                  hello.RAMGB,
@@ -6501,6 +6502,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Status: state,
 
 			ToolSelectionCapabilities: hb.ToolSelectionCapabilities,
+			VisionRuntimeCapabilities: hb.VisionRuntimeCapabilities,
 
 			ModelID:                   hb.ModelID,
 			ModelParamsB:              hb.ModelParamsB,

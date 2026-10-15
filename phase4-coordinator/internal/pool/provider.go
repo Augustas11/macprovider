@@ -114,8 +114,23 @@ type ToolSelectionCapability struct {
 	Validation string   `json:"validation"`
 }
 
+// VisionRuntimeCapability is a provider assertion for a loaded vision runtime.
+// Buyer routing additionally compares it with the operator qualification list;
+// a model name or parser alone never authorizes image dispatch.
+type VisionRuntimeCapability struct {
+	ModelID               string `json:"model_id"`
+	ModelHash             string `json:"model_hash"`
+	ModelHashAlgorithm    string `json:"model_hash_algorithm"`
+	WeightsManifestSHA256 string `json:"weights_manifest_sha256"`
+	ProcessorDigest       string `json:"processor_digest"`
+	Runtime               string `json:"runtime"`
+	RuntimeRevision       string `json:"runtime_revision"`
+	MediaProfile          string `json:"media_profile"`
+}
+
 type Provider struct {
 	ToolSelectionCapabilities []ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
 
 	ProviderID              string  `json:"provider_id"`
 	AssignedID              string  `json:"assigned_id"`
@@ -2923,6 +2938,7 @@ type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
 	ToolSelectionCapabilities []ToolSelectionCapability
+	VisionRuntimeCapabilities []VisionRuntimeCapability
 
 	Status                  State
 	ModelID                 string
@@ -3033,6 +3049,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.LastHeartbeatAt = hb.At
 	// Absence withdraws guarantees, including after a runtime/model change.
 	p.ToolSelectionCapabilities = hb.ToolSelectionCapabilities
+	p.VisionRuntimeCapabilities = hb.VisionRuntimeCapabilities
 
 	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
 	if modelIDChanged {
