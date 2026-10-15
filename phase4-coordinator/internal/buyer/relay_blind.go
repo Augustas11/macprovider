@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
@@ -291,10 +293,22 @@ const (
 	relayBlindCapabilityRefusalMessage = "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
 )
 
+// relayBlindRequiresFirstBinary is the first provider CLI that parses the
+// SPEC-041 v0.6.0 requires member and enforces R005. A CLI below it rejects
+// any envelope that carries requires. It must name a CLI built with that
+// parser: if a CLI at this version ships without it, raise this constant to
+// the first that has it (TestRelayBlindRequiresFloorMatchesProviderSource).
+const relayBlindRequiresFirstBinary = "1.8.242"
+
 // relayBlindProviderMeetsRequires reports whether provider's CLI supports
-// every SPEC-041-R003 capability the request declares.
+// every SPEC-041-R003 capability the request declares: it parses requires
+// and serves SPEC-019 §1a non-strict mode.
 func relayBlindProviderMeetsRequires(provider pool.Provider, requires []string) bool {
-	return !relayblind.RequiresNonStrictJSONSchema(requires) || providerAcceptsNonStrictJSONSchema(provider.BinaryVersion)
+	if !relayblind.RequiresNonStrictJSONSchema(requires) {
+		return true
+	}
+	cmp, ok := versionfloor.Compare(provider.BinaryVersion, relayBlindRequiresFirstBinary)
+	return ok && cmp >= 0 && providerAcceptsNonStrictJSONSchema(provider.BinaryVersion)
 }
 
 // writeRelayBlindCapabilityRefusal writes the capability gate's 400. A
@@ -489,7 +503,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		KeyRecord: key, Model: request.Model, ProviderModel: provider.ModelID, Stream: request.Stream,
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
-		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second,
+		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, Requires: request.Requires,
 	}, s.now())
 	if err != nil {
 		code := "relay_blind_required_unavailable"
@@ -862,10 +876,11 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind state is unavailable")
 		return
 	}
-	// SPEC-041-R004: recheck the envelope's capability declaration against the
-	// reserved provider; the reservation may have been made without it. A
-	// session that is gone fails the checks below.
-	if provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession); live && !relayBlindProviderMeetsRequires(provider, envelope.Requires) {
+	// SPEC-041-R004: the envelope must carry the reservation's capability
+	// declaration, and the reserved provider must support it. A session that
+	// is gone fails the checks below.
+	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
+	if !slices.Equal(reservation.Requires, envelope.Requires) || live && !relayBlindProviderMeetsRequires(provider, envelope.Requires) {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, relayBlindCapabilityRefusalCode, s.now())
 		s.writeRelayBlindCapabilityRefusal(w, r, relayblind.PrivacyRejectPhaseConsume, reservation.PrivacyClass)
 		return
@@ -892,7 +907,6 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind requests are unavailable")
 		return
 	}
-	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
 	_, keyErr := s.relayBlind.store.LookupKeyRecord(r.Context(), reservation.ProviderID, reservation.AssignedSession, reservation.KID, reservation.KeyRecordDigest, s.now())
 	if !live || !relayBlindBindable(provider) || !provider.IsWSTunneled() || keyErr != nil || s.relayBlindSettlementPrerequisite(provider) != "" {
 		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, "relay_blind_key_expired", s.now())

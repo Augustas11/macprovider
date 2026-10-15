@@ -364,6 +364,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
+		Requires: request.Requires,
 	}, s.now())
 	if err != nil {
 		if errors.Is(err, relayblind.ErrCapacity) {

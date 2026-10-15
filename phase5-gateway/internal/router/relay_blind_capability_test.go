@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -77,4 +78,45 @@ func TestRelayBlindCapabilityDeclarationForwardedAndRefusalPassedThrough(t *test
 		}
 	}
 	assertRefusal(post("/v1/chat/completions", envelope))
+}
+
+// A malformed envelope requires member is rejected before replay admission
+// and never reaches the coordinator.
+func TestRelayBlindEnvelopeMalformedRequiresRejectedBeforeReplay(t *testing.T) {
+	res, _ := pilotReservationFixture(t, false)
+	envelope := pilotEnvelopeFixture(t, res)
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	h, store, path, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+		c.Features.RelayBlindRequests.Enabled = true
+		c.Coordinator.BuyerURL = upstream.URL
+	})
+	key := createAccountAndKey(t, store, cfg, "pilot-account")
+	for _, member := range []string{`[]`, `null`, `["other"]`, `["json_schema_non_strict","json_schema_non_strict"]`} {
+		body := append(bytes.TrimSuffix(bytes.TrimSpace(envelope), []byte(`}`)), []byte(`,"requires":`+member+`}`)...)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set("X-Request-ID", "123e4567-e89b-42d3-a456-426614174088")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("requires %s: status=%d body=%s", member, w.Code, w.Body.String())
+		}
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("malformed requires reached the coordinator %d times", upstreamCalls.Load())
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows int
+	if err := db.QueryRow("SELECT count(*) FROM relay_blind_replays").Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("malformed requires created %d replay rows (err %v)", rows, err)
+	}
 }

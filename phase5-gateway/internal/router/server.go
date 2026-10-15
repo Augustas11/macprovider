@@ -1491,6 +1491,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
 	"invalid_limit": true, "invalid_cursor": true, "invalid_settlement_target": true, "invalid_settlement_release_holds_request": true, "api_key_lookup_failed": true,
 	"ambiguous_credentials":                    true,
+	"json_schema_non_strict_unsupported":       true,
 	"request_content_encoding_unsupported":     true,
 	"unsupported_content_shape":                true,
 	"wallet_account_auth_required":             true,

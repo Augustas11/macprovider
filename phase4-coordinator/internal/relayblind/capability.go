@@ -83,8 +83,10 @@ func isJSONNull(raw json.RawMessage) bool {
 }
 
 // strictSubsetSchema reports whether a schema fits the SPEC-019 §3 strict
-// subset. It mirrors the coordinator's validateJSONSchemaRaw as a predicate;
-// a coordinator test keeps the two in agreement.
+// subset. It mirrors the coordinator's validateJSONSchemaRaw as a predicate,
+// a coordinator test keeps the two in agreement, and it is never more
+// permissive than the provider: where the two differ it reports false, so
+// the client declares rather than omits.
 func strictSubsetSchema(raw json.RawMessage, root bool, depth int) bool {
 	if depth > strictSchemaMaxDepth {
 		return false
@@ -94,8 +96,15 @@ func strictSubsetSchema(raw json.RawMessage, root bool, depth int) bool {
 		return false
 	}
 	allowed := map[string]bool{"type": true, "properties": true, "required": true, "items": true, "enum": true, "const": true, "additionalProperties": true, "title": true, "description": true, "minimum": true, "maximum": true, "multipleOf": true}
-	for key := range node {
+	for key, value := range node {
 		if !allowed[key] && !(root && key == "$schema") {
+			return false
+		}
+		// The provider (Swift) rejects an explicit null structural keyword
+		// in strict mode and so runs the schema non-strict, while the
+		// coordinator's parser reads it as absent. Declaring here keeps the
+		// client a superset of both; over-declaring only narrows routing.
+		if key != "const" && isJSONNull(value) {
 			return false
 		}
 	}

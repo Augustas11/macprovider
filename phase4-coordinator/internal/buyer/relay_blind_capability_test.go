@@ -5,11 +5,14 @@ import (
 	"crypto/ecdh"
 	"encoding/json"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
 var nonStrictRequires = []string{relayblind.CapabilityJSONSchemaNonStrict}
@@ -100,11 +103,27 @@ func TestRelayBlindConsumeRejectsDeclaredCapabilityOnIncapableReservation(t *tes
 	}
 
 	provider.BinaryVersion = nonStrictJSONSchemaFirstBinary
-	response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", capabilityReservationBody(nil), "")
-	reservation, err = relayblind.ParseReservationResponse(response.Body.Bytes())
-	if response.Code != http.StatusOK || err != nil {
-		t.Fatalf("reservation status=%d err=%v", response.Code, err)
+	reserve := func(requires []string) relayblind.ReservationResponse {
+		t.Helper()
+		response := relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/route-reservations", capabilityReservationBody(requires), "")
+		reservation, err := relayblind.ParseReservationResponse(response.Body.Bytes())
+		if response.Code != http.StatusOK || err != nil {
+			t.Fatalf("reservation status=%d err=%v", response.Code, err)
+		}
+		return reservation
 	}
+	// The envelope must carry exactly the reservation's declaration, in both
+	// directions, even on a capable CLI.
+	for name, pair := range map[string][2][]string{"reservation only": {nonStrictRequires, nil}, "envelope only": {nil, nonStrictRequires}} {
+		reservation := reserve(pair[0])
+		raw := sealWithRequires(t, reservation, "capability-mismatch-"+strings.ReplaceAll(name, " ", "-"), now, providerPrivate, pair[1])
+		response := relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/consume", raw, "")
+		assertCapabilityRefusal(t, response.Code, response.Body.String())
+		if held, err := server.relayBlind.store.LookupReservation(t.Context(), reservation.ProviderBinding); err != nil || held.State != "rejected" {
+			t.Fatalf("%s: reservation state=%q err=%v, want rejected", name, held.State, err)
+		}
+	}
+	reservation = reserve(nonStrictRequires)
 	raw = sealWithRequires(t, reservation, "capability-consume-ok", now, providerPrivate, nonStrictRequires)
 	if response = relayBlindRequest(t, server, http.MethodPost, "/v1/relay-blind/consume", raw, ""); response.Code != http.StatusOK {
 		t.Fatalf("declared consume on capable CLI status=%d body=%s", response.Code, response.Body.String())
@@ -203,4 +222,35 @@ func countRelayBlindReservations(t *testing.T, server *Server) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+// The requires floor must name a CLI that parses requires (SPEC-041 v0.6.0):
+// a provider source tree whose binaryVersion is at or above the floor must
+// contain the R003 parser and the R005 check, and the floor is never below
+// the SPEC-019 §1a non-strict floor.
+func TestRelayBlindRequiresFloorMatchesProviderSource(t *testing.T) {
+	if cmp, ok := versionfloor.Compare(relayBlindRequiresFirstBinary, nonStrictJSONSchemaFirstBinary); !ok || cmp < 0 {
+		t.Fatalf("requires floor %s is below the non-strict floor %s", relayBlindRequiresFirstBinary, nonStrictJSONSchemaFirstBinary)
+	}
+	client, err := os.ReadFile("../../../phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`static let binaryVersion = "([0-9.]+)"`).FindSubmatch(client)
+	if match == nil {
+		t.Fatal("provider binaryVersion not found")
+	}
+	provider, err := os.ReadFile("../../../phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parses := bytes.Contains(provider, []byte(`static let requiresKey = "requires"`)) && bytes.Contains(provider, []byte(`!envelope.requires.contains(RelayBlindEnvelope.capabilityJSONSchemaNonStrict)`))
+	if !parses {
+		t.Fatal("provider source lacks the SPEC-041 v0.6.0 requires parser or R005 check")
+	}
+	if cmp, ok := versionfloor.Compare(string(match[1]), relayBlindRequiresFirstBinary); !ok {
+		t.Fatalf("provider binaryVersion %q does not parse", match[1])
+	} else if cmp < 0 {
+		t.Logf("provider source %s is below the requires floor %s", match[1], relayBlindRequiresFirstBinary)
+	}
 }

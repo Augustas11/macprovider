@@ -140,7 +140,7 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 	// SPEC-041-R004: the coordinator's capability-gate 400 is the plaintext
 	// path's SPEC-019 code and passes through unchanged.
 	if decoded && wire.Error.Code == relayBlindCapabilityRefusalCode && resp.StatusCode == http.StatusBadRequest {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", relayBlindCapabilityRefusalCode, "Non-strict structured output is unsupported in SPEC-019 v0.1.0")
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0")
 		return
 	}
 	if json.Unmarshal(body, &wire) == nil && strings.HasPrefix(wire.Error.Code, "relay_blind_") {

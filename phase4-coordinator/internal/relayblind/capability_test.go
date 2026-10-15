@@ -53,6 +53,12 @@ func TestRequiredCapabilitiesFollowsSPEC019Modes(t *testing.T) {
 		{"absent strict good bounds", jsonSchema("", `{"type":"number","minimum":1,"maximum":5,"multipleOf":0.5}`), nil},
 		{"absent strict enum type mismatch", jsonSchema("", `{"type":"integer","enum":[1,"a"]}`), nonStrict},
 		{"absent strict array without items", jsonSchema("", `{"type":"array"}`), nonStrict},
+		{"absent strict null properties", jsonSchema("", `{"type":"object","properties":null,"additionalProperties":false}`), nonStrict},
+		{"absent strict null required", jsonSchema("", `{"type":"object","properties":{},"required":null,"additionalProperties":false}`), nonStrict},
+		{"absent strict null additionalProperties", jsonSchema("", `{"type":"object","additionalProperties":null}`), nonStrict},
+		{"absent strict null enum", jsonSchema("", `{"type":"string","enum":null}`), nonStrict},
+		{"absent strict null const on null type", jsonSchema("", `{"type":"null","const":null}`), nil},
+		{"absent strict lexical float integer enum", jsonSchema("", `{"type":"integer","enum":[1.0]}`), nonStrict},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
