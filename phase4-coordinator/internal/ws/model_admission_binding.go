@@ -310,10 +310,17 @@ func (s *Server) scheduleModelAdmissionBindingRefreshRetry(providerID string, ex
 	if s.modelAdmissions == nil || s.pool == nil {
 		return
 	}
+	s.bindingRetries.Add(1)
 	go func() {
+		defer s.bindingRetries.Done()
 		var exhaustedClosed bool
 		for attempt := 0; attempt < modelAdmissionBindingRefreshRetryAttempts; attempt++ {
-			time.Sleep(modelAdmissionBindingRefreshRetryDelay << attempt)
+			delay := time.NewTimer(modelAdmissionBindingRefreshRetryDelay << attempt)
+			select {
+			case <-delay.C:
+			case <-s.bindingRetryWake:
+				delay.Stop()
+			}
 			var stop bool
 			s.withProviderSection(providerID, func(section *providerSection) {
 				ctx, cancel := context.WithTimeout(context.Background(), modelAdmissionBindingRefreshRetryTimeout)

@@ -80,6 +80,14 @@ type Server struct {
 	cfg                       config.Config
 	minProviderThroughputBits atomic.Uint64
 
+	// bindingRetries counts in-flight model-admission binding refresh retry
+	// goroutines, and bindingRetryWake (nil in production, so a retry always
+	// sleeps its full backoff) lets a test cut a sleeping retry short.
+	// Production never uses either; they exist so tests can quiesce retries
+	// before mutating Server fields the retries read (#2005).
+	bindingRetries   sync.WaitGroup
+	bindingRetryWake chan struct{}
+
 	// catalogMaterialRoutingGate is the buyer router's SPEC-022 R-2.7 verdict
 	// (true = excluded), injected at wiring time because ws cannot import buyer.
 	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
