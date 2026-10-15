@@ -66,7 +66,7 @@ type AppAttestRecorder interface {
 // attested public key (AppleAppAttestVerifier). The submit path needs it to
 // record the key with its id.
 type AppAttestKeyVerifier interface {
-	VerifyKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error)
+	AttestedKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error)
 }
 
 type appAttestChallenge struct {
@@ -290,7 +290,7 @@ func (h *Handler) HandleAppAttestSubmit(w http.ResponseWriter, r *http.Request) 
 	}
 	verifier, _ := h.AppAttestVerifier.(AppAttestKeyVerifier)
 	verifyCtx, cancelVerify := context.WithTimeout(r.Context(), appAttestStoreTimeout)
-	publicKey, attested, err := verifier.VerifyKey(verifyCtx, AppAttestEvidence{
+	publicKey, attested, err := verifier.AttestedKey(verifyCtx, AppAttestEvidence{
 		Object:         attestation,
 		KeyID:          keyID,
 		ClientDataHash: sha256.Sum256(clientData),

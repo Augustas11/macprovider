@@ -28,14 +28,14 @@ type AppleAppAttestVerifier struct {
 // ErrAppAttestTransient when the verifier itself cannot run (missing pins,
 // unusable root, cancelled context).
 func (v AppleAppAttestVerifier) Verify(ctx context.Context, evidence AppAttestEvidence) (bool, error) {
-	_, attested, err := v.VerifyKey(ctx, evidence)
+	_, attested, err := v.AttestedKey(ctx, evidence)
 	return attested, err
 }
 
-// VerifyKey is Verify that also returns the attested 65-byte uncompressed
+// AttestedKey is Verify that also returns the attested 65-byte uncompressed
 // P-256 public key when the attestation passes every check, so the recorder
 // can keep it with the key id (SPEC-033-R004).
-func (v AppleAppAttestVerifier) VerifyKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error) {
+func (v AppleAppAttestVerifier) AttestedKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, ErrAppAttestTransient
 	}

@@ -1551,7 +1551,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. A full signed v0.2 journey and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
+        "rationale": "SPEC-049 v0.2.0 defines the Beta operator-constrained privacy class with automatic provider enrollment, release-derived code approval, and the operator-signed identity directory. The coordinator, gateway, and buyer client stay default-off; the provider enters the class only on an eligible signed host. It is implemented locally with unit and integration tests. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (journeys/evidence/privacy-class-beta-20261006T043016Z.journey-result.signed.json), and the v0.1.4 one-time staged-canary activation exception is recorded (SPEC-049 §8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the code_bound_attested label (SPEC-049-R033..SPEC-049-R035), granted per posture only when the App Attest key SPEC-033 recorded for the provider asserts it; providers without App Attest keep the device-bound label. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending; every requirement stays pending. No conformance promotion is made."
       }
     },
     {
@@ -3834,7 +3834,9 @@
         "phase4-coordinator/internal/onboarding/appattest_submit.go:func (h *Handler) HandleAppAttestSubmit",
         "phase4-coordinator/internal/onboarding/store_pg.go:RecordAppAttestVerification",
         "phase3-binary/Sources/macprovider-cli/AppAttestCommand.swift:struct AppAttestClient",
-        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome"
+        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome",
+        "phase4-coordinator/internal/onboarding/store_pg.go:RecordedAppAttestKey",
+        "phase4-coordinator/internal/onboarding/appattest.go:func (v AppleAppAttestVerifier) AttestedKey"
       ],
       "tests": [
         "phase4-coordinator/internal/appattest/real_macos27_test.go::TestRealMacOS27Attestation",
@@ -3846,7 +3848,9 @@
         "phase4-coordinator/internal/stats/integration_test.go::TestHardwareTrustAppAttestAutoTrust",
         "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testSubmitBodyHasExactlyThreeKeysAndTrimsStdinWhitespace",
         "phase3-binary/Tests/macprovider-cliTests/AppAttestCommandTests.swift::testCommandsNeverAcceptATokenOnArgv",
-        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift::testSuccessAttestsClientDataHashAndSubmitsExactArguments"
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift::testSuccessAttestsClientDataHashAndSubmitsExactArguments",
+        "phase4-coordinator/internal/onboarding/appattest_submit_test.go::TestAppAttestAlreadyRecordedReturnsTheFirstKeyID",
+        "phase4-coordinator/internal/stats/migrations/migrations_test.go::TestAppAttestPublicKeyMigrationShape"
       ],
       "journeys": [],
       "evidence": [],
@@ -11156,12 +11160,15 @@
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyScope",
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
         "phase5-gateway/internal/router/privacy_class.go:privacyScope",
-        "phase5-gateway/internal/router/privacy_class.go:privacyResidualRisks"
+        "phase5-gateway/internal/router/privacy_class.go:privacyResidualRisks",
+        "phase5-gateway/internal/router/privacy_class.go:privacyCodeBoundScope",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyCodeBoundScope"
       ],
       "tests": [
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
         "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientDecryptsStreamAndNonStream",
-        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly"
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyRuntimeHardeningTests.swift:testIdentityDocumentIsPublicMaterialOnly",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyCodeBoundStringsArePinned"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11621,11 +11628,15 @@
       "implementation": [
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyDisclosureAgrees",
         "phase5-gateway/cmd/relay-blind-client/main.go:privacyResidualRisks",
-        "phase5-gateway/internal/router/privacy_class.go:privacyUsageObject"
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageObject",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadataFor",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyLabelStrings"
       ],
       "tests": [
         "phase5-gateway/internal/router/privacy_class_test.go:TestPrivacyUsageMetadataExactStrings",
-        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers"
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsMissingR020Headers",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyChatDisclosureFollowsTheEchoedLabel",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientCodeBoundRequirement"
       ],
       "journeys": [
         "JOURNEY-PRIVACY-CLASS-BETA",
@@ -11899,7 +11910,8 @@
         "phase4-coordinator/internal/buyer/privacy_class.go:selectPrivacyProvider",
         "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyRouteRejection",
         "phase5-gateway/internal/relayblind/privacy_reject.go:NormalizePrivacyRejectReason",
-        "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection"
+        "phase5-gateway/internal/router/privacy_reject.go:notePrivacyUpstreamRejection",
+        "phase4-coordinator/internal/buyer/privacy_reject.go:closerPrivacyReject"
       ],
       "tests": [
         "phase4-coordinator/internal/relayblind/privacy_reject_test.go:TestPrivacyRejectReasonsAreClosed",
@@ -11912,7 +11924,8 @@
         "phase4-coordinator/internal/buyer/privacy_reject_test.go:TestPrivacyRejectReasonHeaderOnlyForGateway",
         "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestPrivacyRouteRejectionMetrics",
         "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsUpstreamRejectReason",
-        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsConsumePhase"
+        "phase5-gateway/internal/router/privacy_reject_test.go:TestPrivacyGatewayRecordsConsumePhase",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundRequirementReservesOnlyCodeBoundSessions"
       ],
       "journeys": [],
       "evidence": [],
@@ -12012,6 +12025,115 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1985",
         "rationale": "SPEC-049 v0.4.0 Trusted Pool composition (#1985) is implemented in the coordinator, gateway, and reference client with unit and integration tests. It needs no provider change. It ships in a later runtime train; the requirement stays pending until deployed and a live pool-scoped privacy-class request is observed through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R033",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:evaluateCodeBound",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:ParseCodeBoundEvidence",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:AdvanceAppAttestCounter",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound.go:UseCodeBound",
+        "phase4-coordinator/internal/relayblind/privacy_authority.go:VerifyPostureWithEvidence",
+        "phase4-coordinator/internal/ws/privacy_posture.go:handlePrivacyCodeBoundEvidence",
+        "phase4-coordinator/internal/stats/metrics/metrics.go:IncPrivacyCodeBoundRejection",
+        "phase4-coordinator/cmd/coordinator/main.go:appAttestRecordLookup"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundPostureEarnsTheLabel",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundFailuresOnlyWithholdTheLabel",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundUnconfiguredIsDeviceBound",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundCounterIsDurableAndStrictlyIncreasing",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundEvidenceNeverChangesPostureVerdict",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestCodeBoundEvidenceIsClosed",
+        "phase4-coordinator/internal/relayblind/privacy_code_bound_test.go:TestPrivacyCodeBoundVector",
+        "phase4-coordinator/internal/ws/privacy_code_bound_test.go:TestPrivacyCodeBoundEvidenceRoundTrip",
+        "phase4-coordinator/internal/stats/metrics/metrics_test.go:TestPrivacyCodeBoundRejectionMetrics"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R034",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyAssuranceRequested",
+        "phase4-coordinator/internal/buyer/privacy_class.go:privacyGateExplain",
+        "phase4-coordinator/internal/buyer/privacy_class.go:handlePrivacyClassReservation",
+        "phase4-coordinator/internal/relayblind/store.go:CreateReservation",
+        "phase4-coordinator/internal/relayblind/privacy.go:PrivacyAssuranceKnown",
+        "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceRequested",
+        "phase5-gateway/internal/router/privacy_class.go:privacyAssuranceEcho",
+        "phase5-gateway/internal/router/privacy_class.go:privacyUsageMetadataFor",
+        "phase5-gateway/internal/router/relay_blind_success.go:relayBlindUpstream",
+        "phase5-gateway/cmd/relay-blind-client/main.go:requirePrivacyReservation",
+        "phase5-gateway/cmd/relay-blind-client/main.go:privacyLabelStrings"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundRequirementReservesOnlyCodeBoundSessions",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyCodeBoundReservationLapsesBeforeDispatch",
+        "phase4-coordinator/internal/buyer/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementIsClosed",
+        "phase4-coordinator/internal/relayblind/privacy_test.go:TestPrivacyReservationVersionClosed",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyCodeBoundStringsArePinned",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyAssuranceRequirementForwardedOnReservationOnly",
+        "phase5-gateway/internal/router/privacy_code_bound_test.go:TestPrivacyChatDisclosureFollowsTheEchoedLabel",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientCodeBoundRequirement",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsAnotherLabelBeforeSend",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientRejectsALabelSwapAfterSend",
+        "phase5-gateway/cmd/relay-blind-client/main_test.go:TestPrivacyClientAssuranceFlagIsClosed"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R035",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:final class PrivacyCodeBoundAttestorCore",
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:final class PrivacyCodeBoundAttestorServer",
+        "phase3-binary/app/Sources/Malibu/Agent/PrivacyCodeBoundAttestor.swift:struct KernelPrivacyCodeBoundPeerInspector",
+        "phase3-binary/app/Sources/Malibu/Agent/AppAttestEnrollment.swift:func run(providerID: String) async -> Outcome",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBoundShared.swift:struct PrivacyCodeBoundStatement",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:struct PrivacyCodeBoundSocketAttestor",
+        "phase3-binary/Sources/macprovider-cli/PrivacyCodeBound.swift:enum PrivacyCodeBoundEvidence",
+        "phase3-binary/Sources/macprovider-cli/PrivacyPostureResponder.swift:respondWithCodeBound"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testAssertsTheStatementItFramedWithTheRecordedKey",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testRefusesAnyOtherPeer",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testRefusesWithoutAKeyOrAfterTheKeyFailed",
+        "phase3-binary/app/Tests/MalibuTests/PrivacyCodeBoundAttestorTests.swift:testServerAnswersOverItsSocketAndReadsThePeerFromTheKernel",
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift:testDoneWithoutKeyIDRecoversTheRecordedKeyID",
+        "phase3-binary/app/Tests/MalibuTests/AppAttestEnrollmentTests.swift:testSubmitAlreadyRecordedKeepsTheRecordedKeyID",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testStatementFramingMatchesSharedVector",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testEvidenceOnlyForAnEchoingAttestor",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSocketAttestorExchangesOneFrame",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyCodeBoundTests.swift:testSocketAttestorFailsFastWithoutTheApp",
+        "phase3-binary/Tests/macprovider-cliTests/PrivacyPostureResponderTests.swift:testPostureCarriesCodeBoundEvidenceFirst"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1911",
+        "rationale": "SPEC-049 v0.5.0 code-bound posture key (#1911) is implemented in the coordinator, gateway, reference client, provider CLI and Malibu.app with unit tests and the shared framing vector test/fixtures/relay-blind/privacy-code-bound-v1.json. It needs the SPEC-033 recorder and migration 033 deployed, a runtime train, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a code_bound_attested request through the gateway. The requirement stays pending."
       }
     },
     {
