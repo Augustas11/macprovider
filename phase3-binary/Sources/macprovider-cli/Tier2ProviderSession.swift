@@ -61,6 +61,18 @@ final class Tier2ProviderSession: @unchecked Sendable {
     private var c2pCounter: UInt64 = 0
     private var p2cCounter: UInt64 = 0
 
+    #if MACPROVIDER_TEST_FIXTURES
+    private var responseEndTransformForTest: (@Sendable ([String: Any]) throws -> [String: Any])?
+
+    /// Malicious-provider fixtures alter the constructed receipt before it is
+    /// sealed, so the coordinator receives it through the normal authenticated leg.
+    func setResponseEndTransformForTest(_ transform: @escaping @Sendable ([String: Any]) throws -> [String: Any]) {
+        lock.lock()
+        defer { lock.unlock() }
+        responseEndTransformForTest = transform
+    }
+    #endif
+
     init(
         providerID: String,
         assignedID: String,
@@ -378,6 +390,12 @@ final class Tier2ProviderSession: @unchecked Sendable {
     }
 
     func sealResponseEnd(requestID: String, stream: Bool, payload: [String: Any]) throws -> [String: Any] {
+        #if MACPROVIDER_TEST_FIXTURES
+        lock.lock()
+        let transform = responseEndTransformForTest
+        lock.unlock()
+        let payload = try transform?(payload) ?? payload
+        #endif
         let plaintext = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         lock.lock()
         defer { lock.unlock() }
