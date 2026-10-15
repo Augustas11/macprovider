@@ -95,7 +95,7 @@ func (s *Store) Grant(ctx context.Context, accountID, conversationKey, providerI
 	if accountID == "" || conversationKey == "" || providerID == "" {
 		return Grant{}, fmt.Errorf("%w: empty grant scope", ErrUnavailable)
 	}
-	conversationKey = providerConversationKey(accountID, conversationKey)
+	conversationKey = providerConversationKey(accountID, conversationKey, providerID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Grant{}, fmt.Errorf("%w: begin grant: %v", ErrUnavailable, err)
@@ -132,7 +132,7 @@ func (s *Store) Grant(ctx context.Context, accountID, conversationKey, providerI
 	return Grant{ConversationKey: conversationKey, Generation: generation}, nil
 }
 
-func providerConversationKey(accountID, gatewayKey string) string {
+func providerConversationKey(accountID, gatewayKey, providerID string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte("spec037-v0.2-fleet-cache-grant-v1\n"))
 	var size [8]byte
@@ -142,6 +142,9 @@ func providerConversationKey(accountID, gatewayKey string) string {
 	binary.BigEndian.PutUint64(size[:], uint64(len(gatewayKey)))
 	_, _ = h.Write(size[:])
 	_, _ = h.Write([]byte(gatewayKey))
+	binary.BigEndian.PutUint64(size[:], uint64(len(providerID)))
+	_, _ = h.Write(size[:])
+	_, _ = h.Write([]byte(providerID))
 	return "conv:" + hex.EncodeToString(h.Sum(nil))
 }
 

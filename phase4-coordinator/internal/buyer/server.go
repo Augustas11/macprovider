@@ -4001,7 +4001,11 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	// Demo traffic never receives either key (unauthenticated IPs cannot poison
 	// a bucket). Providers whose binary cannot serve a keyed request get no key
 	// (FR-SR-2 forwarding is a MAY; see providerAcceptsConversationKey).
-	acceptsKey := (state == nil || !state.hasVision) && providerAcceptsConversationKey(provider.BinaryVersion)
+	privacyExecution := strings.TrimSpace(r.Header.Get(relayBlindExecutionAuthorizationHeader)) != ""
+	if present, _ := privacyRequested(r); present {
+		privacyExecution = true
+	}
+	acceptsKey := !privacyExecution && (state == nil || !state.hasVision) && providerAcceptsConversationKey(provider.BinaryVersion)
 	if !acceptsKey && state != nil && hasForwardableConversationKey(r.Header) {
 		state.conversationKeyWithheld = true
 		state.conversationCacheOnly = false

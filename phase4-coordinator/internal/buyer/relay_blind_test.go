@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -27,8 +29,11 @@ func TestRelayBlindHTTPFlowPersistsValidationBeforeSuccess(t *testing.T) {
 		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
 			now := time.Unix(1_800_100_000, 0).UTC()
 			var dispatches atomic.Int32
-			server, record, providerPrivate, closeStore := relayBlindTestServer(t, now, func(_ context.Context, _ pool.Provider, requestID string, body []byte, gotStream bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
+			server, record, providerPrivate, closeStore, provider := relayBlindTestServerWithProvider(t, now, func(dispatchCtx context.Context, _ pool.Provider, requestID string, body []byte, gotStream bool, relayContext providerws.RelayBlindDispatchContext) (*providerws.RelayStream, error) {
 				dispatches.Add(1)
+				if providerws.FleetCacheFromContext(dispatchCtx) != nil || providerws.ConversationKeyFromContext(dispatchCtx) != "" {
+					t.Error("privacy dispatch received reusable conversation cache identity")
+				}
 				if gotStream != stream || requestID == "" || len(body) == 0 {
 					t.Errorf("unexpected dispatch stream=%v requestID=%q body=%d", gotStream, requestID, len(body))
 				}
@@ -51,6 +56,18 @@ func TestRelayBlindHTTPFlowPersistsValidationBeforeSuccess(t *testing.T) {
 				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs, Validations: validations}, nil
 			})
 			defer closeStore()
+			provider.FleetCacheProtocol = 1
+			cacheDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "fleet-cache.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cacheDB.SetMaxOpenConns(1)
+			defer cacheDB.Close()
+			cacheStore, err := fleetcache.NewStore(cacheDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server.fleetCache = cacheStore
 
 			reservationRequest := relayblind.ReservationRequest{EndpointFamily: relayblind.EndpointChatCompletions, Model: "model-a", Stream: stream, MaxOutputTokens: 32, InputTokenUpperBound: 96, EncryptedRequestBytes: 2048}
 			reservationRaw, _ := json.Marshal(reservationRequest)
@@ -85,7 +102,7 @@ func TestRelayBlindHTTPFlowPersistsValidationBeforeSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			response = relayBlindRequest(t, server, http.MethodPost, "/v1/chat/completions", envelopeRaw, consume.ExecutionAuthorization)
+			response = relayBlindRequestWithConversationKey(t, server, http.MethodPost, "/v1/chat/completions", envelopeRaw, consume.ExecutionAuthorization)
 			if response.Code != http.StatusOK {
 				t.Fatalf("chat status=%d body=%s", response.Code, response.Body.String())
 			}
@@ -97,6 +114,10 @@ func TestRelayBlindHTTPFlowPersistsValidationBeforeSuccess(t *testing.T) {
 			}
 			if dispatches.Load() != 1 {
 				t.Fatalf("dispatches=%d", dispatches.Load())
+			}
+			purge, err := cacheStore.PurgeAccount(context.Background(), "account-a")
+			if err != nil || len(purge.Pending) != 0 {
+				t.Fatalf("privacy dispatch registered reusable cache scope: %+v err=%v", purge, err)
 			}
 
 			statusRequest, _ := json.Marshal(relayblind.StatusRequest{ProviderBindingDigest: relayblind.BindingDigest(consume.ProviderBinding), EnvelopeDigest: consume.EnvelopeDigest})
@@ -447,6 +468,14 @@ func TestRelayBlindDoesNotBindPreAckSession(t *testing.T) {
 }
 
 func relayBlindRequest(t *testing.T, server *Server, method, path string, body []byte, executionAuthorization string) *httptest.ResponseRecorder {
+	return relayBlindRequestWithOptionalConversationKey(t, server, method, path, body, executionAuthorization, false)
+}
+
+func relayBlindRequestWithConversationKey(t *testing.T, server *Server, method, path string, body []byte, executionAuthorization string) *httptest.ResponseRecorder {
+	return relayBlindRequestWithOptionalConversationKey(t, server, method, path, body, executionAuthorization, true)
+}
+
+func relayBlindRequestWithOptionalConversationKey(t *testing.T, server *Server, method, path string, body []byte, executionAuthorization string, withConversationKey bool) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))
 	request.RemoteAddr = "127.0.0.1:43210"
@@ -456,6 +485,9 @@ func relayBlindRequest(t *testing.T, server *Server, method, path string, body [
 	request.Header.Set("Content-Type", "application/json")
 	if executionAuthorization != "" {
 		request.Header.Set(relayBlindExecutionAuthorizationHeader, executionAuthorization)
+	}
+	if withConversationKey {
+		request.Header.Set("X-MacProvider-Internal-Conv-Cache", "conv:gateway-derived")
 	}
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)

@@ -40,8 +40,15 @@ func TestGrantPurgeAckGenerationSurvivesRestart(t *testing.T) {
 	if otherAccount.ConversationKey == grant.ConversationKey {
 		t.Fatal("identical supplied key shared a provider-facing cache scope across accounts")
 	}
+	otherProvider, err := store.Grant(ctx, "acct-a", "conv:opaque", "provider-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherProvider.ConversationKey == grant.ConversationKey {
+		t.Fatal("identical account/key shared a provider-facing cache scope across providers")
+	}
 	result, err := store.PurgeAccount(ctx, "acct-a")
-	if err != nil || len(result.Pending) != 1 || result.Pending[0].Generation != 1 {
+	if err != nil || len(result.Pending) != 2 || result.Pending[0].Generation != 1 || result.Pending[1].Generation != 1 {
 		t.Fatalf("purge = %+v, %v", result, err)
 	}
 	if _, err := store.Grant(ctx, "acct-a", "conv:other", "provider-a"); !errors.Is(err, ErrPending) {
@@ -61,8 +68,12 @@ func TestGrantPurgeAckGenerationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := restarted.PendingForProvider(ctx, "provider-a")
-	if err != nil || len(pending) != 1 || pending[0] != result.Pending[0] {
+	if err != nil || len(pending) != 1 {
 		t.Fatalf("restarted pending = %+v, %v", pending, err)
+	}
+	providerBPending, err := restarted.PendingForProvider(ctx, "provider-b")
+	if err != nil || len(providerBPending) != 1 || providerBPending[0].ConversationKey != otherProvider.ConversationKey {
+		t.Fatalf("provider-b pending = %+v, %v", providerBPending, err)
 	}
 	matched, err := restarted.Ack(ctx, "provider-b", pending[0], true)
 	if err != nil || matched {
@@ -75,6 +86,9 @@ func TestGrantPurgeAckGenerationSurvivesRestart(t *testing.T) {
 	grant, err = restarted.Grant(ctx, "acct-a", "conv:opaque", "provider-a")
 	if err != nil || grant.Generation != 2 {
 		t.Fatalf("post-purge grant = %+v, %v", grant, err)
+	}
+	if _, err := restarted.Grant(ctx, "acct-a", "conv:opaque", "provider-b"); !errors.Is(err, ErrPending) {
+		t.Fatalf("provider-b grant crossed provider-a ACK fence: %v", err)
 	}
 }
 

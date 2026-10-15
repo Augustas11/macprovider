@@ -685,7 +685,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	internalConversation, convIsAutoPrefix, invalidConvTag := s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	var internalConversation string
+	var convIsAutoPrefix, invalidConvTag bool
+	// Relay-blind and privacy-class executions must never acquire reusable
+	// provider cache identity. Their ciphertext can share a plaintext prefix,
+	// and the provider-side privacy contract explicitly rejects cache grants.
+	if relayBlindExecutionFor(r) == nil {
+		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+	}
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
