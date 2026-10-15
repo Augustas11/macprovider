@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.4.0
+**Version:** 0.5.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,13 +10,13 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["operator-constrained-privacy-class"],
   "supersedes": [],
-  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-006", "SPEC-008", "SPEC-015", "SPEC-022", "SPEC-025", "SPEC-041", "SPEC-042"],
+  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-006", "SPEC-008", "SPEC-015", "SPEC-022", "SPEC-025", "SPEC-033", "SPEC-041", "SPEC-042"],
   "implementation_status": "pending-reconciliation",
   "production_status": "not-deployed",
   "last_reconciled_commit": null,
@@ -27,7 +27,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1749",
-    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. A full signed v0.2 journey and SPEC-049-R023 remain pending, and every requirement stays pending. No conformance promotion is made by this draft."
+    "rationale": "SPEC-049 defines the Beta operator-constrained privacy class. v0.2.0 adds automatic provider enrollment, release-derived code approval, and the operator-signed identity directory; the coordinator, gateway, and buyer client stay default-off and the provider enters the class only on an eligible signed host. The signed JOURNEY-PRIVACY-CLASS-BETA hardware result for the v0.1 requirement set is committed (#1839, #1864), and the v0.1.4 one-time staged-canary exception is recorded (§8.1, Entry 249) and superseded for v0.2.0 code by §8.2. The CLI224 eligible-network activation is recorded in §8.3 and Entries 251 and 252: the class runs in production under §8.3 without expiry, and SPEC-049-R023 promotion is not required for operation. v0.5.0 adds the `code_bound_attested` label (SPEC-049-R033..SPEC-049-R035), granted only to a posture asserted by the App Attest key that SPEC-033 recorded for the provider; providers without App Attest keep `device_bound_self_attested_beta` unchanged. A full signed v0.2 journey, a real-hardware code-bound run, and SPEC-049-R023 remain pending, and every requirement stays pending. No conformance promotion is made by this draft."
   }
 }
 ```
@@ -42,23 +42,29 @@ SPEC-049 defines a Beta privacy class, `operator_constrained_beta_v1`, layered o
 
 The provider runtime reads plaintext to infer. SPEC-049 does not hide content from the provider runtime. It constrains the ordinary paths by which the person operating the provider Mac could read that plaintext.
 
-### 1.1 Exact claim
+### 1.1 Exact claims
 
-The single assurance label for this class is `device_bound_self_attested_beta`. The exact claim is:
+The class has two assurance labels. The coordinator chooses the label of each verified posture from what it verified, never from a provider field (SPEC-049-R033), and a reservation carries the label the buyer asked for (SPEC-049-R034).
+
+`device_bound_self_attested_beta` is the default label and the only label of a provider without App Attest. Its exact claim is:
 
 > The provider runtime reads plaintext to infer. On a genuine, approved, signed release runtime, the documented ordinary operator access paths are blocked or refused by routing: debugger attach, core dumps, logs, traces, receipts, disk cache, plaintext proxy or subprocess, dev or debug builds, and SIP-off hosts. Posture and code identity are self-reported by the runtime and signed with a device-bound Secure Enclave key. That key is not bound to the code signature, so an operator who modifies the runtime binary can forge them.
 
-Buyer-facing surfaces carry the exact scope string, protection lists, and residual-risk lists fixed in SPEC-049-R020.
+`code_bound_attested` (v0.5.0) is granted only to a posture that passes every SPEC-049-R033 check. Its exact claim is:
+
+> The provider runtime reads plaintext to infer. On a genuine, approved, signed release runtime, the documented ordinary operator access paths are blocked or refused by routing, as for the device-bound label. In addition, the posture that admitted this request was asserted by the App Attest key that Apple certified for the team-signed Malibu.app on a Mac whose key access policy reported SIP and Full Security when the key was attested, and Malibu.app asserted it only after the kernel identified the requesting process as the team-signed provider runtime with the posture's code identity and hardened, non-debugged code-signing flags. That assertion binds the posture, its Secure Enclave key, and its identity key to that code identity. An operator who modifies or re-signs the runtime binary or Malibu.app cannot obtain the assertion. The coordinator, not the buyer, verifies it. A kernel or firmware compromise with SIP on, a compromised team signing key, or Apple itself can still defeat the claim.
+
+Buyer-facing surfaces carry the exact scope string, protection lists, and residual-risk lists fixed in SPEC-049-R020 for the label the request was served under.
 
 ### 1.2 Non-claims
 
-The privacy class MUST NOT be described as confidential compute, a hardware enclave, a TEE, provider-blind inference, end-to-end encryption that excludes the provider, code-bound attestation, remote attestation of the executing binary, anonymous routing, unlinkable settlement, protection against a root or kernel-level operator, or proof that the provider did not retain plaintext. It does not hide request metadata (account, model, sizes, timing, token counts, status, and the SPEC-041-R003 `requires` capability declaration, which says only whether the request needs SPEC-019 §1a non-strict `json_schema` mode) from relays.
+The privacy class MUST NOT be described as confidential compute, a hardware enclave, a TEE, provider-blind inference, end-to-end encryption that excludes the provider, buyer-verifiable attestation, Apple attesting the inference binary itself (Apple attests Malibu.app; Malibu.app checks the runtime through the kernel), anonymous routing, unlinkable settlement, protection against a root or kernel-level operator, or proof that the provider did not retain plaintext. It does not hide request metadata (account, model, sizes, timing, token counts, status, and the SPEC-041-R003 `requires` capability declaration, which says only whether the request needs SPEC-019 §1a non-strict `json_schema` mode) from relays. Under `device_bound_self_attested_beta` it MUST NOT be described as code-bound attestation or remote attestation of the executing binary. Under `code_bound_attested` it MAY be described only by the exact SPEC-049-R020 strings of that label, and never as proof of the GPU, unified-memory, or swap state.
 
 ### 1.3 Scope
 
-In scope for v0.2: the global pool and, from v0.4.0, an authorized Trusted Pool selection under SPEC-049-R032; endpoint family `chat_completions` only; stream and non-stream; the SPEC-041 reference buyer client (`relay-blind-client`) as the only decrypting client; native in-process MLX serving only; Secure Enclave posture keys and relay-blind identities enrolled automatically on the first attested session (operator-configured pins still override); code identities approved from signed release metadata plus an operator allow-list and deny list; buyer identity pins distributed through the operator-signed identity directory.
+In scope for v0.2: the global pool and, from v0.4.0, an authorized Trusted Pool selection under SPEC-049-R032; endpoint family `chat_completions` only; stream and non-stream; the SPEC-041 reference buyer client (`relay-blind-client`) as the only decrypting client; native in-process MLX serving only; Secure Enclave posture keys and relay-blind identities enrolled automatically on the first attested session (operator-configured pins still override); code identities approved from signed release metadata plus an operator allow-list and deny list; buyer identity pins distributed through the operator-signed identity directory. In scope from v0.5.0: the `code_bound_attested` label for a provider whose Malibu.app (macOS 27 or later, App Attest supported) holds the App Attest key that SPEC-033 §5.7.1 recorded for the provider ID, and whose runtime reaches that app's local attestor (SPEC-049-R035); the buyer's optional assurance requirement on the reservation.
 
-Out of scope for v0.2: `responses` and `messages` endpoint families; browser or third-party clients; loopback, subprocess, or IPC runtimes; a pool selection made by a wallet session or a demo account, and a pool-scoped plain SPEC-041 request without this class (both rejected, see SPEC-049-R022 and SPEC-049-R032); code-bound attestation; MDA SIP/SecureBoot evaluation; production activation.
+Out of scope for v0.2: `responses` and `messages` endpoint families; browser or third-party clients; loopback, subprocess, or IPC runtimes; a pool selection made by a wallet session or a demo account, and a pool-scoped plain SPEC-041 request without this class (both rejected, see SPEC-049-R022 and SPEC-049-R032); App Attest in the standalone CLI, daemons, or the development (`appattestdevelop`) environment; buyer-side verification of the App Attest assertion; App Attest fraud-metric receipt evaluation; MDA SIP/SecureBoot evaluation; production activation.
 
 ### 1.4 Carry-forward from earlier planning
 
@@ -92,8 +98,8 @@ The protected asset is the plaintext of one privacy-class request and its respon
 
 - **Relays (gateway, coordinator, their operators, and their logs/stores).** They see buyer authentication, model, caps, sizes, timing, token counts, status, and opaque ciphertext. They MUST NOT obtain request or response plaintext.
 - **Ordinary provider operator.** A non-root user, or an administrator acting through ordinary tools, on the provider Mac who runs the approved signed release unmodified and tries to read plaintext through: attaching a debugger (`lldb`, `dtrace` pid provider, `task_for_pid`); inducing core dumps; reading logs, trace output, receipts, telemetry, or state files; reading the KV disk tier or conversation cache; routing the runtime through a plaintext loopback proxy or subprocess; running a dev, debug, unsigned, or re-signed build; or running on a host with System Integrity Protection disabled. The privacy class constrains this adversary.
-- **Modifying operator.** An operator who patches or rebuilds the runtime binary. Because the Secure Enclave posture key is device-bound and not code-bound (§2.4), this adversary can forge posture and code identity. The privacy class does not constrain this adversary; it is disclosed as a residual risk.
-- **Privileged operator.** Root with SIP bypass, kernel extension, firmware, or hardware access. Not constrained; disclosed.
+- **Modifying operator.** An operator who patches, rebuilds, or re-signs the runtime binary or Malibu.app. Because the Secure Enclave posture key is device-bound and not code-bound (§2.4), this adversary can forge posture and code identity and is served `device_bound_self_attested_beta` reservations; that label discloses it as a residual risk. It cannot obtain a `code_bound_attested` posture (§2.7).
+- **Privileged operator.** Root with SIP bypass, kernel extension, firmware, or hardware access, or a kernel compromise while SIP stays on. Not constrained under either label; disclosed.
 - **Credential holder.** Anyone who holds a provider's admission credential and can open an authenticated provider session for its provider ID, including from a different Mac. Before enrollment this adversary can enroll keys it controls (§2.6). After enrollment it cannot replace the enrolled keys without a quarantine (SPEC-049-R026).
 - **Coordinator operator and coordinator host.** The coordinator holds the enrollment table and the online directory signing key (SPEC-049-R028). Whoever controls the coordinator host can enroll or sign a provider identity of its choice and route privacy-class requests to it. v0.1 kept the buyer pin outside the coordinator path; v0.2 puts the coordinator in the buyer's trust path for provider identity. Disclosed (§2.6).
 
@@ -142,6 +148,37 @@ Enrollment does not protect against:
 - the residual risks of §2.5, which are unchanged.
 - whoever holds the enrolled identity key and can sign with the device's Secure Enclave key rotating the identity to a key of its choice (SPEC-049-R031). That party can already sign postures and key records as the provider, so rotation adds no capability.
 
+### 2.7 Code-bound posture (v0.5.0)
+
+App Attest is available only to a full Mac app's main executable in a user session on macOS 27 or later; the standalone CLI, daemons, and extensions cannot use it. SPEC-033 §5.7.1 already has Malibu.app attest one App Attest key per provider ID and records it, first key wins, under the provider ID bound to the provider bearer. SPEC-049 reuses that recorded key; it creates no second App Attest key and no second attestation. The binding works as follows:
+
+- Apple's attestation, verified once by SPEC-033 §5.7.2, certifies that the key belongs to App ID `<team>.tech.malibu.app` on a genuine Mac and that its access policy reported SIP and Full Security. A re-signed or modified Malibu.app cannot use the key.
+- Malibu.app runs a local attestor (SPEC-049-R035). Before every assertion it takes the requesting process's audit token from the kernel and requires that process to be the team-signed `live.malibu.provider.cli` with valid dynamic code and hardened, non-debugged code-signing flags. It then signs, with an App Attest assertion, a closed statement that binds the posture digest, the provider's Secure Enclave and identity public keys, and the runtime code identity it observed (§4.13).
+- The coordinator verifies that assertion against the public key SPEC-033 recorded for the provider ID, requires a strictly increasing durable counter, and requires the observed code identity to equal the posture's approved code identity (SPEC-049-R033).
+
+Compared with §2.4, a code-bound posture is no longer "a process on the device signed this" but "the Apple-certified, team-signed Malibu.app vouched, after a kernel check, that the approved runtime with these keys produced this posture". Apple certifies the app, not the runtime; the runtime's identity is proven by the attested app's check. The Secure Enclave and identity keys stay device-bound: a modifying operator can still sign device-bound postures with them, which is why the code-bound label is per posture and a buyer asks for it (SPEC-049-R034). The Secure Enclave key never rotates in band (SPEC-049-R031), and the identity key may rotate: every code-bound posture names the current identity key, so a rotation needs no new App Attest binding.
+
+### 2.8 Residual risks (code-bound label)
+
+The following residual risks remain under `code_bound_attested` and MUST be disclosed by SPEC-049-R020:
+
+- a kernel or firmware compromise while SIP stays on can subvert the attestor's check or the runtime's memory;
+- physical or hardware attacks;
+- GPU and unified-memory residue after a request;
+- encrypted swap and hibernation images containing plaintext pages;
+- compromise of the live runtime process (memory-safety bug, malicious model artifact);
+- a malicious signed release or supply-chain compromise;
+- a compromised team signing key can sign a malicious app or runtime that passes every check;
+- Apple is the root of trust for the attestation, the access-policy semantics, and the key binding;
+- SIP and Full Security are attested when the App Attest key is attested; later postures carry only the runtime's own `csr_check` result;
+- the label is verified by the coordinator; the buyer trusts the coordinator for it and cannot verify the assertion itself;
+- register and stack residue in crash reports;
+- the Secure Boot security level is not evaluated;
+- immutable Swift `String` copies of the prompt cannot be zeroized;
+- relays observe sizes, timing, and token counts;
+- provider identity is enrolled on the first attested session of a provider ID (§2.6);
+- the coordinator operator signs the provider identity directory (§2.6).
+
 ## 3. Authority and composition
 
 SPEC-049 owns authority domain `operator-constrained-privacy-class`: the privacy-class marker and its end-to-end binding, the posture statement and its verification, privacy key records and key attestations, the enrollment claim and the durable enrollment of privacy identities, release-derived code approval, the operator-signed identity directory, response encryption, the privacy routing gate, quarantine and kill switch, the privacy error inventory, and privacy disclosure strings.
@@ -152,10 +189,11 @@ SPEC-049 owns authority domain `operator-constrained-privacy-class`: the privacy
 - **SPEC-015** owns receipts. The v0.4 tuple is unchanged and privacy-class work never emits one. Its only receipt is the content-free §N.13 `relay-blind-settlement-v1` receipt (SPEC-049-R010).
 - **SPEC-022** owns verified-model settlement. Privacy-class work is excluded from `verified` as relay-blind work is. Under `enforce` it settles only through the SPEC-022 R-14 relay-blind lane as `relay_blind_settled`.
 - **SPEC-005** owns settlement arithmetic. Unchanged.
-- **SPEC-025** owns the signed `pearl-release.json` and its §6.2.1 `provider_code_identity`. SPEC-049 consumes that field as an approval source (SPEC-049-R027) and does not change it.
-- **SPEC-001** owns provider wire framing. SPEC-049 adds the `privacy_class` field on `inference_request`, the `privacy_posture_challenge` / `privacy_posture_response` messages, the optional `privacy_key_rotation_request` / `privacy_key_rotation_challenge` / `privacy_key_rotation` / `privacy_key_rotation_result` messages (§4.12), and the `privacy_key_records` and `privacy_enrollment` advertisement fields.
+- **SPEC-025** owns the signed `pearl-release.json` and its §6.2.1 `provider_code_identity`, and Malibu.app. SPEC-049 consumes that field as an approval source (SPEC-049-R027) and does not change it. Malibu.app hosts the SPEC-049-R035 attestor; its App Attest entitlement and signing are SPEC-025 §6.3.
+- **SPEC-033** owns the App Attest challenge, verification, and the insert-only `provider_app_attest_verifications` record (§5.7.1, §5.7.2, SPEC-033-R004). SPEC-049 reads that record (key id and attested public key) to verify code-bound assertions and never writes it. The record is not an admission credential and no hardware-trust decision depends on SPEC-049.
+- **SPEC-001** owns provider wire framing. SPEC-049 adds the `privacy_class` field on `inference_request`, the `privacy_posture_challenge` / `privacy_posture_response` messages, the optional `privacy_key_rotation_request` / `privacy_key_rotation_challenge` / `privacy_key_rotation` / `privacy_key_rotation_result` messages (§4.12), the optional `privacy_code_bound_evidence` message (§4.13), and the `privacy_key_records` and `privacy_enrollment` advertisement fields.
 - **SPEC-002** owns assignment and lifecycle. SPEC-049 adds gate checks without bypassing them.
-- **SPEC-006** owns public errors, headers, and JSON/SSE compatibility. SPEC-049 adds the header and error codes in §4 and the `GET /v1/privacy-class/directory` route (SPEC-049-R028).
+- **SPEC-006** owns public errors, headers, and JSON/SSE compatibility. SPEC-049 adds the headers and error codes in §4, including the buyer request header `X-MacProvider-Privacy-Assurance-Required` (SPEC-049-R034), and the `GET /v1/privacy-class/directory` route (SPEC-049-R028).
 
 ## 4. Canonical primitives and wire schemas
 
@@ -166,7 +204,8 @@ All encodings follow SPEC-041 §3: canonical unpadded base64url; u32-length-pref
 | Name | Value |
 |---|---|
 | Privacy class | `operator_constrained_beta_v1` |
-| Assurance | `device_bound_self_attested_beta` |
+| Assurance (device-bound) | `device_bound_self_attested_beta` |
+| Assurance (code-bound, v0.5.0) | `code_bound_attested` |
 | Response encryption | `buyer_provider_aead_v1` |
 | Posture version | `privacy-posture-v1` |
 | Posture signing domain | `macprovider/spec049/posture/v1` |
@@ -184,10 +223,16 @@ All encodings follow SPEC-041 §3: canonical unpadded base64url; u32-length-pref
 | Identity directory signing domain | `macprovider/spec049/identity-directory/v1` |
 | Key rotation version | `privacy-key-rotation-v1` |
 | Key rotation signing domain | `macprovider/spec049/key-rotation/v1` |
+| Code-bound evidence version | `privacy-code-bound-v1` |
+| Code-bound evidence signing domain | `macprovider/spec049/code-bound/v1` |
+| Attested runtime signing identifier | `live.malibu.provider.cli` |
+| Attestor bundle identifier | `tech.malibu.app` |
 
 ### 4.2 Header marker
 
 `X-MacProvider-Privacy-Class: operator_constrained_beta_v1`. Any other value, repeated header, or list value is invalid. The buyer sends it on the reservation and the chat request. The gateway strips every buyer-supplied copy at ingress and re-sets exactly one trusted copy on each upstream coordinator request (reservation, consume, chat) after validating the buyer's value. The coordinator echoes it on a successful privacy-class chat response. On that same response the coordinator sets exactly one `X-MacProvider-Privacy-Posture-Verified-At` header to the decimal Unix seconds of the posture verification time used by the dispatch-time gate; the gateway strips any buyer-supplied copy, requires exactly one positive integer value or returns `privacy_class_unconfirmed` without writing the body, copies the value into `usage.macprovider.privacy.posture_verified_at_unix`, and does not forward the header to the buyer.
+
+`X-MacProvider-Privacy-Assurance-Required: code_bound_attested` (v0.5.0) is the buyer's optional request for the code-bound label. Any other value, a repeated header, or a list value is invalid, and the header is valid only with the privacy-class marker. The buyer sends it on the reservation only. The gateway strips every buyer-supplied copy on every route and re-sets exactly one trusted copy only on the upstream reservation request, after validating the buyer's value; it never forwards it on consume or chat, because the reservation row carries the label (SPEC-049-R034). On a successful privacy-class chat response the coordinator also sets exactly one `X-MacProvider-Privacy-Assurance` header to the reservation's label; the gateway takes the label from it (SPEC-049-R034).
 
 ### 4.3 `privacy-posture-v1` statement
 
@@ -263,14 +308,14 @@ Privacy key records are advertised only in the `privacy_key_records` field of `h
 }
 ```
 
-The attestation framing is the domain string `macprovider/spec049/key-attestation/v1` followed by the attestation fields in the order shown, strings as strings and times as i64. `key_record_digest`, `not_before_unix`, and `expires_at_unix` MUST equal the embedded key record's values. A record set holds at most 8 elements.
+The attestation framing is the domain string `macprovider/spec049/key-attestation/v1` followed by the attestation fields in the order shown, strings as strings and times as i64. `assurance` is always `device_bound_self_attested_beta`: the identity key that signs the attestation is device-bound under either label, and the code-bound label is the coordinator's verification of the posture (SPEC-049-R033), not a property the provider attests. `key_record_digest`, `not_before_unix`, and `expires_at_unix` MUST equal the embedded key record's values. A record set holds at most 8 elements.
 
 ### 4.6 `privacy-class-reservation-v1`
 
 The reservation request body is the unchanged SPEC-041-R004 closed request; the privacy class is selected only by the header. The closed success response is the SPEC-041-R004 response field set with `version` set to `privacy-class-reservation-v1` plus exactly these additional fields:
 
 - `privacy_class`: `operator_constrained_beta_v1`;
-- `privacy_assurance`: `device_bound_self_attested_beta`;
+- `privacy_assurance`: the reservation's label (SPEC-049-R034): `code_bound_attested` when the buyer required it, `device_bound_self_attested_beta` otherwise;
 - `privacy_key_attestation`: the closed attestation object of §4.5 for the reserved `key_record`;
 - `privacy_key_attestation_signature`: its Ed25519 signature;
 - `privacy_posture_verified_at_unix`: the coordinator verification time of the posture that listed this key digest.
@@ -452,6 +497,50 @@ Coordinator to provider:
 
 `nonce` is the challenge nonce, or the empty string when the coordinator refused before issuing one. `reason` is `accepted` on acceptance and otherwise one of `rotation_unavailable`, `rotation_invalid`, `rotation_identity_pinned`, `rotation_not_enrolled`, `rotation_key_in_use`, `rotation_unapproved_code_identity`, `rotation_stale`, `rotation_quarantined`, or `rotation_store_unavailable`.
 
+### 4.13 `privacy-code-bound-v1` evidence (v0.5.0)
+
+One optional message, provider to coordinator, over the authenticated provider WebSocket. The provider sends it immediately before the `privacy_posture_response` it belongs to, on the same session. It is a closed object of at most 8192 encoded bytes:
+
+```json
+{
+  "type": "privacy_code_bound_evidence",
+  "version": 1,
+  "statement": { "...": "closed privacy-code-bound-v1 object" },
+  "assertion": "<canonical base64url of the App Attest assertion object>"
+}
+```
+
+The statement; the signing framing encodes the domain `macprovider/spec049/code-bound/v1` first and then every field in this order:
+
+| # | Field | JSON type | Framing | Constraint |
+|---|---|---|---|---|
+| 1 | `version` | string | string | `privacy-code-bound-v1` |
+| 2 | `privacy_class` | string | string | `operator_constrained_beta_v1` |
+| 3 | `provider_id` | string | string | authenticated provider ID, 1..128 printable ASCII |
+| 4 | `assigned_session` | string | string | current assigned session, 1..128 printable ASCII |
+| 5 | `nonce` | string | raw 32 bytes | base64url of the posture challenge nonce |
+| 6 | `posture_digest` | string | raw 32 bytes | canonical base64url SHA-256 of the §4.3 framing of the posture this evidence belongs to |
+| 7 | `se_public_key` | string | string | canonical standard base64 raw 64-byte P-256 X\|\|Y Secure Enclave public key |
+| 8 | `identity_public_key` | string | string | canonical base64url raw 32-byte Ed25519 relay-blind identity public key |
+| 9 | `app_attest_key_id` | string | raw 32 bytes | canonical base64url of the App Attest key id the attestor used |
+| 10 | `runtime_team_id` | string | string | 10-character team identifier the attestor read from the requesting process's code signature |
+| 11 | `runtime_signing_identifier` | string | string | signing identifier the attestor read; `live.malibu.provider.cli` |
+| 12 | `runtime_cdhash` | string | string | 40 lowercase hex; the requesting process's dynamic cdhash |
+| 13 | `runtime_cs_flags` | integer | u64 | 0..4294967295; the requesting process's dynamic code-signing flags |
+| 14 | `checked_at_unix` | integer | i64 | attestor clock when its check of the requesting process completed |
+
+`assertion` is the unmodified output of `DCAppAttestService.generateAssertion` for the key `app_attest_key_id` with `clientDataHash = SHA-256(statement framing)`. Decoded, it is 1..2048 bytes and exactly one definite-length CBOR map with exactly the two text keys `signature` (a DER ECDSA P-256 signature of at most 72 bytes) and `authenticatorData` (37 bytes: rpIdHash, flags, and the u32 big-endian signature counter, optionally followed by exactly one CBOR extensions map; at most 512 bytes), the shape SPEC-033 §5.7.2's verifier already checks.
+
+Required code-signing flags: CS_VALID (0x1), CS_HARD (0x100), CS_KILL (0x200), and CS_RUNTIME (0x10000). Forbidden: CS_ADHOC (0x2), CS_GET_TASK_ALLOW (0x4), CS_INVALID_ALLOWED (0x20), and CS_DEBUGGED (0x10000000).
+
+**Local attestor channel.** The runtime reaches Malibu.app's attestor (SPEC-049-R035) over the Unix-domain stream socket `~/Library/Application Support/Malibu/privacy/attestor.sock` of the same user. Each frame is a u32 big-endian body length (1..16384) followed by canonical JSON (sorted keys, no insignificant whitespace). The runtime sends the closed request:
+
+```json
+{"type": "code_bound_assert_request", "version": 1, "provider_id": "...", "assigned_session": "...", "nonce": "...", "posture_digest": "...", "se_public_key": "...", "identity_public_key": "..."}
+```
+
+The attestor answers one closed reply, either `{"type": "code_bound_assert_result", "version": 1, "status": "asserted", "statement": {...}, "assertion": "..."}`, whose statement fields 1..8 echo the request, or `{"type": "code_bound_assert_result", "version": 1, "status": "unavailable", "reason": "<bounded code>"}` with `reason` one of `unsupported`, `no_key`, `key_invalid`, `peer_rejected`, `rate_limited`, `invalid_request`, or `assertion_failed`. The channel carries only these public values: no request or response plaintext, no SPEC-041 or SPEC-049 envelope or response keys, and no private key material.
+
 ## 5. Normative requirements
 
 ### SPEC-049-R001 - Enablement in every component
@@ -460,7 +549,7 @@ The coordinator (`privacy_class.enabled: false`), gateway (`features.privacy_cla
 
 ### SPEC-049-R002 - Honest claim and forbidden labels
 
-Every buyer-facing surface that mentions the privacy class MUST use the class `operator_constrained_beta_v1`, the assurance `device_bound_self_attested_beta`, and the exact SPEC-049-R020 strings. No surface, header, response field, documentation, or marketing derived from this implementation MAY claim confidential compute, a hardware enclave or TEE, provider-blind inference, code-bound attestation, or end-to-end encryption that excludes the provider. The assurance label MUST NOT be mapped onto, upgraded to, or reported as any SPEC-008 trust tier.
+Every buyer-facing surface that mentions the privacy class MUST use the class `operator_constrained_beta_v1`, the assurance label the request was served under (`device_bound_self_attested_beta` or `code_bound_attested`), and the exact SPEC-049-R020 strings of that label. No surface, header, response field, documentation, or marketing derived from this implementation MAY claim confidential compute, a hardware enclave or TEE, provider-blind inference, buyer-verifiable attestation, or end-to-end encryption that excludes the provider, and no surface MAY claim code-bound attestation for a `device_bound_self_attested_beta` response. Neither assurance label MAY be mapped onto, upgraded to, or reported as any SPEC-008 trust tier, and the App Attest record SPEC-049 reads is not an admission credential.
 
 ### SPEC-049-R003 - Closed posture statement
 
@@ -523,7 +612,7 @@ The header marker (§4.2), the reservation version (§4.6), the reservation row'
 
 Privacy-class model scopes follow SPEC-041-R004: both exact names of one uniquely matched pinned signed-catalog row may be advertised. The buyer-selected signed name remains unchanged through every cryptographic and routing binding. No general billing-equivalence expansion is allowed.
 
-At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. The SPEC-041-R004 capability gate also applies: a privacy-class reservation that declares `json_schema_non_strict` selects only supporting candidates, and when an otherwise eligible candidate serves the model but none supports it, the coordinator returns the SPEC-019 HTTP 400 `json_schema_non_strict_unsupported` instead of a §4.9 code, at reservation or, for a mismatched envelope, at consume. Otherwise, failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext. Candidate ordering at reservation and the slot wait before dispatch follow SPEC-049-R029. Every refusal records its cause under SPEC-049-R030.
+At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; the live WebSocket session is the one bound by the reservation; and, for a `code_bound_attested` reservation, that verified posture is `code_bound_attested` (SPEC-049-R034). A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. The SPEC-041-R004 capability gate also applies: a privacy-class reservation that declares `json_schema_non_strict` selects only supporting candidates, and when an otherwise eligible candidate serves the model but none supports it, the coordinator returns the SPEC-019 HTTP 400 `json_schema_non_strict_unsupported` instead of a §4.9 code, at reservation or, for a mismatched envelope, at consume. Otherwise, failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext. Candidate ordering at reservation and the slot wait before dispatch follow SPEC-049-R029. Every refusal records its cause under SPEC-049-R030.
 
 ### SPEC-049-R014 - Response AEAD
 
@@ -535,7 +624,7 @@ The coordinator and gateway MUST forward privacy frames byte-for-byte, MUST NOT 
 
 ### SPEC-049-R016 - Buyer verification
 
-The reference client MUST, before encryption, verify the reservation version is `privacy-class-reservation-v1`, the key record against the buyer pin per SPEC-041-R002 (the `--identity-pin` file when given, otherwise the SPEC-049-R028 directory entry whose fingerprint equals the record's `identity_fingerprint`), the key attestation signature against the same pin, attestation field equality with the record, and `privacy_assurance` equal to `device_bound_self_attested_beta`. After the response it MUST decrypt every frame, enforce contiguous sequence from 0, exactly one final frame, no frame after the final frame, a final status of `complete` for success, clear usage equal to the final frame's usage after cap bounding, and the SPEC-049-R020 response headers. Any failure after send MUST exit non-zero with a message ending `do not resubmit` and MUST NOT print undecrypted or partially verified content as a success.
+The reference client MUST, before encryption, verify the reservation version is `privacy-class-reservation-v1`, the key record against the buyer pin per SPEC-041-R002 (the `--identity-pin` file when given, otherwise the SPEC-049-R028 directory entry whose fingerprint equals the record's `identity_fingerprint`), the key attestation signature against the same pin, attestation field equality with the record, the attestation's `assurance` equal to `device_bound_self_attested_beta`, and `privacy_assurance` equal to the label it required (`code_bound_attested` with `--privacy-assurance-required code_bound_attested`, `device_bound_self_attested_beta` otherwise; SPEC-049-R034). After the response it MUST decrypt every frame, enforce contiguous sequence from 0, exactly one final frame, no frame after the final frame, a final status of `complete` for success, clear usage equal to the final frame's usage after cap bounding, and the SPEC-049-R020 response headers and disclosure strings of the reservation's label. Any failure after send MUST exit non-zero with a message ending `do not resubmit` and MUST NOT print undecrypted or partially verified content as a success.
 
 ### SPEC-049-R017 - Quarantine and key revocation
 
@@ -555,11 +644,13 @@ Successful privacy-class responses MUST carry these response headers:
 
 ```text
 X-MacProvider-Privacy-Class: operator_constrained_beta_v1
-X-MacProvider-Privacy-Assurance: device_bound_self_attested_beta
+X-MacProvider-Privacy-Assurance: <label>
 X-MacProvider-Response-Encryption: buyer_provider_aead_v1
 ```
 
-`usage.macprovider.privacy` (non-stream `usage` object and stream clear usage chunk) MUST be the closed object `{class, assurance, scope, protects, does_not_protect, residual_risks, posture_verified_at_unix}` with `class` and `assurance` as above, `posture_verified_at_unix` from the coordinator's `X-MacProvider-Privacy-Posture-Verified-At` header on that chat response (§4.2), and these exact values in this order.
+`<label>` is the reservation's label (SPEC-049-R034). `usage.macprovider.privacy` (non-stream `usage` object and stream clear usage chunk) MUST be the closed object `{class, assurance, scope, protects, does_not_protect, residual_risks, posture_verified_at_unix}` with `class` and `assurance` as above, `posture_verified_at_unix` from the coordinator's `X-MacProvider-Privacy-Posture-Verified-At` header on that chat response (§4.2), and the exact values of that label in this order.
+
+#### Strings for `device_bound_self_attested_beta`
 
 `scope`:
 
@@ -604,7 +695,61 @@ request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintex
 12. `provider_identity_enrolled_on_first_attested_session`
 13. `coordinator_operator_signs_provider_identity_directory`
 
-A pool-scoped privacy-class response (SPEC-049-R032) carries the same closed object with two differences: `does_not_protect` is items 1 to 5 above, without `pool_scoped_requests`, and the object has one more member, `pool`, after `posture_verified_at_unix`. A global response carries the object exactly as above, and its item 6 states that this global disclosure does not describe pool-scoped requests, which carry their own. `pool` is the closed object `{pool_id, scope, pool_operator_sees, pool_operator_does_not_see}`, with `pool_id` the selected pool and these exact values in this order.
+#### Strings for `code_bound_attested` (v0.5.0)
+
+`scope`:
+
+```text
+request_and_response_content_hidden_from_relays; provider_runtime_reads_plaintext; ordinary_operator_access_paths_constrained_on_approved_signed_runtime; posture_asserted_by_apple_attested_malibu_app_after_kernel_code_identity_check; label_verified_by_coordinator_not_by_buyer
+```
+
+`protects`:
+
+1. `request_content_from_gateway_and_coordinator`
+2. `response_content_from_gateway_and_coordinator`
+3. `debugger_attach_to_approved_signed_runtime`
+4. `core_dumps_of_approved_signed_runtime`
+5. `prompt_and_completion_in_provider_logs_traces_receipts_and_telemetry`
+6. `prompt_and_completion_in_provider_disk_and_conversation_caches`
+7. `plaintext_proxy_or_subprocess_runtime_hop`
+8. `dev_debug_unsigned_or_unapproved_builds_refused_by_routing`
+9. `sip_disabled_hosts_refused_by_routing`
+10. `modified_or_resigned_runtime_binary_refused_by_attested_app_check`
+11. `modified_or_resigned_malibu_app_cannot_assert_posture`
+12. `posture_replay_refused_by_attested_counter`
+
+`does_not_protect`:
+
+1. `provider_runtime_reads_plaintext_to_infer`
+2. `request_metadata_visible_to_relays`
+3. `confidential_compute_or_hardware_enclave_execution`
+4. `end_to_end_encryption_excluding_the_provider`
+5. `kernel_or_firmware_compromise_with_sip_on`
+6. `compromised_team_signing_key`
+7. `pool_scoped_requests`
+
+`residual_risks`:
+
+1. `kernel_or_firmware_compromise_with_sip_on`
+2. `physical_or_hardware_attack`
+3. `gpu_and_unified_memory_residue`
+4. `encrypted_swap_and_hibernation_images`
+5. `compromise_of_the_live_runtime_process`
+6. `malicious_signed_release_or_supply_chain`
+7. `compromised_team_signing_key`
+8. `apple_is_root_of_trust_for_app_attest`
+9. `sip_and_full_security_attested_when_app_attest_key_was_attested`
+10. `label_verified_by_coordinator_not_by_buyer`
+11. `crash_report_register_and_stack_residue`
+12. `secure_boot_level_not_evaluated`
+13. `immutable_prompt_strings_not_zeroized`
+14. `relays_observe_sizes_timing_and_token_counts`
+15. `provider_identity_enrolled_on_first_attested_session`
+16. `coordinator_operator_signs_provider_identity_directory`
+
+#### Pool-scoped responses
+
+A pool-scoped privacy-class response (SPEC-049-R032) carries the same closed object of its label with two differences: `does_not_protect` omits `pool_scoped_requests` (the last item of each label's list), and the object has one more member, `pool`, after `posture_verified_at_unix`. A global response carries the object exactly as above, and its `pool_scoped_requests` item states that this global disclosure does not describe pool-scoped requests, which carry their own. `pool` is the closed object `{pool_id, scope, pool_operator_sees, pool_operator_does_not_see}`, with `pool_id` the selected pool and these exact values in this order.
 
 `pool.scope`:
 
@@ -622,7 +767,7 @@ served_only_by_current_trusted_pool_members_enrolled_in_this_class; pool_members
 1. `request_and_response_content_through_pool_surfaces`
 2. `per_request_metadata_and_buyer_attribution_through_pool_surfaces`
 
-`/v1/models` MAY expose `tier1_disclosure.operator_constrained_privacy` (omitted when the class is disabled) with `version: privacy-class-disclosure-v1`, the same class, assurance, scope, and lists, plus per-model buyer-safe `capable_provider_count` and `incapable_provider_count` derived only from currently eligible sessions. The reference client MUST print the class, assurance, scope, and residual risks on stderr for every privacy-class run, and for a pool-scoped run also the `pool_id`, `pool.scope`, and both `pool` lists. These strings change only by a SPEC-049 version bump.
+`/v1/models` MAY expose `tier1_disclosure.operator_constrained_privacy` (omitted when the class is disabled) with `version: privacy-class-disclosure-v1`, the class, the `device_bound_self_attested_beta` assurance, scope, and lists, plus per-model buyer-safe `capable_provider_count` and `incapable_provider_count` derived only from currently eligible sessions of either label. v0.5.0 adds no code-bound listing. The reference client MUST print the class, the served assurance, its scope, and its residual risks on stderr for every privacy-class run, and for a pool-scoped run also the `pool_id`, `pool.scope`, and both `pool` lists. These strings change only by a SPEC-049 version bump.
 
 ### SPEC-049-R021 - Automated redaction proof
 
@@ -691,9 +836,9 @@ A privacy-class reservation pins one provider session, and SPEC-049-R013 forbids
 
 ### SPEC-049-R030 - Real privacy reject reason
 
-When the coordinator refuses a privacy-class request at reservation, at consume, or before dispatch, it MUST record the cause it determined as exactly one reason from this closed set, and MUST NOT record a generic availability or capacity cause in place of a more specific one: `class_not_configured`, `kill_switch_disabled`, `store_unavailable`, `relay_blind_unavailable`, `model_not_served`, `model_not_private_capable`, `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled`, `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `key_stale_or_revoked`, `key_attestation_mismatch`, `reservation_rejected`, `reservation_expired`, `session_lost`, `slot_unavailable`, `provider_quota_unavailable`, `buyer_cancelled`, `settlement_snapshot_failed`, `dispatch_unavailable`, `marker_mismatch` (a SPEC-049-R012 downgrade, including a pool selection that differs from the reservation's), `pool_scoped_request` (SPEC-049-R022, and a pool selection refused before candidate selection under SPEC-049-R032 item 2), `pool_no_eligible_member` (SPEC-049-R032 item 3), `pool_state_stale` (SPEC-049-R032 item 5), `provider_rejected` (the provider's bound pre-decryption rejection), `capability_unsupported` (the SPEC-041-R004 capability gate refused the request), `other`. The phase is one of `reservation`, `consume`, `dispatch`.
+When the coordinator refuses a privacy-class request at reservation, at consume, or before dispatch, it MUST record the cause it determined as exactly one reason from this closed set, and MUST NOT record a generic availability or capacity cause in place of a more specific one: `class_not_configured`, `kill_switch_disabled`, `store_unavailable`, `relay_blind_unavailable`, `model_not_served`, `model_not_private_capable`, `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled`, `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `key_stale_or_revoked`, `key_attestation_mismatch`, `reservation_rejected`, `reservation_expired`, `session_lost`, `slot_unavailable`, `provider_quota_unavailable`, `buyer_cancelled`, `settlement_snapshot_failed`, `dispatch_unavailable`, `marker_mismatch` (a SPEC-049-R012 downgrade, including a pool selection that differs from the reservation's), `pool_scoped_request` (SPEC-049-R022, and a pool selection refused before candidate selection under SPEC-049-R032 item 2), `pool_no_eligible_member` (SPEC-049-R032 item 3), `pool_state_stale` (SPEC-049-R032 item 5), `provider_rejected` (the provider's bound pre-decryption rejection), `capability_unsupported` (the SPEC-041-R004 capability gate refused the request), `assurance_unavailable` (SPEC-049-R034: the request required `code_bound_attested` and the candidate's or reserved session's verified posture is not code-bound), `other`. The phase is one of `reservation`, `consume`, `dispatch`.
 
-1. **Selection.** When no candidate is eligible at reservation, the reason is that of the candidate that passed the most SPEC-049-R013 checks, in this order from least to most: `model_not_served` (no live bindable session serves the model), `model_not_private_capable` (sessions serve it but none holds a fresh privacy key record that fits the request), `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled` (neither configuration pins nor an active enrollment resolve its keys), `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `kill_switch_disabled`, `key_stale_or_revoked`, `key_attestation_mismatch`, `relay_blind_unavailable`, `store_unavailable`. For a pool-scoped request the walk runs over the members that pass the SPEC-049-R032 item 3 pool predicates only, and when no live bindable session serves the model among them the reason is `pool_no_eligible_member` instead of `model_not_served`. A session that serves the model without a fresh privacy key reports the reason its last key advertisement was refused for (`code_identity_unapproved`, `provider_not_enrolled`, or `provider_quarantined`), or `provider_quarantined` when it is quarantined, instead of `model_not_private_capable`; no other advertisement reason is reported there. An advertisement refused because it presents an identity key that an accepted SPEC-049-R031 rotation retired counts as `provider_not_enrolled`. Recording a reason never changes eligibility, ordering, or the provider bound.
+1. **Selection.** When no candidate is eligible at reservation, the reason is that of the candidate that passed the most SPEC-049-R013 checks, in this order from least to most: `model_not_served` (no live bindable session serves the model), `model_not_private_capable` (sessions serve it but none holds a fresh privacy key record that fits the request), `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled` (neither configuration pins nor an active enrollment resolve its keys), `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `kill_switch_disabled`, `key_stale_or_revoked`, `key_attestation_mismatch`, `assurance_unavailable`, `relay_blind_unavailable`, `store_unavailable`. For a pool-scoped request the walk runs over the members that pass the SPEC-049-R032 item 3 pool predicates only, and when no live bindable session serves the model among them the reason is `pool_no_eligible_member` instead of `model_not_served`. A session that serves the model without a fresh privacy key reports the reason its last key advertisement was refused for (`code_identity_unapproved`, `provider_not_enrolled`, or `provider_quarantined`), or `provider_quarantined` when it is quarantined, instead of `model_not_private_capable`; no other advertisement reason is reported there. An advertisement refused because it presents an identity key that an accepted SPEC-049-R031 rotation retired counts as `provider_not_enrolled`. Recording a reason never changes eligibility, ordering, or the provider bound.
 2. **Coordinator record.** For each refused request the coordinator MUST write one structured log line with `event: privacy_route_rejected` and exactly the fields `phase`, `code` (the buyer error code), and `reason`, and MUST increment `relayblind_privacy_route_rejections_total{phase,reason}`. On a response to an authenticated gateway request it MUST set exactly one internal header `X-MacProvider-Privacy-Reject-Reason` carrying the reason. A pinned chat refused only for want of a seat keeps the SPEC-049-R029 `relay_blind_provider_unsupported` outcome and is recorded with reason `slot_unavailable`.
 3. **Gateway record.** On a refused privacy-class reservation, consume, or chat, the gateway MUST read that header, accept exactly one value from the closed set and record `other` otherwise, write one `privacy_route_rejected` log line with its own phase, the buyer code, and the reason, and increment `gateway_privacy_route_rejections_total{phase,reason}`. It MUST NOT forward the header to the buyer on any response, and it MUST serve those counters on `/metrics` only to a direct loopback scraper (no forwarding headers) or the operator bearer.
 4. **Closed labels.** Neither log line nor metric carries a provider ID, session, key digest, kid, account, wallet session, request ID, raw store error, or request or response content. A value outside the closed sets is recorded as `other`.
@@ -739,13 +884,45 @@ A privacy-class request MAY carry an authorized Trusted Pool selection (SPEC-042
 | Unauthorized or unknown-pool callers | the generic `pool_unavailable` | pool existence, membership, enrollment, health |
 | Authorized buyer | the pool labels bound by its reservation, and the serving member's identity fingerprint as for every privacy-class reservation | a stable provider ID; which members are enrolled |
 
+### SPEC-049-R033 - Code-bound posture verification
+
+The coordinator MUST grant `code_bound_attested` to a posture only through this requirement, and MUST NOT derive the label from any provider field it did not verify. When a `privacy_code_bound_evidence` message arrives on a live session while a posture challenge is outstanding, the coordinator holds the latest one for that session, at most one, until the posture response arrives or the challenge ends. After the posture response passes every check that makes it verified under SPEC-049-R003..SPEC-049-R006 and SPEC-049-R025, and before the posture is committed as verified, the coordinator evaluates the held evidence. The posture is `code_bound_attested` only when all of these hold:
+
+1. the message and statement are closed and valid per §4.13, and the message is at most 8192 bytes;
+2. `provider_id`, `assigned_session`, and `nonce` equal the posture's, and `posture_digest` equals SHA-256 of the posture framing recomputed from the parsed posture fields;
+3. `se_public_key` and `identity_public_key` equal the Secure Enclave and identity keys that verified the posture signatures (SPEC-049-R004);
+4. `runtime_signing_identifier` and the posture's `signing_identifier` are both `live.malibu.provider.cli`; `runtime_team_id` equals the posture's `team_id` and the coordinator's configured App Attest team (`onboarding.apple_team_id`); `runtime_cdhash` equals the posture's `code_cdhash`, which SPEC-049-R006 already approved; `runtime_cs_flags` has every required and no forbidden §4.13 flag; and `checked_at_unix` is within ±30 seconds of coordinator time;
+5. the SPEC-033 `provider_app_attest_verifications` record for the authenticated provider ID exists, its key id equals `app_attest_key_id`, and it carries the attested public key (SPEC-033-R004);
+6. the assertion verifies under that public key with the SPEC-033 §5.7.2 assertion shape, `rpIdHash` equal to SHA-256 of `<onboarding.apple_team_id>.<onboarding.bundle_id>`, and the signature over SHA-256(`authenticatorData` || SHA-256(statement framing)) recomputed from the parsed statement;
+7. the assertion counter is strictly greater than the stored counter for that key id, and the coordinator durably commits the new counter, with a conditional write that changes exactly one row, before the label is set. The counter lives in the relay-blind store, survives restarts, and is never held only in memory.
+
+Any failure, an absent evidence message, an unconfigured App Attest record connection, or a store error leaves the posture verified as `device_bound_self_attested_beta`, exactly as it would be without evidence, and records one bounded reason in a `privacy_code_bound_rejected` log line and the `relayblind_privacy_code_bound_rejections_total{reason}` metric, with no provider identity or key material. A code-bound failure never quarantines, never revokes a key record, never changes an enrollment, and never makes the posture ineligible for the device-bound label: that label claims nothing about code identity, so withholding the code-bound label is the whole consequence, and a local attestor fault (an app update, a quit app, a lost key) never switches privacy off. A session's label is the label of its latest verified posture and lapses with it (SPEC-049-R005). A coordinator without v0.5.0 ignores the evidence message as an unknown type, and a provider without v0.5.0 never sends one; both stay device-bound.
+
+### SPEC-049-R034 - Assurance requirement and propagation
+
+The buyer requests the code-bound label only by `X-MacProvider-Privacy-Assurance-Required: code_bound_attested` on the reservation (§4.2). Without it a reservation is `device_bound_self_attested_beta` whatever its provider's posture label, so a client that predates v0.5.0 never meets the new label.
+
+1. **Gateway.** The gateway MUST validate the header as §4.2 states and reject an invalid value, or the header without the privacy-class marker, with `privacy_class_downgrade_rejected` before quota. It forwards exactly one trusted copy on the upstream reservation only.
+2. **Reservation.** With the header the coordinator MUST rank and reserve only candidates whose session's latest verified posture is `code_bound_attested` and that pass every other SPEC-049-R013 check; when an otherwise eligible candidate exists but none is code-bound, it returns `privacy_class_unavailable` with SPEC-049-R030 reason `assurance_unavailable`. The reservation row MUST store the label, and the reservation response's `privacy_assurance` MUST equal it.
+3. **Consume and dispatch.** For a `code_bound_attested` reservation the SPEC-049-R013 gate at consume and immediately before dispatch MUST also require the reserved session's latest verified posture to be `code_bound_attested`; a failure follows the existing SPEC-049-R013 outcomes with reason `assurance_unavailable`. A reservation's label is never upgraded or downgraded.
+4. **Chat response.** The coordinator MUST set exactly one `X-MacProvider-Privacy-Assurance` header with the reservation's label on a successful privacy-class chat response. The gateway MUST strip any buyer-facing copy it received, take the label from that header, return `privacy_class_unconfirmed` without writing the body when the header is repeated or carries any other value, and treat an absent header as `device_bound_self_attested_beta`, which is the only label a coordinator without v0.5.0 serves. It then sets the buyer-facing `X-MacProvider-Privacy-Assurance` and `usage.macprovider.privacy` for that label (SPEC-049-R020).
+5. **Client.** The reference client MUST accept `--privacy-assurance-required code_bound_attested`, send the header on the reservation, and verify the label under SPEC-049-R016 before encryption and after the response.
+
+### SPEC-049-R035 - App Attest key reuse and the Malibu.app attestor
+
+1. **Key.** The attestor uses only the App Attest key that SPEC-033 §5.7.1 recorded for the provider ID; it never generates a second key for privacy. Malibu.app MUST persist the key id per provider ID when the coordinator answers `recorded`, and, when the coordinator answers `already_recorded` with a `key_id` (SPEC-033 §5.7.1), persist that key id instead. A Mac whose enrollment finished before the key id was persisted runs the challenge once more to learn it; nothing is re-attested. When the key is unusable (`DCError.invalidKey`), the attestor answers `key_invalid` and stops asserting for that provider ID; the provider stays device-bound, because SPEC-033 never replaces a recorded key.
+2. **Platform.** Only the Malibu.app main executable with bundle identifier `tech.malibu.app`, signed with Developer ID by its team and carrying the App Attest entitlement (SPEC-025 §6.3), on macOS 27 or later with `DCAppAttestService.isSupported`, MAY assert. It listens on the §4.13 socket in a directory it owns with mode 0700, with the socket at mode 0600, and starts only when it can read its own team identifier from its validated code signature.
+3. **Check before every assertion.** For every request the attestor MUST take the peer's audit token from the kernel (`LOCAL_PEERTOKEN`), never from a message field, re-read on every request; obtain the peer's dynamic `SecCode` from the audit token; require `SecCodeCheckValidity` against `anchor apple generic and identifier "live.malibu.provider.cli" and certificate leaf[subject.OU] = "<own team>"`; read the dynamic code-signing flags by audit token and require every required and no forbidden §4.13 flag; read the dynamic cdhash; and fill fields 10..14 of the statement from these observations only. On any failure it answers `peer_rejected` and asserts nothing. It asserts only for a provider ID whose key id it holds, over the framing it computed itself from the closed request and its own observations, at most once per second and at most one at a time.
+4. **Runtime.** In privacy mode the provider runtime MUST, for each posture challenge, ask the attestor with a total deadline of 3 seconds, check that the reply's statement fields 1..8 equal its request, and send the `privacy_code_bound_evidence` message immediately before the `privacy_posture_response`. Any failure, including no socket, sends the posture alone. The runtime MUST NOT hold, request, or emulate an App Attest key, and MUST NOT send evidence for a posture it did not build. The channel carries no plaintext, so SPEC-049-R009 is unchanged.
+5. **No switch.** Code-bound has no enable flag in any component (AGENTS.md rule 11): it is in force wherever its prerequisites hold, and its absence leaves `device_bound_self_attested_beta`, plain SPEC-041 relay-blind, and plaintext behaviour unchanged. The coordinator needs the SPEC-033 App Attest record connection and `onboarding.apple_team_id` and `onboarding.bundle_id`; the provider needs a Malibu.app attestor.
+
 ## 6. Operator runbook requirement
 
-The normative operator procedure is `docs/runbooks/privacy-class-beta-operations.md`. It covers: enabling the coordinator with automatic enrollment, release-derived approval, and the directory key; generating and holding the directory key and distributing its public key to buyers; the provider opt-out and the eligibility log lines; the optional configuration pins that override enrollment; enabling the gateway and the buyer client; the incident procedure (kill switch, quarantine, enrollment key change, re-enrollment, key revocation, rotation by restart, in-band identity key rotation, directory key rotation, the privacy reject reasons); and the residual-risk table of §2.5. Tooling and documentation MUST never print private key bytes.
+The normative operator procedure is `docs/runbooks/privacy-class-beta-operations.md`. It covers: enabling the coordinator with automatic enrollment, release-derived approval, and the directory key; generating and holding the directory key and distributing its public key to buyers; the provider opt-out and the eligibility log lines; the optional configuration pins that override enrollment; enabling the gateway and the buyer client; the incident procedure (kill switch, quarantine, enrollment key change, re-enrollment, key revocation, rotation by restart, in-band identity key rotation, directory key rotation, the privacy reject reasons, the code-bound label and its rejection reasons); and the residual-risk tables of §2.5 and §2.8. Tooling and documentation MUST never print private key bytes.
 
 ## 7. Implementation, tests, and journeys
 
-The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements map to `JOURNEY-PRIVACY-CLASS-BETA`; implementation and test selectors are added as the implementation lands. Planned surfaces: shared Go privacy crypto and types in both relay-blind modules with a byte-identity parity check; Swift crypto parity against the shared vector `test/fixtures/relay-blind/privacy-response-v1.json`; provider hardening, posture responder, and response sealing; coordinator configuration, store, posture verification, routing gate, and kill-switch CLI; gateway marker, opaque relay, and disclosure; reference-client verification; and the cross-service redaction and adversarial integration suite. v0.2 adds: provider automatic-mode eligibility and the enrollment claim; the coordinator enrollment table, key-change quarantine, `reenroll` and `directory-keygen` CLI, release-derived approval loader, and directory signer and route; the Pearl updater release-identity staging; the gateway directory passthrough; the shared directory verifier in both relay-blind modules under the parity check; and client directory auto-pin. v0.2.7 adds the closed reject reasons in both relay-blind modules under the parity check. v0.3.0 adds the coordinator rotation verifier and atomic enrollment swap, and the provider rotation responder and staged identity key. v0.4.0 adds the Trusted Pool composition (SPEC-049-R032) in the coordinator, gateway, and reference client, and the two pool reject reasons in both relay-blind modules under the parity check; it changes no provider code.
+The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements map to `JOURNEY-PRIVACY-CLASS-BETA`; implementation and test selectors are added as the implementation lands. Planned surfaces: shared Go privacy crypto and types in both relay-blind modules with a byte-identity parity check; Swift crypto parity against the shared vector `test/fixtures/relay-blind/privacy-response-v1.json`; provider hardening, posture responder, and response sealing; coordinator configuration, store, posture verification, routing gate, and kill-switch CLI; gateway marker, opaque relay, and disclosure; reference-client verification; and the cross-service redaction and adversarial integration suite. v0.2 adds: provider automatic-mode eligibility and the enrollment claim; the coordinator enrollment table, key-change quarantine, `reenroll` and `directory-keygen` CLI, release-derived approval loader, and directory signer and route; the Pearl updater release-identity staging; the gateway directory passthrough; the shared directory verifier in both relay-blind modules under the parity check; and client directory auto-pin. v0.2.7 adds the closed reject reasons in both relay-blind modules under the parity check. v0.3.0 adds the coordinator rotation verifier and atomic enrollment swap, and the provider rotation responder and staged identity key. v0.4.0 adds the Trusted Pool composition (SPEC-049-R032) in the coordinator, gateway, and reference client, and the two pool reject reasons in both relay-blind modules under the parity check; it changes no provider code. v0.5.0 adds the code-bound evidence verifier, the durable App Attest counter, the assurance requirement, and the `assurance_unavailable` reason in the coordinator and both relay-blind modules under the parity check; the gateway header and label disclosure; the reference client flag; the runtime's attestor client; the Malibu.app attestor and key id persistence; and the shared framing vector `test/fixtures/relay-blind/privacy-code-bound-v1.json` checked by Go and Swift.
 
 ## 8. Open gaps
 
@@ -753,7 +930,7 @@ The authoritative mapping is `specs/CONFORMANCE.json`. All SPEC-049 requirements
 |---|---|---|---|---|
 | `SPEC-049-R001`..`SPEC-049-R028` | `DECISION_REQUIRED` | `@Augustas11` | `#1749` | Implementation, automated tests, signed hardware journey on a v0.2 release, staged canary, three-lane audits |
 | In-band signed key rotation (SPEC-049-R031) | `DECISION_REQUIRED` | `@Augustas11` | `#1911` | Identity key rotation is specified and unit-tested; it needs a provider CLI release and a real-provider rotation through the gateway. Secure Enclave key rotation stays operator re-enrollment, because that key is also the SPEC-008 session key |
-| Code-bound posture key | `DECISION_REQUIRED` | `@Augustas11` | follow-up of `#1749` | Malibu.app-embedded provider with `keychain-access-groups`; a new label requires a SPEC-049 amendment first |
+| Code-bound posture key (SPEC-049-R033..SPEC-049-R035) | `DECISION_REQUIRED` | `@Augustas11` | `#1911` | Specified in v0.5.0 and implemented with unit tests and a shared framing vector; needs the SPEC-033 recorder deployed, a signed Malibu.app and CLI release, and a real macOS 27 provider serving a `code_bound_attested` request through the gateway |
 | Trusted Pool composition (SPEC-049-R032) | `DECISION_REQUIRED` | `@Augustas11` | `#1985` | Specified with the SPEC-042 0.0.43 amendment and implemented with unit and integration tests; needs a deploy and a live pool-scoped privacy-class request through the gateway |
 
 ### 8.1 Limited activation exception: staged production canary (2026-10-06)
@@ -869,6 +1046,7 @@ remains open; R023 promotion is not required for operation.
 
 ## 10. Changelog and history
 
+- 0.5.0 - #1911 hardening item "code-bound posture key". A second assurance label, `code_bound_attested`, granted per posture by the coordinator (SPEC-049-R033) when the posture arrives with a `privacy-code-bound-v1` evidence statement (§4.13) asserted by the App Attest key that SPEC-033 recorded for the provider ID. Malibu.app's local attestor asserts only after the kernel identifies the requester as the team-signed, hardened, non-debugged provider runtime, and the statement binds the posture digest, the Secure Enclave and identity public keys, and that observed code identity (SPEC-049-R035). The coordinator checks the observed identity against the approved posture identity, the assertion against the recorded public key, and a durable strictly increasing counter. A failure only withholds the label; it never quarantines. The buyer opts in with `X-MacProvider-Privacy-Assurance-Required`; reservations stay device-bound otherwise, so older clients are unaffected (SPEC-049-R034). Claims, non-claims, threat model (§2.7, §2.8), R002, R013, R016, R020 strings, and the R030 reason `assurance_unavailable` are amended. The key attestation stays device-bound. Providers without App Attest, including the CLI-only install, keep `device_bound_self_attested_beta` with no change. No enable flag (AGENTS.md rule 11). Requires SPEC-033 v0.9.0.
 - 0.4.0 - #1985. New SPEC-049-R032: a privacy-class request may carry an authorized Trusted Pool selection, and is served only by a provider that is both a current eligible pool member and eligible for this class. The gateway authorizes the pool as for plaintext; the coordinator gates the pool before selection with the SPEC-042 codes, ranks only the intersection, binds pool ID, manifest version and digest, and generation into the reservation row (bound by the AAD through `provider_binding`), re-checks the pool and the generation fence at consume and before dispatch, and settles through the existing relay-blind lane with pool labels on the route snapshot and the verdict row. No envelope, AAD, provider wire, or receipt field changes, and no provider change is needed. §4.6 adds three pool fields to a pool-scoped reservation response. R012 makes a pool selection that differs from the reservation a downgrade. R020 adds the pool-scoped disclosure, whose `pool` member states what the pool operator can and cannot see; the global disclosure is unchanged. R022 narrows the rejection to pool intent this class cannot serve. R030 adds the reasons `pool_no_eligible_member` and `pool_state_stale`, and buyer errors are unchanged, so no buyer can tell a membership failure from an enrollment failure. R032 item 8 states what each party can see. Coordinated with SPEC-042 0.0.43 (R009), SPEC-041 0.6.1, SPEC-022 v0.4.4 (R-14.1), and SPEC-006 0.9.56 (R019).
 - 0.3.2 - #2006. A privacy-class request may carry the SPEC-041 v0.6.0 `requires` capability declaration. §1.2 lists it among the request metadata visible to relays. SPEC-049-R013 applies the SPEC-041-R004 capability gate, whose refusal is the SPEC-019 HTTP 400 `json_schema_non_strict_unsupported`; SPEC-049-R019 states that it is not a privacy code; SPEC-049-R030 adds the reason `capability_unsupported`. The §4.9 codes, disclosure strings, and assurance label are unchanged.
 

@@ -1,6 +1,6 @@
 # Privacy class beta operations
 
-SPEC-049 `operator_constrained_beta_v1`, v0.2.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
+SPEC-049 `operator_constrained_beta_v1`, v0.5.0. The coordinator, gateway, and buyer client keep the class off until you enable it. A provider enters the class on its own when it runs an eligible signed release, and the coordinator enrolls its keys without a per-provider step. A request that asks for the class either completes inside the class or fails with a typed error. It does not fall back to ordinary relay-blind or plaintext.
 
 These commands print public material only. Do not print, log, or copy private key bytes.
 
@@ -164,6 +164,25 @@ A buyer whose API key is authorized for a Trusted Pool adds `--pool <pool_id>`. 
 
 Settlement is unchanged: under `enforce` the request settles `relay_blind_settled`, and the verdict row carries the pool label (`pool_label_status = verified` counts toward pool accounting). The pool operator sees the pool's policy, members, buyer grants, and aggregate payable request counts and credits of its own members. It does not see request or response content, or per-request metadata, through any pool surface. A pool operator that runs a member Mac is that Mac's provider operator, with the provider-operator limits and residual risks below.
 
+## Code-bound label (SPEC-049-R033..R035)
+
+A provider whose Malibu.app holds an App Attest key gets a second label, `code_bound_attested`, on each posture the coordinator can verify end to end. There is no switch in any component. Everything else keeps `device_bound_self_attested_beta` exactly as before, including the CLI-only install, which cannot use App Attest.
+
+How it works. Malibu.app attests one App Attest key per provider ID through SPEC-033 (`/v1/providers/app-attest`), and the coordinator records it, first key wins. Malibu.app keeps that key id and runs a local attestor on `~/Library/Application Support/Malibu/privacy/attestor.sock`. On each posture challenge the runtime asks it for an assertion. Malibu.app asserts only after the kernel identifies the caller as the team-signed `live.malibu.provider.cli` with valid, hardened, non-debugged code. The runtime sends the assertion as `privacy_code_bound_evidence` just before its posture. The coordinator checks the assertion against the recorded public key, a strictly increasing counter, and the posture's approved code identity.
+
+Prerequisites:
+
+- Coordinator: the `app_attest_recorder` connection is up (SPEC-033 §2.7; startup logs `app_attest_recorder_unavailable` otherwise) and `onboarding.apple_team_id` and `onboarding.bundle_id` are set. The stats database has migration 033.
+- Provider: a release Malibu.app on macOS 27 or later that has recorded its App Attest key, running while the CLI serves. If the app is quit, the provider keeps serving and its postures are device-bound until the app is back.
+
+Buyers ask for the label with `relay-blind-client --privacy-class --privacy-assurance-required code_bound_attested`. The client sends `X-MacProvider-Privacy-Assurance-Required`; the reservation then goes only to a provider whose latest posture is code-bound, and the run prints the code-bound scope and residual risks. Without the flag every reservation is device-bound, whatever the provider supports.
+
+What the operator sees:
+
+- A refused code-bound request answers `privacy_class_unavailable` (or `privacy_class_posture_stale` after consume) with reason `assurance_unavailable` in `privacy_route_rejected`.
+- A posture whose evidence fails stays device-bound and logs `privacy_code_bound_rejected reason=<code>`, counted by `relayblind_privacy_code_bound_rejections_total{reason}`. It never quarantines, revokes keys, or changes the enrollment. Common reasons: `record_missing` (no App Attest record, or a row from before migration 033), `key_mismatch` (the app used another key), `counter_not_increasing`, `assertion_invalid`, `runtime_identity_mismatch`, `store_unavailable`.
+- A provider whose recorded App Attest key is lost (`DCError.invalidKey`, for example after the app's keychain is reset) stays device-bound: SPEC-033 never replaces a recorded key.
+
 ## Incident and revocation
 
 The control plane is the relay-blind SQLite file named by `relay_blind.sqlite_path`. `coordinator-cli` opens that file directly. Do not restart the coordinator for these commands. The next reservation, consume, or dispatch reads the new row.
@@ -214,7 +233,7 @@ X-MacProvider-Privacy-Assurance: device_bound_self_attested_beta
 X-MacProvider-Response-Encryption: buyer_provider_aead_v1
 ```
 
-`usage.macprovider.privacy` uses the same class and assurance. The rest of that object is fixed below, in this order. These strings change only when SPEC-049 bumps its version.
+`usage.macprovider.privacy` uses the same class and assurance. The rest of that object is fixed below, in this order. These strings change only when SPEC-049 bumps its version. A `code_bound_attested` response carries `X-MacProvider-Privacy-Assurance: code_bound_attested` and that label's own scope and lists, fixed in SPEC-049-R020.
 
 `scope`:
 
