@@ -53,6 +53,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{30, "stats_timeseries_daily"},
 		{31, "hardware_trust_app_attest_auto"},
 		{32, "malibu_stake_ledger"},
+		{33, "app_attest_public_key"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -1032,5 +1033,39 @@ func TestHardwareTrustAppAttestAutoMigrationShape(t *testing.T) {
 	}
 	if strings.Contains(body, "GRANT EXECUTE ON FUNCTION auto_trust_attested_hardware(BIGINT) TO provider_onboarding") {
 		t.Error("provider_onboarding must not execute the automatic trust function")
+	}
+}
+
+// TestAppAttestPublicKeyMigrationShape pins migration 033 (SPEC-033-R004):
+// the attested public key column is bound to the key id by a CHECK, and the
+// migration grants nothing, so the recorder keeps exactly SELECT and INSERT.
+func TestAppAttestPublicKeyMigrationShape(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var body string
+	for _, m := range all {
+		if m.Name == "app_attest_public_key" {
+			body = stripSQLComments(m.SQL)
+		}
+	}
+	if body == "" {
+		t.Fatal("app_attest_public_key migration body is empty")
+	}
+	for _, want := range []string{
+		"ADD COLUMN IF NOT EXISTS app_attest_public_key BYTEA NULL;",
+		"octet_length(app_attest_public_key) = 65",
+		"get_byte(app_attest_public_key, 0) = 4",
+		"sha256(app_attest_public_key) = app_attest_key_id",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("migration 033 missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"GRANT ", "UPDATE ", "DELETE "} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("migration 033 must not contain %q", forbidden)
+		}
 	}
 }

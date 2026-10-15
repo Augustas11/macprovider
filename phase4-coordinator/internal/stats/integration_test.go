@@ -40,6 +40,8 @@ package stats_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -2743,7 +2745,13 @@ func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
         ON CONFLICT (chip_normalized) DO NOTHING`); err != nil {
 		t.Fatalf("seed chip profile: %v", err)
 	}
-	keyID := []byte(strings.Repeat("k", 32))
+	attestedKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate App Attest test key: %v", err)
+	}
+	publicKey := attestedKey.PublicKey().Bytes()
+	keyDigest := sha256.Sum256(publicKey)
+	keyID := keyDigest[:]
 	// p-plain carries an attested flag the onboarding role could fabricate;
 	// only the recorder-written verification row counts (security R1 HIGH).
 	if _, err := adminDB.ExecContext(ctx, `
@@ -2759,7 +2767,7 @@ func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
 		t.Fatalf("open onboarding store: %v", err)
 	}
 	defer onboardingStore.Close()
-	if _, err := onboardingStore.RecordAppAttestVerification(ctx, "p-plain", []byte(strings.Repeat("p", 32))); err == nil {
+	if _, err := onboardingStore.RecordAppAttestVerification(ctx, "p-plain", keyID, publicKey); err == nil {
 		t.Fatal("recording without the app_attest_recorder connection must fail")
 	}
 	onboardingDB := openRoleDB(t, fx, roleProviderOnboard)
@@ -2800,18 +2808,37 @@ func TestHardwareTrustAppAttestAutoTrust(t *testing.T) {
 	if recorded, err := onboardingStore.AppAttestVerificationRecorded(ctx, "mp-attested"); err != nil || recorded {
 		t.Fatalf("recorded before record: %v %v", recorded, err)
 	}
-	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested", keyID); err != nil || outcome != onboarding.AppAttestRecorded {
+	// A public key that does not hash to the key id is refused before SQL,
+	// and the migration-033 CHECK refuses it at the database too.
+	if _, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested", []byte(strings.Repeat("k", 32)), publicKey); err == nil {
+		t.Fatal("recording a public key that is not the key id's key must fail")
+	}
+	recorderAdmin := openRoleDB(t, fx, "app_attest_recorder")
+	if _, err := recorderAdmin.ExecContext(ctx, `
+        INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id, app_attest_public_key) VALUES ('mp-mismatch', $1, $2)`,
+		[]byte(strings.Repeat("m", 32)), publicKey); err == nil || !contains(err.Error(), "provider_app_attest_verifications_public_key_check") {
+		t.Fatalf("mismatched public key insert err = %v, want the public key CHECK", err)
+	}
+	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested", keyID, publicKey); err != nil || outcome != onboarding.AppAttestRecorded {
 		t.Fatalf("record verification: outcome=%v err=%v", outcome, err)
+	}
+	if key, ok, err := onboardingStore.RecordedAppAttestKey(ctx, "mp-attested"); err != nil || !ok || !bytes.Equal(key.KeyID, keyID) || !bytes.Equal(key.PublicKey, publicKey) {
+		t.Fatalf("recorded key = %+v ok=%v err=%v", key, ok, err)
 	}
 	if recorded, err := onboardingStore.AppAttestVerificationRecorded(ctx, "mp-attested"); err != nil || !recorded {
 		t.Fatalf("recorded after record: %v %v", recorded, err)
 	}
 	// The same key cannot be recorded for a second provider.
-	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested-clone", keyID); err != nil || outcome != onboarding.AppAttestKeyReused {
+	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested-clone", keyID, publicKey); err != nil || outcome != onboarding.AppAttestKeyReused {
 		t.Fatalf("record duplicate key: outcome=%v err=%v", outcome, err)
 	}
 	// A provider keeps its first key.
-	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested", []byte(strings.Repeat("n", 32))); err != nil || outcome != onboarding.AppAttestAlreadyRecorded {
+	otherKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate second App Attest test key: %v", err)
+	}
+	otherDigest := sha256.Sum256(otherKey.PublicKey().Bytes())
+	if outcome, err := onboardingStore.RecordAppAttestVerification(ctx, "mp-attested", otherDigest[:], otherKey.PublicKey().Bytes()); err != nil || outcome != onboarding.AppAttestAlreadyRecorded {
 		t.Fatalf("record second key: outcome=%v err=%v", outcome, err)
 	}
 	var storedKey []byte

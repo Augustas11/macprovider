@@ -1,7 +1,9 @@
 package onboarding
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -101,30 +103,50 @@ func (s *PGStore) AppAttestRecorderConfigured() bool {
 // AppAttestVerificationRecorded reports whether providerID already has a
 // recorded App Attest verification (SPEC-033 §5.7.1 step 1).
 func (s *PGStore) AppAttestVerificationRecorded(ctx context.Context, providerID string) (bool, error) {
-	if !s.AppAttestRecorderConfigured() {
-		return false, errors.New("app attest record postgres store is not configured")
-	}
-	var recorded bool
-	err := s.appAttestRecordDB.QueryRowContext(ctx, `
-SELECT EXISTS (SELECT 1 FROM provider_app_attest_verifications WHERE provider_id = $1)`, providerID).Scan(&recorded)
+	_, recorded, err := s.RecordedAppAttestKey(ctx, providerID)
 	return recorded, err
 }
 
+// RecordedAppAttestKey returns providerID's recorded App Attest key id and,
+// for a row recorded from migration 033 on, its attested public key. It reads
+// through the app_attest_recorder connection (SELECT only).
+func (s *PGStore) RecordedAppAttestKey(ctx context.Context, providerID string) (RecordedAppAttestKey, bool, error) {
+	if !s.AppAttestRecorderConfigured() {
+		return RecordedAppAttestKey{}, false, errors.New("app attest record postgres store is not configured")
+	}
+	var key RecordedAppAttestKey
+	err := s.appAttestRecordDB.QueryRowContext(ctx, `
+SELECT app_attest_key_id, app_attest_public_key
+  FROM provider_app_attest_verifications
+ WHERE provider_id = $1`, providerID).Scan(&key.KeyID, &key.PublicKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RecordedAppAttestKey{}, false, nil
+	}
+	if err != nil {
+		return RecordedAppAttestKey{}, false, err
+	}
+	return key, true, nil
+}
+
 // RecordAppAttestVerification records that providerID's App Attest key passed
-// Apple verification (SPEC-033-R004). The first record per provider and per
-// key wins and is never updated: a provider that already has a row keeps its
-// first key, and a key recorded for another provider is not recorded again.
-func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID []byte) (AppAttestRecordOutcome, error) {
+// Apple verification (SPEC-033-R004), with the attested public key. The first
+// record per provider and per key wins and is never updated: a provider that
+// already has a row keeps its first key, and a key recorded for another
+// provider is not recorded again.
+func (s *PGStore) RecordAppAttestVerification(ctx context.Context, providerID string, keyID, publicKey []byte) (AppAttestRecordOutcome, error) {
 	if !s.AppAttestRecorderConfigured() {
 		return 0, errors.New("app attest record postgres store is not configured")
 	}
 	if strings.TrimSpace(providerID) == "" || len(keyID) != 32 {
 		return 0, errors.New("app attest record requires a provider id and a 32-byte key id")
 	}
+	if digest := sha256.Sum256(publicKey); len(publicKey) != 65 || publicKey[0] != 0x04 || !bytes.Equal(digest[:], keyID) {
+		return 0, errors.New("app attest record requires the attested public key of the key id")
+	}
 	res, err := s.appAttestRecordDB.ExecContext(ctx, `
-INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING`, providerID, keyID)
+INSERT INTO provider_app_attest_verifications (provider_id, app_attest_key_id, app_attest_public_key)
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING`, providerID, keyID, publicKey)
 	if err != nil {
 		return 0, err
 	}

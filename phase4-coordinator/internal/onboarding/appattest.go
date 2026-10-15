@@ -28,19 +28,27 @@ type AppleAppAttestVerifier struct {
 // ErrAppAttestTransient when the verifier itself cannot run (missing pins,
 // unusable root, cancelled context).
 func (v AppleAppAttestVerifier) Verify(ctx context.Context, evidence AppAttestEvidence) (bool, error) {
+	_, attested, err := v.VerifyKey(ctx, evidence)
+	return attested, err
+}
+
+// VerifyKey is Verify that also returns the attested 65-byte uncompressed
+// P-256 public key when the attestation passes every check, so the recorder
+// can keep it with the key id (SPEC-033-R004).
+func (v AppleAppAttestVerifier) VerifyKey(ctx context.Context, evidence AppAttestEvidence) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return false, ErrAppAttestTransient
+		return nil, false, ErrAppAttestTransient
 	}
 	teamID := strings.TrimSpace(v.Config.TeamID)
 	bundleID := strings.TrimSpace(v.Config.BundleID)
 	if teamID == "" || bundleID == "" {
-		return false, ErrAppAttestTransient
+		return nil, false, ErrAppAttestTransient
 	}
 	root := v.Root
 	if root == nil {
 		pinned, err := appattest.AppleRoot()
 		if err != nil {
-			return false, ErrAppAttestTransient
+			return nil, false, ErrAppAttestTransient
 		}
 		root = pinned
 	}
@@ -48,7 +56,7 @@ func (v AppleAppAttestVerifier) Verify(ctx context.Context, evidence AppAttestEv
 	if v.Now != nil {
 		now = v.Now()
 	}
-	_, err := appattest.VerifyAttestation(appattest.AttestationInput{
+	key, err := appattest.VerifyAttestation(appattest.AttestationInput{
 		Attestation:    evidence.Object,
 		KeyID:          evidence.KeyID,
 		ClientDataHash: evidence.ClientDataHash[:],
@@ -58,10 +66,10 @@ func (v AppleAppAttestVerifier) Verify(ctx context.Context, evidence AppAttestEv
 	})
 	switch {
 	case err == nil:
-		return true, nil
+		return append([]byte(nil), key.PublicKey...), true, nil
 	case errors.Is(err, appattest.ErrACLMismatch):
-		return false, nil
+		return nil, false, nil
 	default:
-		return false, ErrAppAttestBinding
+		return nil, false, ErrAppAttestBinding
 	}
 }
