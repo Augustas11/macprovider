@@ -160,7 +160,7 @@ func newBindingFixture(t *testing.T) *bindingFixture {
 	cfg.Tier2.ObserveEnabled = true
 	clock := &bindingClock{now: now}
 	server := &Server{cfg: cfg, tier2: cfg.Tier2, autotuneCatalog: catalog, now: clock.Now, log: zerolog.Nop(),
-		modelAdmissions: NewMemoryModelAdmissionStore(), catalog: bindingTier2Catalog(t, "tier2-1")}
+		modelAdmissions: NewMemoryModelAdmissionStore(), catalog: bindingTier2Catalog(t, "tier2-1"), bindingRetryWake: make(chan struct{})}
 	server.artifactIdentitySets.sets = map[string]*artifactidentity.Index{catalog.SHA256: index}
 	// As in NewServer: generation 0 means "never validated".
 	server.artifactIdentitySets.gen = 1
@@ -221,7 +221,33 @@ func (f *bindingFixture) offer(t *testing.T, providerID, suffix, runtimeSource s
 	if err != nil || replay {
 		t.Fatalf("offer %s: replay=%v err=%v", suffix, replay, err)
 	}
+	f.quiesceBindingRetries(providerID)
 	return stored
+}
+
+// quiesceBindingRetries runs the binding-refresh retry goroutines an append
+// started to completion, waking them out of their backoff, so a test may
+// then mutate Server fields those goroutines read (server.now,
+// server.modelAdmissions) without a data race (#2005). When the synchronous
+// refresh failed (the session's binding lags its section generation), the
+// retry is the behaviour under test and must keep its real backoff, so it
+// is left running.
+func (f *bindingFixture) quiesceBindingRetries(providerID string) {
+	if p, ok := f.server.pool.Resolve(providerID, ""); ok && p.ModelAdmissionBindingGeneration < f.server.ModelAdmissionBindingGeneration(providerID) {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		f.server.bindingRetries.Wait()
+		close(done)
+	}()
+	for {
+		select {
+		case f.server.bindingRetryWake <- struct{}{}:
+		case <-done:
+			return
+		}
+	}
 }
 
 // decide appends an operator decision the way the endpoint does (stage D):
@@ -252,6 +278,7 @@ func (f *bindingFixture) decide(t *testing.T, current ModelAdmissionEvent, nextS
 	if err != nil {
 		t.Fatalf("decide %s: %v", nextState, err)
 	}
+	f.quiesceBindingRetries(current.ProviderID)
 	return stored
 }
 
