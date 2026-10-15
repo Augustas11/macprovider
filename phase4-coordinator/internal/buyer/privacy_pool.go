@@ -143,7 +143,7 @@ func (s *Server) privacyPoolFence(reservation relayblind.Reservation) (trustpool
 		return trustpool.Snapshot{}, false
 	}
 	provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession)
-	if !snap.Members[reservation.ProviderID] || (live && !privacyPoolMemberEligible(snap, provider)) {
+	if !live || provider.AssignedID != reservation.AssignedSession || !privacyPoolMemberEligible(snap, provider) {
 		return trustpool.Snapshot{}, false
 	}
 	return snap, true

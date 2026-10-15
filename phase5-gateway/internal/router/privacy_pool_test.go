@@ -225,3 +225,60 @@ func TestPrivacyModeRelayBlindRequiredAllowsPoolOnlyWithPrivacyClass(t *testing.
 		t.Fatalf("privacy-class pool refused by the mode gate: %s", w.Body.String())
 	}
 }
+
+func TestPrivacyPoolIntentHeadersOtherThanSelectorAreDowngrades(t *testing.T) {
+	for _, name := range []string{poolEmitHeader, "X-MacProvider-Pool-Manifest-Core-Digest", engineSelectHeader} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/relay-blind/route-reservations", nil)
+		r.Header.Set(name, "x")
+		if !privacyPoolIntentDenied(r, "acct_pool", false) {
+			t.Fatalf("%s was not refused", name)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/relay-blind/route-reservations", nil)
+	r.Header.Set(poolSelectHeader, testPoolID)
+	if privacyPoolIntentDenied(r, "acct_pool", false) {
+		t.Fatal("the buyer pool selector alone was refused")
+	}
+	// A demo request that names a pool reaches the resolver, which answers
+	// the generic pool_unavailable; without a selector it stays a downgrade.
+	if privacyPoolIntentDenied(r, "demo:192.0.2.1", true) {
+		t.Fatal("demo pool selection did not reach the resolver")
+	}
+	if !privacyPoolIntentDenied(httptest.NewRequest(http.MethodPost, "/", nil), "demo:192.0.2.1", true) {
+		t.Fatal("demo privacy request without a pool was not refused")
+	}
+}
+
+func TestPrivacyPoolDemoSelectionGetsGenericPoolUnavailable(t *testing.T) {
+	res := pooledPrivacyReservationFixture(t)
+	raw := pilotEnvelopeFixture(t, res)
+	h, _, hops := privacyPoolGateway(t, res, raw, "acct_pool", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("chat reached the coordinator")
+	})
+	demo := issueDemoToken(t, h, "192.0.2.30")
+	req := httptest.NewRequest(http.MethodPost, "/v1/relay-blind/route-reservations", strings.NewReader(string(privacyReservationBody(t, res))))
+	req.Header.Set("X-Demo-Token", demo)
+	req.Header.Set("X-Real-IP", "192.0.2.30")
+	req.Header.Set(privacyClassHeader, privacyClassV1)
+	req.Header.Set(poolSelectHeader, testPoolID)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"pool_unavailable"`) {
+		t.Fatalf("demo pool reservation %d %s", w.Code, w.Body.String())
+	}
+	if got := hops.get("/v1/relay-blind/route-reservations"); len(got) != 0 {
+		t.Fatalf("demo pool reservation reached the coordinator: %v", got)
+	}
+}
+
+func TestPrivacyRefusalLogCodeAcceptsPoolCodes(t *testing.T) {
+	for code, want := range map[string]string{
+		"pool_unavailable": "pool_unavailable", "pool_model_not_allowed": "pool_model_not_allowed",
+		privacyClassUnavailable: privacyClassUnavailable, "relay_blind_replay": "relay_blind_replay",
+		"pool_no_eligible_member": "unknown", "anything": "unknown",
+	} {
+		if got := privacyRefusalLogCode(code); got != want {
+			t.Fatalf("%s logged as %s", code, got)
+		}
+	}
+}

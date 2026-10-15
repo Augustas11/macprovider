@@ -174,6 +174,16 @@ func privacyErrorMessage(code string) string {
 	}
 }
 
+// privacyRefusalLogCode is the closed buyer-code label of a refused privacy
+// request (SPEC-049-R030 item 3): a privacy or relay-blind code, or a
+// SPEC-042 pool code the coordinator returns under SPEC-049-R032 item 2.
+func privacyRefusalLogCode(code string) string {
+	if _, _, _, pool := privacyPoolRefusal(code); pool || privacyClassKnown(code) || code == relayBlindCapabilityRefusalCode || (strings.HasPrefix(code, "relay_blind_") && len(code) <= 64) {
+		return code
+	}
+	return "unknown"
+}
+
 func privacyClassKnown(code string) bool {
 	switch code {
 	case privacyClassDisabled, privacyClassUnavailable, privacyClassDowngrade, privacyClassStale, privacyClassUnconfirmed:
@@ -202,20 +212,28 @@ func privacyBuyerIntentDenied(r *http.Request, accountID string, demo bool) bool
 
 // privacyPoolIntentDenied is privacyBuyerIntentDenied for the reservation and
 // chat hops of SPEC-049-R032: the buyer pool selector is resolved and
-// authorized there instead of refused. Demo traffic, a buyer-supplied
-// internal pool header, and an engine selector are still refused.
+// authorized there instead of refused, so a demo request that names a pool
+// gets the generic pool_unavailable from the resolver. Any other
+// X-MacProvider-Pool* header (buyer-supplied internal pool authority), an
+// engine selector, and demo traffic without a pool selector are refused.
 func privacyPoolIntentDenied(r *http.Request, accountID string, demo bool) bool {
-	if demo || strings.HasPrefix(accountID, "demo:") {
-		return true
-	}
-	for _, name := range []string{poolEmitHeader, engineSelectHeader} {
-		for _, v := range r.Header.Values(name) {
-			if strings.TrimSpace(v) != "" {
-				return true
-			}
+	poolSelected := false
+	for name, values := range r.Header {
+		nonempty := false
+		for _, v := range values {
+			nonempty = nonempty || strings.TrimSpace(v) != ""
+		}
+		if !nonempty {
+			continue
+		}
+		switch lower := strings.ToLower(name); {
+		case lower == strings.ToLower(poolSelectHeader):
+			poolSelected = true
+		case lower == strings.ToLower(engineSelectHeader), lower == strings.ToLower(poolEmitHeader), strings.HasPrefix(lower, strings.ToLower(poolEmitHeader)+"-"):
+			return true
 		}
 	}
-	return false
+	return (demo || strings.HasPrefix(accountID, "demo:")) && !poolSelected
 }
 
 // resolvePrivacyPool is SPEC-049-R032 item 1 at the gateway: the pool of a

@@ -59,7 +59,7 @@ SPEC-041 owns relay-blind provider key records, buyer pins, encryption envelopes
 - SPEC-040 owns wallet authentication and request signatures. Wallet signatures bind the exact relay-blind transaction.
 - SPEC-042 owns pool selection. Its R009 requires rejection of every pool-scoped relay-blind request except a SPEC-049 privacy-class request under SPEC-049-R032 (SPEC-042 0.0.43).
 
-SPEC-049 privacy-class extension: R002/R004/R005 closed schemas admit exactly the SPEC-049 additions (`privacy_key_records`, the `privacy_enrollment` claim, `privacy-class-reservation-v1`, `privacy_class` dispatch key, and the R005 bound-rejection `error_code` values `privacy_class_downgrade_rejected` and `privacy_class_posture_stale`) only when privacy class is requested; SPEC-049 owns them. For privacy-class key records only, SPEC-049-R025 enrollment is an identity binding equivalent to the operator configuration pin of R002, and the SPEC-049-R028 operator-signed identity directory is the one permitted network discovery channel for buyer pins (R002).
+SPEC-049 privacy-class extension: R002/R004/R005 closed schemas admit exactly the SPEC-049 additions (`privacy_key_records`, the `privacy_enrollment` claim, `privacy-class-reservation-v1` with its SPEC-049-R032 pool fields, `privacy_class` dispatch key, and the R005 bound-rejection `error_code` values `privacy_class_downgrade_rejected` and `privacy_class_posture_stale`) only when privacy class is requested; SPEC-049 owns them. For privacy-class key records only, SPEC-049-R025 enrollment is an identity binding equivalent to the operator configuration pin of R002, and the SPEC-049-R028 operator-signed identity directory is the one permitted network discovery channel for buyer pins (R002).
 
 ## 3. Canonical primitives
 

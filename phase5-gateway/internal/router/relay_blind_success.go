@@ -133,8 +133,8 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 	decoded := json.Unmarshal(body, &wire) == nil
 	if privacy {
 		code := "unknown"
-		if decoded && (privacyClassKnown(wire.Error.Code) || strings.HasPrefix(wire.Error.Code, "relay_blind_") || wire.Error.Code == relayBlindCapabilityRefusalCode) && len(wire.Error.Code) <= 64 {
-			code = wire.Error.Code
+		if decoded {
+			code = privacyRefusalLogCode(wire.Error.Code)
 		}
 		s.notePrivacyUpstreamRejection(resp, phase, code)
 	}

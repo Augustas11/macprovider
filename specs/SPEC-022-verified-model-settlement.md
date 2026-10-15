@@ -11,8 +11,8 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 Issue #1985: R-14.1 covers SPEC-049 privacy-class executions scoped to a
 Trusted Pool under SPEC-049-R032. Their R-14 route snapshot carries the
-reservation's SPEC-042-R006 pool labels in its digest, and the verdict row,
-including a missing-receipt verdict, is stamped with the R006 pool label.
+reservation's SPEC-042-R006 pool labels in its digest, and the verdict row is
+stamped with the R006 pool label through the plaintext pool-route path.
 The outcome is still `relay_blind_settled`, never `verified`; the usage source
 is unchanged; R-14.2 to R-14.7 apply unchanged. The conformance state of
 `SPEC-022-R014` does not change.

@@ -260,3 +260,26 @@ func TestPrivacyPoolRevocationBetweenPhasesIsStale(t *testing.T) {
 		}
 	})
 }
+
+func TestPrivacyPoolFenceRequiresTheLiveReservedSession(t *testing.T) {
+	h, _ := newPrivacyPoolHarness(t, privacyHarnessConfig{privacyKey: true}, privacyPoolSnapshot([]string{"provider-a"}, 7))
+	reservation, err := relayblind.ParseReservationResponse(h.reservePool(t, privacyTestPoolID).Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := h.store.LookupReservation(context.Background(), reservation.ProviderBinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh := h.server.privacyPoolFence(row); !fresh {
+		t.Fatal("fence refused the live reserved member")
+	}
+	// A member whose reserved session left the registry is never fenced
+	// through, even though its pool membership is unchanged.
+	if !h.server.pool.RemoveIfSession("provider-a", "session-a") {
+		t.Fatal("session not removed")
+	}
+	if _, fresh := h.server.privacyPoolFence(row); fresh {
+		t.Fatal("fence passed a reservation whose session is gone")
+	}
+}

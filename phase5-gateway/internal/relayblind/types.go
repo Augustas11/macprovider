@@ -213,11 +213,13 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 		return ReservationResponse{}, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
 	fields := []string{"version", "provider_binding", "buyer_binding", "key_record_digest", "key_record", "kid", "endpoint_family", "model", "provider_model", "stream", "max_encrypted_request_bytes", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "expires_at_unix", "cache_policy", "failover_policy"}
+	pooled := false
 	switch version {
 	case ReservationVersion:
 	case PrivacyReservationVersion:
 		fields = append(append([]string{}, fields...), "privacy_class", "privacy_assurance", "privacy_key_attestation", "privacy_key_attestation_signature", "privacy_posture_verified_at_unix")
 		if closedObjectHasField(raw, "pool_id") {
+			pooled = true
 			fields = append(fields, "pool_id", "pool_manifest_version", "pool_manifest_core_digest")
 		}
 	default:
@@ -226,6 +228,11 @@ func ParseReservationResponse(raw []byte) (ReservationResponse, error) {
 	var value ReservationResponse
 	if err := decodeClosed(raw, &value, fields); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
+	}
+	// SPEC-049 §4.6: a global response never carries the pool fields, not
+	// even zero-valued ones.
+	if pooled && !value.poolExtensionPresent() {
+		return value, ErrInvalidReservation
 	}
 	if err := value.Validate(); err != nil {
 		return value, err
