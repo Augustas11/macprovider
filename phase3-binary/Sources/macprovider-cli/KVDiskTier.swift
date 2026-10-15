@@ -15,7 +15,16 @@ import MacProviderCore
 enum KVDiskCacheGate {
     static let syntheticPrefix = "conv:kvs-synth:"
 
-    static func persists(conversationKey: String?, provenance: KVIngestProvenance) -> Bool {
+    static func persists(
+        conversationKey: String?, provenance: KVIngestProvenance,
+        fleetGrant: FleetConversationCacheGrant? = nil
+    ) -> Bool {
+        if provenance == .relay || provenance == .tier2,
+           let grant = fleetGrant,
+           grant.isValid,
+           grant.conversationKey == conversationKey {
+            return true
+        }
         guard provenance == .directHTTP else { return false }
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
         return key.hasPrefix(syntheticPrefix) && key.utf8.count > syntheticPrefix.utf8.count

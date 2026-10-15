@@ -5,7 +5,7 @@ import Foundation
 /// environment → CLI overrides), but with a **fail-closed** resolution policy:
 /// an invalid value never aborts the serve process (unlike the throwing
 /// `idle_prewarm` validators) — it disables the tier and records an error the
-/// caller logs. `allow_buyer_keys: true` is rejected in v0.1.
+/// caller logs. Buyer eligibility additionally requires an authenticated fleet grant.
 public struct KVDiskCacheConfig: Equatable, Sendable {
     public var enabled: Bool
     public var allowBuyerKeys: Bool
@@ -26,7 +26,7 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
 
     public init(
         enabled: Bool = false,
-        allowBuyerKeys: Bool = false,
+        allowBuyerKeys: Bool = true,
         directory: String = KVDiskCacheConfig.defaultDirectory,
         maxBytes: Int = KVDiskCacheConfig.defaultMaxBytes,
         maxEntries: Int = KVDiskCacheConfig.defaultMaxEntries,
@@ -124,7 +124,7 @@ public struct KVDiskCacheCLIOverrides: Equatable, Sendable {
 
 /// Fail-closed resolver for the `kv_disk_cache:` group (FR-KVP11). Precedence
 /// is YAML file → environment → CLI overrides (later wins). Any type error,
-/// bound violation, or `allow_buyer_keys: true` records an error and forces the
+/// bound violation records an error and forces the
 /// tier off; the resolver never throws.
 public enum KVDiskCacheConfigResolver {
     /// - Parameters:
@@ -171,19 +171,12 @@ public enum KVDiskCacheConfigResolver {
             if let b = r.ok { config.enabled = b } else { fail("enabled", r.raw, "boolean") }
         }
 
-        // allow_buyer_keys — v0.1: true is REJECTED.
-        var allowBuyerRequested = false
+        // This policy never grants eligibility: authenticated coordinator grants
+        // and durable revocation fencing are required independently.
         if let cli = cli.allowBuyerKeys {
-            allowBuyerRequested = cli
+            config.allowBuyerKeys = cli
         } else if let r = rawBool("allow_buyer_keys", "MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS") {
-            if let b = r.ok { allowBuyerRequested = b } else { fail("allow_buyer_keys", r.raw, "boolean") }
-        }
-        config.allowBuyerKeys = allowBuyerRequested
-        if allowBuyerRequested {
-            errors.append(
-                "allow_buyer_keys=true is rejected in SPEC-037 v0.1; kv_disk_cache tier disabled. "
-                + "Preconditions: machine-verifiable coordinator purge propagation (SPEC-024 FR-CI10a) "
-                + "and a published buyer-purge disclosure must land first.")
+            if let b = r.ok { config.allowBuyerKeys = b } else { fail("allow_buyer_keys", r.raw, "boolean") }
         }
 
         // directory (leading ~ expanded, then MUST be absolute)

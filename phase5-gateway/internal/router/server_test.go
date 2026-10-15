@@ -4168,6 +4168,54 @@ func TestStickyDeleteRequiresBearerAndAuthorizesCoordinator(t *testing.T) {
 	}
 }
 
+func TestStickyDeletePreservesPendingPurgeStatus(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusAccepted, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":false,"pending":true,"pending_acknowledgements":1,"entries":0}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_pending")
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sticky", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"pending":true`) || !strings.Contains(resp.Body.String(), `"purged":false`) {
+		t.Fatalf("pending status lost: %s", resp.Body.String())
+	}
+}
+
+func TestStickyGetReportsPendingWithoutStartingPurge(t *testing.T) {
+	var captured *http.Request
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":false,"pending":true,"pending_acknowledgements":1}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_status")
+	req := httptest.NewRequest(http.MethodGet, "/v1/sticky?account_id=acct_attacker", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if captured == nil || captured.Method != http.MethodGet {
+		t.Fatalf("coordinator request = %#v, want GET", captured)
+	}
+	if got := captured.URL.Query().Get("account_id"); got != "acct_sticky_status" {
+		t.Fatalf("account_id = %q, want authenticated account", got)
+	}
+	if !strings.Contains(resp.Body.String(), `"pending":true`) {
+		t.Fatalf("pending status lost: %s", resp.Body.String())
+	}
+}
+
 func expectedConversationKey(secret, accountID, tag string) string {
 	const scope = "spec006-v0.8-sticky-conversation-v1"
 	mac := hmac.New(sha256.New, []byte(secret))

@@ -5,6 +5,98 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class InferenceRelayTests: XCTestCase {
+    func testConversationCachePurgeAcknowledgesOnlyCompletedTeardown() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-relay-purge-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let authority = FleetConversationCacheAuthority(
+            storageURL: root.appendingPathComponent("revocations.json")
+        )
+        let grant = try authority.authorize(conversationKey: "conv:relay-purge", generation: 4)
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+            ),
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            fleetCacheAuthority: authority,
+            purgeFleetConversation: { key in
+                key == "conv:relay-purge" && !grant.isValid
+            },
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+
+        try await relay.handleConversationCachePurge([
+            "type": "conversation_cache_purge",
+            "purge_id": "purge-1",
+            "conversation_key": "conv:relay-purge",
+            "generation": 4,
+        ])
+
+        let frames = await recorder.frames
+        let ack = try XCTUnwrap(frames.last)
+        XCTAssertEqual(ack["type"] as? String, "conversation_cache_purge_ack")
+        XCTAssertEqual(ack["purge_id"] as? String, "purge-1")
+        XCTAssertEqual(ack["conversation_key"] as? String, "conv:relay-purge")
+        XCTAssertEqual(ack["generation"] as? UInt64, 4)
+        XCTAssertEqual(ack["purged"] as? Bool, true)
+        XCTAssertFalse(grant.isValid)
+    }
+
+    func testStrictFleetGenerationDecoding() throws {
+        XCTAssertEqual(InferenceRelay.strictUInt64(try Self.jsonValue("1")), 1)
+        XCTAssertEqual(InferenceRelay.strictUInt64(try Self.jsonValue("18446744073709551615")), UInt64.max)
+        for literal in ["0.0", "1e3", "-1", "18446744073709551616", "true", #""1""#] {
+            XCTAssertNil(InferenceRelay.strictUInt64(try Self.jsonValue(literal)), literal)
+        }
+    }
+
+    func testFleetGrantConversationMismatchIsRejectedBeforeRuntime() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-relay-mismatch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1)
+            ),
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            fleetCacheAuthority: FleetConversationCacheAuthority(
+                storageURL: root.appendingPathComponent("revocations.json")
+            ),
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-mismatched-fleet-key",
+            "stream": false,
+            "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}]}"#,
+            "conversation_key": "conv:envelope",
+            "fleet_cache": ["conversation_key": "conv:different", "generation": 1],
+        ])
+
+        let frames = await recorder.frames
+        let nak = try XCTUnwrap(frames.last)
+        XCTAssertEqual(nak["type"] as? String, "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "req-mismatched-fleet-key")
+        let error = try XCTUnwrap(nak["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "invalid_fleet_cache_grant")
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "inference_response_end" })
+    }
+
     func testEightAdvertisedSeatsSetRelayAdmissionLimit() async throws {
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",

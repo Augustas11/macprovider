@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.59",
+      "version": "0.9.60",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -206,7 +206,7 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.1.5",
+      "version": "v0.2.0",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -13139,6 +13139,51 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2016",
         "rationale": "Bounded native image implementation and exact qualified-capacity routing. Hardware paired-image, resource lifecycle and approved released-provider buyer/settlement acceptance are post-merge gates; no image qualification is claimed by parser support, model name, CI fixtures or text-only evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R014",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Authenticated fleet grants, durable purge delivery, acknowledgement and reconnect reconciliation; implementation and acceptance are in progress. Studio hardware acceptance is pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R015",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Versioned complete recurrent checkpoint representation and restore; implementation and acceptance are in progress. Studio hardware acceptance is pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R016",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2015",
+        "rationale": "Fleet/recurrent cold restore, privacy, revocation-race and designated hardware acceptance; implementation and acceptance are in progress. Studio hardware acceptance is pending."
       }
     }
   ]

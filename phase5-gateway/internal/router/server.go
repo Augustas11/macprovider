@@ -270,7 +270,7 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindMessagesDisabled)))
 	}
-	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
+	mux.Handle("/v1/sticky", s.withCORSMethods([]string{http.MethodGet, http.MethodDelete}, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.Handle("/v1/rate-card", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCard)))
 	mux.Handle("/v1/rate-card.sig", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCardSig)))
@@ -879,7 +879,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
@@ -888,7 +888,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := authn.AccountID
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
@@ -918,7 +918,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_sticky_error", "Coordinator sticky purge error")
 		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, resp.StatusCode, body)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

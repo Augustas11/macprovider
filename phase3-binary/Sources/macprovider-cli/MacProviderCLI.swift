@@ -3051,11 +3051,11 @@ struct ServeCommand: AsyncParsableCommand {
         // loopback serving runtime holds no local KV cache, so the tier is only
         // activated when an MLX `ModelRuntime` is serving.
         if let mlxRuntime = modelRuntime as? ModelRuntime,
-           resolved.kvDiskCache.effectiveEnabled,
            let kvProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !kvProviderID.isEmpty {
             let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
             let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
+            await mlxRuntime.registerKVDiskTierForPurge(tier)
             switch await tier.activateForServeDetailed() {
             case .activated:
                 await mlxRuntime.attachKVDiskTier(tier)

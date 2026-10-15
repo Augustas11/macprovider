@@ -28,6 +28,28 @@ final class KVDiskTierTests: XCTestCase {
 
     // MARK: - Synthetic-key gate (FR-KVP11)
 
+    func testFleetGateRequiresValidMatchingGrantAndTrustedProvenance() async throws {
+        let root = makeRoot()
+        let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
+        let key = "conv:tenant-bound"
+        let grant = try authority.authorize(conversationKey: key, generation: 1)
+        for provenance in [KVIngestProvenance.relay, .tier2] {
+            XCTAssertTrue(KVDiskCacheGate.persists(conversationKey: key, provenance: provenance, fleetGrant: grant))
+            XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: "conv:other", provenance: provenance, fleetGrant: grant))
+        }
+        for provenance in [KVIngestProvenance.privacy, .unknown, .directHTTP] {
+            XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: provenance, fleetGrant: grant))
+        }
+        _ = try await authority.revokeAndPurge(conversationKey: key, through: 1) { _ in true }
+        XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: .relay, fleetGrant: grant))
+    }
+
+    func testPrivacyNeverPersistsSpoofedSyntheticKey() {
+        for key in ["conv:kvs-synth:alpha", "  conv:kvs-synth:alpha  ", "conv:buyer", "conv:kvs-synth:"] {
+            XCTAssertFalse(KVDiskCacheGate.persists(conversationKey: key, provenance: .privacy))
+        }
+    }
+
     func testGateAdmitsSyntheticOnDirectHTTP() {
         XCTAssertTrue(KVDiskCacheGate.persists(conversationKey: "conv:kvs-synth:alpha", provenance: .directHTTP))
     }

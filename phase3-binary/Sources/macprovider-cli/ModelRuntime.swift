@@ -1630,6 +1630,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
+    private var attachedKVDiskTier: KVDiskTier?
     private var inferenceGate: AsyncSemaphore
     /// SPEC-038-R011: the served slot count. The serial `inferenceGate` and
     /// the scheduler's buyer-row limit are sized to it (the scheduler keeps
@@ -5531,6 +5532,7 @@ actor ModelRuntime: ModelRuntimeServing {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
+        await conversationCache.purgeAllHot()
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
@@ -6863,6 +6865,7 @@ actor ModelRuntime: ModelRuntimeServing {
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -6879,7 +6882,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                allowRetainedPagedKVHandoff: true
+                cold: coldContext,
+                allowRetainedPagedKVHandoff: true,
+                fleetGrant: request.fleetCacheGrant
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -7009,7 +7014,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints
                     ),
-                    fullTokens: fullTokens
+                    fullTokens: fullTokens,
+                    cold: coldContext
                 )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
@@ -7327,6 +7333,7 @@ actor ModelRuntime: ModelRuntimeServing {
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
@@ -7343,7 +7350,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                allowRetainedPagedKVHandoff: true
+                cold: coldContext,
+                allowRetainedPagedKVHandoff: true,
+                fleetGrant: request.fleetCacheGrant
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -7524,7 +7533,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints
                     ),
-                    fullTokens: fullTokens
+                    fullTokens: fullTokens,
+                    cold: coldContext
                 )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
@@ -7954,7 +7964,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             incomingTokens: promptTokenIds,
                             modelID: request.model,
                             kvBits: kvBitsOverride,
-                            cold: coldContext
+                            cold: coldContext,
+                            fleetGrant: request.fleetCacheGrant
                         )
                         : nil
                     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8800,7 +8811,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             incomingTokens: promptTokenIds,
                             modelID: request.model,
                             kvBits: kvBitsOverride,
-                            cold: coldContext
+                            cold: coldContext,
+                            fleetGrant: request.fleetCacheGrant
                         )
                         : nil
                     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -9136,6 +9148,14 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-037 stage 5 (FR-KVP7) — attach the activated disk cold tier. Called by
     /// the serve lifecycle after the store acquires its namespace lock, so the hot
     /// tier only reaches disk once single-writer ownership is established.
+    func isFleetCachePurgeReady() -> Bool {
+        attachedKVDiskTier != nil
+    }
+
+    func registerKVDiskTierForPurge(_ tier: KVDiskTier) {
+        attachedKVDiskTier = tier
+    }
+
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
@@ -9161,6 +9181,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // first post-restart request can promote a persisted entry rather than
         // falling back to a fresh prefill until some other conversation commits.
         await seedColdGeometry(into: adapter)
+        attachedKVDiskTier = tier
         coldTierAttached = true
     }
 
@@ -9215,6 +9236,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 // rather than leaving every eligible request to skip observably but
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
+                if adapter.seedTemplate(servedModelID: servedModelID, layers: kvCache) {
+                    return nil
+                }
                 guard let caches = kvCache as? [KVCacheSimple] else {
                     // Report the FIRST layer that is NOT KVCacheSimple (heterogeneous
                     // arrays whose layer 0 is simple but a later layer is not would
@@ -9254,6 +9278,16 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tier is enabled — a running serve owns its ConversationCache and must be able
     /// to remove hot-tier residency so it never keeps serving a purged prefix from
     /// RAM (FR-KVP8). Returns whether the hot tier held live state for the key.
+    /// A fleet acknowledgement requires both hot lease fencing and durable
+    /// key destruction. Failure leaves coordinator reconciliation pending.
+    func purgeFleetConversation(conversationKey: String) async -> Bool {
+        _ = await conversationCache.purgeHot(conversationKey: conversationKey)
+        guard let tier = attachedKVDiskTier else { return false }
+        let result = await tier.purge(rawKey: conversationKey)
+        if case .failed = result { return false }
+        return true
+    }
+
     func purgeHotConversation(conversationKey: String) async -> Bool {
         await conversationCache.purgeHot(conversationKey: conversationKey)
     }
@@ -9302,7 +9336,8 @@ actor ModelRuntime: ModelRuntimeServing {
         // tier silently doing nothing. The pure resolution lives in
         // `ConversationColdContext.resolve` (unit-tested per missing input).
         let gated = KVDiskCacheGate.persists(
-            conversationKey: request.conversationKey, provenance: request.ingestProvenance)
+            conversationKey: request.conversationKey, provenance: request.ingestProvenance,
+            fleetGrant: attachedKVDiskTier?.config.allowBuyerKeys == true ? request.fleetCacheGrant : nil)
         return ConversationColdContext.resolve(
             gated: gated,
             requestModel: request.model,

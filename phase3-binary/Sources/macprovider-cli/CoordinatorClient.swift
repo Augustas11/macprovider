@@ -527,6 +527,7 @@ actor CoordinatorClient {
     }
 
     private var inferenceRelay: InferenceRelay?
+    private static let fleetConversationCacheAuthority = FleetConversationCacheAuthority()
     private let relayBlindRuntime: RelayBlindProviderRuntime?
     private let privacyPostureProbe: (any PrivacyPostureProbe)?
     private let privacyPostureResponder: PrivacyPostureResponder?
@@ -2302,6 +2303,11 @@ actor CoordinatorClient {
             },
             privacyClassBeta: appConfig.privacyClassBeta,
             postureProbe: privacyPostureProbe,
+            fleetCacheAuthority: Self.fleetConversationCacheAuthority,
+            purgeFleetConversation: { [modelRuntime] conversationKey in
+                guard let runtime = modelRuntime as? ModelRuntime else { return false }
+                return await runtime.purgeFleetConversation(conversationKey: conversationKey)
+            },
             sendFrame: sendFrame
         )
     }
@@ -2687,6 +2693,16 @@ actor CoordinatorClient {
                 return
             }
             try await inferenceRelay.handleCancelRequest(dict)
+        case "conversation_cache_purge":
+            guard wsTunneledMode, let inferenceRelay else {
+                try await sendNAK(
+                    inReplyTo: type,
+                    code: "unknown_message_type",
+                    message: "Unrecognized message type: '\(type)'"
+                )
+                return
+            }
+            try await inferenceRelay.handleConversationCachePurge(dict)
         case "drain":
             // SPEC-001 v1.1.3: coordinator drain stops registration only.
             // The local buyer HTTP server keeps serving. Throwing
@@ -7878,6 +7894,9 @@ actor CoordinatorClient {
                 "relay_blind_settlement_receipt_v1": true,
             ],
         ]
+        if await advertisesFleetCacheProtocol() {
+            message["fleet_cache_protocol"] = 1
+        }
         let resolvedCatalog: [String]
         do {
             resolvedCatalog = try SupportedModels.validate(
@@ -7970,6 +7989,13 @@ actor CoordinatorClient {
         if let catalogRowIdentity { message["catalog_row_identity"] = catalogRowIdentity }
     }
 
+    private func advertisesFleetCacheProtocol() async -> Bool {
+        guard Self.fleetConversationCacheAuthority.isAvailable,
+              let runtime = modelRuntime as? ModelRuntime
+        else { return false }
+        return await runtime.isFleetCachePurgeReady()
+    }
+
     func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
         var message: [String: Any] = [
@@ -7987,6 +8013,9 @@ actor CoordinatorClient {
             "binary_version": Self.binaryVersion,
             "attestation": NSNull(),
         ]
+        if await advertisesFleetCacheProtocol() {
+            message["fleet_cache_protocol"] = 1
+        }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }

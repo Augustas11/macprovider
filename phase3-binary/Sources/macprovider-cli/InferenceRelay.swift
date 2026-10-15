@@ -42,6 +42,8 @@ actor InferenceRelay {
     private let relayBlindRuntime: RelayBlindProviderRuntime?
     private let privacyClassBeta: Bool
     private let postureProbe: (any PrivacyPostureProbe)?
+    private let fleetCacheAuthority: FleetConversationCacheAuthority?
+    private let purgeFleetConversation: @Sendable (String) async -> Bool
     // T3-01: number of content-token deltas to accumulate per WS frame.
     // 1 = one frame per token (default, current behaviour).
     nonisolated let streamInterval: Int
@@ -63,6 +65,8 @@ actor InferenceRelay {
         demoteAutoupdateTrust: TrustDemotion? = nil,
         privacyClassBeta: Bool = false,
         postureProbe: (any PrivacyPostureProbe)? = nil,
+        fleetCacheAuthority: FleetConversationCacheAuthority? = nil,
+        purgeFleetConversation: @escaping @Sendable (String) async -> Bool = { _ in false },
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
@@ -80,6 +84,8 @@ actor InferenceRelay {
         self.demoteAutoupdateTrust = demoteAutoupdateTrust
         self.privacyClassBeta = privacyClassBeta
         self.postureProbe = postureProbe
+        self.fleetCacheAuthority = fleetCacheAuthority
+        self.purgeFleetConversation = purgeFleetConversation
         self.sendFrame = sendFrame
     }
 
@@ -99,6 +105,8 @@ actor InferenceRelay {
         let maxOutputTokens: Int?
         let decryptedConversationKey: String?
         let decryptedConversationCacheOnly: Bool
+        let fleetCacheWire: Any?
+        let fleetCacheMisplaced: Bool
         let bodyEncoding: String?
         let relayBlindContextObject: [String: Any]?
         // SPEC-001-R005: the raw `relay_blind_settlement` member. Under SPEC-008
@@ -119,6 +127,8 @@ actor InferenceRelay {
                 maxOutputTokens = payload.maxOutputTokens
                 decryptedConversationKey = payload.conversationKey
                 decryptedConversationCacheOnly = payload.conversationCacheOnly
+                fleetCacheWire = payload.fleetCache
+                fleetCacheMisplaced = message.keys.contains("fleet_cache")
                 bodyEncoding = payload.bodyEncoding
                 relayBlindContextObject = payload.relayBlindContext
                 relayBlindSettlementWire = payload.relayBlindSettlement
@@ -143,6 +153,8 @@ actor InferenceRelay {
             }
             decryptedConversationKey = nil
             decryptedConversationCacheOnly = false
+            fleetCacheWire = message["fleet_cache"]
+            fleetCacheMisplaced = false
             bodyEncoding = message["body_encoding"] as? String
             relayBlindContextObject = message["relay_blind_context"] as? [String: Any]
             relayBlindSettlementWire = message[RelayBlindSettlementMetadata.wireKey]
@@ -184,6 +196,53 @@ actor InferenceRelay {
             ),
             relayBlind: isRelayBlind
         )
+
+        let fleetCacheGrant: FleetConversationCacheGrant?
+        if fleetCacheMisplaced {
+            try await sendNAK(
+                inReplyTo: requestID,
+                code: "invalid_fleet_cache_grant",
+                message: "Tier-2 fleet_cache must be inside the authenticated plaintext envelope"
+            )
+            return
+        } else if let rawGrant = fleetCacheWire {
+            guard privacyPath != .privacy && privacyPath != .downgrade,
+                  let grantObject = rawGrant as? [String: Any],
+                  Set(grantObject.keys) == ["conversation_key", "generation"],
+                  let conversationKey = grantObject["conversation_key"] as? String,
+                  conversationKey == (tier2Session != nil
+                      ? decryptedConversationKey
+                      : message["conversation_key"] as? String),
+                  let generation = Self.strictUInt64(grantObject["generation"])
+            else {
+                try await sendNAK(
+                    inReplyTo: requestID,
+                    code: "invalid_fleet_cache_grant",
+                    message: "inference_request fleet_cache grant is malformed or unavailable for this request"
+                )
+                return
+            }
+            do {
+                guard let fleetCacheAuthority else {
+                    throw FleetConversationCacheAuthority.AuthorityError.metadataUnavailable
+                }
+                fleetCacheGrant = try fleetCacheAuthority.authorize(
+                    conversationKey: conversationKey,
+                    generation: generation
+                )
+            } catch {
+                // Never downgrade a rejected fleet grant to legacy hot-only
+                // reuse using the same conversation identifier.
+                try await sendNAK(
+                    inReplyTo: requestID,
+                    code: "fleet_cache_grant_rejected",
+                    message: "inference_request fleet_cache grant is revoked or unavailable"
+                )
+                return
+            }
+        } else {
+            fleetCacheGrant = nil
+        }
 
         let relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?
         var relayBlindSettlement: RelayBlindSettlementMetadata?
@@ -323,10 +382,10 @@ actor InferenceRelay {
         let conversationKey: String?
         let conversationCacheOnly: Bool
         if tier2Session != nil {
-            conversationKey = decryptedConversationKey
+            conversationKey = fleetCacheGrant?.conversationKey ?? decryptedConversationKey
             conversationCacheOnly = decryptedConversationCacheOnly
         } else {
-            conversationKey = (message["conversation_key"] as? String)?
+            conversationKey = fleetCacheGrant?.conversationKey ?? (message["conversation_key"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             conversationCacheOnly = Tier2ProviderSession.isJSONTrue(message["conversation_cache_only"])
         }
@@ -417,6 +476,7 @@ actor InferenceRelay {
                 maxOutputTokens: maxOutputTokens,
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
                 conversationCacheOnly: conversationCacheOnly,
+                fleetCacheGrant: fleetCacheGrant,
                 startedAt: startedAt,
                 streamInterval: streamInterval,
                 relayBlindOpened: relayBlindOpened,
@@ -465,6 +525,45 @@ actor InferenceRelay {
         request.state.cancel(deliveredOutputBytes: deliveredOutputBytes)
     }
 
+    func handleConversationCachePurge(_ message: [String: Any]) async throws {
+        guard let rawPurgeID = message["purge_id"] as? String,
+              let purgeID = ChatCompletionRequest.normalizedRequestID(rawPurgeID),
+              purgeID == rawPurgeID,
+              let conversationKey = message["conversation_key"] as? String,
+              let generation = Self.strictUInt64(message["generation"]),
+              generation > 0
+        else {
+            try await sendNAK(
+                inReplyTo: "conversation_cache_purge",
+                code: "invalid_conversation_cache_purge",
+                message: "conversation_cache_purge requires bounded purge_id, conversation_key, and generation"
+            )
+            return
+        }
+
+        let purged: Bool
+        if let fleetCacheAuthority {
+            do {
+                purged = try await fleetCacheAuthority.revokeAndPurge(
+                    conversationKey: conversationKey,
+                    through: generation,
+                    purge: purgeFleetConversation
+                )
+            } catch {
+                purged = false
+            }
+        } else {
+            purged = false
+        }
+        try await sendFrame([
+            "type": "conversation_cache_purge_ack",
+            "purge_id": purgeID,
+            "conversation_key": conversationKey,
+            "generation": generation,
+            "purged": purged,
+        ])
+    }
+
     /// An exact non-negative integer that fits Int64. JSON booleans (bridged
     /// as CFBoolean), any floating-point number (the coordinator encodes an
     /// integer literal), decimal numbers out of Int64 range, and strings are
@@ -479,6 +578,16 @@ actor InferenceRelay {
         // wrapped to fit Int64.
         guard number.stringValue == String(value), value >= 0 else { return nil }
         return value
+    }
+
+    static func strictUInt64(_ raw: Any?) -> UInt64? {
+        guard let number = raw as? NSNumber,
+              !(number is NSDecimalNumber),
+              CFGetTypeID(number) == CFNumberGetTypeID(),
+              !CFNumberIsFloatType(number),
+              !number.stringValue.hasPrefix("-")
+        else { return nil }
+        return UInt64(number.stringValue)
     }
 
     func cancelAll() {
@@ -659,6 +768,7 @@ actor InferenceRelay {
         maxOutputTokens: Int?,
         conversationKey: String?,
         conversationCacheOnly: Bool = false,
+        fleetCacheGrant: FleetConversationCacheGrant?,
         startedAt: Date,
         streamInterval: Int = 1,
         relayBlindOpened: RelayBlindProviderRuntime.OpenedRequest?,
@@ -684,12 +794,17 @@ actor InferenceRelay {
                 request = relayBlindOpened.request.withRequestID(requestID)
                 if privacySealer != nil {
                     request = request.withConversationKey(nil)
+                } else if let fleetCacheGrant {
+                    request = request.withFleetCacheGrant(fleetCacheGrant)
                 }
             } else {
                 request = try ChatCompletionRequest.parse(data: requestData)
                     .withConversationKey(conversationKey, cacheOnly: conversationCacheOnly)
                     .withRequestID(requestID)
                     .withIngestProvenance(ingestProvenance)
+                if let fleetCacheGrant {
+                    request = request.withFleetCacheGrant(fleetCacheGrant)
+                }
                 if let maxOutputTokens {
                     request = request.withMaxTokensLimit(maxOutputTokens)
                 }

@@ -14,9 +14,9 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.1 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.6 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.24 | normative | complete | conformant: 2, pending: 13 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.59 | normative | complete | conformant: 2, pending: 20 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.60 | normative | complete | conformant: 2, pending: 20 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.2 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
-| SPEC-008 | Tier-2 Trust Layer | 0.7.1 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
+| SPEC-008 | Tier-2 Trust Layer | 0.7.2 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
 | SPEC-010 | Provider Model Catalog | 1.16 | normative | pending | conformant: 2, pending: 7 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | normative | pending | pending corpus migration | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
@@ -32,7 +32,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.1 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.4.7 | draft | complete | pending: 15 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.24 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
-| SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.10 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
+| SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.11 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1.1 | draft | pending | pending corpus migration | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
@@ -45,7 +45,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1.2 | draft | complete | pending: 18 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
-| SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.5 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
+| SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.2.0 | draft | complete | pending: 16 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
 | SPEC-038 | Continuous batching for concurrent provider inference | v0.3.19 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.16 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |

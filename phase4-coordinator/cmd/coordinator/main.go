@@ -31,6 +31,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/intake"
 	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
@@ -271,6 +272,11 @@ func runCoordinator() (exitCode int) {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	fleetCacheStore, err := fleetcache.NewStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fleet cache authority: %v\n", err)
+		os.Exit(1)
+	}
 	moneyCheckpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(cfg.Storage.DBPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "money sqlite checkpoint: %v\n", err)
@@ -1142,6 +1148,7 @@ func runCoordinator() (exitCode int) {
 	if cfg.PrivacyClass.Enabled && privacyAuthority == nil {
 		logger.Fatal().Msg("privacy class enabled requires the relay-blind store")
 	}
+	wsOpts = append(wsOpts, providerws.WithFleetCache(fleetCacheStore))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	// SPEC-047-R001 v0.1.5: the SIGHUP reload's Tier-2 material is staged and
 	// promoted with the release publication instead of swapped on its own.
@@ -1174,6 +1181,7 @@ func runCoordinator() (exitCode int) {
 		buyer.WithRelayBlind(cfg.RelayBlind, relayBlindStore, wsServer.DispatchRelayBlindInference),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
+		buyer.WithFleetCache(fleetCacheStore, wsServer.DispatchConversationCachePurge),
 		buyer.WithBilling(billingStore, cfg.Rewards),
 		buyer.WithSourceEvidence(sourceEvidenceStore),
 		buyer.WithBillingSnapshotID(snapshotID),

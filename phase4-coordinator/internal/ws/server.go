@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
@@ -117,6 +118,7 @@ type Server struct {
 	modelHashLegacyTimer      *time.Timer
 	modelHashLegacyGeneration uint64
 	pool                      *pool.Registry
+	fleetCache                *fleetcache.Store
 	log                       zerolog.Logger
 	now                       func() time.Time
 	newUUID                   func() string
@@ -567,6 +569,10 @@ type idlePrewarmRecord struct {
 }
 
 type Option func(*Server)
+
+func WithFleetCache(store *fleetcache.Store) Option {
+	return func(s *Server) { s.fleetCache = store }
+}
 
 type RelayBlindKeySink interface {
 	AcceptProviderKeys(context.Context, string, string, []relayblind.KeyRecord, time.Time) error
@@ -1337,6 +1343,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if registry != nil {
 		go s.runSELivenessLoop()
+	}
+	if s.fleetCache != nil && registry != nil {
+		go s.runFleetCachePurgeLoop()
 	}
 	if s.privacyAuthority != nil && registry != nil {
 		go s.runPrivacyPostureLoop()
@@ -2648,6 +2657,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.replayConversationCachePurges(entry.ProviderID, entry.AssignedID)
 	// Privacy key acceptance schedules a posture challenge on this session's
 	// FIFO writer. The provider requires hello_ack as the next frame, so the
 	// challenge may only be enqueued after the ack (SPEC-049).
@@ -3292,6 +3302,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if !s.releaseAckedSessionIfCompatibilityAllowed(session, entry) {
 		return entry.ProviderID, entry.AssignedID
 	}
+	s.replayConversationCachePurges(entry.ProviderID, entry.AssignedID)
 	// See handleV1Conn: the posture challenge must follow auth_response v2.
 	s.acceptPrivacyKeyRecords(entry.ProviderID, entry.AssignedID, initial.PrivacyKeyRecords, initial.PrivacyEnrollment)
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -3627,11 +3638,12 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
 	entry := &pool.Provider{
-		ProviderID:    hello.ProviderID,
-		AssignedID:    assignedID,
-		Hostname:      hello.Hostname,
-		ModelID:       hello.ModelID,
-		RuntimeSource: hello.RuntimeSource,
+		ProviderID:         hello.ProviderID,
+		AssignedID:         assignedID,
+		Hostname:           hello.Hostname,
+		ModelID:            hello.ModelID,
+		RuntimeSource:      hello.RuntimeSource,
+		FleetCacheProtocol: hello.FleetCacheProtocol,
 
 		ToolSelectionCapabilities: hello.ToolSelectionCapabilities,
 		VisionRuntimeCapabilities: hello.VisionRuntimeCapabilities,
@@ -4963,6 +4975,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handlePrivacyKeyRotationRequest(providerID, assignedID, payload)
 	case "privacy_key_rotation":
 		s.handlePrivacyKeyRotation(providerID, assignedID, payload)
+	case "conversation_cache_purge_ack":
+		s.handleConversationCachePurgeAck(providerID, assignedID, payload)
 	case "native_mtp_tuple_offer_v1":
 		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
 	case "native_mtp_canary_result_v1":

@@ -30,6 +30,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -292,30 +293,32 @@ type Server struct {
 	// modelVersionFloors is the #768 per-model minimum-binary-version map
 	// (model_id -> minimum version). Read-only after construction; nil/empty
 	// means no floors, which is byte-identical to pre-#768 routing.
-	modelVersionFloors    map[string]string
-	reqLog                requestLogInserter
-	reqLogStore           *requestlog.Store
-	sourceEvidence        *sourceevidence.Store
-	provisionalWeight     float64
-	maxChatBodyBytes      int64
-	recovering            sync.Map
-	poolCheckMu           sync.Mutex
-	poolCheckLast         map[string]time.Time
-	poolReadinessSources  map[string]receiptKeysBucket
-	poolReadinessLimiters map[string]receiptKeysBucket
-	poolCheckMaxEntries   int
-	poolCheckTTL          time.Duration
-	receiptKeysMu         sync.Mutex
-	receiptKeysLimiters   map[string]receiptKeysBucket
-	receiptKeysMaxEntries int
-	receiptKeysTTL        time.Duration
-	publicTrustPoolWork   chan struct{}
-	streamingDowngrade    *streamingDowngradeStore
-	streamingTiming       *streamingTimingCollector
-	slotQueue             *slotQueue
-	slotQueueDeadline     time.Duration
-	slotQueuePollInterval time.Duration
-	minProviderThroughput float64
+	modelVersionFloors      map[string]string
+	reqLog                  requestLogInserter
+	reqLogStore             *requestlog.Store
+	fleetCache              *fleetcache.Store
+	dispatchFleetCachePurge func(fleetcache.Purge)
+	sourceEvidence          *sourceevidence.Store
+	provisionalWeight       float64
+	maxChatBodyBytes        int64
+	recovering              sync.Map
+	poolCheckMu             sync.Mutex
+	poolCheckLast           map[string]time.Time
+	poolReadinessSources    map[string]receiptKeysBucket
+	poolReadinessLimiters   map[string]receiptKeysBucket
+	poolCheckMaxEntries     int
+	poolCheckTTL            time.Duration
+	receiptKeysMu           sync.Mutex
+	receiptKeysLimiters     map[string]receiptKeysBucket
+	receiptKeysMaxEntries   int
+	receiptKeysTTL          time.Duration
+	publicTrustPoolWork     chan struct{}
+	streamingDowngrade      *streamingDowngradeStore
+	streamingTiming         *streamingTimingCollector
+	slotQueue               *slotQueue
+	slotQueueDeadline       time.Duration
+	slotQueuePollInterval   time.Duration
+	minProviderThroughput   float64
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -784,6 +787,13 @@ func WithRequestLog(store requestLogInserter) Option {
 		if typed, ok := store.(*requestlog.Store); ok {
 			s.reqLogStore = typed
 		}
+	}
+}
+
+func WithFleetCache(store *fleetcache.Store, dispatch func(fleetcache.Purge)) Option {
+	return func(s *Server) {
+		s.fleetCache = store
+		s.dispatchFleetCachePurge = dispatch
 	}
 }
 
@@ -1258,11 +1268,39 @@ func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) InternalHandler() http.Handler {
 	r := chi.NewRouter()
+	r.Get("/internal/sticky", s.handleInternalStickyStatus)
 	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
 	r.Get("/internal/routing", s.handleInternalRouting)
 	r.Get("/internal/settlement/finality", s.handleInternalSettlementFinality)
 	r.Get("/internal/settlement/receipts", s.handleInternalSettlementReceipts)
 	return r
+}
+
+func (s *Server) handleInternalStickyStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal sticky status requires coordinator authorization")
+		return
+	}
+	accountID := strings.TrimSpace(r.URL.Query().Get("account_id"))
+	if accountID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing account_id")
+		return
+	}
+	if s.fleetCache == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	pending, err := s.fleetCache.PendingForAccount(r.Context(), accountID)
+	if err != nil {
+		s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge status lookup failed")
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"purged": len(pending) == 0, "pending": len(pending) != 0,
+		"pending_acknowledgements": len(pending),
+	})
 }
 
 func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
@@ -1611,9 +1649,43 @@ func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Reque
 	if s.stickyEnabled {
 		entries = s.purgeStickyAccount(accountID)
 	}
+	if s.fleetCache == nil {
+		// Legacy/test embeddings without the fleet authority retain the
+		// pre-v0.2 affinity-only contract. Production main always wires the
+		// authority and fails startup if its migration cannot open.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"purged": true, "entries": entries})
+		return
+	}
+	purge, err := s.fleetCache.PurgeAccount(r.Context(), accountID)
+	if err != nil {
+		s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge persistence failed")
+		writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+		return
+	}
+	for _, pending := range purge.Pending {
+		if s.dispatchFleetCachePurge != nil {
+			s.dispatchFleetCachePurge(pending)
+		}
+	}
+	if len(purge.Pending) != 0 {
+		if current, err := s.fleetCache.PendingForAccount(r.Context(), accountID); err != nil {
+			s.log.Error().Err(err).Str("account_id", accountID).Msg("conversation cache purge status lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "fleet_cache_purge_unavailable", "Conversation cache purge storage unavailable")
+			return
+		} else {
+			purge.Pending = current
+		}
+	}
 	s.log.Info().Str("event", "sticky_purged_account").Str("account_id", accountID).Int("entries", entries).Msg("sticky affinity purged")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"purged": true, "entries": entries})
+	if len(purge.Pending) != 0 {
+		w.WriteHeader(http.StatusAccepted)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"purged": len(purge.Pending) == 0, "pending": len(purge.Pending) != 0,
+		"pending_acknowledgements": len(purge.Pending), "entries": entries,
+	})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -3934,14 +4006,39 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		state.conversationKeyWithheld = true
 		state.conversationCacheOnly = false
 	}
-	if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); acceptsKey && strings.HasPrefix(key, "conv:") {
-		ctx = providerws.ContextWithConversationKey(ctx, key)
-	} else if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache")); acceptsKey && strings.HasPrefix(key, "conv:") {
+	stickyKey := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv"))
+	cacheOnlyKey := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv-Cache"))
+	key, cacheOnly := stickyKey, false
+	if key == "" {
+		key, cacheOnly = cacheOnlyKey, true
+	}
+	if acceptsKey && strings.HasPrefix(key, "conv:") && provider.FleetCacheProtocol >= 1 {
+		account, authenticated := authenticatedAccountFromContext(r.Context())
+		if authenticated && s.fleetCache != nil {
+			grant, err := s.fleetCache.Grant(r.Context(), account.ID(), key, provider.ProviderID)
+			if err == nil {
+				ctx = providerws.ContextWithFleetCache(ctx, providerws.FleetCacheGrant{ConversationKey: grant.ConversationKey, Generation: grant.Generation}, cacheOnly)
+			} else {
+				s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("fleet cache grant withheld")
+				if state != nil {
+					state.conversationKeyWithheld = true
+					state.conversationCacheOnly = false
+				}
+			}
+		} else if state != nil {
+			state.conversationKeyWithheld = true
+			state.conversationCacheOnly = false
+		}
+	} else if strings.HasPrefix(stickyKey, "conv:") && acceptsKey {
+		// Legacy providers retain their existing hot-cache behavior but never
+		// receive durable fleet eligibility without the purge ACK protocol.
+		ctx = providerws.ContextWithConversationKey(ctx, stickyKey)
+	} else if strings.HasPrefix(cacheOnlyKey, "conv:") && acceptsKey {
 		// Auto-prefix cache key: set provider context but do NOT activate sticky.
 		// applySticky / stickyStore only read X-MacProvider-Internal-Conv; this
 		// header is intentionally invisible to them (SPEC-006-R012, SPEC-004).
 		// The provider learns it is cache-only (SPEC-048-R009).
-		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, key)
+		ctx = providerws.ContextWithConversationCacheOnlyKey(ctx, cacheOnlyKey)
 		if state != nil {
 			state.conversationCacheOnly = true
 		}

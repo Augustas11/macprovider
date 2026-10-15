@@ -4,8 +4,7 @@ import XCTest
 
 /// SPEC-037 FR-KVP11 / AC-9 — fail-closed config resolution for the KV disk
 /// tier: default-off, triple-source precedence (YAML → env → CLI), each
-/// invalid-value rule disables the tier (never aborts), `allow_buyer_keys=true`
-/// rejected, and tilde expansion.
+/// invalid-value rule disables the tier (never aborts), buyer policy, and tilde expansion.
 final class KVDiskCacheConfigTests: XCTestCase {
 
     private func resolve(
@@ -67,18 +66,19 @@ final class KVDiskCacheConfigTests: XCTestCase {
         XCTAssertTrue(c.effectiveEnabled)
     }
 
-    // MARK: - allow_buyer_keys rejected (v0.1)
+    // MARK: - Buyer policy is independent of authenticated eligibility
 
-    func testAllowBuyerKeysRejectedCLI() {
+    func testAllowBuyerKeysAcceptedCLI() {
         let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, allowBuyerKeys: true))
-        XCTAssertFalse(c.effectiveEnabled, "allow_buyer_keys=true must force the tier off")
-        XCTAssertTrue(c.errors.contains { $0.contains("allow_buyer_keys=true is rejected") })
-        XCTAssertTrue(c.errors.contains { $0.contains("coordinator purge propagation") })
+        XCTAssertTrue(c.effectiveEnabled)
+        XCTAssertTrue(c.allowBuyerKeys)
+        XCTAssertTrue(c.errors.isEmpty)
     }
 
-    func testAllowBuyerKeysRejectedYAML() {
+    func testAllowBuyerKeysAcceptedYAML() {
         let c = resolve(yaml: ["enabled": true, "allow_buyer_keys": true])
-        XCTAssertFalse(c.effectiveEnabled)
+        XCTAssertTrue(c.effectiveEnabled)
+        XCTAssertTrue(c.allowBuyerKeys)
     }
 
     func testAllowBuyerKeysFalseIsFine() {
