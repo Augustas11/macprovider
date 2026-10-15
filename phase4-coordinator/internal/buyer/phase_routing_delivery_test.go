@@ -22,7 +22,7 @@ func TestWSStreamingJSONConversionHasNoFirstToken(t *testing.T) {
 		Data: `{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"` + strings.Repeat("x", 400) + `"},"finish_reason":"stop"}]}`}
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID}
+		done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
 	}()
 	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
 	state := &forwardState{}
@@ -64,5 +64,45 @@ func TestHeldPerformanceNeedsDelivery(t *testing.T) {
 	s.releasePerformance(delivered, true)
 	if e, ok := s.perf.Lookup("fast", "delivered"); !ok || e.ServiceTPS != 50 || delivered.perfHold {
 		t.Fatalf("delivered body: %+v ok=%v", e, ok)
+	}
+}
+
+// SPEC-002-R005 through the WS legacy (record-before-write) path: the
+// observation enters the store only when the whole body was written and
+// flushed to the buyer.
+func TestWSNonStreamingLegacyObservesOnlyDeliveredBody(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		w         http.ResponseWriter
+		wantStore bool
+	}{
+		{"flush fails", failingFlushWriter{httptest.NewRecorder()}, false},
+		{"delivered", httptest.NewRecorder(), true},
+	} {
+		s, _ := phaseTestServer(t)
+		requestID := "req-ws-legacy-" + strings.ReplaceAll(tc.name, " ", "-")
+		chunks := make(chan providerws.InferenceResponseChunk, 1)
+		done := make(chan providerws.InferenceResponseEnd, 1)
+		chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0,
+			Data: `{"id":"c1","object":"chat.completion","model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"` + strings.Repeat("x", 800) + `"},"finish_reason":"stop"}]}`}
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+		}()
+		relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
+		state := &forwardState{estimatedTokens: 300, routingEstimatedTokens: 300}
+		state.phaseTiming.markProviderDispatchStart(phaseTestNow.Add(-4*time.Second), "s-fast")
+		rec := &billingRecorder{server: s, state: state, model: "model-a"}
+		logSuccess := func(a requestLogAttempt) error {
+			return rec.recordRow("s-fast", "fast", "", http.StatusOK, nil, nil, nil, "", "", 0, nil, "none", a.SettlementOutput)
+		}
+		result, attempt := s.forwardWSNonStreaming(tc.w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), requestID, pool.Provider{ProviderID: "fast", AssignedID: "s-fast"}, relay, logSuccess, nil, state, 0)
+		if tc.wantStore && result != wsForwardComplete {
+			t.Fatalf("%s: result = %v attempt=%+v body=%v", tc.name, result, attempt, tc.w)
+		}
+		e, ok := s.perf.Lookup("fast", "model-a")
+		if ok != tc.wantStore || (ok && e.ServiceTPS != 50) {
+			t.Fatalf("%s: evidence = %+v ok=%v", tc.name, e, ok)
+		}
 	}
 }

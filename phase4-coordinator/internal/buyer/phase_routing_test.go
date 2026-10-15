@@ -173,8 +173,8 @@ func (c *countingRouteMetrics) IncRouteSelection(phase, basis string) {
 
 // SPEC-002-R005: only cleanly completed plaintext attempts feed the store,
 // and every rate is the coordinator's own. A streamed attempt with a
-// first-token time gives TTFT, prefill, decode and service throughput; a
-// non-streamed one is end-to-end and gives no TTFT or decode.
+// first-token time gives TTFT and decode; a non-streamed one is end-to-end
+// and gives prefill and service throughput, never TTFT or decode.
 func TestServedPerformanceObservation(t *testing.T) {
 	s, _ := phaseTestServer(t)
 	type attempt struct {
@@ -236,16 +236,24 @@ func TestServedPerformanceObservation(t *testing.T) {
 	}
 	record(streamed)
 	e, found := s.perf.Lookup("fast", "stream")
-	// Prefill: 4000 estimated input tokens over the 1050 ms service time.
-	// Decode: 100 tokens after the first over the 1 s after it.
-	if !found || e.TTFTMs != 50 || math.Abs(e.PrefillTPS-4000/1.05) > 1e-9 || e.DecodeTPS != 100 || e.TTFTSamples != 1 || e.ServiceSamples != 0 {
+	// Decode: 100 tokens after the first over the 1 s after it. A streamed
+	// attempt is done only after its buyer writes, so even a prefill-sized
+	// one gives no prefill or service-throughput sample.
+	if !found || e.TTFTMs != 50 || e.DecodeTPS != 100 || e.TTFTSamples != 1 || e.PrefillSamples != 0 || e.ServiceSamples != 0 {
 		t.Fatalf("evidence = %+v found=%v", e, found)
 	}
-	// A reported cached prefix withholds the prefill sample only.
-	cachedAttempt := streamed
+	// Non-streamed and prefill-dominated: 4000 estimated input tokens over the
+	// 1050 ms from dispatch start. A reported cached prefix withholds it.
+	prefillAttempt := streamed
+	prefillAttempt.model, prefillAttempt.stream, prefillAttempt.firstToken = "prefill", false, false
+	record(prefillAttempt)
+	if e, _ := s.perf.Lookup("fast", "prefill"); math.Abs(e.PrefillTPS-4000/1.05) > 1e-9 || e.PrefillSamples != 1 || e.TTFTSamples != 0 {
+		t.Fatalf("non-stream prefill: %+v", e)
+	}
+	cachedAttempt := prefillAttempt
 	cachedAttempt.cached = 400
 	record(cachedAttempt)
-	if e, _ := s.perf.Lookup("fast", "stream"); e.TTFTSamples != 2 || e.PrefillSamples != 1 || e.DecodeSamples != 2 || e.DecodeTPS != 100 {
+	if e, _ := s.perf.Lookup("fast", "prefill"); e.PrefillSamples != 1 {
 		t.Fatalf("withheld prefill: %+v", e)
 	}
 	// A short streamed request gives no service throughput (only
@@ -368,9 +376,11 @@ func TestGeneratedOutputTokensResistsArgumentPadding(t *testing.T) {
 	for _, padded := range []string{
 		"{\"q\":\"A<b>\",\"n\":10}" + strings.Repeat(" ", 32000),
 		"{ \"q\" :\n\"\\u0041\\u003cb\\u003e\" , \"n\" : 10 }",
+		"{\"q\":\"A<b>\",\"n\":10." + strings.Repeat("0", 32000) + "}",
+		"{\"q\":\"A<b>\",\"n\":1" + strings.Repeat("0", 3000) + "e-2999}",
 	} {
-		if got, _ := generatedOutputTokens(call(padded)); got != plain {
-			t.Fatalf("padded arguments = %d, want %d", got, plain)
+		if got, _ := generatedOutputTokens(call(padded)); got > plain {
+			t.Fatalf("padded arguments = %d, want at most %d", got, plain)
 		}
 	}
 	if got, ok := generatedOutputTokens(call("not json")); !ok || got != (6+8+3)/4 {

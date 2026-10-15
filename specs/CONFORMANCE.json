@@ -12415,7 +12415,8 @@
         "phase4-coordinator/internal/routing/perf.go:FreshFor",
         "phase4-coordinator/internal/buyer/phase_routing.go:holdPerformance",
         "phase4-coordinator/internal/buyer/phase_routing.go:releasePerformance",
-        "phase4-coordinator/internal/buyer/phase_routing.go:canonicalArgumentsLen"
+        "phase4-coordinator/internal/buyer/phase_routing.go:canonicalArgumentsLen",
+        "phase4-coordinator/internal/buyer/phase_routing.go:shortestNumbers"
       ],
       "tests": [
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfStoreEWMAAndFreshness",
@@ -12431,7 +12432,8 @@
         "phase4-coordinator/internal/routing/perf_test.go:TestPerfFreshnessIsPerSignal",
         "phase4-coordinator/internal/buyer/phase_routing_test.go:TestGeneratedOutputTokensResistsArgumentPadding",
         "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestWSStreamingJSONConversionHasNoFirstToken",
-        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestHeldPerformanceNeedsDelivery"
+        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestHeldPerformanceNeedsDelivery",
+        "phase4-coordinator/internal/buyer/phase_routing_delivery_test.go:TestWSNonStreamingLegacyObservesOnlyDeliveredBody"
       ],
       "journeys": [],
       "evidence": [],

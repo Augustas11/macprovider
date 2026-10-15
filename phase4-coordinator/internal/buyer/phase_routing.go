@@ -3,8 +3,10 @@ package buyer
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	mrand "math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -166,8 +168,9 @@ func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *fo
 // estimate of the generated output it delivered. An attempt with a
 // coordinator first-token time also gives TTFT and decode; any other
 // (non-streamed or buffered) is end-to-end and gives no TTFT or decode. Only
-// a non-streamed attempt gives service throughput. Provider usage only
-// withholds a prefill sample, when it reports a cached prefix.
+// a non-streamed attempt, done when its whole response was received, gives
+// the rates that run to done: prefill and service throughput. Provider usage
+// only withholds a prefill sample, when it reports a cached prefix.
 func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok *int64, output *billing.SettlementOutput, errMsg, errCode, faultFlag string) {
 	s := b.server
 	if s == nil || s.perf == nil || b.relayBlind != nil || status < 200 || status >= 300 {
@@ -274,7 +277,8 @@ func generatedOutputTokens(output *billing.SettlementOutput) (int64, bool) {
 }
 
 // canonicalArgumentsLen is the byte length of tool-call arguments re-encoded
-// as compact JSON, so insignificant whitespace or escape spellings that leave
+// as compact JSON with every number in its shortest spelling, so
+// insignificant whitespace, escape spellings or numeric padding that leave
 // the call unchanged cannot inflate the output estimate. Arguments that are
 // not one JSON value count at their raw length.
 func canonicalArgumentsLen(arguments string) int64 {
@@ -287,8 +291,30 @@ func canonicalArgumentsLen(arguments string) int64 {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := enc.Encode(shortestNumbers(v)); err != nil {
 		return int64(len(arguments))
 	}
 	return int64(len(bytes.TrimRight(buf.Bytes(), "\n")))
+}
+
+// shortestNumbers replaces every JSON number with its shortest float64
+// spelling; a number out of float64 range counts as 0.
+func shortestNumbers(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		f, err := strconv.ParseFloat(string(t), 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return json.Number("0")
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	case map[string]any:
+		for k, e := range t {
+			t[k] = shortestNumbers(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = shortestNumbers(e)
+		}
+	}
+	return v
 }

@@ -43,15 +43,16 @@ type PerfObservation struct {
 	TTFTMs             float64
 	DecodeMs           float64
 	// ServiceMs is provider dispatch start to done, which neither an early
-	// content token nor late response headers can shorten. Prefill divides by
-	// it, and for a non-streamed attempt service throughput is the generated
+	// content token nor late response headers can shorten. For a non-streamed
+	// attempt prefill divides by it, and service throughput is the generated
 	// output over it when RequestTokens (the whole request estimate, cached or
 	// not) is at most PerfServiceMaxInputRatio times the output.
 	ServiceMs     float64
 	RequestTokens int64
-	// Streamed attempts give no service-throughput sample: their done follows
-	// the buyer writes, while a non-streamed attempt is done when the whole
-	// response was received, so only non-streamed attempts share one window.
+	// Streamed attempts give no prefill or service-throughput sample: their
+	// done follows the buyer writes, while a non-streamed attempt is done when
+	// the whole response was received, so only non-streamed attempts share
+	// one window for rates that run to done.
 	Streamed bool
 	// EndToEnd marks an attempt without a first-token time (a non-streamed or
 	// buffered response): TTFTMs and DecodeMs are ignored and it yields no
@@ -213,7 +214,7 @@ func (s *PerfStore) Observe(o PerfObservation) {
 	// Prefill is measured on prefill-dominated attempts as input over the whole
 	// service time, so a provider cannot inflate it by emitting early content.
 	prefill := math.NaN()
-	if uncached >= PerfMinPrefillTokens && uncached >= PerfPrefillInputOutputRatio*o.CompletionTokens && positiveMs(o.ServiceMs) {
+	if !o.Streamed && uncached >= PerfMinPrefillTokens && uncached >= PerfPrefillInputOutputRatio*o.CompletionTokens && positiveMs(o.ServiceMs) {
 		prefill = clampFloat(float64(uncached)/(o.ServiceMs/1000), 0, PerfMaxPrefillTPS)
 	}
 	// Decode needs a first token to split the window, so only timed attempts.

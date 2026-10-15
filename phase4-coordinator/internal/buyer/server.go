@@ -3551,8 +3551,7 @@ func (s *Server) forwardHTTPSequence(
 				if !rec.settlementTrailersNegotiated {
 					w.WriteHeader(http.StatusOK)
 					s.stickyStore(r.Header, state.provider, req.Model)
-					_, writeErr := w.Write(respBody)
-					s.releasePerformance(state, writeErr == nil)
+					s.releasePerformance(state, writeDelivered(w, respBody))
 					cancelAttempt()
 					return dispatchedAttempt{}, false
 				}
@@ -4198,9 +4197,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				if state == nil || state.toolSelection == nil {
 					checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 				}
-				_, writeErr := w.Write(checkedBody)
-				s.releasePerformance(state, writeErr == nil)
-				if writeErr != nil {
+				delivered := writeDelivered(w, checkedBody)
+				s.releasePerformance(state, delivered)
+				if !delivered {
 					// A caller that logs this attempt after return must not
 					// observe an undelivered body.
 					holdPerformance(state)

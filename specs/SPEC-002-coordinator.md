@@ -7,8 +7,10 @@ from non-streamed traffic. Every attempt's times run from provider dispatch
 start, so a provider that holds its response headers cannot shorten TTFT or
 the service time. A new signal, service throughput (the generated output over
 dispatch start to done of a non-streamed attempt), is what the `throughput`
-phase (non-streamed requests) ranks on; streamed attempts never feed it, so
-the response mode never decides which provider looks faster. An attempt
+phase (non-streamed requests) ranks on. Rates that run to done (prefill and
+service throughput) come only from non-streamed attempts, whose done is the
+receipt of the whole response, so the response mode never decides which
+provider looks faster. An attempt
 without a coordinator first-token time (non-streamed, buffered, or a whole
 JSON response converted to SSE) is end-to-end and never yields a TTFT or
 decode sample. An attempt recorded before its body is written enters the
@@ -21,7 +23,8 @@ normally completed settlement output that delivered content or a tool call
 yields no observation. Freshness is per signal, and each SPEC-002-R006 phase
 ranks only on its own fresh signal: `throughput` on service throughput,
 `interactive` on TTFT, `long_input` on prefill or TTFT. A record without TTFT
-is never fresh for `interactive` and its latency class is `unknown`.
+is never fresh for `interactive`, and its latency class is `unknown` unless
+fresh prefill gives one for `long_input`.
 SPEC-002-R007 adds `prefill_samples`, `decode_samples` and `service_samples`
 to the route_trace line. No eligibility, admission, pricing, settlement or
 buyer-visible grammar changes.
@@ -5421,14 +5424,16 @@ shorten it; no provider usage count enters a rate:
 - the output estimate is the byte length of the generated content and tool
   calls the coordinator delivered, from its own settlement output, divided by
   4 and rounded up. Tool-call arguments count at their length re-encoded as
-  compact JSON, so whitespace or escape spellings that leave the call
-  unchanged cannot inflate it. Reasoning that was not delivered as content is
+  compact JSON with every number in its shortest spelling, so whitespace,
+  escape spellings or numeric padding that leave the call unchanged cannot
+  inflate it. Reasoning that was not delivered as content is
   not counted;
 - the service time is provider dispatch start to done;
 - `ttft_ms` (timed only), provider dispatch start to first token, clamped to
   1..600000;
-- a prefill rate, the coordinator's token estimate of the request body divided
-  by the service time, only on prefill-dominated attempts: the estimate is at
+- a prefill rate (non-streamed attempts only, for the same reason as service
+  throughput below), the coordinator's token estimate of the request body
+  divided by the service time, only on prefill-dominated attempts: the estimate is at
   least 64 tokens and at least 32 times the output estimate (prefill runs
   roughly 20 to 50 times faster per token than decode, so below that the
   service time is mostly decode), and the provider reported no cached prompt
@@ -5444,14 +5449,16 @@ shorten it; no provider usage count enters a rate:
   times the output estimate (so prompt ingestion does not pass for
   generation), and the time is positive; clamped to at most 2000 tokens/s. A
   streamed attempt is done only after its buyer writes, a non-streamed one
-  when the whole response was received, so streamed attempts never feed it
-  and the response mode never decides which provider looks faster.
+  when the whole response was received, so streamed attempts never feed a
+  rate that runs to done and the response mode never decides which provider
+  looks faster.
 
 Provider usage may only withhold a sample: a reported cached prefix withholds
 the prefill sample. An end-to-end attempt that yields no sample creates no
 record. A non-streamed attempt that is recorded before its body is written
 (a gateway without negotiated settlement trailers) is observed only after the
-whole body was written to the buyer; a failed write drops it.
+whole body was written and flushed to the buyer; a failed write or flush drops
+it.
 
 Each metric is an exponentially weighted moving average with weight 0.2 for
 the new sample, with its own sample count and the time of its own last
