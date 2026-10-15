@@ -132,6 +132,11 @@ struct RelayBlindEnvelope: Sendable, Equatable {
     let issuedAtUnix: Int64
     let ciphertext: Data
     let tag: Data
+    /// SPEC-041-R003 capability declaration; empty means the member is absent.
+    var requires: [String] = []
+
+    static let capabilityJSONSchemaNonStrict = "json_schema_non_strict"
+    static let requiresKey = "requires"
 
     static let keys: Set<String> = [
         "version", "mode", "endpoint_family", "model", "provider_model", "stream", "request_id",
@@ -144,14 +149,17 @@ struct RelayBlindEnvelope: Sendable, Equatable {
         let data = Data(body.utf8)
         guard data.count <= maxSerializedBytes else { throw RelayBlindProviderError.invalidEnvelope }
         let raw = try RelayBlindStrictJSON.topLevelScalars(data)
-        guard Set(raw.keys) == keys, Set(raw.keys).count == raw.keys.count,
+        let declaresRequires = raw.keys.contains(requiresKey)
+        let expectedKeys = declaresRequires ? keys.union([requiresKey]) : keys
+        guard Set(raw.keys) == expectedKeys, Set(raw.keys).count == raw.keys.count,
+              !declaresRequires || raw.isStringArray(requiresKey),
               raw.isBoolean("stream"),
               raw.isUnsignedInteger("max_output_tokens"),
               raw.isUnsignedInteger("input_token_upper_bound"),
               raw.isUnsignedInteger("reservation_token_cap"),
               raw.isSignedInteger("issued_at_unix"),
               let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-              object.count == keys.count,
+              object.count == expectedKeys.count,
               object["version"] as? String == version,
               object["mode"] as? String == mode,
               object["endpoint_family"] as? String == endpointFamily,
@@ -201,6 +209,14 @@ struct RelayBlindEnvelope: Sendable, Equatable {
         guard (1...maxCiphertextBytes).contains(ciphertext.count) else {
             throw RelayBlindProviderError.invalidEnvelope
         }
+        var requires: [String] = []
+        if declaresRequires {
+            // Closed set: present means nonempty, sorted, unique, known names.
+            guard let declared = object[requiresKey] as? [String], declared == [capabilityJSONSchemaNonStrict] else {
+                throw RelayBlindProviderError.invalidEnvelope
+            }
+            requires = declared
+        }
         return RelayBlindEnvelope(
             model: model,
             providerModel: providerModel,
@@ -217,7 +233,8 @@ struct RelayBlindEnvelope: Sendable, Equatable {
             requestReplayNonce: replay,
             issuedAtUnix: issuedAtUnix,
             ciphertext: ciphertext,
-            tag: tag
+            tag: tag,
+            requires: requires
         )
     }
 
@@ -492,6 +509,12 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
             guard request.model == envelope.model,
                   request.stream == envelope.stream,
                   request.maxTokens == Int(exactly: envelope.maxOutputTokens) else {
+                throw RelayBlindProviderError.ciphertextInvalid
+            }
+            // SPEC-041-R005: a request needing SPEC-019 §1a non-strict mode must
+            // have declared it, so the coordinator could route on it.
+            if case .jsonSchema(let spec) = request.responseFormat, !spec.strict,
+               !envelope.requires.contains(RelayBlindEnvelope.capabilityJSONSchemaNonStrict) {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
             let responseSealer: PrivacyResponseSealer?
@@ -1013,6 +1036,13 @@ enum RelayBlindFraming {
         data.appendFramed(value.requestReplayNonce)
         data.appendSigned64(value.issuedAtUnix)
         data.appendFramed(Data(RelayBlindKeyRecord.algorithm.utf8))
+        // SPEC-041-R003: an absent requires leaves the v0.5 AAD unchanged.
+        if !value.requires.isEmpty {
+            data.appendUnsigned32(UInt32(value.requires.count))
+            for name in value.requires {
+                data.appendFramed(Data(name.utf8))
+            }
+        }
         return data
     }
 }
@@ -1072,6 +1102,7 @@ enum RelayBlindStrictJSON {
         case number(String)
         case boolean(Bool)
         case null
+        case stringArray([String])
     }
 
     struct TopLevelScalars {
@@ -1088,6 +1119,12 @@ enum RelayBlindStrictJSON {
             guard let scalar = entries.first(where: { $0.0 == key })?.1,
                   case .number(let text) = scalar else { return false }
             return Self.isCanonicalUnsigned(text)
+        }
+
+        func isStringArray(_ key: String) -> Bool {
+            guard let scalar = entries.first(where: { $0.0 == key })?.1,
+                  case .stringArray = scalar else { return false }
+            return true
         }
 
         func isSignedInteger(_ key: String) -> Bool {
@@ -1165,6 +1202,25 @@ enum RelayBlindStrictJSON {
             let scalar: Scalar
             if index < bytes.count, bytes[index] == 0x22 {
                 scalar = .string(try parseString())
+            } else if index < bytes.count, bytes[index] == 0x5b {
+                // A flat array of strings (the SPEC-041-R003 requires member).
+                index += 1
+                var values: [String] = []
+                skipWhitespace()
+                if index < bytes.count, bytes[index] == 0x5d {
+                    index += 1
+                } else {
+                    while true {
+                        skipWhitespace()
+                        values.append(try parseString())
+                        skipWhitespace()
+                        guard index < bytes.count else { throw RelayBlindProviderError.invalidEnvelope }
+                        if bytes[index] == 0x2c { index += 1; continue }
+                        if bytes[index] == 0x5d { index += 1; break }
+                        throw RelayBlindProviderError.invalidEnvelope
+                    }
+                }
+                scalar = .stringArray(values)
             } else if consume(Array("true".utf8)) {
                 scalar = .boolean(true)
             } else if consume(Array("false".utf8)) {

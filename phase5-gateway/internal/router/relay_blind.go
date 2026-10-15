@@ -16,6 +16,7 @@ import (
 
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
+	"github.com/augstar/macprovider-gateway/internal/relayblind"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -55,6 +56,9 @@ type relayBlindRequestEnvelope struct {
 	Algorithm               string `json:"algorithm"`
 	Ciphertext              string `json:"ciphertext"`
 	Tag                     string `json:"tag"`
+	// Requires is the SPEC-041-R003 capability declaration; the shared
+	// relayblind parser enforces its closed form.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type relayBlindRouteReservationRequest struct {
@@ -64,6 +68,9 @@ type relayBlindRouteReservationRequest struct {
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
 	InputTokenUpperBound  int64  `json:"input_token_upper_bound"`
 	EncryptedRequestBytes int64  `json:"encrypted_request_bytes"`
+	// Requires is the SPEC-041-R004 capability declaration, forwarded to the
+	// coordinator byte for byte.
+	Requires json.RawMessage `json:"requires,omitempty"`
 }
 
 func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +173,12 @@ func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRe
 	}
 	if req.EndpointFamily == "" || strings.TrimSpace(req.Model) == "" || req.Stream == nil || req.MaxOutputTokens <= 0 || req.InputTokenUpperBound <= 0 || req.EncryptedRequestBytes <= 0 {
 		return req, errors.New("Invalid relay-blind route reservation")
+	}
+	if req.Requires != nil {
+		var requires []string
+		if json.Unmarshal(req.Requires, &requires) != nil || requires == nil || !relayblind.ValidRequires(requires) {
+			return req, errors.New("Invalid relay-blind route reservation requires")
+		}
 	}
 	return req, nil
 }

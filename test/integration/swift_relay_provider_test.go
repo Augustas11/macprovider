@@ -73,6 +73,9 @@ type swiftRelayFixture struct {
 	privacyTraced     bool
 	privacyCompletion string
 	omitPrivacyKeys   bool
+	// helloBinaryVersion, when set, is the binary_version the fixture
+	// registers with instead of the unparseable default.
+	helloBinaryVersion string
 	// settlementModelHash runs the SPEC-001-R005 settlement fixture: the
 	// handle pins this catalog hash and signs receipts with an in-memory key
 	// under settlementProviderID, over a SPEC-008 session.
@@ -149,18 +152,19 @@ func startSwiftRelayFixtureWithDelay(t *testing.T, stateDir, model string, strea
 func startSwiftPrivacyFixture(t *testing.T, stateDir, model string, privacy swiftPrivacyFixtureOpts) *swiftRelayFixture {
 	t.Helper()
 	fixture := &swiftRelayFixture{
-		t:                 t,
-		stateDir:          stateDir,
-		model:             model,
-		privacyClass:      true,
-		privacyProviderID: privacy.ProviderID,
-		privacyCDHash:     privacy.CDHash,
-		privacyTraced:     privacy.Traced,
-		privacyCompletion: privacy.Completion,
-		omitPrivacyKeys:   privacy.OmitKeys,
-		postureReady:      make(chan struct{}),
-		stdoutLog:         newLogBuffer(),
-		stderrLog:         newLogBuffer(),
+		t:                  t,
+		stateDir:           stateDir,
+		model:              model,
+		privacyClass:       true,
+		privacyProviderID:  privacy.ProviderID,
+		privacyCDHash:      privacy.CDHash,
+		privacyTraced:      privacy.Traced,
+		privacyCompletion:  privacy.Completion,
+		omitPrivacyKeys:    privacy.OmitKeys,
+		helloBinaryVersion: privacy.BinaryVersion,
+		postureReady:       make(chan struct{}),
+		stdoutLog:          newLogBuffer(),
+		stderrLog:          newLogBuffer(),
 	}
 	fixture.start("")
 	t.Cleanup(fixture.stop)
@@ -173,6 +177,9 @@ type swiftPrivacyFixtureOpts struct {
 	Traced     bool
 	Completion string
 	OmitKeys   bool
+	// BinaryVersion is the registered provider CLI version ("" keeps the
+	// unparseable fixture default).
+	BinaryVersion string
 }
 
 func startSwiftContinuousBatchReplayFixture(t *testing.T, stateDir, model string) *swiftRelayFixture {
@@ -722,6 +729,9 @@ func connectSwiftRelayProviderWithFaultSignal(t *testing.T, ctx context.Context,
 		}
 	} else {
 		hello["relay_blind_key_records"] = []any{fixture.descriptor.KeyRecord}
+	}
+	if fixture.helloBinaryVersion != "" {
+		hello["binary_version"] = fixture.helloBinaryVersion
 	}
 	rawHello, _ := json.Marshal(hello)
 	if err := send(rawHello); err != nil {

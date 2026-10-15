@@ -10,8 +10,8 @@ import (
 func TestPrivacyRejectReasonsAreClosed(t *testing.T) {
 	token := regexp.MustCompile(`^[a-z_]{1,40}$`)
 	reasons := PrivacyRejectReasons()
-	if len(reasons) != 28 {
-		t.Fatalf("reason set size = %d, want 28", len(reasons))
+	if len(reasons) != 29 {
+		t.Fatalf("reason set size = %d, want 29", len(reasons))
 	}
 	for _, reason := range reasons {
 		if !token.MatchString(reason) {

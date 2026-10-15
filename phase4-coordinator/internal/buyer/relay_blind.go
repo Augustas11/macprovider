@@ -275,11 +275,35 @@ var relayBlindErrors = map[string]relayBlindErrorShape{
 	"relay_blind_committed_failed":          {http.StatusInternalServerError, false, "do_not_resubmit"},
 	"relay_blind_provider_unsupported":      {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
 	"unsupported_sampling_penalty":          {http.StatusBadRequest, false, "none"},
+	relayBlindCapabilityRefusalCode:         {http.StatusBadRequest, false, "none"},
 	privacyClassDisabled:                    {http.StatusServiceUnavailable, false, "none"},
 	privacyClassUnavailable:                 {http.StatusServiceUnavailable, false, "none"},
 	privacyClassDowngrade:                   {http.StatusBadRequest, false, "none"},
 	privacyClassStale:                       {http.StatusServiceUnavailable, true, "new_reservation_and_envelope"},
 	privacyClassUnconfirmed:                 {http.StatusInternalServerError, false, "do_not_resubmit"},
+}
+
+// SPEC-041-R004 capability gate: a declared json_schema_non_strict request
+// that no serving provider supports gets the plaintext path's SPEC-019 §1a
+// 400 (see nonStrictJSONSchemaRouteError).
+const (
+	relayBlindCapabilityRefusalCode    = "json_schema_non_strict_unsupported"
+	relayBlindCapabilityRefusalMessage = "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
+)
+
+// relayBlindProviderMeetsRequires reports whether provider's CLI supports
+// every SPEC-041-R003 capability the request declares.
+func relayBlindProviderMeetsRequires(provider pool.Provider, requires []string) bool {
+	return !relayblind.RequiresNonStrictJSONSchema(requires) || providerAcceptsNonStrictJSONSchema(provider.BinaryVersion)
+}
+
+// writeRelayBlindCapabilityRefusal writes the capability gate's 400. A
+// privacy-class refusal is also recorded under SPEC-049-R030.
+func (s *Server) writeRelayBlindCapabilityRefusal(w http.ResponseWriter, r *http.Request, phase string, privacy bool) {
+	if privacy {
+		s.notePrivacyRouteRejection(w, r, phase, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported)
+	}
+	writeRelayBlindError(w, relayBlindCapabilityRefusalCode, relayBlindCapabilityRefusalMessage)
 }
 
 func writeRelayBlindError(w http.ResponseWriter, code, message string) {
@@ -447,7 +471,11 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	}
 	unlockSelection := s.relayBlind.lockAccountSelection(account.ID())
 	defer func() { unlockSelection() }()
-	provider, key, found := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind)
+	provider, key, found, refused := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind, request.Requires)
+	if refused {
+		s.writeRelayBlindCapabilityRefusal(w, r, relayblind.PrivacyRejectPhaseReservation, false)
+		return
+	}
 	if !found {
 		writeRelayBlindError(w, "relay_blind_provider_unsupported", "No relay-blind provider is available")
 		return
@@ -654,9 +682,14 @@ func relayBlindPinnedLaneCap(maxPending, slotsTotal int) int {
 	return laneCap / 2
 }
 
-func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string) (pool.Provider, relayblind.KeyRecord, bool) {
+// selectRelayBlindProvider returns the selected provider and key, whether one
+// was found, and whether the SPEC-041-R004 capability gate refused the
+// request: an otherwise eligible provider serves the model and none supports
+// a capability in requires.
+func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requireFree bool, class string, requires []string) (pool.Provider, relayblind.KeyRecord, bool, bool) {
 	var providers []pool.Provider
 	var keys []relayblind.KeyRecord
+	incapable := false
 	for _, provider := range s.pool.Snapshot() {
 		eligible := relayBlindBindable(provider)
 		if requireFree {
@@ -675,15 +708,19 @@ func (s *Server) selectRelayBlindProvider(ctx context.Context, accountID, model 
 		}
 		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), class)
 		if err == nil && len(records) > 0 {
+			if !relayBlindProviderMeetsRequires(provider, requires) {
+				incapable = true
+				continue
+			}
 			providers = append(providers, provider)
 			keys = append(keys, records[0])
 		}
 	}
 	order := s.orderRelayBlindCandidates(accountID, providers)
 	if len(order) == 0 {
-		return pool.Provider{}, relayblind.KeyRecord{}, false
+		return pool.Provider{}, relayblind.KeyRecord{}, false, incapable
 	}
-	return providers[order[0]], keys[order[0]], true
+	return providers[order[0]], keys[order[0]], true, false
 }
 
 // orderRelayBlindCandidates returns the indexes of fully eligible providers
@@ -823,6 +860,14 @@ func (s *Server) handleRelayBlindConsume(w http.ResponseWriter, r *http.Request)
 	reservation, err := s.relayBlind.store.LookupReservation(r.Context(), envelope.ProviderBinding)
 	if err != nil {
 		writeRelayBlindError(w, "relay_blind_required_unavailable", "Relay-blind state is unavailable")
+		return
+	}
+	// SPEC-041-R004: recheck the envelope's capability declaration against the
+	// reserved provider; the reservation may have been made without it. A
+	// session that is gone fails the checks below.
+	if provider, live := s.pool.Resolve(reservation.ProviderID, reservation.AssignedSession); live && !relayBlindProviderMeetsRequires(provider, envelope.Requires) {
+		_ = s.relayBlind.store.RejectPredispatch(r.Context(), reservation.ProviderBinding, relayBlindCapabilityRefusalCode, s.now())
+		s.writeRelayBlindCapabilityRefusal(w, r, relayblind.PrivacyRejectPhaseConsume, reservation.PrivacyClass)
 		return
 	}
 	if reservation.PrivacyClass {

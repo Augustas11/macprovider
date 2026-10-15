@@ -117,6 +117,8 @@ func readRelayBlindUpstream(resp *http.Response) ([]byte, error) {
 // writeRelayBlindUpstreamError writes a fresh buyer error for a coordinator
 // refusal. For a privacy-class request it first records the SPEC-049-R030
 // reason at phase.
+const relayBlindCapabilityRefusalCode = "json_schema_non_strict_unsupported"
+
 func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.Response, body []byte, privacy bool, phase string) {
 	var wire struct {
 		Error struct {
@@ -126,13 +128,19 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 	decoded := json.Unmarshal(body, &wire) == nil
 	if privacy {
 		code := "unknown"
-		if decoded && (privacyClassKnown(wire.Error.Code) || strings.HasPrefix(wire.Error.Code, "relay_blind_")) && len(wire.Error.Code) <= 64 {
+		if decoded && (privacyClassKnown(wire.Error.Code) || strings.HasPrefix(wire.Error.Code, "relay_blind_") || wire.Error.Code == relayBlindCapabilityRefusalCode) && len(wire.Error.Code) <= 64 {
 			code = wire.Error.Code
 		}
 		s.notePrivacyUpstreamRejection(resp, phase, code)
 	}
 	if decoded && privacyClassKnown(wire.Error.Code) {
 		writePrivacyClassError(w, wire.Error.Code, "")
+		return
+	}
+	// SPEC-041-R004: the coordinator's capability-gate 400 is the plaintext
+	// path's SPEC-019 code and passes through unchanged.
+	if decoded && wire.Error.Code == relayBlindCapabilityRefusalCode && resp.StatusCode == http.StatusBadRequest {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", relayBlindCapabilityRefusalCode, "Non-strict structured output is unsupported in SPEC-019 v0.1.0")
 		return
 	}
 	if json.Unmarshal(body, &wire) == nil && strings.HasPrefix(wire.Error.Code, "relay_blind_") {

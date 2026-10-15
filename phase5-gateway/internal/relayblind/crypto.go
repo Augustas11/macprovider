@@ -240,6 +240,12 @@ func (e Envelope) AAD() ([]byte, error) {
 	if err := writeFrame(&framed, []byte(e.Algorithm)); err != nil {
 		return nil, err
 	}
+	// SPEC-041-R003: an absent requires leaves the v0.5 AAD unchanged.
+	if e.Requires != nil {
+		if err := writeArray(&framed, e.Requires); err != nil {
+			return nil, err
+		}
+	}
 	return framed.Bytes(), nil
 }
 
@@ -436,6 +442,9 @@ func (e Envelope) validateStructure(requireCiphertext bool) error {
 		}
 	}
 	if _, err := decodeBase64URLFixed(e.KID, 16); err != nil {
+		return ErrInvalidEnvelope
+	}
+	if !ValidRequires(e.Requires) {
 		return ErrInvalidEnvelope
 	}
 	if _, err := decodeBase64URLFixed(e.BuyerEphemeralPublicKey, 32); err != nil {
