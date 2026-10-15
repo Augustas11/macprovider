@@ -282,3 +282,14 @@ func TestPrivacyRefusalLogCodeAcceptsPoolCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivacyDirectoryRefusesAnyPoolPrefixedHeader(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, privacyDirectoryRoute, nil)
+	r.Header.Set("X-MacProvider-Pool-Manifest-Core-Digest", "x")
+	if !privacyBuyerIntentDenied(r, "acct_pool", false) {
+		t.Fatal("pool-prefixed header reached the global-only directory route")
+	}
+	if privacyBuyerIntentDenied(httptest.NewRequest(http.MethodGet, privacyDirectoryRoute, nil), "acct_pool", false) {
+		t.Fatal("plain directory request refused")
+	}
+}

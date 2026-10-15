@@ -207,7 +207,24 @@ func privacyClassHTTP(code string) (int, string) {
 }
 
 func privacyBuyerIntentDenied(r *http.Request, accountID string, demo bool) bool {
-	return demo || strings.HasPrefix(accountID, "demo:") || relayBlindPoolSelected(r)
+	return demo || strings.HasPrefix(accountID, "demo:") || relayBlindPoolSelected(r) || poolPrefixedHeaderPresent(r)
+}
+
+// poolPrefixedHeaderPresent reports any nonempty X-MacProvider-Pool* header,
+// so a route that stays global-only (SPEC-049-R022) refuses all pool intent.
+func poolPrefixedHeaderPresent(r *http.Request) bool {
+	prefix := strings.ToLower(poolEmitHeader)
+	for name, values := range r.Header {
+		if lower := strings.ToLower(name); lower != prefix && !strings.HasPrefix(lower, prefix+"-") {
+			continue
+		}
+		for _, v := range values {
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // privacyPoolIntentDenied is privacyBuyerIntentDenied for the reservation and
