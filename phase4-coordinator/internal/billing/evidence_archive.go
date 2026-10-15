@@ -1,78 +1,42 @@
 package billing
 
 import (
-	"bufio"
-	"bytes"
-	"compress/gzip"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"hash"
-	"io"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
+	"github.com/augstar/macprovider-coordinator/internal/verifiedarchive"
 )
 
 // SPEC-022 R-15.3: the settled-evidence archive is gzip-compressed JSON
-// lines with a sidecar manifest. Every row is stored with every column so a
-// settled credit can be rederived from the archive alone (R-15.7).
+// lines with a sidecar manifest (internal/verifiedarchive). Every row is
+// stored with every column so a settled credit can be rederived from the
+// archive alone (R-15.7).
 const (
 	evidenceArchiveFormat         = "macprovider-settlement-evidence-archive-v1"
-	evidenceArchiveSuffix         = ".jsonl.gz"
-	evidenceArchiveManifestSuffix = ".manifest.json"
+	evidenceArchiveSuffix         = verifiedarchive.Suffix
+	evidenceArchiveManifestSuffix = verifiedarchive.ManifestSuffix
 	evidenceArchiveRoleEvidence   = "evidence"
 	evidenceArchiveRoleReference  = "reference"
-	// evidenceArchiveMaxLineBytes bounds one decoded JSON line on re-read.
-	evidenceArchiveMaxLineBytes = 64 << 20
+	evidenceArchiveNamePrefix     = "settlement-evidence"
 )
 
 // ErrEvidenceArchiveInvalid marks an archive that failed re-verification;
 // retention never deletes against it (SPEC-022 R-15.4).
-var ErrEvidenceArchiveInvalid = errors.New("settlement evidence archive failed verification")
+var ErrEvidenceArchiveInvalid = verifiedarchive.ErrInvalid
 
 // archiveRow is one database row keyed by column name. Values are int64,
 // float64, string, nil, or archiveBlob.
 type archiveRow map[string]any
 
 // archiveBlob keeps BLOB values distinguishable from TEXT in JSON.
-type archiveBlob struct {
-	Base64 string `json:"blob_base64"`
-}
-
-type evidenceArchiveLine struct {
-	Kind      string `json:"kind"`
-	Format    string `json:"format,omitempty"`
-	CreatedAt string `json:"created_at_utc,omitempty"`
-	Cutoff    string `json:"cutoff_window_end_utc,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Table     string `json:"table,omitempty"`
-	Role      string `json:"role,omitempty"`
-	// Row is decoded with UseNumber so integers survive round trip.
-	Row          map[string]any   `json:"row,omitempty"`
-	CreditIDs    []int64          `json:"credit_ids,omitempty"`
-	RequestCount int              `json:"request_count,omitempty"`
-	RowCounts    map[string]int64 `json:"row_counts,omitempty"`
-}
+type archiveBlob = verifiedarchive.Blob
 
 // EvidenceArchiveManifest is the sidecar written next to an archive.
-type EvidenceArchiveManifest struct {
-	Format             string           `json:"format"`
-	ArchiveFile        string           `json:"archive_file"`
-	SHA256             string           `json:"sha256"`
-	SizeBytes          int64            `json:"size_bytes"`
-	RequestCount       int              `json:"request_count"`
-	RowCounts          map[string]int64 `json:"row_counts"`
-	CutoffWindowEndUTC string           `json:"cutoff_window_end_utc"`
-	CreatedAtUTC       string           `json:"created_at_utc"`
-}
+type EvidenceArchiveManifest = verifiedarchive.Manifest
 
 // archivedRequest is one request as read back from an archive.
 type archivedRequest struct {
@@ -87,106 +51,32 @@ type archivedRequest struct {
 }
 
 // verifiedEvidenceArchive is an archive whose bytes, lines, and counts were
-// re-checked against its manifest. It keeps only each request's digest, never
-// its rows, so verification memory does not grow with the archive's payload.
-type verifiedEvidenceArchive struct {
-	Path     string
-	Manifest EvidenceArchiveManifest
-	Digests  map[string][sha256.Size]byte
-}
+// re-checked against its manifest. It keeps only each request's digest.
+type verifiedEvidenceArchive = verifiedarchive.Verified
 
 type evidenceArchiveWriter struct {
-	dir       string
-	finalName string
-	partial   *os.File
-	hasher    hash.Hash
-	counter   *countingWriter
-	gz        *gzip.Writer
-	buf       *bufio.Writer
-	enc       *json.Encoder
-	counts    map[string]int64
-	requests  int
-	createdAt string
-	cutoff    string
-}
-
-// countingWriter counts the compressed archive bytes. With a guard set, it
-// calls the guard before every guardStep bytes reach the file, splitting
-// writes at those boundaries, so a guard error stops the archive within one
-// step of output.
-type countingWriter struct {
-	w          io.Writer
-	n          int64
-	guard      func() error
-	guardStep  int64
-	sinceGuard int64
-}
-
-func (c *countingWriter) Write(p []byte) (int, error) {
-	written := 0
-	for len(p) > 0 {
-		chunk := p
-		if c.guard != nil && c.guardStep > 0 {
-			if c.sinceGuard >= c.guardStep {
-				if err := c.guard(); err != nil {
-					return written, err
-				}
-				c.sinceGuard = 0
-			}
-			if room := c.guardStep - c.sinceGuard; int64(len(chunk)) > room {
-				chunk = chunk[:room]
-			}
-		}
-		n, err := c.w.Write(chunk)
-		written += n
-		c.n += int64(n)
-		c.sinceGuard += int64(n)
-		p = p[n:]
-		if err != nil {
-			return written, err
-		}
-		if n < len(chunk) {
-			return written, io.ErrShortWrite
-		}
-	}
-	return written, nil
+	w *verifiedarchive.Writer
 }
 
 // setSpaceGuard makes the writer call guard every step bytes of output.
 func (w *evidenceArchiveWriter) setSpaceGuard(step int64, guard func() error) {
-	w.counter.guard, w.counter.guardStep = guard, step
+	w.w.SetSpaceGuard(step, guard)
 }
 
 func newEvidenceArchiveWriter(dir string, now time.Time, cutoff string) (*evidenceArchiveWriter, error) {
-	if strings.TrimSpace(dir) == "" || !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("settlement evidence archive_dir must be an absolute path")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create archive dir: %w", err)
-	}
-	var nonce [6]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return nil, err
-	}
-	name := fmt.Sprintf("settlement-evidence-%s-%s%s", now.UTC().Format("20060102T150405Z"), hex.EncodeToString(nonce[:]), evidenceArchiveSuffix)
-	f, err := os.OpenFile(filepath.Join(dir, name+".partial"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	w, err := verifiedarchive.NewWriter(dir, evidenceArchiveNamePrefix, evidenceArchiveFormat, now, cutoff)
 	if err != nil {
-		return nil, fmt.Errorf("create archive: %w", err)
-	}
-	h := sha256.New()
-	counter := &countingWriter{w: io.MultiWriter(f, h)}
-	gz := gzip.NewWriter(counter)
-	buf := bufio.NewWriterSize(gz, 1<<20)
-	w := &evidenceArchiveWriter{
-		dir: dir, finalName: name, partial: f, hasher: h, counter: counter, gz: gz, buf: buf,
-		enc: json.NewEncoder(buf), counts: map[string]int64{},
-		createdAt: sqliteTimeText(now), cutoff: cutoff,
-	}
-	if err := w.enc.Encode(evidenceArchiveLine{Kind: "header", Format: evidenceArchiveFormat, CreatedAt: w.createdAt, Cutoff: cutoff}); err != nil {
-		w.abort()
 		return nil, err
 	}
-	return w, nil
+	return &evidenceArchiveWriter{w: w}, nil
+}
+
+func archiveTableRows(table, role string, rows []archiveRow) verifiedarchive.TableRows {
+	out := verifiedarchive.TableRows{Table: table, Role: role, Rows: make([]verifiedarchive.Row, len(rows))}
+	for i, row := range rows {
+		out.Rows[i] = row
+	}
+	return out
 }
 
 func (w *evidenceArchiveWriter) writeRequest(b requestEvidenceBundle) error {
@@ -194,301 +84,62 @@ func (w *evidenceArchiveWriter) writeRequest(b requestEvidenceBundle) error {
 	for _, c := range b.credits {
 		creditIDs = append(creditIDs, c.id)
 	}
-	if err := w.enc.Encode(evidenceArchiveLine{Kind: "request", RequestID: b.requestID, CreditIDs: creditIDs}); err != nil {
-		return err
-	}
-	write := func(table, role string, rows []archiveRow) error {
-		for _, row := range rows {
-			if err := w.enc.Encode(evidenceArchiveLine{Kind: "row", RequestID: b.requestID, Table: table, Role: role, Row: archiveRowJSON(row)}); err != nil {
-				return err
-			}
-			w.counts[table]++
-		}
-		return nil
-	}
+	tables := make([]verifiedarchive.TableRows, 0, len(evidenceReferenceTables)+len(evidenceRetentionTables)+1)
 	for _, table := range evidenceReferenceTables {
-		if err := write(table, evidenceArchiveRoleReference, b.reference[table]); err != nil {
-			return err
-		}
+		tables = append(tables, archiveTableRows(table, evidenceArchiveRoleReference, b.reference[table]))
 	}
 	for _, table := range evidenceRetentionTables {
-		if err := write(table, evidenceArchiveRoleEvidence, b.evidence[table]); err != nil {
-			return err
-		}
+		tables = append(tables, archiveTableRows(table, evidenceArchiveRoleEvidence, b.evidence[table]))
 	}
-	if err := write(evidenceRetentionJournalTable, evidenceArchiveRoleEvidence, b.routeJournal); err != nil {
-		return err
-	}
-	w.requests++
-	return nil
+	tables = append(tables, archiveTableRows(evidenceRetentionJournalTable, evidenceArchiveRoleEvidence, b.routeJournal))
+	return w.w.WriteGroup(b.requestID, creditIDs, tables)
 }
 
 // finish writes the trailer, makes the archive and its manifest durable, and
-// returns the manifest. The archive becomes visible under its final name only
-// after its bytes are fsynced.
+// returns the manifest.
 func (w *evidenceArchiveWriter) finish() (EvidenceArchiveManifest, string, error) {
-	if err := w.enc.Encode(evidenceArchiveLine{Kind: "trailer", RequestCount: w.requests, RowCounts: w.counts}); err != nil {
-		w.abort()
-		return EvidenceArchiveManifest{}, "", err
-	}
-	if err := w.buf.Flush(); err != nil {
-		w.abort()
-		return EvidenceArchiveManifest{}, "", err
-	}
-	if err := w.gz.Close(); err != nil {
-		w.abort()
-		return EvidenceArchiveManifest{}, "", err
-	}
-	if err := w.partial.Sync(); err != nil {
-		w.abort()
-		return EvidenceArchiveManifest{}, "", err
-	}
-	if err := w.partial.Close(); err != nil {
-		_ = os.Remove(w.partial.Name())
-		return EvidenceArchiveManifest{}, "", err
-	}
-	finalPath := filepath.Join(w.dir, w.finalName)
-	if err := os.Rename(w.partial.Name(), finalPath); err != nil {
-		_ = os.Remove(w.partial.Name())
-		return EvidenceArchiveManifest{}, "", err
-	}
-	manifest := EvidenceArchiveManifest{
-		Format:             evidenceArchiveFormat,
-		ArchiveFile:        w.finalName,
-		SHA256:             hex.EncodeToString(w.hasher.Sum(nil)),
-		SizeBytes:          w.counter.n,
-		RequestCount:       w.requests,
-		RowCounts:          w.counts,
-		CutoffWindowEndUTC: w.cutoff,
-		CreatedAtUTC:       w.createdAt,
-	}
-	if err := writeEvidenceArchiveManifest(finalPath, manifest); err != nil {
-		return EvidenceArchiveManifest{}, "", err
-	}
-	if err := fsyncDir(w.dir); err != nil {
-		return EvidenceArchiveManifest{}, "", err
-	}
-	return manifest, finalPath, nil
+	return w.w.Finish()
 }
 
 func (w *evidenceArchiveWriter) abort() {
-	if w == nil || w.partial == nil {
+	if w == nil {
 		return
 	}
-	_ = w.partial.Close()
-	_ = os.Remove(w.partial.Name())
-}
-
-func writeEvidenceArchiveManifest(archivePath string, manifest EvidenceArchiveManifest) error {
-	raw, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	path := archivePath + evidenceArchiveManifestSuffix
-	tmp := path + ".partial"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	w.w.Abort()
 }
 
 func readEvidenceArchiveManifest(archivePath string) (EvidenceArchiveManifest, error) {
-	raw, err := os.ReadFile(archivePath + evidenceArchiveManifestSuffix)
-	if err != nil {
-		return EvidenceArchiveManifest{}, err
-	}
-	var m EvidenceArchiveManifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return EvidenceArchiveManifest{}, err
-	}
-	return m, nil
+	return verifiedarchive.ReadManifest(archivePath)
 }
 
 // verifyEvidenceArchive re-reads an archive from disk and checks it against
-// the expected manifest: byte size, SHA-256, format, every line parsing, the
-// trailer, and per-table row and request counts (SPEC-022 R-15.4 step 1). It
-// streams the file and keeps one request at a time.
+// the expected manifest (SPEC-022 R-15.4 step 1).
 func verifyEvidenceArchive(archivePath string, expected EvidenceArchiveManifest) (verifiedEvidenceArchive, error) {
-	digests := map[string][sha256.Size]byte{}
-	err := streamEvidenceArchive(archivePath, expected, func(req archivedRequest) error {
-		digests[req.RequestID] = req.Digest
-		return nil
-	})
-	if err != nil {
-		return verifiedEvidenceArchive{}, err
+	if expected.Format != evidenceArchiveFormat {
+		return verifiedEvidenceArchive{}, fmt.Errorf("%w: manifest format %q", ErrEvidenceArchiveInvalid, expected.Format)
 	}
-	return verifiedEvidenceArchive{Path: archivePath, Manifest: expected, Digests: digests}, nil
+	return verifiedarchive.Verify(archivePath, expected, evidenceArchiveKnownTable)
 }
 
 // streamEvidenceArchive reads an archive once and calls visit with each
-// complete request in file order; a request's rows follow its request line.
-// The whole-file checks (size, SHA-256, counts, trailer) complete only after
+// complete request in file order. The whole-file checks complete only after
 // the last visit, so a caller that acts on rows before the stream ends must
 // match each request's Digest against a previously verified pass.
 func streamEvidenceArchive(archivePath string, expected EvidenceArchiveManifest, visit func(archivedRequest) error) error {
-	invalid := func(format string, args ...any) error {
-		return fmt.Errorf("%w: %s", ErrEvidenceArchiveInvalid, fmt.Sprintf(format, args...))
-	}
 	if expected.Format != evidenceArchiveFormat {
-		return invalid("manifest format %q", expected.Format)
+		return fmt.Errorf("%w: manifest format %q", ErrEvidenceArchiveInvalid, expected.Format)
 	}
-	f, err := os.Open(archivePath)
-	if err != nil {
-		return invalid("open: %v", err)
-	}
-	defer f.Close()
-	h := sha256.New()
-	counter := &countingWriter{w: h}
-	gz, err := gzip.NewReader(io.TeeReader(f, counter))
-	if err != nil {
-		return invalid("gzip: %v", err)
-	}
-	scanner := bufio.NewScanner(gz)
-	scanner.Buffer(make([]byte, 0, 1<<20), evidenceArchiveMaxLineBytes)
-	counts := map[string]int64{}
-	seen := map[string]bool{}
-	requests := 0
-	var current *archivedRequest
-	var currentHash hash.Hash
-	flush := func() error {
-		if current == nil {
-			return nil
+	return verifiedarchive.Stream(archivePath, expected, evidenceArchiveKnownTable, func(g verifiedarchive.Group) error {
+		req := archivedRequest{RequestID: g.ID, CreditIDs: g.CreditIDs, Rows: make(map[string][]archiveRow, len(g.Rows)), Digest: g.Digest, Bytes: g.Bytes}
+		for table, rows := range g.Rows {
+			converted := make([]archiveRow, len(rows))
+			for i, row := range rows {
+				converted[i] = row
+			}
+			req.Rows[table] = converted
 		}
-		copy(current.Digest[:], currentHash.Sum(nil))
-		req := *current
-		current = nil
 		return visit(req)
-	}
-	sawHeader, sawTrailer := false, false
-	var trailer evidenceArchiveLine
-	for scanner.Scan() {
-		if sawTrailer {
-			return invalid("data after trailer")
-		}
-		raw := scanner.Bytes()
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		var line evidenceArchiveLine
-		if err := dec.Decode(&line); err != nil {
-			return invalid("parse line: %v", err)
-		}
-		switch line.Kind {
-		case "header":
-			if sawHeader || line.Format != evidenceArchiveFormat {
-				return invalid("bad header")
-			}
-			sawHeader = true
-		case "request":
-			if !sawHeader || line.RequestID == "" {
-				return invalid("request before header")
-			}
-			if seen[line.RequestID] {
-				return invalid("duplicate request %q", line.RequestID)
-			}
-			if err := flush(); err != nil {
-				return err
-			}
-			seen[line.RequestID] = true
-			requests++
-			current = &archivedRequest{RequestID: line.RequestID, CreditIDs: line.CreditIDs, Rows: map[string][]archiveRow{}}
-			currentHash = sha256.New()
-		case "row":
-			if current == nil || line.RequestID != current.RequestID || !evidenceArchiveKnownTable(line.Table) || line.Row == nil {
-				return invalid("row for unknown request or table")
-			}
-			row, err := archiveRowFromJSON(line.Row)
-			if err != nil {
-				return invalid("row value: %v", err)
-			}
-			current.Rows[line.Table] = append(current.Rows[line.Table], row)
-			counts[line.Table]++
-		case "trailer":
-			if err := flush(); err != nil {
-				return err
-			}
-			sawTrailer = true
-			trailer = line
-		default:
-			return invalid("unknown line kind %q", line.Kind)
-		}
-		if current != nil {
-			_, _ = currentHash.Write(raw)
-			_, _ = currentHash.Write([]byte{'\n'})
-			current.Bytes += int64(len(raw)) + 1
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return invalid("read: %v", err)
-	}
-	if err := gz.Close(); err != nil {
-		return invalid("gzip close: %v", err)
-	}
-	// Drain any bytes after the gzip stream so size and digest cover the file.
-	if _, err := io.Copy(io.Discard, io.TeeReader(f, counter)); err != nil {
-		return invalid("read tail: %v", err)
-	}
-	if !sawHeader || !sawTrailer {
-		return invalid("missing header or trailer")
-	}
-	if counter.n != expected.SizeBytes {
-		return invalid("size %d, manifest %d", counter.n, expected.SizeBytes)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != expected.SHA256 {
-		return invalid("sha256 %s, manifest %s", got, expected.SHA256)
-	}
-	if requests != expected.RequestCount || trailer.RequestCount != expected.RequestCount {
-		return invalid("request count %d, trailer %d, manifest %d", requests, trailer.RequestCount, expected.RequestCount)
-	}
-	if !equalRowCounts(counts, expected.RowCounts) || !equalRowCounts(trailer.RowCounts, expected.RowCounts) {
-		return invalid("row counts differ from manifest")
-	}
-	return nil
-}
-
-func equalRowCounts(a, b map[string]int64) bool {
-	norm := func(m map[string]int64) map[string]int64 {
-		out := map[string]int64{}
-		for k, v := range m {
-			if v != 0 {
-				out[k] = v
-			}
-		}
-		return out
-	}
-	na, nb := norm(a), norm(b)
-	if len(na) != len(nb) {
-		return false
-	}
-	for k, v := range na {
-		if nb[k] != v {
-			return false
-		}
-	}
-	return true
+	})
 }
 
 func evidenceArchiveKnownTable(table string) bool {
@@ -508,64 +159,8 @@ func evidenceArchiveKnownTable(table string) bool {
 	return false
 }
 
-func archiveRowJSON(row archiveRow) map[string]any {
-	out := make(map[string]any, len(row))
-	for k, v := range row {
-		out[k] = v
-	}
-	return out
-}
-
-func archiveRowFromJSON(raw map[string]any) (archiveRow, error) {
-	row := make(archiveRow, len(raw))
-	for k, v := range raw {
-		switch t := v.(type) {
-		case nil, string:
-			row[k] = t
-		case json.Number:
-			if i, err := t.Int64(); err == nil {
-				row[k] = i
-				continue
-			}
-			f, err := t.Float64()
-			if err != nil {
-				return nil, err
-			}
-			row[k] = f
-		case map[string]any:
-			b64, ok := t["blob_base64"].(string)
-			if !ok || len(t) != 1 {
-				return nil, fmt.Errorf("column %s: unsupported object", k)
-			}
-			if _, err := base64.StdEncoding.DecodeString(b64); err != nil {
-				return nil, fmt.Errorf("column %s: %w", k, err)
-			}
-			row[k] = archiveBlob{Base64: b64}
-		default:
-			return nil, fmt.Errorf("column %s: unsupported value %T", k, v)
-		}
-	}
-	return row, nil
-}
-
 func normalizeArchiveValue(v any) any {
-	switch t := v.(type) {
-	case nil, int64, float64, string:
-		return t
-	case []byte:
-		return archiveBlob{Base64: base64.StdEncoding.EncodeToString(t)}
-	case bool:
-		if t {
-			return int64(1)
-		}
-		return int64(0)
-	case int:
-		return int64(t)
-	case time.Time:
-		return sqliteTimeText(t)
-	default:
-		return fmt.Sprint(t)
-	}
+	return verifiedarchive.NormalizeValue(v)
 }
 
 func (r archiveRow) int64(col string) (int64, bool) {

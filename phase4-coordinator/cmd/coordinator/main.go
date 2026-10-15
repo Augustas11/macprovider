@@ -1672,6 +1672,7 @@ func runCoordinator() (exitCode int) {
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
+	startAuditLogRotation(shutdownCtx, settlementReceiptAuditStore, auditLogRotationOptions(cfg), logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
@@ -3326,6 +3327,76 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 			case <-ticker.C:
 				prune()
 			}
+		}
+	}()
+}
+
+// auditLogRotationOptions derives the SPEC-002 R-7.10.2 rotation settings:
+// the audit database keeps storage.audit_log_hot_days hot and the closed
+// period archives hold the rest of audit_log_retention_days. The archive
+// shares the settled-evidence retention free-space floor and pacing.
+func auditLogRotationOptions(cfg config.Config) audit.RotationOptions {
+	dir := cfg.Storage.AuditLogArchiveDir
+	if dir == "" {
+		dbPath := audit.DefaultDBPath(cfg.Storage.DBPath)
+		if abs, err := filepath.Abs(dbPath); err == nil {
+			dbPath = abs
+		}
+		dir = filepath.Join(filepath.Dir(dbPath), audit.AuditArchiveDirName)
+	}
+	rc := cfg.Billing.Retention
+	return audit.RotationOptions{
+		ArchiveDir:                dir,
+		HotDays:                   cfg.Storage.AuditLogHotDays,
+		RetentionDays:             cfg.Storage.AuditLogRetentionDays,
+		BatchPause:                time.Duration(rc.BatchPauseMS) * time.Millisecond,
+		MinFreeBytes:              rc.ArchiveMinFreeBytes,
+		MinFreePercent:            rc.ArchiveMinFreePercent,
+		IncrementalVacuumPages:    rc.IncrementalVacuumPages,
+		IncrementalVacuumMaxSteps: rc.IncrementalVacuumMaxSteps,
+	}
+}
+
+// startAuditLogRotation rotates the settlement receipt audit database daily
+// at 02:30 UTC, before the 03:00 settled-evidence retention run.
+func startAuditLogRotation(ctx context.Context, store *audit.Store, opts audit.RotationOptions, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 2, 30, 0, 0, time.UTC)
+			if !next.After(now) {
+				next = next.AddDate(0, 0, 1)
+			}
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			report, err := store.RotateClosedPeriods(ctx, opts, time.Now())
+			event := logger.Info()
+			if err != nil {
+				event = logger.Error().Err(err)
+			} else if report.Status == audit.RotationStatusDiskLow {
+				event = logger.Warn()
+			}
+			event.Str("event", "audit_log_rotation").
+				Str("status", report.Status).
+				Str("cutoff_day_utc", report.CutoffDayUTC).
+				Int("archives", report.Archives).
+				Int64("archived_rows", report.ArchivedRows).
+				Int64("deleted_rows", report.DeletedRows).
+				Int64("kept_rows", report.KeptRows).
+				Int("removed_archives", report.RemovedArchives).
+				Str("last_archive_file", report.LastArchiveFile).
+				Str("last_archive_sha256", report.LastArchiveSHA).
+				Str("auto_vacuum", report.AutoVacuumMode).
+				Str("reason", report.Error).
+				Msg("audit log rotation finished")
 		}
 	}()
 }

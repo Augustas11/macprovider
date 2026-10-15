@@ -1447,6 +1447,14 @@ type StorageConfig struct {
 	// minutes after it was mirrored, once its primary row is verified to
 	// hold the same digest and JSON. Unmirrored and mismatched rows stay.
 	RouteSnapshotJournalMirroredGraceMinutes int `yaml:"route_snapshot_journal_mirrored_grace_minutes"`
+	// SPEC-002 R-7.10.2 (#1793): the settlement receipt audit database keeps
+	// this many whole UTC days hot. Older days move to verified closed period
+	// archives in AuditLogArchiveDir, which hold the audit history for
+	// audit_log_retention_days.
+	AuditLogHotDays int `yaml:"audit_log_hot_days"`
+	// AuditLogArchiveDir is the absolute directory of the closed period
+	// archives; empty means audit-archive next to the audit database.
+	AuditLogArchiveDir string `yaml:"audit_log_archive_dir"`
 }
 
 // SourceEvidenceConfig gates the coordinator-owned source export endpoint. The
@@ -2020,6 +2028,7 @@ func Default() Config {
 			AuditLogRetentionDays:    90,
 			SettlementReceiptAuditOutboxDrainedRetentionHours: 24,
 			RouteSnapshotJournalMirroredGraceMinutes:          60,
+			AuditLogHotDays:                                   7,
 		},
 		SourceEvidence: SourceEvidenceConfig{
 			Enabled:      false,
@@ -3278,6 +3287,12 @@ func (c Config) Validate() error {
 	}
 	if h := c.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours; h < 1 || h > 24*c.Storage.AuditLogRetentionDays {
 		return fmt.Errorf("storage.settlement_receipt_audit_outbox_drained_retention_hours must be between 1 and 24*audit_log_retention_days")
+	}
+	if d := c.Storage.AuditLogHotDays; d < 1 || d > c.Storage.AuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_hot_days must be between 1 and audit_log_retention_days")
+	}
+	if dir := c.Storage.AuditLogArchiveDir; dir != "" && !filepath.IsAbs(dir) {
+		return fmt.Errorf("storage.audit_log_archive_dir must be an absolute path")
 	}
 	if m := c.Storage.RouteSnapshotJournalMirroredGraceMinutes; m < 1 || m > maxRouteSnapshotJournalMirroredGraceMinutes {
 		return fmt.Errorf("storage.route_snapshot_journal_mirrored_grace_minutes must be between 1 and %d", maxRouteSnapshotJournalMirroredGraceMinutes)

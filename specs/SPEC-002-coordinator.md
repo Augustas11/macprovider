@@ -1,6 +1,18 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.18 (2026-10-15, public-repo cleanup)
+**Version:** 1.6.19 (2026-10-15, audit database rotation)
+
+**Change log v1.6.19 (2026-10-15, issue #1793):** R-7.10.2 now bounds the
+settlement receipt audit database (`coordinator-audit.db`) to its active
+period. Rows of whole UTC days older than `storage.audit_log_hot_days`
+(default 7) move to closed period archives: gzip JSON lines with a SHA-256,
+byte size and row counts in a sidecar manifest, re-read and verified before
+any row is deleted, and each row deleted only while it still equals its
+archived copy. The archives, not the hot file, hold the audit history for
+`storage.audit_log_retention_days` (90-day floor unchanged); an archive whose
+newest day is past that window is removed. AC-K.14 is restated accordingly.
+The money-database `audit_log` keeps the existing pruner. No event type or
+payload rule in this spec changes.
 
 **Change log v1.6.18 (2026-10-15, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration; removes a historical host address.
 
@@ -3874,10 +3886,44 @@ reads them, and startup drops them where an earlier release created them
 table.
 
 R-7.10.2 `ts_utc` MUST be RFC3339 in UTC. `payload_json` MUST be a
-well-formed JSON object whose schema depends on `event_type`. The table
+well-formed JSON object whose schema depends on `event_type`. The
 retention policy follows §7.7 / §13 `storage.audit_log_retention_days`
-with default 90 days, mirroring `request_log_retention_days`, per
-SPEC-011 v0.5 §3.6 R-3.6.1 / R-3.6.2 and SPEC-002 v1.3.5 AC-K.14.
+with default 90 days (minimum 90), per SPEC-011 v0.5 §3.6 R-3.6.1 /
+R-3.6.2 and SPEC-002 v1.3.5 AC-K.14.
+
+R-7.10.2a (v1.6.19) The settlement receipt audit database
+(`coordinator-audit.db`, SPEC-022 R-11.1.1) keeps only its active period
+hot and satisfies the retention window from closed period archives:
+
+1. A daily rotation moves the rows of whole UTC days older than
+   `storage.audit_log_hot_days` (default 7, at least 1, at most
+   `audit_log_retention_days`) out of the hot file. It writes them to an
+   archive in `storage.audit_log_archive_dir` (default `audit-archive` next
+   to the audit database): gzip-compressed JSON lines holding every column
+   of every row, with a sidecar manifest of the file's SHA-256, byte size,
+   and row counts. The archive format and its verification are the ones
+   settled-evidence retention uses (SPEC-022 R-15.3, R-15.4).
+2. No row is deleted until the archive was re-read and verified: SHA-256
+   and byte size equal the manifest, every line parses, and the row counts
+   match. Deletion re-reads the verified file, requires each block of rows
+   to match its digest from the verified pass, and deletes a row only while
+   the live row equals its archived copy column for column. A row that
+   changed stays hot and is archived again as it now is. A run that stops
+   early resumes the same archive.
+3. The rotation refuses to write an archive while the archive filesystem is
+   below the settled-evidence retention free-space floor
+   (`billing.retention.archive_min_free_bytes` /
+   `archive_min_free_percent`), and re-checks it as the archive grows.
+4. Each archive is recorded in `audit_log_archives` in the audit database
+   (file, SHA-256, size, row count, first and last UTC day, status). An
+   archive whose last day is older than `audit_log_retention_days` is
+   removed together with its manifest.
+5. The existing pruner still deletes hot rows older than
+   `audit_log_retention_days`. The money-database `audit_log` (operator
+   swap, receipt rotation, and billing admin events) is not rotated.
+
+`coordinator-cli audit-log-archive verify --archive <file>` re-verifies an
+archive from the file alone.
 
 #### 7.10.2. `operator_model_swap` event type (NORMATIVE)
 
@@ -4817,8 +4863,11 @@ SPEC-002 v1.3.5 R-7.10.8 and SPEC-011 v0.5 AC-20.
 **AC-K.14 Audit-log retention.**
 Rows older than `storage.audit_log_retention_days` (default 90) MUST be
 pruned by the existing coordinator pruner, extended from the §7.7
-pruner pattern. Traces to SPEC-002 v1.3.5 §7.10.1 and SPEC-011 v0.5
-AC-20.
+pruner pattern. In the settlement receipt audit database, rows of days
+older than `storage.audit_log_hot_days` leave the hot file only into a
+verified closed period archive (R-7.10.2a), and an archive is removed once
+its last day is older than the retention window. Traces to SPEC-002 v1.3.5
+§7.10.1 and SPEC-011 v0.5 AC-20.
 
 **AC-K.15 SPEC-010 validation-order pass-through.**
 The coordinator's v2 `auth_request` initial-stage parser MUST apply

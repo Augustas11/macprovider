@@ -10,7 +10,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |
 |---|---|---|---|---|---|---|
 | SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.34 | normative | pending | pending: 6 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
-| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.18 | normative | pending | pending: 7 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
+| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.19 | normative | pending | pending: 7 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.1 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.6 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.22 | normative | complete | conformant: 2, pending: 13 | [SPEC-005-billing.md](SPEC-005-billing.md) |
@@ -23,14 +23,14 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `malibu-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.12 | draft | pending | pending: 2 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
-| SPEC-015 | Verifiable inference receipts | 0.4.15 | normative | complete | pending: 7 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
+| SPEC-015 | Verifiable inference receipts | 0.4.16 | normative | complete | pending: 7 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | pending: 11 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 2 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.11 | normative | pending | pending: 5 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.3.1 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.25 | normative | pending | pending: 7 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.1 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.4.3 | draft | complete | conformant: 1, pending: 14 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.4.4 | draft | complete | conformant: 1, pending: 14 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.24 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.10 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |

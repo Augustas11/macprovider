@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -36,6 +37,7 @@ func (e SettlementReceiptOutboxConflictError) SettlementReceiptAuditOutboxConfli
 type Store struct {
 	db                             *sql.DB
 	settlementReceiptOutboxEnabled bool
+	rotation                       rotationRuntime
 }
 
 // DefaultDBPath returns the sibling audit DB path next to the primary
@@ -157,11 +159,13 @@ DROP INDEX IF EXISTS idx_audit_log_event_type;
 			return err
 		}
 	}
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := s.db.ExecContext(ctx, `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_settlement_receipt_outbox
     ON audit_log(settlement_receipt_audit_outbox_id)
-    WHERE settlement_receipt_audit_outbox_id IS NOT NULL`)
-	return err
+    WHERE settlement_receipt_audit_outbox_id IS NOT NULL`); err != nil {
+		return err
+	}
+	return s.ensureAuditArchiveTable(ctx)
 }
 
 func (s *Store) Insert(ctx context.Context, ts time.Time, eventType, providerID, payloadJSON string) error {
@@ -238,10 +242,49 @@ WHERE settlement_receipt_audit_outbox_id = ?`, outboxID).Scan(&gotTS, &gotEventT
 		gotEventType != eventType ||
 		gotProvider.Valid != provider.Valid ||
 		(gotProvider.Valid && gotProvider.String != provider.String) ||
-		gotPayload != payloadJSON {
+		(gotPayload != payloadJSON && !legacySettlementReceiptPayloadMatches(gotPayload, payloadJSON)) {
 		return false, SettlementReceiptOutboxConflictError{OutboxID: outboxID}
 	}
 	return false, nil
+}
+
+// legacySettlementReceiptPayloadMatches accepts an audit row that a release
+// before the slim payload (SPEC-022 R-11.1, #1793) wrote for the same outbox
+// row: a drain interrupted after the audit insert but before the outbox row
+// was marked drained re-delivers it in the new form. The legacy form always
+// carried attempt_id, which the slim form never writes. The row is the same
+// event when the legacy payload holds every scalar of the slim one with the
+// same value; only the redacted diagnostics (which replaced the legacy
+// verifier_checks object) are new.
+func legacySettlementReceiptPayloadMatches(existing, slim string) bool {
+	var old, cur map[string]any
+	if json.Unmarshal([]byte(existing), &old) != nil || json.Unmarshal([]byte(slim), &cur) != nil {
+		return false
+	}
+	if _, legacy := old["attempt_id"]; !legacy {
+		return false
+	}
+	if _, ok := cur["attempt_id"]; ok || len(cur) == 0 {
+		return false
+	}
+	for key, cv := range cur {
+		if key == "unmet_checks" || key == "compute_integrity_reason" {
+			continue
+		}
+		ov, ok := old[key]
+		if !ok {
+			return false
+		}
+		switch cv.(type) {
+		case string, float64, bool, nil:
+			if ov != cv {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {

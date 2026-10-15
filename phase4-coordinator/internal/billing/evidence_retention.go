@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/verifiedarchive"
 )
 
 // SPEC-022 R-15 (#1793): settled-evidence retention. Per-attempt settlement
@@ -2526,48 +2527,10 @@ func rowsMatchArchive(live, archived []archiveRow) string {
 	return ""
 }
 
-// archiveRowsEqual compares two rows column by column. A REAL that holds an
-// integral value is written to JSON without a fraction and reads back as an
-// integer, so numbers compare by value.
+// archiveRowsEqual compares two rows column by column; numbers compare by
+// value (verifiedarchive.RowsEqual).
 func archiveRowsEqual(a, b archiveRow) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for col, av := range a {
-		bv, ok := b[col]
-		if !ok || !archiveValuesEqual(av, bv) {
-			return false
-		}
-	}
-	return true
-}
-
-func archiveValuesEqual(a, b any) bool {
-	switch x := a.(type) {
-	case nil:
-		return b == nil
-	case string:
-		y, ok := b.(string)
-		return ok && x == y
-	case archiveBlob:
-		y, ok := b.(archiveBlob)
-		return ok && x == y
-	case int64:
-		switch y := b.(type) {
-		case int64:
-			return x == y
-		case float64:
-			return float64(x) == y && int64(y) == x
-		}
-	case float64:
-		switch y := b.(type) {
-		case float64:
-			return x == y
-		case int64:
-			return float64(y) == x && int64(x) == y
-		}
-	}
-	return false
+	return verifiedarchive.RowsEqual(a, b)
 }
 
 func sameCredits(b requestEvidenceBundle, req archivedRequest) bool {

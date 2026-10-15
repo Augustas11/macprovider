@@ -258,8 +258,9 @@ lock and the three Pearl locks (updater, deploy, deploy-operation). It
 checks free space on the database filesystem for three times the files'
 size (a backup copy, VACUUM's temporary copy, which it keeps there with
 `SQLITE_TMPDIR`, and the WAL), then stops the coordinator. It runs `PRAGMA quick_check` on the
-coordinator database and its `.route-snapshots` journal and refuses, starting
-the coordinator again, if either fails. It then takes a fresh
+coordinator database, its `.route-snapshots` journal, and the audit database
+(`coordinator-audit.db` in the same directory) and refuses, starting the
+coordinator again, if any fails. It then takes a fresh
 `VACUUM INTO` backup next to each file (`<file>.pre-incremental-<UTC stamp>`,
 named in the output). It runs `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` on
 each file with the SQLite 3.53.2 CLI from `ops/pearl-updater`, runs
@@ -372,6 +373,27 @@ These run without the nightly job and need no operator step:
   pages to the freelist and does not rebuild anything. A later rollback to a
   release from before this change recreates the indexes at its startup, which
   takes longer on a large database.
+
+- The audit database (`coordinator-audit.db`) keeps
+  `storage.audit_log_hot_days` (default 7) whole UTC days hot. A daily run at
+  02:30 UTC writes older rows to `storage.audit_log_archive_dir` (default
+  `audit-archive` next to the audit database) as
+  `audit-log-<UTC stamp>-<nonce>.jsonl.gz` with a manifest, re-reads and
+  verifies it, then deletes the rows in short batches (SPEC-002 R-7.10.2a).
+  It refuses below the same free-space floor as this job. The log line is
+  `audit log rotation finished` with `status`, `archived_rows`,
+  `deleted_rows`, `kept_rows`, and `removed_archives`; `kept_rows` are rows
+  that changed after export and are archived again by a later run. Archives
+  whose last day is older than `storage.audit_log_retention_days` are
+  removed. The first runs after the deploy move the existing backlog in
+  bounded archives (200,000 rows each, 15 minutes per run). Verify an archive
+  from the file alone with
+  `coordinator-cli audit-log-archive verify --archive <file>`. The audit file
+  stops growing at once; it shrinks only after the one-time conversion in
+  section 4, which includes it.
+- Audit payloads written by this release name each field once
+  (SPEC-022 R-11.1.2): the ingested event carries the attempt and receipt
+  identity only, and verifier checks are reduced to `unmet_checks`.
 
 ## Done criteria
 

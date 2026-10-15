@@ -2146,3 +2146,29 @@ func TestStorageRouteSnapshotJournalGraceDefaultAndValidation(t *testing.T) {
 		t.Fatalf("route snapshot journal grace above a week should fail; err=%v", err)
 	}
 }
+
+func TestStorageAuditLogHotDaysDefaultAndValidation(t *testing.T) {
+	if got := Default().Storage.AuditLogHotDays; got != 7 {
+		t.Fatalf("audit log hot days default=%d want 7", got)
+	}
+	cfg := validTestConfig()
+	cfg.Storage.AuditLogHotDays = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_hot_days") {
+		t.Fatalf("audit_log_hot_days=0 should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogHotDays = cfg.Storage.AuditLogRetentionDays + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_hot_days") {
+		t.Fatalf("audit_log_hot_days past the retention window should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogArchiveDir = "relative/audit-archive"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_archive_dir") {
+		t.Fatalf("relative audit_log_archive_dir should fail; err=%v", err)
+	}
+	cfg = validTestConfig()
+	cfg.Storage.AuditLogArchiveDir = "/var/lib/macprovider/audit-archive"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("absolute audit_log_archive_dir should pass: %v", err)
+	}
+}

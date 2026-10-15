@@ -1,11 +1,29 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.3
+Version: v0.4.4
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.4
+
+Issue #1793 (slice 6): the audit database footprint. R-11.1.2 fixes the
+audit payload of the two settlement receipt events. The verdict event keeps
+every R-11.1 field and the SPEC-015 scalar fields; it no longer repeats a
+field under a second name (`receipt_verification_outcome`,
+`pending_deadline_unix_ms`, `quarantine_zero_settle_reason`) or writes
+`attempt_id`, which the request id, attempt number and provider id give.
+Verifier diagnostics are redacted to the names of the unmet checks
+(`unmet_checks`) and the compute-integrity reason; the full checks stay in
+the verdict row and its R-15 archive. The ingested event names the attempt
+and the receipt only; the verdict event of the same attempt carries the
+rest. An outbox row delivered by an earlier release and re-delivered after
+an interrupted drain is accepted as the same event. R-15.10 item 6 bounds
+the audit database to its active period by rotation into verified closed
+period archives (SPEC-002 R-7.10.2a). No settlement, payability, or
+retention eligibility rule changes. This version follows v0.4.3.
 
 ### v0.4.3
 
@@ -1444,6 +1462,32 @@ sample age. Retention deletes only drained rows, in bounded indexed batches,
 after the R-15.10 window; pending and poison evidence is never pruned by that
 path.
 
+R-11.1.2. (v0.4.4) Audit payload. The `settlement_receipt_verdict` payload
+carries the R-11.1 fields under one name each: `route_snapshot_policy_version`,
+`route_snapshot_mode`, `paid_entrypoint`, `request_id`, `attempt_n`,
+`account_scope_hash`, `provider_id`, `provider_receipt_key_fingerprint`,
+`provider_session_id` and `provider_generation_id` when available,
+`model_id`, `spec008_hash_status`, `provider_reported_model_hash`,
+`expected_catalog_model_hash`, `catalog_id`, `catalog_body_digest`,
+`terminal_state`, `receipt_profile`, `receipt_version`, `settlement_outcome`
+(the verification outcome), `buyer_debit_outcome`,
+`provider_settlement_outcome`, `payout_exclusion_outcome`, and `reason`. It
+also carries the SPEC-015 §11 scalars `route_snapshot_digest`, `model_hash`,
+`prompt_hash`, `output_hash`, `usage_digest`, `received_at_unix_ms`,
+`receipt_result`, `deadline_unix_ms`, `idempotency_status`,
+`attempted_received_at_unix_ms`, and the outbox id. Verifier diagnostics
+are `unmet_checks` (the names of the checks that did not pass, omitted when
+none) and `compute_integrity_reason` when set; the full checks stay in the
+verdict row. The payload MUST NOT repeat a field under a second name or
+carry a value the attempt identity gives. The `settlement_receipt_ingested`
+payload carries the attempt identity (`account_scope_hash`, `request_id`,
+`attempt_n`, `provider_id`), `receipt_version`, `receipt_profile`,
+`route_snapshot_digest`, `provider_receipt_key_fingerprint`,
+`received_at_unix_ms`, and the outbox id. When an audit row for the same
+outbox id already exists in the form an earlier release wrote (it carries
+`attempt_id`), and every scalar of the new payload equals the old row's,
+delivery treats the row as already delivered rather than as a conflict.
+
 R-11.2. Audit events MUST NOT contain raw prompts, raw outputs, receipt
 signatures, or receipt public keys unless an existing spec already permits the
 field for that exact surface.
@@ -2261,6 +2305,13 @@ holds:
    `idx_srsj_digest` or `idx_srsj_provider`. In the audit database, no query
    reads `idx_audit_log_event_type` or `idx_audit_log_provider_id`
    (SPEC-002 R-7.10.1).
+
+6. Audit database. The settlement receipt audit database keeps only its
+   active period hot: rows of days older than
+   `storage.audit_log_hot_days` move to verified closed period archives
+   written and verified as R-15.3 and R-15.4 archives are, and the archives
+   hold the audit history for `storage.audit_log_retention_days`
+   (SPEC-002 R-7.10.2a).
 
 R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
 row already pruned under items 1 or 2 is neither a reason to keep a request
