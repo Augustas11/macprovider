@@ -86,7 +86,7 @@ func relayBlindPoolSelected(r *http.Request) bool {
 
 // Internal requests are built from an empty header set: browser-supplied routing,
 // wallet identity, execution authority, and credentials cannot cross this boundary.
-func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, session string, body []byte, privacy bool) (*http.Response, error) {
+func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, session string, body []byte, privacy bool, poolID string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, strings.TrimRight(s.coordinatorBuyerURL(), "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -100,6 +100,11 @@ func (s *Server) relayBlindUpstream(r *http.Request, method, path, account, sess
 	}
 	if privacy {
 		req.Header.Set(privacyClassHeader, privacyClassV1)
+	}
+	// SPEC-049-R032: only the gateway-authorized pool of a privacy-class
+	// request crosses this boundary.
+	if privacy && poolID != "" {
+		req.Header.Set(poolEmitHeader, poolID)
 	}
 	client := *s.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -128,8 +133,8 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 	decoded := json.Unmarshal(body, &wire) == nil
 	if privacy {
 		code := "unknown"
-		if decoded && (privacyClassKnown(wire.Error.Code) || strings.HasPrefix(wire.Error.Code, "relay_blind_") || wire.Error.Code == relayBlindCapabilityRefusalCode) && len(wire.Error.Code) <= 64 {
-			code = wire.Error.Code
+		if decoded {
+			code = privacyRefusalLogCode(wire.Error.Code)
 		}
 		s.notePrivacyUpstreamRejection(resp, phase, code)
 	}
@@ -143,6 +148,14 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0")
 		return
 	}
+	// SPEC-049-R032 item 2: a pool refused before selection keeps its
+	// SPEC-042-R010 code.
+	if privacy && decoded {
+		if status, typ, message, ok := privacyPoolRefusal(wire.Error.Code); ok {
+			writeError(w, status, typ, wire.Error.Code, message)
+			return
+		}
+	}
 	if json.Unmarshal(body, &wire) == nil && strings.HasPrefix(wire.Error.Code, "relay_blind_") {
 		_, retryableCode := gatewayRetryableByCode[wire.Error.Code]
 		_, permanentCode := gatewayPermanentCodes[wire.Error.Code]
@@ -155,13 +168,21 @@ func (s *Server) writeRelayBlindUpstreamError(w http.ResponseWriter, resp *http.
 }
 func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, authn authResult, req relayBlindRouteReservationRequest, privacy bool) {
 	accountID := relayBlindAccountID(authn)
-	if privacy && privacyBuyerIntentDenied(r, accountID, authn.Demo) {
+	if privacy && privacyPoolIntentDenied(r, accountID, authn.Demo) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, accountID, authn.Demo))
 		return
 	}
-	if authn.Demo || relayBlindPoolSelected(r) {
+	if !privacy && (authn.Demo || relayBlindPoolSelected(r)) {
 		writeError(w, 400, "invalid_request_error", "relay_blind_downgrade_rejected", "Relay-blind pilot requires an authenticated global route")
 		return
+	}
+	poolID := ""
+	if privacy {
+		resolved, ok := s.resolvePrivacyPool(w, r, accountID, authn.WalletSession != nil)
+		if !ok {
+			return
+		}
+		poolID = resolved
 	}
 	if authn.WalletSession == nil && !s.admitRelayBlindMetadataWrite(w, r, relayBlindAccountID(authn)) {
 		return
@@ -171,7 +192,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 	if authn.WalletSession != nil {
 		session = authn.WalletSession.Session.SessionID
 	}
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/route-reservations", relayBlindAccountID(authn), session, body, privacy)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/route-reservations", relayBlindAccountID(authn), session, body, privacy, poolID)
 	if err != nil {
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind route reservation is unavailable")
 		return
@@ -190,7 +211,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind reservation evidence is invalid")
 		return
 	}
-	if privacy != (reservation.Version == relayblind.PrivacyReservationVersion) {
+	if privacy != (reservation.Version == relayblind.PrivacyReservationVersion) || reservation.PoolID != poolID {
 		writePrivacyClassError(w, privacyClassUnavailable, "")
 		return
 	}
@@ -203,7 +224,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 // prompt estimator, id-less dedupe, model rewriter, or retry loop.
 func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, raw []byte, account string, sessionAuth *walletSessionAuth) {
 	present, valid := privacyRequested(r)
-	if present && privacyBuyerIntentDenied(r, account, false) {
+	if present && privacyPoolIntentDenied(r, account, false) {
 		writePrivacyClassError(w, privacyClassDowngrade, privacyIntentDowngradeMessage(r, account, false))
 		return
 	}
@@ -229,12 +250,23 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		writeError(w, 400, "invalid_request_error", "relay_blind_envelope_invalid", "Envelope request ID must match X-Request-ID")
 		return
 	}
+	poolID := ""
+	if privacy {
+		resolved, ok := s.resolvePrivacyPool(w, r, account, sessionAuth != nil)
+		if !ok {
+			return
+		}
+		poolID = resolved
+		if poolID != "" {
+			setPoolScopedPrivacyModeHeaders(w.Header())
+		}
+	}
 	session := ""
 	if sessionAuth != nil {
 		session = sessionAuth.Session.SessionID
 	}
 	w.Header().Set("X-MacProvider-Relay-Blind-Retry-Action", "new_reservation_and_envelope")
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/consume", account, session, raw, privacy)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/consume", account, session, raw, privacy, poolID)
 	if err != nil {
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind consumption is unavailable; do not reuse the envelope")
 		return
@@ -336,6 +368,9 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	// this empty header set; buyer-supplied copies never reach it.
 	if privacy {
 		up.Header.Set(privacyClassHeader, privacyClassV1)
+		if poolID != "" {
+			up.Header.Set(poolEmitHeader, poolID)
+		}
 	}
 	if session != "" {
 		up.Header.Set("X-MacProvider-Wallet-Session", session)
@@ -435,7 +470,7 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		// Consume bound env.Model to the reservation's canonical model.
-		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt, Model: env.Model}
+		execution.Privacy = &privacyUsageContext{PostureVerifiedAtUnix: verifiedAt, Model: env.Model, PoolID: poolID}
 	}
 	// Keep ordinary provider-leg encryption disclosure separate; never publish
 	// stable peer attribution, a plaintext receipt, or the internal posture
@@ -498,7 +533,7 @@ func relayBlindUsageMetadataBody(r *http.Request, body []byte) []byte {
 	relayBlindHeaders(h, execution.Metadata.EffectivePrivacyOutcome == "relay_blind_satisfied")
 	meta := relayBlindOutcomeMetadata(h, "")
 	if execution.Privacy != nil && meta != nil {
-		meta["privacy"] = privacyUsageMetadata(execution.Privacy.PostureVerifiedAtUnix)
+		meta["privacy"] = privacyUsageMetadata(execution.Privacy.PostureVerifiedAtUnix, execution.Privacy.PoolID)
 	}
 	usage["macprovider"], _ = json.Marshal(meta)
 	root["usage"], _ = json.Marshal(usage)
@@ -523,7 +558,7 @@ func (s *Server) reconcileRelayBlindReservation(ctx context.Context, reservation
 	meta := reservation.RelayBlind
 	body, _ := json.Marshal(map[string]string{"provider_binding_digest": meta.ProviderBindingDigest, "envelope_digest": meta.EnvelopeDigest})
 	r, _ := http.NewRequestWithContext(context.WithValue(ctx, requestIDKey{}, reservation.RequestID), http.MethodPost, "http://localhost/", nil)
-	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/status", reservation.AccountID, reservation.WalletSessionID, body, false)
+	resp, err := s.relayBlindUpstream(r, http.MethodPost, "/v1/relay-blind/status", reservation.AccountID, reservation.WalletSessionID, body, false, "")
 	if err != nil {
 		return "held", nil
 	}
@@ -727,7 +762,7 @@ func (s *Server) applyRelayBlindModelsDisclosure(ctx context.Context, body map[s
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/", nil)
-	resp, err := s.relayBlindUpstream(r, http.MethodGet, "/v1/relay-blind/capabilities", "", "", nil, false)
+	resp, err := s.relayBlindUpstream(r, http.MethodGet, "/v1/relay-blind/capabilities", "", "", nil, false, "")
 	if err != nil {
 		return
 	}

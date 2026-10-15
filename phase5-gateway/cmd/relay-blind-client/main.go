@@ -63,6 +63,26 @@ var privacyDoesNotProtect = []string{
 	"pool_scoped_requests",
 }
 
+// privacyModePoolScopedDisclosure is the SPEC-006-R019 header string for a
+// pool-scoped privacy-class response.
+const privacyModePoolScopedDisclosure = "content_hidden_from_network_relays_and_pool_surfaces; served_only_by_selected_trusted_pool_members; serving_member_runtime_reads_plaintext; metadata_visible_to_relays"
+
+// privacyPoolDoesNotProtect is the SPEC-049-R020 pool-scoped list: items 1
+// to 5, without pool_scoped_requests.
+var privacyPoolDoesNotProtect = privacyDoesNotProtect[:5]
+
+const privacyPoolScope = "served_only_by_current_trusted_pool_members_enrolled_in_this_class; pool_membership_is_administrative_trust_not_content_privacy; a_pool_operator_running_a_member_mac_is_its_provider_operator"
+
+var privacyPoolOperatorSees = []string{
+	"pool_policy_membership_and_buyer_grants",
+	"aggregate_payable_request_counts_and_provider_credits",
+}
+
+var privacyPoolOperatorDoesNotSee = []string{
+	"request_and_response_content_through_pool_surfaces",
+	"per_request_metadata_and_buyer_attribution_through_pool_surfaces",
+}
+
 var privacyResidualRisks = []string{
 	"modified_binary_can_forge_posture_se_key_device_bound_not_code_bound",
 	"root_sip_bypass_kernel_or_firmware_compromise",
@@ -87,7 +107,7 @@ const privacyDirectoryPath = "/v1/privacy-class/directory"
 
 type options struct {
 	baseURL, identityPin, model, input, apiKeyEnv, walletSessionID, walletSessionKeyEnv string
-	directoryPublicKey                                                                  string
+	directoryPublicKey, pool                                                            string
 	maxOutputTokens, inputTokenUpperBound                                               int64
 	stream, privacyClass                                                                bool
 	timeout                                                                             time.Duration
@@ -104,6 +124,7 @@ func main() {
 	flag.Int64Var(&opts.inputTokenUpperBound, "input-token-upper-bound", 0, "declared input token upper bound")
 	flag.BoolVar(&opts.stream, "stream", false, "request streaming response")
 	flag.BoolVar(&opts.privacyClass, "privacy-class", false, "request operator_constrained_beta_v1 and decrypt the provider response")
+	flag.StringVar(&opts.pool, "pool", "", "with --privacy-class and an API key: scope the request to this authorized Trusted Pool (SPEC-049-R032)")
 	flag.StringVar(&opts.apiKeyEnv, "api-key-env", "MACPROVIDER_API_KEY", "environment variable containing the bearer credential")
 	flag.StringVar(&opts.walletSessionID, "wallet-session-id", "", "optional SPEC-040 wallet session ID")
 	flag.StringVar(&opts.walletSessionKeyEnv, "wallet-session-key-env", "MACPROVIDER_WALLET_SESSION_PRIVATE_KEY", "environment variable containing an optional Ed25519 wallet-session private key")
@@ -126,6 +147,9 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	// SPEC-049-R028: a privacy-class run without --identity-pin takes its
 	// pin from the operator-signed directory, verified against one pinned key.
 	useDirectory := opts.privacyClass && opts.identityPin == ""
+	if opts.pool != "" && (!opts.privacyClass || opts.walletSessionID != "" || !visiblePoolID(opts.pool)) {
+		return errors.New("--pool requires --privacy-class, API-key authentication, and a printable pool ID of at most 128 bytes")
+	}
 	var pin relayblind.IdentityPin
 	var directoryKey ed25519.PublicKey
 	if useDirectory {
@@ -194,7 +218,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	reservationRaw, err := doJSON(ctx, base, "/v1/relay-blind/route-reservations", bearer, opts.walletSessionID, sessionKey, reservationRequestID, reservationBody, opts.privacyClass)
+	reservationRaw, err := doJSON(ctx, base, "/v1/relay-blind/route-reservations", bearer, opts.walletSessionID, sessionKey, reservationRequestID, reservationBody, opts.privacyClass, opts.pool)
 	if err != nil {
 		return fmt.Errorf("route reservation failed: %w", err)
 	}
@@ -221,6 +245,11 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	if opts.privacyClass {
 		if err := requirePrivacyReservation(reservation, pin); err != nil {
 			return err
+		}
+		// SPEC-049-R032 item 4: the reservation is bound to the selected
+		// pool, or to none.
+		if reservation.PoolID != opts.pool {
+			return errors.New("privacy class reservation pool rejected")
 		}
 	} else if reservation.Version != relayblind.ReservationVersion {
 		return errors.New("route reservation version rejected")
@@ -273,7 +302,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	zeroBytes(buyerKey)
 
-	request, err := newSignedRequest(ctx, base, "/v1/chat/completions", bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass)
+	request, err := newSignedRequest(ctx, base, "/v1/chat/completions", bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass, opts.pool)
 	if err != nil {
 		return err
 	}
@@ -286,11 +315,11 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	defer response.Body.Close()
 	if opts.privacyClass {
-		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, envelope.Model, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, stdout); err != nil {
+		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, envelope.Model, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, opts.pool, stdout); err != nil {
 			return err
 		}
 		zeroResponseKeys(&responseKeys)
-		writePrivacySuccess(stderr, pin.Fingerprint)
+		writePrivacySuccess(stderr, pin.Fingerprint, reservation)
 		if useDirectory {
 			fmt.Fprintf(stderr, "identity_pin_source: signed_directory directory_key_id=%s\n", relayblind.PublicKeyFingerprint(directoryKey))
 		} else {
@@ -403,7 +432,7 @@ func requirePrivacyReservation(reservation relayblind.ReservationResponse, pin r
 	return nil
 }
 
-func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, pool string, stdout io.Writer) error {
 	defer zeroResponseKeys(&keys)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return privacyDoNotResubmit(fmt.Sprintf("encrypted request returned HTTP %d", response.StatusCode))
@@ -411,10 +440,17 @@ func copyPrivacyResponse(response *http.Response, stream bool, keys relayblind.R
 	if err := requirePrivacyResponseHeaders(response.Header); err != nil {
 		return err
 	}
-	if stream {
-		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, model, inputCap, outputCap, stdout)
+	// SPEC-006-R019: a pool-scoped privacy response carries the fourth
+	// fixed disclosure string.
+	if pool != "" {
+		if mode, disclosure := response.Header.Values("X-MacProvider-Privacy-Mode"), response.Header.Values("X-MacProvider-Privacy-Mode-Disclosure"); len(mode) != 1 || mode[0] != "relay_blind_required" || len(disclosure) != 1 || disclosure[0] != privacyModePoolScopedDisclosure {
+			return privacyDoNotResubmit("privacy mode disclosure rejected")
+		}
 	}
-	return copyPrivacyNonStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, stdout)
+	if stream {
+		return copyPrivacyStream(response.Body, keys, envelopeDigest, kid, requestID, model, inputCap, outputCap, pool, stdout)
+	}
+	return copyPrivacyNonStream(response.Body, keys, envelopeDigest, kid, requestID, inputCap, outputCap, pool, stdout)
 }
 
 func requirePrivacyResponseHeaders(h http.Header) error {
@@ -437,7 +473,7 @@ func requirePrivacyResponseHeaders(h http.Header) error {
 	return nil
 }
 
-func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID string, inputCap, outputCap int64, pool string, stdout io.Writer) error {
 	raw, err := io.ReadAll(io.LimitReader(body, maxPrivacyResponseBytes+1))
 	if err != nil {
 		return privacyDoNotResubmit("incomplete privacy response")
@@ -453,7 +489,7 @@ func copyPrivacyNonStream(body io.Reader, keys relayblind.ResponseKeys, envelope
 	if err != nil {
 		return err
 	}
-	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, stdout)
+	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, pool, stdout)
 }
 
 func parsePrivacyResponse(raw []byte) ([]relayblind.PrivacyFrame, json.RawMessage, error) {
@@ -488,7 +524,7 @@ func parsePrivacyResponse(raw []byte) ([]relayblind.PrivacyFrame, json.RawMessag
 	return frames, body.Usage, nil
 }
 
-func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, stdout io.Writer) error {
+func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDigest, kid, requestID, model string, inputCap, outputCap int64, pool string, stdout io.Writer) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), maxPrivacyStreamLine)
 	var frames []relayblind.PrivacyFrame
@@ -562,7 +598,7 @@ func copyPrivacyStream(body io.Reader, keys relayblind.ResponseKeys, envelopeDig
 	if err != nil {
 		return err
 	}
-	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, stdout)
+	return commitPrivacyPlaintext(plaintexts, finalRaw, usage, inputCap, outputCap, pool, stdout)
 }
 
 func privacyFramePayload(data string) bool {
@@ -638,7 +674,7 @@ func openPrivacyFrames(keys relayblind.ResponseKeys, envelopeDigest, kid, reques
 	return plaintexts, finalRaw, nil
 }
 
-func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.RawMessage, inputCap, outputCap int64, stdout io.Writer) error {
+func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.RawMessage, inputCap, outputCap int64, pool string, stdout io.Writer) error {
 	final, err := relayblind.ParsePrivacyFinal(finalRaw)
 	zeroBytes(finalRaw)
 	if err != nil {
@@ -649,7 +685,7 @@ func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.Raw
 		zeroSlices(plaintexts)
 		return privacyDoNotResubmit("privacy response was not complete")
 	}
-	if err := privacyUsageAgrees(usage, final, inputCap, outputCap); err != nil {
+	if err := privacyUsageAgrees(usage, final, inputCap, outputCap, pool); err != nil {
 		zeroSlices(plaintexts)
 		return err
 	}
@@ -666,7 +702,7 @@ func commitPrivacyPlaintext(plaintexts [][]byte, finalRaw []byte, usage json.Raw
 	return nil
 }
 
-func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inputCap, outputCap int64) error {
+func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inputCap, outputCap int64, pool string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("privacy usage mismatch")
 	}
@@ -693,10 +729,10 @@ func privacyUsageAgrees(raw json.RawMessage, final relayblind.PrivacyFinal, inpu
 	if *usage.PromptTokens != prompt || *usage.CompletionTokens != completion || *usage.TotalTokens != prompt+completion {
 		return privacyDoNotResubmit("privacy usage mismatch")
 	}
-	return privacyMetadataAgrees(usage.Macprovider)
+	return privacyMetadataAgrees(usage.Macprovider, pool)
 }
 
-func privacyMetadataAgrees(raw json.RawMessage) error {
+func privacyMetadataAgrees(raw json.RawMessage, pool string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("missing successful privacy usage metadata")
 	}
@@ -713,7 +749,7 @@ func privacyMetadataAgrees(raw json.RawMessage) error {
 	if json.Unmarshal(raw, &meta) != nil || meta.Requested != "relay_blind_required" || meta.Effective != "relay_blind_satisfied" || meta.Scope != requestScope || meta.Settlement.Verified != "unavailable_for_relay_blind_request" || meta.Settlement.Usage != "standard_usage_settlement_and_clear_cap_enforcement_still_apply" {
 		return privacyDoNotResubmit("missing successful privacy usage metadata")
 	}
-	return privacyDisclosureAgrees(meta.Privacy)
+	return privacyDisclosureAgrees(meta.Privacy, pool)
 }
 
 type privacyDisclosure struct {
@@ -724,9 +760,18 @@ type privacyDisclosure struct {
 	DoesNotProtect        []string `json:"does_not_protect"`
 	ResidualRisks         []string `json:"residual_risks"`
 	PostureVerifiedAtUnix int64    `json:"posture_verified_at_unix"`
+	// Pool is the SPEC-049-R020 member of a pool-scoped response only.
+	Pool *privacyPoolDisclosure `json:"pool"`
 }
 
-func privacyDisclosureAgrees(raw json.RawMessage) error {
+type privacyPoolDisclosure struct {
+	PoolID                 string   `json:"pool_id"`
+	Scope                  string   `json:"scope"`
+	PoolOperatorSees       []string `json:"pool_operator_sees"`
+	PoolOperatorDoesNotSee []string `json:"pool_operator_does_not_see"`
+}
+
+func privacyDisclosureAgrees(raw json.RawMessage, pool string) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || rejectDuplicateKeys(raw) != nil {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
 	}
@@ -739,16 +784,38 @@ func privacyDisclosureAgrees(raw json.RawMessage) error {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
 	}
-	if got.Class != relayblind.PrivacyClassV1 || got.Assurance != relayblind.PrivacyAssurance || got.Scope != privacyScope || got.PostureVerifiedAtUnix <= 0 || !stringSlicesEqual(got.Protects, privacyProtects) || !stringSlicesEqual(got.DoesNotProtect, privacyDoesNotProtect) || !stringSlicesEqual(got.ResidualRisks, privacyResidualRisks) {
+	doesNotProtect := privacyDoesNotProtect
+	if pool != "" {
+		doesNotProtect = privacyPoolDoesNotProtect
+	}
+	if got.Class != relayblind.PrivacyClassV1 || got.Assurance != relayblind.PrivacyAssurance || got.Scope != privacyScope || got.PostureVerifiedAtUnix <= 0 || !stringSlicesEqual(got.Protects, privacyProtects) || !stringSlicesEqual(got.DoesNotProtect, doesNotProtect) || !stringSlicesEqual(got.ResidualRisks, privacyResidualRisks) {
 		return privacyDoNotResubmit("privacy class disclosure rejected")
+	}
+	if pool == "" {
+		if got.Pool != nil {
+			return privacyDoNotResubmit("privacy class disclosure rejected")
+		}
+		return nil
+	}
+	if got.Pool == nil || got.Pool.PoolID != pool || got.Pool.Scope != privacyPoolScope || !stringSlicesEqual(got.Pool.PoolOperatorSees, privacyPoolOperatorSees) || !stringSlicesEqual(got.Pool.PoolOperatorDoesNotSee, privacyPoolOperatorDoesNotSee) {
+		return privacyDoNotResubmit("privacy class pool disclosure rejected")
 	}
 	return nil
 }
 
-func writePrivacySuccess(stderr io.Writer, fingerprint string) {
+func writePrivacySuccess(stderr io.Writer, fingerprint string, reservation relayblind.ReservationResponse) {
 	fmt.Fprintf(stderr, "privacy class satisfied; identity fingerprint=%s\nprivacy_class: %s\nassurance: %s\nscope: %s\n", fingerprint, relayblind.PrivacyClassV1, relayblind.PrivacyAssurance, privacyScope)
 	for _, risk := range privacyResidualRisks {
 		fmt.Fprintf(stderr, "residual_risks: %s\n", risk)
+	}
+	if reservation.PoolID != "" {
+		fmt.Fprintf(stderr, "pool_id: %s\npool_manifest_version: %d\npool_manifest_core_digest: %s\npool_scope: %s\n", reservation.PoolID, reservation.PoolManifestVersion, reservation.PoolManifestCoreDigest, privacyPoolScope)
+		for _, item := range privacyPoolOperatorSees {
+			fmt.Fprintf(stderr, "pool_operator_sees: %s\n", item)
+		}
+		for _, item := range privacyPoolOperatorDoesNotSee {
+			fmt.Fprintf(stderr, "pool_operator_does_not_see: %s\n", item)
+		}
 	}
 	fmt.Fprintf(stderr, "verified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n")
 }
@@ -789,8 +856,8 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) ([]byte, error) {
-	request, err := newSignedRequest(ctx, base, path, bearer, sessionID, sessionKey, requestID, body, privacy)
+func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool, pool string) ([]byte, error) {
+	request, err := newSignedRequest(ctx, base, path, bearer, sessionID, sessionKey, requestID, body, privacy, pool)
 	if err != nil {
 		return nil, err
 	}
@@ -833,8 +900,8 @@ func errorCode(raw []byte) string {
 	return body.Error.Code
 }
 
-func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
-	return newSignedRequestMethod(ctx, http.MethodPost, base, path, bearer, sessionID, sessionKey, requestID, body, privacy)
+func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool, pool string) (*http.Request, error) {
+	return newSignedRequestMethod(ctx, http.MethodPost, base, path, bearer, sessionID, sessionKey, requestID, body, privacy, pool)
 }
 
 // privacyDirectoryPublicKey reads the buyer's pinned directory key: canonical
@@ -861,7 +928,7 @@ func fetchPrivacyDirectory(ctx context.Context, base *url.URL, bearer string, pu
 	if err != nil {
 		return relayblind.IdentityDirectory{}, err
 	}
-	request, err := newSignedRequestMethod(ctx, http.MethodGet, base, privacyDirectoryPath, bearer, "", nil, requestID, nil, false)
+	request, err := newSignedRequestMethod(ctx, http.MethodGet, base, privacyDirectoryPath, bearer, "", nil, requestID, nil, false, "")
 	if err != nil {
 		return relayblind.IdentityDirectory{}, err
 	}
@@ -880,7 +947,7 @@ func fetchPrivacyDirectory(ctx context.Context, base *url.URL, bearer string, pu
 	return relayblind.VerifyIdentityDirectory(raw, publicKey, time.Now().UTC())
 }
 
-func newSignedRequestMethod(ctx context.Context, method string, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
+func newSignedRequestMethod(ctx context.Context, method string, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool, pool string) (*http.Request, error) {
 	target := *base
 	target.Path = strings.TrimRight(target.Path, "/") + path
 	target.RawPath = ""
@@ -896,6 +963,9 @@ func newSignedRequestMethod(ctx context.Context, method string, base *url.URL, p
 		// Wallet profiles do not list this header. Set it before signing so
 		// a profile that names it covers the marker; today the hash is unchanged.
 		request.Header.Set(privacyClassHeader, relayblind.PrivacyClassV1)
+	}
+	if pool != "" {
+		request.Header.Set("X-MacProvider-Pool-Select", pool)
 	}
 	if len(sessionKey) == 0 {
 		return request, nil
@@ -1102,4 +1172,17 @@ func httpClient() *http.Client {
 			ResponseHeaderTimeout: 2 * time.Minute,
 		},
 	}
+}
+
+// visiblePoolID bounds a --pool value to printable ASCII without spaces.
+func visiblePoolID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }

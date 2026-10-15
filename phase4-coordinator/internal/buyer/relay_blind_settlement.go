@@ -297,6 +297,9 @@ func (b *billingRecorder) ingestRelayBlindSettlementReceipt(provider pool.Provid
 		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
 		receivedAtUnixMS:      store.ObserveSettlementReceiptForRecovery(identity),
 		relayBlind:            b.server.relayBlindDispatchEvidence(ctx, providerBinding),
+		// SPEC-049-R032 item 6: a pool-scoped privacy-class attempt stamps
+		// the SPEC-042-R006 pool label on its verdict; nil for global.
+		poolLabels: b.settlementPoolLabels(),
 	}
 	return b.persistObservedSettlementReceipt(ctx, store, provider, input)
 }

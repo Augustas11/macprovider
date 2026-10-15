@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,11 @@ type Reservation struct {
 	// Requires is the SPEC-041-R004 capability declaration of the
 	// reservation request, compared with the envelope's at consume.
 	Requires []string
+	// SPEC-049-R032 pool binding. Empty for a global reservation.
+	PoolID                 string
+	PoolManifestVersion    uint64
+	PoolManifestCoreDigest string
+	PoolGeneration         uint64
 }
 
 // KeySession is one provider session that currently holds a fresh key of a class.
@@ -103,6 +109,12 @@ type ReservationCreate struct {
 	ReplayRetention          time.Duration
 	PrivacyClass             bool
 	Requires                 []string
+	// SPEC-049-R032: the pool snapshot captured at selection; empty for a
+	// global reservation.
+	PoolID                 string
+	PoolManifestVersion    uint64
+	PoolManifestCoreDigest string
+	PoolGeneration         uint64
 }
 
 type ConsumeInput struct {
@@ -487,14 +499,20 @@ func (s *Store) CreateReservation(ctx context.Context, in ReservationCreate, now
 		}
 	}
 	cap := in.InputTokenUpperBound + in.MaxOutputTokens
-	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class,requires_declaration) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass), strings.Join(in.Requires, ","))
+	if in.PoolID != "" && (!in.PrivacyClass || in.PoolManifestVersion == 0 || in.PoolManifestVersion > math.MaxInt64 || in.PoolManifestCoreDigest == "" || in.PoolGeneration > math.MaxInt64) {
+		return Reservation{}, ErrReservationMismatch
+	}
+	if in.PoolID == "" && (in.PoolManifestVersion != 0 || in.PoolManifestCoreDigest != "" || in.PoolGeneration != 0) {
+		return Reservation{}, ErrReservationMismatch
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO relay_blind_reservations(provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,created_at_unix,privacy_class,requires_declaration,pool_id,pool_manifest_version,pool_manifest_core_digest,pool_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, providerBinding, buyerBinding, in.AccountID, in.WalletSession, in.ProviderID, in.AssignedSession, in.KeyRecord.KeyRecordDigest, in.KeyRecord.KID, in.Model, in.ProviderModel, boolInt(in.Stream), in.MaxEncryptedRequestBytes, in.MaxOutputTokens, in.InputTokenUpperBound, cap, in.ExpiresAtUnix, ReservationStateReserved, now.Unix(), boolInt(in.PrivacyClass), strings.Join(in.Requires, ","), in.PoolID, int64(in.PoolManifestVersion), in.PoolManifestCoreDigest, int64(in.PoolGeneration))
 	if err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Reservation{}, fmt.Errorf("%w: %v", ErrStoreUnavailable, err)
 	}
-	return Reservation{ProviderBinding: providerBinding, BuyerBinding: buyerBinding, AccountID: in.AccountID, WalletSession: in.WalletSession, ProviderID: in.ProviderID, AssignedSession: in.AssignedSession, KeyRecordDigest: in.KeyRecord.KeyRecordDigest, KID: in.KeyRecord.KID, Model: in.Model, ProviderModel: in.ProviderModel, Stream: in.Stream, MaxEncryptedRequestBytes: in.MaxEncryptedRequestBytes, MaxOutputTokens: in.MaxOutputTokens, InputTokenUpperBound: in.InputTokenUpperBound, ReservationTokenCap: cap, ExpiresAtUnix: in.ExpiresAtUnix, State: ReservationStateReserved, PrivacyClass: in.PrivacyClass, Requires: in.Requires}, nil
+	return Reservation{ProviderBinding: providerBinding, BuyerBinding: buyerBinding, AccountID: in.AccountID, WalletSession: in.WalletSession, ProviderID: in.ProviderID, AssignedSession: in.AssignedSession, KeyRecordDigest: in.KeyRecord.KeyRecordDigest, KID: in.KeyRecord.KID, Model: in.Model, ProviderModel: in.ProviderModel, Stream: in.Stream, MaxEncryptedRequestBytes: in.MaxEncryptedRequestBytes, MaxOutputTokens: in.MaxOutputTokens, InputTokenUpperBound: in.InputTokenUpperBound, ReservationTokenCap: cap, ExpiresAtUnix: in.ExpiresAtUnix, State: ReservationStateReserved, PrivacyClass: in.PrivacyClass, Requires: in.Requires, PoolID: in.PoolID, PoolManifestVersion: in.PoolManifestVersion, PoolManifestCoreDigest: in.PoolManifestCoreDigest, PoolGeneration: in.PoolGeneration}, nil
 }
 
 func (s *Store) Consume(ctx context.Context, in ConsumeInput) (ConsumeResponse, error) {
@@ -834,7 +852,7 @@ func (s *Store) RecoverUncertain(ctx context.Context, now time.Time) (int64, err
 	return res.RowsAffected()
 }
 
-const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class,COALESCE(terminal_code,''),requires_declaration FROM relay_blind_reservations`
+const reservationSelect = `SELECT provider_binding,buyer_binding,account_id,wallet_session,provider_id,assigned_session,key_record_digest,kid,model,provider_model,stream,max_encrypted_request_bytes,max_output_tokens,input_token_upper_bound,reservation_token_cap,expires_at_unix,state,COALESCE(envelope_digest,''),COALESCE(execution_auth_digest,''),COALESCE(request_id,''),validated_input_tokens,effective_privacy_outcome,COALESCE(internal_request_id,''),completion_tokens,privacy_class,COALESCE(terminal_code,''),requires_declaration,pool_id,pool_manifest_version,pool_manifest_core_digest,pool_generation FROM relay_blind_reservations`
 
 type reservationRow struct {
 	Reservation
@@ -847,10 +865,16 @@ func scanReservation(row rowScanner) (reservationRow, error) {
 	var r reservationRow
 	var stream, privacyClass int
 	var requires string
-	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass, &r.TerminalCode, &requires)
+	var poolManifestVersion, poolGeneration int64
+	err := row.Scan(&r.ProviderBinding, &r.BuyerBinding, &r.AccountID, &r.WalletSession, &r.ProviderID, &r.AssignedSession, &r.KeyRecordDigest, &r.KID, &r.Model, &r.ProviderModel, &stream, &r.MaxEncryptedRequestBytes, &r.MaxOutputTokens, &r.InputTokenUpperBound, &r.ReservationTokenCap, &r.ExpiresAtUnix, &r.State, &r.EnvelopeDigest, &r.ExecutionAuthDigest, &r.RequestID, &r.ValidatedInputTokens, &r.EffectivePrivacyOutcome, &r.InternalRequestID, &r.CompletionTokens, &privacyClass, &r.TerminalCode, &requires, &r.PoolID, &poolManifestVersion, &r.PoolManifestCoreDigest, &poolGeneration)
 	if requires != "" {
 		r.Requires = strings.Split(requires, ",")
 	}
+	if poolManifestVersion < 0 || poolGeneration < 0 {
+		return r, ErrStoreUnavailable
+	}
+	r.PoolManifestVersion = uint64(poolManifestVersion)
+	r.PoolGeneration = uint64(poolGeneration)
 	r.Stream = stream == 1
 	r.PrivacyClass = privacyClass != 0
 	if r.ValidatedInputTokens.Valid {
@@ -934,6 +958,17 @@ func (s *Store) ensurePrivacySchema(ctx context.Context) error {
 	}
 	if err := s.addColumnIfMissing(ctx, "relay_blind_reservations", "requires_declaration", `ALTER TABLE relay_blind_reservations ADD COLUMN requires_declaration TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
+	}
+	// SPEC-049-R032: the pool a privacy-class reservation is scoped to.
+	for _, column := range []struct{ name, alter string }{
+		{"pool_id", `ALTER TABLE relay_blind_reservations ADD COLUMN pool_id TEXT NOT NULL DEFAULT ''`},
+		{"pool_manifest_version", `ALTER TABLE relay_blind_reservations ADD COLUMN pool_manifest_version INTEGER NOT NULL DEFAULT 0`},
+		{"pool_manifest_core_digest", `ALTER TABLE relay_blind_reservations ADD COLUMN pool_manifest_core_digest TEXT NOT NULL DEFAULT ''`},
+		{"pool_generation", `ALTER TABLE relay_blind_reservations ADD COLUMN pool_generation INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := s.addColumnIfMissing(ctx, "relay_blind_reservations", column.name, column.alter); err != nil {
+			return err
+		}
 	}
 	// Attestation bytes stay on the key row. The in-memory authority only
 	// keeps the cdhash, and a reservation response has to echo the signed
