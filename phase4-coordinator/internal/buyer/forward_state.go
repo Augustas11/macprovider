@@ -8,6 +8,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
 
 // forwardState collects the per-request state that the three transport
@@ -244,6 +245,11 @@ type forwardState struct {
 	// routingEstimatedTokens is the SPEC-006 §7.2.1 context-fit estimate
 	// selectProviderExcluding routes and preflights on.
 	routingEstimatedTokens int
+	// perfHold defers the SPEC-002-R005 observation of an attempt recorded
+	// before its body is written (the pre-#1690 non-streaming order) until
+	// the write succeeds; pendingPerf holds it meanwhile.
+	perfHold    bool
+	pendingPerf *routing.PerfObservation
 
 	stickyResult     string
 	stickyMissReason string

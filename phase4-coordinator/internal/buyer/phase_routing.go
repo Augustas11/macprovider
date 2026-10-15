@@ -1,8 +1,12 @@
 package buyer
 
 import (
+	"bytes"
+	"encoding/json"
+	"math"
 	mrand "math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -91,7 +95,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		evidence, ok = s.perf.Lookup(provider.ProviderID, req.Model)
 	}
 	now := s.now()
-	fresh := ok && evidence.Fresh(now)
+	fresh := ok && evidence.FreshFor(d.phase, now)
 	if d.scope != "ranked" && fresh {
 		d.fresh = 1
 	}
@@ -100,7 +104,7 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		ageS = int64(now.Sub(evidence.LastObserved).Seconds())
 	}
 	engine := routing.EngineClass(provider)
-	latency := routing.LatencyClass(d.phase, d.inputTokens, evidence, fresh)
+	latency := routing.LatencyClass(d.phase, d.inputTokens, evidence, now)
 	score, scored := d.scores[provider.SortKey()]
 	event := s.log.Info().
 		Str("event", "route_trace").
@@ -113,6 +117,9 @@ func (s *Server) noteRouteTrace(requestID string, req chatRequest, headers http.
 		Int("candidates", d.candidates).
 		Int("fresh", d.fresh).
 		Int("samples", evidence.TTFTSamples).
+		Int("prefill_samples", evidence.PrefillSamples).
+		Int("decode_samples", evidence.DecodeSamples).
+		Int("service_samples", evidence.ServiceSamples).
 		Int64("evidence_age_s", ageS).
 		Str("engine", engine).
 		Str("latency", latency).
@@ -155,14 +162,18 @@ func (s *Server) markFirstTokenOnContent(acct *deliveredSSEAccounting, state *fo
 	}
 }
 
-// observeServedPerformance feeds one streamed, cleanly completed, plaintext
-// attempt into the SPEC-002-R005 store. Every quantity is the coordinator's
-// own: its clock for TTFT, decode and service time, its token estimate of the
-// request body for prefill, and its delivered-bytes estimate for decode. Provider
-// usage only withholds a prefill sample when it reports a cached prefix.
-func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok, estimatedCompTokens *int64, errMsg, errCode, faultFlag string) {
+// observeServedPerformance feeds one cleanly completed plaintext attempt into
+// the SPEC-002-R005 store. Every rate is the coordinator's own: its clock from
+// provider dispatch start, its token estimate of the request body, and its
+// estimate of the generated output it delivered. An attempt with a
+// coordinator first-token time also gives TTFT and decode; any other
+// (non-streamed or buffered) is end-to-end and gives no TTFT or decode. Only
+// a non-streamed attempt, done when its whole response was received, gives
+// the rates that run to done: prefill and service throughput. Provider usage
+// only withholds a prefill sample, when it reports a cached prefix.
+func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerID string, status int, cachedPromptTok *int64, output *billing.SettlementOutput, errMsg, errCode, faultFlag string) {
 	s := b.server
-	if s == nil || s.perf == nil || b.relayBlind != nil || !b.stream || status < 200 || status >= 300 {
+	if s == nil || s.perf == nil || b.relayBlind != nil || status < 200 || status >= 300 {
 		return
 	}
 	if errMsg != "" || errCode != "" || (faultFlag != "" && faultFlag != billing.FaultNone) {
@@ -171,12 +182,19 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if providerAssignedID == "" || b.model == "" || b.state == nil {
 		return
 	}
+	// Without a normally completed settlement output that delivered content
+	// or a tool call there is no output estimate, and a zero estimate would
+	// pass the prefill gate. Paths that log no output get an empty one.
+	generated, ok := generatedOutputTokens(output)
+	if !ok || generated == 0 {
+		return
+	}
 	timing := b.state.phaseTiming.snapshot()
 	if !timing.matchesProviderAssignedID(providerAssignedID) {
 		return
 	}
-	ttft, decode := timing.routingTTFTMs(), timing.routingDecodeMs()
-	if ttft == nil {
+	service := timing.routingServiceMs()
+	if service == nil {
 		return
 	}
 	if providerID == "" && s.pool != nil {
@@ -191,25 +209,112 @@ func (b *billingRecorder) observeServedPerformance(providerAssignedID, providerI
 	if cachedPromptTok != nil && *cachedPromptTok > 0 {
 		prompt = 0
 	}
-	var completion int64
-	if estimatedCompTokens != nil && *estimatedCompTokens > 0 {
-		completion = *estimatedCompTokens
-	}
-	var decodeMs, serviceMs float64
-	if decode != nil {
-		decodeMs = *decode
-	}
-	if service := timing.routingServiceMs(); service != nil {
-		serviceMs = *service
-	}
-	s.perf.Observe(routing.PerfObservation{
+	obs := routing.PerfObservation{
 		ProviderID:       providerID,
 		Model:            b.model,
 		PromptTokens:     prompt,
-		CompletionTokens: completion,
-		TTFTMs:           *ttft,
-		DecodeMs:         decodeMs,
-		ServiceMs:        serviceMs,
+		RequestTokens:    int64(b.state.routingEstimatedTokens),
+		CompletionTokens: generated,
+		ServiceMs:        *service,
+		EndToEnd:         true,
+		Streamed:         b.stream,
 		At:               s.now(),
-	})
+	}
+	if ttft := timing.routingTTFTMs(); ttft != nil {
+		obs.EndToEnd = false
+		obs.TTFTMs = *ttft
+		if decode := timing.routingDecodeMs(); decode != nil {
+			obs.DecodeMs = *decode
+		}
+	}
+	if b.state.perfHold {
+		b.state.pendingPerf = &obs
+		return
+	}
+	s.perf.Observe(obs)
+}
+
+// holdPerformance defers the next SPEC-002-R005 observation of this attempt:
+// it is recorded before its body is written. A hold that is never released
+// (the attempt failed before its write) only drops observations.
+func holdPerformance(state *forwardState) {
+	if state != nil {
+		state.perfHold, state.pendingPerf = true, nil
+	}
+}
+
+// releasePerformance ends a hold. The held observation enters the store only
+// when the whole body reached the buyer.
+func (s *Server) releasePerformance(state *forwardState, delivered bool) {
+	if state == nil {
+		return
+	}
+	pending := state.pendingPerf
+	state.perfHold, state.pendingPerf = false, nil
+	if delivered && pending != nil && s.perf != nil {
+		s.perf.Observe(*pending)
+	}
+}
+
+// perfOutputBytesPerToken converts generated bytes into the SPEC-002-R005
+// output token estimate.
+const perfOutputBytesPerToken = 4
+
+// generatedOutputTokens estimates the tokens of the content and tool calls the
+// coordinator delivered for an attempt, from its own settlement output: the
+// same quantity for streamed and non-streamed responses. It reports false
+// when the output is missing, unavailable or not a normal completion, which
+// is not empty output.
+func generatedOutputTokens(output *billing.SettlementOutput) (int64, bool) {
+	if output == nil || !output.Available || output.RelayBlindResponseSHA256 != "" || output.TerminalState != billing.TerminalStateNormalDone {
+		return 0, false
+	}
+	n := int64(len(output.Content))
+	for _, call := range output.ToolCalls {
+		n += int64(len(call.Name)) + canonicalArgumentsLen(call.Arguments)
+	}
+	return (n + perfOutputBytesPerToken - 1) / perfOutputBytesPerToken, true
+}
+
+// canonicalArgumentsLen is the byte length of tool-call arguments re-encoded
+// as compact JSON with every number in its shortest spelling, so
+// insignificant whitespace, escape spellings or numeric padding that leave
+// the call unchanged cannot inflate the output estimate. Arguments that are
+// not one JSON value count at their raw length.
+func canonicalArgumentsLen(arguments string) int64 {
+	dec := json.NewDecoder(strings.NewReader(arguments))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return int64(len(arguments))
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(shortestNumbers(v)); err != nil {
+		return int64(len(arguments))
+	}
+	return int64(len(bytes.TrimRight(buf.Bytes(), "\n")))
+}
+
+// shortestNumbers replaces every JSON number with its shortest float64
+// spelling; a number out of float64 range counts as 0.
+func shortestNumbers(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		f, err := strconv.ParseFloat(string(t), 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return json.Number("0")
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	case map[string]any:
+		for k, e := range t {
+			t[k] = shortestNumbers(e)
+		}
+	case []any:
+		for i, e := range t {
+			t[i] = shortestNumbers(e)
+		}
+	}
+	return v
 }

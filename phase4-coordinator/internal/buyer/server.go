@@ -3516,6 +3516,8 @@ func (s *Server) forwardHTTPSequence(
 					// A gateway that did not advertise trailer finality
 					// reads it from headers only: keep the pre-#1690 order,
 					// record before the write (settlement_trailers.go).
+					// Its routing observation waits for the write.
+					holdPerformance(state)
 					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
 						return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, completionCeiling, output)
 					}); err != nil {
@@ -3549,7 +3551,7 @@ func (s *Server) forwardHTTPSequence(
 				if !rec.settlementTrailersNegotiated {
 					w.WriteHeader(http.StatusOK)
 					s.stickyStore(r.Header, state.provider, req.Model)
-					_, _ = w.Write(respBody)
+					s.releasePerformance(state, writeDelivered(w, respBody))
 					cancelAttempt()
 					return dispatchedAttempt{}, false
 				}
@@ -4173,6 +4175,8 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			// before the write with finality in headers.
 			recordBeforeWrite := declareOutcomeTrailers == nil
 			if recordBeforeWrite && logSuccess != nil {
+				// Its routing observation waits for the write.
+				holdPerformance(state)
 				if err := logSuccess(attempt); err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 					return wsForwardFailed, requestLogAttempt{Logged: true}
@@ -4193,7 +4197,13 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				if state == nil || state.toolSelection == nil {
 					checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 				}
-				_, _ = w.Write(checkedBody)
+				delivered := writeDelivered(w, checkedBody)
+				s.releasePerformance(state, delivered)
+				if !delivered {
+					// A caller that logs this attempt after return must not
+					// observe an undelivered body.
+					holdPerformance(state)
+				}
 				return wsForwardComplete, attempt
 			}
 			// Delivered-only (SPEC-022 R-5.6): success is recorded only
@@ -4449,6 +4459,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	writeChunk := func(data string) (bool, wsForwardResult) {
 		if sse, ok := buyerSSEFromProviderJSONCompletion([]byte(data), state); ok {
 			data = string(sse)
+			// A whole JSON response arrives at once: it has no first-token
+			// time (SPEC-002-R005).
+			acct.onFirstContent = nil
 		}
 		acct.provider([]byte(data))
 		data = string(sanitizeQwenLeakedToolMarkupBlock([]byte(data), state))
