@@ -112,6 +112,9 @@ func validateVisionContent(messages []chatMessage) (bool, int, string, string) {
 			}
 			data, mime, err := inlineImageData(part.ImageURL.URL)
 			if err != nil {
+				if !strings.HasPrefix(part.ImageURL.URL, "data:") {
+					return false, 400, "unsupported_content_shape", "remote image URLs are not supported; use inline PNG or JPEG data URLs with qualified vision capacity"
+				}
 				return false, 400, "invalid_image_input", err.Error()
 			}
 			count++

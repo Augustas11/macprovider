@@ -1948,7 +1948,12 @@ NOT establish image qualification.
    withdraws eligibility. No new trust tier, catalog admission or settlement
    authority is granted. Qualification is deployment state, with no calendar
    expiry. Hardware qualification and approved released-provider buyer
-   acceptance remain separate post-merge gates.
+   acceptance remain separate post-merge gates. Buyer
+   `vision_capacity_unavailable` is a retryable 503. Unsupported content/media
+   (`unsupported_content_shape`, `unsupported_media`), malformed inline input
+   and per-image encoded-byte overflow (`invalid_image_input`) are non-retryable
+   400 errors. Image count, dimension and aggregate-limit failures
+   (`image_input_too_large`) are non-retryable 413 errors.
 4. **Execution and resources.** Native generation MUST pass the processor's
    complete `LMInput`, including visual tensors, to the model. Image requests
    MUST NOT enter text-only prefix/conversation/disk caches, continuous batching,
