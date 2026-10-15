@@ -511,6 +511,9 @@ expect_err "continuous_batching.policy.authorized is not true"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":0}'
 run_rc 3 "canary probe with a self-check grant of 0 slots" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "self_check.served_slots 0 < 1"
+status_doc $CAND true false false live_verified failed attached '{"decision":"single_row","served_slots":1}'
+run_rc 3 "single-row canary with a failed local proof" scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "local_proof_result 'failed' != 'passed'"
 run_rc 3 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
 expect_err "requires --probe"
 printf '{"step":"canary_smoke","candidate_sha":"%s","kind":"status_probe","evidence":"old status-only marker"}

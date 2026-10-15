@@ -369,7 +369,10 @@ if not isinstance(mtp, int) or not isinstance(req, int):
     sys.exit(1)
 if cb and not isinstance(shared, int):
     sys.exit(1)
-print(mtp, req, "true" if cb else "false", shared if isinstance(shared, int) else 0)
+mtp_doc = d.get("native_mtp") or {}
+# A provider that reports native MTP explicitly disabled serves on the serial path.
+serial = mtp_doc.get("enabled") is False and not cb
+print(mtp, req, "true" if cb else "false", shared if isinstance(shared, int) else 0, "true" if serial else "false")
 PY
 }
 
@@ -404,13 +407,17 @@ if type(delta) is not int or delta <= 0:
 PY
 }
 
-# proof_moved B_MTP B_REQ B_CB B_SHARED A_MTP A_REQ A_CB A_SHARED: the request
-# moved the provider on the active serving path. Continuous batching must prove
-# scheduler admission/completion through shared_forward_calls; generic
+# proof_moved B_MTP B_REQ B_CB B_SHARED A_MTP A_REQ A_CB A_SHARED [A_SERIAL]: the
+# request moved the provider on the active serving path. Continuous batching must
+# prove scheduler admission/completion through shared_forward_calls; generic
 # requests_total movement can be satisfied by a serial request and is not enough.
+# A provider with neither CB active nor native MTP enabled (A_SERIAL=true) has
+# only the serial path, so requests_total is its serving-path counter.
 proof_moved() {
   if [ "$3" = true ] || [ "$7" = true ]; then
     [ "$3" = true ] && [ "$7" = true ] && [ $(($8 - $4)) -gt 0 ]
+  elif [ "${9:-false}" = true ]; then
+    [ $(($6 - $2)) -gt 0 ]
   else
     [ $(($5 - $1)) -gt 0 ]
   fi
@@ -436,10 +443,10 @@ gateway_proof() {
   model="${PROBE_MODEL:-$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["entries"][0]["model_key"]')}"
   [ -n "$model" ] || refuse "PROBE_MODEL is unset and no admission model_key was found"
 
-  local before after b_mtp b_req b_cb b_shared a_mtp a_req a_cb a_shared
+  local before after b_mtp b_req b_cb b_shared b_serial a_mtp a_req a_cb a_shared a_serial
   read_provider_status "$OPS_TMP_DIR/before.json"
   before="$(provider_counters "$OPS_TMP_DIR/before.json")" || refuse "provider status lacks native_mtp.mtp_forwards/requests_total or continuous_batching.scheduler.shared_forward_calls"
-  read -r b_mtp b_req b_cb b_shared <<< "$before"
+  read -r b_mtp b_req b_cb b_shared b_serial <<< "$before"
   local canary_sid pdb psqlite
   canary_sid="$(json_field "$OPS_TMP_DIR/before.json" 'd["safety_telemetry"]["coordinator_session_id"]')"
   [ -n "$canary_sid" ] || refuse "provider /v1/status reports no safety_telemetry.coordinator_session_id; cannot tie the proof to it"
@@ -479,13 +486,13 @@ gateway_proof() {
   for i in 1 2 3 4 5 6; do
     read_provider_status "$OPS_TMP_DIR/after.json"
     after="$(provider_counters "$OPS_TMP_DIR/after.json")" || refuse "provider status lacks counters after the request"
-    read -r a_mtp a_req a_cb a_shared <<< "$after"
-    proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" && break
+    read -r a_mtp a_req a_cb a_shared a_serial <<< "$after"
+    proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" "$a_serial" && break
     [ "$i" -lt 6 ] && sleep "${PROOF_POLL_SECONDS:-2}"
   done
-  proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" ||
-    die "request $rid did not move the target provider on its active serving path: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)), cb_shared_forward_calls +$((a_shared - b_shared)) (cb_active=$a_cb)"
-  local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb"
+  proof_moved "$b_mtp" "$b_req" "$b_cb" "$b_shared" "$a_mtp" "$a_req" "$a_cb" "$a_shared" "$a_serial" ||
+    die "request $rid did not move the target provider on its active serving path: mtp_forwards +$((a_mtp - b_mtp)), requests_total +$((a_req - b_req)), cb_shared_forward_calls +$((a_shared - b_shared)) (cb_active=$a_cb serial=$a_serial)"
+  local evidence="HTTP 200 model=$model request_id=$rid served_by=canary mtp_forwards+$((a_mtp - b_mtp)) requests_total+$((a_req - b_req)) cb_shared_forward_calls+$((a_shared - b_shared)) cb_active=$a_cb serial=$a_serial"
   log "gateway proof: $evidence"
   mark_done "$OPS_SCOPE" gateway_proof "$evidence" \
     "$(python3 -c 'import json,sys; import hashlib; print(json.dumps({"request_id": sys.argv[1], "sent_request_id": sys.argv[2], "mtp_forwards_delta": int(sys.argv[3]), "requests_total_delta": int(sys.argv[4]), "cb_shared_forward_calls_delta": int(sys.argv[5]), "served_by_canary": True, "served_session_sha256": hashlib.sha256(sys.argv[6].encode()).hexdigest()}))' "$rid" "$sent_rid" "$((a_mtp - b_mtp))" "$((a_req - b_req))" "$((a_shared - b_shared))" "$served_sid")"
