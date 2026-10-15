@@ -2639,11 +2639,6 @@ func coordinatorErrorRetryable(status int, body []byte) bool {
 	return gatewayRetryable(openAIErrorCode(body))
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens, maxTokens int64, cancelCoordinator func(), reservationWindow string) {
-	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
-}
-
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
 		slog.Error("gateway settlement failed before response", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)

@@ -194,31 +194,6 @@ func VerifyWalletProof(proof WalletProof, signature string) error {
 	return nil
 }
 
-func DecodeWalletRequestSignatureJSON(raw []byte) (WalletRequestSignatureObject, []byte, error) {
-	if err := validateClosedJSON(raw, map[string]map[string]bool{
-		"": {
-			"version": true, "session_id": true, "method": true, "canonical_route": true,
-			"request_id": true, "raw_body_sha256": true, "semantic_headers_sha256": true,
-			"timestamp_unix": true,
-		},
-	}); err != nil {
-		return WalletRequestSignatureObject{}, nil, err
-	}
-	var decoded map[string]any
-	if err := decodeJSONUseNumber(raw, &decoded); err != nil {
-		return WalletRequestSignatureObject{}, nil, fmt.Errorf("%w: %v", ErrWalletCanonicalInvalid, err)
-	}
-	obj, err := walletRequestFromMap(decoded)
-	if err != nil {
-		return WalletRequestSignatureObject{}, nil, err
-	}
-	canonical, err := CanonicalWalletRequestBytes(obj)
-	if err != nil {
-		return WalletRequestSignatureObject{}, nil, err
-	}
-	return obj, canonical, nil
-}
-
 func NewWalletRequestSignatureObject(sessionID, method, canonicalRoute, requestID string, rawBody []byte, headers http.Header, timestampUnix int64) (WalletRequestSignatureObject, error) {
 	bodyHash := sha256.Sum256(rawBody)
 	headerHash, err := SemanticHeadersSHA256Base64URL(canonicalRoute, headers)
@@ -411,19 +386,6 @@ func walletChallengeRequestFromMap(m map[string]any) (WalletChallengeRequest, er
 		PerRequestTokenCap: integerField(m, "per_request_token_cap"),
 		TotalTokenCap:      integerField(m, "total_token_cap"),
 		ModelAllowlist:     models,
-	}, nil
-}
-
-func walletRequestFromMap(m map[string]any) (WalletRequestSignatureObject, error) {
-	return WalletRequestSignatureObject{
-		Version:               stringField(m, "version"),
-		SessionID:             stringField(m, "session_id"),
-		Method:                stringField(m, "method"),
-		CanonicalRoute:        stringField(m, "canonical_route"),
-		RequestID:             stringField(m, "request_id"),
-		RawBodySHA256:         stringField(m, "raw_body_sha256"),
-		SemanticHeadersSHA256: stringField(m, "semantic_headers_sha256"),
-		TimestampUnix:         integerField(m, "timestamp_unix"),
 	}, nil
 }
 

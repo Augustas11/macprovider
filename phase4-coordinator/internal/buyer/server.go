@@ -1606,15 +1606,6 @@ func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(map[string]any{"purged": true, "entries": entries})
 }
 
-func isLoopbackRequest(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	providers := s.pool.Snapshot()
 	resp := struct {
@@ -2170,18 +2161,6 @@ func (s *Server) poolCheckClientKey(r *http.Request) string {
 		}
 	}
 	return host
-}
-
-// isLoopbackHost is retained for legacy callers that may still consult
-// it directly. Issue #125 routes the rate-limit key derivation through
-// the configured trusted-proxy CIDR set instead, but the helper stays
-// for any non-rate-limit callsite that wants a quick loopback check.
-func isLoopbackHost(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
 }
 
 // isTrustedProxy reports whether addr falls inside any of the
@@ -8435,12 +8414,6 @@ func stringSliceEqual(a, b []string) bool {
 	return true
 }
 
-func (s *Server) classForRequest(model string, providers []pool.Provider) *config.ModelClassConfig {
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer cancel()
-	return s.classForRequestWithBYOMContext(model, providers, ctx).class
-}
-
 type modelClassResolution struct {
 	class                  *config.ModelClassConfig
 	admissionStorePressure bool
@@ -9149,14 +9122,6 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: msg}
 	}
 	return provider, nil
-}
-
-func (s *Server) selectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
-	provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, model, candidates, headers, class, dailyKey, estimatedTokens, state, slotWaiterStandard)
-	if queued {
-		return provider, routeErr
-	}
-	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
 }
 
 func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState, waiterKind slotWaiterKind) (pool.Provider, *routeError, bool) {

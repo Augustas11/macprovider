@@ -357,32 +357,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     }
 
     static func from(accrual: MalibuAccrualSummary) -> ProviderEarningsSummary {
-        ProviderEarningsSummary(
-            walletBound: accrual.walletBound ?? false,
-            trustTier: accrual.trustTier,
-            unpaidLedgerBacklogUSDC: 0,
-            unpaidLedgerBacklogMALIBU: 0,
-            usdcToday: nil,
-            usdcWeek: nil,
-            usdcPending: nil,
-            usdcLifetime: nil,
-            malibuToday: nil,
-            malibuAllTime: accrual.accruedMALIBU,
-            trustCriteriaMet: accrual.trustCriteriaMet,
-            trustCriteriaRequired: accrual.trustCriteriaRequired,
-            economicCriteria: accrual.economicCriteria,
-            additionalCriteria: accrual.additionalCriteria,
-            malibuWithdrawable: accrual.withdrawableMALIBU,
-            malibuHeld: accrual.heldMALIBU,
-            malibuHoldReasons: accrual.withdrawalHoldReasons,
-            malibuDailyCap: accrual.dailyCapMALIBU,
-            malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
-            malibuRewardEligibility: accrual.rewardEligibility,
-            rewardAuditSupported: false,
-            idlePrewarm: .empty,
-            malibuProjectionFresh: true,
-            earningsProjectionFresh: false
-        )
+        unavailableWalletStatus().merging(accrual: accrual)
     }
 
     static func unavailableWalletStatus() -> ProviderEarningsSummary {
