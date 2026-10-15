@@ -7491,7 +7491,7 @@ var gatewayEmittedErrorCodes = []string{
 	"relay_blind_endpoint_unsupported", "relay_blind_envelope_invalid",
 	"relay_blind_key_expired", "relay_blind_metadata_rate_limited",
 	"relay_blind_replay", "relay_blind_required_unavailable",
-	"relay_blind_route_reservation_invalid",
+	"relay_blind_route_reservation_invalid", "json_schema_non_strict_unsupported",
 	"quota_reservation_failed", "receipt_forbidden", "request_content_encoding_unsupported", "request_too_large",
 	"session_generation_failed", "session_id_untyped", "settlement_failed",
 	"settlement_hold_not_found", "settlement_reconcile_load_failed", "settlement_release_holds_load_failed", "signup_event_failed", "signup_limit_check_failed",

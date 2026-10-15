@@ -196,7 +196,7 @@ type privacySelection struct {
 // key whose posture gate and stored attestation both pass. It never returns a
 // relay-blind key. On failure it returns the §4.9 code and the SPEC-049-R030
 // reason of the candidate that came closest to serving the request.
-func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64) (privacySelection, string, string) {
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string) (privacySelection, string, string) {
 	if reason := s.privacyDisabledReason(ctx); reason != "" {
 		s.logPrivacyGateRejection(reason)
 		return privacySelection{}, privacyClassDisabled, reason
@@ -210,6 +210,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	var unverified []string
 	unverifiedSeen := make(map[string]bool)
 	closest := relayblind.PrivacyRejectModelNotServed
+	incapable := false
 	for _, provider := range s.pool.Snapshot() {
 		if !relayBlindBindable(provider) || !provider.IsWSTunneled() || !modelIDEqual(provider.ModelID, model) {
 			continue
@@ -242,6 +243,12 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 				closest = closerPrivacyReject(closest, relayblind.PrivacyRejectKeyAttestationMismatch)
 				continue
 			}
+			// SPEC-041-R004 capability gate, applied to a fully eligible
+			// candidate: it came closest to serving the request.
+			if !relayBlindProviderMeetsRequires(provider, requires) {
+				incapable = true
+				break
+			}
 			providers = append(providers, provider)
 			selections = append(selections, privacySelection{provider: provider, key: record, attestation: attestation, signature: signature, verifiedAt: verifiedAt})
 			break
@@ -249,6 +256,9 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 	}
 	if order := s.orderRelayBlindCandidates(accountID, providers); len(order) > 0 {
 		return selections[order[0]], "", ""
+	}
+	if incapable {
+		return privacySelection{}, relayBlindCapabilityRefusalCode, relayblind.PrivacyRejectCapabilityUnsupported
 	}
 	switch closest {
 	case relayblind.PrivacyRejectModelNotPrivateCapable:
@@ -319,7 +329,11 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	}
 	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
 	defer func() { unlockSelection() }()
-	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes)
+	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires)
+	if code == relayBlindCapabilityRefusalCode {
+		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
+		return
+	}
 	if code != "" {
 		s.writePrivacyRouteError(w, r, phase, privacyObservedCode(code, true), reason)
 		return
@@ -350,6 +364,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
 		InputTokenUpperBound: request.InputTokenUpperBound, ExpiresAtUnix: expires, MaxActive: s.relayBlind.cfg.MaxActiveReservations,
 		ReplayRetention: time.Duration(s.relayBlind.cfg.ReplayRetentionSeconds) * time.Second, PrivacyClass: true,
+		Requires: request.Requires,
 	}, s.now())
 	if err != nil {
 		if errors.Is(err, relayblind.ErrCapacity) {

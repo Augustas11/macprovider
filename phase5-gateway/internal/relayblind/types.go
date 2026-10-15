@@ -91,6 +91,9 @@ type Envelope struct {
 	Algorithm               string `json:"algorithm"`
 	Ciphertext              string `json:"ciphertext"`
 	Tag                     string `json:"tag"`
+	// Requires is the optional SPEC-041-R003 capability declaration. nil
+	// means absent; a present value is never empty.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type ReservationRequest struct {
@@ -100,6 +103,8 @@ type ReservationRequest struct {
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
 	InputTokenUpperBound  int64  `json:"input_token_upper_bound"`
 	EncryptedRequestBytes int64  `json:"encrypted_request_bytes"`
+	// Requires is the optional SPEC-041-R004 capability declaration.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type ReservationResponse struct {
@@ -177,7 +182,7 @@ func ParseIdentityPin(raw []byte) (IdentityPin, error) {
 
 func ParseEnvelope(raw []byte) (Envelope, error) {
 	var value Envelope
-	if err := decodeClosed(raw, &value, []string{"version", "mode", "endpoint_family", "model", "provider_model", "stream", "request_id", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "provider_binding", "buyer_binding", "key_record_digest", "kid", "buyer_ephemeral_public_key", "request_replay_nonce", "issued_at_unix", "algorithm", "ciphertext", "tag"}); err != nil {
+	if err := decodeClosedOptional(raw, &value, []string{"version", "mode", "endpoint_family", "model", "provider_model", "stream", "request_id", "max_output_tokens", "input_token_upper_bound", "reservation_token_cap", "provider_binding", "buyer_binding", "key_record_digest", "kid", "buyer_ephemeral_public_key", "request_replay_nonce", "issued_at_unix", "algorithm", "ciphertext", "tag"}, requiresField); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidEnvelope, err)
 	}
 	if err := value.validateStructure(true); err != nil {
@@ -188,7 +193,7 @@ func ParseEnvelope(raw []byte) (Envelope, error) {
 
 func ParseReservationRequest(raw []byte) (ReservationRequest, error) {
 	var value ReservationRequest
-	if err := decodeClosed(raw, &value, []string{"endpoint_family", "model", "stream", "max_output_tokens", "input_token_upper_bound", "encrypted_request_bytes"}); err != nil {
+	if err := decodeClosedOptional(raw, &value, []string{"endpoint_family", "model", "stream", "max_output_tokens", "input_token_upper_bound", "encrypted_request_bytes"}, requiresField); err != nil {
 		return value, fmt.Errorf("%w: %v", ErrInvalidReservation, err)
 	}
 	if err := value.Validate(); err != nil {
@@ -307,7 +312,7 @@ func ParseStatusResponse(raw []byte) (StatusResponse, error) {
 }
 
 func (r ReservationRequest) Validate() error {
-	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes {
+	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes || !ValidRequires(r.Requires) {
 		return ErrInvalidReservation
 	}
 	_, err := checkedTokenCap(r.InputTokenUpperBound, r.MaxOutputTokens)
@@ -473,6 +478,16 @@ func decodeClosed(raw []byte, dst any, fields []string) error {
 }
 
 func decodeClosedAllowNull(raw []byte, dst any, fields []string, nullable map[string]bool) error {
+	return decodeClosedFields(raw, dst, fields, nullable, "")
+}
+
+// decodeClosedOptional is decodeClosed with one optional member that may be
+// absent but, when present, is not null.
+func decodeClosedOptional(raw []byte, dst any, fields []string, optional string) error {
+	return decodeClosedFields(raw, dst, append(append([]string{}, fields...), optional), nil, optional)
+}
+
+func decodeClosedFields(raw []byte, dst any, fields []string, nullable map[string]bool, optional string) error {
 	if len(raw) == 0 {
 		return ErrInvalidJSON
 	}
@@ -514,7 +529,7 @@ func decodeClosedAllowNull(raw []byte, dst any, fields []string, nullable map[st
 	if _, err := dec.Token(); err != nil {
 		return ErrInvalidJSON
 	}
-	if len(seen) != len(want) {
+	if _, sawOptional := seen[optional]; len(seen) != len(want) && !(optional != "" && !sawOptional && len(seen) == len(want)-1) {
 		return ErrInvalidJSON
 	}
 	if tok, err := dec.Token(); err != io.EOF || tok != nil {

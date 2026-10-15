@@ -1,0 +1,33 @@
+{
+  "aad_hex": "0000001672656c61792d626c696e642d726571756573742d763100000008726571756972656400000010636861745f636f6d706c6574696f6e73000000076d6f64656c2d61000000076d6f64656c2d6100000000000000000000002430313866376237622d376333352d346366302d386434652d3366306162316332643932380000000000000020000000000000006000000000000000800000002b4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d7a4d0000002b524552455245524552455245524552455245524552455245524552455245524552455245524552455245510000002b78315466684f513674782d6e737a5a3958473944647970353158615a457333416441314757776853524c73000000163930476f45644c74414a4e456e543663386159526d67000000200faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20000000205555555555555555555555555555555555555555555555555555555555555555000000006553f1000000001d7832353531392d686b64662d7368613235362d6132353667636d2d763100000001000000166a736f6e5f736368656d615f6e6f6e5f737472696374",
+  "envelope": {
+    "version": "relay-blind-request-v1",
+    "mode": "required",
+    "endpoint_family": "chat_completions",
+    "model": "model-a",
+    "provider_model": "model-a",
+    "stream": false,
+    "request_id": "018f7b7b-7c35-4cf0-8d4e-3f0ab1c2d928",
+    "max_output_tokens": 32,
+    "input_token_upper_bound": 96,
+    "reservation_token_cap": 128,
+    "provider_binding": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+    "buyer_binding": "REREREREREREREREREREREREREREREREREREREREREQ",
+    "key_record_digest": "x1TfhOQ6tx-nszZ9XG9Ddyp51XaZEs3AdA1GWwhSRLs",
+    "kid": "90GoEdLtAJNEnT6c8aYRmg",
+    "buyer_ephemeral_public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+    "request_replay_nonce": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+    "issued_at_unix": 1700000000,
+    "algorithm": "x25519-hkdf-sha256-a256gcm-v1",
+    "ciphertext": "alBcVDPl3eEP8Nr7XrFY2CQWKx9Uh_tyd3ucY4VqdVROb9POyk4CA75DABaK0ZCwbvsQlgj5bD_enF7Glqpr618_7Dql628MGBj2gsQSz0J9wJxkENV181zctQRQ6gjLwlFE-EoDdaBsNA",
+    "tag": "uemq-jCT7G6roIjw0gvM4A",
+    "requires": [
+      "json_schema_non_strict"
+    ]
+  },
+  "requires": [
+    "json_schema_non_strict"
+  ],
+  "source_fixture": "golden-v1.json",
+  "version": "relay-blind-requires-golden-v1"
+}

@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.3.1
+**Version:** 0.3.2
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -52,7 +52,7 @@ Buyer-facing surfaces carry the exact scope string, protection lists, and residu
 
 ### 1.2 Non-claims
 
-The privacy class MUST NOT be described as confidential compute, a hardware enclave, a TEE, provider-blind inference, end-to-end encryption that excludes the provider, code-bound attestation, remote attestation of the executing binary, anonymous routing, unlinkable settlement, protection against a root or kernel-level operator, or proof that the provider did not retain plaintext. It does not hide request metadata (account, model, sizes, timing, token counts, status) from relays.
+The privacy class MUST NOT be described as confidential compute, a hardware enclave, a TEE, provider-blind inference, end-to-end encryption that excludes the provider, code-bound attestation, remote attestation of the executing binary, anonymous routing, unlinkable settlement, protection against a root or kernel-level operator, or proof that the provider did not retain plaintext. It does not hide request metadata (account, model, sizes, timing, token counts, status, and the SPEC-041-R003 `requires` capability declaration, which says only whether the request needs SPEC-019 §1a non-strict `json_schema` mode) from relays.
 
 ### 1.3 Scope
 
@@ -523,7 +523,7 @@ The header marker (§4.2), the reservation version (§4.6), the reservation row'
 
 Privacy-class model scopes follow SPEC-041-R004: both exact names of one uniquely matched pinned signed-catalog row may be advertised. The buyer-selected signed name remains unchanged through every cryptographic and routing binding. No general billing-equivalence expansion is allowed.
 
-At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. Failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext. Candidate ordering at reservation and the slot wait before dispatch follow SPEC-049-R029. Every refusal records its cause under SPEC-049-R030.
+At reservation, at consume, and immediately before dispatch, the coordinator MUST re-evaluate all of: the privacy class is enabled in configuration; the durable kill switch is not set (SPEC-049-R018); the provider is not quarantined; a verified posture for the same live session is no older than `posture_max_age_seconds`; the reserved privacy key digest is listed in that posture; the posture cdhash is still approved and unexpired; the key record is fresh and unrevoked with known revocation freshness; and the live WebSocket session is the one bound by the reservation. A privacy-class reservation MUST select only privacy-class key records, and a non-privacy relay-blind reservation MUST NOT select them. The SPEC-041-R004 capability gate also applies: a privacy-class reservation that declares `json_schema_non_strict` selects only supporting candidates, and when an otherwise eligible candidate serves the model but none supports it, the coordinator returns the SPEC-019 HTTP 400 `json_schema_non_strict_unsupported` instead of a §4.9 code, at reservation or, for a mismatched envelope, at consume. Otherwise, failure before consume returns `privacy_class_unavailable` or `privacy_class_disabled`; failure between consume and dispatch burns the reservation, refunds held quota, and returns `privacy_class_posture_stale` or `privacy_class_disabled`. There MUST be no failover, retry, alternate provider, downgrade to plain SPEC-041 relay-blind, or downgrade to plaintext. Candidate ordering at reservation and the slot wait before dispatch follow SPEC-049-R029. Every refusal records its cause under SPEC-049-R030.
 
 ### SPEC-049-R014 - Response AEAD
 
@@ -547,7 +547,7 @@ A durable `privacy_class_control` row with `disabled = 1` MUST block privacy-cla
 
 ### SPEC-049-R019 - Shared error inventory
 
-The coordinator and gateway MUST implement the identical §4.9 code set with the identical HTTP status, retryable flag, and retry action, and each MUST have a completeness test against one shared inventory fixture. Neither component MAY emit a privacy code outside the inventory or remap one to a generic error.
+The coordinator and gateway MUST implement the identical §4.9 code set with the identical HTTP status, retryable flag, and retry action, and each MUST have a completeness test against one shared inventory fixture. Neither component MAY emit a privacy code outside the inventory or remap one to a generic error. The SPEC-041-R004 capability refusal `json_schema_non_strict_unsupported` is a SPEC-019 request-validation code, not a privacy code, and both components pass it through unchanged.
 
 ### SPEC-049-R020 - Exact disclosure strings
 
@@ -673,7 +673,7 @@ A privacy-class reservation pins one provider session, and SPEC-049-R013 forbids
 
 ### SPEC-049-R030 - Real privacy reject reason
 
-When the coordinator refuses a privacy-class request at reservation, at consume, or before dispatch, it MUST record the cause it determined as exactly one reason from this closed set, and MUST NOT record a generic availability or capacity cause in place of a more specific one: `class_not_configured`, `kill_switch_disabled`, `store_unavailable`, `relay_blind_unavailable`, `model_not_served`, `model_not_private_capable`, `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled`, `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `key_stale_or_revoked`, `key_attestation_mismatch`, `reservation_rejected`, `reservation_expired`, `session_lost`, `slot_unavailable`, `provider_quota_unavailable`, `buyer_cancelled`, `settlement_snapshot_failed`, `dispatch_unavailable`, `marker_mismatch` (a SPEC-049-R012 downgrade), `pool_scoped_request` (SPEC-049-R022), `provider_rejected` (the provider's bound pre-decryption rejection), `other`. The phase is one of `reservation`, `consume`, `dispatch`.
+When the coordinator refuses a privacy-class request at reservation, at consume, or before dispatch, it MUST record the cause it determined as exactly one reason from this closed set, and MUST NOT record a generic availability or capacity cause in place of a more specific one: `class_not_configured`, `kill_switch_disabled`, `store_unavailable`, `relay_blind_unavailable`, `model_not_served`, `model_not_private_capable`, `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled`, `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `key_stale_or_revoked`, `key_attestation_mismatch`, `reservation_rejected`, `reservation_expired`, `session_lost`, `slot_unavailable`, `provider_quota_unavailable`, `buyer_cancelled`, `settlement_snapshot_failed`, `dispatch_unavailable`, `marker_mismatch` (a SPEC-049-R012 downgrade), `pool_scoped_request` (SPEC-049-R022), `provider_rejected` (the provider's bound pre-decryption rejection), `capability_unsupported` (the SPEC-041-R004 capability gate refused the request), `other`. The phase is one of `reservation`, `consume`, `dispatch`.
 
 1. **Selection.** When no candidate is eligible at reservation, the reason is that of the candidate that passed the most SPEC-049-R013 checks, in this order from least to most: `model_not_served` (no live bindable session serves the model), `model_not_private_capable` (sessions serve it but none holds a fresh privacy key record that fits the request), `live_session_unavailable`, `settlement_prerequisite_missing`, `provider_quarantined`, `provider_not_enrolled` (neither configuration pins nor an active enrollment resolve its keys), `posture_unverified`, `key_not_in_posture`, `posture_expired`, `code_identity_unapproved`, `kill_switch_disabled`, `key_stale_or_revoked`, `key_attestation_mismatch`, `relay_blind_unavailable`, `store_unavailable`. A session that serves the model without a fresh privacy key reports the reason its last key advertisement was refused for (`code_identity_unapproved`, `provider_not_enrolled`, or `provider_quarantined`), or `provider_quarantined` when it is quarantined, instead of `model_not_private_capable`; no other advertisement reason is reported there. An advertisement refused because it presents an identity key that an accepted SPEC-049-R031 rotation retired counts as `provider_not_enrolled`. Recording a reason never changes eligibility, ordering, or the provider bound.
 2. **Coordinator record.** For each refused request the coordinator MUST write one structured log line with `event: privacy_route_rejected` and exactly the fields `phase`, `code` (the buyer error code), and `reason`, and MUST increment `relayblind_privacy_route_rejections_total{phase,reason}`. On a response to an authenticated gateway request it MUST set exactly one internal header `X-MacProvider-Privacy-Reject-Reason` carrying the reason. A pinned chat refused only for want of a seat keeps the SPEC-049-R029 `relay_blind_provider_unsupported` outcome and is recorded with reason `slot_unavailable`.
@@ -827,6 +827,8 @@ remains open; R023 promotion is not required for operation.
 - `journeys/evidence/privacy-class-beta-20261006T043016Z.redacted.json` and its bundle: the reviewed redacted evidence (#1864).
 
 ## 10. Changelog and history
+
+- 0.3.2 - #2006. A privacy-class request may carry the SPEC-041 v0.6.0 `requires` capability declaration. §1.2 lists it among the request metadata visible to relays. SPEC-049-R013 applies the SPEC-041-R004 capability gate, whose refusal is the SPEC-019 HTTP 400 `json_schema_non_strict_unsupported`; SPEC-049-R019 states that it is not a privacy code; SPEC-049-R030 adds the reason `capability_unsupported`. The §4.9 codes, disclosure strings, and assurance label are unchanged.
 
 - 0.3.1 - #1991. Buyer disclosure never includes provider identity: no buyer response, privacy-class or otherwise, carries `X-Provider-Id` or any equivalent stable provider or assigned-session identifier (SPEC-006 §5.4). The gateway deletes them at the buyer boundary. Operator-only route traces keep identity in logs.
 

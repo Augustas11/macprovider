@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.3.0 (2026-10-14, non-strict `json_schema` mode)
+**Version:** 0.3.1 (2026-10-15, relay-blind non-strict capability gate)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
-**Status:** LOCKED. v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
+**Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
 ## Quick orientation
 
@@ -193,6 +193,18 @@ coordinator returns the pre-v0.3.0 coordinator response before dispatch: HTTP 40
 code and message for an absent `strict` with a non-subset schema. Strict-mode
 requests are not gated. The coordinator and the provider CLI can therefore
 deploy in either order.
+
+Relay-blind and privacy-class requests (SPEC-041, SPEC-049) carry the request
+body encrypted, so the coordinator cannot derive the mode from it. For them
+the buyer declares the mode instead: the reference client sets the SPEC-041-R003
+`requires: ["json_schema_non_strict"]` envelope and reservation member exactly
+when the body's effective mode by the table above is non-strict. The
+coordinator applies the same 1.8.242 gate to that declaration at reservation
+and at consume, and when no supporting provider serves the model it returns
+HTTP 400 `json_schema_non_strict_unsupported` (it cannot reproduce the §3 code
+for an absent `strict`, because it never sees the schema). A provider CLI that
+implements SPEC-041 v0.6.0 rejects a decrypted relay-blind body whose effective
+mode is non-strict when the envelope did not declare it (SPEC-041-R005).
 
 Buyer-side validation obligation: the provider validates syntax and schema
 conformance for the returned assistant `content`; it does not validate whether
@@ -1687,9 +1699,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.3.0 (2026-10-14, non-strict `json_schema` mode)
+**Version:** 0.3.1 (2026-10-15, relay-blind non-strict capability gate)
 
-**Status:** LOCKED. v0.3.0 adds the §1a non-strict mode; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
+**Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the §1a non-strict mode; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1713,6 +1725,13 @@ matching SPEC-018 v0.2.10 clarification; it makes no SPEC-015 schema change and
 adds no HTTP endpoint.
 
 ### Change log
+
+- **v0.3.1 (2026-10-15, relay-blind gate):** §1a rollout: relay-blind and
+  privacy-class requests declare non-strict mode in the SPEC-041-R003
+  `requires` member, and the coordinator gates that declaration exactly as it
+  gates a plaintext non-strict body, with HTTP 400
+  `json_schema_non_strict_unsupported` when no supporting provider serves the
+  model. No change to the mode table, validation or receipts. Related: #2006.
 
 - **v0.3.0 (2026-10-14, non-strict mode):** Adds §1a. Explicit `strict:false`
   and an absent `strict` with a schema outside the §3 subset run in a

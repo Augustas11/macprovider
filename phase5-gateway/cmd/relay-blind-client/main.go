@@ -177,10 +177,14 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 			return fmt.Errorf("privacy identity directory rejected: %w", err)
 		}
 	}
+	// SPEC-041-R003: declare, outside the ciphertext, only whether the body
+	// needs SPEC-019 §1a non-strict json_schema mode, so the coordinator can
+	// route it to a provider that supports it.
+	requires := relayblind.RequiredCapabilities(inner)
 	reservationRequest := relayblind.ReservationRequest{
 		EndpointFamily: relayblind.EndpointChatCompletions, Model: opts.model, Stream: opts.stream,
 		MaxOutputTokens: opts.maxOutputTokens, InputTokenUpperBound: opts.inputTokenUpperBound,
-		EncryptedRequestBytes: int64(len(inner)),
+		EncryptedRequestBytes: int64(len(inner)), Requires: requires,
 	}
 	if err := reservationRequest.Validate(); err != nil {
 		return err
@@ -245,6 +249,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
+	envelope.Requires = requires
 	envelope, err = envelope.Encrypt(inner, providerPublicKey, buyerKey)
 	if err != nil {
 		return fmt.Errorf("encrypt request: %w", err)
@@ -802,9 +807,30 @@ func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, 
 		return nil, errors.New("response body too large")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if code := errorCode(raw); code != "" {
+			return nil, fmt.Errorf("HTTP %d %s", response.StatusCode, code)
+		}
 		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	return raw, nil
+}
+
+// errorCode returns a bounded error.code token from an error body, or "".
+func errorCode(raw []byte) string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &body) != nil || len(body.Error.Code) == 0 || len(body.Error.Code) > 64 {
+		return ""
+	}
+	for _, c := range body.Error.Code {
+		if (c < 'a' || c > 'z') && c != '_' {
+			return ""
+		}
+	}
+	return body.Error.Code
 }
 
 func newSignedRequest(ctx context.Context, base *url.URL, path, bearer, sessionID string, sessionKey ed25519.PrivateKey, requestID string, body []byte, privacy bool) (*http.Request, error) {
