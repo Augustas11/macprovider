@@ -115,6 +115,12 @@ final class PrivacyPostureResponder: @unchecked Sendable {
     }
 
     func respond(to challenge: [String: Any], assignedSession: String, now: Date = Date()) throws -> [String: Any]? {
+        try respondWithCodeBound(to: challenge, assignedSession: assignedSession, now: now)?.response
+    }
+
+    /// `respond(to:)` plus the SPEC-049-R035 attestor request for exactly the
+    /// posture it built: its digest and the keys that signed it.
+    func respondWithCodeBound(to challenge: [String: Any], assignedSession: String, now: Date = Date()) throws -> PrivacyPostureReply? {
         try parseChallenge(challenge)
         guard privacyVisibleASCII(assignedSession, maxBytes: PrivacyClassConstants.maxIdentifierBytes),
               let nonce = challenge["nonce"] as? String else {
@@ -151,7 +157,15 @@ final class PrivacyPostureResponder: @unchecked Sendable {
         ]
         let encoded = try JSONSerialization.data(withJSONObject: response, options: [.withoutEscapingSlashes])
         guard encoded.count <= maxPrivacyPostureResponseBytes else { throw PrivacyClassError.invalidMaterial }
-        return response
+        return PrivacyPostureReply(
+            response: response,
+            codeBoundRequest: PrivacyCodeBoundRequest(
+                statement: statement,
+                framing: framing,
+                sePublicKeyRaw: seSigner.publicKeyRaw,
+                identityPublicKey: relayBlindRuntime.identityPublicKeyBase64URL()
+            )
+        )
     }
 
     /// SPEC-049-R031: asks for a rotation nonce when a staged identity key
