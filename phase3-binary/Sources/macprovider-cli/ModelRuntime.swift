@@ -1,4 +1,5 @@
 import Foundation
+import CoreImage
 import CryptoKit
 import Darwin
 import Jinja
@@ -6,6 +7,7 @@ import MLX
 import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
+import MLXVLM
 import MacProviderCore
 import Security
 import Tokenizers
@@ -338,6 +340,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     let nativeMTPCapability: NativeMTPCapability?
     let schedulerSupportsNativeMTP: Bool
     let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
+    let nativeVisionProfile: NativeVisionProfile?
 
     init(
         state: SwapState,
@@ -358,7 +361,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         nativeMTPStatus: NativeMTPStatusSnapshot = NativeMTPStatusSink.disabled().snapshot(),
         nativeMTPCapability: NativeMTPCapability? = nil,
         schedulerSupportsNativeMTP: Bool = false,
-        nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil
+        nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil,
+        nativeVisionProfile: NativeVisionProfile? = nil
     ) {
         self.state = state
         self.container = container
@@ -381,6 +385,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.nativeMTPCapability = nativeMTPCapability
         self.schedulerSupportsNativeMTP = schedulerSupportsNativeMTP
         self.nativeMTPTupleOffer = nativeMTPTupleOffer
+        self.nativeVisionProfile = nativeVisionProfile
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -1260,6 +1265,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int?
     ) -> SpeculativeRoute {
         guard !HarmonyResponseParser.isHarmonyModelID(request.model),
+              !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
               draftLoaded,
               numDraftTokens != nil else {
@@ -1450,8 +1456,12 @@ actor ModelRuntime: ModelRuntimeServing {
     /// dynamic KV quantization begins, leaving a caller-owned reusable cache
     /// without generated-token state. Quantization remains available for
     /// one-shot requests, but reusable conversation keys fail closed to fp16.
-    static func effectiveKVBits(configured: Int?, conversationKey: String?) -> Int? {
-        conversationKey == nil ? configured : nil
+    static func effectiveKVBits(configured: Int?, conversationKey: String?, containsImage: Bool = false) -> Int? {
+        !containsImage && conversationKey == nil ? configured : nil
+    }
+
+    static func effectivePrefillStepSize(configured: Int, containsImage: Bool) -> Int {
+        containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
     struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
@@ -1517,6 +1527,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
     private var currentNativeMTPSelfTestInput: NativeMTPSelfTestInput?
+    private var currentNativeVisionProfile: NativeVisionProfile?
     private var nativeMTPRevocationRefreshTask: Task<Void, Never>?
     private var nativeMTPStatusResetGeneration: UInt64 = 0
     private let configuredDraftModelID: String?
@@ -1762,8 +1773,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-024-R001 — keyed serial serve and SPEC-037 eligible persist both need
     /// `KVCacheSimple` on full-attention models. Sliding-window models that still
     /// return `RotatingKVCache` with `maxKVSize = nil` stay non-simple and miss.
-    nonisolated static func forceSimpleKVCache(eligible: Bool, conversationKey: String?) -> Bool {
-        eligible || hasReusableConversationKey(conversationKey)
+    nonisolated static func forceSimpleKVCache(eligible: Bool, conversationKey: String?, containsImage: Bool = false) -> Bool {
+        if containsImage { return false }
+        return eligible || hasReusableConversationKey(conversationKey)
     }
 
     /// The single serve cache-allocation used at BOTH serve sites (non-streaming +
@@ -2643,6 +2655,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentNativeMTPAdmissionCapability = nil
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
+        self.currentNativeVisionProfile = nil
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
@@ -2742,7 +2755,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
         self.configuredMaxContextTokens = maxContextTokensOverride
         self.loader = { targetModelID in
-            let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
+            let (container, directory) = try await Self.loadLocalContainer(
+                from: targetModelID, nativeVision: NativeVisionProfile.supports(modelID: targetModelID))
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
             return (container, targetModelID, modelHash)
         }
@@ -2760,6 +2774,7 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentWeightsManifestSHA256 = nil
             self.currentTokenizerConfigSHA256 = nil
             self.currentChatTemplateSHA256 = nil
+            self.currentNativeVisionProfile = nil
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
@@ -2770,6 +2785,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
         if normalizedDraftModelID == nil,
+           !NativeVisionProfile.supports(modelID: modelID),
            let verifiedModelArtifactSHA256,
            self.nativeMTPMode == .auto {
             if let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
@@ -2817,7 +2833,10 @@ actor ModelRuntime: ModelRuntimeServing {
             runtimeCacheClass = candidateNativeMTPLoad.runtimeCacheClass
             modelCapabilities = candidateNativeMTPLoad.modelCapabilities
         } else {
-            let loaded = try await Self.loadLocalContainer(from: targetLoadPath)
+            let loaded = try await Self.loadLocalContainer(
+                from: targetLoadPath,
+                nativeVision: NativeVisionProfile.supports(modelID: modelID)
+            )
             container = loaded.0
             directory = loaded.1
             runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
@@ -2849,6 +2868,11 @@ actor ModelRuntime: ModelRuntimeServing {
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
+        self.currentNativeVisionProfile = try NativeVisionProfile.load(
+            modelID: modelID,
+            directory: directory,
+            artifactSHA256: self.currentModelHash
+        )
         self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
         self.configuredTemplateSupportsPreserveThinking = self.configuredTemplateSupportsThinkingToggle
@@ -3135,6 +3159,7 @@ actor ModelRuntime: ModelRuntimeServing {
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testStreamChunks: [StreamChunk] = [],
+        testNativeVisionProfile: NativeVisionProfile? = nil,
         testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
@@ -3312,6 +3337,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.testLoader = testLoader
         self.testCompletion = testCompletion
         self.testStreamChunks = testStreamChunks
+        self.currentNativeVisionProfile = testNativeVisionProfile
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
         let continuousBatchScheduler = Self.makeContinuousBatchScheduler(
@@ -3401,7 +3427,8 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: currentServedSchedulerSupportsNativeMTP(),
-            nativeMTPTupleOffer: currentNativeMTPTupleOffer
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+            nativeVisionProfile: currentNativeVisionProfile
         )
     }
 
@@ -3511,7 +3538,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
                 nativeMTPCapability: currentNativeMTPCapability,
                 schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
-                nativeMTPTupleOffer: currentNativeMTPTupleOffer
+                nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+                nativeVisionProfile: currentNativeVisionProfile
             )
         }
         return RuntimeSnapshot(
@@ -3531,7 +3559,8 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
             nativeMTPCapability: currentNativeMTPCapability,
             schedulerSupportsNativeMTP: schedulerSupportsNativeMTP,
-            nativeMTPTupleOffer: currentNativeMTPTupleOffer
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer,
+            nativeVisionProfile: currentNativeVisionProfile
         )
     }
 
@@ -4005,6 +4034,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 let weightsManifestSHA256: String?
                 let tokenizerConfigSHA256: String?
                 let chatTemplateSHA256: String?
+                let nativeVisionProfile: NativeVisionProfile?
                 let modelCapabilities: PagedKVRuntimeModelCapabilities
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
@@ -4018,6 +4048,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256 = nil
                     tokenizerConfigSHA256 = nil
                     chatTemplateSHA256 = nil
+                    nativeVisionProfile = nil
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
                     if let configuredDraftModelID {
                         do {
@@ -4039,7 +4070,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
-                    let loaded = try await Self.loadLocalContainer(from: targetAuthority.modelArgument)
+                    let loaded = try await Self.loadLocalContainer(
+                        from: targetAuthority.modelArgument,
+                        nativeVision: NativeVisionProfile.supports(modelID: targetModelID)
+                    )
                     container = loaded.0
                     modelID = targetModelID
                     guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
@@ -4052,6 +4086,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
+                    nativeVisionProfile = try NativeVisionProfile.load(
+                        modelID: modelID, directory: loaded.1, artifactSHA256: modelHash)
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
@@ -4112,6 +4148,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256: weightsManifestSHA256,
                     tokenizerConfigSHA256: tokenizerConfigSHA256,
                     chatTemplateSHA256: chatTemplateSHA256,
+                    nativeVisionProfile: nativeVisionProfile,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason,
@@ -5286,6 +5323,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// stops on Harmony also require that parser: raw scheduler token stops
     /// would terminate on hidden analysis or headers.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
+        if request.containsNonTextMessageContentPart { return false }
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
@@ -5449,6 +5487,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: nil,
             tokenizerConfigSHA256: nil,
             chatTemplateSHA256: nil,
+            nativeVisionProfile: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -5465,6 +5504,7 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsManifestSHA256: String?,
         tokenizerConfigSHA256: String?,
         chatTemplateSHA256: String?,
+        nativeVisionProfile: NativeVisionProfile?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
@@ -5510,6 +5550,7 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
+        currentNativeVisionProfile = nativeVisionProfile
         let runtimeCacheClass = pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -5750,6 +5791,7 @@ actor ModelRuntime: ModelRuntimeServing {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
+        _ = try Self.validateNativeVisionRequest(request, profile: snapshot.nativeVisionProfile)
         // Accept the coordinator-advertised catalog id as an alias only while the
         // configured model is the one currently loaded (mirrors
         // coordinatorWireModelID's servedModelID == loadedModelID guard). After a
@@ -5771,6 +5813,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
         // container.perform — real model-thread work) before stream() brackets
         // active inference. Bracket it here too so a pre-first-token wedge during
@@ -5778,7 +5821,9 @@ actor ModelRuntime: ModelRuntimeServing {
         ModelLivenessTracker.shared.beginInference()
         defer { ModelLivenessTracker.shared.endInference() }
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
@@ -5797,7 +5842,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let input = try Self.userInput(
                     for: request,
                     templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                    templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    nativeVisionProfile: handle.snapshot.nativeVisionProfile
                 )
                 let lmInput = try await context.processor.prepare(input: input)
                 try handle.drainCancelled.check()
@@ -5810,7 +5856,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let handle = try acquireRequestHandle(request)
         do {
             _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+            if !request.containsNonTextMessageContentPart {
+                try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+            }
             try handle.drainCancelled.check()
             guard let container = handle.snapshot.container else {
                 throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -5825,7 +5873,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: handle.snapshot.nativeVisionProfile
                     )
                     let prepared = try await context.processor.prepare(input: input)
                     let count = prepared.text.tokens.size
@@ -5842,7 +5891,9 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         _ = try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try handle.drainCancelled.check()
     }
 
@@ -6751,7 +6802,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         CBTrace.log(schedulerRequestID, "rt_cb_prepare")
@@ -7111,6 +7163,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: currentWeightsManifestSHA256,
             tokenizerConfigSHA256: currentTokenizerConfigSHA256,
             chatTemplateSHA256: currentChatTemplateSHA256,
+            nativeVisionProfile: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -7183,6 +7236,7 @@ actor ModelRuntime: ModelRuntimeServing {
         idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
+        guard !request.containsNonTextMessageContentPart else { return nil }
         guard capability.isRequested,
               capability.unsupportedReason == nil,
               !capability.shouldUseSerialPath,
@@ -7203,7 +7257,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let requestStops = request.stop
@@ -7687,6 +7742,7 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
@@ -7704,10 +7760,13 @@ actor ModelRuntime: ModelRuntimeServing {
             emitTelemetry: true
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         try drainCancelled.check()
         CBTrace.log(request.requestID, "rt_complete_enter")
-        if let completion = try await attachedContinuousBatchCompletion(
+        if !request.containsNonTextMessageContentPart,
+           let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
             capability: continuousBatchingCapability,
@@ -7797,17 +7856,20 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = Self.effectiveKVBits(
             configured: kvBitsOverride,
-            conversationKey: request.conversationKey
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart
         )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = prefillStepSize
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -7820,7 +7882,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: snapshot.nativeVisionProfile
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -7881,7 +7944,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             Self.logSpeculativeFallback(error)
                         }
                     }
-                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
                         provenance: request.ingestProvenance,
                         nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
                     )
@@ -7913,7 +7976,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             var iteratorInput: LMInput
                             let forceSimpleKV = Self.forceSimpleKVCache(
                                 eligible: coldContext?.eligible == true,
-                                conversationKey: request.conversationKey)
+                                conversationKey: request.conversationKey,
+                                containsImage: request.containsNonTextMessageContentPart)
                             if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -8384,6 +8448,7 @@ actor ModelRuntime: ModelRuntimeServing {
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {
             let (completion, _) = try await completeWithServedSnapshot(request, with: handle, shouldCancel: shouldCancel)
             try handle.drainCancelled.check()
@@ -8413,7 +8478,9 @@ actor ModelRuntime: ModelRuntimeServing {
             emitTelemetry: false
         )
         let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        if !request.containsNonTextMessageContentPart {
+            try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        }
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         // SPEC-038 AC-6c: a batched structured-output stream runs under the
@@ -8558,16 +8625,19 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = Self.effectiveKVBits(
             configured: kvBitsOverride,
-            conversationKey: request.conversationKey
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart
         )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
-        let prefillStepSize = prefillStepSize
+        let prefillStepSize = Self.effectivePrefillStepSize(
+            configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
-        let stopTokenFilter = stopTokenFilter
+        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+            ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -8590,7 +8660,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(
                         for: request,
                         templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-                        templateSupportsPreserveThinking: templateSupportsPreserveThinking
+                        templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                        nativeVisionProfile: snapshot.nativeVisionProfile
                     )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -8719,7 +8790,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         )
                     }
 
-                    let conversationCacheAllowed = Self.allowsConversationCacheLease(
+                    let conversationCacheAllowed = !request.containsNonTextMessageContentPart && Self.allowsConversationCacheLease(
                         provenance: request.ingestProvenance,
                         nativeAllows: nativeMTPAdmission.allowsConversationCacheLease
                     )
@@ -8749,7 +8820,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     var iteratorInput: LMInput
                     let forceSimpleKV = Self.forceSimpleKVCache(
                         eligible: coldContext?.eligible == true,
-                        conversationKey: request.conversationKey)
+                        conversationKey: request.conversationKey,
+                        containsImage: request.containsNonTextMessageContentPart)
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -9223,7 +9295,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
     /// direct-HTTP provenance; the identity core carries the live model identity.
     private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
-        guard coldTierAttached else { return nil }
+        guard coldTierAttached, !request.containsNonTextMessageContentPart else { return nil }
         // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
         // independent of identity availability, so a gated request whose live identity is
         // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
@@ -9558,22 +9630,37 @@ actor ModelRuntime: ModelRuntimeServing {
         throw SpecDecodeStartupError.fixtureMissing
     }
 
-    private static func loadLocalContainer(from target: String) async throws -> (ModelContainer, URL) {
-        try await loadLocalContainer(from: target, tokenizerLoader: #huggingFaceTokenizerLoader())
+    private static func loadLocalContainer(
+        from target: String,
+        nativeVision: Bool = false
+    ) async throws -> (ModelContainer, URL) {
+        try await loadLocalContainer(
+            from: target,
+            tokenizerLoader: #huggingFaceTokenizerLoader(),
+            nativeVision: nativeVision
+        )
     }
 
     private static func loadLocalContainer(
         from target: String,
-        tokenizerLoader: any TokenizerLoader
+        tokenizerLoader: any TokenizerLoader,
+        nativeVision: Bool = false
     ) async throws -> (ModelContainer, URL) {
         let directory = try localModelDirectory(for: target)
         // mlx-swift-lm 3.x requires an explicit tokenizer loader. The provider
         // preflight has already verified model_artifact_path/model_artifact_sha256,
         // so load directly from the resolved local snapshot instead of downloading.
-        let container = try await LLMModelFactory.shared.loadContainer(
-            from: directory,
-            using: tokenizerLoader
-        )
+        let container: ModelContainer
+        if nativeVision {
+            let before = try NativeVisionProfile.load(
+                modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: nil)
+            container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+            let after = try NativeVisionProfile.load(
+                modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: before?.artifactSHA256)
+            guard before == after else { throw NativeVisionProfile.identityError() }
+        } else {
+            container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+        }
         return (container, directory)
     }
 
@@ -11636,11 +11723,55 @@ actor ModelRuntime: ModelRuntimeServing {
         return context
     }
 
+    /// Validate media before processor work, test generation seams or dispatch.
+    /// Parsing alone is never an assertion that the loaded model sees images.
+    static func validateNativeVisionRequest(
+        _ request: ChatCompletionRequest, profile: NativeVisionProfile?
+    ) throws -> NativeImageInput? {
+        if profile != nil {
+            for message in request.messages {
+                if let text = message.content { try NativeVisionProfile.validateText(text) }
+            }
+        }
+        guard request.containsNonTextMessageContentPart else { return nil }
+        guard profile != nil else {
+            throw APIError(status: 400, message: "Images are not supported by this model",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        let choice = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+        guard case .text = request.responseFormat,
+              !hasEnabledTools(request.promptSource.tools),
+              choice == .auto,
+              !request.conversationCacheOnly else {
+            throw APIError(status: 400, message: "Images cannot be combined with tools, structured output or cache-only requests",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        guard let input = try request.validatedNativeImageInput() else {
+            throw APIError(status: 400, message: "Unsupported media content",
+                           code: "unsupported_content_shape", param: "messages")
+        }
+        for message in input.messages {
+            // The pinned template concatenates adjacent text parts verbatim.
+            // Check the concatenation too: split visual tokens must not create
+            // extra processor placeholders that no admitted image owns.
+            let text = message.parts.compactMap { part -> String? in
+                if case .text(let text) = part { return text }
+                return nil
+            }.joined()
+            try NativeVisionProfile.validateText(text)
+        }
+        return input
+    }
+
     static func userInput(
         for request: ChatCompletionRequest,
         templateSupportsThinkingToggle: Bool = false,
-        templateSupportsPreserveThinking: Bool = false
+        templateSupportsPreserveThinking: Bool = false,
+        nativeVisionProfile: NativeVisionProfile? = nil
     ) throws -> UserInput {
+        if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
+            return try NativeVisionProfile.userInput(from: input)
+        }
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
             to: request.messages,
             responseFormat: request.responseFormat,

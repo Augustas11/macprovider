@@ -22,6 +22,7 @@ import (
 
 type Hello struct {
 	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
 
 	Type                   string                             `json:"type"`
 	Version                int                                `json:"version"`
@@ -108,6 +109,7 @@ type HelloAck struct {
 
 type AuthRequest struct {
 	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
 
 	Type                           string                             `json:"type"`
 	Version                        int                                `json:"version"`
@@ -325,6 +327,7 @@ type AuthModelHashSession struct {
 
 type Heartbeat struct {
 	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
 
 	Type                    string                             `json:"type"`
 	Status                  string                             `json:"status"`
@@ -798,6 +801,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 			return Hello{}, "tool_selection_capabilities", err
 		}
 	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &h.VisionRuntimeCapabilities); err != nil {
+			return Hello{}, "vision_runtime_capabilities", err
+		}
+	}
 	if err := requireString(raw, "type", &h.Type); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -950,6 +958,11 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 	if v, ok := raw["tool_selection_capabilities"]; ok {
 		if err := json.Unmarshal(v, &req.ToolSelectionCapabilities); err != nil {
 			return AuthRequest{}, Spec010Presence{}, "tool_selection_capabilities", err
+		}
+	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &req.VisionRuntimeCapabilities); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "vision_runtime_capabilities", err
 		}
 	}
 	if err := requireString(raw, "type", &req.Type); err != nil {
@@ -1275,6 +1288,7 @@ func (r AuthRequest) Hello() Hello {
 		RuntimeSource: r.RuntimeSource,
 
 		ToolSelectionCapabilities: r.ToolSelectionCapabilities,
+		VisionRuntimeCapabilities: r.VisionRuntimeCapabilities,
 
 		ModelHash:              r.ModelHash,
 		ModelHashAlgorithm:     r.ModelHashAlgorithm,
@@ -1743,6 +1757,11 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	if v, ok := raw["tool_selection_capabilities"]; ok {
 		if err := json.Unmarshal(v, &hb.ToolSelectionCapabilities); err != nil {
 			return Heartbeat{}, HeartbeatPresence{}, "tool_selection_capabilities", err
+		}
+	}
+	if v, ok := raw["vision_runtime_capabilities"]; ok {
+		if err := json.Unmarshal(v, &hb.VisionRuntimeCapabilities); err != nil {
+			return Heartbeat{}, HeartbeatPresence{}, "vision_runtime_capabilities", err
 		}
 	}
 	if err := requireString(raw, "type", &hb.Type); err != nil {

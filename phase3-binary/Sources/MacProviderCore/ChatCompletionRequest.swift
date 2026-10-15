@@ -66,6 +66,16 @@ public struct ChatCompletionRequest: Sendable {
             throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
         }
 
+        // Explicit selection must not inherit Foundation's last-key-wins
+        // interpretation of malformed tool schemas or selection objects.
+        // Apply this to every body: duplicate content/type/url keys can hide
+        // media before its capability check or ambiguously bind a receipt.
+        do {
+            _ = try StrictJSONParser.parse(String(decoding: data, as: UTF8.self), maxDepth: 128)
+        } catch {
+            throw APIError(status: 400, message: "Request requires bounded JSON without duplicate keys", code: "invalid_json")
+        }
+
         let json: Any
         do {
             json = try JSONSerialization.jsonObject(with: data)
@@ -75,17 +85,6 @@ public struct ChatCompletionRequest: Sendable {
 
         guard let dict = json as? [String: Any] else {
             throw APIError(status: 400, message: "Request body must be a JSON object", code: "invalid_request")
-        }
-
-        // Explicit selection must not inherit Foundation's last-key-wins
-        // interpretation of malformed tool schemas or selection objects.
-        if let choice = dict["tool_choice"], !(choice is NSNull),
-           (choice as? String) != "auto" {
-            do {
-                _ = try StrictJSONParser.parse(String(decoding: data, as: UTF8.self), maxDepth: 128)
-            } catch {
-                throw APIError(status: 400, message: "Explicit tool selection requires bounded JSON without duplicate keys", code: "invalid_json")
-            }
         }
 
         guard let model = dict["model"] as? String, !model.isEmpty else {
@@ -566,7 +565,12 @@ public struct ChatMessage: Sendable {
         switch role {
         case .system, .user:
             let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false)
-            guard let content, !content.isEmpty else {
+            // The text projection is not the native execution input for media.
+            // Preserve image-only user turns for the qualified vision path (and
+            // loopback forwarding); native admission must validate raw parts.
+            let hasUserImage = role == .user && (dict["content"] as? [[String: Any]])?
+                .contains(where: { $0["type"] as? String == "image_url" }) == true
+            guard let content, !content.isEmpty || hasUserImage else {
                 throw APIError(status: 400, message: "messages[\(index)].content must be non-empty", code: "invalid_request")
             }
             return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: nil)
@@ -1209,21 +1213,36 @@ private func textProjection(from raw: Any?, messageIndex: Int, allowNull: Bool) 
         }
         switch type {
         case "text":
+            guard Set(part.keys) == ["type", "text"] else {
+                throw APIError(status: 400, message: "Text parts may contain only type and text", code: "unsupported_content_shape")
+            }
             guard let text = part["text"] as? String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].text is invalid", code: "invalid_request")
             }
             textParts.append(text)
         case "image_url":
+            guard Set(part.keys) == ["type", "image_url"] else {
+                throw APIError(status: 400, message: "Image parts may contain only type and image_url", code: "unsupported_content_shape")
+            }
             guard let imageURL = part["image_url"] as? [String: Any],
                   imageURL["url"] is String,
                   imageURL["detail"] == nil || imageURL["detail"] is NSNull || imageURL["detail"] is String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].image_url is invalid", code: "invalid_request")
             }
+            guard Set(imageURL.keys).isSubset(of: ["url", "detail"]) else {
+                throw APIError(status: 400, message: "image_url may contain only url and detail", code: "unsupported_content_shape")
+            }
         case "input_audio":
+            guard Set(part.keys) == ["type", "input_audio"] else {
+                throw APIError(status: 400, message: "Audio parts may contain only type and input_audio", code: "unsupported_content_shape")
+            }
             guard let inputAudio = part["input_audio"] as? [String: Any],
                   inputAudio["data"] is String,
                   inputAudio["format"] is String else {
                 throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].input_audio is invalid", code: "invalid_request")
+            }
+            guard Set(inputAudio.keys) == ["data", "format"] else {
+                throw APIError(status: 400, message: "input_audio may contain only data and format", code: "unsupported_content_shape")
             }
         default:
             throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].type is invalid", code: "invalid_request")

@@ -1,6 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.19 (2026-10-15, audit database rotation)
+**Version:** 1.6.20 (2026-10-15, qualified native image routing)
+
+**Change log v1.6.20 (2026-10-15, Related: #2016):**
+The user-content contract admits the bounded SPEC-006-R022 native inline-image
+exception. Image dispatch requires exact current SPEC-001-R008 capability and
+an operator-reviewed qualification bound to the provider, released binary,
+artifact/runtime and serving configuration. Missing qualification retains
+explicit rejection; no global text-only validation relaxation is authorized.
 
 **Change log v1.6.19 (2026-10-15, issue #1793):** R-7.10.2 now bounds the
 settlement receipt audit database (`coordinator-audit.db`) to its active
@@ -3131,7 +3138,7 @@ inline so this spec is self-contained for build session use; if SPEC-001
 | `role` | Required content shape |
 |---|---|
 | `system` | `content` must be a non-empty string |
-| `user` | `content` must be a non-empty string (no multimodal content arrays in v1) |
+| `user` | `content` must be a non-empty string or a text array, except the bounded ordered native image profile in SPEC-006-R022; image-only input is valid only on that qualified path |
 | `assistant` | `content` may be a string OR `content: null` with `tool_calls` array. If both `content` and `tool_calls` are null/absent → 400. |
 | `tool` | `tool_call_id` (string, required) and `content` (string, required) |
 

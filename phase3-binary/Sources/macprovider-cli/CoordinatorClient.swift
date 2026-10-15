@@ -7180,6 +7180,37 @@ actor CoordinatorClient {
         ]]
     }
 
+    /// Implementation identity only. The coordinator separately requires a
+    /// qualification for the exact provider/configuration before image routing.
+    static func appendNativeVisionCapability(
+        to message: inout [String: Any], snapshot: RuntimeSnapshot,
+        wireModelID: String, runtimeSource: String?
+    ) {
+        message.removeValue(forKey: "vision_runtime_capabilities")
+        guard runtimeSource == nil || runtimeSource == NativeVisionProfile.runtime,
+              snapshot.state == .ready,
+              let profile = snapshot.nativeVisionProfile,
+              NativeVisionProfile.supports(modelID: snapshot.modelID),
+              let hash = snapshot.modelHash, hash == profile.artifactSHA256,
+              snapshot.modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1,
+              let weights = snapshot.weightsManifestSHA256,
+              !wireModelID.isEmpty,
+              message["model_id"] as? String == wireModelID,
+              message["model_hash"] as? String == hash,
+              message["model_hash_algorithm"] as? String == snapshot.modelHashAlgorithm,
+              message["weights_manifest_sha256"] as? String == weights else { return }
+        message["vision_runtime_capabilities"] = [[
+            "model_id": wireModelID,
+            "model_hash": hash,
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "weights_manifest_sha256": weights,
+            "processor_digest": profile.processorConfigSHA256,
+            "runtime": NativeVisionProfile.runtime,
+            "runtime_revision": KVBuildIdentity.mlxSwiftLMRevision,
+            "media_profile": NativeVisionProfile.identifier,
+        ]]
+    }
+
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
@@ -7261,6 +7292,11 @@ actor CoordinatorClient {
                 payload["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
             }
         }
+        Self.appendNativeVisionCapability(
+            to: &payload, snapshot: engineRuntimeSnapshot,
+            wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         if appConfig.publishesSpecDecodeTelemetry {
             if specDecodeTelemetryMatchesRuntime && specDecodeTelemetryRuntimeEligible {
                 payload["spec_decode_enabled"] = snapshot.specDecodeEnabled
@@ -7902,6 +7938,12 @@ actor CoordinatorClient {
                 message["referral_code"] = bootstrapReferralCode
             }
         }
+        let visionSnapshot = await modelRuntime.currentSnapshot()
+        Self.appendNativeVisionCapability(
+            to: &message, snapshot: visionSnapshot,
+            wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         return message
     }
 
@@ -7991,6 +8033,12 @@ actor CoordinatorClient {
             message["runtime_source"] = runtimeSource
         }
         appendPrivacyKeyRecords(to: &message)
+        let visionSnapshot = await modelRuntime.currentSnapshot()
+        Self.appendNativeVisionCapability(
+            to: &message, snapshot: visionSnapshot,
+            wireModelID: coordinatorWireModelID(for: visionSnapshot.modelID),
+            runtimeSource: runtimeSource
+        )
         return message
     }
 

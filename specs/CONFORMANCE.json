@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.35",
+      "version": "1.9.36",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.19",
+      "version": "1.6.20",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.58",
+      "version": "0.9.59",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.16",
+      "version": "0.4.17",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2128,7 +2128,7 @@
     {
       "requirement_id": "SPEC-010-R006",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
@@ -2155,7 +2155,12 @@
           "expires_at": "2026-11-10"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Historical signed text-only warm-swap evidence is retained. Native vision adds VLM loading and atomic processor identity to the mapped beginSwap implementation; the old commit selector no longer covers the current implementation. New native-image replacement acceptance is a post-merge Studio gate, not inferred from existing text qualification."
+      }
     },
     {
       "requirement_id": "SPEC-010-R007",
@@ -12953,6 +12958,50 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1062",
         "rationale": "SPEC-050 v0.1.0 (#1062) MALIBU stake allowance. Implemented in the campaign PR with unit and integration tests; the requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R008",
+      "spec_id": "SPEC-001",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:static func appendNativeVisionCapability",
+        "phase4-coordinator/internal/pool/provider.go:type VisionRuntimeCapability"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeVisionAdvertisementTests.swift:func testExactLoadedSnapshotAdvertisesImplementationWithoutQualificationClaim"
+      ],
+      "state": "pending",
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Bounded native image implementation and exact qualified-capacity routing. Hardware paired-image, resource lifecycle and approved released-provider buyer/settlement acceptance are post-merge gates; no image qualification is claimed by parser support, model name, CI fixtures or text-only evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R022",
+      "spec_id": "SPEC-006",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/InlineImageInput.swift:public func validatedNativeImageInput",
+        "phase3-binary/Sources/macprovider-cli/NativeVisionRuntime.swift:struct NativeVisionProfile",
+        "phase4-coordinator/internal/buyer/vision.go:func providerSupportsVision"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/InlineImageInputTests.swift:final class InlineImageInputTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeVisionRuntimeTests.swift:final class NativeVisionRuntimeTests",
+        "phase4-coordinator/internal/buyer/vision_routing_regression_test.go:func TestVisionRegressionNormalizationAndReceiptPreserveImageMeaning",
+        "phase5-gateway/internal/router/vision_regression_test.go:func TestVisionRegressionGatewayAccountingExcludesImageBytes"
+      ],
+      "state": "pending",
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2016",
+        "rationale": "Bounded native image implementation and exact qualified-capacity routing. Hardware paired-image, resource lifecycle and approved released-provider buyer/settlement acceptance are post-merge gates; no image qualification is claimed by parser support, model name, CI fixtures or text-only evidence."
       }
     }
   ]

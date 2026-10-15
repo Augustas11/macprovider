@@ -764,7 +764,7 @@ func TestStructuredContentArrayRejectsMultimodalPart(t *testing.T) {
 	if status != 400 || code != "unsupported_content_shape" {
 		t.Fatalf("validateChatRequest status=%d code=%s msg=%s, want 400 unsupported_content_shape", status, code, msg)
 	}
-	if !strings.Contains(msg, "multimodal content arrays are not supported") {
+	if !strings.Contains(msg, "remote image URLs are not supported") {
 		t.Fatalf("message not actionable: %q", msg)
 	}
 }
@@ -946,7 +946,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
 	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
 	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
-	"invalid_internal_max_output_tokens", "invalid_json", "invalid_request", "invalid_tool_call_id",
+	"image_input_too_large", "invalid_image_input", "invalid_internal_max_output_tokens", "invalid_json", "invalid_request", "invalid_tool_call_id",
 	"invalid_tools", "json_schema_invalid_const_or_enum_type", "json_schema_invalid_name",
 	"json_schema_missing_name", "json_schema_missing_schema", "json_schema_non_strict_unsupported",
 	"json_schema_strict_requires_additional_properties_false", "json_schema_strict_requires_all_properties_required", "json_schema_too_deep",
@@ -965,8 +965,8 @@ var coordinatorEmittedErrorCodes = []string{
 	"tier2_hash_verified_required", "tier2_output_encoding_invalid", "too_many_tool_calls",
 	"tool_call_arguments_aggregate_too_large", "tool_call_arguments_too_large", "tool_call_final_close_failed",
 	"tool_call_id_not_found", "tool_call_result_out_of_order", "tool_result_too_large",
-	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape",
-	"unsupported_modelID_for_multi_turn",
+	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape", "unsupported_media",
+	"unsupported_modelID_for_multi_turn", "vision_capacity_unavailable",
 	"byom_non_settlement_unavailable",
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_no_eligible_member", "pool_state_stale", "pool_unavailable", "pool_binary_too_old",
