@@ -3,17 +3,17 @@ import XCTest
 @testable import macprovider_cli
 
 final class NativeVisionAdvertisementTests: XCTestCase {
-    private let hash = String(repeating: "a", count: 64)
+    private let artifactHash = String(repeating: "a", count: 64)
     private let weights = String(repeating: "b", count: 64)
 
     private func snapshot(state: SwapState = .ready, model: String? = NativeVisionProfile.modelID,
                           hasProfile: Bool = true, artifact: String? = nil) -> RuntimeSnapshot {
         RuntimeSnapshot(
-            state: state, container: nil, modelID: model, modelHash: hash,
+            state: state, container: nil, modelID: model, modelHash: artifactHash,
             modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
             weightsManifestSHA256: weights,
             nativeVisionProfile: hasProfile ? NativeVisionProfile(
-                artifactSHA256: artifact ?? hash,
+                artifactSHA256: artifact ?? artifactHash,
                 processorConfigSHA256: String(repeating: "c", count: 64),
                 tokenizerConfigSHA256: String(repeating: "d", count: 64),
                 chatTemplateSHA256: String(repeating: "e", count: 64)
@@ -22,7 +22,7 @@ final class NativeVisionAdvertisementTests: XCTestCase {
     }
 
     private func message() -> [String: Any] {
-        ["model_id": NativeVisionProfile.modelID, "model_hash": hash,
+        ["model_id": NativeVisionProfile.modelID, "model_hash": artifactHash,
          "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
          "weights_manifest_sha256": weights]
     }
@@ -33,7 +33,7 @@ final class NativeVisionAdvertisementTests: XCTestCase {
             wireModelID: NativeVisionProfile.modelID, runtimeSource: nil)
         let capabilities = try XCTUnwrap(message["vision_runtime_capabilities"] as? [[String: String]])
         XCTAssertEqual(capabilities.count, 1)
-        XCTAssertEqual(capabilities[0]["model_hash"], hash)
+        XCTAssertEqual(capabilities[0]["model_hash"], artifactHash)
         XCTAssertEqual(capabilities[0]["media_profile"], "qwen2vl-inline-v1")
         XCTAssertEqual(capabilities[0]["runtime_revision"], KVBuildIdentity.mlxSwiftLMRevision)
         XCTAssertNil(capabilities[0]["qualification_digest"])
