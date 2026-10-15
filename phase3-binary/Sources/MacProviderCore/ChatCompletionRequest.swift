@@ -77,6 +77,17 @@ public struct ChatCompletionRequest: Sendable {
             throw APIError(status: 400, message: "Request body must be a JSON object", code: "invalid_request")
         }
 
+        // Explicit selection must not inherit Foundation's last-key-wins
+        // interpretation of malformed tool schemas or selection objects.
+        if let choice = dict["tool_choice"], !(choice is NSNull),
+           (choice as? String) != "auto" {
+            do {
+                _ = try StrictJSONParser.parse(String(decoding: data, as: UTF8.self), maxDepth: 128)
+            } catch {
+                throw APIError(status: 400, message: "Explicit tool selection requires bounded JSON without duplicate keys", code: "invalid_json")
+            }
+        }
+
         guard let model = dict["model"] as? String, !model.isEmpty else {
             throw APIError(status: 400, message: "Missing or invalid model", code: "invalid_request")
         }

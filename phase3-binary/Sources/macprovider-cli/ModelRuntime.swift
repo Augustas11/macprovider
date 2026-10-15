@@ -5758,7 +5758,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ? modelIDAliasList(catalogModelIDAlias)
             : []
         try request.validateModelMatches(snapshot.modelID, aliases: aliases)
-        try Self.validateToolChoiceScope(request)
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: snapshot.modelID, runtime: "mlx_cache")
         try Self.validateNativeSamplingPenalties(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
@@ -5770,6 +5770,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
         // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
         // container.perform — real model-thread work) before stream() brackets
         // active inference. Bracket it here too so a pre-first-token wedge during
@@ -6281,10 +6282,12 @@ actor ModelRuntime: ModelRuntimeServing {
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
         private var observer: NativeToolCallStreamEmitter
+        private let guaranteedSelection: Bool
         private var stopTokenCountValue: Int?
         private let incrementalDecoder: IncrementalTextDecoder
 
         init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
+            guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
                 allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
@@ -6307,7 +6310,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     &observer,
                     decoded: incrementalDecoder.append(token),
                     stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops
+                    requestStops: requestStops,
+                    guaranteedSelection: guaranteedSelection
                 ) {
                     stopTokenCountValue = tokenIDs.count
                     return true
@@ -7682,6 +7686,7 @@ actor ModelRuntime: ModelRuntimeServing {
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
@@ -8014,7 +8019,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                            &serialToolObserver,
                                            decoded: generationContext.tokenizer.decode(tokenIds: tokens),
                                            stopTokenFilter: stopTokenFilter,
-                                           requestStops: request.stop
+                                           requestStops: request.stop,
+                                           guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
                                        )
                                     {
                                         return GenerateDisposition.stop
@@ -8203,7 +8209,7 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop
         )
-        let parsed = parseToolCallsIfRequested(filtered.text, request: request)
+        let parsed = try parseToolCallsIfRequested(filtered.text, request: request)
         let finishReason: String
         if !parsed.toolCalls.isEmpty {
             finishReason = "tool_calls"
@@ -8377,6 +8383,24 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        try ToolSelectionPolicy.validateRequest(request, loadedModelID: handle.snapshot.modelID, runtime: "mlx_cache")
+        if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {
+            let (completion, _) = try await completeWithServedSnapshot(request, with: handle, shouldCancel: shouldCancel)
+            try handle.drainCancelled.check()
+            try Task.checkCancellation()
+            if shouldCancel() { throw CancellationError() }
+            let validated = try Self.validateStructuredCompletion(completion, request: request)
+            if let calls = validated.toolCalls, !calls.isEmpty {
+                for (index, call) in calls.enumerated() {
+                    try handle.drainCancelled.check()
+                    if shouldCancel() { throw CancellationError() }
+                    onChunk(.toolCallDelta(StreamToolCallDelta(index: index, id: call.id, type: "function", functionName: call.functionName, arguments: call.arguments)))
+                }
+            } else if !validated.content.isEmpty {
+                onChunk(.content(validated.content))
+            }
+            return validated
+        }
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
         // progress token is interpretable as a wedge (observability only).
         ModelLivenessTracker.shared.beginInference()
@@ -8645,7 +8669,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
                         let finalDelta = Self.delta(from: emittedText, to: final.text)
-                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        let parsed = try Self.parseToolCallsIfRequested(final.text, request: request)
                         if !finalDelta.isEmpty {
                             if let error = structuredAccumulator.append(finalDelta) {
                                 throw error
@@ -11380,7 +11404,11 @@ actor ModelRuntime: ModelRuntimeServing {
         globalHitStop: Bool = false
     ) throws -> ParsedGeneratedOutput {
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
-            let parsed = parseToolCallsIfRequested(filteredText, request: request)
+            if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
+               case .complete(let finishReason) = mode, finishReason == "length" {
+                throw ToolSelectionPolicy.outputError("Tool generation exhausted its token budget")
+            }
+            let parsed = try parseToolCallsIfRequested(filteredText, request: request)
             return ParsedGeneratedOutput(
                 content: parsed.content,
                 toolCalls: parsed.toolCalls,
@@ -11517,9 +11545,11 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// SPEC-018 serial tool turn (`parallel_tool_calls` omitted/false) on a
     /// non-Harmony model with tools: generation stops once the first tool
-    /// call is complete and valid.
+    /// call is complete and valid. Guaranteed selection runs to the normal
+    /// terminal so cardinality validation can inspect the entire output.
     static func serialToolStopApplies(_ request: ChatCompletionRequest) -> Bool {
         request.stopsAfterFirstCompleteToolCall
+            && (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) != true
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
             && hasEnabledTools(request.promptSource.tools)
     }
@@ -11536,8 +11566,10 @@ actor ModelRuntime: ModelRuntimeServing {
         _ observer: inout NativeToolCallStreamEmitter,
         decoded: String,
         stopTokenFilter: StopTokenFilter,
-        requestStops: [String]
+        requestStops: [String],
+        guaranteedSelection: Bool = false
     ) -> Bool {
+        guard !guaranteedSelection else { return false }
         let candidate = streamingSafePrefix(
             decoded,
             stopTokenFilter: stopTokenFilter,
@@ -11547,7 +11579,11 @@ actor ModelRuntime: ModelRuntimeServing {
         return observer.hasCompletedValidToolCall
     }
 
-    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) -> (content: String, toolCalls: [ToolCall]) {
+    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) throws -> (content: String, toolCalls: [ToolCall]) {
+        if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
+            let calls = try ToolCallParser.parseGuaranteedToolCalls(text)
+            return (calls.isEmpty ? text : "", calls)
+        }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
             return (text, [])
         }
@@ -11610,9 +11646,23 @@ actor ModelRuntime: ModelRuntimeServing {
             responseFormat: request.responseFormat,
             modelID: request.model
         )
+        let selection = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
+        var messages = structuredMessages
+        let callCountInstruction = request.parallelToolCalls == true
+            ? "Return between 1 and 128 calls."
+            : "Return exactly one call."
+        switch selection {
+        case .required:
+            messages.insert(ChatMessage(role: .system, content: "Call a declared function using complete JSON <tool_call> envelopes. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas."), at: 0)
+        case .named(let name):
+            messages.insert(ChatMessage(role: .system, content: "Call the declared function \(name) using a complete JSON <tool_call> envelope. \(callCountInstruction) Return only calls to that function; arguments must match its schema."), at: 0)
+        case .none:
+            messages.insert(ChatMessage(role: .system, content: "Do not call any function or tool. Respond with assistant text."), at: 0)
+        case .auto: break
+        }
         return UserInput(
-            chat: try ToolPromptRenderer.renderMessages(structuredMessages, modelID: request.model),
-            tools: Self.mlxToolsForTemplate(from: request.promptSource.tools),
+            chat: try ToolPromptRenderer.renderMessages(messages, modelID: request.model),
+            tools: selection == .none ? nil : Self.mlxToolsForTemplate(from: request.promptSource.tools),
             additionalContext: Self.templateAdditionalContext(
                 supportsThinkingToggle: templateSupportsThinkingToggle,
                 supportsPreserveThinking: templateSupportsPreserveThinking
@@ -11637,6 +11687,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        try ToolSelectionPolicy.validateOutput(
+            calls: completion.toolCalls ?? [], finishReason: completion.finishReason,
+            generatedTokens: completion.generatedCompletionTokens, request: request
+        )
         if completion.toolCalls?.isEmpty == false {
             return completion
         }
@@ -11988,30 +12042,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func validateToolChoiceScope(_ request: ChatCompletionRequest) throws {
-        if let toolChoice = request.promptSource.toolChoice,
-           !isSupportedToolChoice(toolChoice)
-        {
-            throw APIError(
-                status: 400,
-                message: "tool_choice values other than auto are not supported by this provider",
-                code: "unsupported_tool_choice"
-            )
-        }
-    }
 
-    private static func isSupportedToolChoice(_ value: MacProviderCore.JSONValue) -> Bool {
-        switch value {
-        case .string(let choice):
-            // OpenAI/Pi send "required". We do not force a call, but rejecting it
-            // with 400/502 is worse than treating it as auto.
-            return choice == "auto" || choice == "required"
-        case .null:
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 /// The serial streaming path's buyer-visible text step for non-Harmony output:

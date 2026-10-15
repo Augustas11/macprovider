@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.34",
+      "version": "1.9.35",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.57",
+      "version": "0.9.58",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.11",
+      "version": "0.2.12",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2018,7 +2018,7 @@
     {
       "requirement_id": "SPEC-010-R003",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
@@ -2045,7 +2045,12 @@
           "expires_at": "2026-10-27"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "The tool-selection capability field changes the mapped HeartbeatUpdate declaration; its existing signed weights-identity evidence binds the prior fragment. Existing weights behavior is not claimed broken, and historical evidence is preserved without redating. Reconciliation of the changed mapped heartbeat fragment remains pending."
+      }
     },
     {
       "requirement_id": "SPEC-010-R004",
@@ -2402,6 +2407,28 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.11 clarifies the §3.8 enforcement point: the coordinator rejects multi-turn tool history for catalogued non-family models on native-only routes before dispatch, resolving aliases with billing.ModelsEquivalent; SPEC-004 model-class aliases keep only profiled members and 400 when none has a profile. Native-only Trusted Pool routes (empty or withheld runtime allowlist, or explicit native selection) are gated the same way; explicit non-native engines and BYOM models are exempt. Unit and handler tests land in this change; conformance stays pending until the coordinator deploys on Pearl."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R006",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/MacProviderCore/ToolSelectionPolicy.swift:public enum ToolSelectionPolicy",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseGeneratedOutput",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:actor OpenAICompatibleLoopbackRuntime",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:toolSelectionCapabilities"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/ToolSelectionPolicyTests.swift:final class ToolSelectionPolicyTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Bounded native tool selection uses complete-generation schema holdback for the exact Qwen3.6-35B-A3B-4bit loaded identity, native none, explicit loopback rejection, and unchanged ordinary auto behavior. Implementation and unit coverage do not qualify hardware or a released provider. Studio qualification and approved released-provider buyer acceptance remain pending; no live activation or conformance claim is made."
       }
     },
     {
@@ -10378,7 +10405,7 @@
     {
       "requirement_id": "SPEC-047-R003",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionDefaultPaidRoutingEligible",
         "phase4-coordinator/internal/ws/model_admission.go:ModelAdmissionSettlementBindingForRouteSnapshot",
@@ -10435,7 +10462,12 @@
           "expires_at": "2026-11-05"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "The tool-selection capability recheck changes mapped recordRouteSnapshot before dispatch. Existing model-admission signed evidence binds the prior fragment; it is preserved without redating or claiming it proves the new route guard. Reconciliation of this changed route-time fragment remains pending."
+      }
     },
     {
       "requirement_id": "SPEC-047-R004",
@@ -12336,6 +12368,29 @@
       }
     },
     {
+      "requirement_id": "SPEC-001-R007",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:static func toolSelectionCapabilities",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:static func errorEndFrame",
+        "phase4-coordinator/internal/ws/messages.go:type Heartbeat struct",
+        "phase4-coordinator/internal/pool/provider.go:type ToolSelectionCapability"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/ToolSelectionPolicyTests.swift:final class ToolSelectionPolicyTests",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionCapabilityRouting"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Additive tool-selection wire capabilities and terminal failure transport are implemented. Studio qualification, released-provider acceptance and deployed protocol evidence remain pending; capability assertions alone confer no trust or acceptance."
+      }
+    },
+    {
       "requirement_id": "SPEC-002-R005",
       "spec_id": "SPEC-002",
       "state": "pending",
@@ -12483,6 +12538,37 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1355",
         "rationale": "SPEC-006 v0.9.51 route trace forwarding (#1355). It ships in a later gateway runtime train. The requirement stays pending until production metrics show it serving real buyer traffic through the gateway."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R021",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/tool_selection.go:func providerSupportsToolSelection",
+        "phase4-coordinator/internal/buyer/tool_selection.go:func validateToolSelection(body",
+        "phase4-coordinator/internal/buyer/tool_selection.go:func validateToolSelectionOutput",
+        "phase5-gateway/internal/router/tool_selection_capabilities.go:func mergeToolChoiceModes",
+        "phase5-gateway/internal/router/openrouter_models.go:func openRouterSupportedParameters"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionForwardingUnchanged",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionRequestValidation",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionCapabilityRouting",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionOutputValidation",
+        "phase4-coordinator/internal/buyer/tool_selection_test.go:TestToolSelectionQueuedReconnectFailsClosed",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeTranslations",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeRejectsMissingToolsAndNames",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionFacadeStreamingFailureNeverCompletes",
+        "phase5-gateway/internal/router/tool_selection_test.go:TestToolSelectionCapabilitiesRequireCurrentEnforcement"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2014",
+        "rationale": "Selection-preserving dispatch, model/runtime capability filtering, schema/output validation and buyer capability projection are implemented with unit coverage. Coordinator/gateway deployment, Studio qualification and an approved released-provider buyer acceptance remain pending. Capability advertisements and parser support are not live acceptance; this row is not promoted."
       }
     },
     {

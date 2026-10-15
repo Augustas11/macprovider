@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.11 (2026-09-30, §3.8 coordinator pre-dispatch enforcement clarified)
+**Version:** 0.2.12 (2026-10-15, bounded tool-selection guarantees)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,25 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.12 (2026-10-15, tool-selection guarantees, Related: #2014):**
+  Adds §3.11 (`SPEC-018-R006`) for an explicitly bounded native
+  `required`/named implementation using complete-generation withholding and
+  schema validation, plus native `none`. This is not grammar-constrained
+  sampling and does not qualify a model by family name alone. **Amendment 5**
+  amends v0.1 §5/AC-13's auto-only rejection and scopes v0.2.9 §2.2 serial
+  early-stop and §10d.4 incremental emission to ordinary `auto` turns.
+  Guaranteed modes validate the entire completion before any content or call
+  is exposed; a serial cardinality violation cannot be hidden by early stop.
+  AC-45 adds the diagnostic value `buffered_tool_selection` for this path.
+  Rationale: an agent's required or named selection must survive dispatch and
+  cannot succeed as prose or another function. Replacement mitigation: exact
+  loaded-model/runtime capability binding, strict bounded schema and output
+  validation, full streaming holdback, and explicit unsupported versus
+  generated-output failures. Residual risk: unconstrained generation can fail
+  validation; success is guaranteed to satisfy the selection, not to occur.
+  Unit coverage does not establish Studio qualification or released-provider
+  buyer acceptance; conformance remains pending.
 
 - **v0.2.11 (2026-09-30, §3.8 enforcement point clarified):** The native
   provider already returns HTTP 400 `unsupported_modelID_for_multi_turn`.
@@ -257,6 +276,8 @@ When the underlying model output contains N recognized tool calls, the provider 
 
 **AMENDED v0.2.9:** The N-call preservation rule applies when `parallel_tool_calls` is `true`. When the field is omitted or `false`, the turn is serial: after the first complete valid declared tool (complete JSON object or closed function-XML, within byte/depth caps), the provider MUST stop generation, emit `finish_reason:"tool_calls"` and the transport terminal marker, drop leftover markup, and MUST NOT synthesize further `tool_calls[]` from later text in that turn. A non-boolean `parallel_tool_calls` is HTTP 400 `invalid_request`. Incomplete or undeclared markup MUST NOT trigger serial stop.
 
+**AMENDED v0.2.12:** §3.11 guaranteed `required`/named turns withhold and validate the complete generation instead of stopping at the first parsed call. Their serial policy requires exactly one call in the complete output. Ordinary `auto` retains the v0.2.9 behavior above.
+
 Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; locked by `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:21-30`; serial stop `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` and `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift`. Registers `SPEC-018-R004`.
 
 ### 2.3 `arguments` String Encoding
@@ -454,6 +475,117 @@ Normative rules:
 5. **Token accounting and visible-final truncation:** For Harmony responses, buyer API `usage.completion_tokens` MUST count only token IDs in `final` channel body spans that become buyer-visible assistant content. Structural Harmony tokens, `analysis` body tokens, `commentary` body tokens, tool-call JSON body tokens, constrain/header tokens, and call/end/return markers MUST NOT contribute to API `completion_tokens`. This buyer-visible usage rule does not redefine receipt or settlement accounting: receipt/settlement `tokens_out` remains the actual generated output token count per SPEC-015 and the settlement profile. A Harmony completion that emits only tool calls and no final-channel content therefore has API `completion_tokens = 0` while receipt/settlement `tokens_out` records the generated Harmony tokens. If generation ends by `length` or request stop while already inside a `final` channel body, the implementation MAY expose the filtered final-body prefix generated so far and count only those emitted final-body tokens in API usage; this exception does not apply to hidden `analysis`, `commentary`, role/header, constrain, or function-call JSON spans, which remain fail-closed as `malformed_tool_call_final_json` when structurally incomplete. If a request stop is observed inside the visible final-body prefix, later Harmony frames and tool calls MUST be suppressed.
 6. **Non-Harmony byte identity:** If the request `modelID` does not match the §3.1 Harmony row, the Harmony parser MUST be bypassed. Existing Qwen/Llama parser behavior remains unchanged. Before computing a content delta or feeding decoded text to the incremental tool-call parser, the provider MUST hold back the longest trailing suffix that is a proper prefix of any deterministic `clean_up_tokenization_spaces` rewrite pattern (`" ."`, `" ?"`, `" !"`, `" ,"`, `" ' "`, `" n't"`, `" 'm"`, `" 's"`, `" 've"`, `" 're"`). The terminal flush releases the finalized text. Non-Harmony streaming content and tool-argument concatenations MUST therefore be byte-identical to the corresponding non-streaming decoded bytes for the same generated text and token IDs. The buyer-delivered concatenation remains the streaming output, structured-output terminal-validation, and settlement domain under SPEC-015 §N.5. Retaining a cleanup-deleted space is permitted only as bounded defensive fallback behavior for an unknown cleanup rewrite outside this fixed rule set; it MUST NOT apply to streamed tool arguments, and any such argument mismatch fails final-close. Harmony retains the exact parity rule in rule 4.
 
+### 3.11 Bounded tool-selection guarantees (v0.2.12)
+
+**SPEC-018-R006 — Preserve and enforce selected tool modes.** This section
+supersedes historical auto-only restrictions and governs the non-auto paths.
+Omitted, `null`, and `"auto"` preserve the existing family-specific parsing,
+serial stopping and incremental streaming behavior; they do not acquire a
+schema-validity or required-call guarantee from this section.
+
+This matrix applies to cleartext Chat Completions, its Responses/Messages
+translations, and provider-local native HTTP serving. It does not negotiate
+explicit tool modes for relay-blind/encrypted envelopes.
+
+| Loaded model and runtime | `auto` | `none` | `required` and named function |
+|---|---|---|---|
+| Native `mlx_cache`, exact loaded `mlx-community/Qwen3.6-35B-A3B-4bit` | Existing behavior | Supported | Complete-generation schema holdback |
+| Other native `mlx_cache` identities | Existing behavior | Supported | Unsupported |
+| External/loopback runtimes | Existing behavior | Unsupported | Unsupported |
+
+A buyer alias can use the first row only when routing resolves to that same
+loaded model identity. A `qwen3` family substring, catalog entry, available
+parser, or claimed OpenAI compatibility alone MUST NOT enable guarantees.
+`required`/named require an explicit effective completion budget of 1–16,384
+tokens (`max_tokens`, or its accepted `max_completion_tokens` alias). An absent
+or out-of-range budget fails before inference with HTTP 400
+`unsupported_tool_choice`; implementations MUST NOT supply an unrequested
+default to admit a guaranteed turn. They also require 1–128 function tools
+with unique 1–64-byte ASCII
+`[A-Za-z0-9_-]` names. Named selection is the OpenAI object
+`{"type":"function","function":{"name":"NAME"}}`; `NAME` MUST name a
+declared function. Unsupported modes, unavailable names, incompatible
+runtime/model combinations, and custom `stop` strings or non-text
+`response_format` combined with `required`/named MUST fail before inference with HTTP 400
+`unsupported_tool_choice`; they MUST NOT be downgraded to `auto`.
+
+For `required`/named, every tool's parameters MUST be a schema in the existing
+SPEC-019 strict validator subset: a typed root object; typed schema nodes
+(`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`);
+`additionalProperties:false` on every object; every declared object property
+uniquely listed in `required`; and an `items` schema on every array. Allowed
+keywords are `type`, `properties`, `required`, `items`, `additionalProperties`,
+scalar typed `enum`/`const`, `title`, `description`, `minimum`, `maximum`, and
+`multipleOf`, plus root `$schema`. Every numeric value anywhere in a schema
+MUST be finite with absolute magnitude at most `9007199254740991`
+(`2^53 - 1`), including bounds and numeric `enum`/`const` values. This limits
+the contract to the validator's supported numeric domain and prevents
+large-integer rounding from satisfying a different schema value. Numeric
+bounds must be ordered; `multipleOf` must be greater than `1e-300`. References, union types, optional
+properties, combinators, string patterns/formats and other keywords are
+unsupported. Each schema is at most 16,384 bytes and depth 32. Malformed or
+unsupported schemas fail before inference with HTTP 400
+`unsupported_tool_schema`; the implementation MUST NOT silently weaken a
+schema or treat it as a prompt-only suggestion.
+
+The native guaranteed path MUST withhold the complete generation, parse only
+complete `<tool_call>` envelopes containing strict JSON objects, and validate
+all names and argument objects against the corresponding declared schemas
+before exposing success. Every numeric value recursively within generated
+arguments MUST also be finite with absolute magnitude at most
+`9007199254740991`; out-of-domain values are generated-output validation
+failures, even when a schema contains no numeric bound. This domain applies
+to JSON numbers, without coercing numeric-looking strings. Function-XML,
+Python syntax, duplicate keys,
+missing/invalid arguments, trailing non-whitespace, malformed or partial
+markup, and undeclared/wrong names MUST NOT be recovered into a successful
+call. The path MUST NOT fabricate arguments, insert a missing call, repair
+JSON, retry generation without the selection, or fall back to ordinary prose.
+Every successful `required` response contains at least one valid declared
+call; every successful named response contains only the selected function.
+Omitted/false `parallel_tool_calls` requires exactly one complete call;
+`true` allows 1–128 complete calls in generated order. Argument caps remain
+1 MiB per call and 2 MiB total, with depth 32.
+
+The guarantee is output validation after ordinary model generation, not a
+claim of constrained token sampling. Token exhaustion/`length`, invalid
+arguments, incomplete output, or another generated-output validation failure
+MUST terminate with `tool_selection_validation_failed` (HTTP 502 before
+headers, a terminal error after stream commitment). Cancellation and timeout
+remain bounded by the existing request lifecycle and MUST NOT yield a
+successful completion or fabricated call. No validation-failed turn is a
+successful tool result.
+
+For `stream:true`, the provider MUST hold back all assistant content and
+`tool_calls` deltas until complete-generation validation succeeds, then emit
+the validated call(s), `finish_reason:"tool_calls"`, usage when applicable,
+and the transport completion marker. Invalid output MUST NOT expose partial
+calls, ordinary content, or a successful terminal finish reason. This is full
+holdback, distinct from §10d.4's ordinary-auto incremental path; keepalives
+carry no generated content and do not establish validation success. The
+coordinator streaming diagnostic for this path is `buffered_tool_selection`.
+
+`none` also withholds generation until its no-call check passes. It disables
+new tool calls for the current turn; previous assistant tool
+calls and tool results remain conversation history. It MUST NOT emit a
+successful `tool_calls` result. It does not require a parameter schema or a
+tool-enabled family to provide ordinary text output.
+
+The same enforcement applies at provider-local native HTTP serving and
+cleartext coordinator relay dispatch. SPEC-006 owns buyer endpoint translation
+and capability projection; translators MUST preserve these selection semantics.
+Relay-blind/encrypted envelopes do not negotiate `schema-holdback-v1` in this
+change and receive no `none`, `required`, or named-mode capability claim. A new
+provider that decrypts an explicit non-auto selection MUST reject it before
+generation using the existing opaque `relay_blind_provider_unsupported` path,
+without disclosing the requested function name; automatic selection remains
+unchanged. A blind coordinator cannot infer a hidden mode
+in legacy ciphertext, so neither this contract nor a cleartext capability
+listing establishes that legacy encrypted requests enforce it.
+Local tests and capability fields are implementation evidence only. Studio
+hardware qualification and acceptance through the gateway using an approved
+released provider remain pending, and MUST NOT be inferred from this matrix.
+
 ## 4. Streaming Wire Shape
 
 When `stream = true`, the buyer-visible response MUST use OpenAI-style SSE chat-completion chunks.
@@ -505,7 +637,7 @@ The v0.1 response-synthesis error behavior is:
 - explicit `null`, non-object, or invalid JSON arguments fall back to plain assistant content;
 - output containing recognized sentinels but no `modelID` family match falls back to plain assistant content (§3.2);
 - output exceeding the §3.4 parser depth (32) or byte (256 KiB) caps falls back to plain assistant content;
-- unsupported `tool_choice` values other than omitted, `null`, or `"auto"` produce HTTP 400 with code `unsupported_tool_choice`;
+- unsupported `tool_choice` values other than omitted, `null`, or `"auto"` produce HTTP 400 with code `unsupported_tool_choice` (**AMENDED v0.2.12:** §3.11 defines supported non-auto modes; every other model/runtime combination still fails explicitly);
 - current phase3 provider input containing `role: "tool"` or assistant history `tool_calls[]` produces HTTP 400 with code `unsupported_tool_messages`.
 
 Source: fallback behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-27`; provider scope validation in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909-940`; tests in `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:99-155`.
@@ -672,7 +804,7 @@ AC-11. Coordinator WebSocket relay preserves provider-emitted `tool_calls[]` JSO
 
 AC-12. Gateway non-streaming and streaming forwarding preserves provider-emitted `tool_calls[]` fields without semantic rewriting.
 
-AC-13. `tool_choice` values other than omitted, `null`, or `"auto"` fail with HTTP 400 code `unsupported_tool_choice` at the current provider boundary.
+AC-13. Historical v0.1: `tool_choice` values other than omitted, `null`, or `"auto"` fail with HTTP 400 code `unsupported_tool_choice` at the provider boundary. **AMENDED v0.2.12:** §3.11 defines the bounded non-auto support matrix; unsupported combinations retain this 400 and MUST NOT be rewritten to `auto`.
 
 AC-14. Current provider requests containing `role: "tool"` messages or assistant-history `tool_calls[]` fail with HTTP 400 code `unsupported_tool_messages`. (v0.1 ratifies this as the first-turn-only limitation; closed in §10a v0.2.) For v0.2.0+, AC-14 is superseded by AC-26 and AC-27; the v0.1.x error path is no longer the desired behavior, and the v0.2.0 success path is. AC-14 remains in the SPEC for historical lock discipline.
 
@@ -747,6 +879,8 @@ AC-43. **#4 AC-23s streaming forward-compat regression.** A release-gate test pi
 AC-44. **#4 Cline large write streaming evidence.** In the AC-25a/AC-25b Cline evidence, at least one file-edit tool call has final `function.arguments` length ≥ 64 KiB and at least three argument deltas arrive before `finish_reason:"tool_calls"`. Provider-side timestamp instrumentation is REQUIRED: `t_tool_call_open_detected` (provider-internal native opening detected), `t_first_forwarded_sse_byte` (coordinator-side first forwarded SSE byte for that tool-call argument stream), and `t_first_gateway_byte` (gateway-side first byte delivered to the buyer connection). Timing measurements assume NTP-anchored clock skew `|t_provider - t_gateway| ≤ 100 ms` at request start, verified via heartbeat. Operators MUST run NTP on provider Macs and gateway hosts. v0.2 does NOT inherit this from another SPEC; it is a v0.2 prerequisite for AC-44 to be measurable. IMPL prompt will add `chrony` / `timesyncd` to the deployment checklist. Deterministic provider benchmark fixture: `qwen3-32b-4bit-mlx`, pinned prompt in the AC-25 fixture repo that induces a ≥64 KiB file edit, and recorded expected first-tool-call-open detection time for that model/hardware. Per-class hardware target is measured with skew correction: `t_first_gateway_byte - t_tool_call_open_detected - clock_skew_offset` p95 ≤ 1500 ms on M4, ≤ 3000 ms on M2/M3 in the deterministic provider fixture, where `clock_skew_offset` is measured at request start. Fail condition: missing timestamps, missing heartbeat skew verification, p95 above target after skew correction, or the large edit is buffered to one final delta when streaming is enabled.
 
 AC-45. **#4 Operator kill switch, per-(buyer, provider) downgrade, and buyer-visible diagnostic.** Operator configuration can force buffered-to-end behavior for streaming requests without changing the public wire contract, and 3 malformed incremental streams from the same buyer to the same provider within a 5-minute window trigger automatic downgrade to buffered-to-end for that buyer's future requests to that provider only. The downgrade lifts after 10 minutes with no further malformed streams from that buyer to that provider. Every v0.2 response includes `X-MacProvider-Streaming-Mode` with one of `incremental`, `buffered_kill_switch`, or `buffered_provider_downgrade`. Fixtures cover all three values and assert correlation between the header, operator/provider/buyer tuple state, and request log. AC-45c adversarial-buyer fixture: one buyer repeatedly induces malformed streams from a provider; other buyers sticky-routed to the same provider continue to receive `incremental` unless their own tuple crosses the downgrade threshold. Fail condition: no kill switch exists, the kill switch changes request/response schema, one buyer's malformed incremental stream disables streaming for other buyers or globally for all providers, downgrade fails to recover after the clean interval, the header is absent, or the header value disagrees with operator/provider/buyer state.
+
+**AMENDED v0.2.12 (AC-45):** The closed diagnostic enum additionally accepts `buffered_tool_selection` for §3.11 non-auto complete-generation validation holdback. This value is independent of operator/tuple downgrade state; the existing auto-path downgrade and recovery requirements are unchanged. Tests MUST distinguish this holdback from a kill switch or provider downgrade.
 
 AC-46. **#2 Minimal model-hash binding observation.** Every provider response in v0.2 includes additive, non-canonicalized `usage.macprovider_model_hash_observed`. Buyer-visible behavior is field-present plus JSON type-correct only: the value is `null | "^[a-f0-9]{64}$"`. This field is observation-only in v0.2 and MUST NOT drive v0.2 parser selection or settlement. It gives buyers and v0.3 registry work passive evidence to log the served `model_hash` against the modelID-declared family. Provider self-test: when the provider's own `model_hash` subsystem reports a known hash, the field MUST be that lowercase hex value; when unknown, the field MUST be `null`. AC-46 fixtures cover (a) buyer-side type assertion that every v0.2 response has the field present with type null or lowercase SHA-256 hex, and (b) provider-side log/release-gate assertion that known/unknown branches match the provider's local hash subsystem state. Fail condition: buyer-visible missing field, non-null non-hex value, inclusion in SPEC-015 canonical output binding, v0.2 enforcement based on a registry that §10c has explicitly deferred, or provider self-test mismatch against local `model_hash` state.
 
@@ -856,6 +990,8 @@ Amendment log:
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
 - Amendment 4 (v0.2.9): §2.2 v0.1-locked “preserve all N recognized tool calls” → scoped to `parallel_tool_calls: true`. Omitted/`false` is serial: stop after the first complete valid tool. Rationale: agent loops (Pi) omit the field and execute one tool per turn; leftover decode after a valid tool hangs or kills the stream. Residual risk: a client wanting two tools in one assistant message must send `parallel_tool_calls: true`. Mitigation: explicit request boolean; default matches Pi.
+
+- Amendment 5 (v0.2.12): §5/AC-13 v0.1 auto-only rejection → §3.11 explicit model/runtime matrix; v0.2.9 §2.2 serial early-stop and §10d.4 incremental tool emission → ordinary `auto` only, with complete-generation holdback for `required`/named; AC-45 adds `buffered_tool_selection` to its diagnostic enum. Rationale: selected modes must be preserved and successful calls must satisfy the selected name, schema and cardinality. Mitigation: strict bounds, capability routing, full holdback and explicit failures. Residual risk: generation may fail validation; no fabricated or repaired call is substituted.
 
 Note: §10c.1 covers both locked-content amendments (e.g., Amendment 1 amended §10c which was v0.1.3-locked) AND in-flight draft-content revisions (e.g., Amendment 2 deleted §3.9 which was v0.2.1-introduced and not yet locked). v0.3 governance MAY refine this distinction; v0.2.4 treats both classes under the same (a)-(d) discipline.
 
@@ -973,9 +1109,11 @@ AC-14 transition: v0.1.5 ratified `unsupported_tool_messages` as an expected err
 
 #### 10d.4 Deliverable #4 — Token-incremental streaming promotion
 
+**AMENDED v0.2.12:** This incremental-emission contract applies to ordinary `auto` turns. §3.11 `required`/named turns use full generation holdback before any generated content or calls are exposed.
+
 For Cline-targeted compatible models, v0.2 streaming defaults to token-incremental tool-call streaming. Operator configuration MUST be able to force buffered-to-end behavior as a kill switch. Auto-downgrade attribution is per-(buyer, provider) tuple, NOT per-provider for all buyers: 3 malformed streams from the same buyer to the same provider within a 5-minute window downgrade that buyer's future requests to that provider to buffered-to-end. The downgrade lifts after 10 minutes of no further malformed streams from the same buyer to the same provider. This configurability is operational and MUST NOT be exposed as a public wire negotiation surface in v0.2.
 
-Streaming mode is exposed to buyers via the non-negotiating diagnostic response header `X-MacProvider-Streaming-Mode`. Values: `incremental` (default for v0.2 Cline-compatible models), `buffered_kill_switch` (operator-disabled), `buffered_provider_downgrade` (auto-downgraded due to malformed stream history for that buyer/provider tuple). The header is observation-only — buyers MUST NOT use it for negotiation in v0.2.
+Streaming mode is exposed to buyers via the non-negotiating diagnostic response header `X-MacProvider-Streaming-Mode`. Values: `incremental` (default for v0.2 Cline-compatible models), `buffered_kill_switch` (operator-disabled), `buffered_provider_downgrade` (auto-downgraded due to malformed stream history for that buyer/provider tuple), `buffered_tool_selection` (v0.2.12 non-auto output validation holdback). The header is observation-only — buyers MUST NOT use it for negotiation in v0.2.
 
 The Cline v4.0.0 anchor framework drives OpenAI-compatible chat completions through Vercel AI SDK (`@ai-sdk/openai-compatible`), not openai-python. Cline-specific terminal-SSE-error behavior is gated by AC-48b using `sdk/packages/llms/src/providers/vendors/openai-compatible.ts`; openai-python ecosystem behavior remains gated separately by AC-39 and AC-48a.
 

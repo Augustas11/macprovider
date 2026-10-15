@@ -2338,7 +2338,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 
 func isNullUsageProviderError(body []byte) bool {
 	switch openAIErrorCode(body) {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed":
 		return true
 	default:
 		return false
@@ -3974,7 +3974,7 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 	// Rewriting them to stream_malformed made Pi/openai-python treat a
 	// structured parse failure as a generic malformed stream.
 	switch code {
-	case "malformed_tool_call", "malformed_tool_call_final_json":
+	case "malformed_tool_call", "malformed_tool_call_final_json", "tool_selection_validation_failed":
 		return true
 	default:
 		return false

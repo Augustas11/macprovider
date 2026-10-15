@@ -1763,7 +1763,7 @@ actor InferenceRelay {
         // four terminal structured-output codes are the canonical table.
         // Asymmetry across provider WS, coordinator SSE, and gateway SSE
         // allow-lists is a money-path violation.
-        case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+        case "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
             status = error.code
         default:
             status = "error_internal"
@@ -1777,6 +1777,7 @@ actor InferenceRelay {
         ]
         if error.code == "malformed_json_response" ||
             error.code == "json_schema_validation_failed" ||
+            error.code == "tool_selection_validation_failed" ||
             error.code == "response_byte_cap_exceeded" ||
             error.code == "provider_timeout" {
             frame["retryable"] = (error.envelope["error"] as? [String: Any])?["retryable"] as? Bool

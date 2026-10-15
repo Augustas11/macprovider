@@ -88,6 +88,26 @@ for call in resp.choices[0].message.tool_calls or []:
     print(call.function.name, call.function.arguments)  # arguments is a JSON string
 ```
 
+For a required call, set `tool_choice="required"` and an explicit
+`max_tokens` budget from 1 through 16,384 (for example, `max_tokens=1024`).
+To select one function, pass both
+`tool_choice={"type":"function","function":{"name":"get_weather"}}` and
+`max_tokens=1024`.
+These modes require the exact native Qwen3.6 model/runtime and the strict
+parameter-schema subset described in [Tool-selection support](tool-selection.md).
+For that example, add `"additionalProperties": False` to the parameter object;
+every declared property must be required. The ordinary `auto` example above
+preserves its existing behavior.
+
+`GET /v1/status` exposes `tool_choice_modes` per model. A mode is available
+only through providers advertising the corresponding loaded model/runtime
+capability; a model family or OpenAI-compatible loopback does not establish
+support. Unsupported requests fail explicitly. Guaranteed streaming holds
+back all generated content and calls until validation succeeds, so it does
+not provide incremental argument fragments. These explicit-mode guarantees
+apply to cleartext requests and provider-local native HTTP; relay-blind
+encrypted envelopes do not negotiate them.
+
 A complete multi-turn tool demo lives at [`examples/tool_calling_demo.py`](../examples/tool_calling_demo.py).
 
 **Note.** `function.arguments` is a JSON-encoded STRING per OpenAI's wire shape — `json.loads(call.function.arguments)` to get a dict. Both Qwen 2.5 and Llama 3.3 chat templates render `tools` natively.

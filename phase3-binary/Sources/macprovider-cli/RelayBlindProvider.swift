@@ -501,6 +501,16 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
             let parsed = try ChatCompletionRequest.parse(data: plaintext)
+            // The visible envelope has no negotiated capability for selection
+            // guarantees. Reject after decryption using the opaque relay-blind
+            // error vocabulary, without exposing the requested function.
+            do {
+                guard try ToolSelectionPolicy.selection(parsed.promptSource.toolChoice) == .auto else {
+                    throw RelayBlindProviderError.providerUnsupported
+                }
+            } catch {
+                throw RelayBlindProviderError.providerUnsupported
+            }
             // SPEC-049-R010: privacy work is not a conversation-cache key and is
             // not the direct-HTTP disk-tier provenance. Swift Strings cannot be zeroed.
             let request = privacyClass
