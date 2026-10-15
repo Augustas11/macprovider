@@ -1602,6 +1602,18 @@ func (s *Server) publicRoutingEligible(p pool.Provider) bool {
 	return true
 }
 
+// publicServingEligible is the /poolz.serving_eligible predicate (#1570):
+// publicRoutingEligible apart from the free-slot term, so a provider that is
+// serving but momentarily full still counts. The gateway uses it for the
+// context the OpenRouter document advertises; buyer routing keeps
+// routing_eligible.
+func (s *Server) publicServingEligible(p pool.Provider) bool {
+	if p.SlotsTotal > 0 && p.SlotsFree < 1 {
+		p.SlotsFree = p.SlotsTotal
+	}
+	return s.publicRoutingEligible(p)
+}
+
 // SetCatalogMaterialRoutingGate injects the buyer router's request-independent
 // SPEC-022 R-2.7 verdict (enforce mode and no Tier-2 route-snapshot material
 // => excluded) so /poolz.routing_eligible agrees with buyer routing. Like the
@@ -7505,6 +7517,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	type poolzProvider struct {
 		pool.Provider
 		RoutingEligible   bool                    `json:"routing_eligible"`
+		ServingEligible   bool                    `json:"serving_eligible"`
 		CanaryFailCount   int                     `json:"canary_fail_count"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
@@ -7528,6 +7541,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		poolz = append(poolz, poolzProvider{
 			Provider:          provider,
 			RoutingEligible:   s.publicRoutingEligible(provider),
+			ServingEligible:   s.publicServingEligible(provider),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,

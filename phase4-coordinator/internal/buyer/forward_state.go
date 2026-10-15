@@ -69,6 +69,10 @@ type forwardState struct {
 	// tool-history gate against the fresh provider session.
 	requestedModel       string
 	multiTurnToolHistory bool
+	// nonStrictJSONSchema records a SPEC-019 §1a non-strict json_schema
+	// request so a queued same-ID reconnect is re-checked against the CLI
+	// capability gate.
+	nonStrictJSONSchema bool
 	// poolRequiresSettlementEnforce is captured from the selected pool
 	// snapshot. It is re-checked at the dispatch boundary so a coordinator
 	// settlement-mode hot reload cannot downgrade an enforce-required pool
@@ -232,7 +236,12 @@ type forwardState struct {
 	// have returned an error before afterAdvance fired); when
 	// preflight was skipped (low estimate OR no preflight func), the
 	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
+	// #1570: this is the billed fallback estimate (bytes/4); routing,
+	// preflight labels and route evidence use routingEstimatedTokens.
 	estimatedTokens int
+	// routingEstimatedTokens is the SPEC-006 §7.2.1 context-fit estimate
+	// selectProviderExcluding routes and preflights on.
+	routingEstimatedTokens int
 
 	stickyResult     string
 	stickyMissReason string

@@ -818,15 +818,9 @@ private func parseResponseFormat(_ raw: Any?, rawSchemaByteCount: Int?) throws -
             throw APIError(status: 400, message: "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$", code: "json_schema_invalid_name", param: "response_format.json_schema.name")
         }
         let description = rawSpec["description"] as? String
-        let strict = try optionalBool(rawSpec["strict"], key: "response_format.json_schema.strict") ?? true
-        guard strict else {
-            throw APIError(
-                status: 400,
-                message: "Non-strict structured output is unsupported in SPEC-019 v0.1.0",
-                code: "json_schema_non_strict_unsupported",
-                param: "response_format.json_schema.strict"
-            )
-        }
+        // SPEC-019 v0.3.0 §1a: explicit true is strict, explicit false is
+        // non-strict, absent is strict only when the schema fits the subset.
+        let explicitStrict = try optionalBool(rawSpec["strict"], key: "response_format.json_schema.strict")
         guard let rawSchema = rawSpec["schema"], !(rawSchema is NSNull) else {
             throw APIError(status: 400, message: "response_format.json_schema.schema is required", code: "json_schema_missing_schema", param: "response_format.json_schema.schema")
         }
@@ -837,7 +831,18 @@ private func parseResponseFormat(_ raw: Any?, rawSchemaByteCount: Int?) throws -
         guard try schema.deterministicJSONString().utf8.count <= JSONSchemaValidator.maxSchemaBytes else {
             throw APIError(status: 413, message: "response_format.json_schema.schema exceeds 16384 bytes", code: "json_schema_too_large", param: "response_format.json_schema.schema")
         }
-        try JSONSchemaValidator.validateSchemaShape(schema: schema)
+        var strict = false
+        if explicitStrict != false {
+            do {
+                try JSONSchemaValidator.validateSchemaShape(schema: schema)
+                strict = true
+            } catch where explicitStrict == nil {
+                strict = false
+            }
+        }
+        if !strict {
+            try JSONSchemaValidator.validateNonStrictSchemaShape(schema: schema)
+        }
         return .jsonSchema(JSONSchemaSpec(name: name, description: description, strict: strict, schema: schema))
     default:
         throw APIError(status: 400, message: "response_format.type must be text, json_object, or json_schema", code: "invalid_request")

@@ -1371,8 +1371,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
+	//
+	// #1570: the decode-idle deadline is armed by the first content-bearing
+	// frame, not at stream open. Before that frame the provider is in
+	// admission/prefill, which the first-token phase (and the ceiling) bound.
+	// Arming decode-idle at open made a long prefill expire as decode_idle,
+	// so production had to raise streaming_idle_ms to the prefill budget and
+	// lost decode-idle protection.
 	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
-	progressDeadline := streamingProgressDeadline(idleTimeout)
+	var progressDeadline time.Time
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage
@@ -1737,8 +1744,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						line = nil
 					}
 				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
-					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r), "upstream_error_code", terminalCode)
+					// #1570: a coordinator terminal error frame keeps its
+					// code. Rewriting provider_error to stream_malformed hid
+					// the real failure. Settlement is unchanged.
+					if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
+						writeSSEError(w, message, errType, code)
+					} else {
+						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -3967,6 +3981,25 @@ func isPassThroughTerminalSSEErrorCode(code string) bool {
 	}
 }
 
+// coordinatorStreamTerminalError maps a coordinator post-commit terminal SSE
+// error code to the buyer-visible envelope the gateway emits instead of
+// stream_malformed (#1570). Codes, types and messages are the gateway's own,
+// never the upstream text: coordinator provider_error is normalized to
+// upstream_provider_error (SPEC-006 §17), provider_disconnected keeps the
+// SPEC-002 FR-B6 server_error envelope. Both settle as stream_malformed, a
+// SPEC-006 §17.7.1 named mapping. provider_timeout already passes through as
+// a SPEC-019 terminal code.
+func coordinatorStreamTerminalError(code string) (string, string, string, bool) {
+	switch code {
+	case "provider_error":
+		return "upstream_provider_error", "api_error", "Upstream provider error", true
+	case "provider_disconnected":
+		return "provider_disconnected", "server_error", "Provider disconnected during streaming", true
+	default:
+		return "", "", "", false
+	}
+}
+
 func gatewayCleanLengthTruncationTerminalCode(code string) bool {
 	switch code {
 	case "stream_output_exceeded", "response_byte_cap_exceeded":
@@ -4543,35 +4576,26 @@ func estimatePromptTokens(body []byte) int64 {
 }
 
 // promptHeadroomTokens absorbs the chat-template overhead that the
-// byte-heuristic cannot see (im_start/role/content/im_end markers,
-// BOS token, etc.) — fixed-cost per request, independent of body
-// length. 64 covers the largest chat templates observed in the
-// operator fleet with margin.
+// estimate cannot see (im_start/role/content/im_end markers, BOS token,
+// a default system preamble) — fixed-cost per request, independent of
+// body length.
 const promptHeadroomTokens = 64
 
-// promptCapTokens — generous upper bound used ONLY in the usage-
-// validation cap (maxUsageTokens). Equal to the billable estimate
-// plus fixed chat-template headroom. Never used as a billed
-// quantity.
+// promptCapTokens is the SPEC-006 §7.2.1 prompt reservation: the prompt part
+// of the quota hold and of the usage validation cap (maxUsageTokens). Never a
+// billed quantity.
 //
-// Background. estimatePromptTokens returns ceil(bytes/4), which is
-// fine for English prose but consistently 5-50 tokens below the
-// provider's actual tokenizer output. The provider's tokenizer
-// applies the chat template AFTER body parse, adding fixed-cost
-// overhead the byte-heuristic cannot see. Empirically reproducible
-// on mlx-community/Qwen2.5-Coder-7B-Instruct-4bit during the
-// 2026-06-28 phase-A re-run: a 115-byte body + max_tokens=4 → bare
-// cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
-// rejected as invalid_provider_usage. Adding +64 to the cap (only)
-// fixes the false reject without inflating any billed quantity.
-//
-// NOTE: this cap equals the reservation hold (chat_proxy §"Validation
-// cap matches the reservation exposure"), so it cannot be widened
-// without widening every request's quota hold. Token-dense prompts
-// that still exceed it are handled by the clamp in usageFromJSON
-// (bounded provider_reported billing) rather than a wider cap.
+// #1570: it is the larger of ceil(bytes/4) and the class-weighted upper
+// estimate, plus headroom. ceil(bytes/4) alone under-counted token-dense
+// prompts (digits, code, JSON, emoji), so the clamp in usageFromJSON charged
+// less than the provider's honest count. The max keeps every hold at or above
+// its pre-#1570 size.
 func promptCapTokens(body []byte) int64 {
-	return estimatePromptTokens(body) + promptHeadroomTokens
+	reservation := estimatePromptTokens(body)
+	if upper, ok := promptTokenClassEstimate(body, promptTokenUpperWeights); ok && upper > reservation {
+		reservation = upper
+	}
+	return reservation + promptHeadroomTokens
 }
 
 func copyForwardHeaders(dst, src http.Header) {

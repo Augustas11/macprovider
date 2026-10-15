@@ -350,12 +350,15 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 
 var externalRuntimeBody = []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)
 
+// externalRuntimePromptTokenUpperBound mirrors SPEC-006 §7.2.1: the larger of
+// len(body)/4 and the class-weighted upper estimate (16 tokens for
+// externalRuntimeBody), plus 64 headroom.
 func externalRuntimePromptTokenUpperBound() int64 {
-	estimate := len(externalRuntimeBody) / 4
-	if estimate < 1 {
-		estimate = 1
+	estimate := int64(len(externalRuntimeBody) / 4)
+	if classUpper := int64(16); classUpper > estimate {
+		estimate = classUpper
 	}
-	return int64(estimate) + 64
+	return estimate + 64
 }
 
 // externalRuntimePoolHeaders are a pool route's headers from a gateway that

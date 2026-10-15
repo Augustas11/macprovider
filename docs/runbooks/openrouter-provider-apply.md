@@ -64,8 +64,11 @@ Do not submit the OpenRouter form on a failing soak.
 - OpenRouter catalog slug: `qwen/qwen3.6-35b-a3b`
 - Features declared on the row: `tools`, `tool_choice` (`auto` only),
   `response_format` (object descriptor whose `type` is `text`, `json_object`
-  or `json_schema`), `structured_outputs`. `json_schema` is strict-only (SPEC-019): a schema
-  without `additionalProperties:false` on every object returns HTTP 400.
+  or `json_schema`), `structured_outputs`. `json_schema` follows SPEC-019
+  v0.3.0 §1a: `strict:true` is enforced and rejects a schema outside the strict
+  subset with HTTP 400; `strict:false`, or an absent `strict` with a schema
+  outside the subset, runs non-strict (schema-guided, not validated), matching
+  the OpenAI default.
 
 Submit at [openrouter.ai/providers/apply](https://openrouter.ai/providers/apply)
 only after the soak and after `/privacy` is live.

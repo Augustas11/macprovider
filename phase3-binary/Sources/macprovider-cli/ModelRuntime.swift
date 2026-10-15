@@ -5290,7 +5290,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
         if HarmonyResponseParser.isHarmonyModelID(request.model),
-           requiresStructuredValidation(request.responseFormat)
+           isStructuredResponseFormat(request.responseFormat)
             || hasEnabledTools(request.promptSource.tools)
             || request.stop.contains(where: { !$0.isEmpty }) {
             return false
@@ -11565,12 +11565,26 @@ actor ModelRuntime: ModelRuntimeServing {
         return ("", parsed.toolCalls)
     }
 
+    /// Any json_object or json_schema request, strict or not (SPEC-019 §1a).
+    /// Routing gates that depend on the rendered structured-output prompt use
+    /// this; post-inference validation and holdback use
+    /// `requiresStructuredValidation`.
+    static func isStructuredResponseFormat(_ responseFormat: ResponseFormat) -> Bool {
+        if case .text = responseFormat {
+            return false
+        }
+        return true
+    }
+
     static func requiresStructuredValidation(_ responseFormat: ResponseFormat) -> Bool {
         switch responseFormat {
         case .text:
             return false
-        case .jsonObject, .jsonSchema:
+        case .jsonObject:
             return true
+        case .jsonSchema(let spec):
+            // SPEC-019 v0.3.0 §1a: non-strict output is not validated.
+            return spec.strict
         }
     }
 
@@ -11633,6 +11647,9 @@ actor ModelRuntime: ModelRuntimeServing {
             _ = try parseStructuredJSONContent(completion.content, requireObjectOrArray: true)
             return completion
         case .jsonSchema(let spec):
+            guard spec.strict else {
+                return completion
+            }
             let parsed = try parseStructuredJSONContent(completion.content, requireObjectOrArray: false)
             do {
                 try JSONSchemaValidator.validateInstance(parsed, against: spec.schema)

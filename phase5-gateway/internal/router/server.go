@@ -1028,6 +1028,10 @@ type statusResponse struct {
 	Coordinator coordinatorStatus `json:"coordinator"`
 	Pool        statusPool        `json:"pool"`
 	Models      []statusModel     `json:"models"`
+	// ServingMaxContextTokens maps a model id to the largest context a
+	// serving provider grants (#1570): ready or busy, serving-eligible, full
+	// or not. The OpenRouter document advertises it. Not serialized.
+	ServingMaxContextTokens map[string]int `json:"-"`
 }
 
 type coordinatorStatus struct {
@@ -1097,7 +1101,10 @@ type poolzProviderRow struct {
 	PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
 	// routing_eligible is coordinator-computed from pool.Provider.RoutingEligible().
 	// Omitted on legacy coordinators — gateway falls back to auth_state exclusion.
-	RoutingEligible *bool  `json:"routing_eligible,omitempty"`
+	RoutingEligible *bool `json:"routing_eligible,omitempty"`
+	// serving_eligible is routing_eligible apart from the free-slot term
+	// (#1570). Omitted on older coordinators.
+	ServingEligible *bool  `json:"serving_eligible,omitempty"`
 	AuthState       string `json:"auth_state,omitempty"`
 }
 
@@ -1174,6 +1181,15 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
 	for _, p := range poolz.Pool {
+		// #1570: the OpenRouter document's context comes from serving
+		// providers, including one that is busy with no free slot (which
+		// routing_eligible excludes).
+		if poolzProviderServesContext(p) && p.ModelID != "" && p.MaxContextTokens > out.ServingMaxContextTokens[p.ModelID] {
+			if out.ServingMaxContextTokens == nil {
+				out.ServingMaxContextTokens = map[string]int{}
+			}
+			out.ServingMaxContextTokens[p.ModelID] = p.MaxContextTokens
+		}
 		// SPEC-003 v0.8.3 FR-C9.4 + pool.Provider.RoutingEligible() — sessions
 		// admitted to /poolz for operator visibility but excluded from buyer
 		// routing (self_minted, bearerless_duplicate, pending receipt rotation,
@@ -1268,6 +1284,20 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 
 // poolzProviderCountsTowardBuyerCapacity mirrors pool.Provider.RoutingEligible()
 // for buyer-facing /v1/status aggregation.
+// poolzProviderServesContext reports whether a /poolz row's context is
+// servable: a ready or busy provider the coordinator marks serving-eligible
+// (routing-eligible apart from free slots). Older coordinators omit
+// serving_eligible, so the row falls back to the routing predicate.
+func poolzProviderServesContext(p poolzProviderRow) bool {
+	if p.State != "ready" && p.State != "busy" {
+		return false
+	}
+	if p.ServingEligible != nil {
+		return *p.ServingEligible
+	}
+	return poolzProviderCountsTowardBuyerCapacity(p)
+}
+
 func poolzProviderCountsTowardBuyerCapacity(p poolzProviderRow) bool {
 	if p.RoutingEligible != nil {
 		return *p.RoutingEligible

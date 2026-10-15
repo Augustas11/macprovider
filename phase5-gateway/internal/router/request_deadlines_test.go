@@ -228,13 +228,12 @@ func TestStreamCeilingFiresOnEndlessStream(t *testing.T) {
 	}
 }
 
-// TestHeartbeatOnlyStreamDiesAtProgressIdle is the highest-value guard in
-// #760. Dropping the flat wall is only safe because the idle timer became a
-// CONTENT-progress budget: a provider that keeps the socket warm with
-// role-only / keepalive frames produces bytes forever but no tokens, and under
-// the old "any byte resets the timer" rule nothing would have stopped it once
-// the wall was gone.
-func TestHeartbeatOnlyStreamDiesAtProgressIdle(t *testing.T) {
+// TestHeartbeatOnlyStreamDiesAtFirstToken pins the #760 guard after #1570
+// moved decode-idle behind the first content frame: a provider that keeps the
+// socket warm with role-only frames and never produces content is still cut,
+// now by the first-token phase rather than decode-idle. Role-only frames
+// neither disarm first-token nor arm decode-idle.
+func TestHeartbeatOnlyStreamDiesAtFirstToken(t *testing.T) {
 	// A role-only delta: real SSE traffic, zero generated content.
 	// streamingCompletionDeltaBytes excludes role/id/type/name, so this must
 	// NOT count as progress.
@@ -243,10 +242,10 @@ func TestHeartbeatOnlyStreamDiesAtProgressIdle(t *testing.T) {
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Timeouts.StreamingIdleMS = 400
-		// Every other clock is left long: only the content-progress budget
-		// can end this stream.
+		cfg.Timeouts.FirstTokenSeconds = 1
+		// Every other clock is left long: only the first-token budget can
+		// end this stream.
 		cfg.Timeouts.CoordinatorRequestSeconds = 300
-		cfg.Timeouts.FirstTokenSeconds = 300
 		cfg.Timeouts.StreamCeilingFloorSeconds = 300
 		cfg.Timeouts.StreamCeilingMaxSeconds = 900
 	}, WithHTTPClient(client))
@@ -257,14 +256,85 @@ func TestHeartbeatOnlyStreamDiesAtProgressIdle(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if elapsed > 5*time.Second {
-		t.Fatalf("heartbeat-only stream ran %s — byte traffic is still resetting the idle timer, "+
-			"so the decode-progress guard cannot catch a wedged provider", elapsed)
+		t.Fatalf("heartbeat-only stream ran %s — role-only frames disarmed the first-token phase", elapsed)
+	}
+	if elapsed < 900*time.Millisecond {
+		t.Fatalf("heartbeat-only stream ended after %s, before the 1s first-token budget — decode-idle is still armed before first content", elapsed)
 	}
 	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) {
 		t.Fatalf("want provider_timeout terminal after %s; body=%.400q", elapsed, resp.Body.String())
 	}
 	if outcome, _ := usageEventOutcome(t, dbPath, "acct_heartbeat"); outcome != "provider_timeout" {
 		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestWedgedAfterContentDiesAtDecodeIdle: once content has started, a
+// provider that degrades to role-only frames is cut by decode-idle, which
+// #1570 arms on the first content frame.
+func TestWedgedAfterContentDiesAtDecodeIdle(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		if _, err := pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"x"}}]}` + "\n\n")); err != nil {
+			return
+		}
+		endlessFrameStream(40*time.Millisecond, `data: {"id":"c","choices":[{"delta":{"role":"assistant"}}]}`+"\n\n")(pw, ctx)
+	})
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 400
+		cfg.Timeouts.FirstTokenSeconds = 300
+		cfg.Timeouts.CoordinatorRequestSeconds = 300
+		cfg.Timeouts.StreamCeilingFloorSeconds = 300
+		cfg.Timeouts.StreamCeilingMaxSeconds = 900
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_wedged_after_content")
+
+	start := time.Now()
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Fatalf("wedged stream ran %s — decode-idle did not arm on first content", elapsed)
+	}
+	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) {
+		t.Fatalf("want provider_timeout terminal after %s; body=%.400q", elapsed, resp.Body.String())
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_wedged_after_content"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestLongPrefillLongerThanDecodeIdleSucceeds is the #1570 regression: a
+// provider that commits headers, emits a role frame and then spends longer
+// than the decode-idle budget in prefill before its first content must not be
+// cut as decode_idle. Prefill belongs to the first-token phase.
+func TestLongPrefillLongerThanDecodeIdleSucceeds(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		if _, err := pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n")); err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			_ = pw.CloseWithError(ctx.Err())
+			return
+		case <-time.After(1500 * time.Millisecond): // prefill, 3x the idle budget
+		}
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}` + "\n\n"))
+		_, _ = pw.Write([]byte(`data: [DONE]` + "\n\n"))
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 500
+		cfg.Timeouts.FirstTokenSeconds = 30
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_long_prefill")
+
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	if !strings.Contains(body, `"content":"hello"`) || !strings.Contains(body, "data: [DONE]") || strings.Contains(body, "provider_timeout") {
+		t.Fatalf("a prefill longer than decode-idle was cut; body=%.600q", body)
 	}
 }
 
@@ -292,10 +362,10 @@ func TestUnknownDeltaKeyDoesNotCountAsProgress(t *testing.T) {
 			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 				cfg.Coordinator.BuyerURL = "http://coordinator.test"
 				cfg.Timeouts.StreamingIdleMS = 400
-				// Every other clock is left long: only the content-progress
-				// budget can end this stream.
+				// #1570: before first content only the first-token budget can
+				// end this stream; unknown keys must not disarm it.
 				cfg.Timeouts.CoordinatorRequestSeconds = 300
-				cfg.Timeouts.FirstTokenSeconds = 300
+				cfg.Timeouts.FirstTokenSeconds = 1
 				cfg.Timeouts.StreamCeilingFloorSeconds = 300
 				cfg.Timeouts.StreamCeilingMaxSeconds = 900
 			}, WithHTTPClient(client))

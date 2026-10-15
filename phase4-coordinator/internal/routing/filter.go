@@ -160,9 +160,9 @@ type EligibilityChecker interface {
 
 	// ProviderContextSufficient reports whether the provider's
 	// MaxContextTokens fits the request's estimated token budget.
-	// Implementation MUST use the same token-estimation function
-	// the buyer Server uses elsewhere to keep selection
-	// byte-identical with pre-Phase-C behavior.
+	// Implementation MUST use the same estimate the buyer Server routes
+	// and preflights with: the SPEC-006 §7.2.1 context-fit (central)
+	// estimate since #1570.
 	ProviderContextSufficient(p pool.Provider) bool
 
 	// Tier2Decision reports the tier2 verification outcome.

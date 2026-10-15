@@ -1710,7 +1710,7 @@ type fakeProvider struct {
 	admissionPriv      ed25519.PrivateKey
 	trustedPoolV1      bool
 	omitCatalogRelease bool
-	binaryVersion      string // "" = "1.6.0-fake"
+	binaryVersion      string // "" = "1.6.0-fake" (receipt hello) or "1.0.0-fake" (legacy hello)
 	// reconnectRequests makes runWS close its session and hello again on
 	// the same receipt key, as a restarted provider CLI does.
 	reconnectRequests chan struct{}
@@ -1723,6 +1723,15 @@ type fakeProvider struct {
 	// milliseconds and skips a 0ms sample, so without it a burst-written
 	// stream yields a decode sample only when the runner happens to stall.
 	streamDecodeDelay time.Duration
+	// maxContextTokens is the advertised max_context_tokens (0 = 8192).
+	maxContextTokens int
+}
+
+func (p *fakeProvider) maxContextTokensOrDefault() int {
+	if p.maxContextTokens > 0 {
+		return p.maxContextTokens
+	}
+	return 8192
 }
 
 func (p *fakeProvider) binaryVersionOrDefault() string {
@@ -2523,7 +2532,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"model_id":                    p.modelID,
 			"model_params_b":              3.0,
 			"ram_gb":                      16,
-			"max_context_tokens":          8192,
+			"max_context_tokens":          p.maxContextTokensOrDefault(),
 			"max_concurrency":             2,
 			"throughput_tps_estimate":     20.0,
 			"binary_version":              p.binaryVersionOrDefault(),
@@ -2632,12 +2641,17 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			return
 		}
 		ready := readyStateUpdate(p.modelID, p.modelHash)
+		ready["metrics_snapshot"].(map[string]any)["max_context_tokens"] = p.maxContextTokensOrDefault()
 		p.canonicalIdentity(ready["metrics_snapshot"].(map[string]any))
 		if err := writeJSONFrame(conn, ready); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
 	} else {
+		binaryVersion := "1.0.0-fake"
+		if p.binaryVersion != "" {
+			binaryVersion = p.binaryVersion
+		}
 		hello := map[string]any{
 			"type":                    "hello",
 			"version":                 1,
@@ -2647,10 +2661,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"model_id":                p.modelID,
 			"model_params_b":          3.0,
 			"ram_gb":                  16,
-			"max_context_tokens":      8192,
+			"max_context_tokens":      p.maxContextTokensOrDefault(),
 			"max_concurrency":         2,
 			"throughput_tps_estimate": 20.0,
-			"binary_version":          "1.0.0-fake",
+			"binary_version":          binaryVersion,
 			"attestation":             nil,
 			"endpoint_url":            endpointURL,
 		}
@@ -2708,7 +2722,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"model_id":                   p.modelID,
 				"model_params_b":             3.0,
 				"ram_gb":                     16,
-				"max_context_tokens":         8192,
+				"max_context_tokens":         p.maxContextTokensOrDefault(),
 				"max_concurrency":            2,
 				"slots_free":                 2,
 				"slots_total":                2,
