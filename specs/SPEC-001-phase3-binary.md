@@ -8,7 +8,8 @@ Adds `SPEC-001-R007` (§6.5): optional loaded-model/runtime-bound
 and the `tool_selection_validation_failed` terminal status. SPEC-018-R006
 owns mode support and validation semantics; SPEC-006-R021 owns buyer routing
 and projection. These are capability assertions, not a trust-tier or released
-hardware acceptance claim.
+hardware acceptance claim. AC-18.11 retains the historical v1.3/v1.2.4
+comparison and permits this explicit additive extension on current frames.
 
 **Change log v1.9.34 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
 
@@ -2486,6 +2487,12 @@ and MUST NOT enable a non-auto guarantee. Old receivers ignore this additive
 field; new receivers MUST fail closed on absent, mismatched or unknown
 capabilities for guaranteed-mode dispatch, per SPEC-006-R021. The field grants
 no model admission, attestation, receipt or settlement authority.
+
+On legacy `hello`, this field is an explicit additive exception to the current
+frame comparison in AC-18.11. Removing only `tool_selection_capabilities` MUST
+leave the pre-existing legacy fields and values unchanged; the extension MUST
+NOT add warm-swap fields when warm swap is disabled. Its presence does not
+authorize unrelated new keys or change the legacy handshake version.
 
 An `inference_response_end` with generated-output tool-selection failure uses
 `status:"tool_selection_validation_failed"` and `retryable:false`. It MUST
@@ -5103,6 +5110,15 @@ handshake) is byte-identical to SPEC-001 v1.2.4 §6.5. v1.3 adds the v2
 handshake as a new §6.7; it does NOT modify the legacy `hello`
 documentation. Verifiable by `diff` of the two versions' §6.5 sections.
 Traces to SPEC-011 v0.5 AC-18 and SPEC-010 v1.5 AC-16.
+
+**Current-frame reconciliation (v1.9.35).** The version-to-version documentation
+comparison above remains historical. Current legacy `hello` frames MAY include
+the optional `tool_selection_capabilities` extension defined by SPEC-001-R007.
+For this extension, compatibility is checked by validating that field against
+R007 and comparing the remaining legacy fields and values to their pre-extension
+behavior. In particular, warm-swap-disabled frames MUST still omit
+`supported_models`, `publishes_supported_models` and `loading`. This exception
+does not permit other field or value drift.
 
 **AC-18.12. Control-socket detection precedence — ECONNREFUSED.**
 A v1.3 binary `serve --enable-warm-swap` running with a stale socket

@@ -261,10 +261,19 @@ final class EndToEndAcceptanceTests: XCTestCase {
         }
     }
 
-    func testAC_N_11_LegacyHelloByteIdenticalToV124() async throws {
+    func testAC_N_11_LegacyHelloPreservesBaseFieldsWithToolSelectionExtension() async throws {
         let client = try await makeClient(modelID: "A", modelHash: String(repeating: "c", count: 64), enableWarmSwap: false)
 
-        let hello = await client.helloMessage()
+        var hello = await client.helloMessage()
+        // SPEC-001-R007 permits this additive field on the legacy envelope.
+        let capabilities = try XCTUnwrap(hello.removeValue(forKey: "tool_selection_capabilities") as? [[String: Any]])
+        XCTAssertEqual(capabilities.count, 1)
+        let capability = try XCTUnwrap(capabilities.first)
+        XCTAssertEqual(Set(capability.keys), ["model_id", "runtime", "modes", "validation"])
+        XCTAssertEqual(capability["model_id"] as? String, "A")
+        XCTAssertEqual(capability["runtime"] as? String, "mlx_cache")
+        XCTAssertEqual(capability["modes"] as? [String], ["auto", "none"])
+        XCTAssertEqual(capability["validation"] as? String, "schema-holdback-v1")
         let allowedKeys: Set<String> = [
             "type",
             "version",
