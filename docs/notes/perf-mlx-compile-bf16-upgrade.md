@@ -1,7 +1,7 @@
 # MLX Decode-Engine Perf Upgrade — Implementation Spec
 
 > Paste this prompt into a fresh Claude Code session rooted in
-> `/Users/augstar/macprovider-poc`. Self-contained; no prior context needed.
+> `<repo>`. Self-contained; no prior context needed.
 
 ---
 

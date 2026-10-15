@@ -77,7 +77,7 @@ spec:
   (v1.5, **LOCKED**) lets a provider *advertise* additional `supported_models[]`
   it could cold-start into (`:243`), but only one model is warm at a time —
   not concurrent multi-model serving, and not sharding.
-- **Current dependency pins** (`beta/throughput-engineering/UPSTREAM_WATCH.json`,
+- **Current dependency pins** (`scripts/data/upstream-watch.json`,
   checked 2026-07-22): `mlx_swift_lm = 3.31.4`, `mlx_swift = 0.31.6`. Neither
   includes any distributed-communication code (see below).
 
@@ -182,7 +182,7 @@ recommendation — see ranked blockers below.
 For whoever picks this up:
 
 1. **Register the upstream watch**, don't build yet. Add an entry to
-   `beta/throughput-engineering/UPSTREAM_WATCH.json` under `blockers`
+   `scripts/data/upstream-watch.json` under `blockers`
    (pattern matches the existing `mlx_swift_lm_406_...` / `mlx_swift_lm_364_...`
    entries), e.g. `mlx_swift_371_distributed_communication` pointing at
    [PR #371](https://github.com/ml-explore/mlx-swift/pull/371), so it surfaces
@@ -223,6 +223,6 @@ For whoever picks this up:
 - In-repo: `specs/SPEC-015-receipts.md` (Q3), `specs/SPEC-025-native-mac-app.md`
   (§13), `specs/SPEC-010-model-catalog.md` (v1.5, LOCKED), `specs/SPEC-017-*`
   (anonymity-set rationale), `docs/OPEN_QUESTIONS.md`,
-  `beta/throughput-engineering/UPSTREAM_WATCH.json`,
+  `scripts/data/upstream-watch.json`,
   `audits/2026-06-30/mlx-swift-examples-upstream-issue.md` (precedent for
   writing up an upstream-dependency constraint)

@@ -652,7 +652,7 @@ type StatsPartnerKeysConfig struct {
 	// on a deployed coordinator config, `partner-keys issue`
 	// reads the file at this path AND requires its content
 	// to match the SPEC-014 SHA + YYYY-MM-DD sign-off
-	// template (see OPS.md §10.5). Issuance fails closed if
+	// template (see the operator runbook §10.5). Issuance fails closed if
 	// the file is missing, empty, or malformed.
 	//
 	// When this field is UNSET (empty), the coordinator is
@@ -840,7 +840,7 @@ type StatsRollupConfig struct {
 	// `earnings_work_usd = provider_credits * UsdPerMillionCredits
 	// / 1_000_000`. Default 1.0 (1 USD per million credits).
 	// Operator MAY override per ramp; the formula is documented
-	// in OPS.md.
+	// in the operator runbook.
 	UsdPerMillionCredits float64 `yaml:"usd_per_million_credits"`
 	// DriftThresholdRatio — fractional divergence (>0.005 = >0.5%
 	// per SPEC §9.4) at which the nightly rebuild emits

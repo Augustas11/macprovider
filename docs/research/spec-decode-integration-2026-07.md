@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Branch:** `research/spec-decode-serve`
-**Requested by:** `specs/RESEARCH_SPEC_DECODE_PROMPT.md` from `/Users/augstar/macprovider-poc-spec-decode-prompt`
+**Requested by:** `specs/RESEARCH_SPEC_DECODE_PROMPT.md` from `<repo>-spec-decode-prompt`
 
 ## Summary
 
@@ -29,7 +29,7 @@ Local code/spec anchors:
 - Receipt/verifier strict usage schema: `phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:279-285`, `phase4-coordinator/internal/billing/settlement_verifier.go:35-49`, `:273-319`, `:348-354`, `:375-380`, `:511-519`.
 - SPEC constraints: SPEC-001 `:167-193`, `:443-456`, `:1069-1096`, `:1316-1336`, `:1760-1820`, `:1933-1937`; SPEC-010 `:300-303`, `:333-369`, `:490-513`, `:861-879`; SPEC-011 `:110-125`, `:227-239`; SPEC-013 `:252-260`, `:927-929`; SPEC-015 `:1-5`, `:20-45`.
 - Current static candidate catalog: `phase3-binary/dist/static/autotune-candidates.json:1`.
-- Beta workload and Air configs: `beta/workloads.py:26-34`, `:88-240`; `beta/config-m1.yaml:7-23`; `beta/config-m4.yaml:7-21`; `beta/DECISION_CRITERIA.md:54-76`, `:254-264`.
+- Beta workload and Air configs: `beta/workloads.py:26-34`, `:88-240`; `beta/config-m1.yaml:7-23`; `beta/config-m4.yaml:7-21`; `docs/decision-log.md:54-76`, `:254-264`.
 
 External upstream anchors:
 

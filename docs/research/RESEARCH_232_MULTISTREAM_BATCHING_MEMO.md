@@ -2547,7 +2547,7 @@ They must be resolved before production:
 - `phase3-binary/Sources/MacProviderCLI/RecommendationEmitter.swift`
 - `phase4-coordinator/internal/pool/provider.go`
 - `phase4-coordinator/internal/pow/drift.go`
-- `beta/DECISION_CRITERIA.md`
+- `docs/decision-log.md`
 - `specs/SPEC-023*`
 - `specs/SPEC-028*`
 - `docs/research/RESEARCH_223_MLX_THROUGHPUT_ROADMAP_MEMO.md`

@@ -13,7 +13,7 @@ Input: `specs/SPEC-008-tier2.md` (v0.1).  Output: same file, bumped to v0.2.
 No code is written; this is a spec revision session.
 
 Paste everything between `=== BEGIN PROMPT ===` and `=== END PROMPT ===`
-into a fresh session rooted at `/Users/augstar/macprovider-poc`.
+into a fresh session rooted at `<repo>`.
 
 ---
 
@@ -22,8 +22,8 @@ into a fresh session rooted at `/Users/augstar/macprovider-poc`.
 
 You are revising SPEC-008 v0.1 to produce v0.2.
 
-Input:  /Users/augstar/macprovider-poc/specs/SPEC-008-tier2.md
-Audit:  /Users/augstar/macprovider-poc/specs/SPEC-008-audit.md
+Input:  <repo>/specs/SPEC-008-tier2.md
+Audit:  <repo>/specs/SPEC-008-audit.md
 Output: same file, in-place.  Bump version header to 0.2 and add a v0.2
 change-log entry that lists every finding ID resolved.
 

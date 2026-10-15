@@ -1,6 +1,8 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.33 (2026-10-13, engine profile heartbeat object)
+**Version:** 1.9.34 (2026-10-14, public-repo cleanup)
+
+**Change log v1.9.34 (2026-10-14, public-repo cleanup):** Editorial, no normative change: generic wording for the third-party marketplace seller integration.
 
 **Change log v1.9.33 (2026-10-13, engine profile heartbeat object, #1355):**
 Adds `SPEC-001-R006` (§6.15.2.1): the optional closed `engine_profile`
@@ -695,7 +697,7 @@ chain (see Section 3 for the hook-point diagram).
 - Buyer authentication or authorization (Tier 2)
 - Web UI, dashboard, or contributor portal
 - Contributor onboarding flow beyond "run this binary"
-- Antseed seller plugin integration (coordinator's responsibility)
+- Third-party marketplace seller plugin integration (coordinator's responsibility)
 - Automatic model downloading (contributor pre-downloads via `huggingface-cli`)
 - **Coordinator-side** validation/policy of provider authentication and
   attestation (owned by SPEC-002 / SPEC-008 / SPEC-026). **Reconciled v1.7:** the

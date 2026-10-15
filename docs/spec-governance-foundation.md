@@ -11,7 +11,7 @@ PR #619 establishes a structured governance foundation for the canonical
   `schemas/spec-conformance-v1.schema.json`, and
   `schemas/spec-pr-governance-v1.schema.json` for the public JSON contracts.
 
-`beta/DECISION_CRITERIA.md` is the human decision log used by the arbitration
+`docs/decision-log.md` is the human decision log used by the arbitration
 process for accepted product, security, architecture, release, and exception
 decisions. It is not a machine-readable conformance manifest, but changes to it
 are inside the SPEC governance review boundary because those decisions can be

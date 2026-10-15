@@ -539,7 +539,7 @@ Re-open only if T0-03 **RED** or TG4 concurrency mandate.
 
 # Upstream watch (automated)
 
-Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM_WATCH.json` and polled by `scripts/check-upstream-throughput-blockers.sh`.
+Pending throughput blockers are tracked in `scripts/data/upstream-watch.json` and polled by `scripts/check-upstream-throughput-blockers.sh`.
 
 | Upstream | Kind | Runbook | Cursor Automation |
 |----------|------|---------|-------------------|

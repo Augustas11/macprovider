@@ -74,7 +74,7 @@ LIVE_WRITER_RE = re.compile(
     r'|kill -s HUP|kill -HUP|"HUP"'
 )
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|test-support|fixtures)/|(^|/)test[-_]|_test\.|\.test\.sh$")
-SKIP_PREFIXES = (".omc/", "audits/", "journeys/", "docs/", ".git/")
+SKIP_PREFIXES = (".omc/", "journeys/", "docs/", ".git/")
 SKIP_SUFFIXES = (".md", ".html", ".json", ".go", ".example", ".service", ".conf",
                  ".yaml", ".txt", ".png", ".patch")
 
@@ -667,6 +667,7 @@ class ActivationWriterRefusalTests(unittest.TestCase):
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "SSH_BIN": str(bin_dir / "ssh"),
             "SSH_KEY": str(self.root / "key"),
+            "VPS_HOST": "fake-pearl.invalid",
             "VERIFY_SCRIPT": str(bin_dir / "verify"),
             "REMOTE_CONFIG": str(self.config),
             "DEMO_TOKEN": "demo",

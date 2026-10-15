@@ -5,12 +5,11 @@ Apple Silicon box (Mac Studio, Mini, or a provider Mac). It exists because the
 merge → cut CLI → reinstall → retest loop wastes hours that a local
 `swift build -c release` on the box does in minutes.
 
-Canonical short form: `AGENTS.md` (Hardware campaign loop). Cursor
-enforcement: `.cursor/rules/lab-campaign-loop.mdc`.
+Canonical short form: `AGENTS.md` (Hardware campaign loop).
 
-Pearl catalog T0 (#608 → #609) still uses
-`.cursor/rules/autonomous-serial-pearl-ship.mdc`. Do not use this runbook as
-permission to skip those ordered production mutations.
+Pearl catalog activation still follows the ordered `scripts/ops/` entry
+points. Do not use this runbook as permission to skip those ordered
+production mutations.
 
 ## Two loops
 

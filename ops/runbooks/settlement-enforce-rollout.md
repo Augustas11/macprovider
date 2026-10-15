@@ -181,7 +181,7 @@ out with `settlement: { verified_model_settlement_mode: observe }` in its overla
 
 ## After a stable window
 
-- Record the outcome in `beta/DECISION_CRITERIA.md`.
+- Record the outcome in `docs/decision-log.md`.
 - SPEC-016 payout enablement (§9 prereqs) is the next and final step to actual
   USDC — separate change, separate gate.
 
@@ -229,4 +229,4 @@ restart).
    `ledger_ceiling_restatements` rows equals the sum of the write batches' `gross_credits_delta`. The
    next nightly reconcile reports no `reconciliation_mismatch` quarantines for
    the restated rows. Record the outcome (counts only) in
-   `beta/DECISION_CRITERIA.md` Entry 250.
+   `docs/decision-log.md` Entry 250.

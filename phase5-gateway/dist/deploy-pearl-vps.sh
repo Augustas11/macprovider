@@ -5,7 +5,7 @@
 # config gate as step 0, .prev binary snapshot for one-command rollback,
 # version-stamped provenance check on /healthz. The previous gateway deploy
 # was an .md runbook with no scripted automation — DEVE-4 in the
-# audits/2026-06-10/REPO_AUDIT.md.
+# 2026-06-10 repo audit.
 #
 # Run this from the operator's Mac. It SSHes into Pearl VPS, installs the
 # gateway behind the existing nginx + Let's Encrypt for api.malibu.tech,
@@ -28,7 +28,7 @@
 #
 # Environment:
 #   SSH_KEY          default: ~/.ssh/pearl_operator_ed25519
-#   VPS_HOST         default: 159.223.165.194
+#   VPS_HOST         required: Pearl VPS address
 #   VPS_USER         default: root
 #   DOMAIN           default: api.malibu.tech
 #   EMAIL            default: augstar@gmail.com
@@ -70,7 +70,7 @@ for arg in "$@"; do
 done
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-api.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
@@ -791,7 +791,7 @@ echo "  binary cannot safely read. After any deploy that crosses schema"
 echo "  versions, restore BOTH the binary AND the pre-deploy DB snapshot:"
 echo
 echo "    ssh $VPS_USER@$VPS_HOST '"
-echo "      # #290 R6 convergent CODE+ARCH MED — mirror the OPS.md"
+echo "      # #290 R6 convergent CODE+ARCH MED — mirror the operator runbook"
 echo "      # canonical rollback recipe: validate snapshot AND .prev"
 echo "      # binary BEFORE stopping the service, use sudo -u macprovider"
 echo "      # consistently for reader validation on 0750 daemon-owned"

@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in the provider CLI, Malibu app, coordinator, gateway, or tooling does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use the private process in SECURITY.md.
+        Remove API keys, provider tokens, prompts, and receipt contents from anything you paste.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Provider CLI (macprovider-cli / malibu-cli)
+        - Malibu app
+        - Installer
+        - Coordinator
+        - Buyer gateway / API
+        - Receipt verifier (macprovider-verify)
+        - Console or provider portal
+        - Release or CI tooling
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `malibu-cli --version`, the release tag, or a commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Mac model, chip, RAM, and macOS version (provider issues), or client SDK and version (buyer issues).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact error text and the relevant SPEC section if you know it.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redacted logs or command output.
+      render: text

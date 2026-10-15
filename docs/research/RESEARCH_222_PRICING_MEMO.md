@@ -135,7 +135,7 @@ resulting cells in the Part 3 table, and state who pays the gap.
 
 ### Part 5 — DECISION_CRITERIA.md entry (ready to commit)
 
-Drop a numbered entry suitable for appending to `beta/DECISION_CRITERIA.md`.
+Drop a numbered entry suitable for appending to `docs/decision-log.md`.
 House style is established through Entries 1-21. The entry must contain:
 
 - **Decision** — what changed and to what value(s)
@@ -301,7 +301,7 @@ resulting cells in the Part 3 table, and state who pays the gap.
 
 ### Part 5 — DECISION_CRITERIA.md entry (ready to commit)
 
-Drop a numbered entry suitable for appending to `beta/DECISION_CRITERIA.md`.
+Drop a numbered entry suitable for appending to `docs/decision-log.md`.
 House style is established through Entries 1-21. The entry must contain:
 
 - **Decision** — what changed and to what value(s)
@@ -367,7 +367,7 @@ All prices are public list prices retrieved 2026-06-30. `$ / 1k completion` is `
 | 15 | Groq Llama 3.3 70B Versatile | 0.59 | 0.79 | 0.00079 | [Groq pricing](https://groq.com/pricing/) |
 | 16 | Together Qwen2.5-Coder 32B Instruct | 0.80 | 0.80 | 0.00080 | [Together model page](https://www.together.ai/models/qwen-2-5-coder-32b-instruct) |
 | 17 | Fireworks Llama 3.3 70B tier | 0.90 | 0.90 | 0.00090 | [Fireworks pricing/model pages](https://docs.fireworks.ai/serverless/pricing) |
-| 18 | **macprovider current buyer gross** | **0.50** | **1.00** | **0.00100** | [config.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go:544) |
+| 18 | **macprovider current buyer gross** | **0.50** | **1.00** | **0.00100** | [config.go](/phase4-coordinator/internal/config/config.go:544) |
 | 19 | OpenRouter Qwen2.5-Coder 32B Instruct | 0.66 | 1.00 | 0.00100 | [OpenRouter models API](https://openrouter.ai/api/v1/models) |
 | 20 | Together Qwen3.7 Plus closest current Qwen plus tier | 0.32 | 1.28 | 0.00128 | [Together pricing](https://www.together.ai/pricing) |
 | 21 | OpenAI gpt-4.1-mini | 0.40 | 1.60 | 0.00160 | [OpenAI GPT-4.1](https://openai.com/index/gpt-4-1/) |
@@ -470,13 +470,13 @@ Change live config first:
 
 - Pearl VPS: `/opt/macprovider/coordinator.yaml`
 - Set `rewards.global_multiplier: 10.0`
-- Send `SIGHUP` to the coordinator. The reload path loads config, writes a billing snapshot, and applies `SetBillingConfig` for new requests at [main.go](/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator/main.go:908).
+- Send `SIGHUP` to the coordinator. The reload path loads config, writes a billing snapshot, and applies `SetBillingConfig` for new requests at [main.go](/phase4-coordinator/cmd/coordinator/main.go:908).
 
 Code defaults if you want the repo default to match:
 
-- `Rewards.GlobalMultiplier` at [config.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go:544)
-- Rate-card defaults at [config.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go:548)
-- `UsdPerMillionCredits` field at [config.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go:138)
+- `Rewards.GlobalMultiplier` at [config.go](/phase4-coordinator/internal/config/config.go:544)
+- Rate-card defaults at [config.go](/phase4-coordinator/internal/config/config.go:548)
+- `UsdPerMillionCredits` field at [config.go](/phase4-coordinator/internal/config/config.go:138)
 
 No repo files were changed in this research pass.
 

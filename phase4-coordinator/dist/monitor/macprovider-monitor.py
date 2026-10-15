@@ -24,8 +24,8 @@ only — journald still records every alert, and the state machine still
 treats muted alerts as alerting transitions.
 
 Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
-  ALERT_EMAIL=augstar@gmail.com
-  GMAIL_USER=augstar@gmail.com
+  ALERT_EMAIL=operator@example.com
+  GMAIL_USER=operator@example.com
   GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx   # 16-char Google app password (2FA)
   EMAIL_MUTED_KINDS=provider,provider_liveness,pool,gateway_status
       # optional; this is the default. "all" mutes every kind

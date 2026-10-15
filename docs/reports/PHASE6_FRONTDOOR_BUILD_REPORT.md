@@ -31,7 +31,7 @@ No locked spec files were modified.
 - `phase5-gateway/internal/router/pages_test.go`
 - `phase5-gateway/internal/router/templates/account.html`
 - `phase5-gateway/internal/router/templates/docs.md`
-- `beta/DECISION_CRITERIA.md`
+- `docs/decision-log.md`
 - `specs/PHASE6_FRONTDOOR_BUILD_REPORT.md`
 
 ## Acceptance criteria
@@ -66,7 +66,7 @@ No locked spec files were modified.
 | AC-26 | PASS | `GOCACHE=/private/tmp/macprovider-go-build-cache GOPATH=/private/tmp/macprovider-go go build ./...` passed. |
 | AC-27 | PASS | `GOCACHE=/private/tmp/macprovider-go-build-cache GOPATH=/private/tmp/macprovider-go go test ./...` passed. |
 | AC-28 | PASS | `server.go` adds exactly one new route, `/docs`; CORS wraps existing four demo-allowed routes. |
-| AC-29 | PASS | Entry 28 drafted in `beta/DECISION_CRITERIA.md`. |
+| AC-29 | PASS | Entry 28 drafted in `docs/decision-log.md`. |
 
 ## Open questions and handback notes
 

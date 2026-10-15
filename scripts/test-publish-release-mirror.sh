@@ -281,7 +281,7 @@ printf 'dummy key\n' > "$UP/key"
 
 run_upload() {
   PATH="$UP/bin:$PATH" GITHUB_REPOSITORY="Augustas11/macprovider" \
-    MALIBU_DOWNLOAD_SSH_KEY="$UP/key" MALIBU_DOWNLOAD_WEBROOT="$WEBROOT" \
+    MALIBU_DOWNLOAD_SSH_KEY="$UP/key" MALIBU_DOWNLOAD_VPS_HOST=127.0.0.1 MALIBU_DOWNLOAD_WEBROOT="$WEBROOT" \
     MALIBU_DOWNLOAD_KNOWN_HOSTS="$REPO_ROOT/scripts/dist/malibu-download-known_hosts" \
     bash "$FAKE_ROOT/scripts/publish-release-mirror.sh" --tag "$TAG" "$@"
 }

@@ -14,7 +14,7 @@ import (
 // main.go injects a default implementation that aggregates from
 // `internal/pool.Registry.Snapshot()` and existing telemetry.
 // Tests inject a stub. Fields the operator has not wired a real
-// source for default to zero with an OPS.md note.
+// source for default to zero with an operator-runbook note.
 //
 // Fields below map 1:1 to the live-pool columns in
 // `stats_overview_current`.
@@ -66,7 +66,7 @@ type OverviewSnapshot struct {
 // ZeroSnapshotProvider is the safe-default SnapshotProvider for
 // tests + dev environments where no real source is wired. It
 // returns zero values for every live field with `At = time.Now()`.
-// Production deployments MUST inject a real provider per OPS.md.
+// Production deployments MUST inject a real provider per the operator runbook.
 type ZeroSnapshotProvider struct{}
 
 // OverviewSnapshot satisfies the interface.

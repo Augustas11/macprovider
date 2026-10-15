@@ -1,6 +1,8 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.30 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.30.1 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.30.1 (2026-10-14, public-repo cleanup):** Editorial, no normative change: owner is the GitHub handle.
 
 **Change log v0.30 (2026-10-04, issue #1842 signed provider code identity).**
 Adds §6.2.1: a release that ships the provider CLI signs the CLI's code

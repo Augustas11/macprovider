@@ -989,7 +989,7 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
                 "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
                 "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
                 "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
-                "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+                "operator_local_model": "mlx-community/alice-MacBook-Pro",
                 "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
                 "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
                 "completion_phrase_model": "mlx-community/raw-completion-text",
@@ -999,15 +999,15 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
                 with self.assertRaises(SystemExit, msg=name):
                     capture.main(argv)
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-operator-local.redacted.json")
-            argv[argv.index("--operator-role") + 1] = "augstar@MacBook-Pro.local"
+            argv[argv.index("--operator-role") + 1] = "alice@MacBook-Pro.local"
             with self.assertRaises(SystemExit):
                 capture.main(argv)
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-operator-bare-local.redacted.json")
-            argv[argv.index("--operator-role") + 1] = "augstar-mbp"
+            argv[argv.index("--operator-role") + 1] = "alice-mbp"
             with self.assertRaises(SystemExit):
                 capture.main(argv)
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-hardware-local.redacted.json")
-            argv[argv.index("--hardware-profile") + 1] = "Users/augstar/laptop"
+            argv[argv.index("--hardware-profile") + 1] = "Users/alice/laptop"
             with self.assertRaises(SystemExit):
                 capture.main(argv)
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-hardware-bare-local.redacted.json")
@@ -1018,7 +1018,7 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-reviewer-local.redacted.json")
             review_manifest = Path(argv[argv.index("--review-manifest") + 1])
             manifest = json.loads(review_manifest.read_text(encoding="utf-8"))
-            manifest["review"]["reviewer_role"] = "augstar@MacBook-Pro.local"
+            manifest["review"]["reviewer_role"] = "alice@MacBook-Pro.local"
             review_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             with self.assertRaises(SystemExit):
                 capture.main(argv)
@@ -1026,7 +1026,7 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-reviewer-bare-local.redacted.json")
             review_manifest = Path(argv[argv.index("--review-manifest") + 1])
             manifest = json.loads(review_manifest.read_text(encoding="utf-8"))
-            manifest["review"]["reviewer_role"] = "augstar-mbp"
+            manifest["review"]["reviewer_role"] = "alice-mbp"
             review_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
             with self.assertRaises(SystemExit):
                 capture.main(argv)
@@ -1049,9 +1049,9 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
         capture = load_capture()
         cases = {
             "--cli-version": "1.2.3-MacBook-Pro",
-            "--model-id": "gpt-5augstar",
+            "--model-id": "gpt-5alice",
             "--sdk-name": "local/sdk",
-            "--sdk-version": "augstar-MacBook-Pro",
+            "--sdk-version": "alice-MacBook-Pro",
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

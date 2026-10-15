@@ -165,6 +165,7 @@ run_apply() {
   FAKE_LOG="$TMP_ROOT/verify.log" \
     FAKE_SSH_LOG="$TMP_ROOT/ssh.log" \
     SSH_BIN="$TMP_ROOT/ssh" \
+    VPS_HOST=fake-pearl.invalid \
     SSH_KEY="$TMP_ROOT/key" \
     SSH_KNOWN_HOSTS="$TMP_ROOT/known_hosts" \
     DEMO_TOKEN=demo \

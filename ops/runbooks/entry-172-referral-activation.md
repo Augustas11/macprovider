@@ -368,7 +368,7 @@ durable-state preservation check:
 
 - This runbook does not close #613, #658, #582, #617, #661, or any Lane C work.
 - #658 still needs the trust-preserving bridge plus physical update, rollback, buyer-serving, and renewal evidence for continuous discovery.
-- The first available fresh referred-provider invite-earn journey PASSed on Air5 (`mp-90542c0bcf7c4d303795cd10bda3830d`); see [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21). That PASS expired `exc-entry172-air-referral-activation`; Entry 224 now governs ongoing prebeta referral/X exposure, and #960 owns current evidence before `SPEC-034-R001` promotion.
+- The first available fresh referred-provider invite-earn journey PASSed on Air5 (`mp-<provider-a>`); see [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21). That PASS expired `exc-entry172-air-referral-activation`; Entry 224 now governs ongoing prebeta referral/X exposure, and #960 owns current evidence before `SPEC-034-R001` promotion.
 - Lane C / #615 owns exception inventory. Do not implement #615 from this runbook.
 - This runbook does not implement the #658 discovery bridge.
 - This runbook does not deploy, tag, publish, change nginx, change checked-in flag defaults, write live DB rows, create real HMAC secrets, or create real seed codes.

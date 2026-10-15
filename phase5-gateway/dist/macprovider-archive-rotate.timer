@@ -1,6 +1,6 @@
 [Unit]
 Description=Daily gateway DB archive-rotate check (M2-4 Part C / PERF-1)
-Documentation=https://github.com/Augustas11/macprovider/blob/main/audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md
+Documentation=https://github.com/Augustas11/macprovider/blob/main/docs/design/gateway-archive-rotate.md
 
 [Timer]
 # Daily at 04:00 UTC — chosen to fall in the existing scripted-deploy quiet

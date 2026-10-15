@@ -1,6 +1,6 @@
 # Runbook: run the #1816 fake-Pearl VM acceptance (Lima, this Mac)
 
-**Audience:** any agent session on Augustas's Mac that has to continue #1816 VM work. Read `docs/handoffs/1816-pool-scoped-models.md` first: it says where the work stands and which failures to chase. This file explains how to drive the VM.
+**Audience:** any agent session on the operator's Mac that has to continue #1816 VM work. Read the #1816 handoff in the private engineering archive first: it says where the work stands and which failures to chase. This file explains how to drive the VM.
 
 **Rule for this campaign:** no further audit rounds. The VM run is the only gate that raises bugs. Merge requires two consecutive full passes with no FAIL, or each remaining failure filed with a repro in `docs/testing/1816-vm-acceptance-plan.md` (Findings).
 
@@ -23,8 +23,8 @@
 ## 1. Before you start
 
 ```bash
-cd /Users/augstar/macprovider-1816-pool-models        # campaign worktree; create it if missing:
-#   git -C /Users/augstar/macprovider-poc worktree add ../macprovider-1816-pool-models feat/1816-pool-scoped-models
+cd ~/macprovider-1816-pool-models        # campaign worktree; create it if missing:
+#   git -C <repo> worktree add ../macprovider-1816-pool-models feat/1816-pool-scoped-models
 git status -sb                                          # must be clean: the VM ships COMMITTED trees only (git archive)
 git log --oneline -1                                    # this is your E2E_NEW_REF
 limactl list | grep macprovider-1690                    # Stopped or Running
@@ -40,7 +40,7 @@ limactl list | grep macprovider-1690                    # Stopped or Running
 ## 2. Run the full acceptance (two passes)
 
 ```bash
-cd /Users/augstar/macprovider-1816-pool-models
+cd ~/macprovider-1816-pool-models
 E2E_NEW_REF=$(git rev-parse HEAD) bash test/e2e-1816/run-all.sh 2
 ```
 
@@ -104,7 +104,7 @@ The driver writes `ALL-PASSES-DONE` as the last line of `run-passes-1816.out` wh
 ## 5. Collect evidence and summarize
 
 ```bash
-D=/Users/augstar/macprovider-1816-pool-models/.omc/e2e-1816/vm-$(git -C /Users/augstar/macprovider-1816-pool-models rev-parse --short HEAD)
+D=~/macprovider-1816-pool-models/.omc/e2e-1816/vm-$(git -C ~/macprovider-1816-pool-models rev-parse --short HEAD)
 mkdir -p "$D"
 limactl shell macprovider-1690 -- sudo cat /root/e2e/evidence/results.jsonl > "$D/results.jsonl"
 limactl shell macprovider-1690 -- sudo tar -C /root/e2e -czf - evidence logs > "$D/evidence.tgz"

@@ -1,6 +1,6 @@
 /goal
 
-Working directory: /Users/augstar/macprovider-poc
+Working directory: <repo>
 
 Read specs/SPEC-005-billing.md in full before writing any code.
 Pay special attention to:

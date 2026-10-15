@@ -13,7 +13,7 @@
 ### Issues
 
 [MEDIUM] Stale-marker CAS does not update `payout_attempts.updated_at_utc`  
-File: [orphans.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/orphans.go:476)  
+File: [orphans.go](/phase4-coordinator/internal/payout/orphans.go:476)  
 Confidence: HIGH  
 Issue: SPEC §4.7’s stale transition SQL sets both `cancel_reconfirm_stale_paged_at_utc = :now` and `updated_at_utc = :now`, but the implementation only sets the stale marker. The outbox correctly preserves the pre-read reorg timestamp as `reorg_reactivated_at_utc`, so this is not a PAGE emission blocker, but it leaves the attempt row’s own update timestamp stale after the CAS.  
 Fix: Add `updated_at_utc = ?` to the CAS update and pass `staleStarted`; extend `TestProduceStaleOutboxRows_BothRPCsMissAfterThreshold_Produces` to assert the attempt row timestamp advances while the outbox keeps the original reactivation timestamp.
@@ -21,13 +21,13 @@ Fix: Add `updated_at_utc = ?` to the CAS update and pass `staleStarted`; extend 
 ### Open Questions
 
 [MEDIUM] Per-cycle producer scale remains acceptable but unindexed on full predicate  
-File: [orphans.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/orphans.go:397)  
+File: [orphans.go](/phase4-coordinator/internal/payout/orphans.go:397)  
 Confidence: LOW  
 Issue: The producer still scans all matching stale-candidate cancel broadcasts before RPC checks. Existing `idx_pa_cancel_recent` bounds this to cancel broadcasts, and the practical cardinality should be near-zero, so this is acceptable for Step 3.  
 Fix if needed in r4/Step 4: add a partial index such as `idx_pa_cancel_reconfirm_stale_scan ON payout_attempts(updated_at_utc, payout_id, attempt_seq, nonce, tx_hash, block_number) WHERE is_cancel_self_transfer=1 AND raw_signed_tx IS NOT NULL AND broadcast_at_utc IS NOT NULL AND confirmed_at_utc IS NULL AND cancel_reconfirm_stale_paged_at_utc IS NULL AND abandoned_at_utc IS NULL`.
 
 [LOW] Non-idempotent `ALTER TABLE ADD COLUMN` is tracked, but not transactionally paired with the tracking insert  
-File: [migrations.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/migrations.go:73)  
+File: [migrations.go](/phase4-coordinator/internal/payout/migrations.go:73)  
 Confidence: MEDIUM  
 Issue: Normal reruns are safe because `payout_schema_applied` records `0012_stale_outbox_run_id.sql`, but a crash after the `ALTER TABLE` succeeds and before the tracking row insert would make the next run hit duplicate-column failure. This is an existing migration-runner limitation, not specific to this fix-pass.  
 Fix: If crash-safe migration recovery is in scope, wrap each migration body plus tracking insert in a transaction where SQLite permits it, or make ADD COLUMN migrations duplicate-column tolerant.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # archive-rotate.sh — gateway DB archive rotation (M2-4 Part C, PERF-1 close-out).
 #
-# Implements the Q4 ruling (beta/DECISION_CRITERIA.md Entry 77, 2026-06-11) and
-# audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md: the gateway's 9 RAISE(ABORT)
+# Implements the Q4 ruling (docs/decision-log.md Entry 77, 2026-06-11) and
+# docs/design/gateway-archive-rotate.md: the gateway's 9 RAISE(ABORT)
 # BEFORE-DELETE triggers stay in force ("append-only forever" tamper-evidence
 # claim is preserved). Disk pressure is solved out-of-band by this script:
 #

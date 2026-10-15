@@ -3330,7 +3330,7 @@ func settlementFinalityTrailerForTest(mode, policyVersion, outcome, receiptResul
 // exposes provider identity, even when the upstream hop sends every known
 // provider-identifying header (#1991, SPEC-006 R-019).
 func TestBuyerResponsesNeverCarryProviderIdentity(t *testing.T) {
-	const peerID = "m4-air-augstar"
+	const peerID = "m4-air-alice"
 	identityHeaders := []string{
 		"X-Provider-Id", "X-Provider-Assigned-Id", "X-Provider-Fingerprint", "X-Route-Provider",
 		"X-MacProvider-Provider", "X-MacProvider-Route", "X-MacProvider-Session",

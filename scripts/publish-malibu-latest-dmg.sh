@@ -67,7 +67,7 @@ else
   [[ -n "$discovery" ]] || die "current provider publication requires release discovery"
 fi
 
-VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
+VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:?set MALIBU_DOWNLOAD_VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 SSH_KEY="${MALIBU_DOWNLOAD_SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
 WEBROOT="${MALIBU_DOWNLOAD_WEBROOT:-/var/www/malibu-download}"

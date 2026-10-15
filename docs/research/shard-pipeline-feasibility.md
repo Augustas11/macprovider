@@ -1,7 +1,7 @@
 # Shard pipeline-over-WAN → MacProvider feasibility assessment
 
 **Date:** 2026-07-07 (updated same day — shard clone refreshed)  
-**Scope:** Read-only comparison of [shard](file:///Users/augstar/c0mpute-watch/shard) (reference clone at `182e93b`, includes PR #28 cwnd keep-warm) and MacProvider (this repo).
+**Scope:** Read-only comparison of [shard](~/c0mpute-watch/shard) (reference clone at `182e93b`, includes PR #28 cwnd keep-warm) and MacProvider (this repo).
 
 ---
 

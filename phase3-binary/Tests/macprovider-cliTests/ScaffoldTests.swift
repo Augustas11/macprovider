@@ -6,7 +6,7 @@ import XCTest
 ///
 /// Live `CompiledDecodeStep` correctness (greedy token-ID equality) requires
 /// a real loaded model and is covered by the manual bench in
-/// `beta/throughput-engineering/T2-01-compiled-decode-wire-in.md`.
+/// the T2-01 compiled-decode wire-in throughput note.
 final class CompiledDecodeFlagTests: XCTestCase {
     func testEnvFlagAcceptsCommonTruthyForms() {
         XCTAssertTrue(CompiledDecode.isEnabledByEnvironment(["MACPROVIDER_COMPILED_DECODE": "1"]))

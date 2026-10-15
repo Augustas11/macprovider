@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a new capability or a change to an existing one.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behaviour you want. Name the affected component.
+    validations:
+      required: true
+  - type: input
+    id: specs
+    attributes:
+      label: Related SPECs
+      description: SPEC IDs this would touch, for example SPEC-006 or SPEC-038. See specs/README.md.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

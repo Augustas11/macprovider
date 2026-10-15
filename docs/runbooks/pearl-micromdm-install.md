@@ -49,7 +49,7 @@ ssh pearl 'systemctl restart macprovider-coordinator'
 ssh pearl 'journalctl -u macprovider-coordinator -n 50 --no-pager | grep -i enroll'
 ```
 
-Push topic must match the issued APNs cert. Renewals: Apple ID `augstar@gmail.com` at identity.apple.com — renew, do not create a new cert.
+Push topic must match the issued APNs cert. Renewals: Apple ID `operator@example.com` at identity.apple.com — renew, do not create a new cert.
 
 ## Smoke tests
 

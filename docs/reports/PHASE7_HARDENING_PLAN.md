@@ -3,7 +3,7 @@
 **Date:** 2026-05-29
 **Status:** PLAN — not scoped/approved/built. Decision-ready for next session.
 **Author context:** Derived from the 2026-05-29 deploy session (see
-`beta/DECISION_CRITERIA.md` Entry 30 + `specs/PHASE3_BINARY_KEEPALIVE_ROOT_CAUSE.md`).
+`docs/decision-log.md` Entry 30 + `specs/PHASE3_BINARY_KEEPALIVE_ROOT_CAUSE.md`).
 **Guiding principle:** Harden the live system before adding new spec surface.
 North Star = a stranger hitting `console.malibu.tech` gets a fast, reliable
 completion *every time*. Today proved the system works end-to-end but is

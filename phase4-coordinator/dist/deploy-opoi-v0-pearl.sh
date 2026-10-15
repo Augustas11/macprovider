@@ -11,7 +11,7 @@
 #
 # Environment:
 #   SSH_KEY          default ~/.ssh/pearl_operator_ed25519
-#   VPS_HOST         default 159.223.165.194
+#   VPS_HOST         required: Pearl VPS address
 #   VPS_USER         default root
 #   DOMAIN           default coordinator.malibu.tech (healthz + pool_size check)
 #   FORCE_RESTART    default 0 — set 1 to restart with connected providers
@@ -21,7 +21,7 @@
 # Rollback:
 #   ssh pearl 'sudo rm /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf \
 #     && sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator'
-#   # Binary rollback: /opt/macprovider/coordinator.prev → coordinator (see OPS.md)
+#   # Binary rollback: /opt/macprovider/coordinator.prev → coordinator (see docs/runbooks/coordinator-rollback.md)
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ OVERLAY="$MODULE_DIR/coordinator.opoi-v0-staging.yaml"
 DROPIN="$DIST_DIR/systemd/opoi-v0.conf.example"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
-VPS_HOST="${VPS_HOST:-159.223.165.194}"
+VPS_HOST="${VPS_HOST:-}"  # required before any SSH; checked where SSH is built
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 FORCE_RESTART="${FORCE_RESTART:-0}"
@@ -72,6 +72,7 @@ if [ "$SKIP_BUILD" != "1" ]; then
   fi
 fi
 
+: "${VPS_HOST:?set VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
 SSH=(ssh -i "$SSH_KEY" -o ConnectTimeout=10 -p 22 "$VPS_USER@$VPS_HOST")
 SCP=(scp -i "$SSH_KEY" -P 22)
 

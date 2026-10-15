@@ -20,7 +20,7 @@ Validation run:
 
 **Severity:** CRITICAL  
 **Category:** A04 Insecure Design / A01 Broken Access Control  
-**Location:** [funding.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/funding.go:185), [funding.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/funding.go:210), [0003_payout_runner_state.sql](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/migrations/0003_payout_runner_state.sql:18)  
+**Location:** [funding.go](/phase4-coordinator/internal/payout/funding.go:185), [funding.go](/phase4-coordinator/internal/payout/funding.go:210), [0003_payout_runner_state.sql](/phase4-coordinator/internal/payout/migrations/0003_payout_runner_state.sql:18)  
 **Exploitability:** Authenticated compromised operator-key holder with raw DB write, matching the prompt threat model.  
 **Blast Radius:** Can re-enable `source='manual'` after bootstrap, record fake hot-wallet funding, and bypass the intended both-RPC confirmation requirement.
 
@@ -74,7 +74,7 @@ if bootstrapComplete != 0 || confirmedExists != 0 {
 
 **Severity:** HIGH  
 **Category:** A03 Injection/Data Validation / A04 Insecure Design  
-**Location:** [funding.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/funding.go:350), [funding.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/funding.go:373)  
+**Location:** [funding.go](/phase4-coordinator/internal/payout/funding.go:350), [funding.go](/phase4-coordinator/internal/payout/funding.go:373)  
 **Exploitability:** Requires fabricated or malformed receipt data accepted by both RPC views, or future token/chain assumptions where oversized values appear.  
 **Blast Radius:** A `Transfer` value larger than `uint64` can be accepted as a smaller requested amount if its low 64 bits match.
 
@@ -105,7 +105,7 @@ if got.Cmp(want) != 0 {
 
 **Severity:** MEDIUM  
 **Category:** A02 Cryptographic Failures / Secrets Management / A09 Logging Failures  
-**Location:** [lease.go](/Users/augstar/macprovider-poc/phase4-coordinator/internal/payout/lease.go:206)  
+**Location:** [lease.go](/phase4-coordinator/internal/payout/lease.go:206)  
 **Exploitability:** Requires log access; impact increases if logs are centralized or visible outside the coordinator host.  
 **Blast Radius:** Exposes `holder_token` values used for runner self-fencing and lease ownership checks.
 

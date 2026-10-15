@@ -9,7 +9,7 @@ Prefill still writes per-row `PagedKVCache`. Timed decode packs that KV into sto
 ## Header
 
 - **Date:** 2026-09-20
-- **Operator:** augstar
+- **Operator:** @Augustas11
 - **Provider id:** non-production test drive; no coordinator join, no buyer traffic, no receipts
 - **Measurement seam:** `macprovider-cli msb-throughput --engine paged --compile`
 - **Binary:** `feat/spec038-compiled-scheduler-decode` built on-box, run from `run/` co-located with candidate v1.8.170 `mlx.metallib`

@@ -20,7 +20,7 @@ import Foundation
 /// **implied bytes-per-token / active-param count** the hardware must have
 /// moved, and compare that against the dense-total and sparse-active references —
 /// i.e. answer "is this MoE actually decoding sparsely, or as if it were
-/// dense?". See `beta/throughput-engineering/T2-02-decode-bandwidth-model.md`.
+/// dense?". The T2-02 decode-bandwidth throughput note has the derivation.
 ///
 /// Everything here is pure arithmetic (Foundation only, no MLX) so it is unit
 /// testable without a GPU or model weights.
