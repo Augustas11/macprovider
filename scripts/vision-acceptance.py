@@ -232,6 +232,17 @@ def check_labels(content, expected):
     require(labels == expected, "image-dependent color labels or ordering did not match")
 
 
+def check_rejection(path, status, data):
+    # The native provider does not mount either facade. An absent facade is an
+    # explicit rejection, while a missing Chat Completions route is a failure.
+    allowed = (400, 413, 415, 422)
+    if path in ("/v1/responses", "/v1/messages"):
+        allowed += (404,)
+    require(status in allowed, "invalid media was not explicitly rejected before serving")
+    require(isinstance(data, dict) and isinstance(data.get("error"), dict),
+            "rejection did not contain a structured error")
+
+
 def run_suite(origin, token, unsupported_model):
     results = []
     red, blue = image(png((255, 0, 0))), image(png((0, 0, 255)))
@@ -247,9 +258,7 @@ def run_suite(origin, token, unsupported_model):
 
     def rejection(name, payload, path="/v1/chat/completions"):
         status, data = post(origin, path, payload, token)
-        require(status in (400, 413, 415, 422), "invalid media was not explicitly rejected before serving")
-        require(isinstance(data, dict) and isinstance(data.get("error"), dict),
-                "rejection did not contain a structured error")
+        check_rejection(path, status, data)
         results.append({"case": name, "passed": True, "status": status})
 
     for streaming in (False, True):

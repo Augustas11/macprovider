@@ -16,6 +16,21 @@ SPEC.loader.exec_module(vision)
 
 
 class VisionAcceptanceTests(unittest.TestCase):
+    def test_absent_facade_rejects_media_but_missing_chat_route_fails(self):
+        error = {"error": {"code": "invalid_request", "message": "not found"}}
+        for path in ("/v1/responses", "/v1/messages"):
+            with self.subTest(path=path):
+                vision.check_rejection(path, 404, error)
+                vision.check_rejection(path, 400, error)
+                with self.assertRaises(vision.AcceptanceError):
+                    vision.check_rejection(path, 404, "not found")
+                with self.assertRaises(vision.AcceptanceError):
+                    vision.check_rejection(path, 503, error)
+        with self.assertRaises(vision.AcceptanceError):
+            vision.check_rejection("/v1/chat/completions", 404, error)
+        for status in (400, 413, 415, 422):
+            vision.check_rejection("/v1/chat/completions", status, error)
+
     def test_endpoint_guard_refuses_live_redirectable_and_operator_targets(self):
         for value in ("https://api.malibu.tech", "http://localhost:18016",
                       "http://127.0.0.1:8080", "http://127.0.0.1",
