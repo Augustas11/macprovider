@@ -198,15 +198,16 @@ func TestPerfStoreEndToEndObservation(t *testing.T) {
 	if e, _ := s.Lookup("fast", "m"); e.ServiceTPS != PerfMaxDecodeTPS {
 		t.Fatalf("clamp: %+v", e)
 	}
-	// A timed attempt feeds service throughput over the same window, so the
-	// two response modes are compared on one denominator: 101 tokens over
-	// 9 s to the first token plus 1 s of decode is 10.1 tokens/s either way.
-	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", RequestTokens: 100, CompletionTokens: 101, TTFTMs: 9000, DecodeMs: 1000, ServiceMs: 10000, At: perfNow})
-	e2e("untimed", 100, 100, 101, 10000)
-	timed, _ := s.Lookup("timed", "m")
-	untimed, _ := s.Lookup("untimed", "m")
-	if timed.ServiceTPS != untimed.ServiceTPS || timed.DecodeTPS != 100 || untimed.DecodeSamples != 0 {
-		t.Fatalf("mixed modes: timed=%+v untimed=%+v", timed, untimed)
+	// Streamed attempts never give service throughput (their done follows
+	// the buyer writes), timed or buffered, so the response mode never
+	// decides which provider looks faster.
+	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", Streamed: true, RequestTokens: 100, CompletionTokens: 101, TTFTMs: 9000, DecodeMs: 1000, ServiceMs: 10000, At: perfNow})
+	s.Observe(PerfObservation{ProviderID: "buffered", Model: "m", Streamed: true, EndToEnd: true, RequestTokens: 100, CompletionTokens: 101, ServiceMs: 10000, At: perfNow})
+	if timed, _ := s.Lookup("timed", "m"); timed.ServiceSamples != 0 || timed.DecodeTPS != 100 || timed.TTFTSamples != 1 {
+		t.Fatalf("timed stream: %+v", timed)
+	}
+	if _, ok := s.Lookup("buffered", "m"); ok {
+		t.Fatal("a buffered stream without a sample created a record")
 	}
 }
 

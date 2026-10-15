@@ -20,7 +20,7 @@ func warm(s *PerfStore, id string, ttftMs, prefillTPS, decodeTPS float64) {
 	for i := 0; i < PerfFreshMinSamples; i++ {
 		// A short-prompt attempt gives TTFT and decode; a prefill-dominated one
 		// with no output gives prefill as input over the service time.
-		s.Observe(PerfObservation{ProviderID: id, Model: "m", RequestTokens: 10, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: perfNow})
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", Streamed: true, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: perfNow})
 		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: int64(prefillTPS), TTFTMs: ttftMs, ServiceMs: 1000, At: perfNow})
 	}
 }
@@ -45,6 +45,7 @@ func TestClassifyPhase(t *testing.T) {
 		{8000, 4000, true, PhaseInteractive},
 		{4000, 0, false, PhaseLongInput}, // absent max_tokens defaults to 512
 		{2047, 1, true, PhaseInteractive},
+		{2048, 1 << 62, false, PhaseThroughput}, // 4*max_out would overflow
 	}
 	for _, c := range cases {
 		if got := ClassifyPhase(c.input, c.maxOut, c.stream); got != c.want {
@@ -78,10 +79,10 @@ func TestPhaseOrderPrefersMeasuredFitPerPhase(t *testing.T) {
 			t.Fatalf("%s: basis=%s order=%v", tc.phase, d.Basis, ids(candidates))
 		}
 	}
-	// Throughput prefers free slots times decode rate.
+	// Throughput prefers free slots times service throughput.
 	s2 := NewPerfStore()
-	warm(s2, "one-slot", 50, 1000, 100)
-	warm(s2, "four-slots", 50, 1000, 60)
+	warmEndToEnd(s2, "one-slot", 100)
+	warmEndToEnd(s2, "four-slots", 60)
 	candidates := []pool.Provider{phaseProvider("one-slot", 1, 1), phaseProvider("four-slots", 4, 4)}
 	d := PhaseOrder(candidates, "m", PhaseThroughput, s2, perfNow, 0.99, 0)
 	if d.Basis != BasisMeasured || candidates[0].ProviderID != "four-slots" {
@@ -220,12 +221,12 @@ func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
 	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
 		t.Fatalf("throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
-	// Mixed: a streamed provider's service throughput competes with a
-	// non-streamed one's on the same window.
-	warm(s, "streamed", 50, 1000, 40)
-	candidates = []pool.Provider{phaseProvider("streamed", 1, 1), phaseProvider("fast", 1, 1)}
+	// Streamed evidence (TTFT, decode) is not throughput evidence: a
+	// streamed-only provider stays unmeasured for the throughput phase.
+	warm(s, "streamed", 50, 1000, 400)
+	candidates = []pool.Provider{phaseProvider("streamed", 1, 1), phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}
 	d = PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
-	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
+	if d.Basis != BasisMeasured || d.Fresh != 2 || ids(candidates)[0] != "fast" || ids(candidates)[2] != "streamed" {
 		t.Fatalf("mixed throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
 	// Interactive: service-only records are unmeasured, not fast. With one

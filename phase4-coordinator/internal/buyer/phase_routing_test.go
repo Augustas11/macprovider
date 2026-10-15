@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 )
@@ -247,13 +248,13 @@ func TestServedPerformanceObservation(t *testing.T) {
 	if e, _ := s.perf.Lookup("fast", "stream"); e.TTFTSamples != 2 || e.PrefillSamples != 1 || e.DecodeSamples != 2 || e.DecodeTPS != 100 {
 		t.Fatalf("withheld prefill: %+v", e)
 	}
-	// A short streamed request also gives service throughput: 101 tokens over
-	// the 1050 ms from dispatch start. TTFT also runs from dispatch start, so
-	// a provider that accepts the dispatch late cannot shorten it.
+	// A short streamed request gives no service throughput (only
+	// non-streamed attempts do). TTFT runs from dispatch start, so a provider
+	// that accepts the dispatch late cannot shorten it.
 	short := streamed
 	short.model, short.estimate, short.dispatchAccepted = "stream-short", 100, 40
 	record(short)
-	if e, _ := s.perf.Lookup("fast", "stream-short"); e.TTFTMs != 50 || math.Abs(e.ServiceTPS-101/1.05) > 1e-9 || e.PrefillSamples != 0 {
+	if e, _ := s.perf.Lookup("fast", "stream-short"); e.TTFTMs != 50 || e.ServiceSamples != 0 || e.PrefillSamples != 0 || e.DecodeSamples != 1 {
 		t.Fatalf("short stream: %+v", e)
 	}
 
@@ -266,11 +267,12 @@ func TestServedPerformanceObservation(t *testing.T) {
 	if !found || e.ServiceTPS != 50 || e.ServiceSamples != 1 || e.DecodeSamples != 0 || e.TTFTSamples != 0 || e.TTFTMs != 0 || e.PrefillSamples != 0 {
 		t.Fatalf("non-stream evidence = %+v found=%v", e, found)
 	}
-	// A streamed attempt without a first-token time (buffered) is end-to-end.
+	// A streamed attempt without a first-token time (buffered) is end-to-end
+	// but streamed: no TTFT, decode or service-throughput sample.
 	buffered := nonStream
 	buffered.stream = true
 	record(buffered)
-	if e, _ := s.perf.Lookup("fast", "non-stream"); e.ServiceSamples != 2 || e.TTFTSamples != 0 {
+	if e, _ := s.perf.Lookup("fast", "non-stream"); e.ServiceSamples != 1 || e.TTFTSamples != 0 || e.DecodeSamples != 0 {
 		t.Fatalf("buffered stream: %+v", e)
 	}
 	// An attempt that delivered nothing (a path that logs no output gets an
@@ -349,5 +351,38 @@ func TestStickyHitSkipsPhaseReorder(t *testing.T) {
 	}
 	if state.stickyResult != "hit" || state.routeDecision == nil || state.routeDecision.scope != "sticky" || state.routeDecision.basis != routing.BasisFallback {
 		t.Fatalf("sticky=%q decision=%+v", state.stickyResult, state.routeDecision)
+	}
+}
+
+// SPEC-002-R005: tool-call arguments count at their compact JSON length, so
+// whitespace or escape spellings that leave the call unchanged cannot inflate
+// the output estimate; unavailable output is no estimate at all.
+func TestGeneratedOutputTokensResistsArgumentPadding(t *testing.T) {
+	call := func(args string) *billing.SettlementOutput {
+		return settlementOutputForContent("", nil, []billing.SettlementToolCall{{ID: "c1", Type: "function", Name: "search", Arguments: args}}, "normal_done")
+	}
+	plain, ok := generatedOutputTokens(call(`{"q":"A<b>","n":10}`))
+	if !ok || plain != (6+19+3)/4 {
+		t.Fatalf("plain = %d ok=%v", plain, ok)
+	}
+	for _, padded := range []string{
+		"{\"q\":\"A<b>\",\"n\":10}" + strings.Repeat(" ", 32000),
+		"{ \"q\" :\n\"\\u0041\\u003cb\\u003e\" , \"n\" : 10 }",
+	} {
+		if got, _ := generatedOutputTokens(call(padded)); got != plain {
+			t.Fatalf("padded arguments = %d, want %d", got, plain)
+		}
+	}
+	if got, ok := generatedOutputTokens(call("not json")); !ok || got != (6+8+3)/4 {
+		t.Fatalf("raw arguments = %d ok=%v", got, ok)
+	}
+	for name, output := range map[string]*billing.SettlementOutput{
+		"nil":         nil,
+		"unavailable": settlementOutputUnavailable(),
+		"not normal":  settlementOutputForContent("hello", nil, nil, billing.TerminalStateProviderError),
+	} {
+		if _, ok := generatedOutputTokens(output); ok {
+			t.Fatalf("%s output gave an estimate", name)
+		}
 	}
 }

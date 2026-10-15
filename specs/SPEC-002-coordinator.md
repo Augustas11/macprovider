@@ -6,11 +6,13 @@
 from non-streamed traffic. Every attempt's times run from provider dispatch
 start, so a provider that holds its response headers cannot shorten TTFT or
 the service time. A new signal, service throughput (the generated output over
-dispatch start to done), is measured the same way for streamed and
-non-streamed attempts, and the `throughput` phase ranks on it, so the two
-response modes are compared on one window. An attempt without a coordinator
-first-token time (non-streamed, or a buffered stream) is end-to-end: it yields
-prefill and service-throughput samples and never a TTFT or decode sample. The
+dispatch start to done of a non-streamed attempt), is what the `throughput`
+phase (non-streamed requests) ranks on; streamed attempts never feed it, so
+the response mode never decides which provider looks faster. An attempt
+without a coordinator first-token time (non-streamed, buffered, or a whole
+JSON response converted to SSE) is end-to-end and never yields a TTFT or
+decode sample. An attempt recorded before its body is written enters the
+store only once the whole body reached the buyer. The
 output count for every rate is the coordinator's estimate of the generated
 content and tool calls it delivered (bytes / 4), replacing the
 delivered-SSE-bytes estimate; the prefill gate moves from 4 to 32 times that
@@ -5409,16 +5411,19 @@ content or a tool call reaches the buyer side of the coordinator; an opening
 role-only event does not count. Only incrementally relayed streams carry a
 first-token time. An attempt with a first-token time is **timed**; any other
 attempt (a non-streamed response, or a stream the coordinator buffers or
-renders from a whole JSON response) is **end-to-end**: its first byte follows
+renders from a whole JSON response, including a whole JSON completion it
+converts to SSE) is **end-to-end**: its first byte follows
 the whole generation, so it MUST NOT yield a TTFT or decode sample. Every
 quantity is the coordinator's own and every time starts at provider dispatch
 start, so a provider that holds its response headers until it is done cannot
 shorten it; no provider usage count enters a rate:
 
 - the output estimate is the byte length of the generated content and tool
-  calls (name and arguments) the coordinator delivered, from its own
-  settlement output, divided by 4 and rounded up; reasoning that was not
-  delivered as content is not counted;
+  calls the coordinator delivered, from its own settlement output, divided by
+  4 and rounded up. Tool-call arguments count at their length re-encoded as
+  compact JSON, so whitespace or escape spellings that leave the call
+  unchanged cannot inflate it. Reasoning that was not delivered as content is
+  not counted;
 - the service time is provider dispatch start to done;
 - `ttft_ms` (timed only), provider dispatch start to first token, clamped to
   1..600000;
@@ -5433,17 +5438,20 @@ shorten it; no provider usage count enters a rate:
 - a decode rate (timed only), the output estimate minus 1 divided by the
   first-token-to-done time, when the output estimate is at least 8 and the
   time is positive, clamped to at most 2000 tokens/s;
-- a service throughput, for both kinds, the output estimate divided by the
-  service time, when the output estimate is at least 8, the coordinator's
-  estimate of the whole request (cached or not) is at most 16 times the
-  output estimate (so prompt ingestion does not pass for generation), and the
-  time is positive; clamped to at most 2000 tokens/s. Timed and end-to-end
-  attempts measure it over the same window, so the response mode never
-  decides which provider looks faster.
+- a service throughput (non-streamed attempts only), the output estimate
+  divided by the service time, when the output estimate is at least 8, the
+  coordinator's estimate of the whole request (cached or not) is at most 16
+  times the output estimate (so prompt ingestion does not pass for
+  generation), and the time is positive; clamped to at most 2000 tokens/s. A
+  streamed attempt is done only after its buyer writes, a non-streamed one
+  when the whole response was received, so streamed attempts never feed it
+  and the response mode never decides which provider looks faster.
 
 Provider usage may only withhold a sample: a reported cached prefix withholds
 the prefill sample. An end-to-end attempt that yields no sample creates no
-record.
+record. A non-streamed attempt that is recorded before its body is written
+(a gateway without negotiated settlement trailers) is observed only after the
+whole body was written to the buyer; a failed write drops it.
 
 Each metric is an exponentially weighted moving average with weight 0.2 for
 the new sample, with its own sample count and the time of its own last
@@ -5454,8 +5462,7 @@ signal that phase is judged on (SPEC-002-R006) is fresh, and is otherwise
 missing or stale TTFT is never read as zero or as fast.
 A provider can still shape its own TTFT, for example by emitting an early
 content token; that moves time from TTFT into decode, which the interactive
-score weighs equally, it cannot change the prefill rate or service
-throughput, and the bounds in SPEC-002-R006 limit what any score can win.
+score weighs equally, it cannot change the prefill rate, and the bounds in SPEC-002-R006 limit what any score can win.
 
 The only self-reported input is the heartbeat `throughput_tps_estimate`, used
 as a decode prior (not a service-throughput prior) worth 2 samples and capped at 1.25 times the measured decode

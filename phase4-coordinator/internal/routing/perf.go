@@ -42,13 +42,17 @@ type PerfObservation struct {
 	CompletionTokens   int64
 	TTFTMs             float64
 	DecodeMs           float64
-	// ServiceMs is provider dispatch start to done for either response mode,
-	// which neither an early content token nor late response headers can
-	// shorten. Prefill divides by it, and service throughput is the generated
+	// ServiceMs is provider dispatch start to done, which neither an early
+	// content token nor late response headers can shorten. Prefill divides by
+	// it, and for a non-streamed attempt service throughput is the generated
 	// output over it when RequestTokens (the whole request estimate, cached or
 	// not) is at most PerfServiceMaxInputRatio times the output.
 	ServiceMs     float64
 	RequestTokens int64
+	// Streamed attempts give no service-throughput sample: their done follows
+	// the buyer writes, while a non-streamed attempt is done when the whole
+	// response was received, so only non-streamed attempts share one window.
+	Streamed bool
 	// EndToEnd marks an attempt without a first-token time (a non-streamed or
 	// buffered response): TTFTMs and DecodeMs are ignored and it yields no
 	// TTFT or decode sample.
@@ -62,8 +66,8 @@ type PerfEvidence struct {
 	TTFTMs     float64
 	PrefillTPS float64
 	DecodeTPS  float64
-	// ServiceTPS is generated output over dispatch start to done, measured
-	// the same way for streamed and non-streamed attempts.
+	// ServiceTPS is generated output over dispatch start to done of
+	// non-streamed attempts: the throughput phase's own request class.
 	ServiceTPS          float64
 	TTFTSamples         int
 	PrefillSamples      int
@@ -218,7 +222,7 @@ func (s *PerfStore) Observe(o PerfObservation) {
 		decode = clampFloat(float64(o.CompletionTokens-1)/(o.DecodeMs/1000), 0, PerfMaxDecodeTPS)
 	}
 	service := math.NaN()
-	if o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.ServiceMs) && o.RequestTokens <= PerfServiceMaxInputRatio*o.CompletionTokens {
+	if !o.Streamed && o.CompletionTokens >= PerfMinDecodeTokens && positiveMs(o.ServiceMs) && o.RequestTokens <= PerfServiceMaxInputRatio*o.CompletionTokens {
 		service = clampFloat(float64(o.CompletionTokens)/(o.ServiceMs/1000), 0, PerfMaxDecodeTPS)
 	}
 	if o.EndToEnd && math.IsNaN(prefill) && math.IsNaN(service) {

@@ -41,7 +41,8 @@ func ClassifyPhase(inputTokens, maxOut int, stream bool) Phase {
 	if maxOut <= 0 {
 		maxOut = PhaseDefaultMaxOut
 	}
-	if inputTokens >= PhaseLongInputMinTokens && inputTokens >= PhaseLongInputOutputRatio*maxOut {
+	// Divide rather than multiply, so a huge max_tokens cannot overflow.
+	if inputTokens >= PhaseLongInputMinTokens && maxOut <= inputTokens/PhaseLongInputOutputRatio {
 		return PhaseLongInput
 	}
 	if stream {
