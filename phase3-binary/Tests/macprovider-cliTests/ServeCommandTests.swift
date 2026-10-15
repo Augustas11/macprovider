@@ -497,9 +497,9 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(resolved.directory, "/var/kvcache")
     }
 
-    /// AC-9: `--kv-disk-cache-allow-buyer-keys` reaches the resolver and fails closed —
-    /// the tier is force-disabled with the v0.1 precondition error, even with enabled=true.
-    func testKVDiskCacheAllowBuyerKeysFlagFailsClosed() throws {
+    /// AC-9: fleet policy reaches the resolver without replacing request-level
+    /// authenticated-grant enforcement in KVDiskCacheGate.
+    func testKVDiskCacheAllowBuyerKeysFlagReachesFleetPolicy() throws {
         let command = try ServeCommand.parse([
             "--no-join", "--model", "model-a",
             "--kv-disk-cache-enabled",
@@ -508,9 +508,9 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(command.kvDiskCacheCLIOverrides.allowBuyerKeys, true)
         let resolved = KVDiskCacheConfigResolver.resolve(
             yaml: nil, environment: [:], cli: command.kvDiskCacheCLIOverrides, homeDirectory: "/Users/tester")
-        XCTAssertFalse(resolved.effectiveEnabled, "allow_buyer_keys=true must force the tier off")
-        XCTAssertTrue(resolved.errors.contains { $0.contains("allow_buyer_keys=true is rejected") },
-                      "the v0.1 precondition error must be recorded (and later logged on serve)")
+        XCTAssertTrue(resolved.effectiveEnabled)
+        XCTAssertTrue(resolved.allowBuyerKeys)
+        XCTAssertTrue(resolved.errors.isEmpty)
     }
 
     func testAutotuneCandidateFlagRequiresNoJoin() throws {
