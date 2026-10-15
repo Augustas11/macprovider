@@ -362,21 +362,15 @@ func (snap requestPhaseTimingSnapshot) requestLogDecodeMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerFirstByte, snap.providerDone)
 }
 
-// routingTTFTMs and routingDecodeMs are the SPEC-002-R005 measurements:
-// dispatch done to the first generated token, and that token to done.
+// routingTTFTMs, routingServiceMs and routingDecodeMs are the SPEC-002-R005
+// measurements: dispatch start to the first generated token, dispatch start to
+// done, and that token to done. They start before dispatch completes, so a
+// provider that holds its response headers cannot shorten them.
 func (snap requestPhaseTimingSnapshot) routingTTFTMs() *float64 {
-	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerFirstToken)
+	return nullableDurationMillisBetween(snap.providerDispatchStart, snap.providerFirstToken)
 }
 
 func (snap requestPhaseTimingSnapshot) routingServiceMs() *float64 {
-	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerDone)
-}
-
-// routingEndToEndServiceMs is dispatch start to done: the service time of an
-// attempt without a first-token time. It starts before dispatch completes, so
-// a provider that withholds its response headers until it is done cannot
-// shorten it.
-func (snap requestPhaseTimingSnapshot) routingEndToEndServiceMs() *float64 {
 	return nullableDurationMillisBetween(snap.providerDispatchStart, snap.providerDone)
 }
 

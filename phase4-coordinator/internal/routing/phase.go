@@ -133,7 +133,7 @@ func freeShare(p pool.Provider) float64 {
 func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvidence, scores map[string]float64, now time.Time) {
 	decode := make(map[string]float64, len(fresh))
 	prefill := make(map[string]float64, len(fresh))
-	var minTTFT, maxDecode, maxPrefill, maxSlotDecode float64
+	var minTTFT, maxDecode, maxPrefill, maxSlotService float64
 	for i, p := range fresh {
 		e := evidence[p.SortKey()]
 		d := e.decodeAt(now, p.ThroughputTPSEstimate)
@@ -144,7 +144,7 @@ func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvid
 		}
 		maxDecode = math.Max(maxDecode, d)
 		maxPrefill = math.Max(maxPrefill, prefill[p.SortKey()])
-		maxSlotDecode = math.Max(maxSlotDecode, float64(max(p.SlotsFree, 0))*d)
+		maxSlotService = math.Max(maxSlotService, float64(max(p.SlotsFree, 0))*e.ServiceTPS)
 	}
 	ratio := func(v, best float64) float64 {
 		if best <= 0 {
@@ -161,7 +161,7 @@ func scorePhase(fresh []pool.Provider, phase Phase, evidence map[string]PerfEvid
 		case PhaseLongInput:
 			s = (0.8*ratio(prefill[key], maxPrefill) + 0.2*ratio(decode[key], maxDecode)) * load
 		case PhaseThroughput:
-			s = ratio(float64(max(p.SlotsFree, 0))*decode[key], maxSlotDecode)
+			s = ratio(float64(max(p.SlotsFree, 0))*e.ServiceTPS, maxSlotService)
 		default:
 			ttftTerm := 0.0
 			if e.TTFTMs > 0 {

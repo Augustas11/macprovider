@@ -158,8 +158,9 @@ func TestPerfPrefillUsesServiceTime(t *testing.T) {
 	}
 }
 
-// SPEC-002-R005: an end-to-end (non-streamed) attempt gives decode as the
-// generated output over the whole service time and never a TTFT sample.
+// SPEC-002-R005: an end-to-end (non-streamed) attempt gives service
+// throughput (generated output over dispatch start to done) and prefill, and
+// never a TTFT or decode sample.
 func TestPerfStoreEndToEndObservation(t *testing.T) {
 	s := NewPerfStore()
 	e2e := func(id string, request, prompt, completion int64, serviceMs float64) {
@@ -168,22 +169,22 @@ func TestPerfStoreEndToEndObservation(t *testing.T) {
 	// 200 tokens in 4 s: 50 tokens/s, every token counted.
 	e2e("ns", 300, 300, 200, 4000)
 	e, ok := s.Lookup("ns", "m")
-	if !ok || e.DecodeTPS != 50 || e.DecodeSamples != 1 || e.TTFTSamples != 0 || e.TTFTMs != 0 || e.PrefillSamples != 0 || !e.TTFTLastObserved.IsZero() {
-		t.Fatalf("end-to-end decode: %+v ok=%v", e, ok)
+	if !ok || e.ServiceTPS != 50 || e.ServiceSamples != 1 || e.DecodeSamples != 0 || e.TTFTSamples != 0 || e.TTFTMs != 0 || e.PrefillSamples != 0 || !e.TTFTLastObserved.IsZero() {
+		t.Fatalf("end-to-end service: %+v ok=%v", e, ok)
 	}
-	// A prompt-heavy end-to-end attempt is not a decode measurement.
-	e2e("ns", 4*200+1, 4*200+1, 200, 4000)
-	if e, _ := s.Lookup("ns", "m"); e.DecodeSamples != 1 {
-		t.Fatalf("prompt-heavy attempt gave a decode sample: %+v", e)
+	// A prompt-ingestion attempt is not a throughput measurement.
+	e2e("ns", PerfServiceMaxInputRatio*200+1, PerfServiceMaxInputRatio*200+1, 200, 4000)
+	if e, _ := s.Lookup("ns", "m"); e.ServiceSamples != 1 {
+		t.Fatalf("prompt-heavy attempt gave a service sample: %+v", e)
 	}
 	// The gate reads the whole request, so a cached prompt cannot hide it.
-	e2e("ns", 4*200+1, 0, 200, 4000)
-	if e, _ := s.Lookup("ns", "m"); e.DecodeSamples != 1 {
-		t.Fatalf("cached prompt-heavy attempt gave a decode sample: %+v", e)
+	e2e("ns", PerfServiceMaxInputRatio*200+1, 0, 200, 4000)
+	if e, _ := s.Lookup("ns", "m"); e.ServiceSamples != 1 {
+		t.Fatalf("cached prompt-heavy attempt gave a service sample: %+v", e)
 	}
 	// A prefill-dominated end-to-end attempt gives prefill only.
 	e2e("pf", 8000, 8000, 10, 2000)
-	if e, _ := s.Lookup("pf", "m"); e.PrefillTPS != 4000 || e.PrefillSamples != 1 || e.DecodeSamples != 0 || e.TTFTSamples != 0 {
+	if e, _ := s.Lookup("pf", "m"); e.PrefillTPS != 4000 || e.PrefillSamples != 1 || e.ServiceSamples != 0 || e.TTFTSamples != 0 {
 		t.Fatalf("end-to-end prefill: %+v", e)
 	}
 	// An end-to-end attempt that yields no sample creates no record.
@@ -192,14 +193,24 @@ func TestPerfStoreEndToEndObservation(t *testing.T) {
 	if _, ok := s.Lookup("none", "m"); ok {
 		t.Fatal("an end-to-end attempt without a sample created a record")
 	}
-	// The decode clamp still applies.
+	// The clamp still applies.
 	e2e("fast", 10, 10, 1_000_000, 1)
-	if e, _ := s.Lookup("fast", "m"); e.DecodeTPS != PerfMaxDecodeTPS {
+	if e, _ := s.Lookup("fast", "m"); e.ServiceTPS != PerfMaxDecodeTPS {
 		t.Fatalf("clamp: %+v", e)
+	}
+	// A timed attempt feeds service throughput over the same window, so the
+	// two response modes are compared on one denominator: 101 tokens over
+	// 9 s to the first token plus 1 s of decode is 10.1 tokens/s either way.
+	s.Observe(PerfObservation{ProviderID: "timed", Model: "m", RequestTokens: 100, CompletionTokens: 101, TTFTMs: 9000, DecodeMs: 1000, ServiceMs: 10000, At: perfNow})
+	e2e("untimed", 100, 100, 101, 10000)
+	timed, _ := s.Lookup("timed", "m")
+	untimed, _ := s.Lookup("untimed", "m")
+	if timed.ServiceTPS != untimed.ServiceTPS || timed.DecodeTPS != 100 || untimed.DecodeSamples != 0 {
+		t.Fatalf("mixed modes: timed=%+v untimed=%+v", timed, untimed)
 	}
 }
 
-// Freshness is per signal: decode-only evidence ranks throughput and nothing
+// Freshness is per signal: service-only evidence ranks throughput and nothing
 // that depends on the first token.
 func TestPerfFreshnessIsPerSignal(t *testing.T) {
 	s := NewPerfStore()
@@ -207,13 +218,13 @@ func TestPerfFreshnessIsPerSignal(t *testing.T) {
 		s.Observe(PerfObservation{ProviderID: "ns", Model: "m", EndToEnd: true, RequestTokens: 100, PromptTokens: 100, CompletionTokens: 100, ServiceMs: 2000, At: perfNow})
 	}
 	e, _ := s.Lookup("ns", "m")
-	if !e.DecodeFresh(perfNow) || e.TTFTFresh(perfNow) || e.PrefillFresh(perfNow) || !e.Fresh(perfNow) {
-		t.Fatalf("decode-only freshness: %+v", e)
+	if !e.ServiceFresh(perfNow) || e.DecodeFresh(perfNow) || e.TTFTFresh(perfNow) || e.PrefillFresh(perfNow) || !e.Fresh(perfNow) {
+		t.Fatalf("service-only freshness: %+v", e)
 	}
 	if !e.FreshFor(PhaseThroughput, perfNow) || e.FreshFor(PhaseInteractive, perfNow) || e.FreshFor(PhaseLongInput, perfNow) {
-		t.Fatalf("decode-only phase freshness: %+v", e)
+		t.Fatalf("service-only phase freshness: %+v", e)
 	}
-	// TTFT samples from long ago do not stay fresh because decode is recent.
+	// TTFT samples from long ago do not stay fresh because service is recent.
 	old := perfNow.Add(-PerfFreshMaxAge - time.Minute)
 	for i := 0; i < PerfFreshMinSamples; i++ {
 		observe(s, "mixed", 0, 0, 50, 0, old)
@@ -221,7 +232,7 @@ func TestPerfFreshnessIsPerSignal(t *testing.T) {
 	}
 	e, _ = s.Lookup("mixed", "m")
 	if e.TTFTSamples != PerfFreshMinSamples || e.TTFTFresh(perfNow) || e.FreshFor(PhaseInteractive, perfNow) || !e.FreshFor(PhaseThroughput, perfNow) {
-		t.Fatalf("stale TTFT with recent decode: %+v", e)
+		t.Fatalf("stale TTFT with recent service: %+v", e)
 	}
 	if !e.LastObserved.Equal(perfNow) || !e.TTFTLastObserved.Equal(old) {
 		t.Fatalf("observation times: %+v", e)

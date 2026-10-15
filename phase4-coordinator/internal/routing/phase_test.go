@@ -20,7 +20,7 @@ func warm(s *PerfStore, id string, ttftMs, prefillTPS, decodeTPS float64) {
 	for i := 0; i < PerfFreshMinSamples; i++ {
 		// A short-prompt attempt gives TTFT and decode; a prefill-dominated one
 		// with no output gives prefill as input over the service time.
-		s.Observe(PerfObservation{ProviderID: id, Model: "m", CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: perfNow})
+		s.Observe(PerfObservation{ProviderID: id, Model: "m", RequestTokens: 10, CompletionTokens: completion, TTFTMs: ttftMs, DecodeMs: decodeMs, ServiceMs: ttftMs + decodeMs, At: perfNow})
 		s.Observe(PerfObservation{ProviderID: id, Model: "m", PromptTokens: int64(prefillTPS), TTFTMs: ttftMs, ServiceMs: 1000, At: perfNow})
 	}
 }
@@ -191,18 +191,18 @@ func TestRouteTraceHeaderGrammar(t *testing.T) {
 	if got := LatencyClass(PhaseInteractive, 10, ttft(100), perfNow.Add(PerfFreshMaxAge+time.Second)); got != "unknown" {
 		t.Fatalf("latency %s", got)
 	}
-	// Decode-only evidence (non-streamed traffic) says nothing about the
+	// Service-only evidence (non-streamed traffic) says nothing about the
 	// first token: no TTFT is never read as fast.
-	decodeOnly := PerfEvidence{DecodeTPS: 80, DecodeSamples: PerfFreshMinSamples, DecodeLastObserved: perfNow, LastObserved: perfNow}
+	serviceOnly := PerfEvidence{ServiceTPS: 80, ServiceSamples: PerfFreshMinSamples, ServiceLastObserved: perfNow, LastObserved: perfNow}
 	for _, phase := range []Phase{PhaseInteractive, PhaseThroughput, PhaseLongInput} {
-		if got := LatencyClass(phase, 10, decodeOnly, perfNow); got != "unknown" {
-			t.Fatalf("%s decode-only latency %s", phase, got)
+		if got := LatencyClass(phase, 10, serviceOnly, perfNow); got != "unknown" {
+			t.Fatalf("%s service-only latency %s", phase, got)
 		}
 	}
 }
 
-// warmEndToEnd gives provider id fresh decode-only evidence, as non-streamed
-// traffic does.
+// warmEndToEnd gives provider id fresh service-throughput-only evidence, as
+// non-streamed traffic does.
 func warmEndToEnd(s *PerfStore, id string, decodeTPS float64) {
 	for i := 0; i < PerfFreshMinSamples; i++ {
 		s.Observe(PerfObservation{ProviderID: id, Model: "m", EndToEnd: true, RequestTokens: 10, PromptTokens: 10, CompletionTokens: int64(decodeTPS), ServiceMs: 1000, At: perfNow})
@@ -220,22 +220,23 @@ func TestPhaseOrderUsesEndToEndEvidence(t *testing.T) {
 	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
 		t.Fatalf("throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
-	// Mixed: a streamed provider's decode competes with a non-streamed one's.
+	// Mixed: a streamed provider's service throughput competes with a
+	// non-streamed one's on the same window.
 	warm(s, "streamed", 50, 1000, 40)
 	candidates = []pool.Provider{phaseProvider("streamed", 1, 1), phaseProvider("fast", 1, 1)}
 	d = PhaseOrder(candidates, "m", PhaseThroughput, s, perfNow, 0.99, 0)
 	if d.Basis != BasisMeasured || d.Fresh != 2 || candidates[0].ProviderID != "fast" {
 		t.Fatalf("mixed throughput: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
-	// Interactive: decode-only records are unmeasured, not fast. With one
+	// Interactive: service-only records are unmeasured, not fast. With one
 	// TTFT-fresh candidate the objective order is kept.
 	candidates = []pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1), phaseProvider("streamed", 1, 1)}
 	d = PhaseOrder(candidates, "m", PhaseInteractive, s, perfNow, 0.99, 0)
 	if d.Basis != BasisFallback || d.Fresh != 1 || ids(candidates)[0] != "slow" {
 		t.Fatalf("interactive: basis=%s fresh=%d order=%v", d.Basis, d.Fresh, ids(candidates))
 	}
-	if _, scored := d.Scores["fast"]; scored {
-		t.Fatal("a decode-only record was scored for interactive")
+	if _, scored := d.Scores[phaseProvider("fast", 1, 1).SortKey()]; scored {
+		t.Fatal("a service-only record was scored for interactive")
 	}
 	// Long input needs prefill or TTFT evidence.
 	d = PhaseOrder([]pool.Provider{phaseProvider("slow", 1, 1), phaseProvider("fast", 1, 1)}, "m", PhaseLongInput, s, perfNow, 0.99, 0)
