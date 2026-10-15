@@ -115,6 +115,13 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writePrivacyClassError(w, privacyClassDowngrade, "")
 		return
 	}
+	// SPEC-049-R034: the code-bound requirement is valid only as one exact
+	// value with the privacy-class marker, and only on the reservation.
+	assurancePresent, assuranceValid := privacyAssuranceRequested(r)
+	if assurancePresent && (!present || !assuranceValid) {
+		writePrivacyClassError(w, privacyClassDowngrade, "")
+		return
+	}
 	if present && !s.privacyClassEnabled() {
 		writePrivacyClassError(w, privacyClassDisabled, "")
 		return
@@ -155,7 +162,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return
 	}
-	s.reserveRelayBlindRoute(w, r, authn, req, present)
+	s.reserveRelayBlindRoute(w, r, authn, req, present, assurancePresent)
 }
 
 func decodeRelayBlindRouteReservation(body []byte) (relayBlindRouteReservationRequest, error) {
