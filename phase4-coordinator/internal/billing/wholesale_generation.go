@@ -75,7 +75,15 @@ func (s *Store) wholesaleLineTotals(ctx context.Context, accountID, startText, e
 	// looked up independently; an identity with a NULL config_snapshot_id
 	// counts as absent. UNIQUE(request_id, attempt_n, provider_assigned_id)
 	// makes each lookup return at most one identity.
-	rows, err := s.db.QueryContext(ctx, wholesaleRowsSQL(`rl.account_id = ?
+	// SPEC-005 §2.1b: the live rows and the folded days are read in one read
+	// transaction, so a fold committing between the two reads can neither
+	// count a request twice nor drop it.
+	readTx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = readTx.Rollback() }()
+	rows, err := readTx.QueryContext(ctx, wholesaleRowsSQL(`rl.account_id = ?
    AND julianday(rl.ts_utc) >= julianday(?)
    AND julianday(rl.ts_utc) < julianday(?)`), accountID, startText, endText)
 	if err != nil {
@@ -108,8 +116,12 @@ func (s *Store) wholesaleLineTotals(ctx context.Context, accountID, startText, e
 		return nil, err
 	}
 	rows.Close()
-	folded, err := s.foldedWholesaleRows(ctx, accountID, startText, endText)
+	folded, err := foldedWholesaleRows(ctx, readTx, accountID, startText, endText)
 	if err != nil {
+		return nil, err
+	}
+	// Pricing reads only immutable config snapshots, outside the snapshot.
+	if err := readTx.Rollback(); err != nil {
 		return nil, err
 	}
 	for _, f := range folded {

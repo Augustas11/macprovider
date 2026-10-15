@@ -7420,7 +7420,8 @@
         "phase4-coordinator/internal/billing/creator_earnings_test.go:TestCreatorPoolEarningsCountArchivedAndRolledUpCredits",
         "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupRetriesHeldRequests",
         "phase4-coordinator/internal/billing/evidence_early_archive_test.go:TestLateUndeliveredQuarantineLeavesArchivedCreditPayable",
-        "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow"
+        "phase4-coordinator/internal/billing/endpoints_test.go:TestReconcileEndpointRefusesRangeBeforeRequestLogWindow",
+        "phase4-coordinator/internal/billing/ledger_rollup_test.go:TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout"
       ],
       "journeys": [],
       "evidence": [],

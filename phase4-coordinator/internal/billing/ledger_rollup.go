@@ -637,6 +637,10 @@ func (s *Store) exportLedgerRollupArchive(ctx context.Context, opts LedgerRollup
 		}
 		held = append(held, r)
 	}
+	if err := holds.Err(); err != nil {
+		holds.Close()
+		return nil, 0, err
+	}
 	if err := holds.Close(); err != nil {
 		return nil, 0, err
 	}
@@ -646,7 +650,14 @@ func (s *Store) exportLedgerRollupArchive(ctx context.Context, opts LedgerRollup
 			return nil, kept, err
 		}
 	}
+	// Phase 2: walk payouts from the cursor. The cursor only passes payouts
+	// that can gain no more credits and are fully walked: consumed and voided
+	// ones in an unbroken run from the cursor. A ready payout (settlement may
+	// still add credits to it) or a too-recent one is walked again by later
+	// runs, and the walk goes on past it to older-window payouts with larger
+	// ids.
 	state := ledgerRollupWalk{cursor: cursor, partialPayout: partialPayout, partialRequest: partialRequest}
+	pos, advance := cursor, true
 walk:
 	for selected < opts.MaxRequestsPerArchive {
 		if err := ctx.Err(); err != nil {
@@ -660,7 +671,7 @@ walk:
 SELECT id, provider_id, window_end_utc, status FROM ledger_payout_ready
  WHERE id > ?
  ORDER BY id
- LIMIT ?`, state.cursor, ledgerRollupPayoutChunk)
+ LIMIT ?`, pos, ledgerRollupPayoutChunk)
 		if err != nil {
 			abort()
 			return nil, kept, err
@@ -670,18 +681,20 @@ SELECT id, provider_id, window_end_utc, status FROM ledger_payout_ready
 		}
 		for _, p := range payouts {
 			id, _ := p.int64("id")
+			pos = id
 			status, _ := p.str("status")
 			endText, _ := p.str("window_end_utc")
 			end, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(endText))
 			if status == "voided" {
 				// A voided payout's credits never roll up; they stay hot.
-				state = ledgerRollupWalk{cursor: id}
+				if advance {
+					state.cursor = id
+				}
 				continue
 			}
 			if perr != nil || end.After(cutoff) {
-				// Payouts are walked in id order; a too-recent one stops the
-				// walk so the cursor never passes it.
-				break walk
+				advance = false
+				continue
 			}
 			after := ""
 			if state.partialPayout == id {
@@ -708,6 +721,11 @@ SELECT DISTINCT request_id FROM ledger_request_credits
 				}
 				requests = append(requests, r)
 			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				abort()
+				return nil, kept, err
+			}
 			if err := rows.Close(); err != nil {
 				abort()
 				return nil, kept, err
@@ -721,10 +739,17 @@ SELECT DISTINCT request_id FROM ledger_request_credits
 			if len(requests) == limit {
 				// The archive is full inside this payout: the next archive
 				// continues after its last request.
-				state = ledgerRollupWalk{cursor: state.cursor, partialPayout: id, partialRequest: requests[len(requests)-1]}
+				state.partialPayout, state.partialRequest = id, requests[len(requests)-1]
 				break walk
 			}
-			state = ledgerRollupWalk{cursor: id}
+			if state.partialPayout == id {
+				state.partialPayout, state.partialRequest = 0, ""
+			}
+			if advance && status == "consumed" {
+				state.cursor = id
+			} else {
+				advance = false
+			}
 		}
 	}
 	saveSkips := func(e evidenceExecer) error {

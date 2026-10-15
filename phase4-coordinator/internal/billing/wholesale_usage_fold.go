@@ -144,6 +144,10 @@ SELECT rowid, ts_utc, account_id, request_id FROM request_log
 				groups = append(groups, g)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return deleted, err
+		}
 		if err := rows.Close(); err != nil {
 			return deleted, err
 		}
@@ -230,6 +234,10 @@ SELECT COUNT(*) FROM request_log
 			}
 			fold = append(fold, r)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
 		if err := rows.Close(); err != nil {
 			return 0, 0, err
 		}
@@ -288,9 +296,9 @@ func nullSnapshot(v sql.NullInt64) int64 {
 
 // foldedWholesaleRows reads an account's folded days in [startText, endText)
 // as statement rows: each carries the summed tokens and its request count.
-func (s *Store) foldedWholesaleRows(ctx context.Context, accountID, startText, endText string) ([]wholesaleFoldedRow, error) {
+func foldedWholesaleRows(ctx context.Context, q evidenceQueryer, accountID, startText, endText string) ([]wholesaleFoldedRow, error) {
 	startDay, endDay := dayPrefix(startText), dayPrefix(endText)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 SELECT day_utc, model, exact_snapshot_id, derived_snapshot_id, ts_snapshot_id,
        request_count, prompt_tokens, completion_tokens
   FROM wholesale_usage_daily

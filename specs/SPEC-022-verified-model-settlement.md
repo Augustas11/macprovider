@@ -2452,7 +2452,10 @@ retention run with its run budget, batch size, pause, archive directory, and
 free-space floor; `billing.ledger_rollup.enabled: false` (SIGHUP-reloadable)
 stops it at the next batch. It walks payouts from a persisted cursor and
 reads each payout's credits through the provider's time index, so it never
-walks the whole ledger.
+walks the whole ledger. The cursor passes only payouts that can gain no more
+credits (consumed or voided) in an unbroken run; a `ready` payout, which a
+settlement rerun may still add credits to, and a too-recent one are walked
+again by later runs.
 
 R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
 row already pruned under items 1 or 2 is neither a reason to keep a request

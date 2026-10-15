@@ -71,7 +71,7 @@ usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e
 
 ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
-VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator and route-snapshot journal database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
+VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
 APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
 

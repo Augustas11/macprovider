@@ -807,8 +807,9 @@ ordinal changes while it can still be priced:
   ordinal, the one linked at its id ordinal, and (when neither is linked)
   the snapshot in effect at its timestamp; the request's rows are then
   deleted.
-- A statement prices the account's live rows in the month and its folded
-  days in the month exactly as it priced the rows: each folded key resolves
+- A statement reads the account's live rows and its folded days of the
+  month in one read transaction, so a fold committing meanwhile neither
+  doubles nor drops a request, and prices them exactly as it priced the rows: each folded key resolves
   to the same generation, and its token sums join the same (model, rate row,
   multiplier) group. A key whose generations conflict or do not resolve fails
   the statement closed, as the row did.
@@ -1996,6 +1997,8 @@ rows:
 
 A request skipped for a reason that can clear is held in
 `ledger_rollup_holds` and re-checked by every run before the payout walk.
+The walk's cursor passes only consumed or voided payouts; a `ready` payout
+is walked again, so credits a settlement rerun adds to it still roll up.
 
 Per-request listings (explorer ledger and session detail) cover hot rows only;
 the archive holds the rolled-up rows. The frozen settlement finality of a

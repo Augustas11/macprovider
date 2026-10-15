@@ -1689,7 +1689,9 @@ func runCoordinator() (exitCode int) {
 	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, time.Duration(cfg.Storage.SettlementReceiptAuditOutboxDrainedRetentionHours)*time.Hour, metricsHandle, moneySQLiteActivity, logger)
 	startRequestLogRetentionPruner(shutdownCtx, foldingRequestLogPruner{fold: billingStore, log: reqLogStore}, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
-	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
+	// SPEC-002 R-7.10.2a: settlement receipt audit rows leave only through a
+	// verified closed period archive (startAuditLogRotation), never by the
+	// generic pruner.
 	startAuditLogRotation(shutdownCtx, settlementReceiptAuditStore, auditLogRotationOptions(cfg), logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
@@ -3397,6 +3399,7 @@ func auditLogRotationOptions(cfg config.Config) audit.RotationOptions {
 		HotDays:                   cfg.Storage.AuditLogHotDays,
 		RetentionDays:             cfg.Storage.AuditLogRetentionDays,
 		BatchPause:                time.Duration(rc.BatchPauseMS) * time.Millisecond,
+		RunBudget:                 time.Duration(rc.RunBudgetMinutes) * time.Minute,
 		MinFreeBytes:              rc.ArchiveMinFreeBytes,
 		MinFreePercent:            rc.ArchiveMinFreePercent,
 		IncrementalVacuumPages:    rc.IncrementalVacuumPages,

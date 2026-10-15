@@ -122,7 +122,7 @@ func TestLedgerRollupKeepsEveryTotalAndPayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != ledgerRollupStatusRolledUp || report.RolledRequests != 3 || report.RolledCredits != 3 || report.KeptRequests != 1 {
+	if report.Status != ledgerRollupStatusRolledUp || report.RolledRequests != 3 || report.RolledCredits != 3 || report.KeptRequests < 1 || report.PayoutCursor != 0 {
 		t.Fatalf("rollup report=%+v", report)
 	}
 	for _, suffix := range []string{"a", "b", "c"} {
@@ -173,6 +173,12 @@ func TestLedgerRollupKeepsEveryTotalAndPayout(t *testing.T) {
 	}
 	if status := scalarText(t, f.store.db, `SELECT status FROM ledger_payout_ready WHERE id = ?`, payoutID); status != "consumed" {
 		t.Fatalf("payout status after claim=%s", status)
+	}
+	// The cursor passes a payout only once it is consumed: a ready payout
+	// can still gain credits from a settlement rerun and is walked again.
+	report, err = f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.PayoutCursor != payoutID {
+		t.Fatalf("cursor after the payout was consumed=%+v err=%v", report, err)
 	}
 	// Rollup rows are permanent and only grow.
 	if _, err := f.store.db.Exec(`DELETE FROM ledger_settled_rollups`); err == nil {
@@ -375,5 +381,39 @@ func TestLedgerRollupSplitsALargePayoutAcrossArchives(t *testing.T) {
 	}
 	if after := snapshotLedgerReaders(t, f, f.base.ProviderID); !reflect.DeepEqual(before, after) {
 		t.Fatalf("readers changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+// A credit settled into a ready payout after a rollup run walked that payout
+// is rolled up by the next run: the cursor never passes a ready payout.
+func TestLedgerRollupFindsCreditsSettledLaterIntoAReadyPayout(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	for _, suffix := range []string{"first", "a"} {
+		f.seed(t, suffix)
+	}
+	f.settle(t)
+	f.seed(t, "late")
+	if _, err := f.store.RunEvidenceRetention(ctx, retentionTestOptions(t.TempDir(), nil)); err != nil {
+		t.Fatal(err)
+	}
+	f.addLaterWindows(t, 6)
+	dir := t.TempDir()
+	report, err := f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 1 {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	// A settlement rerun of the same window adds the late credit to the
+	// still-ready payout.
+	payoutID := scalar(t, f.store.db, `SELECT id FROM ledger_payout_ready`)
+	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = ? WHERE request_id = ?`, payoutID, f.inputs["late"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunLedgerRollup(ctx, ledgerRollupTestOptions(dir))
+	if err != nil || report.RolledRequests != 1 {
+		t.Fatalf("second run=%+v err=%v", report, err)
+	}
+	if n := scalar(t, f.store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, f.inputs["late"].RequestID); n != 0 {
+		t.Fatal("late credit not rolled up")
 	}
 }

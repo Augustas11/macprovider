@@ -3918,9 +3918,14 @@ hot and satisfies the retention window from closed period archives:
    (file, SHA-256, size, row count, first and last UTC day, status). An
    archive whose last day is older than `audit_log_retention_days` is
    removed together with its manifest.
-5. The existing pruner still deletes hot rows older than
-   `audit_log_retention_days`. The money-database `audit_log` (operator
-   swap, receipt rotation, and billing admin events) is not rotated.
+5. Rows leave this database only through a verified archive; the generic
+   pruner does not run on it. A row past `audit_log_retention_days` that a
+   rotation has not archived yet is archived by the next run (oldest first)
+   and its archive removed with the expired ones. The rotation shares the
+   settled-evidence retention run budget and pacing; its settings apply at
+   coordinator start. The money-database `audit_log` (operator swap,
+   receipt rotation, and billing admin events) keeps the existing pruner and
+   is not rotated.
 
 `coordinator-cli audit-log-archive verify --archive <file>` re-verifies an
 archive from the file alone.
@@ -4863,10 +4868,9 @@ SPEC-002 v1.3.5 R-7.10.8 and SPEC-011 v0.5 AC-20.
 **AC-K.14 Audit-log retention.**
 Rows older than `storage.audit_log_retention_days` (default 90) MUST be
 pruned by the existing coordinator pruner, extended from the §7.7
-pruner pattern. In the settlement receipt audit database, rows of days
-older than `storage.audit_log_hot_days` leave the hot file only into a
-verified closed period archive (R-7.10.2a), and an archive is removed once
-its last day is older than the retention window. Traces to SPEC-002 v1.3.5
+pruner pattern. In the settlement receipt audit database, rows leave the
+hot file only into a verified closed period archive (R-7.10.2a), and an
+archive is removed once its last day is older than the retention window. Traces to SPEC-002 v1.3.5
 §7.10.1 and SPEC-011 v0.5 AC-20.
 
 **AC-K.15 SPEC-010 validation-order pass-through.**

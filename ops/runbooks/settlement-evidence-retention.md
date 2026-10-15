@@ -259,7 +259,7 @@ growing even without the conversion.
 
 The one-time conversion rewrites the whole file and needs the coordinator
 stopped, so it waits for the drain (`backlog_drained=true`). It runs through
-the ops entry point, never by hand. The entry point reads both files'
+the ops entry point, never by hand. The entry point reads the three files'
 `auto_vacuum` mode and the last retention lap read-only. It refuses until
 the drain signal holds, states the downtime first, and takes the live-ops
 lock and the three Pearl locks (updater, deploy, deploy-operation). It
@@ -400,7 +400,9 @@ These run without the nightly job and need no operator step:
   `deleted_rows`, `kept_rows`, and `removed_archives`; `kept_rows` are rows
   that changed after export and are archived again by a later run. Archives
   whose last day is older than `storage.audit_log_retention_days` are
-  removed. The first runs after the deploy move the existing backlog in
+  removed. Rows leave the audit database only through a verified archive;
+  the generic 90-day pruner no longer runs on it. The first runs after the
+  deploy move the existing backlog in
   bounded archives (200,000 rows each, 15 minutes per run). Verify an archive
   from the file alone with
   `coordinator-cli audit-log-archive verify --archive <file>`. The audit file
