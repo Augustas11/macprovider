@@ -42,7 +42,7 @@ final class AppAttestEnrollmentTests: XCTestCase {
 
     func testAlreadyRecordedShortCircuitsAndPersistsDone() async {
         let keys = FakeKeyService()
-        let cli = FakeCLI(responses: [ok(#"{"status":"already_recorded","provider_id":"\#(providerID)"}"#)])
+        let cli = FakeCLI(responses: [ok(#"{"status":"already_recorded","provider_id":"\#(providerID)","key_id":"\#(recordedKeyID)"}"#)])
         let enrollment = makeEnrollment(keys: keys, cli: cli)
 
         let outcome = await enrollment.run(providerID: providerID)
@@ -51,10 +51,59 @@ final class AppAttestEnrollmentTests: XCTestCase {
         XCTAssertEqual(cli.calls.map(\.arguments), [["app-attest", "challenge"]])
         XCTAssertEqual(keys.generated, 0)
         XCTAssertTrue(store.isDone(providerID))
+        XCTAssertEqual(store.keyID(providerID), recordedKeyID)
 
         let again = await enrollment.run(providerID: providerID)
         XCTAssertEqual(again, .alreadyDone)
         XCTAssertEqual(cli.calls.count, 1)
+    }
+
+    /// SPEC-049-R035 item 1: a Mac enrolled before the key id was kept asks
+    /// once more, with backoff, to learn it; nothing is re-attested.
+    func testDoneWithoutKeyIDRecoversTheRecordedKeyID() async {
+        let clock = Clock(Date(timeIntervalSince1970: 2_000_000))
+        let keys = FakeKeyService()
+        let cli = FakeCLI(responses: [
+            ok(#"{"status":"already_recorded","provider_id":"\#(providerID)"}"#),
+            ok(#"{"status":"already_recorded","provider_id":"\#(providerID)","key_id":"\#(recordedKeyID)"}"#),
+        ])
+        let enrollment = makeEnrollment(keys: keys, cli: cli, clock: clock)
+
+        // An older coordinator names no key id: done, but retried later.
+        let first = await enrollment.run(providerID: providerID)
+        XCTAssertEqual(first, .alreadyRecorded)
+        XCTAssertTrue(store.isDone(providerID))
+        XCTAssertNil(store.keyID(providerID))
+        let next = try? XCTUnwrap(store.nextAttempt(providerID))
+        let blocked = await enrollment.run(providerID: providerID)
+        XCTAssertEqual(blocked, .backingOff(until: next!))
+
+        clock.now = next!
+        let recovered = await enrollment.run(providerID: providerID)
+        XCTAssertEqual(recovered, .alreadyRecorded)
+        XCTAssertEqual(store.keyID(providerID), recordedKeyID)
+        let done = await enrollment.run(providerID: providerID)
+        XCTAssertEqual(done, .alreadyDone)
+        XCTAssertEqual(keys.generated, 0)
+        XCTAssertEqual(cli.calls.count, 2)
+    }
+
+    /// First key wins: a submit answered already_recorded keeps the recorded
+    /// key id, not the one just generated.
+    func testSubmitAlreadyRecordedKeepsTheRecordedKeyID() async {
+        let cli = FakeCLI(responses: [
+            ok(challengeJSON()),
+            ok(#"{"status":"already_recorded","provider_id":"\#(providerID)","key_id":"\#(recordedKeyID)"}"#),
+        ])
+        let outcome = await makeEnrollment(keys: FakeKeyService(), cli: cli).run(providerID: providerID)
+        XCTAssertEqual(outcome, .alreadyRecorded)
+        XCTAssertEqual(store.keyID(providerID), recordedKeyID)
+    }
+
+    func testMalformedKeyIDIsNotKept() {
+        store.setKeyID("not-base64", for: providerID)
+        store.setKeyID(Data(repeating: 1, count: 16).base64EncodedString(), for: providerID)
+        XCTAssertNil(store.keyID(providerID))
     }
 
     func testSuccessAttestsClientDataHashAndSubmitsExactArguments() async throws {
@@ -78,6 +127,8 @@ final class AppAttestEnrollmentTests: XCTestCase {
         XCTAssertEqual(cli.calls[1].stdin, Data(FakeKeyService.attestation.base64EncodedString().utf8))
         XCTAssertTrue(store.isDone(providerID))
         XCTAssertNil(store.nextAttempt(providerID))
+        // SPEC-049-R035 item 1: the attested key id is kept for assertions.
+        XCTAssertEqual(store.keyID(providerID), FakeKeyService.keyID)
     }
 
     func testSubmitFailureDoesNotPersistDoneAndBacksOffThenRetries() async {
@@ -160,6 +211,7 @@ final class AppAttestEnrollmentTests: XCTestCase {
     // MARK: - helpers
 
     private var store: AppAttestEnrollmentStore { AppAttestEnrollmentStore(defaults: defaults) }
+    private let recordedKeyID = Data(repeating: 0xC4, count: 32).base64EncodedString()
 
     private func makeEnrollment(keys: FakeKeyService, cli: FakeCLI, clock: Clock = Clock(Date())) -> AppAttestEnrollment {
         AppAttestEnrollment(
@@ -229,6 +281,10 @@ private final class FakeKeyService: AppAttestKeyService, @unchecked Sendable {
         if let attestError { throw attestError }
         lock.withLock { attested.append((keyID, clientDataHash)) }
         return Self.attestation
+    }
+
+    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        Data([0xA2])
     }
 }
 

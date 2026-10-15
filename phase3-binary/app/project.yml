@@ -41,6 +41,9 @@ targets:
           # Resources entries. They are packaged as a folder by the
           # "Bundle payout-signer" post-build step instead.
           - "Resources/payout-signer/**"
+      # SPEC-049 §4.13: the code-bound statement and attestor channel are
+      # framed from one source shared with macprovider-cli.
+      - path: ../Sources/macprovider-cli/PrivacyCodeBoundShared.swift
     resources:
       # payout-signer is deliberately EXCLUDED here and copied as a directory
       # by the "Bundle payout-signer" post-build step below. XcodeGen 2.45.4's

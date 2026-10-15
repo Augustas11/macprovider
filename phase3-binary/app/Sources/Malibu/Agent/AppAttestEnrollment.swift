@@ -6,12 +6,14 @@ import Foundation
 // Attest key; the CLI carries the provider bearer (`app-attest challenge` /
 // `app-attest submit`). Best effort: it never blocks provider start or
 // serving, persists nothing until the coordinator confirms, and backs off
-// between failed attempts across launches.
+// between failed attempts across launches. It keeps the recorded key id so
+// the privacy attestor can assert with that same key (SPEC-049-R035).
 
 protocol AppAttestKeyService: Sendable {
     var isSupported: Bool { get }
     func generateKey() async throws -> String
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data
+    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data
 }
 
 /// `DCAppAttestService`, used only on macOS 27 or later.
@@ -31,6 +33,10 @@ struct DeviceCheckAppAttestKeyService: AppAttestKeyService {
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
         try await DCAppAttestService.shared.attestKey(keyID, clientDataHash: clientDataHash)
     }
+
+    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        try await DCAppAttestService.shared.generateAssertion(keyID, clientDataHash: clientDataHash)
+    }
 }
 
 struct AppAttestCLIResult: Sendable, Equatable {
@@ -42,7 +48,9 @@ struct AppAttestCLIResult: Sendable, Equatable {
 /// Runs the provider CLI with `arguments`, writing `stdin` (if any) to its standard input.
 typealias AppAttestCLIRunner = @Sendable (_ arguments: [String], _ stdin: Data?) async throws -> AppAttestCLIResult
 
-/// Per-provider enrollment state. Only "done" and the retry schedule are kept.
+/// Per-provider enrollment state: "done", the recorded key id, whether that
+/// key turned out unusable, and the retry schedule. The key id is public: it
+/// is the SHA-256 of the attested public key.
 struct AppAttestEnrollmentStore: @unchecked Sendable {
     static let backoff: [TimeInterval] = [15 * 60, 60 * 60, 4 * 60 * 60, 12 * 60 * 60, 24 * 60 * 60]
 
@@ -60,6 +68,33 @@ struct AppAttestEnrollmentStore: @unchecked Sendable {
         defaults.set(true, forKey: key("done", providerID))
         defaults.removeObject(forKey: key("failures", providerID))
         defaults.removeObject(forKey: key("nextAttemptAt", providerID))
+    }
+
+    /// The key id the coordinator recorded for providerID (standard base64
+    /// of 32 bytes), or nil when it is not known yet.
+    func keyID(_ providerID: String) -> String? {
+        guard let value = defaults.string(forKey: key("keyID", providerID)), Self.validKeyID(value) else { return nil }
+        return value
+    }
+
+    func setKeyID(_ keyID: String, for providerID: String) {
+        guard Self.validKeyID(keyID) else { return }
+        defaults.set(keyID, forKey: key("keyID", providerID))
+    }
+
+    /// DCAppAttestService refused this key (SPEC-049-R035 item 1). SPEC-033
+    /// never replaces a recorded key, so the attestor stops asserting for it.
+    func markKeyInvalid(_ keyID: String, for providerID: String) {
+        defaults.set(keyID, forKey: key("invalidKeyID", providerID))
+    }
+
+    func isKeyInvalid(_ keyID: String, for providerID: String) -> Bool {
+        defaults.string(forKey: key("invalidKeyID", providerID)) == keyID
+    }
+
+    static func validKeyID(_ value: String) -> Bool {
+        guard let data = Data(base64Encoded: value) else { return false }
+        return data.count == 32 && data.base64EncodedString() == value
     }
 
     func recordFailure(_ providerID: String, now: Date) {
@@ -97,13 +132,19 @@ struct AppAttestEnrollment: Sendable {
 
     func run(providerID: String) async -> Outcome {
         guard keyService.isSupported else { return .unsupported }
-        guard !store.isDone(providerID) else { return .alreadyDone }
+        // Done means the key id is known too. A provider enrolled before the
+        // key id was kept asks once more (with backoff) to learn it; nothing
+        // is re-attested when the coordinator already recorded a key.
+        if store.isDone(providerID), store.keyID(providerID) != nil { return .alreadyDone }
         if let next = store.nextAttempt(providerID), now() < next {
             return .backingOff(until: next)
         }
         do {
             let outcome = try await enroll(providerID: providerID)
             store.markDone(providerID)
+            if store.keyID(providerID) == nil {
+                store.recordFailure(providerID, now: now())
+            }
             NSLog("[malibu] app_attest_enrollment outcome=%@", String(describing: outcome))
             return outcome
         } catch {
@@ -123,6 +164,7 @@ struct AppAttestEnrollment: Sendable {
         let challenge = try Self.response(challengeResult, step: "challenge", providerID: providerID)
         switch challenge["status"] as? String {
         case "already_recorded":
+            rememberRecordedKeyID(challenge, providerID: providerID)
             return .alreadyRecorded
         case "challenge":
             break
@@ -152,11 +194,22 @@ struct AppAttestEnrollment: Sendable {
         let submit = try Self.response(submitResult, step: "submit", providerID: providerID)
         switch submit["status"] as? String {
         case "recorded":
+            store.setKeyID(keyID, for: providerID)
             return .recorded
         case "already_recorded":
+            // First key wins: the recorded key is the one named, not this one.
+            rememberRecordedKeyID(submit, providerID: providerID)
             return .alreadyRecorded
         default:
             throw EnrollmentError(reason: "submit_unexpected_status")
+        }
+    }
+
+    /// Keeps the key id an `already_recorded` answer names (SPEC-033
+    /// §5.7.1). An older coordinator names none; the key id stays unknown.
+    private func rememberRecordedKeyID(_ object: [String: Any], providerID: String) {
+        if let keyID = object["key_id"] as? String {
+            store.setKeyID(keyID, for: providerID)
         }
     }
 
