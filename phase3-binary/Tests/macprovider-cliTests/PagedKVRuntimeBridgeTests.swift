@@ -2126,13 +2126,13 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let quantized = try read("quantized.cpp")
         XCTAssertEqual(
             digest(region(quantized, from: { $0.hasPrefix("inline int get_qmv_batch_limit") }, through: { $0 == "}" })),
-            "53bef60bc4110c007e25e7824ddab81aaff934921c06faca58c8961c798510e8",
+            "0e3012862456a0b8a6ab5231f4e1f75fcfcabb0b80f5510baba88b45aae272ab",
             "get_qmv_batch_limit changed: re-derive ContinuousBatchDecodeRouteBound and ContinuousBatchPrefillGroupingRule"
         )
         let sdpa = try read("scaled_dot_product_attention.cpp")
         XCTAssertEqual(
             digest(region(sdpa, from: { $0.hasPrefix("void sdpa_vector_2pass(") }, through: { $0.contains("size_t k_head_stride") })),
-            "db7dbdee9644cb9902f620f34e9ecce2c108f6559190633f3ebe468e4ec7fe79",
+            "b703ced4cc336d8fea7934631dbf6d040688f95511a7e7012fce3256647d335f",
             "sdpa_vector_2pass partition/variant choice changed: re-derive PagedKVVectorAttentionRoute"
         )
         XCTAssertEqual(
@@ -2143,7 +2143,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertTrue(sdpa.contains("  if (q_pre.shape(2) <= 8) {"), "vector-mode query bound changed")
         XCTAssertEqual(
             digest(try read("kernels/sdpa_vector.h").joined(separator: "\n")),
-            "de098d50a67a865e2e64fb1700fc4819307861f009a65642679777a9a9cec7cd",
+            "32146cdd4b9982723ee696da1ad8d146682d84d2ee40098a4063a25b8a1ec322",
             "vector attention kernels changed: re-check that masked keys are skipped and keys are dealt to partitions by index"
         )
     }

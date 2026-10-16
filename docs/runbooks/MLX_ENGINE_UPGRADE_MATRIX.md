@@ -209,8 +209,8 @@ the call's shape:
   own keys and query columns, with the mask its lone call takes (none for
   decode, its slice of the packed mask for verification); an unknown route
   always splits. `PagedKVVectorAttentionRoute` ports the dispatch (core
-  `scaled_dot_product_attention.cpp` lines 469-473, 486-523, 812, 875 at
-  `v0.32.2-macprovider.5`; the file is unchanged since `.2`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
+  `scaled_dot_product_attention.cpp` lines 754-763, 772-812, 1508, 1577 at
+  `v0.32.4-macprovider.1`); `testVectorAttentionRouteMatchesTheCoreDispatchBoundaries`
   pins every boundary, and `testSharedDecodeAndVerifyAttentionMatchLoneBitsAtServedHeadDims`,
   `testSharedDecodeWindowAttentionMatchesLoneBitsEveryStep` and
   `testRaggedPrefillAttentionMatchesLoneCausalAttentionBitwise` check every
