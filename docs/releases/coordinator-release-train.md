@@ -48,6 +48,19 @@ happens across many sessions and agents: read this file before cutting or
 applying a coordinator release, and update it in the same commit or PR after any
 release-affecting action. If reality and this file disagree, fix this file.
 
+## Next coordinator release — net changes vs live v1.8.247 (tracked 2026-10-16)
+
+Live on Pearl: runtime **v1.8.247** (coordinator + gateway), recommending CLI
+1.8.242. Already live and not repeated here: #2020 (#2014) and #2022 (#2016) in
+v1.8.246; #2023 (#1355) in v1.8.246; #2024 (#1911/#2017) in v1.8.247.
+
+| PR | Issue | Coordinator/gateway change | Status |
+|---|---|---|---|
+| #2025 | #2015 | Authenticated fleet KV persistence (merged after v1.8.247) | merged |
+| (to open) | #1979, #1793 | Retention "drained" means caught up (reachable under steady intake); ledger-rollup completion logging | in progress |
+| #1986 | #1644 | Cross-provider scoring, coordinator side | in progress |
+| (not yet opened) | #2018 | Responses API parity, gateway side if any | in progress (another session) |
+
 ## How to track the next coordinator release
 
 The table below is the net change against the **live** Pearl coordinator/gateway.

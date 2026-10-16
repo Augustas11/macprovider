@@ -13,6 +13,9 @@ import Security
 import Tokenizers
 
 protocol ModelRuntimeServing: Actor {
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities
+    func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities
+    func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
     /// SPEC-015 §M.2 — return the runtime-owned snapshot that
     /// actually drove inference (validation, in-flight registration,
@@ -241,6 +244,18 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities { .unavailable }
+
+
+    func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
+        LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
+    }
+
+
+    func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult {
+        throw APIError(status: 501, message: "Runtime lacks exact tokenizer and template access", code: "token_utilities_unsupported")
+    }
+
     func relayBlindPrepare(_ request: ChatCompletionRequest) async throws -> RelayBlindPreparedRequest {
         throw RelayBlindProviderError.providerUnsupported
     }
@@ -5857,6 +5872,102 @@ actor ModelRuntime: ModelRuntimeServing {
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
+        }
+    }
+
+
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        let snapshot = requestStartSnapshot()
+        guard snapshot.state == .ready, snapshot.container != nil, let model = snapshot.modelID else {
+            return .unavailable
+        }
+        return .loaded(model: model, modelHash: snapshot.modelHash,
+                       generation: selfCheckGeneration, runtime: "mlx_cache")
+    }
+
+    func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
+        let snapshot = requestStartSnapshot()
+        guard snapshot.state == .ready, snapshot.container != nil, snapshot.modelID != nil else {
+            return LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
+        }
+        var operations = ["tokenize", "detokenize"]
+        if currentChatTemplateSHA256 != nil { operations.append("apply-template") }
+        return LocalTokenUtilityCapabilities(model: snapshot.modelID, modelHash: snapshot.modelHash,
+                                             generation: selfCheckGeneration, operations: operations)
+    }
+
+
+    func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult {
+        let handle = try acquireRequestHandle(request.admissionRequest())
+        let generation = selfCheckGeneration
+        defer { unregisterInFlight(handle.registrationID) }
+        if request.operation == .applyTemplate, currentChatTemplateSHA256 == nil {
+            throw APIError(status: 422, message: "Loaded model has no verified chat template", code: "chat_template_unsupported")
+        }
+
+        guard let container = handle.snapshot.container, let model = handle.snapshot.modelID else {
+            throw APIError(status: 503, message: "Model not loaded", code: "model_not_loaded")
+        }
+        let checkCancellation: @Sendable () throws -> Void = {
+            try Task.checkCancellation()
+            try handle.drainCancelled.check()
+            if shouldCancel() { throw CancellationError() }
+        }
+        try checkCancellation()
+        let session = LocalTokenUtilitySession(model: model, modelHash: handle.snapshot.modelHash,
+                                              generation: generation, gate: inferenceGate)
+        let work = Task {
+            try await session.perform {
+
+                try checkCancellation()
+                return try await container.perform { context in
+                    try checkCancellation()
+                    let tokens: [Int]?
+                    let text: String?
+                    switch request.operation {
+                    case .tokenize:
+                        tokens = context.tokenizer.encode(text: request.text!, addSpecialTokens: false)
+                        text = nil
+                    case .detokenize:
+                        let ids = request.tokens!
+                        guard ids.allSatisfy({ context.tokenizer.convertIdToToken($0) != nil }) else {
+                            throw LocalTokenUtilityRequest.invalid("Token ID is outside the loaded tokenizer vocabulary")
+                        }
+                        tokens = nil
+                        text = context.tokenizer.decode(tokenIds: ids, skipSpecialTokens: false)
+                    case .applyTemplate:
+                        let messages: [[String: any Sendable]] = request.messages!.map { message in
+                            ["role": message["role"]!, "content": message["content"]!]
+                        }
+                        do {
+                            tokens = try context.tokenizer.applyChatTemplate(messages: messages, tools: nil, additionalContext: Self.templateAdditionalContext(
+                                supportsThinkingToggle: handle.snapshot.templateSupportsThinkingToggle,
+                                supportsPreserveThinking: handle.snapshot.templateSupportsPreserveThinking))
+                        } catch {
+                            throw APIError(status: 422, message: "Loaded tokenizer cannot apply this chat template", code: "chat_template_unsupported")
+                        }
+                        guard tokens!.count <= LocalTokenUtilityRequest.tokenLimit else { throw LocalTokenUtilityRequest.limitError() }
+                        text = context.tokenizer.decode(tokenIds: tokens!, skipSpecialTokens: false)
+                    }
+                    guard (tokens?.count ?? 0) <= LocalTokenUtilityRequest.tokenLimit,
+                          (text?.utf8.count ?? 0) <= LocalTokenUtilityRequest.outputByteLimit else {
+                        throw LocalTokenUtilityRequest.limitError()
+                    }
+                    try checkCancellation()
+                    return (tokens, text)
+                }
+            }
+        }
+        // Replace the existing registration in this actor turn, before yielding.
+        // Drain timeout cancels a queued permit waiter as well as firing its token.
+        inFlightCancellations[handle.registrationID] = {
+            handle.drainCancelled.fire()
+            work.cancel()
+        }
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
         }
     }
 

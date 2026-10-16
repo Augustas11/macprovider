@@ -1253,6 +1253,12 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         self.providerStatus = providerStatus
     }
 
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        guard identityIsValid() else { return .unavailable }
+        return .loaded(model: servedModelRef, modelHash: identity.digest,
+                       generation: nil, runtime: runtimeSource)
+    }
+
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(
             state: .ready,

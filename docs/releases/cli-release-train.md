@@ -62,6 +62,25 @@ Verified 2026-10-10 against public release metadata, the release train
 | Installer | `get.malibu.tech/install.sh` matches the v1.8.232 `dist/install.sh` (train step `install_sh_vs_release: parity`). |
 | Release mirror | `download.malibu.tech/releases/v1.8.232/` byte-identical to GitHub (33 assets verified); `latest.json` promoted from `v1.8.224` to `v1.8.232` on 2026-10-10 with `publish-release-mirror.sh --promote-latest`. |
 
+## Next CLI release — net changes vs 1.8.242 (tracked 2026-10-16)
+
+Live fleet target: **1.8.242** (published 2026-10-15; Pearl recommends it).
+Staged on main: `binaryVersion` **1.8.248** (`b4e1f2f52`); v1.8.243–v1.8.247 are
+consumed by runtime releases. **Operator hold (2026-10-16): no candidate cut
+until every open PR below is merged**; then one cut carries all of them, with
+the canary on a macOS 27 Mac (also the live `code_bound_attested` proof for
+#1911/#2017) and the Studio CB grant check.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2020 | #2014 | Required/named tool selection enforced on the provider | merged |
+| #2022 | #2016 | Native image input preserved through qualified Chat Completions | merged |
+| #2024 | #1911, #2017 | Code-bound posture key: CLI evidence + Malibu.app attestor (macOS 27+) | merged |
+| #2025 | #2015 | Authenticated fleet KV persistence with recurrent checkpoints | merged |
+| #1986 | #1644 | Cross-provider scoring (SPEC-036 v0.2) | in progress (audit + real-chip thresholds) |
+| #1980 | #1971 | Stricter CB self-check exactness probe | in progress (Studio grant validation) |
+| (not yet opened) | #2018 | Provider-local Responses API and tokenizer parity | in progress (another session) |
+
 ## Next CLI release — net changes vs 1.8.240
 
 **Authorized (operator, 2026-10-11), with a start condition:** cut the next

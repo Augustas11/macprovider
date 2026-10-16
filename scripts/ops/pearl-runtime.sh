@@ -42,8 +42,9 @@
 # (ops/runbooks/settlement-evidence-retention.md section 4):
 #   1 vacuum_mode       read-only: PRAGMA auto_vacuum of the coordinator,
 #                       route-snapshot journal, and audit database files
-#   2 drain_gate        read-only: the last completed retention lap found no
-#                       eligible request (backlog_drained)
+#   2 drain_gate        read-only: the last completed retention lap selected no
+#                       overdue request, so retention is caught up
+#                       (backlog_drained)
 #   3 convert           under the live-ops lock and the three Pearl locks:
 #                       stop the coordinator, quick_check (refuse on failure),
 #                       take a fresh VACUUM INTO backup of each file, VACUUM
@@ -250,18 +251,32 @@ gather_retention_vacuum() {
   fi
   step vacuum_mode "done" "coordinator=$main_mode journal=$journal_mode audit=$audit_mode (2 = INCREMENTAL)"
 
-  # The drain signal: the last completed retention lap found nothing eligible.
+  # The drain signal (backlog_drained): the last completed retention lap
+  # selected no overdue request, one already eligible a nightly interval
+  # before the finality point. Requests that became eligible since the
+  # previous run do not count. A coordinator without the count fails the
+  # read and stays blocked. The lap must be recent (within 36 hours: one
+  # nightly interval plus slack), so a stopped or failing retention cannot
+  # leave an old caught-up lap holding the gate open.
   local lap
-  lap="$(pearl_sqlite_read "$sqlite" "$db" "SELECT laps_completed, last_lap_eligible_requests, last_lap_completed_at_utc FROM settlement_evidence_retention_state WHERE id = 1;" || true)"
+  lap="$(pearl_sqlite_read "$sqlite" "$db" "SELECT laps_completed, last_lap_overdue_requests, last_lap_eligible_requests, last_lap_completed_at_utc FROM settlement_evidence_retention_state WHERE id = 1;" || true)"
   fact retention_last_lap "$lap"
   local laps="${lap%%|*}" rest="${lap#*|}"
-  local eligible="${rest%%|*}"
-  if [[ "$laps" =~ ^[0-9]+$ ]] && [ "$laps" -gt 0 ] && [ "$eligible" = 0 ]; then
-    step drain_gate "done" "last lap completed ${rest#*|} with 0 eligible requests"
+  local overdue="${rest%%|*}"
+  rest="${rest#*|}"
+  local eligible="${rest%%|*}" completed="${rest#*|}" lap_age
+  lap_age="$(python3 -I -c 'import sys,datetime as d
+v=sys.argv[1].strip()
+if not v.endswith("Z"): sys.exit(1)
+t=d.datetime.strptime(v[:19],"%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)
+print(int((d.datetime.now(d.timezone.utc)-t).total_seconds()))' "$completed" 2>/dev/null || echo unknown)"
+  fact retention_last_lap_age_seconds "$lap_age"
+  if [[ "$laps" =~ ^[0-9]+$ ]] && [ "$laps" -gt 0 ] && [ "$overdue" = 0 ] && [[ "$lap_age" =~ ^[0-9]+$ ]] && [ "$lap_age" -le 129600 ]; then
+    step drain_gate "done" "last lap completed ${rest#*|} caught up: 0 overdue of ${eligible} eligible requests"
   else
-    step drain_gate blocked "retention has not drained (laps_completed=${laps:-?} last_lap_eligible_requests=${eligible:-?})"
-    set_next drain_gate blocked "Wait for settlement-evidence retention to drain" "" \
-      "the conversion rewrites the whole file, so it waits until a completed retention lap finds no eligible request (backlog_drained=true in the nightly log); now laps_completed=${laps:-?} last_lap_eligible_requests=${eligible:-?}"
+    step drain_gate blocked "retention has not caught up (laps_completed=${laps:-?} last_lap_overdue_requests=${overdue:-?} last_lap_age_seconds=${lap_age:-?})"
+    set_next drain_gate blocked "Wait for settlement-evidence retention to catch up" "" \
+      "the conversion rewrites the whole file, so it waits until a retention lap completed within 36 hours selects no overdue request (backlog_drained=true in the nightly log); now laps_completed=${laps:-?} last_lap_overdue_requests=${overdue:-?} last_lap_eligible_requests=${eligible:-?} last_lap_age_seconds=${lap_age:-?}"
     return
   fi
 
