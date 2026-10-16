@@ -112,7 +112,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// alone; otherwise a row's numerics depend on its batch neighbours. A shared
 /// prefill feeds `[rows, chunk]` tokens, and every quantized projection
 /// flattens that to `M = rows x chunk` (`QuantizedMatmul::eval_gpu`,
-/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.2`):
+/// `mlx/backend/metal/quantized.cpp`, MLX core fork `v0.32.2-macprovider.4`):
 /// `M < vector_limit` takes `qmv` (or `qmv_quad` at K 64/128), else `qmm`,
 /// with `vector_limit = get_qmv_batch_limit(K, N, device)` for transposed
 /// weights and 4 otherwise. Within each route a row's result does not depend
@@ -127,7 +127,7 @@ struct ContinuousBatchSchedulerSnapshot: Sendable, Equatable {
 /// `GatherQMM::eval_gpu` takes `gather_qmm_rhs` when `M == 1`, `B >= 16`, the
 /// gather is right-sorted and `B / E >= 4` (B = expert selections in the
 /// call, E = experts), else `gather_qmv`. mlx-swift-lm's `SwitchGLU` (fork
-/// `3.32.3-macprovider.6`) sorts, and Qwen3.5 then takes the direct weighted
+/// `3.32.3-macprovider.8`) sorts, and Qwen3.5 then takes the direct weighted
 /// reduction, once a call carries 64 selections. A grouped call carries the
 /// selections of every row (A3B, 256 experts, top-8: a 32-127-token chunk
 /// takes `gather_qmv` alone, `gather_qmm_rhs` beside a second row). The fused
@@ -238,7 +238,7 @@ struct ContinuousBatchPrefillGroupingRule: Sendable, Equatable {
 /// row decoded beside enough neighbours would switch kernels and reduction
 /// order. A decode forward carries at most `vector limit - 1` rows, where the
 /// limit is the smallest `get_qmv_batch_limit` of the device over every K and
-/// N (core `v0.32.2-macprovider.2`, `mlx/backend/metal/quantized.cpp`). The
+/// N (core `v0.32.2-macprovider.4`, `mlx/backend/metal/quantized.cpp`). The
 /// smallest value belongs to the K or N above 4096 branch, which every served
 /// model reaches through its output head. M3 Ultra: 12, so 11 rows; M1/M2
 /// non-Ultra: 6, so 5 rows; M3-M5 non-Ultra: 13, so 12 rows.

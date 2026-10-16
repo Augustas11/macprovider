@@ -11020,12 +11020,17 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Package.swift:let package",
-        "scripts/read_swiftpm_pins.py:SPEC048_MLX_SWIFT_LM_REVISION"
+        "scripts/read_swiftpm_pins.py:SPEC048_MLX_SWIFT_LM_REVISION",
+        "scripts/read_swiftpm_pins.py:SPEC048_MLX_CORE_REVISION",
+        "scripts/check_mlx_core_streams.py:def scan"
       ],
       "tests": [
         "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationAPIUsesExplicitMixedRaggedRows() throws",
         "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws",
-        "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests"
+        "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests",
+        "scripts/tests/test_check_mlx_core_streams.py:class CheckMLXCoreStreamsTests",
+        "phase3-binary/Tests/macprovider-cliTests/MLXCoreStreamPropagationTests.swift:func testResolvedCoreKeepsEveryInternalOpOnTheCallersStream() throws",
+        "phase3-binary/Tests/macprovider-cliTests/MLXCoreStreamPropagationTests.swift:func testResolvedCoreIsTheReviewedForkRevision() throws"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -11048,7 +11053,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.33 authorizes the operator's permanent three-fork MLX runtime: mlx-swift-lm 3.32.3-macprovider.7 (45ffd959588d8854adb117475f1f80b18ce68919, upstream 3.32.3), mlx-swift 0.32.3-macprovider.4 (c4af173883e763547d2bd07a9ccd2963b5411ae9, upstream 0.32.3), and MLX core v0.32.2-macprovider.3 (91a45ed4778b574eeef9769230e61aa4688c9587, upstream v0.32.2), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, plus the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, and every-thread compiled-function erase. Mac Studio startup batched-isolation probes pass with fused MoE on and off and native-MTP R015 passed on the compile-state fix (docs/research/mlx-swift-lm-3.32.3/). R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "SPEC-048 v0.1.33 authorizes the operator's permanent three-fork MLX runtime: mlx-swift-lm 3.32.3-macprovider.8 (b07d6626ac0aa44b8cf8a7af9eefda10c99ed2ed, upstream 3.32.3), mlx-swift 0.32.3-macprovider.6 (da7953bad9e15ac1211b2dce068d65a57542491e, upstream 0.32.3), and MLX core v0.32.2-macprovider.4 (b3397bfc904ab6868b497e1669a7ccc2f66eed05, upstream v0.32.2), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, plus the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, and every-thread compiled-function erase. Mac Studio startup batched-isolation probes pass with fused MoE on and off and native-MTP R015 passed on the compile-state fix (docs/research/mlx-swift-lm-3.32.3/). R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

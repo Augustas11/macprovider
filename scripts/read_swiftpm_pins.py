@@ -12,8 +12,8 @@ Two entry points:
   stacks fail closed, because either half alone silently drops fork patches.
 
 Package.resolved does not list the MLX core (``mlx``) submodule. The reviewed
-mlx-swift fork revision pins it: at ca2f61d2 the ``Source/Cmlx/mlx`` gitlink is
-https://github.com/Augustas11/mlx at c9196eb7 (the batch-invariant core fork),
+mlx-swift fork revision pins it: at da7953ba the ``Source/Cmlx/mlx`` gitlink is
+https://github.com/Augustas11/mlx at b3397bfc (``SPEC048_MLX_CORE_REVISION``),
 so requiring that exact mlx-swift revision transitively pins the core fork.
 
 The CLI runs the production gate; ``--historical`` selects ``read_pins``.
@@ -42,15 +42,20 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.7 on upstream mlx-swift-lm 3.32.3.
-SPEC048_MLX_SWIFT_LM_REVISION = "45ffd959588d8854adb117475f1f80b18ce68919"
+# Fork tag 3.32.3-macprovider.8 on upstream mlx-swift-lm 3.32.3.
+SPEC048_MLX_SWIFT_LM_REVISION = "b07d6626ac0aa44b8cf8a7af9eefda10c99ed2ed"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
-# Fork tag 0.32.3-macprovider.4: upstream mlx-swift 0.32.3 with the MLX core
-# submodule on the batch-invariant small-M quantized matmul fork
-# (v0.32.2-macprovider.3).
-SPEC048_MLX_SWIFT_REVISION = "c4af173883e763547d2bd07a9ccd2963b5411ae9"
+# Fork tag 0.32.3-macprovider.6: upstream mlx-swift 0.32.3 with the MLX core
+# submodule on the core fork below.
+SPEC048_MLX_SWIFT_REVISION = "da7953bad9e15ac1211b2dce068d65a57542491e"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
+# Fork tag v0.32.2-macprovider.4 on upstream MLX v0.32.2: the reviewed
+# Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# not carry it; MLXCoreStreamPropagationTests checks the resolved gitlink.
+SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
+SPEC048_MLX_CORE_REVISION = "b3397bfc904ab6868b497e1669a7ccc2f66eed05"
+SPEC048_MLX_CORE_UPSTREAM_BASE = "1f8e74e3f12f31365464a6867c6579f0e9b29d85"
 
 # Each reviewed fork is accepted only at its exact revision with no version.
 REVIEWED_FORK_PINS = {

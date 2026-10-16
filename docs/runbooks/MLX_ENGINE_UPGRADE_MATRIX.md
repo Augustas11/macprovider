@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.7` | `45ffd959588d8854adb117475f1f80b18ce68919` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.4` | `c4af173883e763547d2bd07a9ccd2963b5411ae9` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.2-macprovider.3` | `91a45ed4778b574eeef9769230e61aa4688c9587` | `v0.32.2` (`1f8e74e3…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.8` | `b07d6626ac0aa44b8cf8a7af9eefda10c99ed2ed` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.6` | `da7953bad9e15ac1211b2dce068d65a57542491e` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.2-macprovider.4` | `b3397bfc904ab6868b497e1669a7ccc2f66eed05` | `v0.32.2` (`1f8e74e3…`) |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 the next by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm,
@@ -50,7 +50,7 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..3.32.3-macprovider.7`):
+mlx-swift-lm (`3.32.3..3.32.3-macprovider.8`):
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -62,31 +62,37 @@ mlx-swift-lm (`3.32.3..3.32.3-macprovider.7`):
 | Fused A3B MoE | `e787537`, `965f78e` | `MLX_LM_QWEN35_FUSED_MOE` decode/verify-width kernels; eligible only for the exact stock module types and exact quantized layout, stock path otherwise. |
 | Compiled MTP verify | `1007bc6` | Qwen 3.5 verify step compiled like single-token decode (`MLX_LM_QWEN35_COMPILED_VERIFY`). |
 | Compile-state ownership | `7be182c` (upstream #631, `-x`), `905170f` | The fused GDN projection and every array a verify trace reads are declared compile state. |
-| Core pin | `37f0d7c`, `5203b73`, `45ffd95` | Resolves the mlx-swift fork. |
+| Core pin | `37f0d7c`, `5203b73`, `45ffd95`, `b07d662` | Resolves the mlx-swift fork. |
 | Tests | `8941054`, `72c4ab0` | Prepared fused-GDN compiled-verify fixture and in-place reload regression. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
 
-mlx-swift (`0.32.3..0.32.3-macprovider.4`, branch
-`macprovider/0.32.3-core0.32.2`): `d073a644`, `ca2f61d2`, `c4af1738` move the
-`Source/Cmlx/mlx` submodule to the core fork and update the compiled-function
-erase documentation. No API change. (`0.32.3-macprovider.3` on branch
-`macprovider/0.32.3` belongs to the v0.32.4 core rebase, not this tuple.)
+mlx-swift (`0.32.3..0.32.3-macprovider.6`, branch
+`macprovider/0.32.3-core0.32.2`): `d073a644`, `ca2f61d2`, `c4af1738`, `da7953ba`
+move the `Source/Cmlx/mlx` submodule to the core fork and update the
+compiled-function erase documentation. No API change. (`0.32.3-macprovider.3`
+and `.5` on branch `macprovider/0.32.3` belong to the v0.32.4 core rebase, not
+this tuple.)
 
-MLX core (`v0.32.2..v0.32.2-macprovider.3`):
+MLX core (`v0.32.2..v0.32.2-macprovider.4`):
 
 | Patch | Commit | What it carries |
 | --- | --- | --- |
 | Batch-invariant small-M quantized matmul | `ff1b94832` | No `qmv_wide` (every small-M product stays on `qmv`) and no `qmm_splitk` (`qmm` reduces K in one order for every M), so a continuously batched row matches its serial result. |
 | Every-thread compiled-function erase | `c9196eb71` | Freeing a compiled function erases it from every thread's compile cache, so a later function at the same address never replays a dead trace. |
-| Internal ops on the caller's stream | `91a45ed47` | `quantized_matmul` (the `x`/`scales`/`biases` casts), `indices_or_default`, `gather`, `scatter`, `affine_quantize` and the bool-mask SDPA fallback pass the caller's stream to the casts and broadcasts they create. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest as `8a9975f82`. |
+| Internal ops on the caller's stream | `91a45ed47`, `b3397bfc9` | Every internal call inside a stream-taking op passes the caller's stream: the `quantized_matmul` casts of `x`/`scales`/`biases`, `indices_or_default`, `gather`, `scatter`, `affine_quantize`, the bool-mask SDPA fallback, the implicit random key split (`KeySequence::next`, reached by temperature sampling), `categorical`, `layer_norm` and its VJP, `linalg` `l2_norm`/`cross`, the `fft` zero-pad, `number_of_elements` and `imag`. mlx-swift runs every op on its own pooled stream, so a stream-less internal op ran on the thread's default stream: a second Metal queue, a cross-queue event wait and a separate submit per op. gpt-oss-20b decode (8-bit affine projections over float32 activations) paid 140 per token, 30% slower than 3.31.4 (#2028). Upstream v0.32.4 already passes the stream in `indices_or_default` and the SDPA fallback; the v0.32.4 rebase carries the rest (`8a9975f82` and its follow-up). |
 
-A rebase checks this property, not just the patch: on the Studio, a gpt-oss
-decode step with per-stream primitive accounting shows every primitive on the
-caller's stream (#2028 method), and a new stream-less internal op found by
-`grep` for `astype(`/`broadcast_arrays(`/`where(` calls without a stream
-argument inside stream-taking ops gets the same fix.
+`MLXCoreStreamPropagationTests` (CI, `swift test`) enforces this on the
+resolved core: it reads the declarations in `mlx/ops.h`, `fast.h`, `random.h`,
+`linalg.h`, `fft.h` and `einsum.h`, and fails on any call to one of those ops,
+inside a stream-taking op or a primitive rule in `ops.cpp`, `fast.cpp`,
+`random.cpp`, `linalg.cpp`, `fft.cpp`, `einsum.cpp` or `primitives.cpp`, whose
+last argument is not the caller's stream, and on any operator overload applied
+to an array value there. It also checks the resolved mlx-swift's
+`Source/Cmlx/mlx` gitlink equals the reviewed core revision. A rebase that
+introduces a new stream-less call fails CI until that call passes the
+stream.
 
 ### Bounded routing exceptions
 
@@ -349,7 +355,7 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-10-16): fork `mlx-swift-lm 3.32.3-macprovider.7` (`45ffd959…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.4` (`c4af1738…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.3` (`91a45ed4…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
+Current protected baseline (2026-10-16): fork `mlx-swift-lm 3.32.3-macprovider.8` (`b07d6626…`, upstream `3.32.3`), fork `mlx-swift 0.32.3-macprovider.6` (`da7953ba…`, upstream `0.32.3`), and fork MLX core `v0.32.2-macprovider.4` (`b3397bfc…`, upstream `v0.32.2`), built on Xcode 26.6 / Swift 6.3.3 / macOS SDK 26.5; `swift-transformers` and `swift-jinja` exactly as pinned in `phase3-binary/Package.resolved`. Previous baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2` on Xcode 16.4 / Swift 6.1.
 
 `swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
 #966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is
