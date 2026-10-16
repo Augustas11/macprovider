@@ -373,7 +373,7 @@ func TestDefaultCorpusAndProbeBody(t *testing.T) {
 	rng := rand.New(rand.NewSource(9))
 	seen := map[SamplingClass]bool{}
 	for i := 0; i < 50; i++ {
-		p, err := DrawProbe(rng, c, "model-x", false)
+		p, err := DrawProbe(rng, c, "model-x", false, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -403,7 +403,7 @@ func TestDefaultCorpusAndProbeBody(t *testing.T) {
 		t.Fatal("probes must draw both sampling classes")
 	}
 	for i := 0; i < 20; i++ {
-		if p, _ := DrawProbe(rng, c, "model-x", true); p.Class != SamplingGreedy {
+		if p, _ := DrawProbe(rng, c, "model-x", true, false); p.Class != SamplingGreedy {
 			t.Fatal("greedyOnly must draw the greedy profile")
 		}
 	}
@@ -643,5 +643,41 @@ func TestScoringStoreBackfillFailureRetries(t *testing.T) {
 	}
 	if got, err := store.RecentVerificationRequests(ctx, time.Now().Add(-time.Hour), 10); err != nil || len(got) != 1 {
 		t.Fatalf("retried backfill carried %d starts err=%v, want 1", len(got), err)
+	}
+}
+
+// FR-22: temperature 1.0 outputs form the hot class, judged against the hard
+// floor only: honest hot runs can degenerate (measured down to about -5.2 on
+// real chips), so no learned band or cold prior above the floor applies, and
+// escalation never draws a hot probe.
+func TestHotClassUsesHardFloorOnlyAndIsNotEscalated(t *testing.T) {
+	if SamplingClassFor(0) != SamplingGreedy || SamplingClassFor(0.7) != SamplingSampled || SamplingClassFor(1.0) != SamplingHot {
+		t.Fatal("profile classes: want greedy, sampled, hot")
+	}
+	tol := NewTolerance()
+	key := ToleranceKey{ModelID: "m", ManifestSHA256: "h", Class: SamplingHot}
+	for i := 0; i < 64; i++ {
+		tol.Accept(key, string(rune('a'+i%4)), Measurement{ScoredTokens: 100, Top1Matches: 90, SumLogprob: -30})
+	}
+	band := tol.Band(key)
+	if band.Warm || band.MeanLogprobFloor != hardSampledLogprobFloor || band.Top1Floor >= 0 {
+		t.Fatalf("hot band = %+v, want the cold hard floor only", band)
+	}
+	if ok, _ := band.Evaluate(Measurement{ScoredTokens: 100, Top1Matches: 40, SumLogprob: -524}); !ok {
+		t.Fatal("a degenerate honest hot output above the hard floor must stay in band")
+	}
+	if ok, _ := band.Evaluate(Measurement{ScoredTokens: 100, Top1Matches: 5, SumLogprob: -900}); ok {
+		t.Fatal("a hot output below the hard floor must fall out of band")
+	}
+	rng := rand.New(rand.NewSource(7))
+	c := DefaultCorpus()
+	for i := 0; i < 200; i++ {
+		p, err := DrawProbe(rng, c, "model-x", false, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Class == SamplingHot {
+			t.Fatal("an escalation probe must never be hot")
+		}
 	}
 }

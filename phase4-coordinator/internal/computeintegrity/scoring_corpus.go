@@ -123,14 +123,21 @@ type ProbeRequest struct {
 // the profile to greedy: escalation requests use it while the sampled band of
 // the model is still cold, because the cold sampled prior is too loose to
 // decide (FR-20).
-func DrawProbe(rng *rand.Rand, corpus Corpus, modelID string, greedyOnly bool) (ProbeRequest, error) {
+//
+// escalating restricts the profile to greedy and sampled: a hot measurement
+// is judged against the hard floor only, so it cannot decide an escalation.
+func DrawProbe(rng *rand.Rand, corpus Corpus, modelID string, greedyOnly, escalating bool) (ProbeRequest, error) {
 	if corpus == nil || corpus.Len() == 0 {
 		return ProbeRequest{}, fmt.Errorf("compute-integrity corpus is empty")
 	}
 	prompt := corpus.Prompt(rng.Intn(corpus.Len()))
 	prompt.User = prompt.User + " " + drawStyle(rng)
 	profile := SamplingProfiles[0]
-	if !greedyOnly {
+	switch {
+	case greedyOnly:
+	case escalating:
+		profile = SamplingProfiles[rng.Intn(2)]
+	default:
 		profile = SamplingProfiles[rng.Intn(len(SamplingProfiles))]
 	}
 	maxTokens := ProbeMaxTokens[rng.Intn(len(ProbeMaxTokens))]

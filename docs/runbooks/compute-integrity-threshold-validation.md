@@ -19,7 +19,8 @@ Values come from `phase4-coordinator/internal/computeintegrity/scoring.go`.
 | Threshold | Value | Must hold for |
 |---|---|---|
 | Cold prior, greedy | `top1_rate >= 0.85` and `mean_logprob >= -1.0` | honest outputs, same and cross chip |
-| Cold prior, sampled | `mean_logprob >= -4.0` | honest outputs, same and cross chip |
+| Cold prior, sampled (`temperature: 0.7`) | `mean_logprob >= -4.0` | honest outputs, same and cross chip |
+| Hot (`temperature: 1.0`), cold and warm | `mean_logprob >= -6.0` (hard floor only) | every honest output |
 | Hard floor, greedy | `top1_rate >= 0.50` and `mean_logprob >= -3.0` | every honest output |
 | Hard floor, sampled | `mean_logprob >= -6.0` | every honest output |
 | Minimum scored tokens | 16 | — |
@@ -88,28 +89,18 @@ CLI=.build/release/macprovider-cli
    report against it:
 
    ```bash
-   python3 - "$@" <<'PY' honest-A.json:A-scores-honest-A.json B-scores-honest-A.json C-scores-honest-B.json -- B-scores-honest-C.json B-scores-subst-A.json
-   import json, statistics, sys
-   args = sys.argv[1:]; cut = args.index("--")
-   train = [i for f in args[:cut] for i in json.load(open(f.split(":")[-1]))["items"] if i["mean_logprob"] is not None]
-   def floor(vals, margin):
-       med = statistics.median(vals); mad = statistics.median(abs(v - med) for v in vals)
-       return med - max(6 * mad, margin)
-   for cls in ("greedy", "sampled"):
-       rows = [i for i in train if i["sampling_class"] == cls]
-       lp = floor([i["mean_logprob"] for i in rows], 0.25)
-       t1 = floor([i["top1_rate"] for i in rows], 0.05) if cls == "greedy" else None
-       print(cls, "n", len(rows), "logprob_floor", round(lp, 3), "top1_floor", t1 and round(t1, 3))
-       for f in args[cut + 1:]:
-           test = [i for i in json.load(open(f))["items"] if i["sampling_class"] == cls and i["mean_logprob"] is not None]
-           inside = [i for i in test if i["mean_logprob"] >= lp and (t1 is None or i["top1_rate"] >= t1)]
-           print("  ", f, "in_band", len(inside), "of", len(test))
-   PY
+   python3 -I scripts/lab/1986-compute-score/warmband.py \
+     A-scores-honest-A.json,B-scores-honest-B.json,C-scores-honest-C.json \
+     B-scores-honest-A.json B-scores-subst-A.json
    ```
+
+   `scripts/lab/1986-compute-score/summarize.py <reports>` prints the
+   per-class table against the cold prior and the hard floors.
 
 ## Pass criteria
 
-Read `summary.greedy` and `summary.sampled` in each report.
+Read `summary.greedy`, `summary.sampled` and `summary.hot` in each report
+(or run `python3 -I tools/summarize.py <reports>` from the lab dir).
 
 - **Honest, steps 1 and 2:**
   - `above_hard_floor == measured` in every class;
@@ -119,12 +110,11 @@ Read `summary.greedy` and `summary.sampled` in each report.
   failure needs 3 of the last 5 escalation measurements out with both
   scorers agreeing. At a 1% miss rate, escalations stay rare and a false
   failure is on the order of 1e-5 per escalation.
-- **Substituted, step 3:**
-  - greedy `in_cold_prior / measured <= 0.20`;
-  - sampled `median_mean_logprob < -4.0`.
-
-  Otherwise 3 of 5 escalation measurements would not reliably fall out of
-  band.
+- **Substituted, step 3:** greedy `in_cold_prior / measured <= 0.20`.
+  Detection while a model is cold rests on greedy probes: escalation uses
+  greedy until the sampled band warms, so 3 of 5 escalation measurements
+  fall out of band. The cold sampled and hot bands are not detectors; they
+  only have to accept honest outputs.
 - **Under load, step 4:** in `under_load`:
   - `generations_ok_while_scoring > 0`;
   - `generations_failed == 0`;
@@ -132,8 +122,8 @@ Read `summary.greedy` and `summary.sampled` in each report.
   - `max_mean_logprob_drift` is set and `<= 0.05`.
 - **Warm band, step 5:**
   - the held-out honest report is at least 99% in band in each class;
-  - the substituted report is at most 20% in band for greedy, and below the
-    floor at its median for sampled.
+  - the substituted report is at most 20% in band for greedy and for
+    sampled. Hot uses the hard floor only.
 
 If an honest class fails, set its cold prior below the observed minimum with
 the FR-22 margin (0.25 for log-probability, 0.05 for top-1). Keep the prior

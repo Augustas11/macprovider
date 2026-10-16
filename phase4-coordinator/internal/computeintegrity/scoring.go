@@ -20,12 +20,24 @@ type SamplingClass string
 const (
 	SamplingGreedy  SamplingClass = "greedy"
 	SamplingSampled SamplingClass = "sampled"
+	// SamplingHot is temperature above hotTemperature. Honest hot outputs
+	// have a heavy low tail (a run can degenerate into near-random tokens,
+	// measured down to about -5.2 mean log-probability on real chips), so a
+	// hot measurement is judged against the hard floor only and never warms
+	// a learned band.
+	SamplingHot SamplingClass = "hot"
 )
+
+// hotTemperature separates the sampled and hot FR-20 profiles (0.7 and 1.0).
+const hotTemperature = 0.85
 
 // SamplingClassFor maps a request temperature to its FR-22 class.
 func SamplingClassFor(temperature float64) SamplingClass {
-	if temperature == 0 {
+	switch {
+	case temperature == 0:
 		return SamplingGreedy
+	case temperature > hotTemperature:
+		return SamplingHot
 	}
 	return SamplingSampled
 }
@@ -124,8 +136,11 @@ func (b Band) Evaluate(m Measurement) (bool, OutReason) {
 
 // PriorBand is the FR-22 cold-start band for a sampling class.
 func PriorBand(class SamplingClass) Band {
-	if class == SamplingGreedy {
+	switch class {
+	case SamplingGreedy:
 		return Band{Top1Floor: priorGreedyTop1Floor, MeanLogprobFloor: priorGreedyLogprobFloor}
+	case SamplingHot:
+		return Band{Top1Floor: toleranceUnsetTop1Floor, MeanLogprobFloor: hardSampledLogprobFloor}
 	}
 	return Band{Top1Floor: toleranceUnsetTop1Floor, MeanLogprobFloor: priorSampledLogprobFloor}
 }
@@ -181,7 +196,7 @@ func (t *Tolerance) Prune(cutoff time.Time) {
 // given operator. Each operator keeps at most tolerancePerOperatorCap entries
 // (its oldest is evicted first) and the window at most toleranceWindowSize.
 func (t *Tolerance) Accept(key ToleranceKey, operator string, m Measurement) {
-	if t == nil || !m.Valid() || operator == "" {
+	if t == nil || !m.Valid() || operator == "" || key.Class == SamplingHot {
 		return
 	}
 	t.mu.Lock()
@@ -214,7 +229,7 @@ func (t *Tolerance) Accept(key ToleranceKey, operator string, m Measurement) {
 // prior otherwise.
 func (t *Tolerance) Band(key ToleranceKey) Band {
 	prior := PriorBand(key.Class)
-	if t == nil {
+	if t == nil || key.Class == SamplingHot {
 		return prior
 	}
 	t.mu.Lock()

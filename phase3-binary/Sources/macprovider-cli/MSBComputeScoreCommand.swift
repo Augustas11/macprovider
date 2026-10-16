@@ -205,7 +205,8 @@ enum MSBComputeScoreLab {
         let name: String
         let temperature: Double
         let topP: Double
-        var samplingClass: String { temperature == 0 ? "greedy" : "sampled" }
+        /// The coordinator's FR-22 classes: greedy, sampled (0.7), hot (1.0).
+        var samplingClass: String { temperature == 0 ? "greedy" : (temperature > 0.85 ? "hot" : "sampled") }
     }
 
     static let profiles = [
@@ -263,11 +264,14 @@ enum MSBComputeScoreLab {
             case minScoredTokens = "min_scored_tokens"
         }
 
+        /// Hot measurements are judged against the hard floor only.
         func inPrior(_ item: ScoredItem) -> Bool? {
             guard let mean = item.meanLogprob, let top1 = item.top1Rate, item.scoredTokens >= minScoredTokens else { return nil }
-            return item.samplingClass == "greedy"
-                ? top1 >= priorGreedyTop1 && mean >= priorGreedyMeanLogprob
-                : mean >= priorSampledMeanLogprob
+            switch item.samplingClass {
+            case "greedy": return top1 >= priorGreedyTop1 && mean >= priorGreedyMeanLogprob
+            case "hot": return mean >= hardSampledMeanLogprob
+            default: return mean >= priorSampledMeanLogprob
+            }
         }
 
         func aboveHardFloor(_ item: ScoredItem) -> Bool? {
@@ -432,7 +436,7 @@ enum MSBComputeScoreLab {
     static func summarize(_ items: [ScoredItem]) -> [String: ClassSummary] {
         let thresholds = Thresholds()
         var out: [String: ClassSummary] = [:]
-        for cls in ["greedy", "sampled"] {
+        for cls in ["greedy", "sampled", "hot"] {
             let measured = items.filter { $0.samplingClass == cls && thresholds.inPrior($0) != nil }
             let means = measured.compactMap(\.meanLogprob).sorted()
             let tops = measured.compactMap(\.top1Rate).sorted()

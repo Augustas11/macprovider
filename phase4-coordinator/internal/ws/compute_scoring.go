@@ -708,6 +708,12 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 		e.inconclusive(ciInconclusiveNoScorer)
 		return
 	}
+	// Selection ran under the lock; the deadline is checked one last time
+	// right at the reservation.
+	if time.Now().After(deadline) {
+		e.mu.Unlock()
+		return
+	}
 	for _, sc := range scorers {
 		e.scorerBusy[sc.ProviderID] = true
 	}
@@ -817,7 +823,11 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 	if st := e.states[key]; st != nil && st.State.Escalating() {
 		greedyOnly = !e.tolerance.Band(sampledKey).Warm
 	}
-	probe, err := computeintegrity.DrawProbe(e.rng, e.deps.Corpus, verified.ModelID, greedyOnly)
+	escalating := false
+	if st := e.states[key]; st != nil {
+		escalating = st.State.Escalating()
+	}
+	probe, err := computeintegrity.DrawProbe(e.rng, e.deps.Corpus, verified.ModelID, greedyOnly, escalating)
 	e.mu.Unlock()
 	if err != nil {
 		e.inconclusive(ciInconclusiveDispatch)
@@ -829,10 +839,11 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
-	if e.s.now().After(at) {
-		// Something held this request past its recorded start. Sending it
-		// now would start it after the time the hourly bound counts, so it
-		// is dropped; the recorded start still counts (the safe side).
+	if e.s.now().After(at.Add(-computeScoreDispatchTimeout)) {
+		// Something held this request so long that a full dispatch timeout
+		// no longer fits before its recorded start; it could reach the
+		// provider after the time the hourly bound counts, so it is dropped.
+		// The recorded start still counts (the safe side).
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
@@ -1026,7 +1037,7 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 		for _, id := range e.scorers.RecordPair(ms[0].scorer.ProviderID, ms[1].scorer.ProviderID, inBand[0] == inBand[1]) {
 			e.persistExclusion(ctx, id, now)
 		}
-		if allIn {
+		if allIn && tkey.Class != computeintegrity.SamplingHot {
 			seq.SourceProvider = verified.ProviderID
 			seq.SourceOperator = verified.OperatorKey
 			seq.Scorers = []string{ms[0].scorer.ProviderID, ms[1].scorer.ProviderID}
@@ -1149,13 +1160,17 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 }
 
 // beginDispatch turns a reservation into a counted start immediately before
-// dispatch. The start is made durable first, so a restart always sees it;
-// it is stamped at the latest moment the dispatch may begin, and the caller
-// sends nothing once that moment has passed. If the write fails, the
+// dispatch. The start is made durable first, so a restart always sees it.
+// It is stamped at the latest moment the request can reach the provider:
+// the write bound plus the dispatch timeout, after which the dispatch
+// context cancels it. The caller sends nothing if a full dispatch timeout no
+// longer fits before that stamp. If the write fails, the
 // request is not sent. Either way the reservation's pending count is
 // released.
 func (e *computeScoringEngine) beginDispatch(ctx context.Context) (time.Time, bool) {
-	at := e.s.now().Add(computeScoreLookupTimeout)
+	// The request reaches the provider, or is cancelled, within the write
+	// bound plus the dispatch timeout, so that is the time it counts from.
+	at := e.s.now().Add(computeScoreLookupTimeout + computeScoreDispatchTimeout)
 	wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
 	// Start writes are serialized and retried within the bound, so
 	// concurrent dispatches do not fail each other on a busy database.
