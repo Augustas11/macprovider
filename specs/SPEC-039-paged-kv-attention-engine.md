@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.17
-Status: draft (normative design). v0.1.17 adds the `glm5_next` hybrid paged
+Version: v0.1.18
+Status: draft (normative design). v0.1.18 names the `glm5_next` catalog key
+(`zai-org/glm-5.3-flash`) and counts the native-MTP next-N layer's
+sparse-attention cache in the FR-PKV13 sizing input. v0.1.17 adds the `glm5_next` hybrid paged
 family (epic #2029): a `pagedMLA(kpool:)` cache kind that pages the MLA latent
 and the indexer's pooled keys of each DeepSeek-sparse-attention layer through
 the unchanged `macprovider_paged_kv_gather_v1` kernel, KDA linear-attention
@@ -62,6 +64,12 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.18 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry keys on
+catalog model id `zai-org/glm-5.3-flash` plus `Glm5NextForConditionalGeneration`.
+The FR-PKV13 `glm5_next` sizing input is computed from the admitted config
+and adds the next-N layer's cache (SPEC-048 R012): 1,003,257,856 bytes per
+64k row with native MTP, 931,954,688 without. Selecting a per-family pool
+block size (256 for `glm5_next`) remains IMPL work. No requirement changes.
 Change log v0.1.17 (2026-10-17): FR-PKV12 gains the `glm5_next` mixed
 topology (`MambaCache` on `linear_attention` layers, `pagedMLA(kpool:)` on
 `deepseek_sparse_attention` layers) and a SPEC-first allowlist entry keyed by
@@ -734,8 +742,8 @@ be individually measured before it is added. The v1 allowlist is:
 - `openai/gpt-oss-120b` with `GptOssForCausalLM` in the artifact's
   `config.json` architectures (MoE sliding-window/full-attention decoder; the
   paged path MUST additionally pass cross-row shared-forward isolation).
-- (v0.1.17, SPEC-first) the GLM-5.3-Flash identity: the catalog model whose
-  verified artifact is `Jundot/GLM-5.3-Flash-oQ4e-mtp` @
+- (v0.1.17, SPEC-first) the GLM-5.3-Flash identity `zai-org/glm-5.3-flash`
+  (catalog key from v0.1.18), the catalog model whose verified artifact is `Jundot/GLM-5.3-Flash-oQ4e-mtp` @
   `36defc5042d92a992a7948e83d6f110b8df69329`, with
   `architectures[0] == "Glm5NextForConditionalGeneration"`, top-level
   `model_type` `glm5_next`, and `text_config.model_type` `glm5_next_text` in
@@ -876,14 +884,21 @@ These are normative define-and-record obligations; the specific byte and
 percentage values are chosen by the IMPL against real evidence and recorded in
 diagnostics and acceptance fixtures.
 
-**`glm5_next` sizing input (v0.1.17).** A `glm5_next` row's resident state is
-the paged latent (`kv_lora_rank` values per token per sparse layer), the paged
-pooled keys (`index_head_dim` values per `index_kpool` tokens per sparse
-layer), and the row-local KDA recurrent and short-convolution state of every
-`linear_attention` layer. For the admitted identity that is about 0.93 GB per
-row at a 64k-token context, and the recorded design point is 4 slots at 64k
-with 256-token blocks. These are IMPL sizing inputs recorded with the
-evidence; the served slot count stays a SPEC-038 FR-CB10 on-device decision.
+**`glm5_next` sizing input (v0.1.17, computed in v0.1.18).** A `glm5_next`
+row's resident state is the paged latent (`kv_lora_rank` values per token per
+sparse layer), the paged pooled keys (`index_head_dim` values per
+`index_kpool` tokens per sparse layer), and the row-local KDA recurrent and
+short-convolution state of every `linear_attention` layer. For the admitted
+config (bf16 latent and pooled keys, fp32 recurrent state) each sparse layer
+holds `512 × 2 + 128 × 2 / 4 = 1,088` bytes per token, each KDA layer holds
+`64 × 128 × 128 × 4 + 3 × 24,576 × 2 = 4,341,760` bytes, and one row at a
+65,536-token context holds 11 × 71,303,168 + 34 × 4,341,760 = 931,954,688
+bytes. A native-MTP row adds the next-N layer's own sparse-attention cache,
+71,303,168 bytes at that context (SPEC-048 R012), for 1,003,257,856 bytes.
+The recorded design point is 4 slots at 64k with 256-token blocks
+(4,013,031,424 bytes with native MTP). These are IMPL sizing inputs recorded
+with the evidence; the served slot count stays a SPEC-038 FR-CB10 on-device
+decision.
 
 The overhead ceiling is enforced per tuple through SPEC-038 FR-CB10 acceptance
 coverage, not by a startup micro-benchmark. A throughput measurement at

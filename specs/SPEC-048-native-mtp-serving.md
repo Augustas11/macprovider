@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.33
+**Version:** 0.1.34
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -268,8 +268,11 @@ every key not already under `mtp.` gains that prefix. A key the loader would
 not apply (for example a bare drafter `fc` override, which the loader ignores
 in favour of the global width) fails closed as unmatched, as does a `false`
 entry that names no consumed floating module or names a module that has
-packed weights. Overrides are admitted only for `4` or `8` bits, group sizes
-`32`, `64`, or `128`, and an absent or exactly `affine` mode. The observed
+packed weights. Overrides are admitted only for `4`, `5`, `6`, or `8` bits
+(SPEC-023 v0.22.25; `4` or `8` before 0.1.34), group sizes `32`, `64`, or
+`128`, and an absent or exactly `affine` mode. A packed override tensor's
+last dimension times 32 MUST divide exactly by its width, and the quotient is
+the module's logical input width. The observed
 affine representation MUST match the signed SPEC-023 quantization object
 exactly before native MTP is admitted. A SPEC-023 `base` admission likewise
 requires both artifacts observed as unquantized bfloat16 with no overrides or
@@ -303,7 +306,10 @@ For standalone drafter artifacts, the accepted tensor namespace is exactly
 top-level `model_type` `glm5_next`, `architectures` exactly
 `["Glm5NextForConditionalGeneration"]`, `text_config.model_type`
 `glm5_next_text`, and `text_config.num_nextn_predict_layers` exactly `1` uses
-the `glm5_next_mtp_v1` adapter with `source_layout` `checkpoint_mtp`. Any other
+the `glm5_next_mtp_v1` adapter with `source_layout` `checkpoint_mtp`
+(0.1.34: the catalog key is `zai-org/glm-5.3-flash`). The entry's adapter
+string determines the layout: `glm5_next_mtp_v1` is `checkpoint_mtp` and every
+other adapter keeps `separate_artifact`. Any other
 `num_nextn_predict_layers`, or a `glm5_next` config naming another
 architecture, fails closed. The Qwen rules above (prefix rewriting, the
 `vision_tower` / `model.visual` discard, the standalone drafter namespace)
@@ -331,21 +337,32 @@ do not apply to this adapter; these do:
   `vision_model.`, `vision_tower.`, `visual.`, or `model.visual.`. The
   observer drops exactly those dotted namespaces and no others. The text-only
   boundary of §8 applies: no image-input buyer path is admitted.
-- *Sanitizer mapping.* Override and `false` keys are matched against the
-  exact post-sanitize module paths, which the observer computes with the same
-  pure name/shape mapping as the pinned `GLM5NextWeights.sanitize`:
-  `.hc_attn_` / `.hc_ffn_` renames, the forget-gate move under
-  `forget_gate.`, per-projection `q_conv1d` / `k_conv1d` / `v_conv1d`
-  concatenation, `.mlp.experts.<e>.` stacking into `.mlp.switch_mlp.`, and the
-  `kv_b_proj` split into `embed_q` and `unembed_out`. A mapping that would drop
-  a tensor, overwrite another, leave a partial conv triple or an expert group
-  not exactly `0..<n_routed_experts`, or derive a `kv_b_proj` width that differs
-  from the `embed_q` / `unembed_out` overrides fails closed.
+- *Post-sanitize layout only (0.1.34).* The pinned `GLM5NextWeights.sanitize`
+  rewrites raw Hugging Face names (`.hc_attn_` / `.hc_ffn_` renames, the
+  forget-gate move under `forget_gate.`, per-projection `q_conv1d` /
+  `k_conv1d` / `v_conv1d` concatenation, `.mlp.experts.<e>.` stacking into
+  `.mlp.switch_mlp.`, the `kv_b_proj` split into `embed_q` and `unembed_out`,
+  and router-gate dequantization when `.mlp.gate.scales` exists). The
+  observer admits only a checkpoint already in the post-sanitize layout, on
+  which that mapping is the identity, so tensor names, override keys, and
+  `false` keys are the loader's module paths as written. Any tensor name the
+  sanitizer would rewrite fails closed: one containing `.hc_attn_`,
+  `.hc_ffn_`, `.mlp.experts.`, `.kv_b_proj.`, `.q_conv1d.`, `.k_conv1d.`,
+  `.v_conv1d.`, `.mlp.gate.scales`, `.mlp.gate.biases`, or a forget-gate part
+  (`A_log`, `dt_bias`, `f_a_proj`, `f_b_proj`) directly under `.self_attn.`.
+  The admitted artifact is in this layout.
+- *Floating parameters.* The loader quantizes a module only when its
+  `<path>.scales` tensor exists. Besides rank-1 tensors and rank-3
+  `conv1d.weight` kernels, the observer admits exactly these unpaired
+  floating tensors, which the model holds as plain parameters or unquantized
+  layers: `.attn_hc.fn`, `.ffn_hc.fn`, `.mlp.gate.weight`,
+  `.indexer.index_kpool_compress_ape`, `.indexer.index_kpool_compress_gate`,
+  and `language_model.mtp.0.eh_proj.weight`. Any other rank-2 floating weight
+  without a scale pair fails closed unless the config declares it `false`.
 - *Quantization.* Only the top-level `quantization` object is read; the
   artifact's `quantization_config` copy is ignored as for every adapter. The
-  global width is affine 4-bit, group 32, 64, or 128. For this adapter,
-  per-module overrides are admitted at `4`, `5`, `6`, or `8` bits with the same
-  group sizes and an absent or exactly `affine` mode. Because target and MTP
+  global width is affine 4-bit, group 32, 64, or 128, and per-module
+  overrides follow the rule above (`4`, `5`, `6`, or `8` bits). Because target and MTP
   share one config, each override is recorded once, as `target/<module>`
   (`target/language_model.mtp.0.…` for next-N modules); no `mtp/` exception is
   emitted, and the representation manifest's `mtp` object is byte-equal to
@@ -371,6 +388,9 @@ the v1 form (`macprovider.native-mtp-artifact-projection.v1`, one
 pre-0.1.33 output. Consumers MUST read both forms. A v1-only consumer rejects
 the v2 form and stays ordinary for every model, so a release MUST NOT publish
 the v2 form before the provider CLI that reads it is the released CLI.
+The same ordering applies to a sidecar that carries a 5- or 6-bit override or
+more than 256 exceptions (SPEC-023 v0.22.25): a CLI that predates 0.1.34
+rejects the whole sidecar. R014 item 10 makes this a release gate.
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
@@ -1042,18 +1062,29 @@ SPEC-023 sidecar before any native-MTP tuple can advertise capability.
 
 For `glm5_next_mtp_v1` (0.1.33) `mlx_affine_4bit` names the global width only.
 The artifact's per-module 5-, 6-, and 8-bit overrides (R002), including those
-on `language_model.mtp.0.*` and the `kv_b_proj`-derived `embed_q` /
-`unembed_out` widths, are part of the observed representation: each appears
+on `language_model.mtp.0.*` and on `embed_q` / `unembed_out`, are part of the
+observed representation: each appears
 in `per_layer_exceptions` and in the representation manifest with its exact
 `bits` and `group_size`, and the fit model counts their packed bytes at those
 widths. A mismatch in any override width or group size, a missing or extra
 override, or an override the loader would not apply fails admission closed.
 The admitted artifact carries 554 overrides (467 at 8 bits, 70 at 5, 17 at
-6, all group 64). SPEC-023-R024 as locked bounds `per_layer_exceptions` at 256
-entries and admits override widths of 4 or 8 bits only, so a
-`glm5_next_mtp_v1` sidecar cannot validate until SPEC-023-R024 is amended in
-lockstep to admit widths 5 and 6 and an exception bound that covers this
-artifact. This revision does not change SPEC-023.
+6, all group 64). SPEC-023 v0.22.25 (lockstep with 0.1.34) admits widths 5
+and 6 and raises the exception bound to 1024 entries.
+
+**GLM fit headroom (0.1.34).** The fit model and the R015 10% free-memory
+headroom count the next-N layer's own sparse-attention cache as resident
+per-row state, not only as round workspace. Computed from the admitted
+config (bf16 cache values; `kv_lora_rank` 512, `index_head_dim` 128,
+`index_kpool` 4), each sparse layer holds `512 × 2 + 128 × 2 / 4 = 1,088`
+bytes per context token. The next-N layer is one such layer: 71,303,168 bytes
+per row at 65,536 tokens. With the target's 11 sparse layers (784,334,848
+bytes) and the 34 KDA layers' fp32 recurrent state
+(`64 × 128 × 128 × 4` bytes each) and bf16 short-convolution state
+(`3 × 24,576 × 2` bytes each), 147,619,840 bytes together, one 64k row holds
+1,003,257,856 bytes, about 1.00 GB, and the 4-slot design point holds
+4,013,031,424 bytes. `complete_window_bytes_by_depth` covers only the staged
+round on top of that.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
@@ -1079,6 +1110,10 @@ malformed. The provider revision, source commit, reproducible-build digest, and
 live executable CDHash are recorded provenance of the qualifying build
 (SPEC-023 v0.22.13): a consumer MUST NOT require them to equal the running
 provider CLI, so a signed admission keeps serving across signed CLI releases.
+**(0.1.34)** One CLI release serves every entry of a sidecar, so the
+release-owned provenance (`provider_revision`, `source_commit`,
+`reproducible_build_sha256`, `live_executable_cdhash`) is shared by all
+entries of one release; per-entry provenance is not required.
 **(0.1.32)** Admission is model-keyed: only the model key and target
 artifact bind. The upstream MLX runtime revision, hardware class, RAM and
 qualified slot count are recorded provenance of the qualifying run; a sidecar
@@ -1144,6 +1179,12 @@ For each qualified tuple, production enablement requires all of the following:
    `JOURNEY-NATIVE-MTP-RELEASE` result covers R014 and is the evidence that may
    promote it to conformant.
 9. No unreleased local binary is connected to the live coordinator.
+10. (0.1.34) A sidecar or projection manifest that a released CLI cannot
+    parse is not published while that CLI is the released one: the v2
+    multi-model projection, a second model's entry, a 5- or 6-bit override,
+    or more than 256 exceptions ship only after the CLI cut that reads them
+    is the released CLI. Publishing earlier would turn native MTP off for
+    every tuple on the older CLI.
 
 Failure or revocation of any tuple-specific gate MUST remove or disable only that
 tuple's native-MTP eligibility and MUST preserve ordinary decode. No partial
@@ -1449,8 +1490,9 @@ contains:
    qualification surface;
 2. provider signed-admission sidecar parsing and artifact observation for the
    Qwen 3.5 separate-artifact tuple (the GLM-5-Next `checkpoint_mtp` observer,
-   the v2 projection-manifest reader, and the `glm5_next_mtp_v1` drafter are
-   epic #2029 work and not yet on this list);
+   the v2 projection-manifest reader, and adapter-derived source layout are
+   in the epic #2029 campaign branch; the `glm5_next_mtp_v1` drafter and its
+   runtime load path are not yet);
 3. default-off native-MTP selection, revocation gating, and ordinary fallback
    before sticky native state;
 4. serial and mixed continuous-batching native-MTP runtime plumbing with
@@ -1512,7 +1554,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | R002 `checkpoint_mtp` observer and drafter in the provider and fork; SPEC-023-R024 lockstep amendment for 5/6-bit override widths and the 554-entry exception list; final mlx-swift-lm fork tag and R003 review record (pending rows); GLM R015 and journey. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | The `glm5_next_mtp_v1` drafter in the fork and the provider runtime load path; final mlx-swift-lm fork tag and R003 review record (pending rows); GLM R015 and journey. The observer, sidecar parsing, v2 projection reader, and SPEC-023 v0.22.25 widths are in the campaign branch. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1551,6 +1593,18 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.34 (2026-10-17)** — GLM-5.3-Flash admission details (epic #2029,
+  lockstep with SPEC-023 v0.22.25). MTP-2: override widths `4`, `5`, `6`, or
+  `8` for every adapter; the source layout is derived from the adapter
+  string; the GLM observer admits only a post-sanitize checkpoint and names
+  its unpaired floating parameters; the catalog key is
+  `zai-org/glm-5.3-flash`. MTP-12: the next-N layer's sparse-attention cache
+  (1,088 bytes per token, 71 MB per 64k row) counts in the fit model and the
+  R015 headroom; one 64k GLM row is about 1.00 GB. MTP-13: release-owned
+  provenance is shared by every entry of one release. MTP-14 item 10: a
+  sidecar or projection that a released CLI cannot parse ships only after the
+  CLI that reads it is released.
 
 - **0.1.33 (2026-10-17)** — GLM-5.3-Flash native MTP and the campaign fork
   tuple (epic #2029). MTP-2 adds the `glm5_next_mtp_v1` adapter with the
