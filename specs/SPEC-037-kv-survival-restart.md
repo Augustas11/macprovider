@@ -72,10 +72,11 @@ Out of scope (recorded, not silently dropped):
   disabled and unenableable in v0.1** (FR-KVP11).
 - Long-context restore beyond the promotion ceiling. Under the v1
   allowlist (unquantized `KVCacheSimple`, ~96 KiB/token for the live Qwen
-  shape) the **default** 256 MiB ceiling still services the **~2.5k-token
-  prefix class** (KVS-01a). Q6 on that tuple is FP16 `KVCacheSimple`, not
-  q4, so the memo's 8k class needs the v0.1.3 1 GiB hard ceiling (an
-  operator-raised `staging_max_bytes`, never the default). The 32k–64k
+  shape) the 256 MiB ceiling (the default below 64 GiB of host memory)
+  still services the **~2.5k-token prefix class** (KVS-01a). Q6 on that
+  tuple is FP16 `KVCacheSimple`, not q4, so the memo's 8k class needs the
+  v0.1.3 1 GiB hard ceiling (operator-raised, or the v0.2.1 default on
+  hosts with at least 64 GiB). The 32k–64k
   class still exceeds 1 GiB (~3–6 GiB FP16) and stays deferred to
   KVS-04-class evidence under a future format milestone.
 - Defense against a hostile process running under the **same macOS user
