@@ -34,9 +34,9 @@
 #
 # Legs:
 #   bounded   (always) PR head as it ships, device decode row bound in force.
-#             PASS when lab served_slots >= live served_slots and lab
-#             verified_k >= live served_slots, every measured width
-#             conformant up to verified_k.
+#             PASS when lab verified_k >= live served_slots (the probe never
+#             caps below what live serves); served_slots is compared and
+#             reported.
 #   unbounded (UNBOUNDED_CLI set) the lab-harness build (PR body) with
 #             MACPROVIDER_LAB_DECODE_ROW_BOUND above the device limit. PASS
 #             when the probe refuses some width above the device's vector
@@ -365,11 +365,17 @@ run_leg bounded "$CLI" "$bounded_config" || { log "RESULT=FAIL (bounded leg did 
 read -r b_decision b_verified b_served b_build < "$OUT/bounded.grant" || true
 log "bounded: decision=$b_decision verified_k=$b_verified served_slots=$b_served build=$b_build"
 
+# The probe can lower a grant only through verified_k (no width above it is
+# ever served); the slot count picked from the throughput rungs is unchanged
+# by this PR, and the live served count may also carry a coordinator policy
+# grant a no-join lab cannot have. So the gate is verified_k >= the live
+# served count; the served comparison is reported.
 result=PASS
-if ! [[ "$b_served" =~ ^[0-9]+$ && "$b_verified" =~ ^[0-9]+$ ]] \
-  || (( b_served < live_served || b_verified < live_served )); then
+if ! [[ "$b_served" =~ ^[0-9]+$ && "$b_verified" =~ ^[0-9]+$ ]] || (( b_verified < live_served )); then
   result=FAIL
-  log "bounded FAIL: lab grant below the live grant (live served_slots=$live_served)"
+  log "bounded FAIL: lab verified_k=$b_verified below the live served_slots=$live_served"
+elif (( b_served < live_served )); then
+  log "bounded note: lab served_slots=$b_served < live served_slots=$live_served (throughput rung selection, live verified_k=$live_verified)"
 fi
 
 if [[ -n "${UNBOUNDED_CLI:-}" ]]; then
