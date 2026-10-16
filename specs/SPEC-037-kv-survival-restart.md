@@ -610,7 +610,11 @@ block, fail, or corrupt the request being served.
   once promoted. The `disk_miss_budget` trigger is the entry's
   `decoded_length` (§5a — the same geometry formula as the FR-KVP3
   write-side estimate, so nothing writable is unpromotable) exceeding the
-  configured ceiling. Q6 on the live Qwen tuple is unquantized
+  configured ceiling. **(v0.2.1)** A `kvsurv-codec-v2` restore holds the
+  decoded bytes and the materialized tensors at once, so its effective
+  staging is `2 × decoded_length`: write admission (FR-KVP3) and the
+  pre-decrypt read check both compare that product with the ceiling, and
+  the single promotion slot spans decode and MLX materialization. Q6 on the live Qwen tuple is unquantized
   `KVCacheSimple` (~98 KiB/token); Q7 q4 is not the active representation,
   so v0.1.3 raises this hard ceiling to 1 GiB to make the 8k FP16 class
   configurable instead of adding a `QuantizedKVCache` codec. A further
@@ -1211,7 +1215,8 @@ capture and publication; restoration must recheck fences after suspension.
 
 All existing quota, retention, key destruction, clock rollback, staging and
 single-writer bounds apply to the sum of attention tensors, recurrent slots and
-checkpoint metadata. Bounds and overflow checks precede allocation/copy. Cleanup
+checkpoint metadata. Staging for a codec-v2 entry is charged at twice its decoded length
+(FR-KVP9, v0.2.1). Bounds and overflow checks precede allocation/copy. Cleanup
 must not refresh the original reuse deadline. Corruption or incompatibility is a
 safe miss, never a partial restore or a request failure.
 

@@ -148,6 +148,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let epochLock = NSLock()
     private var cachedEpoch = 1
 
+    /// FR-KVP9 single promotion: the store's slot ends when `read` returns, but MLX
+    /// restoration still holds the decoded bytes. This slot spans read + restore so a
+    /// concurrent candidate misses instead of overlapping that allocation.
+    private let restoreLock = NSLock()
+    private var restoreInFlight = false
+
     /// CRITICAL-2 — per-index (keyed by raw conversation key) monotonic commit
     /// sequence, allocated synchronously under the hot lease. Seeded from the store's
     /// last published sequence at `sampledPurgeGeneration` (begin-time) so
@@ -346,6 +352,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         let recurrentLayouts = recurrentGeometryTemplates[identity.servedModelID] ?? []
         templateLock.unlock()
         guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
+        restoreLock.lock()
+        let claimed = !restoreInFlight
+        if claimed { restoreInFlight = true }
+        restoreLock.unlock()
+        guard claimed else { return nil }
+        defer { restoreLock.lock(); restoreInFlight = false; restoreLock.unlock() }
         let epoch = await store.currentEpoch
         let runtime = promotionRuntime(
             identity: identity, template: template, epoch: epoch,
