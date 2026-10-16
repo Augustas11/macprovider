@@ -278,8 +278,13 @@ def install(tmp, path):
         os.close(dfd)
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def healthz(url):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:
@@ -545,11 +550,13 @@ def invocation_events(unit, names):
     inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
                          capture_output=True, text=True, timeout=15).stdout.strip()
     if not re.match(r"^[0-9a-f]{32}$", inv):
-        return []
+        raise Refused("cannot read the coordinator's invocation id")
     proc = subprocess.run(["journalctl", "_SYSTEMD_INVOCATION_ID=" + inv, "--no-pager", "-o", "cat"],
                           capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise Refused("cannot read the coordinator's journal")
     found = []
-    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+    for line in proc.stdout.splitlines():
         if not any(n in line for n in names):
             continue
         try:
@@ -630,7 +637,7 @@ def installed_matches(path, unit, j):
         return False
     start = main_start(unit)
     try:
-        if start is None or int(os.lstat(path).st_ctime) > start:
+        if start is None or int(os.lstat(path).st_ctime) >= start:
             return False
         with open(path, "rb") as f:
             version, prompts = parse_corpus(f.read(CORPUS_MAX_BYTES + 1))
@@ -715,7 +722,9 @@ def write_corpus(path, data, gid, uid=None, mode=0o640):
     try:
         os.fchown(fd, os.geteuid() if uid is None else uid, gid)
         os.fchmod(fd, mode)
-        os.write(fd, data)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -803,6 +812,8 @@ def apply_compute_integrity(args):
                 if tmp and os.path.exists(tmp):
                     os.unlink(tmp)
             try:
+                # The unchanged-since-start check works in whole seconds.
+                time.sleep(1.1)
                 restart(args, pid)
                 ci_live(args, prompts, version)
             except Exception:

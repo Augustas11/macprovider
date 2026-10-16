@@ -163,7 +163,7 @@ def run(args):
         if time.monotonic() > deadline:
             raise RuntimeError("no report for this run within %d s; it may still be running or another run "
                                "took the lock first: read the coordinator journal, do not retry blindly" % args.wait_max_s)
-        time.sleep(args.poll_s)
+        time.sleep(max(0.0, min(args.poll_s, deadline - time.monotonic())))
 
 
 def summary(report, key):

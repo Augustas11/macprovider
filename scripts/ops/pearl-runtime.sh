@@ -454,8 +454,8 @@ retention_run_layout() {
   plain_args "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$RR_UNIT" "$PEARL_PROC_ROOT"
   [[ "$PEARL_COORDINATOR_ADMIN_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+$ ]] ||
     refuse "PEARL_COORDINATOR_ADMIN_URL must be http://127.0.0.1:PORT (Pearl's loopback admin listener)"
-  [[ "$RR_WAIT" =~ ^[0-9]+$ ]] && [[ "$RR_POLL" =~ ^[0-9]+$ ]] && [ "$RR_POLL" -ge 0 ] ||
-    refuse "RETENTION_RUN_WAIT_MAX_S and RETENTION_RUN_POLL_S must be whole seconds"
+  [[ "$RR_WAIT" =~ ^[0-9]{1,6}$ ]] && [[ "$RR_POLL" =~ ^[0-9]{1,3}$ ]] && [ "$RR_POLL" -le 300 ] ||
+    refuse "RETENTION_RUN_WAIT_MAX_S must be whole seconds and RETENTION_RUN_POLL_S at most 300"
   [[ "$RR_NIGHTLY" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || refuse "PEARL_RETENTION_NIGHTLY_UTC must be HH:MM"
 }
 
@@ -648,7 +648,10 @@ gather_compute_integrity() {
     return
   fi
   local scheduled=false
-  if [ "$path" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ -n "$installed" ] && [ "$enabled" = true ] &&
+  # The overlay must own the setting: a base-only path is replaced by the
+  # next coordinator.yaml release.
+  if [ "$path" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] &&
+    [ "$(json_field_str "$facts" 'd["overlay_corpus_path"]')" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ -n "$installed" ] && [ "$enabled" = true ] &&
     [ "$invalid" = false ] && [[ "$loaded" =~ ^[0-9]+$ ]] && [ "$loaded" -gt 0 ] &&
     [ "$(json_field_str "$facts" 'd["loaded_matches_installed"]')" = true ] &&
     [ "$(json_field_str "$facts" 'd["installed_mode_ok"]')" = true ]; then
