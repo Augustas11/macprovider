@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.34",
+      "version": "0.1.33",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11136,7 +11136,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.34 authorizes the operator's permanent three-fork MLX runtime: mlx-swift-lm 3.32.3-macprovider.9.4 (ce3bb5235317367c61c054311a830b1e81aaa6ea, upstream 3.32.3; 3.32.3-macprovider.9 (dbe8bcb39a00e31b8ba9a0602c60d9388fca247d) plus only the Qwen2-VL per-image vision attention fix for issue #2016, every other decode path byte-identical, so the Qwen3.6 CB and native-MTP re-bind is identity-only), mlx-swift 0.32.3-macprovider.8 (745f5e4872054ae2c1c497d2351a61b6d89e8a05, upstream 0.32.3), and MLX core v0.32.2-macprovider.5 (49d94e9fece0849443fa414e2d47813f68a51eaa, upstream v0.32.2), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, plus the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, and every-thread compiled-function erase. Mac Studio startup batched-isolation probes pass with fused MoE on and off and native-MTP R015 passed on the compile-state fix (docs/research/mlx-swift-lm-3.32.3/). R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "SPEC-048 v0.1.33 authorizes the epic #2029 campaign fork tuple with one pending row: mlx-swift-lm candidate revision 378aaf7618891e6903d207af7fb9906f6119070f on branch glm53/tuple-0324 (upstream 3.32.3; fork tag PENDING, filled by the campaign release step, which writes the final tag and revision here and in SPEC-048 MTP-3 in the same change), mlx-swift 0.32.3-macprovider.3 (0c9854fc147a6669b36c7e9d0f1c325ab0c6aa91, upstream 0.32.3), and MLX core v0.32.4-macprovider.1 (1b194804592cd5c22bfd1d036f4b364516f01449, upstream v0.32.4), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), checkpointed GDN, compiled MTP verification, declared compile state, batch-invariant small-M quantized routing, and every-thread compiled-function erase surfaces, plus the GLM-5-Next model, attention cache, and fused decode kernels (T3 parity: docs/evidence/glm53-flash-t3-parity-2026-10-16/). The review record for this tuple is a PENDING row filled by the campaign release step; the previous tuple (3.32.3-macprovider.6 / 0.32.3-macprovider.2 / v0.32.2-macprovider.2) keeps its 2026-10-10 review record (docs/research/mlx-swift-lm-3.32.3/). No production build may resolve the untagged candidate. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {
