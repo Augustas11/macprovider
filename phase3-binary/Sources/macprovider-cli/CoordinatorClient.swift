@@ -7264,13 +7264,20 @@ actor CoordinatorClient {
         return catalogModelIDForCoordinator
     }
 
-    static func toolSelectionCapabilities(wireModelID: String, loadedModelID: String?, runtimeSource: String?) -> [[String: Any]] {
-        guard !wireModelID.isEmpty, loadedModelID != nil else { return [] }
+    /// `runtimeWireModelID` is the coordinator wire identity of the model the
+    /// runtime has loaded now (`coordinatorWireModelID(for:)`, so an
+    /// alias-configured model resolves to its catalog id). Guaranteed modes
+    /// are claimed only when that identity is the advertised `wireModelID`;
+    /// a mismatch (swap in flight) claims the conservative non-guaranteed set.
+    static func toolSelectionCapabilities(wireModelID: String, runtimeWireModelID: String?, runtimeSource: String?) -> [[String: Any]] {
+        guard !wireModelID.isEmpty, let runtimeWireModelID else { return [] }
         let runtime = runtimeSource ?? "mlx_cache"
         return [[
             "model_id": wireModelID,
             "runtime": runtime,
-            "modes": ToolSelectionPolicy.modes(modelID: loadedModelID, runtime: runtime),
+            "modes": ToolSelectionPolicy.modes(
+                modelID: runtimeWireModelID == wireModelID ? wireModelID : nil, runtime: runtime
+            ),
             "validation": "schema-holdback-v1",
         ]]
     }
@@ -7332,7 +7339,8 @@ actor CoordinatorClient {
         let engineRuntimeSnapshot = await modelRuntime.currentSnapshot()
         payload["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
             wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),
-            loadedModelID: engineRuntimeSnapshot.modelID, runtimeSource: runtimeSource
+            runtimeWireModelID: engineRuntimeSnapshot.modelID.map { coordinatorWireModelID(for: $0) },
+            runtimeSource: runtimeSource
         )
         if let selfCheck = engineRuntimeSnapshot.continuousBatching?.selfCheck {
             payload["cb_self_check"] = selfCheck.jsonObject
@@ -8009,7 +8017,7 @@ actor CoordinatorClient {
             message["compatibility_set_id"] = compatibilitySetID
         }
         message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
-            wireModelID: wireModelID, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            wireModelID: wireModelID, runtimeWireModelID: (await modelRuntime.currentSnapshot()).modelID.map { coordinatorWireModelID(for: $0) },
             runtimeSource: runtimeSource
         )
         // SPEC-047 v0.1.6 auth `runtime_source` (#1690 M6): the WS-tunneled
@@ -8129,7 +8137,7 @@ actor CoordinatorClient {
             message["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
         message["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
-            wireModelID: wireModelIDForHello, loadedModelID: (await modelRuntime.currentSnapshot()).modelID,
+            wireModelID: wireModelIDForHello, runtimeWireModelID: (await modelRuntime.currentSnapshot()).modelID.map { coordinatorWireModelID(for: $0) },
             runtimeSource: runtimeSource
         )
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)

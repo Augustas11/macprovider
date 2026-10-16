@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.2.12 (2026-10-15, bounded tool-selection guarantees)
+**Version:** 0.2.13 (2026-10-16, loaded identity of an alias-configured model)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,15 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.2.13 (2026-10-16, §3.11 loaded identity clarified, Related: #2014):**
+  A native model configured under a local name with a configured catalog id
+  is served and advertised under that catalog id. §3.11 now states that this
+  catalog id is the loaded identity while the configured model is the one
+  loaded, so the capability claim, the provider request check and the local
+  capability listing all evaluate the id the coordinator routes. A model
+  warm-swapped in keeps its own loaded id. The exact-identity rule is
+  unchanged; family names and aliases still never qualify a model.
 
 - **v0.2.12 (2026-10-15, tool-selection guarantees, Related: #2014):**
   Adds §3.11 (`SPEC-018-R006`) for an explicitly bounded native
@@ -494,8 +503,13 @@ explicit tool modes for relay-blind/encrypted envelopes.
 | External/loopback runtimes | Existing behavior | Unsupported | Unsupported |
 
 A buyer alias can use the first row only when routing resolves to that same
-loaded model identity. A `qwen3` family substring, catalog entry, available
-parser, or claimed OpenAI compatibility alone MUST NOT enable guarantees.
+loaded model identity. When a native provider loads its configured model under
+a local name and advertises a configured catalog id for it, the provider MUST
+evaluate this matrix against that catalog id while the configured model is the
+one loaded. Any other loaded model, including one warm-swapped in, MUST be
+evaluated against its own loaded id. A pool model id is never a catalog id.
+A `qwen3` family substring, catalog entry, available parser, or claimed OpenAI
+compatibility alone MUST NOT enable guarantees.
 `required`/named require an explicit effective completion budget of 1–16,384
 tokens (`max_tokens`, or its accepted `max_completion_tokens` alias). An absent
 or out-of-range budget fails before inference with HTTP 400
