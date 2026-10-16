@@ -627,6 +627,7 @@
       "owner_spec": "SPEC-036",
       "consumers": [
         "SPEC-021",
+        "SPEC-022",
         "SPEC-048"
       ],
       "status": "declared",

@@ -387,6 +387,18 @@ func TestProviderEarningsRollupMatchesViewOnSeededData(t *testing.T) {
 SELECT id, 'force_credit', 'op', 'x', '2026-09-15T07:00:00.000000000Z', '2026-09-15T08:00:00.000000000Z', '2026-09-15T07:00:00.000000000Z' FROM ledger_request_credits WHERE model = 'model-v'`},
 		{"edit a resolution", `UPDATE ledger_quarantine_resolutions SET force_credit_matures_at_utc = '2000-01-01T00:00:00.000000000Z' WHERE force_credit_matures_at_utc = '2999-01-01T00:00:00.000000000Z'`},
 		{"delete a resolution", `DELETE FROM ledger_quarantine_resolutions WHERE resolution_kind = 'force_void' AND created_at_utc = '2026-09-15T10:00:00.000000000Z'`},
+		// SPEC-022 R-16: compute-integrity holds change the view without
+		// touching a credit row.
+		{"hold a model window", `INSERT INTO compute_integrity_earnings_holds (provider_id, model_id, kind, window_start_utc, window_end_utc, reason, status, created_at_utc)
+VALUES ('p-a', 'model-a', 'failure', '2026-09-14T00:00:00.000000000Z', '2026-09-16T23:00:00.000000000Z', 'confirmed_failure', 'held', '2026-09-17T00:00:00.000000000Z')`},
+		{"open a recovery hold", `INSERT INTO compute_integrity_earnings_holds (provider_id, model_id, kind, window_start_utc, window_end_utc, reason, status, created_at_utc)
+VALUES ('p-b', 'model-a', 'recovery', '2026-09-16T00:00:00.000000000Z', NULL, 'cooldown_elapsed', 'held', '2026-09-17T00:00:00.000000000Z')`},
+		{"narrow a hold window", `UPDATE compute_integrity_earnings_holds SET window_start_utc = '2026-09-16T08:00:00.000000000Z' WHERE provider_id = 'p-a'`},
+		{"release a hold", `UPDATE compute_integrity_earnings_holds SET status = 'released', released_at_utc = '2026-09-17T01:00:00.000000000Z', released_by = 'op', release_reason = 'reviewed' WHERE provider_id = 'p-a'`},
+		{"delete a hold", `DELETE FROM compute_integrity_earnings_holds WHERE provider_id = 'p-b'`},
+		{"hold again", `INSERT INTO compute_integrity_earnings_holds (provider_id, model_id, kind, window_start_utc, window_end_utc, reason, status, created_at_utc)
+VALUES ('p-b', 'model-a', 'failure', '2026-09-15T00:00:00.000000000Z', '2026-09-16T23:00:00.000000000Z', 'confirmed_failure', 'held', '2026-09-17T00:00:00.000000000Z')`},
+		{"settle a held credit", `UPDATE ledger_request_credits SET settled = 1 WHERE provider_id = 'p-b' AND model = 'model-a'`},
 		{"insert a new hour", `INSERT INTO ledger_request_credits (request_id, attempt_n, provider_id, ts_utc, model, status, stream, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits, created_at_utc)
 VALUES ('late', 0, 'p-a', '2026-09-16T23:59:59.999999999Z', 'model-late', 200, 0, 'provider_reported', 1, 1, 1, 5, 9000, 5, '2026-09-16T23:59:59.999999999Z')`},
 	}
@@ -898,6 +910,13 @@ func TestProviderEarningsRollupTriggerCoversViewColumns(t *testing.T) {
 	cols := map[string]bool{}
 	for _, c := range earningsRollupLRCColumns {
 		cols[c] = true
+	}
+	// A column may instead have a dedicated update trigger (SPEC-022 R-16.6:
+	// settled matters to the view only under a held hold).
+	for _, tr := range providerEarningsRollupTriggers() {
+		if m := regexp.MustCompile(`AFTER UPDATE OF ([a-z_]+) ON ledger_request_credits`).FindStringSubmatch(tr.ddl); m != nil {
+			cols[m[1]] = true
+		}
 	}
 	for _, m := range regexp.MustCompile(`\blrc\.([a-z_]+)`).FindAllStringSubmatch(viewSQL, -1) {
 		if !cols[m[1]] {

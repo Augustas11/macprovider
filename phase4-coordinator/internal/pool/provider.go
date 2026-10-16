@@ -233,6 +233,14 @@ type Provider struct {
 	// (SPEC-001-R005). Under SPEC-022 enforce only such a session is eligible
 	// for relay-blind work (R-14.2).
 	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
+	// ComputeScoreV1 records that this session advertised
+	// tier2_capabilities.compute_score_v1: it runs SPEC-036 FR-21 scoring
+	// jobs. Sessions without it are never chosen as scorers.
+	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
+	// ComputeIntegritySuspended is set while the SPEC-036 FR-23 key for this
+	// provider and its served model is failed. The registry recomputes it from
+	// the suspension set on registration, model change and every set change.
+	ComputeIntegritySuspended bool `json:"compute_integrity_suspended,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -792,6 +800,11 @@ func (p Provider) RoutingEligible() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
+	// SPEC-036 FR-25: a confirmed compute-integrity failure removes this
+	// provider from routing for the model it serves.
+	if p.ComputeIntegritySuspended {
+		return false
+	}
 	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
 		return false
 	}
@@ -844,6 +857,11 @@ func (p Provider) CapacityEligible() bool {
 // SlotQueueEligible reports a serving provider that may regain a seat while
 // buyers wait. A safety hold prevents routing, not waiting for recovery.
 func (p Provider) SlotQueueEligible() bool {
+	// SPEC-036 FR-25: a suspended model serves no buyer path, including the
+	// slot queue.
+	if p.ComputeIntegritySuspended {
+		return false
+	}
 	return p.ServingCapable() && p.SlotsTotal > 0 && (p.SlotsFree == 0 || p.capacitySafetyHold)
 }
 
@@ -945,6 +963,10 @@ type Registry struct {
 	modelIdentityResolver   ModelIdentityResolver
 	swapEmitter             SwapEventEmitter
 	receiptRotationEmitter  ReceiptRotationEventEmitter
+
+	// computeIntegritySuspended is the SPEC-036 FR-25 set of failed
+	// (provider_id, model_id) keys.
+	computeIntegritySuspended map[string]map[string]struct{}
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -1032,6 +1054,7 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		recoveryHolds:             map[string]recoveryHold{},
 		canarySanctions:           map[string]canarySanction{},
 		lastBreakerRecoveries:     map[string]time.Time{},
+		computeIntegritySuspended: map[string]map[string]struct{}{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -1269,6 +1292,7 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
 	r.applyCanarySanctionLocked(p)
+	r.applyComputeIntegritySuspensionLocked(p)
 	return old, true, RegisterRefusalNone
 }
 
@@ -2707,6 +2731,43 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 	return updated
 }
 
+func (r *Registry) applyComputeIntegritySuspensionLocked(p *Provider) {
+	_, suspended := r.computeIntegritySuspended[p.ProviderID][p.ModelID]
+	p.ComputeIntegritySuspended = suspended
+}
+
+// SetComputeIntegritySuspended adds or removes a SPEC-036 FR-25 routing
+// suspension for one (provider_id, model_id) and applies it to the live
+// session when it serves that model. It returns true when the set changed.
+func (r *Registry) SetComputeIntegritySuspended(providerID, modelID string, suspended bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	models := r.computeIntegritySuspended[providerID]
+	_, had := models[modelID]
+	if had == suspended {
+		return false
+	}
+	if suspended {
+		if r.computeIntegritySuspended == nil {
+			r.computeIntegritySuspended = map[string]map[string]struct{}{}
+		}
+		if models == nil {
+			models = map[string]struct{}{}
+			r.computeIntegritySuspended[providerID] = models
+		}
+		models[modelID] = struct{}{}
+	} else {
+		delete(models, modelID)
+		if len(models) == 0 {
+			delete(r.computeIntegritySuspended, providerID)
+		}
+	}
+	if p := r.providers[providerID]; p != nil {
+		r.applyComputeIntegritySuspensionLocked(p)
+	}
+	return true
+}
+
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
 	if !ok {
@@ -3104,6 +3165,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.ExpectedModelHash = hb.ExpectedModelHash
 
 	p.ModelID = hb.ModelID
+	r.applyComputeIntegritySuspensionLocked(p)
 	if sessionIdentityFingerprint(p) != priorIdentity {
 		r.bumpSessionEpochLocked(p)
 	}

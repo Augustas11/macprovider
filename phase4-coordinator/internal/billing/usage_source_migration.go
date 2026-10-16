@@ -58,13 +58,21 @@ func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary(ctx context.C
 // replaced by ledger_settled_rollups aggregates, which a contract-5 binary
 // does not add to payable totals or payout revalidation. Recorded in the
 // first rollup transaction.
-const billingCompatContract = billingCompatContractLedgerRollup
+// 7 = SPEC-022 v0.4.9 (R-16): compute-integrity earnings holds withhold
+// credits from the payable view and settlement, which a contract-6 binary
+// would pay. Recorded in the transaction that writes the first hold, so a
+// rollback stays possible until a hold exists and fails closed after.
+const billingCompatContract = billingCompatContractComputeIntegrityHold
 
 // billingCompatContractEarlyArchive is contract 5 (SPEC-022 R-15.9, v0.4.5).
 const billingCompatContractEarlyArchive = 5
 
 // billingCompatContractLedgerRollup is contract 6 (SPEC-022 R-15.11, v0.4.6).
 const billingCompatContractLedgerRollup = 6
+
+// billingCompatContractComputeIntegrityHold is contract 7, the floor the
+// first SPEC-022 R-16 hold records (v0.4.9).
+const billingCompatContractComputeIntegrityHold = 7
 
 // billingCompatContractRelayBlind is contract 3, the floor the relay-blind
 // outcome widening records.

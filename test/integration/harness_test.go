@@ -1714,6 +1714,14 @@ type fakeProvider struct {
 	// reconnectRequests makes runWS close its session and hello again on
 	// the same receipt key, as a restarted provider CLI does.
 	reconnectRequests chan struct{}
+	// SPEC-036 §5A: outputText replaces the canned completion text (a
+	// substituted model answers differently), weightsManifest is reported
+	// as the session's weights manifest hash, and computeScore answers
+	// compute_score_request_v1 frames as an independent scorer would.
+	outputText      string
+	weightsManifest string
+	computeScore    func(outputText string) (scored, top1 int, sumLogprob float64)
+	wsWriteMu       sync.Mutex
 	// streamFirstByteDelay holds a streamed response between its headers and
 	// its first chunk, so the coordinator measures it as time to first token
 	// (SPEC-002-R005 phase-aware routing journey).
@@ -1725,6 +1733,56 @@ type fakeProvider struct {
 	streamDecodeDelay time.Duration
 	// maxContextTokens is the advertised max_context_tokens (0 = 8192).
 	maxContextTokens int
+}
+
+func (p *fakeProvider) completionText() string {
+	if p.outputText != "" {
+		return p.outputText
+	}
+	return "hello from fake provider"
+}
+
+func (p *fakeProvider) completionBody() string {
+	if p.outputText == "" {
+		return fakeCompletionBody
+	}
+	body, _ := json.Marshal(map[string]any{
+		"id": "chatcmpl-fake-integration", "object": "chat.completion", "created": 1780000000,
+		"model":   "llama-3.2-3b-instruct",
+		"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": p.outputText}, "finish_reason": "stop"}},
+		"usage":   map[string]any{"prompt_tokens": 8, "completion_tokens": 12, "total_tokens": 20},
+	})
+	return string(body)
+}
+
+func (p *fakeProvider) addWeightsManifest(msg map[string]any) {
+	if p.weightsManifest == "" {
+		return
+	}
+	msg["weights_manifest_sha256"] = p.weightsManifest
+	msg["weights_manifest_algorithm"] = "macprovider.safetensors-manifest.v1"
+}
+
+func (p *fakeProvider) writeFrame(conn net.Conn, payload map[string]any) error {
+	p.wsWriteMu.Lock()
+	defer p.wsWriteMu.Unlock()
+	return writeJSONFrame(conn, payload)
+}
+
+// answerComputeScore replies to one SPEC-036 FR-21 scoring job.
+func (p *fakeProvider) answerComputeScore(conn net.Conn, raw []byte) {
+	var req map[string]any
+	if json.Unmarshal(raw, &req) != nil || req["type"] != "compute_score_request_v1" || p.computeScore == nil {
+		return
+	}
+	output, _ := req["output_text"].(string)
+	scored, top1, sum := p.computeScore(output)
+	_ = p.writeFrame(conn, map[string]any{
+		"type": "compute_score_result_v1", "version": 1,
+		"score_id": req["score_id"], "provider_id": req["provider_id"], "assigned_id": req["assigned_id"],
+		"model_id": req["model_id"], "weights_manifest_sha256": req["weights_manifest_sha256"],
+		"status": "ok", "prompt_tokens": 40, "scored_tokens": scored, "top1_matches": top1, "sum_logprob": sum,
+	})
 }
 
 func (p *fakeProvider) maxContextTokensOrDefault() int {
@@ -2374,7 +2432,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 		p.hitMu.Lock()
 		p.hits++
 		p.lastRequestBody = append([]byte(nil), requestBody...)
-		p.lastResponseBody = []byte(fakeCompletionBody)
+		p.lastResponseBody = []byte(p.completionBody())
 		omitReceipt := p.omitSettlementReceipt
 		p.hitMu.Unlock()
 		if chatBodyRequestsStream(requestBody) {
@@ -2383,7 +2441,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 			var receipt string
 			if p.settlementEnabled && hasSettlementMetadata && !omitReceipt {
 				var err error
-				receipt, err = p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+				receipt, err = p.buildSettlementReceiptHeader(settlementMetadata, p.completionText(), "stop", 8, 12, terminalTS)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -2418,7 +2476,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-MacProvider-Completion-Tokens", "12")
 		if p.receiptEnabled {
-			receipt, err := p.buildReceiptHeader(requestBody, []byte(fakeCompletionBody))
+			receipt, err := p.buildReceiptHeader(requestBody, []byte(p.completionBody()))
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -2427,7 +2485,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 		}
 		if p.settlementEnabled && hasSettlementMetadata && !omitReceipt {
 			terminalTS := time.Now().UTC().UnixMilli()
-			receipt, err := p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+			receipt, err := p.buildSettlementReceiptHeader(settlementMetadata, p.completionText(), "stop", 8, 12, terminalTS)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -2436,7 +2494,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(fakeCompletionBody))
+		_, _ = w.Write([]byte(p.completionBody()))
 	})
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2550,6 +2608,10 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 		if p.trustedPoolV1 {
 			initial["tier2_capabilities"].(map[string]any)["trusted_pool_v1"] = true
 		}
+		if p.computeScore != nil {
+			initial["tier2_capabilities"].(map[string]any)["compute_score_v1"] = true
+		}
+		p.addWeightsManifest(initial)
 		if p.admissionPriv != nil {
 			initial["provider_admission_public_key"] = base64.StdEncoding.EncodeToString(p.admissionPriv.Public().(ed25519.PublicKey))
 		}
@@ -2643,7 +2705,8 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 		ready := readyStateUpdate(p.modelID, p.modelHash)
 		ready["metrics_snapshot"].(map[string]any)["max_context_tokens"] = p.maxContextTokensOrDefault()
 		p.canonicalIdentity(ready["metrics_snapshot"].(map[string]any))
-		if err := writeJSONFrame(conn, ready); err != nil {
+		p.addWeightsManifest(ready["metrics_snapshot"].(map[string]any))
+		if err := p.writeFrame(conn, ready); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
@@ -2695,12 +2758,15 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	go func() {
 		defer close(readDone)
 		for {
-			_, _, err := wsutil.ReadServerData(conn)
+			frame, _, err := wsutil.ReadServerData(conn)
 			if err != nil {
 				return
 			}
-			// Silently drop frames; the coordinator doesn't actually
-			// send inference forwards in endpoint_url mode.
+			// Inference forwards go over HTTP in endpoint_url mode; the
+			// only frame this fake answers is a SPEC-036 scoring job.
+			if p.computeScore != nil && bytes.Contains(frame, []byte("compute_score_request_v1")) {
+				go p.answerComputeScore(conn, frame)
+			}
 		}
 	}()
 
@@ -2732,7 +2798,8 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"throughput_tps_since_last":  0.0,
 			}
 			p.canonicalIdentity(hb)
-			if err := writeJSONFrame(conn, hb); err != nil {
+			p.addWeightsManifest(hb)
+			if err := p.writeFrame(conn, hb); err != nil {
 				return
 			}
 		}

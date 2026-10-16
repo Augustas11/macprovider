@@ -2766,6 +2766,22 @@ func (s *Store) ListOwnedProviders(ctx context.Context, githubUserID int64) ([]O
 	return out, rows.Err()
 }
 
+// ProviderOperatorKey is the SPEC-036 FR-19 operator key: the claiming
+// GitHub identity when the provider is claimed, the provider itself
+// otherwise.
+func (s *Store) ProviderOperatorKey(ctx context.Context, providerID string) (string, error) {
+	var githubUserID int64
+	err := s.db.QueryRowContext(ctx, `SELECT github_user_id FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&githubUserID)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("github:%d", githubUserID), nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "provider:" + providerID, nil
+	default:
+		return "", err
+	}
+}
+
 func (s *Store) HasOwnership(ctx context.Context, providerID string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&n)

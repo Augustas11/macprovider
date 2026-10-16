@@ -1,9 +1,22 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.1.2-draft
-**Date:** 2026-08-17
-**Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.1.5, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
+**Status:** v0.2.0-draft
+**Date:** 2026-10-13
+**Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.2.0 (2026-10-13, issue #1644 — cross-provider scoring):**
+Adds §5A (FR-19 through FR-25), the compute-integrity verification path that
+ships. Verification requests travel the ordinary paid dispatch path, so the
+provider cannot tell them from buyer traffic. An independent peer that serves
+the same catalog artifact scores the verified output by teacher-forced
+prefill. A tolerance band learned continuously from the network's own honest
+pairs decides each measurement. A confirmed failure suspends routing of that
+model to the provider and holds its earnings for the affected window under
+SPEC-022 R-16. §5A does not use the FR-1 mode ladder, the FR-5 trusted
+reference, the FR-8 calibration gate or the §6 migration ladder; it is on by
+default. FR-1 through FR-18 are unchanged and keep governing the overt
+`compute_integrity_probe_v1` profile.
 
 **Change log v0.1.1 (2026-08-17, issue #1010 — receipt binding decision):**
 - Records the #1010 decision that request-start compute-integrity state digests
@@ -89,7 +102,9 @@ Out of scope:
   digest/replay wire framing — it owns its settlement-bearing digest preimage,
   replay binding, Tier-2 carrier, and result variants (FR-6), reusing only the
   encrypted-carrier structural pattern by substituting the profile discriminator.
-- Covert canaries or buyer-indistinguishable probes.
+- Covert canaries or buyer-indistinguishable probes under FR-1 through FR-18.
+  §5A (FR-19 through FR-25) adds the buyer-indistinguishable verification path
+  separately; FR-1 through FR-18 remain the overt path.
 - Hardware attestation, binary attestation, or cryptographic proof that a
   malicious provider honestly ran a model.
 - Buyer-issued quarantine-grade canaries.
@@ -1954,7 +1969,10 @@ Manual review MUST define:
 
 ### FR-17 Cost, capacity, and funding
 
-Compute-integrity probes are non-billable.
+Compute-integrity probes are non-billable. FR-17 governs the overt FR-6
+profile, trusted-reference and consensus work. It does not govern §5A: an
+FR-20 verification request is an ordinary paid SPEC-022 attempt with no buyer
+debit (SPEC-022 R-16.9), and an FR-21 scoring job is unpaid.
 
 All SPEC-036 probe, trusted-reference, and consensus-telemetry work MUST NOT create
 buyer debit, provider credit, provider earnings, payout readiness, or any uncapped
@@ -2051,6 +2069,425 @@ affect already captured rows, or authorize settlement. It also does not replace
 FR-6 through FR-10 measurement and reference requirements. This adapter adds no
 receipt or usage field and retains FR-17's bounded non-billable
 capacity/funding rules.
+
+## 5A. Cross-provider scoring (v0.2)
+
+§5A is the compute-integrity verification path that ships. It binds the
+computation, not only identity and code. A provider that claims a catalog
+model but serves a cheaper one passes every identity, release, hash and
+receipt check; §5A catches it by asking an independent peer how likely the
+provider's output is under the claimed model.
+
+§5A is independent of FR-1 through FR-18. It does not read the FR-1 policy
+mode, needs no FR-5 trusted reference and no FR-8 calibration record, and is
+not reached through the §6 migration ladder. It is on by default. The kill
+switch `compute_integrity.scoring.enabled=false` stops scheduling new
+verification requests; it does not clear existing states or holds. An
+unusable or missing private corpus also stops scheduling (logged), never
+serving.
+
+### FR-19 Scope and keys (SPEC-036-R019)
+
+A **verification key** is `(provider_id, model_id)`. A provider session serves
+one model at a time, so the key names exactly the traffic a decision affects.
+The **cohort hash** of a session is its coordinator-verified catalog model
+hash. A provider cannot choose it, so a provider-reported value never decides
+which scorers a provider is compared with. A session's reported
+`weights_manifest_sha256` is only what a scoring job to that session carries
+(FR-21).
+
+The **operator key** of a provider is `github:<github_user_id>` when the
+provider is claimed in `provider_ownership`, and `provider:<provider_id>`
+otherwise. Two providers have different operators when their operator keys
+differ.
+
+A provider is **verifiable** for its served model when its model hash is
+catalog-verified, it reports a weights manifest hash, and it is routing-eligible for
+that model. A
+provider is a **scorer candidate** when it advertised
+`tier2_capabilities.compute_score_v1: true` in its current session.
+
+### FR-20 Verification requests (SPEC-036-R020)
+
+The coordinator injects verification requests through the ordinary buyer
+dispatch path: the coordinator's own `/v1/chat/completions` handler with
+gateway context, pinned to the verified provider session with the internal
+`X-MacProvider-Session` header (never forwarded to the provider). The provider receives an
+ordinary `inference_request` frame and MUST NOT be able to tell it from buyer
+traffic by headers, frame fields, sampling parameters, or timing class:
+
+- The body is an OpenAI chat completion with `stream: false`. Its messages come
+  from the prompt corpus (FR-20 corpus rules), with a system message. Each
+  request appends a randomly drawn phrasing instruction to the user message,
+  so a request never repeats a corpus entry verbatim.
+- Sampling parameters come from a closed profile mix that mirrors buyer
+  traffic: greedy (`temperature: 0`), `temperature: 0.7` with `top_p: 0.95`,
+  and `temperature: 1.0` with `top_p: 1.0`. `max_tokens` is drawn from
+  `{96, 160, 256}`. An escalation request (FR-23 `suspect` or `recovering`)
+  uses the greedy profile while the sampled tolerance key of its model is
+  cold (FR-22), because the cold sampled prior is too loose to decide, and
+  never the hot profile, which is cover traffic only.
+- Each request uses a pseudonymous account drawn at random from a small set
+  kept per verified provider: up to 4 accounts, each retired after a random
+  lifetime of 3 to 10 days and replaced. Its SPEC-015 `account_scope`
+  therefore recurs on that provider the way a returning buyer's does, and is
+  neither unique to every request nor constant across probes. It carries a
+  random auto-prefix conversation-cache key in the shape the gateway produces
+  and the same effective `max_output_tokens` header the gateway sets.
+- A due request is dispatched after a delay drawn uniformly from one sweep
+  interval, so its arrival carries no scheduler tick phase. No delay class or
+  distinct request-id prefix marks it.
+
+Money:
+
+- No buyer is debited. Buyer debit happens only in the gateway, and a
+  verification request never passes through it.
+- The verified provider is credited and settled exactly like any other paid
+  request: same ledger row, same receipt, same SPEC-022 verification, same
+  payout path. A verification request is paid work.
+- Verification accounts carry the reserved prefix `cip_`. Unmatched-model
+  intake ignores them, and buyer usage statistics are recorded by the
+  gateway, which they never pass through.
+
+Rate bounds:
+
+- Base cadence per verification key: one request per
+  `compute_integrity.scoring.base_interval_seconds` (default 6 h) with ±50 %
+  uniform jitter, including the first request after a key appears or the
+  coordinator starts. A key in `suspect` or `recovering` (FR-23) is probed every
+  `escalation_interval_seconds` (default 10 min) with the same jitter. A key
+  keeps its due time while its provider is disconnected, so a reconnect
+  resumes an overdue request instead of restarting the cadence; the due time
+  of a key whose provider has been absent for 7 days is dropped.
+- At most `max_in_flight` (default 4) verification requests are outstanding
+  coordinator-wide, and at most one per verification key.
+- At most `max_per_hour` (default 240) verification requests start in any
+  rolling hour coordinator-wide. A reservation holds budget until its
+  request is dispatched. Immediately before dispatch the start is written to
+  a dedicated table, pruned to the last hours, and stamped at the latest
+  moment the request can reach the provider: the write bound plus the
+  dispatch timeout, after which the dispatch is cancelled. A request held so
+  long that a full dispatch timeout no longer fits before its stamp is
+  dropped while its start keeps counting. If the write fails the request
+  is not sent. The coordinator reads the table at start, so the
+  bound survives a restart without scanning buyer traffic; on the first open
+  of the table it carries over the last two hours of reserved `cip_` requests
+  from the request log, in the transaction that creates the table, so a
+  failed carry-over is retried at the next start. If the history cannot be read, the bound fails
+  closed and the whole budget counts as spent for one hour.
+- One deadline of one sweep interval bounds each sweep, including
+  maintenance writes and the operator-identity lookups of a scorer pool:
+  each lookup runs under it and it is checked again after every lookup and
+  under the lock that makes a reservation. A key the deadline cuts off reserves nothing and
+  stays due for the next sweep; identities resolved so far stay cached, and
+  a lookup cut off by the deadline is not cached as a failure.
+- A key whose operator identity cannot be resolved waits for its next cadence
+  slot; a failed lookup is cached for one minute.
+- A verification request is sent only when an eligible scorer exists for the
+  key (FR-21), so no provider work is spent on a request that cannot be scored.
+
+Prompt corpus: the coordinator reads prompts through a replaceable corpus
+interface. A deployment configures a private, coordinator-only corpus file
+with `compute_integrity.scoring.corpus_path` and rotates it out of band.
+Scheduling requires it: the repository is public, so a provider can read the
+checked-in generic corpus (no buyer data) and answer its prompts honestly
+while substituting for buyers. With no private corpus configured the
+coordinator schedules no verification requests and logs
+`compute_integrity_private_corpus_missing` at startup; states and holds still
+load. The checked-in corpus is a format example and a test fixture. Each request
+draws a prompt uniformly at random. A corpus entry is a system message plus a
+user message, each at most 2 KiB.
+
+Output capture: the coordinator keeps the response content (and any separate
+reasoning text) in memory only for scoring, then discards it. It MUST NOT
+persist or log prompts, outputs, or scorer token data. A response that is not
+a complete `stop` or `length` completion, exceeds the FR-21 32 KiB output
+bound, or arrives after the verified session changed model, cohort hash,
+reported manifest or session is `inconclusive:dispatch`.
+
+### FR-21 Teacher-forced scoring job (SPEC-036-R021)
+
+Scorer selection: for each scored measurement the coordinator draws distinct
+operators uniformly at random, then one provider of each, among providers
+that
+
+1. are scorer candidates (FR-19),
+2. serve the same `model_id` with the same cohort hash (FR-19) as the
+   verified provider,
+3. have a different operator key from the verified provider,
+4. are not in `suspect`, `failed` or `recovering` for that model, and are not
+   scorer-excluded (FR-24),
+5. are connected and in a ready or busy state, and
+6. have no other scoring job outstanding: a provider runs one job at a time,
+   so the coordinator reserves a scorer for each job until it ends. A key
+   whose missing scorers are only reserved stays due and is retried next
+   sweep, rather than being measured with fewer scorers.
+
+Old providers never advertise the capability and are never chosen. A job to
+a scorer carries that scorer's own reported `weights_manifest_sha256`.
+
+Wire. The coordinator sends `compute_score_request_v1` over the scorer's
+WebSocket session:
+
+```json
+{"type": "compute_score_request_v1", "version": 1,
+ "score_id": "<uuid>", "provider_id": "...", "assigned_id": "...",
+ "model_id": "...", "weights_manifest_sha256": "<64 hex>",
+ "body": "<chat completion request JSON>",
+ "output_text": "...", "reasoning_text": "...",
+ "issued_at": "<RFC 3339>", "expires_at": "<RFC 3339>"}
+```
+
+The scorer answers with `compute_score_result_v1`:
+
+```json
+{"type": "compute_score_result_v1", "version": 1,
+ "score_id": "<uuid>", "provider_id": "...", "assigned_id": "...",
+ "model_id": "...", "weights_manifest_sha256": "<64 hex>",
+ "status": "ok" | "unavailable" | "invalid" | "too_long",
+ "prompt_tokens": 0, "scored_tokens": 0,
+ "top1_matches": 0, "sum_logprob": 0.0}
+```
+
+Scoring:
+
+- The scorer builds the prompt tokens from `body` exactly as its serving path
+  does (chat template, tools, response format), then appends the tokens of
+  the output. When `reasoning_text` is non-empty the output is
+  `"<think>\n" + reasoning_text + "\n</think>\n\n" + output_text`; otherwise it
+  is `output_text`.
+- It runs one teacher-forced prefill over prompt + output on the served model
+  and, for every output position, takes the log-softmax of the logits at the
+  preceding position. `sum_logprob` is the sum of the log-probabilities of
+  the actual output tokens. `top1_matches` counts positions where the output
+  token is the arg-max token.
+- Bounds: `body` at most 64 KiB, `output_text` plus `reasoning_text` at most
+  32 KiB, prompt at most 4,096 tokens, scored output at most 512 tokens (longer
+  output is truncated to its first 512 tokens). Over-bound input returns
+  `too_long` without running the model.
+- The job is deterministic for a given model, runtime and input. It is not a
+  buyer request: it is not billed and is not routed. It runs as one serial
+  request: it holds one slot of the runtime's serial inference permit, exactly
+  like a serial buyer request, and a provider runs at most one scoring job at
+  a time.
+- The scorer MUST NOT retain or log `body`, the output, or per-token data. It
+  MAY log the score id, status, and token counts.
+- A scorer whose session, model, or manifest hash no longer matches the
+  request answers `unavailable`.
+
+The coordinator treats scorer results as untrusted input. It rejects a
+result whose `provider_id`, `assigned_id`, `score_id`, `model_id` or manifest
+hash does not match the outstanding request, that arrives after `expires_at`
+(default deadline 60 s), that exceeds the FR-21 bounds (`prompt_tokens` above
+4,096, `scored_tokens` above 512, `top1_matches` above `scored_tokens`,
+`sum_logprob` above 0 or below −100 × `scored_tokens`), or that carries
+non-zero aggregates with a status other than `ok`. It logs only a closed
+category for a rejected result, never scorer-supplied text. `scored_tokens`
+below 16 makes the measurement `inconclusive:short_output`.
+
+### FR-22 Agreement metrics and tolerance (SPEC-036-R022)
+
+Per measurement: `top1_rate = top1_matches / scored_tokens` and
+`mean_logprob = sum_logprob / scored_tokens`.
+
+Sampling class: `greedy` when the request's temperature is 0, `hot` when it
+is above 0.85 (the `temperature: 1.0` profile), otherwise `sampled`.
+Distributions are kept per **tolerance key**
+`(model_id, cohort hash, sampling class)` for `greedy` and `sampled`.
+
+Hot requests are cover traffic only. They stay in the profile mix so
+verification traffic matches buyer traffic, and they are dispatched,
+credited and settled like any verification request, but the coordinator sends
+no scoring job for them and they never change a key's state or enter a
+window. Real-chip validation (#1644) found that honest `temperature: 1.0`
+runs can degenerate into near-random tokens that the claimed model itself
+scores as low as −9.6, below every floor, so a hot output cannot decide
+anything. An escalation request (FR-23) never uses the hot profile.
+
+Honest-pair distribution. Each tolerance key keeps a rolling window of the
+last 256 accepted measurements. A measurement is accepted into the window when
+every scorer put it in band (prior band while cold, learned band while warm)
+and the verified provider was in `unverified` or `passing`. Each verified
+operator contributes at most 16 entries; its oldest entry is evicted first.
+The window is in memory and rebuilds from traffic after a restart.
+
+Band. A tolerance key is **warm** when its window holds at least 32 entries
+from at least 3 distinct verified operators. For a warm key:
+
+- `mean_logprob` floor = `median − max(6 × MAD, 0.25)`.
+- `top1_rate` floor (greedy only) = `median − max(6 × MAD, 0.05)`.
+
+MAD is the median absolute deviation of the window. A measurement is in band
+when every applicable metric is at or above its floor. A learned floor never
+drops below a hard floor (greedy: `top1_rate` 0.50, `mean_logprob` −3.0;
+sampled: `mean_logprob` −6.0), which bounds how far a window can be dragged
+down.
+
+Cold start. A cold key uses a fixed prior:
+
+- greedy: `top1_rate ≥ 0.85` and `mean_logprob ≥ −1.0`;
+- sampled: `mean_logprob ≥ −4.0`.
+
+Rationale for the prior: teacher-forced scoring conditions every position on
+the same prefix, so cross-chip numerical differences change the arg-max only
+at near-ties. The per-Mac CB self-check (SPEC-038 FR-CB10) and the CB
+decode-isolation evidence put honest same-model kernel-route differences at a
+logit or less, with arg-max flips only between the top two tokens. They do not
+propagate under teacher forcing. A substituted or more heavily quantized
+model disagrees at many positions and assigns lower probability to its output.
+
+### FR-23 Decision state machine (SPEC-036-R023)
+
+Each verification key is in exactly one state:
+
+| State | Routing | Meaning |
+| --- | --- | --- |
+| `unverified` | normal | no decision yet |
+| `passing` | normal | at least 3 in-band measurements in a row |
+| `suspect` | normal | an out-of-band measurement; escalation running |
+| `failed` | suspended for this model | confirmed failure; earnings held |
+| `recovering` | normal, earnings held | probation after a failure |
+
+Transitions:
+
+- `unverified` → `passing` with reason `in_band_streak` after 3 consecutive
+  in-band measurements.
+- `unverified` or `passing` → `suspect` on one out-of-band measurement. The
+  **affected window** opens at the last in-band measurement before it (or at
+  the first measurement for the key when there is none).
+- In `suspect` and `recovering`, each escalation request is scored by two
+  scorers of different operators when two exist. A measurement counts only
+  when every selected scorer returned a valid answer; otherwise it is
+  inconclusive. An escalation measurement is **out** when every scorer put it
+  out of band, and **in** when every scorer put it in band. Split answers count
+  as neither and are recorded for FR-24.
+- `suspect` → `failed` when at least 3 of the last 5 escalation measurements
+  are out and those outs were scored by at least 2 distinct scorer operators.
+- `suspect` → `passing` after 3 consecutive in escalation measurements.
+- `suspect` → `passing` with reason `escalation_inconclusive` after 15
+  escalation measurements without a decision.
+- `failed` → `recovering` after `recovery_cooldown` (default 24 h). Routing
+  resumes, and a new open hold covers earnings from that moment.
+- `recovering` → `passing` after 5 consecutive in-band measurements scored by
+  at least 2 distinct scorer operators. The recovery hold closes and is
+  released automatically; the failure-window hold stays.
+- `recovering` → `failed` on the FR-23 suspect rule applied within
+  recovery: 3 out of the last 5 measurements, with 2 or more scorer
+  operators. The recovery hold stays held.
+- An operator MAY clear any key to `unverified` (audited, with a reason).
+
+Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
+`short_output`, `scorer_invalid`) change no state.
+
+A transition commits its SPEC-022 R-16 hold change and the new state in one
+database transaction (bounded at 5 s), and only then publishes the routing
+suspension. If the commit fails, nothing changes and the next measurement or
+tick retries.
+
+States persist across coordinator restarts. A coordinator that cannot load
+them does not start, and it loads them even with the kill switch off, so a
+failed key stays out of routing. A reconnecting provider resumes its stored
+state for the model. A state restored at start counts as seen at start, so
+it is kept in memory until its provider has been away for 7 days, exactly
+as without a restart.
+
+### FR-24 Scorer integrity (SPEC-036-R024)
+
+- Random scorer choice across operators bounds collusion: a cheater must
+  control a scorer of a different operator for the same model and also be
+  drawn for every escalation measurement.
+- No failure is confirmed on one scorer operator's word (FR-23).
+- Scorer agreement is tracked per scorer provider. Split answers are pair
+  disagreements and failed known-sequence checks; the double-scored window
+  holds pair measurements only. A scorer is **scorer-excluded** when it has at
+  least 4 split answers and disagrees with its co-scorer in more than half of
+  its last 8 double-scored measurements. It is never chosen as a scorer until
+  an operator clears it; a failed exclusion write keeps the exclusion in
+  memory and is retried every sweep until durable. An operator clear removes
+  any pending retry, and an exclusion write decided before the clear is
+  skipped, so a cleared exclusion never comes back. Exclusion does not affect
+  its own serving or verification.
+- Known-sequence checks: the coordinator keeps in memory, per tolerance key,
+  up to 8 recent measurements that two scorers both scored in band with
+  `mean_logprob` within 0.25 of each other. After every 25th scoring job the
+  coordinator also sends one of these known sequences to a random eligible
+  scorer that is independent of it: not the provider that produced the
+  output, not an original scorer, and of none of their operators. The cadence
+  counts every scoring job successfully sent, answered or not. An answer more than 0.5 below the recorded
+  `mean_logprob`, or with `top1_rate` more than 0.1 below it, counts as a split
+  answer for that scorer.
+- A scorer that does not answer within the deadline counts as
+  `scorer_timeout`. After 8 consecutive jobs without a usable answer it rests
+  for one hour (not chosen), so verification moves on to other scorers; only
+  a usable measurement resets the count. Known-sequence checks count like any
+  other job. A job without a usable answer is a timeout, a non-`ok` status,
+  or an `ok` measurement below the FR-21 scored-token floor when another
+  scorer scored the same output usably or the output is at least 1 KiB (a
+  short output that no scorer could score usably counts against no scorer).
+  On a known sequence such a short answer also fails the check. Silence is
+  not otherwise penalised.
+
+### FR-25 Consequences, visibility and telemetry (SPEC-036-R025)
+
+Consequences of `failed`:
+
+- The provider is excluded from routing for that model: every buyer path
+  (ordinary, pinned, slot queue, relay-blind and privacy-class binding, and
+  their capability counts) skips it. Other models the provider may later serve
+  are unaffected. The provider stays connected, so it can recover; the
+  pool-check `buyer_serving` session-liveness signal is unchanged, and the
+  provider learns its state from the status surface below.
+- Its unsettled earnings inside the affected window are held under SPEC-022
+  R-16, whatever model string the buyer requested, because a credit records
+  the requested model, which may be an alias of the served one. Nothing is burned. A hold has no expiry and is released
+  only by FR-23 recovery (recovery hold) or by an operator (any hold).
+
+Visibility:
+
+- The provider sees `GET /v1/provider/compute-integrity` (provider bearer)
+  with a `scoring` section listing, per model, `state`, `reason`, `since`,
+  `next_step` and the counts of in-band and out-of-band measurements, plus
+  its holds (window, kind, status, reason, held credits) and whether it is
+  scorer-excluded.
+- Operators see the same at `GET /admin/compute-integrity/<provider_id>`, and
+  can clear a key, lift a scorer exclusion, or release a hold at
+  `POST /admin/compute-integrity/<provider_id>/clear` (with `model_id`),
+  `POST /admin/compute-integrity/<provider_id>/clear-scorer` and
+  `POST /admin/compute-integrity/holds/<hold_id>/release`, each with an
+  `operator_id` and a reason, and each audit-logged.
+- Reasons are a closed set: `in_band_streak`, `out_of_band_top1`,
+  `out_of_band_logprob`, `confirmed_failure`, `recovery_passed`,
+  `escalation_passed`, `escalation_inconclusive`, `operator_clear`,
+  `cooldown_elapsed`.
+- The provider's view of a hold omits who released it and why; operators see
+  both. `operator_id` is an operator-asserted label (at most 64 characters of
+  `[A-Za-z0-9._@-]`) under the shared operator credential, as for SPEC-022
+  quarantine resolutions.
+- `next_step` is a closed set: `none`, `escalation_running`,
+  `cooldown_until:<RFC 3339>`, `requalification_running`.
+
+Telemetry:
+
+- Counter `compute_integrity_verifications_total{outcome}` with outcome in
+  `in_band`, `out_of_band`, `split`, `inconclusive`.
+- Counter `compute_integrity_inconclusive_total{reason}` with the FR-23
+  inconclusive reasons.
+- Counter `compute_integrity_transitions_total{from,to}` over FR-23 states.
+- Counter `compute_integrity_scoring_jobs_total{status}` over the FR-21
+  result statuses plus `timeout`.
+- Gauge `compute_integrity_keys{state}`.
+- Gauge `compute_integrity_held_holds`.
+
+Labels are closed sets. Provider ids, model ids and operator keys never
+appear as metric labels.
+
+Memory: tolerance windows and known sequences of a (model, manifest) unseen
+for 7 days are dropped, and so are in-memory states of providers absent for
+7 days in `unverified` or `passing`. Durable `unverified` and `passing`
+rows not updated for 30 days are deleted. `suspect`, `failed` and
+`recovering` keys are never pruned. Logs MAY name provider and model ids on
+state transitions; they MUST NOT contain prompts, outputs, or scorer token
+data.
 
 ## 6. Migration
 
@@ -2304,6 +2741,25 @@ Before SPEC-036 can move toward LOCK:
     that v0.1 enforce refuses sampler stages without defined capture and
     normalization semantics.
 
+## 7A. Acceptance Criteria for §5A
+
+1. A verification request reaches the provider as an ordinary
+   `inference_request` with no field, header, prefix or parameter outside
+   the buyer distribution, debits no buyer, and credits the provider through
+   the ordinary ledger path.
+2. A scoring job round-trips `compute_score_request_v1` /
+   `compute_score_result_v1`, enforces the FR-21 bounds, and never selects a
+   scorer without the capability, of the same operator, or with a different
+   cohort hash.
+3. The tolerance model rejects a substituted model and accepts honest
+   cross-chip pairs, both cold (prior) and warm (learned band).
+4. The FR-23 machine reaches `failed` only with two scorer operators, suspends
+   routing for that model only, opens a SPEC-022 R-16 hold for the affected
+   window, and recovers through `recovering` with the hold behaviour of FR-23.
+5. An integration test runs an honest fake provider to `passing` and a
+   substituted-model fake provider to `failed` through the real coordinator.
+6. Metrics and logs carry closed labels only and no prompt or output text.
+
 ## 8. Resolved v0.1 Decisions
 
 The five drafting open questions are resolved for v0.1 as follows. Each item
@@ -2370,7 +2826,8 @@ default holds unless maintainers record a stricter value in the LOCK PR or
 
 - Proving hardware integrity.
 - Proving runtime binary integrity.
-- Proving malicious-provider honesty under overt probes.
+- Proving malicious-provider honesty under overt probes. (§5A addresses this
+  with covert verification requests; FR-1 through FR-18 remain overt.)
 - Adding buyer-facing canary issuance.
 - Changing buyer inference, usage, receipt, or settlement request/response schema; additive buyer catalog disclosure fields remain owned by SPEC-006.
 - Changing SPEC-015 v0.4 receipt shape.

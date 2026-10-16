@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.3.1 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.25 | normative | pending | pending: 7 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.1 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.4.8 | draft | complete | pending: 15 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.4.9 | draft | complete | pending: 16 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.24 | normative | pending | conformant: 2, pending: 23 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.11 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
@@ -44,7 +44,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.9.0 | draft | pending | conformant: 1, pending: 3 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
-| SPEC-036 | Compute-Integrity Receipt Companion | v0.1.2 | draft | complete | pending: 18 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
+| SPEC-036 | Compute-Integrity Receipt Companion | v0.2.0 | draft | complete | pending: 25 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.2.0 | draft | complete | pending: 16 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
 | SPEC-038 | Continuous batching for concurrent provider inference | v0.3.20 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.16 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |

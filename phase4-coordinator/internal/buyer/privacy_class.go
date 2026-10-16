@@ -483,7 +483,7 @@ func (s *Server) privacyCapabilityModels(ctx context.Context) (bool, map[string]
 		return enabled, models
 	}
 	for _, provider := range s.pool.Snapshot() {
-		if !provider.ServingCapable() || !provider.IsWSTunneled() {
+		if !provider.ServingCapable() || !provider.IsWSTunneled() || provider.ComputeIntegritySuspended {
 			continue
 		}
 		value := models[provider.ModelID]

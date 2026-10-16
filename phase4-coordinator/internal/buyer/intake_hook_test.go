@@ -132,6 +132,7 @@ func TestIntakeHookAppliesExclusionAndAdmittedCatalogPredicate(t *testing.T) {
 		return rr
 	}
 	post("acct_keepwarm", "Some-Unknown")             // excluded account: not observed
+	post("cip_0123456789abcdef", "Some-Unknown")      // SPEC-036 verification account: not observed
 	post("acct_buyer_1", "Qwen/Qwen3-Coder-30B")      // listed row (case-normalized): not observed
 	post("acct_buyer_1", "meta/llama-3-8b")           // recommendable row: not observed
 	post("acct_buyer_1", "acme/watched-1b")           // listed-but-not-admitted: observed

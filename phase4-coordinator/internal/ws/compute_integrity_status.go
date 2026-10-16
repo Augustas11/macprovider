@@ -21,8 +21,8 @@ type computeIntegrityReadOnlyTokenValidator interface {
 }
 
 func (s *Server) handleAdminComputeIntegrity(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -30,7 +30,11 @@ func (s *Server) handleAdminComputeIntegrity(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "unauthorized", "code": "invalid_operator_token"}})
 		return
 	}
-	if s.computeIntegrityStatus == nil {
+	if r.Method == http.MethodPost {
+		s.handleAdminComputeIntegrityAction(w, r)
+		return
+	}
+	if s.computeIntegrityStatus == nil && s.computeScoring.Load() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "compute-integrity status unavailable", "code": "compute_integrity_status_unavailable"}})
 		return
 	}
@@ -44,7 +48,7 @@ func (s *Server) handleAdminComputeIntegrity(w http.ResponseWriter, r *http.Requ
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	statuses, err := s.computeIntegrityStatus.ComputeIntegrityStatus(ctx, providerID)
+	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID, false)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "compute-integrity status lookup failed", "code": "compute_integrity_status_error"}})
 		return
@@ -59,12 +63,16 @@ func (s *Server) handleAdminComputeIntegrity(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"provider_id": providerID,
 		"count":       len(statuses),
 		"statuses":    statuses,
 		"disclosure":  computeintegrity.StatusCopyV1,
-	})
+	}
+	if scoring != nil {
+		body["scoring"] = scoring
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +89,7 @@ func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "provider tokens unavailable", "code": "provider_tokens_unavailable"}})
 		return
 	}
-	if s.computeIntegrityStatus == nil {
+	if s.computeIntegrityStatus == nil && s.computeScoring.Load() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "compute-integrity status unavailable", "code": "compute_integrity_status_unavailable"}})
 		return
 	}
@@ -102,7 +110,7 @@ func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "provider bearer token required", "code": "unauthorized"}})
 		return
 	}
-	statuses, err := s.computeIntegrityStatus.ComputeIntegrityStatus(ctx, providerID)
+	statuses, scoring, err := s.computeIntegrityStatuses(ctx, providerID, true)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "compute-integrity status lookup failed", "code": "compute_integrity_status_error"}})
 		return
@@ -117,12 +125,34 @@ func (s *Server) handleProviderComputeIntegrity(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"provider_id": providerID,
 		"count":       len(statuses),
 		"statuses":    statuses,
 		"disclosure":  computeintegrity.StatusCopyV1,
-	})
+	}
+	if scoring != nil {
+		body["scoring"] = scoring
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// computeIntegrityStatuses reads the SPEC-036 FR-15 statuses (when that
+// source is wired) and the §5A scoring section (when the engine runs).
+func (s *Server) computeIntegrityStatuses(ctx context.Context, providerID string, forProvider bool) ([]computeintegrity.StatusSnapshot, *ComputeScoringStatus, error) {
+	statuses := []computeintegrity.StatusSnapshot{}
+	if s.computeIntegrityStatus != nil {
+		got, err := s.computeIntegrityStatus.ComputeIntegrityStatus(ctx, providerID)
+		if err != nil {
+			return nil, nil, err
+		}
+		statuses = got
+	}
+	scoring, err := s.computeScoringStatusFor(ctx, providerID, forProvider)
+	if err != nil {
+		return nil, nil, err
+	}
+	return statuses, scoring, nil
 }
 
 func bearerToken(header string) string {

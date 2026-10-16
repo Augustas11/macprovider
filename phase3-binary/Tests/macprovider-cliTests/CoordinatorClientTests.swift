@@ -808,6 +808,141 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_canary_request_v1")
     }
 
+    // MARK: SPEC-036 FR-21 compute scoring job
+
+    private static func computeScoreRequest(
+        assignedID: String = "assigned-score",
+        modelID: String = "model-a",
+        body: String = #"{"model":"model-a","messages":[{"role":"user","content":"hi"}]}"#,
+        output: String = "hello there"
+    ) -> [String: Any] {
+        [
+            "type": "compute_score_request_v1",
+            "version": 1,
+            "score_id": "score-1",
+            "provider_id": "provider-test",
+            "assigned_id": assignedID,
+            "model_id": modelID,
+            "weights_manifest_sha256": String(repeating: "a", count: 64),
+            "body": body,
+            "output_text": output,
+            "reasoning_text": "",
+            "issued_at": "2026-10-13T00:00:00Z",
+            "expires_at": "2099-10-13T00:01:00Z",
+        ]
+    }
+
+    private func waitForFrame(
+        _ recorder: CoordinatorFrameRecorder,
+        after initialCount: Int,
+        type: String
+    ) async throws -> [String: Any] {
+        for _ in 0..<200 {
+            if let frame = await recorder.frames.dropFirst(initialCount).first(where: { $0["type"] as? String == type }) {
+                return frame
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("no \(type) frame")
+        return [:]
+    }
+
+    func testComputeScoreRequestRunsExecutorAndReturnsAggregate() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, computeScoreExecutor: { request in
+            ComputeScoreProtocol.Result(
+                request: request,
+                status: .ok,
+                promptTokens: 12,
+                scoredTokens: 20,
+                top1Matches: 19,
+                sumLogprob: -4.5
+            )
+        })
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-score")
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest())
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "compute_score_result_v1")
+        XCTAssertEqual(result["score_id"] as? String, "score-1")
+        XCTAssertEqual(result["provider_id"] as? String, "provider-test")
+        XCTAssertEqual(result["assigned_id"] as? String, "assigned-score")
+        XCTAssertEqual(result["status"] as? String, "ok")
+        XCTAssertEqual(result["scored_tokens"] as? Int, 20)
+        XCTAssertEqual(result["top1_matches"] as? Int, 19)
+        XCTAssertEqual(result["sum_logprob"] as? Double, -4.5)
+        XCTAssertNil(result["body"])
+        XCTAssertNil(result["output_text"])
+    }
+
+    func testComputeScoreOnRuntimeWithoutModelIsUnavailable() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // Default executor: the MLX runtime, here with no model loaded.
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-score")
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest())
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "compute_score_result_v1")
+        XCTAssertEqual(result["status"] as? String, "unavailable")
+        XCTAssertEqual(result["scored_tokens"] as? Int, 0)
+    }
+
+    func testComputeScoreBodyForAnotherModelIsInvalid() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-score")
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest(modelID: "other-model"))
+
+        let result = try await waitForFrame(recorder, after: initialCount, type: "compute_score_result_v1")
+        XCTAssertEqual(result["status"] as? String, "invalid")
+    }
+
+    func testComputeScoreRequestRejectsSessionMismatchAndAnswersTooLong() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, computeScoreExecutor: { request in
+            XCTFail("executor must not run")
+            return ComputeScoreProtocol.Result(request: request, status: .ok)
+        })
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-score")
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest(assignedID: "stale-session"))
+        let tooLong = String(repeating: "x", count: ComputeScoreProtocol.maxOutputBytes + 1)
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest(output: tooLong))
+
+        let frames = Array(await recorder.frames.dropFirst(initialCount))
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertEqual(frames[0]["type"] as? String, "nak")
+        XCTAssertEqual(frames[0]["in_reply_to"] as? String, "compute_score_request_v1")
+        XCTAssertEqual(frames[1]["type"] as? String, "compute_score_result_v1")
+        XCTAssertEqual(frames[1]["status"] as? String, "too_long")
+    }
+
     func testNativeMTPRuntimeTupleIdentityMatchesGoVector() throws {
         let admission = String(repeating: "8", count: 64)
         let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
@@ -6527,6 +6662,8 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["catalog_material_hold_v1"] as? Bool, true)
         // SPEC-001-R005: relay-blind settlement receipt support.
         XCTAssertEqual(caps["relay_blind_settlement_receipt_v1"] as? Bool, true)
+        // SPEC-036 FR-21: the MLX runtime runs scoring jobs.
+        XCTAssertEqual(caps["compute_score_v1"] as? Bool, true)
     }
 
     func testInBandAEADRekeyProvesFreshKeysBeforeSameSessionCutover() async throws {
@@ -9497,6 +9634,7 @@ final class CoordinatorClientTests: XCTestCase {
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
         nativeMTPTupleDisableHandler: CoordinatorClient.NativeMTPTupleDisableHandler? = nil,
+        computeScoreExecutor: CoordinatorClient.ComputeScoreExecutor? = nil,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
@@ -9579,6 +9717,7 @@ final class CoordinatorClientTests: XCTestCase {
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
             nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
+            computeScoreExecutor: computeScoreExecutor,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,
             coordinatorReadiness: coordinatorReadiness,

@@ -538,7 +538,8 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 // the ack. ServingCapable itself is left untouched because its body is
 // bound by SPEC-032-R001 conformant commit evidence.
 func relayBlindBindable(p pool.Provider) bool {
-	return p.ServingCapable() && !p.HandshakeAckPending
+	// SPEC-036 FR-25: a suspended model binds no relay-blind or privacy work.
+	return p.ServingCapable() && !p.HandshakeAckPending && !p.ComputeIntegritySuspended
 }
 
 // relayBlindSessionUsable is the session half of RoutingEligible for a
@@ -1700,7 +1701,7 @@ func (s *Server) handleRelayBlindCapabilities(w http.ResponseWriter, r *http.Req
 	}
 	models := make(map[string]counts)
 	for _, provider := range s.pool.Snapshot() {
-		if !provider.ServingCapable() || !provider.IsWSTunneled() {
+		if !provider.ServingCapable() || !provider.IsWSTunneled() || provider.ComputeIntegritySuspended {
 			continue
 		}
 		value := models[provider.ModelID]

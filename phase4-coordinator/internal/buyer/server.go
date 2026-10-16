@@ -288,6 +288,9 @@ type Server struct {
 	stickyMismatchLimiter *stickyMismatchLimiter
 	operatorKey           string
 	gatewayServiceToken   string
+	// ciProbeAccounts are the SPEC-036 FR-20 verification accounts, reused
+	// per provider like returning buyers (compute_integrity_probe.go).
+	ciProbeAccounts       computeIntegrityProbeAccounts
 	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
 	tier2                 config.Tier2Config

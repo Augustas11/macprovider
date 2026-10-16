@@ -1,11 +1,27 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.8
+Version: v0.4.9
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.4.9
+
+Issue #1644: compute-integrity earnings hold. Adds R-16
+(`SPEC-022-R016`). When SPEC-036 FR-23 confirms that a provider did not serve
+the model it claimed, the provider's unsettled credits inside the affected
+window are held, whatever model string the buyer requested: excluded from the payable view, payout
+readiness and earnings totals, but never quarantined, voided, or burned. A
+hold has no expiry. It is released by SPEC-036 FR-23 recovery (recovery holds
+only) or by an audited operator release, after which the credits are payable
+again and enter the next settlement. R-7.8 is unchanged: a release restores
+exactly the credits the hold removed and creates no new money. R-15.9 adds
+billing contract 7, recorded with the first hold. A held credit is not
+payable, so R-15.2 keeps its evidence hot; a credit tombstoned under R-15.6
+before a hold opened is withheld through the same predicate. This version
+follows v0.4.8.
 
 ### v0.4.8
 
@@ -2380,6 +2396,9 @@ database at open. Until then the database stays readable by contract 4.
 payable totals or payout revalidation, so it would under-report earnings and
 void a `ready` payout whose credits rolled up. Contract 6 is recorded in the
 first rollup transaction.
+(v0.4.9) A contract-6 coordinator does not read R-16 compute-integrity holds,
+so it would pay held credits. Contract 7 is recorded in the transaction that
+writes the first hold (R-16.8).
 
 R-15.10. Hot footprint. Evidence that is already held elsewhere leaves the
 hot databases early, and no column or index holds what another already
@@ -2508,6 +2527,63 @@ again by later runs.
 R-15.2 and R-15.4 apply to the outbox and journal rows that still exist: a
 row already pruned under items 1 or 2 is neither a reason to keep a request
 hot nor a mismatch at deletion.
+
+### R-16. Compute-integrity earnings hold (SPEC-022-R016)
+
+R-16.1. A hold row names `provider_id`, `model_id`, a window start, an
+optional window end (open while null), a kind (`failure` or `recovery`), a
+reason, and a status (`held` or `released`). SPEC-036 FR-23 creates it: a
+`failure` hold for the affected window when a key enters `failed`, and a
+`recovery` hold with an open end when a key enters `recovering`.
+
+R-16.2. While a hold is `held`, every unsettled (`settled = 0`)
+`ledger_request_credits` row with the same `provider_id` and `ts_utc` inside
+the window (start inclusive, end inclusive when set), including one whose
+evidence R-15.6 already archived, is excluded from `spec022_payable_request_credits` and
+from the weekly settlement selection, which applies the same predicate. It
+therefore stays out of `ledger_payout_ready`, the provider earnings endpoint
+and its rollup cache, and payable totals. The row itself is not modified: its
+outcome, quarantine flag and receipt verdict stay as they are. The predicate
+does not compare the credit's `model`: that column records the model the
+buyer requested, which may be an alias of the served model, so matching on it
+would let alias-routed credits escape the hold. The hold's `model_id` names
+the verified model the hold was opened for. Because a held credit is not
+payable, R-15.2 does not archive its evidence while the
+hold is `held`.
+
+R-16.3. Credits already settled into a payout (`settled = 1`) are never
+withheld, so a hold can neither claw back a payout nor invalidate or strand a
+`ready` one.
+
+R-16.4. A hold is never burned and has no expiry. It is released only by:
+(a) SPEC-036 FR-23 `recovering` → `passing`, which closes and releases the
+`recovery` hold of that key; or (b) an operator release with an
+`operator_id` and a reason, which releases any hold. Release sets the status
+to `released` and records who, why, and when. Released credits become payable
+again and enter the next settlement as ordinary payable credits.
+
+R-16.5. A release is not an R-7.8 money-positive bypass: it only removes the
+R-16 exclusion and cannot make a credit payable that R-7 would not otherwise
+admit.
+
+R-16.6. Every hold write and release bumps the provider earnings rollup
+generation for each credit the hold covers, in the writer's transaction, and
+a change of `settled` on a credit a held hold covers bumps its bucket, so
+cached earnings never serve a figure that disagrees with the view.
+
+R-16.7. The provider sees its holds (window, kind, status, reason, held
+provider credits) on the SPEC-036 FR-25 provider status surface.
+
+R-16.8. The transaction that writes the first hold raises the billing
+compatibility floor to contract 7 (R-15.9). A coordinator that predates R-16 would pay
+held credits, so it refuses the database from then on; a rollback stays
+possible until the first hold exists.
+
+R-16.9. A SPEC-036 FR-20 verification request is an ordinary attempt under
+this specification: same route snapshot, receipt, verdict and R-7 gate, and
+an ordinary `ledger_request_credits` row for the provider. It debits no buyer,
+because buyer debit happens only in the gateway and the request never passes
+through it; the network funds it.
 
 ## Acceptance criteria
 
