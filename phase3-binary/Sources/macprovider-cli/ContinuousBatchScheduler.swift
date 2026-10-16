@@ -2163,6 +2163,12 @@ actor ContinuousBatchScheduler {
     /// exactness probe's shape.
     nonisolated var maxRequestTokens: Int { configuration.maxRequestTokens }
     nonisolated var blockSizeTokens: Int { configuration.descriptor.blockSizeTokens }
+    /// The backend's flattened-token bound on one shared forward, beyond the
+    /// device route bound (`glm5_next`: 8, SPEC-039 v0.1.19); nil when only
+    /// the device bound applies.
+    nonisolated var forwardTokenCap: Int? {
+        (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward
+    }
     nonisolated var poolTokens: Int {
         configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
     }

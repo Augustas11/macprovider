@@ -4857,7 +4857,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 kernelIdentifier: tuple.kernelIdentifier,
                 hardwareClass: tuple.hardwareClass,
                 osBuild: ContinuousBatchingSelfCheckKey.currentOSBuild,
-                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild,
+                runtimeBuild: Self.continuousBatchingSelfCheckRuntimeBuild(
+                    forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound,
+                    forwardTokenCap: scheduler.forwardTokenCap
+                ),
                 decodeWindow: scheduler.maxDecodeLockstepWindow
             ),
             maxRows: maxBatch,
@@ -5489,12 +5492,18 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingSelfCheckRuntimeBuild(forwardBound: PagedKVSharedForwardBackend.deviceVerifyTokenBound)
     }
 
+    /// A backend with a flattened-token cap (`glm5_next`) keys on the bound
+    /// it actually serves under plus the cap itself, so a grant measured
+    /// under one bound never survives a change to it.
     static func continuousBatchingSelfCheckRuntimeBuild(
-        forwardBound bound: Int,
-        routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary
+        forwardBound deviceBound: Int,
+        routeKeyBoundary: Int = ContinuousBatchingSelfCheck.deviceRouteKeyBoundary,
+        forwardTokenCap: Int? = nil
     ) -> String {
-        "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
-            + "+\(ContinuousBatchingSelfCheck.probeVersion)/route\(routeKeyBoundary)"
+        let bound = min(deviceBound, forwardTokenCap ?? Int.max)
+        let cap = forwardTokenCap.map { "+flat\($0)" } ?? ""
+        return "\(ContinuousBatchingSelfCheckKey.currentRuntimeBuild)+cb-isolation-v1/decode\(bound)/verify\(bound)"
+            + "+\(ContinuousBatchingSelfCheck.probeVersion)/route\(routeKeyBoundary)" + cap
     }
 
     /// Metal architecture name as MLX core reads it (`MLX_METAL_GPU_ARCH`

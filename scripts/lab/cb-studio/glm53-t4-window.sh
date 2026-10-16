@@ -10,9 +10,26 @@
 #        xctest host (paged MLA vs stock cache, 48 exact greedy tokens, gather
 #        coverage, byte-equal pending window, attach probes).
 #     2. FR-CB10 self-check ladder on an isolated no-join lab serve of the
-#        lab-harness binary: unequal-length exactness probe at k = 2, 3, 4 and
-#        the >20%-over-serial gain gate. Paged attach for glm5_next is opened
-#        only by the lab-harness override (MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH).
+#        lab-harness binary (lab-local config, CB `canary`, own self-check
+#        store): the unequal-length exactness probe at k = 2, 3, 4 and the
+#        SPEC-038 FR-CB10 gain rule, quoted: "the gain is the median
+#        batch/serial ratio ... It grants the rung with the highest gain,
+#        preferring the lowest k within 15% of it, only when that gain is at
+#        least 1.2x". PASS: every k = 2..4 measured conformant (equal to its
+#        lone run, or first differing only at the FR-CB10 near-tie: stock
+#        serial top two within 1/1024 logit), verified_k >= 4, and decision
+#        `granted` (some rung's median gain >= 1.2x).
+#        Unsigned-tuple lab path: docs/runbooks/continuous-batching-enable-gate.md
+#        documents no lab self-check procedure for an unsigned tuple, and the
+#        signed GLM CB policy entry is T7 work bound to the final CLI CDHash.
+#        So paged attach for glm5_next is opened only by the lab-harness gate
+#        (`-DMACPROVIDER_LAB_HARNESS` build plus
+#        MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH=1), the documented way here.
+#        The serve runs `--no-join --no-idle-prewarm` WITHOUT
+#        `--autotune-candidate`: an autotune child skips the served-slots plan
+#        (MacProviderCLI `if !autotuneCandidate, ...` before AutoServedSlots),
+#        so the FR-CB10 self-check driver would never start (also recorded in
+#        1971-selfcheck/studio-selfcheck-validation.sh).
 #     3. msb-throughput, paged engine, rows 1, 2 and 4 at block 256.
 #   It never binds or signals the live port; pausing the live provider is the
 #   window owner's job, and `run` refuses to start while it serves.
@@ -125,6 +142,12 @@ PY
   trap "kill $pid 2>/dev/null || true" EXIT INT TERM HUP
   while kill -0 $pid 2>/dev/null && (( $(date +%s) - t0 < ${SELFCHECK_TIMEOUT_S:-3600} )); do
     sleep 10
+    # Fail fast when the driver never starts (load plus first step).
+    if (( $(date +%s) - t0 > ${SELFCHECK_START_TIMEOUT_S:-1200} )) \
+       && ! grep -q 'event=cb_self_check action=step' $dir/serve.log; then
+      echo "leg2: no self-check step within ${SELFCHECK_START_TIMEOUT_S:-1200}s" | tee -a $OUT/summary.txt
+      break
+    fi
     if body=$(status_json $LAB_PORT) && print -r -- $body | python3 -c 'import json,sys
 s = ((json.load(sys.stdin).get("continuous_batching") or {}).get("self_check") or {})
 d = str(s.get("decision"))
@@ -151,11 +174,13 @@ for k in (2, 3, 4):
     if k not in rows:
         print(f"leg2 k={k} not measured"); ok = False; continue
     conformant, gain, divergent = rows[k]
-    print(f"leg2 k={k} conformant={conformant} gain={gain:.2f} over_20pct={gain > 1.2} divergent_rows={divergent}")
+    print(f"leg2 k={k} conformant={conformant} median_gain={gain:.2f} at_least_1.2x={gain >= 1.2} divergent_rows={divergent}")
     ok = ok and conformant
 best = max((g for _, g, _ in rows.values()), default=0.0)
-print(f"leg2 decision={s.get('decision')} verified_k={s.get('verified_k')} served_slots={s.get('served_slots')} best_gain={best:.2f}")
-ok = ok and best > 1.2 and int(s.get("served_slots") or 0) >= 2
+print(f"leg2 decision={s.get('decision')} verified_k={s.get('verified_k')} served_slots={s.get('served_slots')} best_median_gain={best:.2f}")
+# FR-CB10: granted only when the chosen rung's median gain is at least 1.2x.
+ok = ok and int(s.get("verified_k") or 0) >= 4 and str(s.get("decision")) == "granted" \
+    and int(s.get("served_slots") or 0) >= 2 and best >= 1.2
 print("leg2 self-check " + ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)
 PY

@@ -810,7 +810,8 @@ native-MTP verification MUST group rows so each group carries at most 8 target
 tokens, and a shared prompt prefill whose rows × chunk length exceeds 8 MUST
 prefill each row in its own forward. The bound is a property of the code path,
 not an operator setting; the SPEC-038 FR-CB10 self-check still decides the
-served slot count. The engine MUST preserve each row's recurrent state
+served slot count, and its stored key records the bound the rows were measured
+under, so a grant never survives a change to it. The engine MUST preserve each row's recurrent state
 where present, page only attention KV, and pass token-parity and multi-step
 batched row-isolation gates, including row leave and join, before advertising
 the exact tuple. Adding a further mixed identity to this allowlist is a

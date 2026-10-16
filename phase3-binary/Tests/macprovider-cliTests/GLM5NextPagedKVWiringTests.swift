@@ -221,4 +221,23 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         XCTAssertFalse(PagedMLALatentCache.blockSizeIsValid(2, kpool: 4))
         XCTAssertFalse(PagedMLALatentCache.blockSizeIsValid(256, kpool: 0))
     }
+
+    func testSelfCheckKeyChangesWithTheFlattenedTokenCap() {
+        let plain = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024)
+        let glm = ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+            forwardBound: 11, routeKeyBoundary: 1024, forwardTokenCap: 8
+        )
+        XCTAssertNotEqual(plain, glm)
+        XCTAssertTrue(glm.contains("/decode8/verify8"))
+        XCTAssertTrue(glm.hasSuffix("+flat8"))
+        XCTAssertNotEqual(glm, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(
+            forwardBound: 11, routeKeyBoundary: 1024, forwardTokenCap: 6
+        ))
+        // A device bound below the cap still records the cap.
+        XCTAssertNotEqual(
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 5, routeKeyBoundary: 1024),
+            ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 5, routeKeyBoundary: 1024, forwardTokenCap: 8)
+        )
+        XCTAssertEqual(plain, ModelRuntime.continuousBatchingSelfCheckRuntimeBuild(forwardBound: 11, routeKeyBoundary: 1024))
+    }
 }
