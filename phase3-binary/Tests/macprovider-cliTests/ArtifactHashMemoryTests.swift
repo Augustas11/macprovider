@@ -10,7 +10,7 @@ final class ArtifactHashMemoryTests: XCTestCase {
     private static let fileBytes = 512 * 1024 * 1024
     private static let allowedGrowth = 128 * 1024 * 1024
 
-    private func physFootprint() -> Int {
+    private func physFootprint() throws -> Int {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -18,7 +18,9 @@ final class ArtifactHashMemoryTests: XCTestCase {
                 task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
             }
         }
-        return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+        // A failed probe must fail the test, not read as zero growth.
+        guard result == KERN_SUCCESS else { throw NSError(domain: "task_info", code: Int(result)) }
+        return Int(info.phys_footprint)
     }
 
     private func sparseShard() throws -> URL {
@@ -36,17 +38,17 @@ final class ArtifactHashMemoryTests: XCTestCase {
 
     func testWeightManifestHashDoesNotRetainShardBytes() throws {
         let shard = try sparseShard()
-        let before = physFootprint()
+        let before = try physFootprint()
         XCTAssertNotNil(try ModelRuntime.modelWeightArtifactManifestHash(in: shard.deletingLastPathComponent()))
-        let growth = physFootprint() - before
+        let growth = try physFootprint() - before
         XCTAssertLessThan(growth, Self.allowedGrowth, "hashing a \(Self.fileBytes >> 20) MB shard kept \(growth >> 20) MB resident")
     }
 
     func testArtifactSizeAndHashDoesNotRetainFileBytes() throws {
         let shard = try sparseShard()
-        let before = physFootprint()
+        let before = try physFootprint()
         let (size, _) = try ModelArtifactVerifier.sizeAndSHA256(of: shard)
-        let growth = physFootprint() - before
+        let growth = try physFootprint() - before
         XCTAssertEqual(size, UInt64(Self.fileBytes))
         XCTAssertLessThan(growth, Self.allowedGrowth, "hashing a \(Self.fileBytes >> 20) MB file kept \(growth >> 20) MB resident")
     }
