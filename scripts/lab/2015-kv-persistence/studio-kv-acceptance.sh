@@ -35,7 +35,22 @@
 #   SRC_INSTALL (~/macprovider) LAB_CONFIG_TEMPLATE (~/lab-1980/config-template.yaml)
 #   LIVE_CONFIG (~/.config/macprovider/config.yaml, read only)
 #   DOC_TOKENS (6000) TTFT_CONVERSATIONS (4) LOAD_TIMEOUT_S (900)
-#   SELF_CHECK_TIMEOUT_S (1200) RUN_TIMEOUT_S (4500)
+#   SELF_CHECK_TIMEOUT_S (1200) RUN_TIMEOUT_S (4500) KVCACHE_TIMEOUT_S (60)
+#   SESSION_TIMEOUT_S (1800) LAB_PROVIDER_ID (derived from the binary identity)
+#
+# No step can block: every CLI call and driver session runs under a hard alarm
+# (bounded), the whole run (prep included) is under RUN_TIMEOUT_S, and any
+# timeout exits non-zero after stopping the lab serve and purging the lab
+# namespace (the purge is bounded too).
+#
+# Keychain identity: the disk tier's DEKs live in the login keychain, and each
+# item's ACL trusts the binary that created it. A lab build of a PR head is
+# ad-hoc signed, so reading items created by the released Developer ID binary
+# raises an "allow access" dialog in the GUI session (SecurityAgent) and the
+# call blocks forever (the 2026-10-16 14:12Z hang). credential_store:
+# protected_file covers provider credentials only, not the KV DEKs. So a
+# binary that is not the released Developer ID gets its own lab namespace and
+# kv directory, keyed by its CDHash, whose items it creates itself.
 set -euo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 
@@ -47,8 +62,11 @@ SRC_INSTALL="${SRC_INSTALL:-$HOME/macprovider}"
 LAB_CONFIG_TEMPLATE="${LAB_CONFIG_TEMPLATE:-$HOME/lab-1980/config-template.yaml}"
 LIVE_CONFIG="${LIVE_CONFIG:-$HOME/.config/macprovider/config.yaml}"
 EXPECT_VERSION="${EXPECT_VERSION:-1.8.248}"
-LAB_PROVIDER_ID="lab-2015-kvs"
+LAB_PROVIDER_ID="${LAB_PROVIDER_ID:-}"
+RELEASE_TEAM_ID="YF7XNRJUG4"
 LOAD_TIMEOUT_S="${LOAD_TIMEOUT_S:-900}"
+KVCACHE_TIMEOUT_S="${KVCACHE_TIMEOUT_S:-60}"
+SESSION_TIMEOUT_S="${SESSION_TIMEOUT_S:-1800}"
 SELF_CHECK_TIMEOUT_S="${SELF_CHECK_TIMEOUT_S:-1200}"
 RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-4500}"
 export DOC_TOKENS="${DOC_TOKENS:-6000}" TTFT_CONVERSATIONS="${TTFT_CONVERSATIONS:-4}"
@@ -57,7 +75,7 @@ BIN_DIR="$LAB_DIR/bin"
 CLI="$BIN_DIR/macprovider-cli"
 CONF_DIR="$LAB_DIR/config"
 CONFIG="$CONF_DIR/config.yaml"
-KV_DIR="$LAB_DIR/kv-cache"
+KV_DIR=""   # set in prep from the namespace
 DRIVER="$HERE/kv_acceptance.py"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$LAB_DIR/run-$STAMP"
@@ -74,7 +92,25 @@ for p in sys.argv[1].split('.'):
     d=(d or {}).get(p) if isinstance(d, dict) else None
 print(d)" "$1"; }
 
-kvcache() { "$CLI" kv-cache "$@" --config "$CONFIG"; }
+# bounded SECS CMD...: exec CMD under a SIGALRM after SECS seconds (exit 142 on
+# timeout; the alarm survives exec and its default action terminates the CLI
+# even while it waits on a Keychain dialog).
+bounded() { local secs="$1"; shift; perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' "$secs" "$@"; }
+timed_out() { (( $1 == 142 )); }
+kvcache() { bounded "$KVCACHE_TIMEOUT_S" "$CLI" kv-cache "$@" --config "$CONFIG"; }
+
+# Whole-run watchdog, armed before prep: on expiry it stops the lab serve and
+# every child, then TERMs this script (whose EXIT trap purges, bounded).
+watchdog() {
+  ( trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+    sleep "$RUN_TIMEOUT_S" & sp=$!; wait "$sp"
+    echo "[$(date -u +%TZ)] 2015-kv: RUN_TIMEOUT_S=$RUN_TIMEOUT_S reached; stopping" >> "$OUT/summary.txt"
+    pkill -TERM -f "serve --config $CONFIG" 2>/dev/null || true
+    pkill -TERM -P $$ 2>/dev/null || true
+    kill -TERM $$ 2>/dev/null || true
+    sleep 20; pkill -KILL -f "serve --config $CONFIG" 2>/dev/null || true ) &
+  WD=$!
+}
 
 # --- Prep (no model load) ---------------------------------------------------
 prep() {
@@ -92,6 +128,17 @@ prep() {
   version="$("$CLI" --version)"
   [[ "$version" == "$EXPECT_VERSION" ]] || { log "lab binary reports $version, expected $EXPECT_VERSION"; exit 2; }
   codesign --verify --strict "$CLI" || { log "codesign verify failed on lab copy"; exit 2; }
+  sig="$(codesign -dvvv "$CLI" 2>&1)"
+  team="$(printf '%s\n' "$sig" | sed -n 's/^TeamIdentifier=//p')"
+  cdhash="$(printf '%s\n' "$sig" | sed -n 's/^CDHash=//p' | head -1)"
+  [[ "$cdhash" =~ ^[0-9a-f]{40}$ ]] || { log "cannot read CDHash of $CLI"; exit 2; }
+  if [[ -z "$LAB_PROVIDER_ID" ]]; then
+    if [[ "$team" == "$RELEASE_TEAM_ID" ]]; then LAB_PROVIDER_ID="lab-2015-kvs"
+    else LAB_PROVIDER_ID="lab-2015-kvs-${cdhash:0:12}"; fi
+  fi
+  [[ "$LAB_PROVIDER_ID" =~ ^lab-2015-kvs(-[0-9a-f]{12})?$ ]] || { log "bad LAB_PROVIDER_ID $LAB_PROVIDER_ID"; exit 2; }
+  if [[ "$LAB_PROVIDER_ID" == lab-2015-kvs ]]; then KV_DIR="$LAB_DIR/kv-cache"; else KV_DIR="$LAB_DIR/kv-cache-${LAB_PROVIDER_ID#lab-2015-kvs-}"; fi
+  log "signing team=${team:-none} cdhash=$cdhash namespace=$LAB_PROVIDER_ID kv_dir=$KV_DIR"
   metallib_sha="$(shasum -a 256 "$BIN_DIR/mlx.metallib" | cut -d' ' -f1)"
   log "binary $CLI version=$version sha256=$src_sha metallib=$metallib_sha"
 
@@ -141,11 +188,17 @@ out += ["kv_disk_cache:",
 open(dst, "w").write("\n".join(out) + "\n")
 PY
   chmod 600 "$CONFIG"
+  CONFIG_READY=1
   log "lab config $CONFIG port=$LAB_PORT max_concurrency=$live_conc queue=$live_queue continuous_batching=$live_cb provider_id=$LAB_PROVIDER_ID kv_dir=$KV_DIR"
 
   # Keychain + namespace preflight through the released CLI (no model load):
   # creates the lab namespace master key and directory, takes the free lock.
-  kvcache status > "$OUT/prep-kv-status.json" 2> "$OUT/prep-kv-status.err" || true
+  local rc=0
+  kvcache status > "$OUT/prep-kv-status.json" 2> "$OUT/prep-kv-status.err" || rc=$?
+  if timed_out "$rc"; then
+    log "kv-cache status TIMED OUT after ${KVCACHE_TIMEOUT_S}s (Keychain access dialog? SecurityAgent: $(pgrep -x SecurityAgent | tr '\n' ' '))"
+    exit 3
+  fi
   st="$(jget status < "$OUT/prep-kv-status.json" 2>/dev/null || echo none)"
   ns="$(jget namespace_id < "$OUT/prep-kv-status.json" 2>/dev/null || echo none)"
   [[ "$st" == ok && "$ns" == "$LAB_PROVIDER_ID" ]] || {
@@ -153,20 +206,8 @@ PY
   log "kv-cache preflight ok: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print({k: d[k] for k in ("entry_count","bytes_used","keychain_item_count","key_epoch","reuse_eligibility_ttl_seconds")})' "$OUT/prep-kv-status.json")"
 }
 
-prep
-if [[ "${PREP_ONLY:-0}" == "1" ]]; then log "PREP_ONLY=1: done, no model loaded. evidence=$OUT"; exit 0; fi
-
-# --- Window preflight (never pauses anything) -------------------------------
-live_body="$(status_json "$LIVE_PORT")" || { log "live status unreachable on $LIVE_PORT"; exit 3; }
-printf '%s' "$live_body" > "$OUT/live-status-before.json"
-[[ "$(printf '%s' "$live_body" | jget lifecycle.operator_paused)" == "True" ]] || {
-  log "live provider on $LIVE_PORT is NOT paused; pause it, drain it and stop the buyer runner first"; exit 4; }
-[[ "$(printf '%s' "$live_body" | jget requests_in_flight)" == "0" ]] || { log "live provider not drained"; exit 4; }
-if pgrep -f "serve --config $CONFIG" >/dev/null; then log "a lab-2015 serve is already running"; exit 4; fi
-others="$(ps -axo command= | grep '[m]acprovider-cli serve' | grep -v -- "$CONFIG" || true)"
-log "other serve processes (must be idle): $(printf '%s\n' "$others" | grep -c . || true)"
-printf '%s\n' "$others" | sed -E 's/(token|secret)[^ ]*/<redacted>/g' > "$OUT/other-serves.txt"
-
+CONFIG_READY=0
+WD=""
 server_pid=""
 stop_lab_server() {
   [[ -n "$server_pid" ]] || return 0
@@ -184,15 +225,20 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
   stop_lab_server || true
-  kill "${WD:-0}" 2>/dev/null || true
-  # Leave nothing behind: purge every lab entry and forget the lab DEKs.
-  if kvcache purge --all --forget > "$OUT/final-purge.json" 2>>"$OUT/final-purge.err"; then
+  [[ -n "${WD:-}" ]] && kill -TERM "$WD" 2>/dev/null || true
+  pkill -TERM -f "serve --config $CONFIG" 2>/dev/null || true
+  # Leave nothing behind: purge every lab entry and forget the lab DEKs
+  # (bounded; skipped only when prep never wrote the lab config).
+  if [[ "$CONFIG_READY" != 1 ]]; then
+    log "cleanup: lab config not written; nothing to purge"
+  elif kvcache purge --all --forget > "$OUT/final-purge.json" 2>>"$OUT/final-purge.err"; then
     kvcache status > "$OUT/final-kv-status.json" 2>/dev/null || true
     log "final purge: $(cat "$OUT/final-purge.json") status_entries=$(jget entry_count < "$OUT/final-kv-status.json" 2>/dev/null || echo ?)"
   else
-    log "!!! final lab purge failed; run: $CLI kv-cache purge --all --forget --config $CONFIG"
+    log "!!! final lab purge failed or timed out; run (from the GUI session, with the binary that created namespace $LAB_PROVIDER_ID): <cli> kv-cache purge --all --forget --config $CONFIG"
     (( status == 0 )) && status=6
   fi
+  if [[ "${PREP_ONLY:-0}" == "1" ]]; then exit "$status"; fi
   after="$(status_json "$LIVE_PORT" || true)"
   printf '%s' "$after" > "$OUT/live-status-after.json"
   log "live provider still paused=$(printf '%s' "$after" | jget lifecycle.operator_paused 2>/dev/null || echo unknown) (this script never resumes it)"
@@ -202,21 +248,53 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-( sleep "$RUN_TIMEOUT_S"; log "RUN_TIMEOUT_S=$RUN_TIMEOUT_S reached"; kill -TERM $$ ) & WD=$!
+watchdog
+prep
+if [[ "${PREP_ONLY:-0}" == "1" ]]; then
+  # cleanup (EXIT trap) runs the same bounded purge a failed window would.
+  log "PREP_ONLY=1: prep done, no model loaded; running the bounded cleanup purge. evidence=$OUT"; exit 0
+fi
+
+# --- Window preflight (never pauses anything) -------------------------------
+live_body="$(status_json "$LIVE_PORT")" || { log "live status unreachable on $LIVE_PORT"; exit 3; }
+printf '%s' "$live_body" > "$OUT/live-status-before.json"
+[[ "$(printf '%s' "$live_body" | jget lifecycle.operator_paused)" == "True" ]] || {
+  log "live provider on $LIVE_PORT is NOT paused; pause it, drain it and stop the buyer runner first"; exit 4; }
+[[ "$(printf '%s' "$live_body" | jget requests_in_flight)" == "0" ]] || { log "live provider not drained"; exit 4; }
+if pgrep -f "serve --config $CONFIG" >/dev/null; then log "a lab-2015 serve is already running"; exit 4; fi
+others="$(ps -axo command= | grep '[m]acprovider-cli serve' | grep -v -- "$CONFIG" || true)"
+log "other serve processes (must be idle): $(printf '%s\n' "$others" | grep -c . || true)"
+printf '%s\n' "$others" | sed -E 's/(token|secret)[^ ]*/<redacted>/g' > "$OUT/other-serves.txt"
+
 
 # Start from an empty lab namespace.
 kvcache purge --all --forget > "$OUT/initial-purge.json" 2>>"$OUT/initial-purge.err" || { log "initial purge failed"; exit 3; }
 
 # start_session <name> on|off
+# A SecurityAgent process that appears after the serve started means a Keychain
+# dialog is waiting on the Studio screen: fail at once instead of waiting.
+new_keychain_prompt() {
+  local p
+  for p in $(pgrep -x SecurityAgent 2>/dev/null); do
+    [[ " $agents_before " == *" $p "* ]] || return 0
+  done
+  return 1
+}
+alive_or_fail() {   # alive_or_fail <session> <phase>
+  kill -0 "$server_pid" 2>/dev/null || { log "session=$1 FAIL: serve exited during $2"; tail -20 "$OUT/$1-serve.log" >&2; return 1; }
+  if new_keychain_prompt; then log "session=$1 FAIL: Keychain access dialog (SecurityAgent) appeared during $2"; return 1; fi
+}
+
 start_session() {
-  local name="$1" disk="$2" flag serve_log="$OUT/$1-serve.log" t0 body decision
+  local name="$1" disk="$2" flag serve_log="$OUT/$1-serve.log" t0 body decision agents_before
+  agents_before="$(pgrep -x SecurityAgent 2>/dev/null | tr '\n' ' ')"
   [[ "$disk" == on ]] && flag=--kv-disk-cache-enabled || flag=--no-kv-disk-cache-enabled
   log "session=$name disk=$disk start"
   "$CLI" serve --config "$CONFIG" --port "$LAB_PORT" --no-join --no-idle-prewarm "$flag" > "$serve_log" 2>&1 &
   server_pid=$!
   t0=$(date +%s)
   until body="$(status_json "$LAB_PORT")" && [[ "$(printf '%s' "$body" | jget model_loaded)" == "True" ]]; do
-    kill -0 "$server_pid" 2>/dev/null || { log "session=$name FAIL: serve exited during load"; tail -20 "$serve_log" >&2; return 1; }
+    alive_or_fail "$name" load || return 1
     (( $(date +%s) - t0 > LOAD_TIMEOUT_S )) && { log "session=$name FAIL: not loaded in ${LOAD_TIMEOUT_S}s"; return 1; }
     sleep 3
   done
@@ -228,7 +306,7 @@ start_session() {
     decision="$(status_json "$LAB_PORT" | jget continuous_batching.self_check.decision 2>/dev/null || echo None)"
     case "$decision" in None|pending|prior_grant*|"") ;; *) break ;; esac
     [[ "$(sed -n 's/^continuous_batching:[[:space:]]*//p' "$CONFIG")" == off ]] && break
-    kill -0 "$server_pid" 2>/dev/null || { log "session=$name FAIL: serve exited during self-check"; return 1; }
+    alive_or_fail "$name" self-check || return 1
     (( $(date +%s) - t0 > SELF_CHECK_TIMEOUT_S )) && { log "session=$name FAIL: no CB decision in ${SELF_CHECK_TIMEOUT_S}s"; return 1; }
     sleep 10
   done
@@ -239,6 +317,7 @@ start_session() {
       if grep -qE 'event=kv_disk_cache action=(dormant|config_error)|kv_disk_cache config error|kv_disk_tier_unsupported_model' "$serve_log"; then
         log "session=$name FAIL: $(grep -m1 -E 'kv_disk_cache action=(dormant|config_error)|kv_disk_cache config error|kv_disk_tier_unsupported_model' "$serve_log")"; return 1
       fi
+      alive_or_fail "$name" disk-tier-activation || return 1
       (( $(date +%s) - t0 > 120 )) && { log "session=$name FAIL: disk tier not activated in 120s"; return 1; }
       sleep 2
     done
@@ -251,8 +330,8 @@ start_session() {
 run_session() {
   local name="$1" disk="$2"
   start_session "$name" "$disk" || exit 7
-  python3 -I "$DRIVER" "$name" --port "$LAB_PORT" --log "$OUT/$name-serve.log" --state "$OUT/state.json" 2>&1 \
-    | tee -a "$OUT/summary.txt" >&2 || { log "session=$name driver failed"; exit 7; }
+  bounded "$SESSION_TIMEOUT_S" python3 -I "$DRIVER" "$name" --port "$LAB_PORT" --log "$OUT/$name-serve.log" --state "$OUT/state.json" 2>&1 \
+    | tee -a "$OUT/summary.txt" >&2 || { log "session=$name driver failed or exceeded SESSION_TIMEOUT_S=$SESSION_TIMEOUT_S"; exit 7; }
   stop_lab_server || log "session=$name shutdown was not graceful"
   if [[ "$disk" == on ]]; then
     kvcache status > "$OUT/$name-kv-status.json" 2>/dev/null || true
@@ -266,6 +345,6 @@ run_session off2 off
 run_session on1 on
 run_session on2 on
 verdict=0
-python3 -I "$DRIVER" verdict --state "$OUT/state.json" --out "$OUT" 2>&1 | tee -a "$OUT/summary.txt" >&2 || verdict=$?
+bounded 120 python3 -I "$DRIVER" verdict --state "$OUT/state.json" --out "$OUT" 2>&1 | tee -a "$OUT/summary.txt" >&2 || verdict=$?
 log "evidence=$OUT"
 exit "$verdict"
