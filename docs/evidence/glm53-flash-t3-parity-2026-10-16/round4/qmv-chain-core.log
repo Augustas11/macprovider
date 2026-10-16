@@ -1,0 +1,4 @@
+chain: bits=8 57.9 us/call 1231.9 GB/s
+chain: bits=6 69.4 us/call 786.2 GB/s
+chain: bits=5 65.4 us/call 705.9 GB/s
+chain: bits=4 41.2 us/call 915.5 GB/s

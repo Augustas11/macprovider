@@ -1,0 +1,17 @@
+b029bf6520a3f995c1048d0471730d47900da4fca793f961912c7230f6aba1aa  /Users/a1/lab-glm53/t3/poc/phase3-binary/.build/release/macprovider-cli
+589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094  /Users/a1/lab-glm53/t3/poc/phase3-binary/.build/release/mlx.metallib
+/Users/a1/lab-glm53/t3/round4-20261016T200943Z/parity/oracle_1024.json prompt=1024 greedy=256 logit_steps=16
+/Users/a1/lab-glm53/t3/round4-20261016T200943Z/parity/oracle_8192.json prompt=8192 greedy=256 logit_steps=16
+/Users/a1/lab-glm53/t3/round4-20261016T200943Z/parity/oracle_65536.json prompt=65536 greedy=256 logit_steps=16
+glm-parity: load start dir=/Users/a1/lab-glm53/models/GLM-5.3-Flash-oQ4e-mtp oracles=3 mlx_active_gb=0.0 mlx_peak_gb=0.0 mlx_cache_gb=0.0 peak_footprint_gb=0.0
+glm-parity: load done seconds=108.4 mlx_active_gb=184.8 mlx_peak_gb=185.9 mlx_cache_gb=1.1 peak_footprint_gb=186.2
+glm-parity: oracle start oracle_1024.npz prompt=1024 mlx_active_gb=184.8 mlx_peak_gb=185.9 mlx_cache_gb=1.1 peak_footprint_gb=186.2
+glm-parity: oracle=oracle_1024.npz prompt=1024 first_divergence=none top1_first16=16/16 max_abs_logit_diff=5.1250 prefill_tps=88.2 decode_tps=40.53 peak_gb=188.1
+glm-parity: oracle done oracle_1024.npz mlx_active_gb=184.8 mlx_peak_gb=188.1 mlx_cache_gb=4.3 peak_footprint_gb=190.8
+glm-parity: oracle start oracle_8192.npz prompt=8192 mlx_active_gb=184.8 mlx_peak_gb=188.1 mlx_cache_gb=0.0 peak_footprint_gb=190.8
+glm-parity: oracle=oracle_8192.npz prompt=8192 first_divergence=none top1_first16=16/16 max_abs_logit_diff=1.1875 prefill_tps=308.6 decode_tps=38.18 peak_gb=191.3
+glm-parity: oracle done oracle_8192.npz mlx_active_gb=184.8 mlx_peak_gb=191.3 mlx_cache_gb=4.3 peak_footprint_gb=196.0
+glm-parity: oracle start oracle_65536.npz prompt=65536 mlx_active_gb=184.8 mlx_peak_gb=191.3 mlx_cache_gb=0.0 peak_footprint_gb=196.0
+glm-parity: oracle=oracle_65536.npz prompt=65536 first_divergence=none top1_first16=16/16 max_abs_logit_diff=1.1250 prefill_tps=268.8 decode_tps=36.27 peak_gb=191.9
+glm-parity: oracle done oracle_65536.npz mlx_active_gb=184.8 mlx_peak_gb=191.9 mlx_cache_gb=4.3 peak_footprint_gb=197.2
+wrote /Users/a1/lab-glm53/t3/round4-20261016T200943Z/parity/parity.json
