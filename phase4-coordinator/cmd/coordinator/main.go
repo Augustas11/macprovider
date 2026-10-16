@@ -1700,6 +1700,7 @@ func runCoordinator() (exitCode int) {
 			Int64("watermark_credit_id", report.WatermarkCreditID).
 			Int64("laps_completed", report.LapsCompleted).
 			Int64("last_lap_eligible_requests", report.LastLapEligibleRequests).
+			Int64("last_lap_overdue_requests", report.LastLapOverdueRequests).
 			Str("last_lap_skipped", report.LastLapSkipSummary()).
 			Str("auto_vacuum", report.AutoVacuumModes()).
 			Int64("archive_id", report.ArchiveID).

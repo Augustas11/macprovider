@@ -2,7 +2,7 @@
 
 **Status:** v0.2.0-draft
 **Date:** 2026-10-13
-**Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.8, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
+**Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
 
 **Change log v0.2.0 (2026-10-13, issue #1644 — cross-provider scoring):**

@@ -1612,6 +1612,213 @@ func TestEvidenceRetentionDeletionRefusalHoldsWatermark(t *testing.T) {
 	}
 }
 
+// latestRetentionEligibility is the moment the fixture's requests became
+// eligible by time: their latest credit and verdict close stamps.
+func latestRetentionEligibility(t *testing.T, f *retentionFixture) time.Time {
+	t.Helper()
+	var latest time.Time
+	rows, err := f.store.db.Query(`
+SELECT ts_utc FROM ledger_request_credits
+UNION ALL SELECT created_at_utc FROM settlement_receipt_verdicts
+UNION ALL SELECT COALESCE(updated_at_utc, '') FROM settlement_receipt_verdicts`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ts.After(latest) {
+			latest = ts
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if latest.IsZero() {
+		t.Fatal("no eligibility stamps")
+	}
+	return latest
+}
+
+func earliestRetentionCreditTime(t *testing.T, f *retentionFixture) time.Time {
+	t.Helper()
+	var text string
+	if err := f.store.db.QueryRow(`SELECT MIN(ts_utc) FROM ledger_request_credits`).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
+// #1979: drained means caught up. Under steady traffic every nightly lap
+// finds the requests that crossed the finality point since the previous run;
+// those are not a backlog. A lap reports drained when it selected no request
+// that was already eligible a nightly interval (plus the run budget) before
+// the finality point.
+func TestEvidenceRetentionDrainedMeansCaughtUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// pastFinality is how long before the finality point the requests
+		// became eligible.
+		pastFinality time.Duration
+		wantOverdue  int64
+	}{
+		{name: "only requests that became eligible since the last run", pastFinality: time.Hour, wantOverdue: 0},
+		{name: "a nightly interval", pastFinality: 24 * time.Hour, wantOverdue: 0},
+		// A pass may start up to the run budget later in the run than the
+		// previous night's pass did.
+		{name: "inside the run budget slack", pastFinality: 24*time.Hour + 15*time.Minute, wantOverdue: 0},
+		{name: "past the run budget slack", pastFinality: 24*time.Hour + 45*time.Minute, wantOverdue: 2},
+		{name: "eligible longer than a nightly interval", pastFinality: 25 * time.Hour, wantOverdue: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newRetentionFixture(t, false)
+			f.seed(t, "first")
+			f.seed(t, "b")
+			f.seed(t, "c")
+			f.settle(t)
+			// The cases assume b and c became eligible together: their stamps
+			// lie well inside the 15-minute steps between the cases.
+			if spread := latestRetentionEligibility(t, f).Sub(earliestRetentionCreditTime(t, f)); spread > 5*time.Minute {
+				t.Fatalf("fixture stamps spread %s", spread)
+			}
+			opts := retentionTestOptions(t.TempDir(), nil)
+			opts.ReconcileHorizon = time.Hour
+			opts.RunBudget = 30 * time.Minute
+			// The finality point is now minus the 48-hour grace.
+			now := latestRetentionEligibility(t, f).Add(evidenceRetentionDefaultGrace + tc.pastFinality)
+			f.store.now = func() time.Time { return now }
+			report, err := f.store.RunEvidenceRetention(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.DeletedRequests != 2 || report.LapsCompleted != 1 || report.LastLapEligibleRequests != 2 ||
+				report.LastLapOverdueRequests != tc.wantOverdue || report.BacklogDrained != (tc.wantOverdue == 0) {
+				t.Fatalf("report=%+v want 2 eligible, %d overdue", report, tc.wantOverdue)
+			}
+			line := evidenceRetentionLogLine(report)
+			for _, want := range []string{
+				"backlog_drained=" + map[bool]string{true: "true", false: "false"}[tc.wantOverdue == 0],
+				"last_lap_eligible_requests=2",
+				"last_lap_overdue_requests=" + map[bool]string{true: "0", false: "2"}[tc.wantOverdue == 0],
+			} {
+				if !strings.Contains(line, want) {
+					t.Fatalf("log line %q missing %q", line, want)
+				}
+			}
+			if tc.wantOverdue == 0 {
+				return
+			}
+			// The overdue requests were deleted, so the next lap is caught up.
+			now = now.Add(evidenceRetentionCaughtUpInterval)
+			report, err = f.store.RunEvidenceRetention(ctx, opts)
+			if err != nil || !report.BacklogDrained || report.LastLapOverdueRequests != 0 {
+				t.Fatalf("next run=%+v err=%v", report, err)
+			}
+		})
+	}
+}
+
+// Held requests never count toward the caught-up backlog: a hold that clears
+// became eligible since its last re-check, however old its stamps are.
+func TestEvidenceRetentionDrainedIgnoresClearedHolds(t *testing.T) {
+	ctx := context.Background()
+	f := newRetentionFixture(t, false)
+	f.seed(t, "first")
+	f.seed(t, "b")
+	f.seed(t, "undrained")
+	f.addDrainedOutbox(t, "undrained", false, false)
+	f.seed(t, "quarantined")
+	f.settle(t)
+	if _, err := f.store.db.Exec(`UPDATE ledger_request_credits SET quarantined = 1, quarantine_reason = 'operator' WHERE request_id = ?`, f.inputs["quarantined"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	opts := retentionTestOptions(t.TempDir(), nil)
+	// The fixture's requests are weeks past the finality point: b is overdue.
+	report, err := f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || report.HeldRequests != 2 || report.LastLapOverdueRequests != 1 || report.BacklogDrained {
+		t.Fatalf("first run=%+v err=%v", report, err)
+	}
+	if _, err := f.store.db.Exec(`UPDATE settlement_receipt_audit_outbox SET drained_at_utc = ? WHERE request_id = ?`,
+		sqliteTimeText(f.windowEnd), f.inputs["undrained"].RequestID); err != nil {
+		t.Fatal(err)
+	}
+	report, err = f.store.RunEvidenceRetention(ctx, opts)
+	if err != nil || report.DeletedRequests != 1 || f.hotRows(t, "undrained") != 0 {
+		t.Fatalf("hold re-check run=%+v err=%v", report, err)
+	}
+	// The lap selected the cleared hold and nothing overdue; the quarantined
+	// request stays held and hot.
+	if !report.BacklogDrained || report.LastLapEligibleRequests != 1 || report.LastLapOverdueRequests != 0 ||
+		report.HeldRequests != 1 || f.hotRows(t, "quarantined") != 3 {
+		t.Fatalf("drained run=%+v hot(quarantined)=%d", report, f.hotRows(t, "quarantined"))
+	}
+}
+
+// A lap that was already selecting requests when the overdue count was added
+// cannot prove it is caught up; a lap that had selected nothing counts from 0.
+func TestEvidenceRetentionOverdueCountMigration(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		lapEligible int64
+		wantOverdue int64
+	}{{lapEligible: 5, wantOverdue: -1}, {lapEligible: 0, wantOverdue: 0}} {
+		f := newRetentionFixture(t, false)
+		if err := f.store.saveRetentionLapState(ctx, retentionLapState{lapStart: 10, lapEligible: tc.lapEligible, lapsCompleted: 3,
+			lastLapEligible: 0, lapSkipped: map[string]int{}, lastLapSkipped: map[string]int{}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, col := range []string{"lap_overdue_requests", "last_lap_overdue_requests"} {
+			if _, err := f.store.db.Exec(`ALTER TABLE settlement_evidence_retention_state DROP COLUMN ` + col); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := f.store.ensureSettlementEvidenceRetentionTables(ctx); err != nil {
+			t.Fatal(err)
+		}
+		st, err := loadRetentionLapState(ctx, f.store.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.lapOverdue != tc.wantOverdue || st.lastLapOverdue != -1 {
+			t.Fatalf("lap eligible %d: overdue=%d last=%d want %d and -1", tc.lapEligible, st.lapOverdue, st.lastLapOverdue, tc.wantOverdue)
+		}
+		// The upgraded database reports not drained until a counted lap completes.
+		var report EvidenceRetentionReport
+		if err := f.store.fillRetentionLapReport(ctx, &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.BacklogDrained {
+			t.Fatalf("lap eligible %d: drained before a counted lap: %+v", tc.lapEligible, report)
+		}
+		// The lap in progress completes as unknown when it was; the next lap
+		// counts from 0 and decides.
+		opts := retentionTestOptions(t.TempDir(), nil)
+		report, err = f.store.RunEvidenceRetention(ctx, opts)
+		if err != nil || report.LapsCompleted != 4 || report.LastLapOverdueRequests != tc.wantOverdue || report.BacklogDrained != (tc.wantOverdue == 0) {
+			t.Fatalf("lap eligible %d: completing run=%+v err=%v", tc.lapEligible, report, err)
+		}
+		report, err = f.store.RunEvidenceRetention(ctx, opts)
+		if err != nil || report.LapsCompleted != 5 || report.LastLapOverdueRequests != 0 || !report.BacklogDrained {
+			t.Fatalf("lap eligible %d: next run=%+v err=%v", tc.lapEligible, report, err)
+		}
+	}
+}
+
 // A cursor left by the first retention release (no lap state) starts a lap
 // at the watermark, so the part of the ledger below the old cursor is not
 // skipped.

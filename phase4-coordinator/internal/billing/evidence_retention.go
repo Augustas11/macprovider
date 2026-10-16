@@ -82,6 +82,11 @@ const (
 
 	// evidenceRetentionDefaultRunBudget applies when no budget is set.
 	evidenceRetentionDefaultRunBudget = 30 * time.Minute
+	// evidenceRetentionCaughtUpInterval is the nightly run interval. A
+	// request that was already eligible this long before the finality point
+	// (plus the run budget, which absorbs when within a run a pass starts) is
+	// overdue: a caught-up run would have taken it the night before.
+	evidenceRetentionCaughtUpInterval = 24 * time.Hour
 	// evidenceRetentionBacklogTimeout bounds the end-of-run backlog count.
 	evidenceRetentionBacklogTimeout = 2 * time.Minute
 
@@ -296,7 +301,10 @@ type EvidenceRetentionReport struct {
 	// refused (Status names the refusal). Empty on error.
 	StopReason string `json:"stop_reason,omitempty"`
 	// BacklogDrained is true when the most recently completed scan lap,
-	// persisted across runs, found no eligible request.
+	// persisted across runs, selected no overdue request: retention is caught
+	// up, so the backlog is no larger than what one nightly run takes.
+	// Requests that became eligible since the previous run, and held
+	// requests whose hold cleared, are not overdue (#1979).
 	BacklogDrained bool `json:"backlog_drained"`
 	// BacklogCandidateCredits counts settled, unarchived credits above the
 	// archived low watermark that are past both finality cutoffs, plus the
@@ -315,9 +323,17 @@ type EvidenceRetentionReport struct {
 	// LapEligibleRequests counts the current lap's eligible requests so far.
 	LapsCompleted       int64 `json:"laps_completed"`
 	LapEligibleRequests int64 `json:"lap_eligible_requests"`
-	// LastLap* describe the most recently completed lap (eligible -1: none).
+	// LapOverdueRequests counts the current lap's overdue requests so far:
+	// selected from the ledger walk (not from a hold) and already eligible
+	// at the caught-up horizon, the finality point minus the nightly
+	// interval and the run budget. -1: unknown (the lap began before the
+	// count existed).
+	LapOverdueRequests int64 `json:"lap_overdue_requests"`
+	// LastLap* describe the most recently completed lap (eligible and
+	// overdue -1: none, or unknown).
 	LastLapCompletedAtUTC   string         `json:"last_lap_completed_at_utc,omitempty"`
 	LastLapEligibleRequests int64          `json:"last_lap_eligible_requests"`
+	LastLapOverdueRequests  int64          `json:"last_lap_overdue_requests"`
 	LastLapSkippedRequests  map[string]int `json:"last_lap_skipped_requests,omitempty"`
 	// DeleteBatches counts the short delete transactions of the run.
 	DeleteBatches           int   `json:"delete_batches"`
@@ -505,21 +521,27 @@ CREATE TABLE IF NOT EXISTS settlement_evidence_retention_state (
 	}
 	// #1979: the scan lap state and the archived low watermark. Added by
 	// column so databases created by the first retention release migrate.
-	add := []struct{ table, name, sql string }{
-		{"settlement_evidence_retention_state", "archived_low_watermark_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN archived_low_watermark_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(archived_low_watermark_credit_id >= 0)`},
-		{"settlement_evidence_retention_state", "lap_start_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_start_credit_id INTEGER NOT NULL DEFAULT -1`},
-		{"settlement_evidence_retention_state", "lap_hold_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_hold_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(lap_hold_credit_id >= 0)`},
-		{"settlement_evidence_retention_state", "lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_eligible_requests INTEGER NOT NULL DEFAULT 0`},
-		{"settlement_evidence_retention_state", "lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
-		{"settlement_evidence_retention_state", "laps_completed", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN laps_completed INTEGER NOT NULL DEFAULT 0`},
-		{"settlement_evidence_retention_state", "last_lap_completed_at_utc", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_completed_at_utc TEXT NOT NULL DEFAULT ''`},
-		{"settlement_evidence_retention_state", "last_lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_eligible_requests INTEGER NOT NULL DEFAULT -1`},
-		{"settlement_evidence_retention_state", "last_lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_skipped_json TEXT NOT NULL DEFAULT '{}'`},
-		{"settlement_evidence_retention_state", "lap_holds_cursor", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_holds_cursor INTEGER NOT NULL DEFAULT 0`},
-		{"settlement_evidence_archives", "min_credit_id", `ALTER TABLE settlement_evidence_archives ADD COLUMN min_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(min_credit_id >= 0)`},
+	add := []struct{ table, name, sql, after string }{
+		{"settlement_evidence_retention_state", "archived_low_watermark_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN archived_low_watermark_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(archived_low_watermark_credit_id >= 0)`, ""},
+		{"settlement_evidence_retention_state", "lap_start_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_start_credit_id INTEGER NOT NULL DEFAULT -1`, ""},
+		{"settlement_evidence_retention_state", "lap_hold_credit_id", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_hold_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(lap_hold_credit_id >= 0)`, ""},
+		{"settlement_evidence_retention_state", "lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_eligible_requests INTEGER NOT NULL DEFAULT 0`, ""},
+		{"settlement_evidence_retention_state", "lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_skipped_json TEXT NOT NULL DEFAULT '{}'`, ""},
+		{"settlement_evidence_retention_state", "laps_completed", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN laps_completed INTEGER NOT NULL DEFAULT 0`, ""},
+		{"settlement_evidence_retention_state", "last_lap_completed_at_utc", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_completed_at_utc TEXT NOT NULL DEFAULT ''`, ""},
+		{"settlement_evidence_retention_state", "last_lap_eligible_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_eligible_requests INTEGER NOT NULL DEFAULT -1`, ""},
+		{"settlement_evidence_retention_state", "last_lap_skipped_json", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_skipped_json TEXT NOT NULL DEFAULT '{}'`, ""},
+		{"settlement_evidence_retention_state", "lap_holds_cursor", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_holds_cursor INTEGER NOT NULL DEFAULT 0`, ""},
+		// #1979 caught-up drain: a lap in progress that already selected
+		// requests began uncounted, so its overdue count is unknown (-1) and
+		// cannot report drained; a lap that selected nothing yet counts from 0.
+		{"settlement_evidence_retention_state", "lap_overdue_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN lap_overdue_requests INTEGER NOT NULL DEFAULT -1`,
+			`UPDATE settlement_evidence_retention_state SET lap_overdue_requests = 0 WHERE lap_eligible_requests = 0`},
+		{"settlement_evidence_retention_state", "last_lap_overdue_requests", `ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_overdue_requests INTEGER NOT NULL DEFAULT -1`, ""},
+		{"settlement_evidence_archives", "min_credit_id", `ALTER TABLE settlement_evidence_archives ADD COLUMN min_credit_id INTEGER NOT NULL DEFAULT 0 CHECK(min_credit_id >= 0)`, ""},
 		// #1793: the pool binding of the credit's attempt, so SPEC-043-R010
 		// creator earnings keep counting it after its route snapshot leaves.
-		{"settlement_evidence_archived_credits", "pool_id", `ALTER TABLE settlement_evidence_archived_credits ADD COLUMN pool_id TEXT NULL`},
+		{"settlement_evidence_archived_credits", "pool_id", `ALTER TABLE settlement_evidence_archived_credits ADD COLUMN pool_id TEXT NULL`, ""},
 	}
 	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS settlement_evidence_retention_holds (
@@ -574,6 +596,11 @@ END;`); err != nil {
 		}
 		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
 			return err
+		}
+		if col.after != "" {
+			if _, err := s.db.ExecContext(ctx, col.after); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1091,6 +1118,23 @@ func verdictClosedBefore(v archiveRow, t time.Time) bool {
 	return !closedAt.IsZero() && closedAt.Before(t)
 }
 
+// retentionEligibleAt reports whether an eligible request was already
+// eligible at t by time: every credit was created, and every verdict closed,
+// before t.
+func retentionEligibleAt(b requestEvidenceBundle, t time.Time) bool {
+	for _, c := range b.credits {
+		if c.tsUTC.IsZero() || !c.tsUTC.Before(t) {
+			return false
+		}
+	}
+	for _, v := range b.evidence["settlement_receipt_verdicts"] {
+		if !verdictClosedBefore(v, t) {
+			return false
+		}
+	}
+	return true
+}
+
 // retentionPermanentSkips are skip reasons that keep a request hot for good:
 // the watermark passes it and no hold is kept. A request misclassified as
 // permanent only stays hot; it is never deleted early.
@@ -1127,22 +1171,25 @@ type retentionLapState struct {
 	// to be re-checked this lap; -1 once they all were.
 	holdsCursor        int64
 	lapEligible        int64
+	lapOverdue         int64 // -1: unknown for this lap
 	lapSkipped         map[string]int
 	lapsCompleted      int64
 	lastLapCompletedAt string
 	lastLapEligible    int64 // -1: no lap completed yet
+	lastLapOverdue     int64 // -1: no lap completed yet, or unknown
 	lastLapSkipped     map[string]int
 }
 
 func loadRetentionLapState(ctx context.Context, q evidenceQueryer) (retentionLapState, error) {
-	st := retentionLapState{lapStart: -1, lastLapEligible: -1, lapSkipped: map[string]int{}, lastLapSkipped: map[string]int{}}
+	st := retentionLapState{lapStart: -1, lastLapEligible: -1, lastLapOverdue: -1, lapSkipped: map[string]int{}, lastLapSkipped: map[string]int{}}
 	var lapSkipped, lastSkipped string
 	err := q.QueryRowContext(ctx, `
 SELECT scan_cursor_credit_id, archived_low_watermark_credit_id, lap_start_credit_id, lap_hold_credit_id,
-       lap_holds_cursor, lap_eligible_requests, lap_skipped_json, laps_completed, last_lap_completed_at_utc,
-       last_lap_eligible_requests, last_lap_skipped_json
+       lap_holds_cursor, lap_eligible_requests, lap_overdue_requests, lap_skipped_json, laps_completed,
+       last_lap_completed_at_utc, last_lap_eligible_requests, last_lap_overdue_requests, last_lap_skipped_json
   FROM settlement_evidence_retention_state WHERE id = 1`).Scan(&st.cursor, &st.watermark, &st.lapStart, &st.pin,
-		&st.holdsCursor, &st.lapEligible, &lapSkipped, &st.lapsCompleted, &st.lastLapCompletedAt, &st.lastLapEligible, &lastSkipped)
+		&st.holdsCursor, &st.lapEligible, &st.lapOverdue, &lapSkipped, &st.lapsCompleted, &st.lastLapCompletedAt,
+		&st.lastLapEligible, &st.lastLapOverdue, &lastSkipped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return st, nil
 	}
@@ -1172,9 +1219,10 @@ func (s *Store) saveRetentionLapState(ctx context.Context, st retentionLapState)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO settlement_evidence_retention_state (
     id, scan_cursor_credit_id, archived_low_watermark_credit_id, lap_start_credit_id, lap_hold_credit_id,
-    lap_holds_cursor, lap_eligible_requests, lap_skipped_json, laps_completed, last_lap_completed_at_utc,
-    last_lap_eligible_requests, last_lap_skipped_json, updated_at_utc
-) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    lap_holds_cursor, lap_eligible_requests, lap_overdue_requests, lap_skipped_json, laps_completed,
+    last_lap_completed_at_utc, last_lap_eligible_requests, last_lap_overdue_requests, last_lap_skipped_json,
+    updated_at_utc
+) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     scan_cursor_credit_id = excluded.scan_cursor_credit_id,
     archived_low_watermark_credit_id = excluded.archived_low_watermark_credit_id,
@@ -1182,14 +1230,16 @@ ON CONFLICT(id) DO UPDATE SET
     lap_hold_credit_id = excluded.lap_hold_credit_id,
     lap_holds_cursor = excluded.lap_holds_cursor,
     lap_eligible_requests = excluded.lap_eligible_requests,
+    lap_overdue_requests = excluded.lap_overdue_requests,
     lap_skipped_json = excluded.lap_skipped_json,
     laps_completed = excluded.laps_completed,
     last_lap_completed_at_utc = excluded.last_lap_completed_at_utc,
     last_lap_eligible_requests = excluded.last_lap_eligible_requests,
+    last_lap_overdue_requests = excluded.last_lap_overdue_requests,
     last_lap_skipped_json = excluded.last_lap_skipped_json,
     updated_at_utc = excluded.updated_at_utc`,
-		st.cursor, st.watermark, st.lapStart, st.pin, st.holdsCursor, st.lapEligible, string(lapSkipped), st.lapsCompleted,
-		st.lastLapCompletedAt, st.lastLapEligible, string(lastSkipped), sqliteTimeText(s.nowUTC()))
+		st.cursor, st.watermark, st.lapStart, st.pin, st.holdsCursor, st.lapEligible, st.lapOverdue, string(lapSkipped),
+		st.lapsCompleted, st.lastLapCompletedAt, st.lastLapEligible, st.lastLapOverdue, string(lastSkipped), sqliteTimeText(s.nowUTC()))
 	return err
 }
 
@@ -1252,7 +1302,11 @@ func minCreditID(ids []int64) int64 {
 // retentionScanPass is the outcome of one selection pass.
 type retentionScanPass struct {
 	selected int
-	from     int64
+	// overdue counts the selected requests that are overdue: emitted by the
+	// ledger walk without a hold row and already eligible at the caught-up
+	// horizon.
+	overdue int
+	from    int64
 	// next is where the following pass resumes, unless the pass wrapped.
 	next    int64
 	wrapped bool
@@ -1334,12 +1388,14 @@ func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRete
 	}
 	first := &providerFirstVerifiedVerdicts{q: s.reader(), cache: map[string]int64{}}
 	journalDB := s.routeSnapshotJournalDB.Load()
+	caughtUpHorizon := cut.creditBefore.Add(-(evidenceRetentionCaughtUpInterval + opts.RunBudget))
 	// evaluate collects one request and runs the R-15.2 predicate; ok means
 	// it was emitted. With precheckFinality (a hold that only the deletion
 	// re-check refused, because its settlement finality was still open) the
 	// finality is read first, so a request that would be refused again is
-	// neither re-archived nor counted as eligible.
-	evaluate := func(requestID string, precheckFinality bool) (bool, string, error) {
+	// neither re-archived nor counted as eligible. With countOverdue an
+	// emitted request already eligible at the caught-up horizon is overdue.
+	evaluate := func(requestID string, precheckFinality, countOverdue bool) (bool, string, error) {
 		b, err := collectRequestEvidence(ctx, s.reader(), requestID)
 		if err != nil {
 			return false, "", err
@@ -1376,6 +1432,9 @@ func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRete
 			return false, "", err
 		}
 		pass.selected++
+		if countOverdue && retentionEligibleAt(b, caughtUpHorizon) {
+			pass.overdue++
+		}
 		return true, "", nil
 	}
 
@@ -1397,7 +1456,9 @@ func (s *Store) selectRetentionCandidates(ctx context.Context, opts EvidenceRete
 				capped = true
 				break
 			}
-			ok, reason, err := evaluate(h.requestID, h.reason == retentionSkipFinalityOpen)
+			// A hold that cleared became eligible since its last re-check,
+			// so it is never overdue.
+			ok, reason, err := evaluate(h.requestID, h.reason == retentionSkipFinalityOpen, false)
 			if err != nil {
 				return retentionScanPass{}, err
 			}
@@ -1502,7 +1563,7 @@ SELECT lrc.id, lrc.request_id, lrc.ts_utc,
 				capped = true
 				break
 			}
-			ok, reason, err := evaluate(cand.requestID, cand.holdReason == retentionSkipFinalityOpen)
+			ok, reason, err := evaluate(cand.requestID, cand.holdReason == retentionSkipFinalityOpen, cand.holdReason == "")
 			if err != nil {
 				return retentionScanPass{}, err
 			}
@@ -1577,6 +1638,9 @@ func (s *Store) saveRetentionPass(ctx context.Context, pass retentionScanPass) (
 		st.pin = pass.pin
 	}
 	st.lapEligible += int64(pass.selected)
+	if st.lapOverdue >= 0 {
+		st.lapOverdue += int64(pass.overdue)
+	}
 	for reason, n := range pass.skipped {
 		st.lapSkipped[reason] += n
 	}
@@ -1605,8 +1669,9 @@ SELECT MIN(min_credit_id) FROM settlement_evidence_archives
 	st.lapsCompleted++
 	st.lastLapCompletedAt = sqliteTimeText(s.nowUTC())
 	st.lastLapEligible = st.lapEligible
+	st.lastLapOverdue = st.lapOverdue
 	st.lastLapSkipped = st.lapSkipped
-	st.lapEligible, st.lapSkipped = 0, map[string]int{}
+	st.lapEligible, st.lapOverdue, st.lapSkipped = 0, 0, map[string]int{}
 	return st, true, s.saveRetentionLapState(ctx, st)
 }
 
@@ -1746,10 +1811,12 @@ func (s *Store) fillRetentionLapReport(ctx context.Context, report *EvidenceRete
 	report.LapEligibleRequests = st.lapEligible
 	report.LastLapCompletedAtUTC = st.lastLapCompletedAt
 	report.LastLapEligibleRequests = st.lastLapEligible
+	report.LapOverdueRequests = st.lapOverdue
+	report.LastLapOverdueRequests = st.lastLapOverdue
 	if len(st.lastLapSkipped) > 0 {
 		report.LastLapSkippedRequests = st.lastLapSkipped
 	}
-	report.BacklogDrained = st.lapsCompleted > 0 && st.lastLapEligible == 0
+	report.BacklogDrained = st.lapsCompleted > 0 && st.lastLapOverdue == 0
 	return s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM settlement_evidence_retention_holds`).Scan(&report.HeldRequests)
 }
 
@@ -2809,8 +2876,8 @@ func evidenceRetentionLogLine(report EvidenceRetentionReport) string {
 	if report.Status == EvidenceRetentionStatusArchiveDiskLow {
 		level = "warn"
 	}
-	return fmt.Sprintf("settlement evidence retention: level=%s status=%s stop_reason=%s archives=%d eligible_requests=%d deleted_requests=%d delete_batches=%d scanned_credits=%d backlog_drained=%t backlog_candidate_credits=%d held_requests=%d watermark_credit_id=%d laps_completed=%d lap_eligible_requests=%d last_lap_eligible_requests=%d last_lap_skipped=%q auto_vacuum=%s archive_bytes=%d archive_free_bytes=%d archive_disk_bytes=%d reason=%q",
-		level, report.Status, report.StopReason, report.Archives, report.EligibleRequests, report.DeletedRequests, report.DeleteBatches, report.ScannedCredits, report.BacklogDrained, report.BacklogCandidateCredits, report.HeldRequests, report.WatermarkCreditID, report.LapsCompleted, report.LapEligibleRequests, report.LastLapEligibleRequests, report.LastLapSkipSummary(), report.AutoVacuumModes(), report.ArchiveBytes, report.ArchiveFreeBytes, report.ArchiveDiskBytes, report.Error)
+	return fmt.Sprintf("settlement evidence retention: level=%s status=%s stop_reason=%s archives=%d eligible_requests=%d deleted_requests=%d delete_batches=%d scanned_credits=%d backlog_drained=%t backlog_candidate_credits=%d held_requests=%d watermark_credit_id=%d laps_completed=%d lap_eligible_requests=%d last_lap_eligible_requests=%d last_lap_overdue_requests=%d last_lap_skipped=%q auto_vacuum=%s archive_bytes=%d archive_free_bytes=%d archive_disk_bytes=%d reason=%q",
+		level, report.Status, report.StopReason, report.Archives, report.EligibleRequests, report.DeletedRequests, report.DeleteBatches, report.ScannedCredits, report.BacklogDrained, report.BacklogCandidateCredits, report.HeldRequests, report.WatermarkCreditID, report.LapsCompleted, report.LapEligibleRequests, report.LastLapEligibleRequests, report.LastLapOverdueRequests, report.LastLapSkipSummary(), report.AutoVacuumModes(), report.ArchiveBytes, report.ArchiveFreeBytes, report.ArchiveDiskBytes, report.Error)
 }
 
 // StartEvidenceRetention runs retention daily at 03:00 UTC, away from the
@@ -2840,6 +2907,8 @@ func (s *Store) StartEvidenceRetention(ctx context.Context, logf func(EvidenceRe
 				}
 			}
 			if ropts, ok := s.ledgerRollupOptions(); ok && ropts.Enabled {
+				// The rollup logs only when it finishes; this shows a run in progress.
+				log.Print("ledger rollup: level=info status=started")
 				report, err := s.RunLedgerRollup(ctx, ropts)
 				for _, f := range rollupLogf {
 					if f != nil {

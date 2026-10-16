@@ -1,13 +1,13 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.4.8
+Version: v0.4.9
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
 
-### v0.4.8
+### v0.4.9
 
 Issue #1644: compute-integrity earnings hold. Adds R-16
 (`SPEC-022-R016`). When SPEC-036 FR-23 confirms that a provider did not serve
@@ -21,7 +21,23 @@ exactly the credits the hold removed and creates no new money. R-15.9 adds
 billing contract 7, recorded with the first hold. A held credit is not
 payable, so R-15.2 keeps its evidence hot; a credit tombstoned under R-15.6
 before a hold opened is withheld through the same predicate. This version
-follows v0.4.7.
+follows v0.4.8.
+
+### v0.4.8
+
+Issue #1979: `backlog_drained` means caught up. Under steady traffic every
+nightly lap finds the requests that crossed the R-15.2 finality point since
+the previous run, so "the last completed lap found no eligible request"
+never held and the one-time `auto_vacuum = INCREMENTAL` conversion stayed
+gated. R-15.5 now reports the backlog drained when the last completed lap
+selected no overdue request: one the ledger walk selected (a held request
+whose hold cleared is never overdue) whose credits were all created, and
+whose verdicts all closed, before the caught-up horizon, the finality point
+minus 24 hours (the nightly interval) and `run_budget_minutes`. Each run
+reports the count (`last_lap_overdue_requests`). A lap already in progress
+when the count is added reports it unknown and never drained. Selection,
+holds, archive verification, deletion, and every never-touched class are
+unchanged. This version follows v0.4.7.
 
 ### v0.4.7
 
@@ -2257,8 +2273,16 @@ early.
 Each run reports:
 
 - why it stopped (`stop_reason`);
-- whether the last completed lap found no eligible request
-  (`backlog_drained`, persisted across runs);
+- whether retention is caught up (`backlog_drained`, persisted across
+  runs): the last completed lap selected no overdue request. A request is
+  overdue when the ledger walk selected it, not the re-check of a hold, and
+  every credit was created, and every verdict closed, before the caught-up
+  horizon: the finality point T minus 24 hours (the nightly interval) and
+  `run_budget_minutes` (a pass may start that much later in the run). A
+  request that became eligible since the previous run, or a hold that
+  cleared, is not overdue, so a caught-up lap may still select requests;
+- the last completed lap's overdue count (`last_lap_overdue_requests`; -1
+  when no lap completed, or when the lap began before the count existed);
 - the watermark, the lap counters, and the last lap's skip counts by reason,
   which are the expected non-zero floor of a drained backlog;
 - the held requests plus the settled, unarchived credits above the
@@ -2372,7 +2396,7 @@ database at open. Until then the database stays readable by contract 4.
 payable totals or payout revalidation, so it would under-report earnings and
 void a `ready` payout whose credits rolled up. Contract 6 is recorded in the
 first rollup transaction.
-(v0.4.8) A contract-6 coordinator does not read R-16 compute-integrity holds,
+(v0.4.9) A contract-6 coordinator does not read R-16 compute-integrity holds,
 so it would pay held credits. Contract 7 is recorded in the transaction that
 writes the first hold (R-16.8).
 
@@ -2869,13 +2893,15 @@ through it; the network funds it.
 - **AC-022-74 (v0.4.0):** A retention-capable coordinator records billing
   compatibility floor 4 at open and in every delete transaction, so a
   coordinator below contract 4 refuses to open the database.
-- **AC-022-75 (v0.4.3):** Retention is enabled by default with the default
+- **AC-022-75 (v0.4.3, v0.4.8):** Retention is enabled by default with the default
   archive directory next to the database. A run drains the eligible backlog
   along a scan lap that starts at the archived low watermark, in archives of
   at most `max_requests_per_run` requests deleted `batch_size` requests per
   transaction. It stops when the lap completes or its `run_budget_minutes`
   budget is spent, and reports whether the last completed lap drained the
-  backlog. A request that can still become eligible stays in a holds table
+  backlog. (v0.4.8) The backlog counts as drained when that lap selected no
+  overdue request, so a lap that only finds requests that became eligible
+  since the previous run, or holds that cleared, reports drained. A request that can still become eligible stays in a holds table
   that every lap re-checks, or, when too young, below the watermark. A run that would write a new archive below the archive
   filesystem's free-space floor exports and deletes nothing.
 - **AC-022-76 (v0.4.5):** A verdict audit payload carries every R-11.1 field
