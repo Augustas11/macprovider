@@ -10,10 +10,10 @@ import XCTest
 final class GLM5NextPagedKVWiringTests: XCTestCase {
     typealias CacheKind = PagedKVSharedForwardBackend.CacheKind
 
-    /// The admitted artifact's layout: 45 layers, a sparse layer every fourth
-    /// slot plus the last (11 sparse, 34 KDA), `index_topk` 2048, `index_kpool` 4.
+    /// The admitted artifact's `text_config.layer_types`: 45 layers, sparse at
+    /// 3, 7, ..., 43 (11 sparse, 34 KDA), `index_topk` 2048, `index_kpool` 4.
     static let layerTypes: [String] = (0 ..< 45).map {
-        ($0 % 4 == 3 || $0 == 44) ? "deepseek_sparse_attention" : "linear_attention"
+        $0 % 4 == 3 ? "deepseek_sparse_attention" : "linear_attention"
     }
 
     static func config(
