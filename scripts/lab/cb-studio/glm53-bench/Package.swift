@@ -1,6 +1,7 @@
 // swift-tools-version: 6.0
 // GLM-5.3-Flash native decode lab bench (epic #2029). Builds against the
-// mlx-swift-lm fork revision the provider pins; it reads module internals,
+// mlx-swift-lm fork (a revision at or after the provider's pin; newer ones
+// only add lab parameters with unchanged defaults). It reads module internals,
 // so build with testing enabled:
 //   swift build -c release --build-system native -Xswiftc -enable-testing
 // and place the core's mlx.metallib next to .build/release/GLMBench.
@@ -12,7 +13,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e2c8ed2a48c72e0b414e357513b789b12a42ebd1")
+            revision: "378aaf7618891e6903d207af7fb9906f6119070f")
     ],
     targets: [
         .executableTarget(

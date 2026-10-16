@@ -8,7 +8,12 @@
 //                    use --module-census / --census for dispatch counts)
 //   --oracle F.json  teacher-forced top-16 logit diffs vs a glm-parity oracle
 //                    for all-fused, hyper-connection op path and all-op configs
-//   --gpu-profile    GPU busy vs wall time per step; with MLX_MAX_OPS_PER_BUFFER=0,
+//   --qmv-chain      200 dependent one-token qmv per bit width (no model load);
+//                    compare with glm53_qmv_chain.py on another MLX core
+//   --qmv-sweep      projection / MoE kernel bandwidth per layout (no model load;
+//                    run with MLX_MAX_OPS_PER_BUFFER=0)
+//   --gpu-profile    GPU busy vs wall time per step (pipelined decode; --sync for
+//                    synchronous steps); with MLX_MAX_OPS_PER_BUFFER=0,
 //                    GPU time, bound bytes and bandwidth per kernel and family
 //   --census         compute dispatches per decode step by kernel name
 //   --module-census  dispatches per module (MoE, dense FFN, KDA, DSA, head)
@@ -42,6 +47,119 @@ let syncEach = args.contains("--sync")
 Memory.cacheLimit = 4096 << 20
 if ["--census", "--module-census", "--gpu-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
+if args.contains("--qmv-chain") {
+    // 200 dependent one-token quantized matmuls in one eval (decode-like:
+    // back-to-back in a command buffer), x_{i+1} = y_i, per bit width. Same
+    // method as glm53_qmv_chain.py for comparing cores; wired like it.
+    let chainCap = GPU.maxRecommendedWorkingSetBytes() ?? 0
+    _ = await WiredMemoryTicket(
+        size: chainCap, policy: MLXLMCommon.WiredFixedPolicy(limit: chainCap), manager: .shared,
+        kind: .active
+    ).start()
+    for bits in [8, 6, 5, 4] {
+        let n = 8192
+        let w = MLXRandom.randInt(low: 0, high: Int32.max, [n, n * bits / 32]).asType(.uint32)
+        let sc = (0.0001 + 0.0001 * MLXRandom.uniform(0 ..< 1, [n, n / 64])).asType(.bfloat16)
+        let bi = (-0.001 * MLXRandom.uniform(0 ..< 1, [n, n / 64])).asType(.bfloat16)
+        var x = (0.1 * MLXRandom.normal([1, n])).asType(.bfloat16)
+        eval(w, sc, bi, x)
+        func chain(_ count: Int) -> MLXArray {
+            var y = x
+            for _ in 0 ..< count {
+                y = quantizedMatmul(y, w, scales: sc, biases: bi, transpose: true, groupSize: 64, bits: bits)
+            }
+            return y
+        }
+        eval(chain(10))
+        var best = Double.infinity
+        for _ in 0 ..< 3 {
+            let t = Date()
+            eval(chain(200))
+            best = min(best, Date().timeIntervalSince(t))
+        }
+        let moved = Double(w.nbytes + sc.nbytes + bi.nbytes)
+        print(String(format: "chain: bits=%d %.1f us/call %.1f GB/s", bits, best / 200 * 1e6, moved * 200 / best / 1e9))
+        x = MLXArray(0)
+    }
+    exit(0)
+}
+if args.contains("--qmv-sweep") {
+    // Bandwidth of the decode projections per kernel layout, on random packed
+    // weights of the artifact's shapes and bit widths (no model load). Run with
+    // MLX_MAX_OPS_PER_BUFFER=0: GPU time per call from one-kernel buffers.
+    DispatchCensus.install()
+    func packed(_ shape: [Int], _ k: Int, _ bits: Int) -> GLM5NextAffine {
+        let lead = Array(shape.dropLast())
+        let w = MLXRandom.randInt(low: 0, high: Int32.max, lead + [shape.last! * bits / 32])
+            .asType(.uint32)
+        let s = (0.001 + 0.001 * MLXRandom.uniform(0 ..< 1, lead + [k / 64])).asType(.bfloat16)
+        let b = (-0.01 * MLXRandom.uniform(0 ..< 1, lead + [k / 64])).asType(.bfloat16)
+        eval(w, s, b)
+        return GLM5NextAffine(weight: w, scales: s, biases: b, bits: bits, groupSize: 64)
+    }
+    func bytes(_ p: GLM5NextAffine) -> Double {
+        Double(p.weight.nbytes + p.scales.nbytes + p.biases.nbytes)
+    }
+    func time(_ label: String, _ moved: Double, reps: Int = 30, _ f: () -> MLXArray) {
+        eval(f()); eval(f())
+        DispatchCensus.reset()
+        DispatchCensus.enabled = true
+        for _ in 0 ..< reps { eval(f()) }
+        DispatchCensus.enabled = false
+        DispatchCensus.group.wait()
+        let calls = DispatchCensus.gpuCount.values.reduce(0, +)
+        let us = DispatchCensus.gpuTime.values.reduce(0, +) * 1e6 / Double(reps)
+        print(String(format: "sweep: %-34@ %8.1f us/call %7.1f GB/s  (%d kernels per call)", label, us, moved / us / 1e3, calls / reps))
+    }
+    let dense: [(String, Int, Int, Int)] = [
+        ("kda_qkv 8192x4096 b8", 8192, 4096, 8), ("kda_qkv 8192x4096 b5", 8192, 4096, 5),
+        ("o_proj 4096x8192 b8", 4096, 8192, 8), ("o_proj 4096x8192 b6", 4096, 8192, 6),
+        ("dsa_q_a 1536x4096 b8", 1536, 4096, 8), ("mlp_up 12288x4096 b8", 12288, 4096, 8),
+        ("mlp_down 4096x12288 b8", 4096, 12288, 8), ("lm_head 154880x4096 b8", 154880, 4096, 8),
+    ]
+    for (name, n, k, bits) in dense {
+        let p = packed([n, k], k, bits)
+        let x = (0.5 * MLXRandom.normal([1, k])).asType(.bfloat16)
+        eval(x)
+        time("mlx_qmv " + name, bytes(p)) {
+            quantizedMatmul(x, p.weight, scales: p.scales, biases: p.biases, transpose: true,
+                            groupSize: 64, bits: bits)
+        }
+        for (rps, nsg) in [(4, 2), (4, 4), (4, 8), (8, 2), (8, 4), (2, 4), (2, 8)] where n % (rps * nsg) == 0 {
+            time("multi_qmv r\(rps)s\(nsg) " + name, bytes(p)) { glm5NextMultiQMV(x, [p], rps: rps, nsg: nsg)![0] }
+        }
+    }
+    // The KDA input group: q, k, v, f_a, g_a, b in one call.
+    do {
+        let parts = [8192, 8192, 8192, 128, 128, 64].map { packed([$0, 4096], 4096, 8) }
+        let x = (0.5 * MLXRandom.normal([1, 4096])).asType(.bfloat16)
+        let moved = parts.map(bytes).reduce(0, +)
+        for (rps, nsg) in [(4, 2), (4, 4), (8, 2), (2, 4)] {
+            time("multi_qmv r\(rps)s\(nsg) kda_group b8", moved) { glm5NextMultiQMV(x, parts, rps: rps, nsg: nsg)![0] }
+        }
+    }
+    // MoE experts: 288 x 4-bit routed, 8-bit shared, top-8.
+    do {
+        let gate = packed([288, 2048, 4096], 4096, 4), up = packed([288, 2048, 4096], 4096, 4)
+        let down = packed([288, 4096, 2048], 2048, 4)
+        let sg = packed([2048, 4096], 4096, 8), su = packed([2048, 4096], 4096, 8)
+        let sd = packed([4096, 2048], 2048, 8)
+        let x = (0.5 * MLXRandom.normal([1, 4096])).asType(.bfloat16)
+        let sig = MLXRandom.uniform(0 ..< 1, [1, 288])
+        let biased = sig + 0.01 * MLXRandom.normal([1, 288])
+        eval(x, sig, biased)
+        let per = { (p: GLM5NextAffine) in bytes(p) / 288.0 }
+        let moved = 8 * (per(gate) + per(up) + per(down)) + bytes(sg) + bytes(su) + bytes(sd)
+        for (rps, nsg) in [(4, 2), (4, 4), (8, 2), (2, 4), (4, 8)] {
+            time("moe r\(rps)s\(nsg) (gate_up + down)", moved) {
+                glm5NextMoEExperts(x, sig: sig, biased: biased, topK: 8, scaling: 2.5, normalize: true,
+                                   limit: 10, gate: gate, up: up, down: down, sharedGate: sg,
+                                   sharedUp: su, sharedDown: sd, rps: rps, nsg: nsg)!
+            }
+        }
+    }
+    exit(0)
+}
 let configData = try Data(contentsOf: dir.appendingPathComponent("config.json"))
 let base = try JSONDecoder().decode(BaseConfiguration.self, from: configData)
 let config = try JSONDecoder().decode(GLM5NextConfiguration.self, from: configData)
@@ -440,9 +558,22 @@ if args.contains("--gpu-profile") {
     DispatchCensus.reset()
     DispatchCensus.enabled = true
     let t0 = Date()
-    for _ in 0 ..< steps {
-        tok = argMax(model(tok.reshaped(1, 1), cache: cache)[0, -1, 0...], axis: -1)
-        eval(tok)
+    if args.contains("--sync") {
+        for _ in 0 ..< steps {
+            tok = argMax(model(tok.reshaped(1, 1), cache: cache)[0, -1, 0...], axis: -1)
+            eval(tok)
+        }
+    } else {
+        // Pipelined as TokenIterator: encode step n + 1 while step n runs.
+        var pending = tok
+        asyncEval(pending)
+        for _ in 0 ..< steps {
+            let next = argMax(model(pending.reshaped(1, 1), cache: cache)[0, -1, 0...], axis: -1)
+            asyncEval(next)
+            _ = pending.item(Int.self)
+            pending = next
+        }
+        eval(pending)
     }
     let wall = Date().timeIntervalSince(t0) / Double(steps)
     DispatchCensus.enabled = false
