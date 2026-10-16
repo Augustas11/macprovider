@@ -331,7 +331,7 @@ mkdir -p "$tmp/vacuum"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/flock"
 chmod +x "$tmp/bin/flock"
 VDB="$tmp/vacuum/coordinator.db"
-sqlite3 "$VDB" "PRAGMA journal_mode=WAL; CREATE TABLE settlement_evidence_retention_state (id INTEGER PRIMARY KEY, laps_completed INTEGER, last_lap_eligible_requests INTEGER, last_lap_completed_at_utc TEXT); INSERT INTO settlement_evidence_retention_state VALUES (1, 3, 12, '2026-10-10T03:20:00Z'); CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(50000));" >/dev/null
+sqlite3 "$VDB" "PRAGMA journal_mode=WAL; CREATE TABLE settlement_evidence_retention_state (id INTEGER PRIMARY KEY, laps_completed INTEGER, last_lap_eligible_requests INTEGER, last_lap_completed_at_utc TEXT); INSERT INTO settlement_evidence_retention_state VALUES (1, 3, 0, '2026-10-10T03:20:00Z'); CREATE TABLE t (v BLOB); INSERT INTO t VALUES (randomblob(50000));" >/dev/null
 sqlite3 "$VDB.route-snapshots" "CREATE TABLE j (v BLOB); INSERT INTO j VALUES (randomblob(20000));" >/dev/null
 VAUDIT="$tmp/vacuum/coordinator-audit.db"
 sqlite3 "$VAUDIT" "CREATE TABLE audit_log (v BLOB); INSERT INTO audit_log VALUES (randomblob(20000));" >/dev/null
@@ -348,11 +348,27 @@ health v9.0.0 "$LIVE"
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task without a database path" scripts/ops/pearl-runtime.sh status
 expect_next vacuum_mode:blocked
 export PEARL_COORDINATOR_DB="$VDB"
+# A coordinator without the overdue count stays blocked, even at 0 eligible.
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a coordinator without the overdue count" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+# Unknown (-1, a lap begun before the count existed) stays blocked.
+sqlite3 "$VDB" "ALTER TABLE settlement_evidence_retention_state ADD COLUMN last_lap_overdue_requests INTEGER NOT NULL DEFAULT -1; UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours')" >/dev/null
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task with an unknown overdue count" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_eligible_requests = 117000, last_lap_overdue_requests = 12" >/dev/null
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task before the drain" scripts/ops/pearl-runtime.sh status
 expect_next drain_gate:blocked
+case "$(next_field reason)" in *"last_lap_overdue_requests=12"*) ok ;; *) bad "drain gate reason: $(next_field reason)" ;; esac
 PEARL_RUNTIME_TASK=retention-vacuum-conversion MACPROVIDER_OPS_OWNER=t run_rc 3 "conversion refused before the drain" scripts/ops/pearl-runtime.sh next --run
 if [ "$(sqlite3 "$VDB" 'PRAGMA auto_vacuum;')" = 0 ]; then ok; else bad "conversion ran before the drain"; fi
-sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET laps_completed = 4, last_lap_eligible_requests = 0" >/dev/null
+# Caught up: the last lap still found a night's newly eligible requests, but
+# none overdue.
+# A caught-up lap that completed long ago does not open the gate.
+sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET laps_completed = 4, last_lap_eligible_requests = 48000, last_lap_overdue_requests = 0, last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-3 days')" >/dev/null
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after a stale caught-up lap" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
+case "$(next_field reason)" in *"within 36 hours"*) ok ;; *) bad "stale drain gate reason: $(next_field reason)" ;; esac
+sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 hours')" >/dev/null
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task after the drain" scripts/ops/pearl-runtime.sh status
 expect_next convert:mutate
 case "$(next_field expected_downtime)" in *"coordinator stopped"*VACUUM*) ok ;; *) bad "conversion downtime: $(next_field expected_downtime)" ;; esac

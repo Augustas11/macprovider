@@ -97,9 +97,20 @@ the end of the ledger.
 
 When a lap completes, the watermark moves up and the run stops:
 `stop_reason` is `drained` when that lap found no eligible request, else
-`lap_complete`. The next run's lap shows whether the backlog drained.
-`backlog_drained` is persisted: it is true while the last completed lap
-found nothing eligible.
+`lap_complete`. `backlog_drained` is persisted and means caught up: it is
+true while the last completed lap selected no overdue request. A request is
+overdue when the ledger walk selected it (not a hold that cleared) and it
+was already eligible at the caught-up horizon, the finality point minus 24
+hours and `run_budget_minutes`. Under steady traffic every nightly lap
+finds the requests that crossed the finality point since the previous run;
+they are not a backlog, so a caught-up lap reports drained with a non-zero
+`last_lap_eligible_requests` and `last_lap_overdue_requests=0`. After the
+upgrade that adds the count, a lap already in progress reports
+`last_lap_overdue_requests=-1` (unknown) and the next lap decides. The
+count compares stamps, so one not-drained night after coordinator downtime
+across 03:00 UTC or a stalled nightly reconcile is expected; the next lap
+decides. The conversion gate also needs that lap to have completed within
+36 hours.
 
 ### Optional off-host verify command contract
 
@@ -144,7 +155,9 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
      or `refused` (`status` names the refusal; `archives` and
      `deleted_requests` still count what the run deleted before it);
    - `backlog_drained`, `laps_completed`, `lap_eligible_requests`,
-     `last_lap_eligible_requests`, `watermark_credit_id`, and
+     `last_lap_eligible_requests`, `last_lap_overdue_requests` (the
+     eligible requests past the caught-up horizon that decide
+     `backlog_drained`), `watermark_credit_id`, and
      `held_requests` (the holds table);
    - `last_lap_skipped`: the last completed lap's skip counts by reason;
    - `backlog_candidate_credits`: the held requests plus the settled,
@@ -156,7 +169,7 @@ got="$(ssh <backup-host> sha256sum "<backup-dir>/$(basename "$archive")" | cut -
    its floor is the held requests and the too-young credits, and
    `last_lap_skipped` names them by reason. `backlog_drained=true` is
    the drain signal. A watermark that climbs and a
-   `last_lap_eligible_requests` that falls night over night mean draining. To hold
+   `last_lap_overdue_requests` that falls night over night mean draining. To hold
    retention off for this deploy, set `billing.retention.enabled: false`
    in `coordinator.yaml` before the runtime train step.
 
