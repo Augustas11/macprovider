@@ -28,6 +28,7 @@ Files in STATE_DIR steer it:
                           run updates (one more lap, overdue = retention_overdue, now)
   retention_overdue       last_lap_overdue_requests of the next run (default 0)
   retention_no_report     a started run never publishes its report
+  retention_status        status of the next report (default deleted)
   retention_report.json   the last run's report (written here; ?report=last)
   retention_posts         number of run requests that started a run (written here)
 """
@@ -77,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
         open(os.path.join(state, "retention_posts"), "w").write(str(posts))
         if read("retention_no_report") is not None:
             return self.send(202, '{"status": "started"}')
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
         overdue = int(read("retention_overdue", "0"))
         laps = 1
         db = read("retention_db")
@@ -89,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
                  "last_lap_overdue_requests = %d, last_lap_eligible_requests = 900, last_lap_completed_at_utc = '%s' WHERE id = 1; "
                  "SELECT laps_completed FROM settlement_evidence_retention_state WHERE id = 1;" % (overdue, now)],
                 capture_output=True, text=True, check=True).stdout.strip())
-        report = {"status": "deleted", "dry_run": False, "started_at_utc": now, "finished_at_utc": now,
+        report = {"status": read("retention_status") or "deleted", "dry_run": False, "started_at_utc": now, "finished_at_utc": now,
                   "deleted_requests": 42, "archives": 1, "stop_reason": "lap_complete",
                   "backlog_drained": overdue == 0, "laps_completed": laps, "last_lap_overdue_requests": overdue,
                   "last_lap_eligible_requests": 900, "last_lap_completed_at_utc": now,

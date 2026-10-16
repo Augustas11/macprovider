@@ -490,14 +490,29 @@ print("yes" if s-d.timedelta(minutes=10)<=n<s else "no")' "$RR_NIGHTLY")"
     return
   fi
   step window "done" "outside the nightly start window"
+  # Done only for a run that completed without refusal or error and whose
+  # reported lap is caught up and under 36 hours old: backlog_drained alone
+  # is carried over from an older lap when a run stops before its own lap.
   local fresh=false
   if marker_done "$RETENTION_SCOPE" run &&
-    [ -n "$(find "$(marker_path "$RETENTION_SCOPE" run)" -mmin -2160 2>/dev/null)" ] &&
-    [ "$(marker_field "$RETENTION_SCOPE" run 'd.get("backlog_drained")')" = true ]; then
+    python3 -I - "$(marker_path "$RETENTION_SCOPE" run)" <<'PY'
+import datetime as d, json, sys
+r = json.load(open(sys.argv[1]))
+v = r.get("last_lap_completed_at_utc") or ""
+try:
+    t = d.datetime.strptime(v[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)
+except ValueError:
+    sys.exit(1)
+age = (d.datetime.now(d.timezone.utc) - t).total_seconds()
+ok = (r.get("backlog_drained") is True and r.get("last_lap_overdue_requests") == 0 and not r.get("error")
+      and not str(r.get("status", "")).startswith("refused") and v.endswith("Z") and 0 <= age <= 129600)
+sys.exit(0 if ok else 1)
+PY
+  then
     fresh=true
   fi
   if [ "$fresh" = true ]; then
-    step run "done" "the last on-demand run (under 36 hours old) reports backlog_drained"
+    step run "done" "the last on-demand run reports a caught-up lap under 36 hours old"
     set_next "done" "done" "retention is caught up; next: PEARL_RUNTIME_TASK=retention-vacuum-conversion" ""
     return
   fi
@@ -532,6 +547,10 @@ for k in ("status","deleted_requests","backlog_drained","last_lap_overdue_reques
     if k in d: print("%s: %s" % (k, json.dumps(d[k]) if isinstance(d[k], bool) else d[k]))' "$extra"
   mark_done "$RETENTION_SCOPE" run "on-demand retention run" "$extra"
   log "recorded the run in $(marker_path "$RETENTION_SCOPE" run)"
+  # A refusal or error is recorded (its lap fields are still the live state)
+  # but the step failed; the task offers the run again.
+  python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(1 if d.get("error") or d["status"].startswith("refused") else 0)' "$extra" ||
+    die "the retention run ended with status $(json_field_str "$extra" 'd["status"]'); read its report above"
 }
 
 ci_layout() {
@@ -627,10 +646,13 @@ gather_compute_integrity() {
   fi
   local scheduled=false
   if [ "$path" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ -n "$installed" ] && [ "$enabled" = true ] &&
-    [ "$invalid" = false ] && [[ "$loaded" =~ ^[0-9]+$ ]] && [ "$loaded" -gt 0 ]; then
+    [ "$invalid" = false ] && [[ "$loaded" =~ ^[0-9]+$ ]] && [ "$loaded" -gt 0 ] &&
+    [ "$(json_field_str "$facts" 'd["loaded_matches_installed"]')" = true ]; then
     scheduled=true
   fi
-  if [ "$scheduled" = true ] && { [ -z "$CI_SHA" ] || [ "$installed" = "$CI_SHA" ]; }; then
+  # A local corpus that is set must be valid and be the installed one; unset
+  # (another machine) reads Pearl's state alone.
+  if [ "$scheduled" = true ] && { [ -z "${COMPUTE_INTEGRITY_CORPUS:-}" ] || [ "$installed" = "$CI_SHA" ]; }; then
     step enable "done" ""
     step scheduled "done" "scheduling enabled with $loaded private prompts (sha256 $installed)"
     set_next "done" "done" "compute-integrity scoring is scheduled with the private corpus" ""
@@ -661,9 +683,18 @@ ci_enable_internal() {
   local staged
   staged="$(dirname "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH")/.compute-integrity-corpus.staging"
   # noclobber after rm: the staged copy is a new root-only file, never a link target.
-  pearl_ssh "set -eu; umask 077; s=$staged; rm -f -- \"\$s\"; set -o noclobber; cat > \"\$s\"" < "$CI_CORPUS_REAL"
-  pearl_ssh "python3 - apply-compute-integrity $CI_LAYOUT --ci-staged $staged --ci-sha256 $CI_SHA" \
-    < "$OPS_LIB_DIR/pearl-cli-config.py"
+  local rc=0
+  pearl_ssh "set -eu; umask 077; s=$staged; rm -f -- \"\$s\"; set -o noclobber; cat > \"\$s\"" < "$CI_CORPUS_REAL" || rc=$?
+  if [ "$rc" = 0 ]; then
+    pearl_ssh "python3 - apply-compute-integrity $CI_LAYOUT --ci-staged $staged --ci-sha256 $CI_SHA" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    # The helper removes the staged copy itself; this covers a failure before
+    # it ran (ssh, interpreter). Best effort: report the original failure.
+    pearl_ssh "rm -f -- $staged" </dev/null || log "could not remove $staged on Pearl; remove it by hand"
+    return "$rc"
+  fi
 }
 
 gather() {

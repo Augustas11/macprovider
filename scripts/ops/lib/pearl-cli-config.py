@@ -516,7 +516,7 @@ def validate_corpus_file(path):
         raw = f.read(CORPUS_MAX_BYTES + 1)
     _, count = parse_corpus(raw)
     return {"prompts": count, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-            "private": st.st_mode & 0o077 == 0}
+            "private": st.st_mode & 0o7777 == 0o600}
 
 
 def load_effective(args):
@@ -589,6 +589,8 @@ def file_sha256(path):
 
 
 def ci_facts(args):
+    # The files read must be the ones the running coordinator was started with.
+    running(args)
     base, overlay = load_effective(args)
     b, o = ci_scoring(base), ci_scoring(overlay)
     enabled = o.get("enabled", b.get("enabled", True))
@@ -599,13 +601,26 @@ def ci_facts(args):
         "overlay_sets_compute_integrity": "compute_integrity" in overlay,
         "kill_switch": enabled is False,
         "installed_sha256": file_sha256(args.ci_corpus),
-        # Never the corpus version: the journal check below compares it on Pearl.
+        # The running process loaded the corpus now installed (prompt count
+        # and version); the version itself is never printed.
+        "loaded_matches_installed": installed_matches(args.ci_corpus, j),
         "scoring_enabled": j["scoring_enabled"],
         "corpus_loaded_prompts": j["corpus_loaded_prompts"],
         "corpus_invalid": j["corpus_invalid"],
         "private_corpus_missing": j["private_corpus_missing"],
     }
     print(json.dumps(facts, sort_keys=True))
+
+
+def installed_matches(path, j):
+    if not os.path.isfile(path) or os.path.islink(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            version, prompts = parse_corpus(f.read(CORPUS_MAX_BYTES + 1))
+    except (OSError, Refused):
+        return False
+    return j["corpus_loaded_prompts"] == prompts and j["corpus_loaded_version"] == version
 
 
 def ci_overlay_plan(text, overlay, corpus_path):
@@ -652,13 +667,14 @@ def ci_live(args, prompts, version):
         time.sleep(1)
 
 
-def write_corpus(path, data, gid):
+def write_corpus(path, data, gid, uid=None, mode=0o640):
     """Install the corpus root-owned (this process), group = the coordinator's
-    group, mode 0640: the coordinator runs as its own user and must read it."""
+    group, mode 0640: the coordinator runs as its own user and must read it.
+    A rollback passes the replaced file's own owner, group and mode."""
     fd, tmp = tempfile.mkstemp(prefix=".compute-integrity-corpus-", dir=os.path.dirname(path))
     try:
-        os.fchown(fd, os.geteuid(), gid)
-        os.fchmod(fd, 0o640)
+        os.fchown(fd, os.geteuid() if uid is None else uid, gid)
+        os.fchmod(fd, mode)
         os.write(fd, data)
         os.fsync(fd)
     finally:
@@ -702,11 +718,13 @@ def apply_compute_integrity(args):
             new_overlay = ci_overlay_plan(original_overlay.decode(), overlay, dest).encode()
             original_corpus = None
             if os.path.exists(dest):
+                st = os.lstat(dest)
                 with open(dest, "rb") as f:
-                    original_corpus = f.read()
-            result = {"changed": new_overlay != original_overlay or original_corpus != raw,
+                    original_corpus = (f.read(), st.st_uid, st.st_gid, st.st_mode & 0o7777)
+            result = {"changed": new_overlay != original_overlay or original_corpus is None
+                      or original_corpus[0] != raw,
                       "prompts": prompts, "corpus_path": dest}
-            if not result["changed"] and applied(args) and ci_loaded(ci_journal(args.unit), prompts, version):
+            if not result["changed"] and (original_corpus[1:] == (os.geteuid(), gid, 0o640)) and applied(args) and ci_loaded(ci_journal(args.unit), prompts, version):
                 # Disk holds the requested state and the running coordinator
                 # loaded exactly it. Otherwise a validated restart loads it.
                 print(json.dumps(result, sort_keys=True))
@@ -747,8 +765,17 @@ def apply_compute_integrity(args):
                     if new_overlay != original_overlay:
                         install(write_like(args.overlay, original_overlay, args.overlay), args.overlay)
                     restore_corpus(dest, raw, original_corpus, gid)
-                    subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
+                    back = subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
+                    if back.returncode != 0:
+                        raise Refused("the rollback restart failed; the overlay and corpus are restored on disk "
+                                      "but not proven live: check the coordinator now")
                     healthz(args.healthz)
+                    deadline = time.monotonic() + 30
+                    while not applied(args):
+                        if time.monotonic() > deadline:
+                            raise Refused("after the rollback restart the coordinator did not log the restored "
+                                          "config as its boot config: check the coordinator now")
+                        time.sleep(1)
                     result["restored"] = True
                 raise
             result["restarted"] = True
@@ -767,8 +794,9 @@ def restore_corpus(dest, ours, original, gid):
             return
     if original is None:
         os.unlink(dest)
-    elif original != ours:
-        write_corpus(dest, original, gid)
+    else:
+        data, uid, ogid, mode = original
+        write_corpus(dest, data, ogid, uid=uid, mode=mode)
 
 
 def main(argv):

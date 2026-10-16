@@ -42,11 +42,20 @@ class Refused(Exception):
 
 
 def utc(text):
-    """Parse the coordinator's RFC 3339 UTC text (fraction optional)."""
-    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?Z$", text or "")
+    """The coordinator's RFC 3339 UTC text (fraction optional) as
+    (datetime, nanoseconds within the second), or None."""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$", text if isinstance(text, str) else "")
     if not m:
         return None
-    return datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    t = datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    return t, int((m.group(2) or "0").ljust(9, "0"))
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The operator key goes to the loopback admin URL only, never a redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
 
 
 def nightly_window(now, hhmm):
@@ -107,10 +116,24 @@ def run(args):
         raise Refused("the nightly retention run starts at %s UTC; start an on-demand run outside the ten minutes before it"
                       % args.nightly_utc)
     key = operator_key(args)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     base = args.admin_url.rstrip("/")
-    # The report of this run started at or after this instant (Pearl's clock).
-    t0 = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) - datetime.timedelta(seconds=1)
+    # The route returns no run id. This run's report is the first one that
+    # started after the previous report and at or after this instant, at full
+    # precision on Pearl's own clock (the coordinator's clock): an older report
+    # can never be taken for it. Another run that won the lock in the gap
+    # would be a real run that also finished after the POST.
+    previous = None
+    code, body = call(opener, "GET", base + REPORT_PATH, key)
+    if code == 200:
+        try:
+            previous = utc(json.loads(body).get("started_at_utc"))
+        except (ValueError, AttributeError):
+            previous = None
+    elif code != 404:
+        raise RuntimeError("the report route answered HTTP %d" % code)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    t0 = (now.replace(microsecond=0), now.microsecond * 1000)
     code, body = call(opener, "POST", base + RUN_PATH, key)
     reason = error_code(body)
     if code == 409 and reason == "retention_busy":
@@ -122,7 +145,7 @@ def run(args):
     if code != 202:
         raise RuntimeError("the run route answered HTTP %d %s" % (code, reason))
     sys.stderr.write("retention run started at %s; waiting for its report (at most %d s)\n"
-                     % (t0.strftime("%Y-%m-%dT%H:%M:%SZ"), args.wait_max_s))
+                     % (t0[0].strftime("%Y-%m-%dT%H:%M:%SZ"), args.wait_max_s))
     deadline = time.monotonic() + args.wait_max_s
     while True:
         code, body = call(opener, "GET", base + REPORT_PATH, key)
@@ -132,8 +155,9 @@ def run(args):
             except ValueError:
                 report = {}
             started = utc(report.get("started_at_utc") if isinstance(report, dict) else None)
-            if started is not None and started >= t0 and report.get("finished_at_utc"):
-                return report
+            if started is not None and started >= t0 and (previous is None or started > previous) \
+                    and report.get("finished_at_utc"):
+                return report, key
         elif code != 404:
             raise RuntimeError("the report route answered HTTP %d" % code)
         if time.monotonic() > deadline:
@@ -142,7 +166,7 @@ def run(args):
         time.sleep(args.poll_s)
 
 
-def summary(report):
+def summary(report, key):
     out = {}
     for name, kind in FIELDS.items():
         v = report.get(name)
@@ -151,7 +175,9 @@ def summary(report):
         elif kind is bool and isinstance(v, bool):
             out[name] = v
         elif kind is str and isinstance(v, str):
-            # Errors may quote paths; keep the report safe for a terminal.
+            # Errors may quote paths or anything else: never the key, and
+            # only terminal-safe text.
+            v = v.replace(key, "REDACTED") if key else v
             out[name] = v if SAFE.match(v) else "(unprintable)"
     return out
 
@@ -171,7 +197,7 @@ def main(argv):
     try:
         if not re.match(r"^([01][0-9]|2[0-3]):[0-5][0-9]$", args.nightly_utc):
             raise Refused("--nightly-utc must be HH:MM")
-        print(json.dumps(summary(run(args)), sort_keys=True))
+        print(json.dumps(summary(*run(args)), sort_keys=True))
     except Refused as exc:
         sys.stderr.write("pearl-retention-run: REFUSED: %s\n" % exc)
         sys.exit(3)

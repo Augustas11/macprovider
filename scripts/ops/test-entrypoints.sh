@@ -445,10 +445,27 @@ sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_complete
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a database behind the recorded run" scripts/ops/pearl-runtime.sh status
 expect_next drain_gate:blocked
 case "$(next_field reason)" in *"must be the live coordinator's database"*) ok ;; *) bad "lagging database reason: $(next_field reason)" ;; esac
-# A recorded run older than 36 hours is offered again.
-touch -t "$(date -v-37H +%Y%m%d%H%M 2>/dev/null || date -d '-37 hours' +%Y%m%d%H%M)" "$RSCOPE/run.json"
+# A recorded lap older than 36 hours is offered again.
+python3 -c 'import datetime as d,json,sys; r=json.load(open(sys.argv[1])); r["last_lap_completed_at_utc"]=(d.datetime.now(d.timezone.utc)-d.timedelta(hours=37)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"); json.dump(r,open(sys.argv[1],"w"))' "$RSCOPE/run.json"
 PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status with a stale record" scripts/ops/pearl-runtime.sh status
 expect_next run:mutate
+# A refused run carries backlog_drained over from an older lap: recorded, the
+# step fails, and the task offers the run again.
+printf 'refused_archive_disk_low' > "$tmp/svc/retention_status"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "refused on-demand run" scripts/ops/pearl-runtime.sh next --run
+expect_err "ended with status refused_archive_disk_low"
+expect_lock_free
+if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["status"] == "refused_archive_disk_low" else 1)' "$RSCOPE/run.json"; then ok; else bad "refused run not recorded"; fi
+PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status after a refused run" scripts/ops/pearl-runtime.sh status
+expect_next run:mutate
+rm -f "$tmp/svc/retention_status"
+# An older report is never taken for this run's: with the report route
+# serving only a previous report, the run times out unrecorded.
+rm -f "$RSCOPE/run.json"
+: > "$tmp/svc/retention_no_report"
+RETENTION_RUN_WAIT_MAX_S=0 PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "an older report is not this run's" scripts/ops/pearl-runtime.sh next --run
+if [ -e "$RSCOPE/run.json" ]; then bad "an older report was recorded as this run"; else ok; fi
+rm -f "$tmp/svc/retention_no_report"
 rm -rf "$RSCOPE" "$tmp/svc/retention_report.json" "$tmp/svc/retention_overdue" "$tmp/svc/retention_db" "$tmp/svc/retention_posts"
 rm -f "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml"
 unset PEARL_COORDINATOR_ADMIN_URL RETENTION_RUN_POLL_S RETENTION_RUN_WAIT_MAX_S
@@ -547,6 +564,9 @@ if grep -q SECRET-PROMPT-TEXT "$tmp/out" "$tmp/err"; then bad "corpus content ec
 cp "$CORPUS1" "$CI_SECRETS/open.json"; chmod 644 "$CI_SECRETS/open.json"
 COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/open.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "world-readable corpus" scripts/ops/pearl-runtime.sh status
 expect_next corpus:blocked
+chmod 400 "$CI_SECRETS/open.json"
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/open.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "corpus not exactly 0600" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
 export COMPUTE_INTEGRITY_CORPUS="$CORPUS1"
 SHA1="$(shasum -a 256 "$CORPUS1" | awk '{print $1}')"
 # The kill switch is never overridden.
@@ -590,6 +610,15 @@ if [ "$(state_of scheduled)" = done ]; then ok; else bad "scheduled state: $(sta
 # Without a local corpus the live state still reads as done.
 COMPUTE_INTEGRITY_CORPUS= PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status on another machine" scripts/ops/pearl-runtime.sh status
 expect_next done:done
+# A local corpus that is set but invalid is never hidden behind done.
+COMPUTE_INTEGRITY_CORPUS="$CI_SECRETS/bad.json" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "invalid local corpus after enable" scripts/ops/pearl-runtime.sh status
+expect_next corpus:blocked
+# A corpus replaced on Pearl after the coordinator started is not what it loaded.
+cp "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" "$tmp/pearl/corpus.keep"
+cp "$CORPUS2" "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+COMPUTE_INTEGRITY_CORPUS= PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "corpus replaced behind the running coordinator" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in done) bad "a corpus the coordinator did not load reads as done" ;; *) ok ;; esac
+cp "$tmp/pearl/corpus.keep" "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"; chmod 640 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"; rm -f "$tmp/pearl/corpus.keep"
 # A new local corpus replaces the installed one; a corpus changed after status is refused.
 COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status with a new corpus" scripts/ops/pearl-runtime.sh status
 expect_next enable:mutate

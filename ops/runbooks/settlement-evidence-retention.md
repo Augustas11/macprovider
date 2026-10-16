@@ -205,17 +205,8 @@ lap cursor and writes nothing.
    an absolute `archive_dir` and reload with SIGHUP.
 2. Optional: install an off-host verify command, test it by hand on a scratch
    file, set `offhost_verify_command`, and reload with SIGHUP.
-3. Wait for the nightly run, or start one now:
-
-   ```bash
-   curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_KEY" \
-     https://<coordinator-host>/admin/ledger/settlement-evidence-retention/run
-   curl -fsS -H "Authorization: Bearer $OPERATOR_KEY" \
-     "https://<coordinator-host>/admin/ledger/settlement-evidence-retention?report=last"
-   ```
-
-   On Pearl, start it through the ops entry point instead. Expected
-   downtime: none, no restart.
+3. Wait for the nightly run, or start one now. On Pearl, start it only
+   through the ops entry point. Expected downtime: none, no restart.
 
    ```bash
    PEARL_RUNTIME_TASK=retention-run scripts/ops/pearl-runtime.sh status
@@ -234,6 +225,16 @@ lap cursor and writes nothing.
    runs after the nightly retention. A lap the on-demand run completes
    updates the same state as a nightly lap, so it opens the drain gate the
    same way.
+
+   On a lab or test coordinator (never Pearl, which would bypass the
+   live-ops lock and the nightly-window guard), call the route directly:
+
+   ```bash
+   curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_KEY" \
+     https://<coordinator-host>/admin/ledger/settlement-evidence-retention/run
+   curl -fsS -H "Authorization: Bearer $OPERATOR_KEY" \
+     "https://<coordinator-host>/admin/ledger/settlement-evidence-retention?report=last"
+   ```
 
 4. The run is done when it reports `status: deleted`, with
    `deleted_requests`, `delete_batches`, `tables.<table>.deleted_rows`,
