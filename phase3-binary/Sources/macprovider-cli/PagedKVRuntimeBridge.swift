@@ -549,12 +549,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// presented to attention as the rotating-equivalent suffix — not a
         /// ring buffer, and not sink-token keep>0.
         case slidingWindow(windowTokens: Int)
+        /// SPEC-039 v0.1.17 `glm5_next` sparse-attention layer: the MLA latent
+        /// and the indexer's pooled keys (one per `kpool` tokens) paged on the
+        /// row's one block table (`PagedMLALatentCache`).
+        case pagedMLA(kpool: Int)
 
         var usesPagedKVCache: Bool {
             switch self {
-            case .pagedAttention, .slidingWindow: true
+            case .pagedAttention, .slidingWindow, .pagedMLA: true
             case .recurrentMamba: false
             }
+        }
+
+        var isPagedMLA: Bool {
+            if case .pagedMLA = self { return true }
+            return false
         }
 
         var hasSlidingWindow: Bool {
@@ -563,6 +572,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         static func recognized(from cache: KVCache) -> CacheKind? {
+            if let latent = cache as? any GLM5NextLatentCache {
+                guard latent.kpool >= 1 else { return nil }
+                return .pagedMLA(kpool: latent.kpool)
+            }
             if cache is KVCacheSimple { return .pagedAttention }
             if cache is MambaCache { return .recurrentMamba }
             if cache is RotatingKVCache {
@@ -692,6 +705,32 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// Consecutive packed-verify groups in packed-row order, each carrying at
     /// most `maxTokens` target tokens (rows x the group's widest row), and at
     /// least one row.
+    /// Most tokens (rows x tokens per row) one shared `glm5_next` forward
+    /// carries. The GLM-5-Next fused decode kernels and quantized projections
+    /// keep a batched row bitwise equal to its serial decode only up to this
+    /// many flattened tokens; past the core's `qmv` vector limit the
+    /// projections switch to `qmm` and rows diverge (SPEC-038 FR-CB2).
+    static let pagedMLAMaxFlattenedTokensPerForward = 8
+
+    /// The flattened-token cap of a shared forward over these layers, or nil
+    /// when only the device route bound applies.
+    static func maxFlattenedTokensPerForward(cacheKinds: [CacheKind]) -> Int? {
+        cacheKinds.contains(where: \.isPagedMLA) ? pagedMLAMaxFlattenedTokensPerForward : nil
+    }
+
+    /// Rows one decode forward may carry beyond the device route bound
+    /// (`pagedMLA`: `pagedMLAMaxFlattenedTokensPerForward`); nil when only the
+    /// device bound applies. The scheduler splits larger decode steps.
+    let maxDecodeRowsPerForward: Int?
+
+    /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
+    /// forward under this backend's flattened-token cap.
+    func sharedForwardFits(rows: Int, tokensPerRow: Int) -> Bool {
+        guard let cap = maxDecodeRowsPerForward else { return true }
+        let (tokens, overflow) = rows.multipliedReportingOverflow(by: tokensPerRow)
+        return !overflow && tokens <= cap
+    }
+
     static func verifyGroups(widths: [Int], maxTokens: Int) -> [Range<Int>] {
         var groups: [Range<Int>] = []
         var start = 0
@@ -743,15 +782,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.container = container
         self.drafterContainer = drafterContainer
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
-        self.maxVerifyTokensPerForward = max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound)
+        let resolvedKinds = (cacheKinds?.isEmpty == false)
+            ? cacheKinds!
+            : Array(repeating: CacheKind.pagedAttention, count: max(1, layerCount))
+        let flattenedCap = Self.maxFlattenedTokensPerForward(cacheKinds: resolvedKinds)
+        self.maxVerifyTokensPerForward = min(
+            max(1, maxVerifyTokensPerForward ?? Self.deviceVerifyTokenBound),
+            flattenedCap ?? Int.max
+        )
+        self.maxDecodeRowsPerForward = flattenedCap
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
-        if let cacheKinds, !cacheKinds.isEmpty {
-            self.cacheKinds = cacheKinds
-        } else {
-            self.cacheKinds = Array(repeating: .pagedAttention, count: max(1, layerCount))
-        }
+        self.cacheKinds = resolvedKinds
         self.contiguousCacheBridge = contiguousCacheBridge
         self.compiledDecode = compiledDecode
     }
@@ -795,6 +838,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return try await container.perform(nonSendable: inputs) { context, inputs in
             let raggedOffsets = Self.hasRaggedPromptOffsets(inputs)
             if Self.canSharePrefillForward(inputs),
+               self.sharedForwardFits(rows: inputs.count, tokensPerRow: inputs[0].promptTokens.count),
                !raggedOffsets || self.supportsRaggedPrefillOffsets {
                 let rowStates = inputs.map {
                     self.rowState(
@@ -1624,6 +1668,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         let unavailable = ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable")
+        // SPEC-039 FR-PKV12: a `glm5_next` row serves first-turn/cache-miss
+        // requests only; no FR-CB10 grant covers a retained MLA handoff.
+        guard !cacheKinds.contains(where: \.isPagedMLA) else { throw unavailable }
         guard cacheKinds.contains(.recurrentMamba) else {
             guard recurrentCheckpoint == nil else { throw unavailable }
             let state = RowState(caches: handoff.caches, state: nil)
@@ -1655,6 +1702,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             case .pagedAttention, .slidingWindow:
                 guard let cache = attention.next() else { throw unavailable }
                 caches.append(cache)
+            case .pagedMLA:
+                throw unavailable
             case .recurrentMamba:
                 guard let state = recurrentCheckpoint.states[index], !state.isEmpty else { throw unavailable }
                 let cache = MambaCache()
@@ -1723,7 +1772,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         tokenCount: Int,
         recurrentCheckpoints: [RecurrentStateCheckpoint]
     ) async throws -> ContinuousBatchSerialConversationCache? {
-        guard cacheKinds.contains(.recurrentMamba), !recurrentCheckpoints.isEmpty else { return nil }
+        guard cacheKinds.contains(.recurrentMamba),
+              !cacheKinds.contains(where: \.isPagedMLA),
+              !recurrentCheckpoints.isEmpty
+        else { return nil }
         guard beginOperation() else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
@@ -1750,6 +1802,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                     }
                     layers.append(cache)
+                case .pagedMLA:
+                    throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                 case .recurrentMamba:
                     let cache = MambaCache()
                     if let state = terminal?.states[index] {
@@ -1771,7 +1825,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             lock.lock()
             cancelRequested = true
             decodeSession = nil
-            let handlesToDiscard = rows.compactMap { Self.pagedAttentionCaches(in: $0.value.caches).first?.binding.handle }
+            let handlesToDiscard = rows.compactMap { Self.storageHandle(in: $0.value.caches) }
             rows.removeAll()
             nativeMTPPendingTransactions.removeAll()
             nativeMTPDrafterStates.removeAll()
@@ -1863,6 +1917,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         reconstructViaGather: false,
                         attentionWindowTokens: windowTokens
                     )
+                case .pagedMLA(let kpool):
+                    PagedMLALatentCache(
+                        kpool: kpool,
+                        blockSizeTokens: blockSizeTokens,
+                        maxPhysicalBlocks: maxPhysicalBlocks,
+                        poolEpoch: poolEpoch,
+                        binding: binding,
+                        initialOffset: initialOffset,
+                        reconstructViaGather: false
+                    )
                 case .recurrentMamba:
                     MambaCache()
                 }
@@ -1904,7 +1968,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         let removed = rows.removeValue(forKey: requestID)
         lock.unlock()
-        if discardRecordedCache, let handle = removed.flatMap({ Self.pagedAttentionCaches(in: $0.caches).first?.binding.handle }) {
+        if discardRecordedCache, let handle = removed.flatMap({ Self.storageHandle(in: $0.caches) }) {
             contiguousCacheBridge?.discard(handle: handle)
         }
     }
@@ -1916,6 +1980,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         onStep: ContinuousBatchDecodeWindowStepObserver? = nil
     ) throws -> [ContinuousBatchDecodeOutcome] {
         let decodeSteps = max(1, steps)
+        // A capped backend (`pagedMLA`) never forms a wider forward; the
+        // scheduler splits decode steps to fit.
+        guard sharedForwardFits(rows: supportedInputs.count, tokensPerRow: 1) else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_forward_token_cap")
+        }
         var rowStates = supportedInputs.map {
             self.rowState(
                 for: $0.requestID,
@@ -3430,7 +3499,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             let rowMaps = tokenRows.enumerated().map { index, row in
                 MTPPackedVerificationRowMap(
                     rowIndex: index,
-                    queryOffset: states[index].caches.compactMap { $0 as? PagedKVCache }.first?.offset ?? 0,
+                    queryOffset: states[index].caches.lazy.compactMap { ($0 as? PagedKVCache)?.offset ?? ($0 as? PagedMLALatentCache)?.offset }.first ?? 0,
                     inputCount: row.count,
                     proposalCount: row.count - 1
                 )
@@ -3692,6 +3761,27 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         }
                     }
                 )
+            case .pagedMLA:
+                let rows = rowCaches.compactMap { $0[layerIndex] as? PagedMLALatentCache }
+                guard rows.count == rowCaches.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                // Rows keep their own state; the batch only routes each row of
+                // the forward to its cache, so there is nothing to sync.
+                let cache = PagedMLABatchLayerCache(rowCaches: rows)
+                return PagedKVSharedLayerBatch(
+                    cache: cache,
+                    validateBatchStateClosure: {},
+                    syncRowsFromBatchClosure: {},
+                    writebackCompiledInnerStateClosure: { _, _ in
+                        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                    },
+                    pendingMTPResolutionsClosure: {
+                        try cache.pendingMTPResolutions().map {
+                            NativeMTPPendingLayerResolution.pagedMLA($0)
+                        }
+                    }
+                )
             case .recurrentMamba:
                 let rows = rowCaches.compactMap { $0[layerIndex] as? MambaCache }
                 guard rows.count == rowCaches.count else {
@@ -3760,6 +3850,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private static func pagedAttentionCaches(in caches: [KVCache]) -> [PagedKVCache] {
         caches.compactMap { $0 as? PagedKVCache }
+    }
+
+    /// The block-table handle a row's paged layers are bound to.
+    private static func storageHandle(in caches: [KVCache]) -> PagedKVBlockTableHandle? {
+        if let paged = pagedAttentionCaches(in: caches).first { return paged.binding.handle }
+        return caches.lazy.compactMap { ($0 as? PagedMLALatentCache)?.binding.handle }.first
     }
 
     private static func packMambaRows(_ rows: [MambaCache], into batch: MambaCache) throws {
@@ -4064,11 +4160,13 @@ enum PagedKVRowAttention {
 
 private enum NativeMTPPendingLayerResolution {
     case pagedAttention(PagedKVBatchLayerCache.PendingMTPResolution)
+    case pagedMLA(PagedMLABatchLayerCache.PendingMTPResolution)
     case recurrent(MTPPackedMambaRowTransaction)
 
     var inputTokenCount: Int {
         switch self {
         case .pagedAttention(let resolution): resolution.inputTokenCount
+        case .pagedMLA(let resolution): resolution.inputTokenCount
         case .recurrent(let resolution): resolution.inputCount
         }
     }
@@ -4076,6 +4174,7 @@ private enum NativeMTPPendingLayerResolution {
     var proposalTokenCount: Int {
         switch self {
         case .pagedAttention(let resolution): resolution.proposalTokenCount
+        case .pagedMLA(let resolution): resolution.proposalTokenCount
         case .recurrent(let resolution): resolution.proposalCount
         }
     }
@@ -4085,6 +4184,8 @@ private enum NativeMTPPendingLayerResolution {
     func stageCommit(inputCount: Int) throws -> [MLXArray] {
         switch self {
         case .pagedAttention(let resolution):
+            try resolution.stageCommit(inputCount: inputCount)
+        case .pagedMLA(let resolution):
             try resolution.stageCommit(inputCount: inputCount)
         case .recurrent(let resolution):
             try resolution.stageCommit(retaining: inputCount)

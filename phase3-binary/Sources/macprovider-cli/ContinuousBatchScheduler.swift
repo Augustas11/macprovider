@@ -4534,9 +4534,10 @@ actor ContinuousBatchScheduler {
         // Each forward stays below the device's quantized-matmul vector limit
         // (`ContinuousBatchDecodeRouteBound`); a backend whose model attended
         // outside its per-row attention path decodes one row per forward.
-        let rowBound = (backend as? PagedKVSharedForwardBackend)?.serializesPaddedRows == true
+        let pagedBackend = backend as? PagedKVSharedForwardBackend
+        let rowBound = pagedBackend?.serializesPaddedRows == true
             ? 1
-            : configuration.maxDecodeRowsPerForward
+            : min(configuration.maxDecodeRowsPerForward, pagedBackend?.maxDecodeRowsPerForward ?? Int.max)
         if rows.count > rowBound {
             for start in stride(from: 0, to: rows.count, by: rowBound) {
                 let part = rows[start ..< min(start + rowBound, rows.count)]

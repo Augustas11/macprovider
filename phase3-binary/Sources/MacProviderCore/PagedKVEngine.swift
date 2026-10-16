@@ -346,7 +346,7 @@ public enum PagedKVAttachDecision: Equatable, Sendable {
 
 public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
-    public static let recognizedModelFamilies = ["gpt_oss", "llama", "qwen"]
+    public static let recognizedModelFamilies = ["glm5_next", "gpt_oss", "llama", "qwen"]
 
     /// Some mixed cache layouts are measured per identity: Qwen hybrid decoders
     /// retain row-local recurrent state while paging only attention KV, and the
@@ -370,6 +370,7 @@ public enum PagedKVAttachGate {
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
+        blockSizeMultiple: Int = 1,
         gates: PagedKVGates
     ) -> PagedKVAttachDecision {
         guard config.effectiveEnabled else { return .disabled }
@@ -381,7 +382,11 @@ public enum PagedKVAttachGate {
         guard config.blockSizeTokens > 0,
               config.blockSizeTokens <= PagedKVConfig.maximumBlockSizeTokens,
               config.maxPhysicalBlocks > 0,
-              config.maxPhysicalBlocks <= PagedKVConfig.maximumPhysicalBlocks
+              config.maxPhysicalBlocks <= PagedKVConfig.maximumPhysicalBlocks,
+              // SPEC-039 FR-PKV4 rule 1: a `pagedMLA` pool block holds whole
+              // `index_kpool` windows so one block table serves both buffers.
+              blockSizeMultiple >= 1,
+              config.blockSizeTokens % blockSizeMultiple == 0
         else {
             return fail(.allocator)
         }

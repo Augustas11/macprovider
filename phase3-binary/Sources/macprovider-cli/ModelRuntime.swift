@@ -577,11 +577,66 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
+    /// The verified sparse-attention layout of an allowlisted `glm5_next`
+    /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
+    let sparseAttention: PagedKVSparseAttentionLayout?
 
-    init(modelFamily: String, requiresMoEDispatch: Bool, hybridDecoderArchitectureVerified: Bool = false) {
+    init(
+        modelFamily: String,
+        requiresMoEDispatch: Bool,
+        hybridDecoderArchitectureVerified: Bool = false,
+        sparseAttention: PagedKVSparseAttentionLayout? = nil
+    ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+        self.sparseAttention = sparseAttention
+    }
+
+    /// Prompt tokens of the attach-time parity probes: 513 (the production
+    /// 512-token chunk boundary), or for a sparse-attention family
+    /// `max(513, index_topk + 2 x block_size_tokens)` so the context exceeds
+    /// `index_topk` and the indexer selects over paged pooled keys
+    /// (SPEC-039 FR-PKV12).
+    func attachProbePromptTokens(blockSizeTokens: Int) -> Int {
+        let base = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+        guard let sparseAttention else { return base }
+        let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
+        let (span, spanOverflow) = sparseAttention.indexTopk.addingReportingOverflow(twoBlocks)
+        return blocksOverflow || spanOverflow ? Int.max : max(base, span)
+    }
+}
+
+/// `glm5_next` per-layer layout from `text_config` (SPEC-039 FR-PKV12):
+/// `linear_attention` layers ride `MambaCache`, `deepseek_sparse_attention`
+/// layers `pagedMLA(kpool: indexKpool)`.
+struct PagedKVSparseAttentionLayout: Equatable, Sendable {
+    static let recurrentLayerType = "linear_attention"
+    static let sparseLayerType = "deepseek_sparse_attention"
+
+    let layerTypes: [String]
+    let indexTopk: Int
+    let indexKpool: Int
+
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        layerTypes.map { $0 == Self.sparseLayerType ? .pagedMLA(kpool: indexKpool) : .recurrentMamba }
+    }
+
+    init?(textConfig: [String: Any]) {
+        guard let layerTypes = textConfig["layer_types"] as? [String],
+              !layerTypes.isEmpty,
+              let hiddenLayers = textConfig["num_hidden_layers"] as? Int,
+              layerTypes.count == hiddenLayers,
+              layerTypes.allSatisfy({ $0 == Self.recurrentLayerType || $0 == Self.sparseLayerType }),
+              layerTypes.contains(Self.sparseLayerType),
+              let indexTopk = textConfig["index_topk"] as? Int,
+              indexTopk > 0,
+              let indexKpool = textConfig["index_kpool"] as? Int,
+              indexKpool > 0
+        else { return nil }
+        self.layerTypes = layerTypes
+        self.indexTopk = indexTopk
+        self.indexKpool = indexKpool
     }
 }
 
@@ -1896,6 +1951,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: capabilities.modelFamily,
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
             hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
+            blockSizeMultiple: capabilities.sparseAttention?.indexKpool ?? 1,
             gates: modelHash?.isEmpty == false ? gates : .closed
         )
     }
@@ -1984,6 +2040,24 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-039 FR-PKV4/FR-PKV12 parity label suffix: `glm5_next` results
+    /// (MLA sparse attention over gathered latent and pooled keys) never share
+    /// a label with stock-SDPA tuples.
+    nonisolated static func pagedKVParityLabelSuffix(modelFamily: String) -> String {
+        modelFamily == "glm5_next" ? "glm5-next-mla-parity-v1" : "sdpa-parity-v1"
+    }
+
+    /// Set true in the change that records the `glm5_next` AC-20 fixture,
+    /// attach proof, and row-isolation, replay and drain evidence under
+    /// `docs/evidence/` (SPEC-039 FR-PKV12). A lab-harness build may measure
+    /// attach before that with `MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH=1`.
+    nonisolated static var glm5NextPagedAttachEvidenceRecorded: Bool {
+        #if MACPROVIDER_LAB_HARNESS
+        if ProcessInfo.processInfo.environment["MACPROVIDER_LAB_GLM5_NEXT_PAGED_ATTACH"] == "1" { return true }
+        #endif
+        return false
+    }
+
     nonisolated static func measurePagedKVRuntime(
         config: PagedKVConfig,
         modelID: String?,
@@ -2033,24 +2107,34 @@ actor ModelRuntime: ModelRuntimeServing {
         // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
         // boundary-crossing, non-identity layout. Anything short of that fails closed —
         // no measured parity, no label, no attach.
+        // SPEC-039 FR-PKV12: the `glm5_next` entry advertises nothing until
+        // its AC-20 fixture, attach proof, and row-isolation, replay and drain
+        // evidence are recorded; until then attach fails closed on parity.
+        if modelCapabilities.modelFamily == "glm5_next", !Self.glm5NextPagedAttachEvidenceRecorded {
+            PagedKVRuntimeDiagnostics.log("measure nil: glm5_next paged attach evidence not recorded (SPEC-039 AC-20)")
+            return nil
+        }
+        // Every paged layer gathers twice per forward: K and V, or for
+        // `pagedMLA` the latent and the pooled keys (SPEC-039 FR-PKV4 rule 4).
         guard let parity = parityProbe,
               parity.established,
               parity.nLayers > 0,
               parity.nNew > 0,
-              parity.gatherKernelCalls == parity.nLayers * parity.nNew * 2,
+              parity.nForwards >= parity.nNew,
+              parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
               parity.maxLogicalBlocks >= 3,
               parity.nonIdentityPermutation
         else {
             if let p = parityProbe {
                 PagedKVRuntimeDiagnostics.log(
-                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
+                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
             } else {
                 PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
             }
             return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
-            "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|sdpa-parity-v1".utf8
+            "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|\(Self.pagedKVParityLabelSuffix(modelFamily: modelCapabilities.modelFamily))".utf8
         )))
         // EVERY paging-eligible model attaches only when a batched shared-forward step is
         // proven to keep rows isolated — the SPEC-038 FR-CB6 determinism/isolation
@@ -2225,9 +2309,13 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelCapabilities: modelCapabilities
                 )
         else { return (nil, nil) }
-        let promptTokens = await container.perform { context in
+        let probePromptTokens = modelCapabilities.attachProbePromptTokens(blockSizeTokens: pagedKVConfig.blockSizeTokens)
+        let encodedProbePrompt = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
+        let promptTokens = modelCapabilities.sparseAttention == nil
+            ? encodedProbePrompt
+            : Self.repeatedProbeTokens(encodedProbePrompt, targetCount: probePromptTokens)
         let parityProbe = await pagedKVRuntimeProber.parity(
             container,
             modelID,
@@ -2259,14 +2347,8 @@ actor ModelRuntime: ModelRuntimeServing {
             let promptB = await container.perform { context in
                 context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
             }
-            let parityPromptA = Self.repeatedProbeTokens(
-                promptA,
-                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-            )
-            let parityPromptB = Self.repeatedProbeTokens(
-                promptB,
-                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-            )
+            let parityPromptA = Self.repeatedProbeTokens(promptA, targetCount: probePromptTokens)
+            let parityPromptB = Self.repeatedProbeTokens(promptB, targetCount: probePromptTokens)
             return await prober.moe(
                 container,
                 blockSizeTokens,
@@ -2333,8 +2415,15 @@ actor ModelRuntime: ModelRuntimeServing {
         _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
-        guard modelCapabilities.hybridDecoderArchitectureVerified,
-              cacheKinds.contains(.pagedAttention)
+        guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.modelFamily == "glm5_next" {
+            // Exactly one cache per decoder layer, in layer order, each pool
+            // width equal to `index_kpool` (SPEC-039 FR-PKV12).
+            guard let sparse = modelCapabilities.sparseAttention else { return false }
+            return cacheKinds == sparse.expectedCacheKinds
+        }
+        guard cacheKinds.contains(.pagedAttention),
+              !cacheKinds.contains(where: \.isPagedMLA)
         else { return false }
         if modelCapabilities.modelFamily == "qwen",
            cacheKinds.contains(.recurrentMamba),
@@ -2565,9 +2654,10 @@ actor ModelRuntime: ModelRuntimeServing {
         if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
-        // GLM-5-Next (`glm5_next`, text model `glm5_next_text`). Not a paged-KV
-        // family: the attach gate falls back on identity until SPEC-039 adds
-        // its hybrid KDA/DSA layout.
+        // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
+        // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
+        // a verified layout; any other `glm5_next` artifact is a `mixed` cache
+        // class without one and fails closed.
         if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
         return nil
     }
@@ -2600,14 +2690,32 @@ actor ModelRuntime: ModelRuntimeServing {
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
+            "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
         ]
+        let configObject = configJSONData.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        // `glm5_next` keys on the exact `architectures` array and model types
+        // and carries its verified per-layer layout (SPEC-039 FR-PKV12).
+        let sparseAttention: PagedKVSparseAttentionLayout? = {
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
+                  expectedArchitecture == "Glm5NextForConditionalGeneration",
+                  let configObject,
+                  configObject["architectures"] as? [String] == [expectedArchitecture],
+                  configObject["model_type"] as? String == "glm5_next",
+                  let textConfig = configObject["text_config"] as? [String: Any],
+                  textConfig["model_type"] as? String == "glm5_next_text"
+            else { return nil }
+            return PagedKVSparseAttentionLayout(textConfig: textConfig)
+        }()
         let allowlistedArchitectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
-                  let configJSONData,
-                  let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
-                  let architectures = object["architectures"] as? [String]
+                  let configObject,
+                  let architectures = configObject["architectures"] as? [String]
             else { return false }
+            if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             return architectures.contains(expectedArchitecture)
         }()
         let architectureVerified = allowlistedArchitectureVerified
@@ -2619,7 +2727,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
-            hybridDecoderArchitectureVerified: architectureVerified
+            hybridDecoderArchitectureVerified: architectureVerified,
+            sparseAttention: sparseAttention
         )
     }
 

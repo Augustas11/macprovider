@@ -654,8 +654,8 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
 
-        // GLM-5.3-Flash: a labelled family that is not paged (identity
-        // fallback), MoE from the expert counts under `text_config`.
+        // GLM-5.3-Flash: the SPEC-039 v0.1.17 paged family, MoE from the
+        // expert counts under `text_config`.
         let glm5Next = ModelRuntime.pagedKVModelCapabilities(
             modelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp",
             configJSONData: Data(#"""
@@ -665,8 +665,10 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
         XCTAssertEqual(glm5Next.modelFamily, "glm5_next")
         XCTAssertTrue(glm5Next.requiresMoEDispatch)
+        // A path-style artifact id is not the allowlisted catalog identity.
         XCTAssertFalse(glm5Next.hybridDecoderArchitectureVerified)
-        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(glm5Next.modelFamily))
+        XCTAssertNil(glm5Next.sparseAttention)
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains(glm5Next.modelFamily))
         let glm5NextText = ModelRuntime.pagedKVModelCapabilities(
             modelID: nil,
             configJSONData: Data(#"{"model_type":"glm5_next_text","n_routed_experts":288}"#.utf8)

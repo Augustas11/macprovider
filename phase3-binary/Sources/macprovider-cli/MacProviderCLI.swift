@@ -2907,8 +2907,9 @@ struct ServeCommand: AsyncParsableCommand {
             } else {
                 helloRuntimeSource = nil
                 // Before any MLX device use: MLX reads the budget when it creates the device.
-                if let target = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model,
-                   let family = ModelRuntime.localModelFamily(target),
+                let localModelFamily = (startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? resolved.model)
+                    .flatMap(ModelRuntime.localModelFamily)
+                if let family = localModelFamily,
                    let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
                     FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
                 }
@@ -2924,7 +2925,7 @@ struct ServeCommand: AsyncParsableCommand {
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
-                    pagedKVConfig: resolved.pagedKV.sizedToCover(
+                    pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
                         contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
                     ),
                     prefillStepSize: resolved.prefillStepSize,

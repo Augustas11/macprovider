@@ -257,6 +257,20 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// `PagedKVGatherKernel` via a block table. Forces genuine physical non-contiguity so
     /// the gather is exercised, not bypassed. Returns a tensor identical to the input.
     private func pagedGather(_ logical: MLXArray) -> MLXArray {
+        Self.reversedBlockGather(logical, blockSizeTokens: blockSizeTokens, kernel: &registeredKernel)
+    }
+
+    /// The gather round trip shared by every paged cache kind (SPEC-039 FR-PKV3):
+    /// lay a logical `[1, H, S, D]` tensor out as `blockSizeTokens`-token blocks
+    /// in REVERSED physical order, then gather it back to logical order with the
+    /// registered `PagedKVGatherKernel`. Returns a tensor identical to the input
+    /// and records the gather diagnostics.
+    static func reversedBlockGather(
+        _ logical: MLXArray,
+        blockSizeTokens: Int,
+        logicalBlockCount: Int = 0,
+        kernel registeredKernel: inout MLXFast.MLXFastKernel?
+    ) -> MLXArray {
         // Validate rank/dims and compute all shape/grid math with overflow-checked
         // arithmetic BEFORE launching the kernel. Any invalid or overflowing configuration
         // returns the logical tensor unchanged and does NOT launch the kernel.
@@ -273,7 +287,9 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let D = logical.dim(3)
         guard blockSize > 0, H > 0, S > 0, D > 0 else { return logical }
 
-        let nBlocks = (S + blockSize - 1) / blockSize
+        // A caller sharing one block table across buffers (`pagedMLA`) passes
+        // the table's block count, so every buffer uses the same permutation.
+        let nBlocks = max((S + blockSize - 1) / blockSize, logicalBlockCount)
         let (sPad, sPadOverflow) = nBlocks.multipliedReportingOverflow(by: blockSize)
         guard !sPadOverflow else { return logical }
         let (tokenStride, strideOverflow) = H.multipliedReportingOverflow(by: D)
