@@ -41,13 +41,20 @@ struct GLMParityCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int = 2048
 
+    @Option(
+        name: .customLong("mlx-cache-limit-mb"),
+        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Long prefills otherwise keep tens of GB of freed buffers. Default 4096."
+    )
+    var mlxCacheLimitMB: Int = 4096
+
     @Option(help: "Full output path for the JSON result. Default: stdout only.")
     var output: String?
 
     func run() async throws {
-        guard steps > 0, prefillStepSize > 0, !oracle.isEmpty else {
+        guard steps > 0, prefillStepSize > 0, !oracle.isEmpty,
+              ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) else {
             FileHandle.standardError.write(Data(
-                "glm-parity: --oracle is required; --steps and --prefill-step-size must be > 0\n".utf8
+                "glm-parity: --oracle is required; --steps and --prefill-step-size must be > 0; --mlx-cache-limit-mb in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -63,6 +70,8 @@ struct GLMParityCommand: AsyncParsableCommand {
         let configData = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
         let capabilities = ModelRuntime.pagedKVModelCapabilities(modelID: modelDir, configJSONData: configData)
 
+        ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
+        Self.progress("load start dir=\(directory.path) oracles=\(references.count)")
         let loadStarted = Date()
         let runtime = try await ModelRuntime(modelID: modelDir)
         guard await runtime.isLoaded, let container = await runtime.currentSnapshot().container else {
@@ -70,9 +79,11 @@ struct GLMParityCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
         let loadSeconds = Date().timeIntervalSince(loadStarted)
+        Self.progress("load done seconds=\(String(format: "%.1f", loadSeconds))")
 
         var runs: [GLMParityRun] = []
         for (reference, data) in references {
+            Self.progress("oracle start \(reference.source) prompt=\(reference.prompt.count)")
             let measured = try await Self.measure(
                 container: container, reference: reference, steps: steps, prefillStepSize: prefillStepSize)
             runs.append(GLMParityRun(
@@ -85,6 +96,7 @@ struct GLMParityCommand: AsyncParsableCommand {
                 measurement: measured
             ))
             FileHandle.standardError.write(Data(Self.summaryLine(source: reference.source, measured).utf8))
+            Self.progress("oracle done \(reference.source)")
             Memory.clearCache()
         }
 
@@ -97,6 +109,7 @@ struct GLMParityCommand: AsyncParsableCommand {
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxSwiftRevision: KVBuildIdentity.mlxSwiftRevision,
             prefillStepSize: prefillStepSize,
+            mlxCacheLimitMB: mlxCacheLimitMB,
             stepsRequested: steps,
             loadSeconds: loadSeconds,
             runs: runs,
@@ -235,6 +248,17 @@ struct GLMParityCommand: AsyncParsableCommand {
         }
     }
 
+    /// One stderr line with the current MLX and process memory, so a run that
+    /// is killed shows the last phase it reached.
+    private static func progress(_ message: String) {
+        let gb = { (bytes: Int) in String(format: "%.1f", Double(bytes) / 1e9) }
+        let footprint = msbLifetimePeakPhysFootprintMB(pid: getpid()).map { String(format: "%.1f", Double($0) * 1_048_576 / 1e9) } ?? "n/a"
+        let line = "glm-parity: \(message) mlx_active_gb=\(gb(Memory.activeMemory)) mlx_peak_gb=\(gb(Memory.peakMemory))"
+            + " mlx_cache_gb=\(gb(Memory.cacheMemory))"
+            + " peak_footprint_gb=\(footprint)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
     private static func summaryLine(source: String, _ measured: GLMParityMeasurement) -> String {
         let free = measured.freeRunning
         let divergence = free.firstDivergence.map { String($0) } ?? "none"
@@ -365,6 +389,7 @@ struct GLMParityReport: Encodable {
     let mlxSwiftLMRevision: String
     let mlxSwiftRevision: String
     let prefillStepSize: Int
+    let mlxCacheLimitMB: Int
     let stepsRequested: Int
     let loadSeconds: Double
     let runs: [GLMParityRun]
