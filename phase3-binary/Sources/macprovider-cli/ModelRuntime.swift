@@ -1595,6 +1595,9 @@ actor ModelRuntime: ModelRuntimeServing {
     // relay_serve_model_id_alias.
     private let catalogModelIDAlias: String?
     private var currentContainer: ModelContainer?
+    /// Keeps the loaded model's weights in MLX's residency sets; see
+    /// `startResidentWeightsTicket(modelFamily:)`.
+    private var residentWeightsTicket: WiredMemoryTicket?
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
@@ -2376,6 +2379,38 @@ actor ModelRuntime: ModelRuntimeServing {
         return bytes
     }
 
+    /// Families served with the process wired limit at Metal's recommended
+    /// working set for as long as the model is loaded.
+    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next"]
+
+    /// A model-lifetime wired-limit ticket at Metal's recommended working set,
+    /// the limit mlx-lm's generation paths set. At the default limit (0) no
+    /// buffer joins MLX's residency sets, and a model this close to the working
+    /// set (GLM-5.3-Flash: ~185 GB of 239 GB on a 256 GB M3 Ultra) pays a
+    /// multi-second residency cost on every forward: 0.38 tok/s decode, while a
+    /// 30 GB cut of the same model decodes at 75 tok/s. A fixed policy always
+    /// admits, so starting the ticket never suspends a load. Nil for other
+    /// families and when Metal reports no working set.
+    nonisolated static func residentWeightsTicket(
+        modelFamily: String,
+        recommendedWorkingSetBytes: Int?
+    ) -> WiredMemoryTicket? {
+        guard residentWeightsFamilies.contains(modelFamily),
+              let bytes = recommendedWorkingSetBytes, bytes > 0
+        else { return nil }
+        return WiredMemoryTicket(
+            size: bytes, policy: MLXLMCommon.WiredFixedPolicy(limit: bytes), kind: .active)
+    }
+
+    nonisolated static func startResidentWeightsTicket(modelFamily: String) async -> WiredMemoryTicket? {
+        guard let ticket = residentWeightsTicket(
+            modelFamily: modelFamily,
+            recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes()
+        ) else { return nil }
+        _ = await ticket.start()
+        return ticket
+    }
+
     nonisolated static func clearMLXBufferCacheAfterPrefill(
         using clear: () -> Void = { Memory.clearCache() }
     ) {
@@ -2973,6 +3008,8 @@ actor ModelRuntime: ModelRuntimeServing {
             try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
         self.currentContainer = container
+        self.residentWeightsTicket = await Self.startResidentWeightsTicket(
+            modelFamily: modelCapabilities.modelFamily)
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -5662,6 +5699,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         await conversationCache.purgeAllHot()
         currentContainer = container
+        if let previous = residentWeightsTicket {
+            residentWeightsTicket = nil
+            _ = await previous.end()
+        }
+        residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
         currentModelID = modelID
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(

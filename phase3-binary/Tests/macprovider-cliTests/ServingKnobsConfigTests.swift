@@ -2732,6 +2732,26 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
+    // GLM-5.3-Flash is served with the wired limit at the recommended working
+    // set (mlx-lm's generation default); every other family keeps the default.
+    func testResidentWeightsTicketOnlyForGLM5NextAtRecommendedWorkingSet() {
+        let recommended = 239_143_780_352
+        let ticket = ModelRuntime.residentWeightsTicket(
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended)
+        XCTAssertEqual(ticket?.size, recommended)
+        XCTAssertEqual(ticket?.policy.limit(baseline: 0, activeSizes: [recommended]), recommended)
+        XCTAssertEqual(
+            ticket?.policy.canAdmit(baseline: recommended, activeSizes: [recommended], newSize: recommended),
+            true, "admission must never suspend a model load")
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "unknown"] {
+            XCTAssertNil(
+                ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
+                family)
+        }
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: nil))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
+    }
+
     private static func request(
         model: String,
         stream: Bool = false,
