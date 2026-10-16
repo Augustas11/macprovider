@@ -230,7 +230,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 			_ = c.Close()
 		}
 	})
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ci.db"))
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "ci.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,10 +1069,10 @@ func TestComputeScoringSweepDeadlineBoundsLookups(t *testing.T) {
 	}
 }
 
-// FR-20: a reservation is counted from the time it is made plus one tick
-// (the latest dispatch), not from the sweep start, and is persisted for a
-// restart.
-func TestComputeScoringStartCountedFromReservation(t *testing.T) {
+// FR-20: a request's start is recorded durably at dispatch, stamped at the
+// latest moment the dispatch can begin, and persisted for a restart; a
+// reservation holds budget until then.
+func TestComputeScoringStartCountedAtDispatch(t *testing.T) {
 	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
 	h.round(2 * time.Hour)
 	h.round(2 * time.Hour)
@@ -1081,14 +1081,74 @@ func TestComputeScoringStartCountedFromReservation(t *testing.T) {
 	}
 	h.engine.mu.Lock()
 	starts := append([]time.Time(nil), h.engine.recentStarts...)
+	pending := h.engine.pendingStarts
 	h.engine.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending reservations leaked: %d", pending)
+	}
 	for _, s := range starts {
-		if s.Before(h.now().Add(h.engine.tickInterval())) {
-			t.Fatalf("start %v counted before the latest dispatch %v", s, h.now().Add(h.engine.tickInterval()))
+		if s.Before(h.now().Add(computeScoreLookupTimeout)) {
+			t.Fatalf("start %v counted before the latest dispatch %v", s, h.now().Add(computeScoreLookupTimeout))
 		}
 	}
 	got, err := h.engine.deps.Store.RecentVerificationRequests(context.Background(), h.now().Add(-time.Hour), 100)
-	if err != nil || len(got) != len(starts) {
-		t.Fatalf("persisted %d starts err=%v, want %d", len(got), err, len(starts))
+	if err != nil || len(got) != len(starts) || int64(len(got)) != h.dispatched.Load() {
+		t.Fatalf("persisted %d starts err=%v, want %d (dispatched %d)", len(got), err, len(starts), h.dispatched.Load())
 	}
+}
+
+// FR-20: if a start cannot be made durable, the request is not sent and its
+// reservation is released.
+func TestComputeScoringUnpersistedStartIsNotDispatched(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.round(2 * time.Hour)
+	if _, err := h.db.Exec(`DROP TABLE compute_integrity_verification_starts`); err != nil {
+		t.Fatal(err)
+	}
+	h.round(2 * time.Hour)
+	if n := h.dispatched.Load(); n != 0 {
+		t.Fatalf("dispatched %d requests whose start was not durable", n)
+	}
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	if h.engine.pendingStarts != 0 || len(h.engine.recentStarts) != 0 {
+		t.Fatalf("pending=%d starts=%d after failed persistence", h.engine.pendingStarts, len(h.engine.recentStarts))
+	}
+}
+
+// FR-20: a lookup that returns after the sweep deadline reserves nothing,
+// and its cut-off result is not cached as a failure.
+func TestComputeScoringLookupPastDeadlineReservesNothing(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"a": "github:1", "b": "github:2"}, nil)
+	h.round(2 * time.Hour)
+	h.advance(2 * time.Hour)
+	inner := h.engine.deps.OperatorKey
+	h.engine.deps.OperatorKey = func(ctx context.Context, id string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	var p pool.Provider
+	var cands []computeintegrity.ScorerCandidate
+	for _, q := range h.registry.Snapshot() {
+		if q.ProviderID == "a" {
+			p = q
+		}
+		cands = append(cands, scoringCandidate(q))
+	}
+	h.engine.considerProvider(context.Background(), p, cands, h.now(), time.Now().Add(50*time.Millisecond))
+	h.engine.mu.Lock()
+	if h.engine.inFlightCount != 0 || h.engine.pendingStarts != 0 {
+		h.engine.mu.Unlock()
+		t.Fatal("a lookup past the deadline must reserve nothing")
+	}
+	_, cached := h.engine.operatorKeys["a"]
+	due := h.engine.nextDue[computeScoringKey{"a", scoringModel}]
+	h.engine.mu.Unlock()
+	if cached {
+		t.Fatal("a lookup cut off by the deadline must not be cached as a failure")
+	}
+	if due.After(h.now()) {
+		t.Fatal("the key must stay due")
+	}
+	h.engine.deps.OperatorKey = inner
 }

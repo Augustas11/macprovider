@@ -4827,7 +4827,10 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringDispatchDelaySpansSweep",
         "phase4-coordinator/internal/buyer/compute_integrity_suspension_internal_test.go:TestComputeIntegrityProbeAccountsRecurAndRetire",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringSweepDeadlineBoundsLookups",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringStartCountedFromReservation"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringStartCountedAtDispatch",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringUnpersistedStartIsNotDispatched",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringLookupPastDeadlineReservesNothing",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestScoringStoreBackfillsStartsOnce"
       ],
       "journeys": [],
       "evidence": [],

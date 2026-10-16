@@ -274,6 +274,11 @@ type computeScoringEngine struct {
 	// recentStarts holds the start times of the verification requests of
 	// the last rolling hour (FR-20 max_per_hour).
 	recentStarts []time.Time
+	// pendingStarts counts reserved requests not yet dispatched; they use
+	// hourly budget until their start is recorded at dispatch.
+	pendingStarts int
+	// startWriteMu serializes durable start writes (beginDispatch).
+	startWriteMu sync.Mutex
 	scoringJobs  int
 	operatorKeys map[string]cachedOperatorKey
 	// scorerBusy reserves a scorer for one job at a time: the provider runs
@@ -428,6 +433,11 @@ func (e *computeScoringEngine) operatorKey(ctx context.Context, providerID strin
 	lctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
 	key, err := e.deps.OperatorKey(lctx, providerID)
 	cancel()
+	if err != nil && ctx.Err() != nil {
+		// Cut off by the caller's deadline, not a lookup failure: nothing is
+		// cached, so the next sweep retries at once.
+		return ""
+	}
 	if err != nil || key == "" {
 		e.mu.Lock()
 		e.operatorKeys[providerID] = cachedOperatorKey{fetched: now}
@@ -595,7 +605,7 @@ func (e *computeScoringEngine) hourlyBudgetLocked(now time.Time) bool {
 		keep++
 	}
 	e.recentStarts = e.recentStarts[keep:]
-	return len(e.recentStarts) < e.deps.Config.MaxPerHour
+	return len(e.recentStarts)+e.pendingStarts < e.deps.Config.MaxPerHour
 }
 
 func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Provider, candidates []computeintegrity.ScorerCandidate, now, deadline time.Time) {
@@ -634,10 +644,17 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	e.mu.Unlock()
 
 	verified := scoringCandidate(p)
+	// Lookups run under the sweep deadline; past it the key reserves
+	// nothing and stays due.
+	lctx, cancelLookups := context.WithDeadline(ctx, deadline)
+	defer cancelLookups()
 	if time.Now().After(deadline) {
 		return
 	}
-	verified.OperatorKey = e.operatorKey(ctx, p.ProviderID, now)
+	verified.OperatorKey = e.operatorKey(lctx, p.ProviderID, now)
+	if time.Now().After(deadline) {
+		return
+	}
 	if verified.OperatorKey == "" {
 		// Back off until the next cadence slot instead of retrying the
 		// identity lookup every sweep.
@@ -660,13 +677,15 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 			// with the identities resolved so far cached.
 			return
 		}
-		c.OperatorKey = e.operatorKey(ctx, c.ProviderID, now)
+		c.OperatorKey = e.operatorKey(lctx, c.ProviderID, now)
 		scorerPool = append(scorerPool, c)
+	}
+	if time.Now().After(deadline) {
+		return
 	}
 	e.mu.Lock()
 	// Lookups took time: reserve against the hourly bound as of now.
-	reserveAt := e.s.now()
-	if !e.hourlyBudgetLocked(reserveAt) {
+	if !e.hourlyBudgetLocked(e.s.now()) {
 		e.mu.Unlock()
 		return
 	}
@@ -693,13 +712,10 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 	}
 	e.inFlight[key] = true
 	e.inFlightCount++
-	// The request starts after its dispatch delay, at most one tick after
-	// this reservation; counting it from then keeps actual starts within
-	// max_per_hour in any rolling hour.
-	startAt := reserveAt.Add(e.tickInterval())
-	e.recentStarts = append(e.recentStarts, startAt)
+	// The reservation uses hourly budget now; its start time is recorded
+	// when it is dispatched (runProbe).
+	e.pendingStarts++
 	e.mu.Unlock()
-	e.recordStart(ctx, startAt)
 	go e.runProbe(ctx, verified, scorers)
 }
 
@@ -777,6 +793,14 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 	key := computeScoringKey{verified.ProviderID, verified.ModelID}
 	defer e.finishProbe(key)
 	defer e.releaseScorers(scorers)
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			e.mu.Lock()
+			e.pendingStarts--
+			e.mu.Unlock()
+		}
+	}()
 	if d := e.dispatchDelay(); d > 0 {
 		timer := time.NewTimer(d)
 		select {
@@ -795,6 +819,11 @@ func (e *computeScoringEngine) runProbe(ctx context.Context, verified computeint
 	probe, err := computeintegrity.DrawProbe(e.rng, e.deps.Corpus, verified.ModelID, greedyOnly)
 	e.mu.Unlock()
 	if err != nil {
+		e.inconclusive(ciInconclusiveDispatch)
+		return
+	}
+	dispatched = true
+	if !e.beginDispatch(ctx) {
 		e.inconclusive(ciInconclusiveDispatch)
 		return
 	}
@@ -1110,14 +1139,41 @@ func (e *computeScoringEngine) persistExclusion(ctx context.Context, providerID 
 	e.s.log.Warn().Str("event", "compute_integrity_scorer_excluded").Str("provider_id", providerID).Msg("compute-integrity scorer excluded")
 }
 
-// recordStart persists a counted start so a restart rebuilds the hourly
-// window. A failed write is logged; the in-memory window still holds it.
-func (e *computeScoringEngine) recordStart(ctx context.Context, at time.Time) {
+// beginDispatch turns a reservation into a counted start immediately before
+// dispatch. The start is made durable first, so a restart always sees it;
+// it is stamped at the latest moment the dispatch can begin after the
+// bounded write. If the write fails, the request is not sent. Either way
+// the reservation's pending count is released.
+func (e *computeScoringEngine) beginDispatch(ctx context.Context) bool {
+	at := e.s.now().Add(computeScoreLookupTimeout)
 	wctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
-	defer cancel()
-	if err := e.deps.Store.RecordVerificationStart(wctx, at); err != nil {
-		e.s.log.Warn().Str("event", "compute_integrity_start_persist_failed").Msg("verification start not persisted")
+	// Start writes are serialized and retried within the bound, so
+	// concurrent dispatches do not fail each other on a busy database.
+	e.startWriteMu.Lock()
+	var err error
+	for {
+		if err = e.deps.Store.RecordVerificationStart(wctx, at); err == nil || wctx.Err() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	e.startWriteMu.Unlock()
+	cancel()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pendingStarts--
+	if err != nil {
+		e.s.log.Warn().Str("event", "compute_integrity_start_persist_failed").Msg("verification start not persisted; request not sent")
+		return false
+	}
+	i := len(e.recentStarts)
+	for i > 0 && e.recentStarts[i-1].After(at) {
+		i--
+	}
+	e.recentStarts = append(e.recentStarts, time.Time{})
+	copy(e.recentStarts[i+1:], e.recentStarts[i:])
+	e.recentStarts[i] = at
+	return true
 }
 
 func (e *computeScoringEngine) retryExclusions(ctx context.Context, now time.Time, deadline time.Time) {

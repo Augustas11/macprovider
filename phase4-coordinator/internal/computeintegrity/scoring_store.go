@@ -25,6 +25,10 @@ func NewScoringStore(ctx context.Context, db *sql.DB) (*ScoringStore, error) {
 	if db == nil {
 		return nil, errScoringStoreClosed
 	}
+	var startsTable int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'compute_integrity_verification_starts'`).Scan(&startsTable); err != nil {
+		return nil, err
+	}
 	_, err := db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS compute_integrity_scoring_keys (
     provider_id    TEXT NOT NULL,
@@ -46,7 +50,27 @@ CREATE INDEX IF NOT EXISTS idx_civs_started ON compute_integrity_verification_st
 	if err != nil {
 		return nil, err
 	}
+	if startsTable == 0 {
+		// One-time upgrade backfill: an earlier build counted starts from
+		// the reserved cip_ accounts in the request log. Carry the last two
+		// hours over so the first restart on this build counts them.
+		if err := backfillVerificationStarts(ctx, db); err != nil {
+			return nil, err
+		}
+	}
 	return &ScoringStore{db: db}, nil
+}
+
+func backfillVerificationStarts(ctx context.Context, db *sql.DB) error {
+	var present int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'`).Scan(&present); err != nil || present == 0 {
+		return err
+	}
+	since := time.Now().Add(-2 * time.Hour).UTC().Format(verificationStartFormat)
+	_, err := db.ExecContext(ctx, `
+INSERT INTO compute_integrity_verification_starts (started_at_utc)
+SELECT ts_utc FROM request_log WHERE account_id LIKE 'cip\_%' ESCAPE '\' AND ts_utc >= ?`, since)
+	return err
 }
 
 // LoadKeyStates returns every persisted key state. A row whose JSON does not
