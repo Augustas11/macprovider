@@ -15,7 +15,7 @@
 #             PASS when lab served_slots >= live served_slots and lab
 #             verified_k >= live served_slots, every measured width
 #             conformant up to verified_k.
-#   unbounded (UNBOUNDED_CLI set) a -DMACPROVIDER_LAB_HARNESS build with
+#   unbounded (UNBOUNDED_CLI set) the lab-harness build (PR body) with
 #             MACPROVIDER_LAB_DECODE_ROW_BOUND above the device limit. PASS
 #             when the probe refuses some width above the device's vector
 #             limit (decision row_divergence_at_<k>, k > DEVICE_ROW_BOUND).
