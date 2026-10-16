@@ -228,6 +228,21 @@ array f(const array& a, const Stream& stream) {
 """)
         self.assertEqual(scan(root), [])
 
+    def test_a_shadowing_lambda_does_not_hide_the_op_outside_its_scope(self):
+        root = ops_cpp("""
+array f(const array& a, const Stream& stream) {
+  auto b = add(a, a);
+  if (a.ndim() > 1) {
+    auto add = [stream](auto in) { return multiply(in, in, stream); };
+    b = add(b);
+  }
+  return add(b, b);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 2, findings)
+        self.assertTrue(all("add(" in f for f in findings))
+
     def test_missing_required_file_fails_closed(self):
         root = core()
         (root / "mlx" / "primitives.cpp").unlink()

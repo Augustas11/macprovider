@@ -80,6 +80,19 @@ def matching(text: str, open_index: int, opener: str, closer: str) -> int:
     return -1
 
 
+def enclosing_block_end(text: str, index: int) -> int:
+    """Offset of the `}` closing the innermost block that contains `index`."""
+    depth = 0
+    for position in range(index, len(text)):
+        if text[position] == "{":
+            depth += 1
+        elif text[position] == "}":
+            if depth == 0:
+                return position
+            depth -= 1
+    return len(text)
+
+
 def split_arguments(text: str) -> list[str]:
     arguments, depth, current = [], 0, ""
     for char in text:
@@ -181,13 +194,18 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
         stream_argument = re.compile(r"^(?:" + caller_names + r"|to_stream\(\s*(?:" + caller_names + r")\s*\)|stream\(\))$")
         first_line = text[:body_start].count("\n")
 
-        # A local lambda that shadows an op name (auto expand_dims = [stream](...))
-        # is not the op; its own body is checked where it calls the real ops.
-        shadowed = set(re.findall(r"\bauto\s+(\w+)\s*=\s*\[", body))
-        shadowed |= set(re.findall(r"\bstd::function<[^;]*?>\s+(\w+)\s*=", body))
+        # A local lambda or std::function that shadows an op name
+        # (auto expand_dims = [stream](...)) is not the op, but only where C++
+        # sees it: after its declaration, to the end of its enclosing block.
+        shadows = []
+        for binding in re.finditer(r"\bauto\s+(\w+)\s*=\s*\[|\bstd::function<[^;]*?>\s+(\w+)\s*=", body):
+            block_end = enclosing_block_end(body, binding.start())
+            shadows.append((binding.group(1) or binding.group(2), binding.end(), block_end))
         for call in call_pattern.finditer(body):
             qualifier = call.group(1) or ""
-            if not qualifier and call.group(2) in shadowed:
+            if not qualifier and any(
+                call.group(2) == shadow and start <= call.start() < end for shadow, start, end in shadows
+            ):
                 continue
             if qualifier and not set(filter(None, qualifier.split("::"))) <= CORE_QUALIFIERS:
                 continue
