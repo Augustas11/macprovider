@@ -350,11 +350,11 @@ print(int((d.datetime.now(d.timezone.utc)-t).total_seconds()))' "$completed" 2>/
     fact retention_run_backlog_drained "$(marker_field "$RETENTION_SCOPE" run 'd.get("backlog_drained")')"
   fi
   if [ -n "$run_lap" ]; then
-    run_rel="$(python3 -I -c 'import sys,datetime as d
+    run_rel="$(python3 -I -c 'import re,sys,datetime as d
 def p(v):
-    v=v.strip()
-    if not v.endswith("Z"): raise ValueError
-    return d.datetime.strptime(v[:19],"%Y-%m-%dT%H:%M:%S")
+    m=re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$",v.strip())
+    if not m: raise ValueError
+    return (d.datetime.strptime(m.group(1),"%Y-%m-%dT%H:%M:%S"), int((m.group(2) or "0").ljust(9,"0")))
 print("behind" if p(sys.argv[1]) < p(sys.argv[2]) else "ok")' "$completed" "$run_lap" 2>/dev/null || echo behind)"
   fi
   if [ "$run_rel" = behind ]; then
@@ -537,8 +537,8 @@ retention_run_internal() {
   local extra
   extra="$(python3 -I -c 'import json,sys
 d=json.loads(sys.argv[1])
-need={"status":str,"stop_reason":str,"deleted_requests":int,"backlog_drained":bool,"last_lap_overdue_requests":int}
-bad=[k for k,t in need.items() if not isinstance(d.get(k),t)]
+# An error report may lack the lap fields and stop_reason; status is always set.
+bad=[] if isinstance(d.get("status"),str) and d["status"] else ["status"]
 if bad: sys.exit("report lacks "+",".join(bad))
 print(json.dumps(d,sort_keys=True))' "$out")" || die "the retention run report is malformed"
   python3 -I -c 'import json,sys
@@ -559,6 +559,9 @@ ci_layout() {
   CI_UPDATER_LOCK="${PEARL_UPDATER_LOCK:-/run/lock/macprovider-pearl-updater.lock}"
   plain_args "$PEARL_COORDINATOR_CONFIG" "$PEARL_COORDINATOR_OVERLAY" "$CI_UNIT" "$PEARL_INSTALL_ROOT" \
     "$PEARL_CONFIG_GUARD" "$CI_UPDATER_LOCK" "$PEARL_BACKUP_ROOT" "$CI_HEALTHZ" "$PEARL_PROC_ROOT"
+  # The root helper polls it during the restart: Pearl's loopback only.
+  [[ "$CI_HEALTHZ" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$ ]] ||
+    refuse "PEARL_COORDINATOR_HEALTHZ_URL must be an http://127.0.0.1:PORT/ URL (Pearl's loopback)"
   [[ "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] ||
     refuse "PEARL_COMPUTE_INTEGRITY_CORPUS_PATH must be an absolute plain path"
   CI_LAYOUT="--config $PEARL_COORDINATOR_CONFIG --overlay $PEARL_COORDINATOR_OVERLAY --unit $CI_UNIT \
@@ -629,7 +632,7 @@ gather_compute_integrity() {
     return
   fi
   local k installed kill path enabled loaded invalid
-  for k in effective_corpus_path installed_sha256 kill_switch scoring_enabled corpus_loaded_prompts corpus_invalid private_corpus_missing; do
+  for k in effective_corpus_path installed_sha256 installed_mode_ok loaded_matches_installed kill_switch scoring_enabled corpus_loaded_prompts corpus_invalid private_corpus_missing; do
     fact "pearl_ci_$k" "$(json_field_str "$facts" "d[\"$k\"]")"
   done
   installed="$(json_field_str "$facts" 'd["installed_sha256"]')"
@@ -647,7 +650,8 @@ gather_compute_integrity() {
   local scheduled=false
   if [ "$path" = "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" ] && [ -n "$installed" ] && [ "$enabled" = true ] &&
     [ "$invalid" = false ] && [[ "$loaded" =~ ^[0-9]+$ ]] && [ "$loaded" -gt 0 ] &&
-    [ "$(json_field_str "$facts" 'd["loaded_matches_installed"]')" = true ]; then
+    [ "$(json_field_str "$facts" 'd["loaded_matches_installed"]')" = true ] &&
+    [ "$(json_field_str "$facts" 'd["installed_mode_ok"]')" = true ]; then
     scheduled=true
   fi
   # A local corpus that is set must be valid and be the installed one; unset

@@ -29,6 +29,7 @@ Files in STATE_DIR steer it:
   retention_overdue       last_lap_overdue_requests of the next run (default 0)
   retention_no_report     a started run never publishes its report
   retention_status        status of the next report (default deleted)
+  retention_error         the next report is an error report (no stop_reason, no lap fields)
   retention_report.json   the last run's report (written here; ?report=last)
   retention_posts         number of run requests that started a run (written here)
 """
@@ -95,6 +96,10 @@ class Handler(BaseHTTPRequestHandler):
                   "backlog_drained": overdue == 0, "laps_completed": laps, "last_lap_overdue_requests": overdue,
                   "last_lap_eligible_requests": 900, "last_lap_completed_at_utc": now,
                   "archive_file": "/var/lib/macprovider/retention-archive/a.json.gz"}
+        if read("retention_error") is not None:
+            # An archive-verification error: no stop_reason and no lap fields.
+            report = {"status": "exported", "started_at_utc": now, "finished_at_utc": now,
+                      "deleted_requests": 0, "error": "archive verify failed"}
         open(os.path.join(state, "retention_report.json"), "w").write(json.dumps(report))
         return self.send(202, '{"status": "started"}')
 

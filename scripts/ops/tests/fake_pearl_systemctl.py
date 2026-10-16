@@ -5,6 +5,7 @@ Env FAKE_PEARL=<dir> holds: svc/ (fake_services state), proc/ (a fake /proc),
 pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   show -p InvocationID --value U   fixed invocation id (svc/invocation_seq: one per call)
   show -p MainPID --value U        current fake main pid
+  show --timestamp=unix -p ExecMainStartTimestamp --value U   @<unix second of the last start>
   restart U                        new pid and /proc entry, boot.txt digests of
                                    the files now on disk, /healthz recommending
                                    the config's latest_binary_version; the
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 
 root = os.environ["FAKE_PEARL"]
 svc, proc, pearl = (os.path.join(root, d) for d in ("svc", "proc", "pearl"))
@@ -38,6 +40,7 @@ def mkproc(p):
     open(os.path.join(d, "status"), "w").write("Uid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\n"
                                                % ((os.getuid(),) * 4 + (os.getgid(),) * 4))
     open(os.path.join(svc, "mainpid"), "w").write(str(p))
+    open(os.path.join(svc, "started_at"), "w").write(str(int(time.time())))
 
 
 def digest(path):
@@ -86,6 +89,8 @@ elif args[:1] == ["show"] and "InvocationID" in args:
         print(values[0])
     else:
         print("0123456789abcdef0123456789abcdef")
+elif args[:1] == ["show"] and "ExecMainStartTimestamp" in args:
+    print("@" + open(os.path.join(svc, "started_at")).read().strip())
 elif args[:1] == ["show"] and "MainPID" in args:
     print(pid())
 elif args[:1] == ["restart"]:

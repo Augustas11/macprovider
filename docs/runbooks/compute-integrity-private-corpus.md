@@ -92,7 +92,12 @@ does the following:
 
 `status` then reports `scheduled: done`: the running coordinator logged
 scheduling enabled with the installed corpus. It reads Pearl's state, so it
-also works on a machine without the local corpus.
+also works on a machine without the local corpus. The journal carries no
+corpus hash, so "the installed corpus" means: the file is still root-owned,
+in the coordinator's group, mode 0640, and unchanged since the coordinator
+process started (its ctime is not newer), and its version and prompt count
+match what the process logged. Any later change to the file, even a
+`chmod`, makes `enable` the next step again; that run restarts once.
 
 ## Replacing the corpus
 

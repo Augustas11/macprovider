@@ -445,6 +445,16 @@ sqlite3 "$VDB" "UPDATE settlement_evidence_retention_state SET last_lap_complete
 PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a database behind the recorded run" scripts/ops/pearl-runtime.sh status
 expect_next drain_gate:blocked
 case "$(next_field reason)" in *"must be the live coordinator's database"*) ok ;; *) bad "lagging database reason: $(next_field reason)" ;; esac
+# A database lap earlier within the same second as the recorded one is behind.
+python3 - "$RSCOPE/run.json" "$VDB" <<'PYFRAC'
+import json, subprocess, sys
+r = json.load(open(sys.argv[1]))
+r["last_lap_completed_at_utc"] = r["last_lap_completed_at_utc"][:19] + ".900000000Z"
+json.dump(r, open(sys.argv[1], "w"))
+subprocess.run(["sqlite3", sys.argv[2], "UPDATE settlement_evidence_retention_state SET last_lap_completed_at_utc = '%s'" % (r["last_lap_completed_at_utc"][:19] + ".100000000Z")], check=True)
+PYFRAC
+PEARL_RUNTIME_TASK=retention-vacuum-conversion run_rc 0 "vacuum task on a database behind by a fraction of a second" scripts/ops/pearl-runtime.sh status
+expect_next drain_gate:blocked
 # A recorded lap older than 36 hours is offered again.
 python3 -c 'import datetime as d,json,sys; r=json.load(open(sys.argv[1])); r["last_lap_completed_at_utc"]=(d.datetime.now(d.timezone.utc)-d.timedelta(hours=37)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"); json.dump(r,open(sys.argv[1],"w"))' "$RSCOPE/run.json"
 PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status with a stale record" scripts/ops/pearl-runtime.sh status
@@ -459,6 +469,12 @@ if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["stat
 PEARL_RUNTIME_TASK=retention-run run_rc 0 "retention run status after a refused run" scripts/ops/pearl-runtime.sh status
 expect_next run:mutate
 rm -f "$tmp/svc/retention_status"
+# An error report without stop_reason or lap fields is still printed and recorded.
+: > "$tmp/svc/retention_error"
+PEARL_RUNTIME_TASK=retention-run MACPROVIDER_OPS_OWNER=t run_rc 1 "on-demand run with an error report" scripts/ops/pearl-runtime.sh next --run
+if grep -qF "error: archive verify failed" "$tmp/out" && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["status"] == "exported" and d["error"] else 1)' "$RSCOPE/run.json"; then ok; else bad "error report not printed and recorded"; fi
+expect_err "ended with status exported"
+rm -f "$tmp/svc/retention_error"
 # An older report is never taken for this run's: with the report route
 # serving only a previous report, the run times out unrecorded.
 rm -f "$RSCOPE/run.json"
@@ -607,6 +623,8 @@ if grep -q "private topic" "$tmp/out" "$tmp/err"; then bad "enable printed corpu
 PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status after enable" scripts/ops/pearl-runtime.sh status
 expect_next done:done
 if [ "$(state_of scheduled)" = done ]; then ok; else bad "scheduled state: $(state_of scheduled)"; fi
+if [ "$(fact_of pearl_ci_loaded_matches_installed)" = True ] && [ "$(fact_of pearl_ci_installed_mode_ok)" = True ]; then ok; else bad "loaded/mode facts after enable"; fi
+PEARL_COORDINATOR_HEALTHZ_URL="http://10.0.0.1:8444/healthz" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 3 "non-loopback healthz refused" scripts/ops/pearl-runtime.sh status
 # Without a local corpus the live state still reads as done.
 COMPUTE_INTEGRITY_CORPUS= PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status on another machine" scripts/ops/pearl-runtime.sh status
 expect_next done:done
@@ -630,6 +648,12 @@ if [ "$(shasum -a 256 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH" | awk '{print $1}')
 if [ "$(grep -c compute_integrity "$tmp/pearl/overlay.yaml")" = 1 ]; then ok; else bad "overlay edited twice: $(cat "$tmp/pearl/overlay.yaml")"; fi
 COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "compute-integrity status after the replacement" scripts/ops/pearl-runtime.sh status
 expect_next done:done
+# Permission drift on the installed corpus is not done.
+chmod 644 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
+COMPUTE_INTEGRITY_CORPUS="$CORPUS2" PEARL_RUNTIME_TASK=compute-integrity-enable run_rc 0 "installed corpus with drifted mode" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in done) bad "a drifted corpus mode reads as done" ;; *) ok ;; esac
+if [ "$(fact_of pearl_ci_installed_mode_ok)" = False ]; then ok; else bad "mode drift not reported: $(fact_of pearl_ci_installed_mode_ok)"; fi
+chmod 640 "$PEARL_COMPUTE_INTEGRITY_CORPUS_PATH"
 unset COMPUTE_INTEGRITY_CORPUS PEARL_COMPUTE_INTEGRITY_CORPUS_PATH
 rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" "$tmp/pearl/etc/compute-integrity-corpus.json"
 

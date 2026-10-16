@@ -590,7 +590,7 @@ def file_sha256(path):
 
 def ci_facts(args):
     # The files read must be the ones the running coordinator was started with.
-    running(args)
+    _, _, _, _, gid = running(args)
     base, overlay = load_effective(args)
     b, o = ci_scoring(base), ci_scoring(overlay)
     enabled = o.get("enabled", b.get("enabled", True))
@@ -603,7 +603,8 @@ def ci_facts(args):
         "installed_sha256": file_sha256(args.ci_corpus),
         # The running process loaded the corpus now installed (prompt count
         # and version); the version itself is never printed.
-        "loaded_matches_installed": installed_matches(args.ci_corpus, j),
+        "loaded_matches_installed": installed_matches(args.ci_corpus, args.unit, j),
+        "installed_mode_ok": installed_mode_ok(args.ci_corpus, gid),
         "scoring_enabled": j["scoring_enabled"],
         "corpus_loaded_prompts": j["corpus_loaded_prompts"],
         "corpus_invalid": j["corpus_invalid"],
@@ -612,15 +613,54 @@ def ci_facts(args):
     print(json.dumps(facts, sort_keys=True))
 
 
-def installed_matches(path, j):
+def main_start(unit):
+    """Unix second the unit's current main process started, or None."""
+    out = subprocess.run(["systemctl", "show", "--timestamp=unix", "-p", "ExecMainStartTimestamp", "--value", unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    m = re.match(r"^@([0-9]+)$", out)
+    return int(m.group(1)) if m else None
+
+
+def installed_matches(path, unit, j):
+    """The running process loaded the corpus installed now: the file has not
+    changed since the process started (the coordinator reads it once at
+    start; the journal carries no content hash) and its version and prompt
+    count are the ones the process logged."""
     if not os.path.isfile(path) or os.path.islink(path):
         return False
+    start = main_start(unit)
     try:
+        if start is None or int(os.lstat(path).st_ctime) > start:
+            return False
         with open(path, "rb") as f:
             version, prompts = parse_corpus(f.read(CORPUS_MAX_BYTES + 1))
     except (OSError, Refused):
         return False
     return j["corpus_loaded_prompts"] == prompts and j["corpus_loaded_version"] == version
+
+
+def installed_mode_ok(path, gid):
+    """Root-owned (this process), the coordinator's group, exactly 0640."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return os.path.isfile(path) and not os.path.islink(path) and st.st_uid == os.geteuid() \
+        and st.st_gid == gid and st.st_mode & 0o7777 == 0o640
+
+
+def safe_parent(path):
+    """The directory a root process writes the corpus into, and every
+    ancestor of its resolved path, is owned by root or this process's user
+    and not writable by group or others (sticky directories excepted)."""
+    cur = os.path.realpath(os.path.dirname(path))
+    while True:
+        st = os.lstat(cur)
+        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not st.st_mode & 0o1000):
+            raise Refused("%s must be owned by root and not writable by group or others" % cur)
+        if cur == os.path.dirname(cur):
+            return
+        cur = os.path.dirname(cur)
 
 
 def ci_overlay_plan(text, overlay, corpus_path):
@@ -707,6 +747,7 @@ def apply_compute_integrity(args):
     try:
         with guard(args):
             raw, version, prompts = read_staged(args)
+            safe_parent(dest)
             pid, binary, env, uid, gid = running(args)
             base, overlay = load_effective(args)
             if ci_scoring(overlay).get("enabled", ci_scoring(base).get("enabled", True)) is False:
@@ -750,6 +791,12 @@ def apply_compute_integrity(args):
                 if tmp:
                     install(tmp, args.overlay)
             except Exception:
+                # Before any restart: put the overlay back if it was already
+                # replaced (a failure after the rename), then the corpus.
+                with open(args.overlay, "rb") as f:
+                    replaced = f.read() == new_overlay
+                if tmp and new_overlay != original_overlay and replaced:
+                    install(write_like(args.overlay, original_overlay, args.overlay), args.overlay)
                 restore_corpus(dest, raw, original_corpus, gid)
                 raise
             finally:
