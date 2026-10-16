@@ -2939,7 +2939,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     // configuration, a per-layer quantization exclusion, or no readable
     // configuration never groups.
     /// The decode row bound ports core `get_qmv_batch_limit`
-    /// (`v0.32.2-macprovider.2`): a decode forward of `M` rows stays on
+    /// (`v0.32.2-macprovider.5`): a decode forward of `M` rows stays on
     /// `qmv` for every quantized projection while `M` is below the device's
     /// smallest vector limit.
     func testDecodeRouteBoundFollowsTheCoreVectorLimitPerDevice() {

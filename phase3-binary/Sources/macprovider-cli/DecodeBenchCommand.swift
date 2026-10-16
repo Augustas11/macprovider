@@ -428,11 +428,12 @@ struct DecodeBenchCommand: AsyncParsableCommand {
 
 // MARK: - Helpers (module-level, prefixed to avoid collision)
 
-/// The mlx-swift-lm pin tag used for benchmark output filenames so a
-/// future operator can disambiguate runs taken on different pins.
-/// Source of truth: `phase3-binary/Package.resolved` — update when pin bumps.
+/// The mlx-swift-lm pin tag used for benchmark output filenames and records so
+/// a future operator can disambiguate runs taken on different pins. It derives
+/// from `KVBuildIdentity.mlxSwiftLMRevision`, which `KVBuildIdentityDriftTests`
+/// holds equal to `Package.resolved`, so it follows every pin bump.
 func decodeBenchMLXPinTag() -> String {
-    return "mlxlm-3.31.4"
+    "mlxlm-" + String(KVBuildIdentity.mlxSwiftLMRevision.prefix(12))
 }
 
 /// Nearest-rank percentile for small `runs` budgets (3–5).

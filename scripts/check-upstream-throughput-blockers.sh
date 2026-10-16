@@ -455,8 +455,9 @@ out = {
         ),
         "note": (
             "The fork patch set is rebased onto upstream mlx-swift-lm 3.32.3 "
-            "(3.32.3-macprovider.6) with mlx-swift 0.32.3 on a batch-invariant "
-            "small-M quantized matmul MLX core fork (0.32.3-macprovider.2); it is "
+            "(3.32.3-macprovider.9) with mlx-swift 0.32.3 (0.32.3-macprovider.8) on "
+            "a batch-invariant small-M quantized matmul MLX core fork "
+            "(v0.32.2-macprovider.5); it is "
             "not approved until Studio validation and the freeze audits pass; "
             "native MTP stays default-off; the forks are the permanent production "
             "runtime, and an upstream equivalent (for example #645) only retires the "

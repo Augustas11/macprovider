@@ -9,6 +9,9 @@ from pathlib import Path
 
 from scripts import read_swiftpm_pins
 from scripts.read_swiftpm_pins import (
+    SPEC048_MLX_CORE_FORK,
+    SPEC048_MLX_CORE_REVISION,
+    SPEC048_MLX_CORE_UPSTREAM_BASE,
     SPEC048_MLX_SWIFT_FORK,
     SPEC048_MLX_SWIFT_LM_FORK,
     SPEC048_MLX_SWIFT_LM_REVISION,
@@ -88,7 +91,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "72c4ab082a08f291ba270a7303880e90036742e3"
+            "revision": "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -98,11 +101,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "72c4ab082a08f291ba270a7303880e90036742e3",
+            "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "72c4ab082a08f291ba270a7303880e90036742e3",
+            "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -136,7 +139,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -144,9 +147,9 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
             pins = read_pins(resolved)
 
-        self.assertEqual(pins["mlx_swift"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41")
+        self.assertEqual(pins["mlx_swift"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05")
         self.assertEqual(
-            pins["mlx_swift_revision"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
         )
 
     def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
@@ -167,7 +170,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "ca2f61d22c5e8afe87170525ebc1769f72da5b41",
+            "revision": "745f5e4872054ae2c1c497d2351a61b6d89e8a05",
             "version": "0.32.3",
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -182,10 +185,10 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         pins = read_pins(resolved)
 
         self.assertEqual(
-            pins["mlx_swift_lm_revision"], "72c4ab082a08f291ba270a7303880e90036742e3"
+            pins["mlx_swift_lm_revision"], "dbe8bcb39a00e31b8ba9a0602c60d9388fca247d"
         )
         self.assertEqual(
-            pins["mlx_swift_revision"], "ca2f61d22c5e8afe87170525ebc1769f72da5b41"
+            pins["mlx_swift_revision"], "745f5e4872054ae2c1c497d2351a61b6d89e8a05"
         )
 
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
@@ -327,6 +330,7 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
         for fork, revision, base in (
             (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
             (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
+            (SPEC048_MLX_CORE_FORK, SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE),
         ):
             with self.subTest(fork=fork):
                 cells = [cell.strip() for cell in rows[fork].split("|")]

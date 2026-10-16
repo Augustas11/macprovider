@@ -83,7 +83,8 @@ classify() {
       scripts/promote-signed-journey-result.py|scripts/check_spec_governance.py|\
       scripts/build-local-consumer-endpoint-journey-result.py|\
       scripts/native_mtp_journey_evidence.py|scripts/pool_promotion_transition.py|\
-      scripts/privacy_class_beta_journey_evidence.py)
+      scripts/privacy_class_beta_journey_evidence.py|\
+      scripts/check_mlx_core_streams.py|scripts/read_swiftpm_pins.py)
         swift=true
         matched_swift=$((matched_swift + 1)) ;;
     esac

@@ -50,7 +50,7 @@ final class DecodeBenchHelperTests: XCTestCase {
     }
 
     func testPinTagIsNonEmpty() {
-        XCTAssertFalse(decodeBenchMLXPinTag().isEmpty)
+        XCTAssertEqual(decodeBenchMLXPinTag(), "mlxlm-" + String(KVBuildIdentity.mlxSwiftLMRevision.prefix(12)))
     }
 
     func testSanitizeFilenameComponentRejectsPathTraversal() {

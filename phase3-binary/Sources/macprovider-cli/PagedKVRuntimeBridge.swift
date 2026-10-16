@@ -3906,7 +3906,7 @@ struct PagedKVRowAttentionExtent: Equatable {
 
 /// The vector attention route MLX core takes for a call (query length at
 /// most 8), ported from core fork `Augustas11/mlx` tag
-/// `v0.32.2-macprovider.2`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+/// `v0.32.2-macprovider.5`, `mlx/backend/metal/scaled_dot_product_attention.cpp`:
 /// vector mode at line 812 (`q_pre.shape(2) <= 8`), one vs two passes at
 /// line 875, the `_gqa` first-pass kernel at lines 469-473, the partition
 /// count at lines 486-523 (with the `MLX_SDPA_BLOCKS` override at 519).
