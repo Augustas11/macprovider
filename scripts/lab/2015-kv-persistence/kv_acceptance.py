@@ -324,6 +324,11 @@ def session(name, args):
             s[f"{sc}_fresh_t2"] = lab.chat(msgs, None, max_tokens=64)
         s["div_fresh_t2"] = lab.chat(dmsgs, None, max_tokens=64)
         s["cancel_fresh_t1"] = lab.chat(lab.t1_messages(CANCEL[0], CANCEL[1]), None, max_tokens=48)
+        # Same-path reference for B4/B5: a keyed first turn on a key that was never
+        # cancelled. Keyed hybrid rows split prefill at recurrent checkpoint
+        # positions (ContinuousBatchScheduler.prefillSpanEnd), unkeyed rows do not,
+        # so an unkeyed request is not a bit-exact reference for a keyed one.
+        s["cancel_keyed_ref_t1"] = lab.chat(lab.t1_messages(CANCEL[0], CANCEL[1]), lab.key("hot", "cancel-ref"), max_tokens=48)
         s["control_main_t1"] = lab.chat(lab.t1_messages(SCEN["main"][0], SCEN["main"][1]), None, **SCEN["main"][3])
     else:
         raise SystemExit(f"unknown session {name}")
@@ -382,12 +387,27 @@ def verdict(args):
     check("B3 model stop token (natural EOS) boundary = main", on1["main_t1"]["finish_reason"] == "stop"
           and all(c["pass"] for c in checks if c["id"].startswith(("A2", "A3"))),
           {"main_t1_finish": on1["main_t1"]["finish_reason"]})
+    # B4/B5: a cancelled turn must leave nothing that changes the resend. The
+    # reference is a keyed, never-cancelled first turn (same decode path).
+    # Evidence captured before that reference existed falls back to the two
+    # resends checking each other: they ran in different processes, and the
+    # cold one had no disk hit, so neither can carry the other's state.
     fr = on2["cancel_fresh_t1"]
-    for cid, r in (("B4 cancel then resend (hot)", on1["cancel_hot_resend"]),
-                   ("B5 cancel, restart, resend (cold)", on2["cancel_cold_resend"])):
-        check(cid, r["text"] == fr["text"] and (r["cached_prompt_tokens"] or 0) < (r["prompt_tokens"] or 0),
-              {"cached": r["cached_prompt_tokens"], "prompt": r["prompt_tokens"], "text": r["text"], "fresh": fr["text"],
-               "cancelled_write": on1["cancel_cancelled"]["write"].get("outcome")})
+    hot_r, cold_r = on1["cancel_hot_resend"], on2["cancel_cold_resend"]
+    keyed_ref = on2.get("cancel_keyed_ref_t1")
+    cancelled_write = on1["cancel_cancelled"]["write"].get("outcome")
+    info["cancel_keyed_equals_unkeyed"] = (keyed_ref or cold_r)["text"] == fr["text"]
+    for cid, r, ref, ref_name, extra in (
+            ("B4 cancel then resend (hot)", hot_r, keyed_ref or cold_r,
+             "cancel_keyed_ref_t1" if keyed_ref else "cancel_cold_resend (other process)", True),
+            ("B5 cancel, restart, resend (cold)", cold_r, keyed_ref or hot_r,
+             "cancel_keyed_ref_t1" if keyed_ref else "cancel_hot_resend (other process)",
+             not cold_r["disk_hit"] and cancelled_write != "committed")):
+        check(cid, extra and r["text"] == ref["text"] and r["finish_reason"] == ref["finish_reason"]
+              and (r["cached_prompt_tokens"] or 0) < (r["prompt_tokens"] or 0),
+              {"cached": r["cached_prompt_tokens"], "prompt": r["prompt_tokens"], "disk_hit": r["disk_hit"],
+               "text": r["text"], "reference": ref_name, "reference_text": ref["text"],
+               "unkeyed_fresh_text": fr["text"], "cancelled_write": cancelled_write})
     dv, df = on2["div_cold_t2"], on2["div_fresh_t2"]
     check("B6 divergent prefix recomputes", not dv["cached_prompt_tokens"] and dv["text"] == df["text"],
           {"cached": dv["cached_prompt_tokens"], "conv_cache": dv["conv_cache"], "text": dv["text"], "fresh": df["text"]})
