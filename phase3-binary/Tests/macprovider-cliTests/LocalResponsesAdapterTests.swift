@@ -57,8 +57,13 @@ final class LocalResponsesAdapterTests: XCTestCase {
             XCTAssertThrowsError(try LocalResponsesAdapter(body: Data(body.utf8)))
         }
         XCTAssertThrowsError(try adapter(["input": [["role": "user", "content": [["type": "input_image", "image_url": "x"]]]]]))
+        for field in ["input_image", "image_url", "input_audio", "input_file"] {
+            XCTAssertThrowsError(try adapter(["input": [["role": "user", "content": [["type": "input_text", "text": "hello", field: "unsupported"]]]]]))
+        }
+        XCTAssertThrowsError(try adapter(["text": ["format": ["type": "text", "verbosity": "high"]]]))
         XCTAssertThrowsError(try adapter(["tools": [["type": "web_search"]]]))
         XCTAssertThrowsError(try adapter(["tool_choice": "required"]))
+        XCTAssertThrowsError(try adapter(["tools": [["type": "function", "name": "weather"]], "tool_choice": ["type": "function", "name": "weather", "namespace": "other"]]))
         XCTAssertThrowsError(try adapter(["reasoning": ["effort": "high"]]))
     }
     func testEOFAndMalformedStreamFailExactlyOnce() throws {

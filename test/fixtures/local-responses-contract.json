@@ -191,6 +191,77 @@
         "truncation": "auto"
       },
       "error_code": "unsupported_parameter"
+    },
+    {
+      "name": "function_history",
+      "request": {
+        "model": "test-model",
+        "store": false,
+        "input": [
+          {
+            "role": "user",
+            "content": "weather"
+          },
+          {
+            "type": "function_call",
+            "call_id": "call_abcdefghijklmnop",
+            "name": "weather",
+            "arguments": "{\"city\":\"Rome\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call_abcdefghijklmnop",
+            "output": "sunny"
+          }
+        ]
+      },
+      "chat": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "weather"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_abcdefghijklmnop",
+                "type": "function",
+                "function": {
+                  "name": "weather",
+                  "arguments": "{\"city\":\"Rome\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_abcdefghijklmnop",
+            "content": "sunny"
+          }
+        ]
+      }
+    },
+    {
+      "name": "hidden_media",
+      "request": {
+        "model": "test-model",
+        "store": false,
+        "input": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello",
+                "input_image": "secret"
+              }
+            ]
+          }
+        ]
+      },
+      "error_code": "invalid_request"
     }
   ],
   "streams": [

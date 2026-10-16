@@ -13191,10 +13191,13 @@
       "spec_id": "SPEC-001",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift"
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:final class RouterHandler",
+        "phase3-binary/Sources/macprovider-cli/LocalResponsesAdapter.swift:final class LocalResponsesAdapter"
       ],
       "tests": [
-        "phase5-gateway/internal/router/local_responses_contract_test.go:TestLocalResponsesSharedContract"
+        "phase5-gateway/internal/router/local_responses_contract_test.go:TestLocalResponsesSharedContract",
+        "phase3-binary/Tests/macprovider-cliTests/LocalResponsesAdapterTests.swift:final class LocalResponsesAdapterTests",
+        "phase3-binary/Tests/macprovider-cliTests/HTTPServerLocalResponsesTests.swift:final class HTTPServerLocalResponsesTests"
       ],
       "journeys": [],
       "evidence": [],
@@ -13210,9 +13213,9 @@
       "spec_id": "SPEC-001",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:final class RouterHandler",
         "phase3-binary/Sources/macprovider-cli/LocalTokenUtilities.swift:struct LocalTokenUtilityRequest",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:actor ModelRuntime"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/LocalTokenUtilitiesTests.swift:final class LocalTokenUtilitiesTests"

@@ -77,6 +77,8 @@ final class LocalResponsesAdapter {
         } else if let items = req["input"] as? [[String: Any]], !items.isEmpty {
             for item in items {
                 let type = item["type"] as? String ?? "message"
+                let itemFields: Set<String> = type == "message" ? ["type", "id", "status", "role", "content"] : type == "function_call" ? ["type", "id", "status", "call_id", "name", "arguments"] : ["type", "id", "status", "call_id", "output"]
+                guard Set(item.keys).isSubset(of: itemFields) else { throw invalid("input", "Unsupported input item field", "unsupported_parameter") }
                 switch type {
                 case "message":
                     let role = item["role"] as? String ?? "user"
@@ -99,20 +101,21 @@ final class LocalResponsesAdapter {
             guard let inputTools = value as? [[String: Any]] else { throw invalid("tools", "tools must be an array") }
             for tool in inputTools {
                 if tool["type"] as? String == "namespace" {
-                    guard let nested = tool["tools"] as? [[String: Any]] else { throw invalid("tools", "namespace tools must be an array") }
+                    guard Set(tool.keys).isSubset(of: ["type", "name", "description", "tools"]), let nested = tool["tools"] as? [[String: Any]] else { throw invalid("tools", "namespace tools must be an array") }
                     flatTools.append(contentsOf: nested)
                 } else { flatTools.append(tool) }
             }
         }
         var names = Set<String>()
         for tool in flatTools {
+            guard Set(tool.keys).isSubset(of: ["type", "name", "description", "parameters", "strict"]) else { throw invalid("tools", "Unsupported function tool field", "unsupported_parameter") }
             guard tool["type"] as? String == "function", let name = tool["name"] as? String, !name.isEmpty, names.insert(name).inserted else { throw invalid("tools", "Only uniquely named function tools are supported", "unsupported_parameter") }
         }
         var chat: [String: Any] = ["model": model, "messages": messages, "stream": req["stream"] as? Bool ?? false]
         if !flatTools.isEmpty { chat["tools"] = flatTools.map { tool -> [String: Any] in var fn = tool; fn.removeValue(forKey: "type"); return ["type": "function", "function": fn] } }
         if let choice = req["tool_choice"], !(choice is NSNull) {
             if let choice = choice as? String, ["auto", "none", "required"].contains(choice), choice != "required" || !flatTools.isEmpty { chat["tool_choice"] = choice }
-            else if let choice = choice as? [String: Any], choice["type"] as? String == "function", let name = choice["name"] as? String, names.contains(name) { chat["tool_choice"] = ["type": "function", "function": ["name": name]] }
+            else if let choice = choice as? [String: Any], Set(choice.keys).isSubset(of: ["type", "name"]), choice["type"] as? String == "function", let name = choice["name"] as? String, names.contains(name) { chat["tool_choice"] = ["type": "function", "function": ["name": name]] }
             else { throw invalid("tool_choice", "Unsupported or unavailable function selection", "unsupported_parameter") }
         }
         var textFormat: [String: Any] = ["type": "text"]
@@ -120,6 +123,8 @@ final class LocalResponsesAdapter {
             guard let config = value as? [String: Any], Set(config.keys).isSubset(of: ["format"]) else { throw invalid("text", "Only text.format is supported") }
             if let value = config["format"], !(value is NSNull) {
                 guard let fmt = value as? [String: Any], let type = fmt["type"] as? String else { throw invalid("text.format", "text.format must have a type") }
+                let fields: Set<String> = type == "json_schema" ? ["type", "name", "description", "schema", "strict"] : ["type"]
+                guard Set(fmt.keys).isSubset(of: fields) else { throw invalid("text.format", "Unsupported text format field", "unsupported_parameter") }
                 textFormat = fmt
                 switch type {
                 case "text": break
@@ -145,7 +150,7 @@ final class LocalResponsesAdapter {
         if value == nil || value is NSNull { return "" }
         guard let parts = value as? [[String: Any]] else { throw LocalResponsesError(code: "invalid_request", param: "input", message: "Only text content is supported") }
         return try parts.map { part in
-            guard let type = part["type"] as? String, ["input_text", "output_text", "text"].contains(type), part["image_url"] == nil, let text = part["text"] as? String else { throw LocalResponsesError(code: "unsupported_parameter", param: "input", message: "Only text content is supported") }
+            guard Set(part.keys).isSubset(of: ["type", "text", "annotations"]), let type = part["type"] as? String, ["input_text", "output_text", "text"].contains(type), part["image_url"] == nil, let text = part["text"] as? String else { throw LocalResponsesError(code: "invalid_request", param: "input", message: "Only text content is supported") }
             return text
         }.joined()
     }

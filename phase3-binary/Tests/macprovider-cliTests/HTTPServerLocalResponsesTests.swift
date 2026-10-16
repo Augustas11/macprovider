@@ -117,6 +117,17 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                 defer { session.invalidateAndCancel() }
                 let (data, _) = try await session.data(from: URL(string: "http://127.0.0.1:\(port)/v1/capabilities")!)
                 let capabilities = try self.object(data)
+                XCTAssertEqual(capabilities["model"] as? String, "fixture-model")
+                let responses = try XCTUnwrap(capabilities["responses"] as? [String: Any])
+                XCTAssertEqual(responses["available"] as? Bool, true)
+                XCTAssertEqual(responses["model"] as? String, "fixture-model")
+                XCTAssertEqual(responses["model_hash"] as? String, "fixture-hash")
+                XCTAssertEqual(responses["generation"] as? Int, 7)
+                XCTAssertEqual(responses["tool_choice_modes"] as? [String], supported ? ["auto", "none"] : ["auto"])
+                XCTAssertEqual(responses["text_formats"] as? [String], supported ? ["text", "json_object", "json_schema"] : ["text"])
+                XCTAssertEqual(responses["upstream_text_formats"] as? [String], supported ? [] : ["json_object", "json_schema"])
+                XCTAssertEqual(responses["structured_output_enforcement"] as? String,
+                    supported ? "json_object_and_strict_json_schema_validated" : "upstream_dependent")
                 let utilities = try XCTUnwrap(capabilities["token_utilities"] as? [String: Any])
                 XCTAssertEqual(utilities["supported"] as? Bool, supported)
                 XCTAssertEqual(utilities["endpoints"] as? [String], supported ? ["/v1/tokenize", "/v1/detokenize", "/v1/apply-template"] : [])
@@ -247,6 +258,10 @@ private actor LocalResponsesRuntime: ModelRuntimeServing {
         self.failAfterChunk = failAfterChunk
         self.tokenUtilitiesSupported = tokenUtilitiesSupported
         self.awaitDisconnect = awaitDisconnect
+    }
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        .loaded(model: "fixture-model", modelHash: "fixture-hash", generation: 7,
+                runtime: tokenUtilitiesSupported ? "mlx_cache" : "external_openai_loopback")
     }
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
         LocalTokenUtilityCapabilities(model: "fixture-model", modelHash: nil, generation: 7,

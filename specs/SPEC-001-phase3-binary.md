@@ -2172,9 +2172,27 @@ local Chat Completions and network requests MUST share existing runtime admissio
 capacity, cancellation and cleanup ownership; no independent engine or weight
 copy is permitted. Model/status discovery MUST advertise the exact supported
 local endpoints and model-dependent utilities without implying remote endpoint
-or runtime capabilities. Shared Go/Swift contract fixtures MUST cover accepted
-inputs, unsupported controls, function tools, structured output, streaming and
-terminal errors.
+or runtime capabilities. `GET /v1/capabilities` MUST expose a `responses` object with `endpoint`,
+`stateless:true`, `store:false`, `stream:true`, `retained_responses:false`,
+`available`, `model`, `model_hash`, `generation`, `tool_choice_modes`,
+`text_formats`, `upstream_text_formats` and `structured_output_enforcement`.
+Each model-dependent capability object MUST carry its own runtime-owned identity
+snapshot; clients MUST NOT combine capability fields from separately sampled
+model generations. Tool-choice modes MUST reflect the selected model/runtime's
+existing tool-selection policy.
+
+For native `mlx_cache`, `text_formats` is `["text", "json_object", "json_schema"]`,
+`upstream_text_formats` is empty, and enforcement is
+`json_object_and_strict_json_schema_validated`. This names JSON-object and
+**strict** JSON-schema validation; accepting a non-strict schema does not promise
+schema-constrained output. For external runtimes, `text_formats` is `["text"]`,
+`upstream_text_formats` is `["json_object", "json_schema"]`, and enforcement is
+`upstream_dependent`: forwarding a format is not provider validation or a claim
+that the external runtime enforces it. When unavailable, identity is null, all
+three capability lists are empty, and enforcement is `unavailable`.
+
+Shared Go/Swift contract fixtures MUST cover accepted inputs, unsupported
+controls, function tools, structured output, streaming and terminal errors.
 
 **SPEC-001-R010 — Exact loaded-model token utilities.** `POST /v1/tokenize`,
 `POST /v1/detokenize` and `POST /v1/apply-template` MUST use the tokenizer/template of the
@@ -2195,8 +2213,11 @@ tokens; detokenize preserves special tokens. Apply-template returns exact
 template token IDs and their decoded text. Successful results identify `model`
 and `generation` (and `model_hash` when available). `GET /v1/capabilities` MUST
 advertise these bounds, endpoints, local-client authorization policy, stateless
-Responses scope and utility availability for the current loaded model. Detokenize MUST reject malformed, negative and out-of-range
-token IDs. Apply-template MUST validate the supported message shape and reject
+Responses scope and utility availability for the current loaded model. The
+`token_utilities` object MUST carry its own `model`, `model_hash` and `generation`
+snapshot, `supported`, available `endpoints`, and the four numeric limits
+`max_input_bytes`, `max_tokens`, `max_output_bytes`, `max_messages`. Detokenize
+MUST reject malformed, negative and out-of-Int32-range token IDs. Apply-template MUST validate the supported message shape and reject
 unsupported media or controls. Errors MUST be explicit OpenAI-shaped errors, and
 utility work MUST remain bounded under simultaneous generation and warm swaps.
 Unsupported exact access is HTTP 501 `token_utilities_unsupported`; unsupported

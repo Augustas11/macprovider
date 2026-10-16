@@ -13,6 +13,7 @@ import Security
 import Tokenizers
 
 protocol ModelRuntimeServing: Actor {
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities
     func localTokenUtility(_ request: LocalTokenUtilityRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> LocalTokenUtilityResult
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
@@ -243,6 +244,8 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities { .unavailable }
+
 
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
         LocalTokenUtilityCapabilities(model: nil, modelHash: nil, generation: nil, operations: [])
@@ -5866,6 +5869,15 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+
+    func localResponsesCapabilities() async -> LocalResponsesCapabilities {
+        let snapshot = requestStartSnapshot()
+        guard snapshot.state == .ready, snapshot.container != nil, let model = snapshot.modelID else {
+            return .unavailable
+        }
+        return .loaded(model: model, modelHash: snapshot.modelHash,
+                       generation: selfCheckGeneration, runtime: "mlx_cache")
+    }
 
     func localTokenUtilityCapabilities() async -> LocalTokenUtilityCapabilities {
         let snapshot = requestStartSnapshot()

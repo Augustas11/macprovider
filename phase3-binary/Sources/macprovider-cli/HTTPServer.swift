@@ -719,16 +719,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let writer = ResponseWriter(context: context)
         let runtime = modelRuntime
         Task {
-            let snapshot = await runtime.currentSnapshot()
+            let responses = await runtime.localResponsesCapabilities()
             let utilities = await runtime.localTokenUtilityCapabilities()
             writer.writeJSON(status: .ok, body: [
                 "object": "local_capabilities",
-                "model": snapshot.modelID as Any? ?? NSNull(),
+                "model": responses.model as Any? ?? NSNull(),
                 "authorization": ["policy": "loopback_local_process", "bearer_auth": false],
                 "responses": [
                     "endpoint": "/v1/responses", "stateless": true, "store": false,
                     "stream": true, "retained_responses": false,
-                    "model_features": "validated_by_loaded_runtime",
+                    "available": responses.available,
+                    "model": responses.model as Any? ?? NSNull(),
+                    "model_hash": responses.modelHash as Any? ?? NSNull(),
+                    "generation": responses.generation as Any? ?? NSNull(),
+                    "tool_choice_modes": responses.toolChoiceModes,
+                    "text_formats": responses.textFormats,
+                    "upstream_text_formats": responses.upstreamTextFormats,
+                    "structured_output_enforcement": responses.structuredOutputEnforcement,
                 ],
                 "token_utilities": [
                     "supported": !utilities.operations.isEmpty,
