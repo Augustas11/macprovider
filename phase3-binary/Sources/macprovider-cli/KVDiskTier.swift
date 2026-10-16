@@ -1,21 +1,24 @@
 import Foundation
 import MacProviderCore
 
-/// SPEC-037 FR-KVP11 — the synthetic-key persistence gate. The disk tier
-/// persists (and, once wired, promotes) a conversation ONLY when BOTH hold:
-///   1. the canonical key bytes begin with the reserved `conv:kvs-synth:`
-///      sub-namespace prefix, and
-///   2. the request arrived over the direct-HTTP operator path.
-/// Coordinator-derived buyer keys carry a base64url HMAC suffix that cannot
-/// contain `:`, so they can never match the sub-namespace; and relay / Tier-2 /
-/// privacy-class traffic never persists regardless of key shape (defense in
-/// depth against a buyer crafting the prefix on a non-gateway path).
-/// SPEC-049-R010: `.privacy` is non-persisting, the same as `.relay`. The gate
-/// never infers provenance from key shape alone — both inputs are required.
+/// SPEC-037 FR-KVP11/R014 — persistence requires either a matching, valid
+/// authenticated fleet grant on relay/Tier-2 traffic or a reserved synthetic
+/// key on the direct-HTTP operator path. Key shape alone cannot grant fleet
+/// eligibility. Privacy and unknown provenance never persist, even when a
+/// caller supplies a synthetic-shaped key or a grant.
 enum KVDiskCacheGate {
     static let syntheticPrefix = "conv:kvs-synth:"
 
-    static func persists(conversationKey: String?, provenance: KVIngestProvenance) -> Bool {
+    static func persists(
+        conversationKey: String?, provenance: KVIngestProvenance,
+        fleetGrant: FleetConversationCacheGrant? = nil
+    ) -> Bool {
+        if provenance == .relay || provenance == .tier2,
+           let grant = fleetGrant,
+           grant.isValid,
+           grant.conversationKey == conversationKey {
+            return true
+        }
         guard provenance == .directHTTP else { return false }
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
         return key.hasPrefix(syntheticPrefix) && key.utf8.count > syntheticPrefix.utf8.count

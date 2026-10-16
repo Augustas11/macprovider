@@ -1,6 +1,6 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.59 (2026-10-15, bounded native image input)
+**Version:** 0.9.60 (2026-10-16, authenticated fleet cache purge)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
 
 **Change log v0.9.59 (2026-10-15, Related: #2016):**
@@ -612,6 +612,18 @@ SPEC-006 v1 explicitly does not specify:
 
 These items belong to v0.2, SPEC-005, SPEC-007, or later specs.
 
+**v0.9.60 fleet persistence amendment (SPEC-037-R014).** The historical
+non-buyer-purgeable limitation below applies to legacy hot-cache providers.
+A provider advertising `fleet_cache_protocol: 1` may receive durable reuse
+eligibility only through authenticated coordinator grants. `DELETE /v1/sticky`
+must durably revoke every registered account scope, including cache-only scopes,
+and report pending until the serving providers acknowledge local hot/disk purge.
+Disconnected providers reconcile before further eligible grants. Fresh inference
+may continue while cache eligibility is denied. The published disclosure in §1.6
+must distinguish this protocol from legacy independent-TTL hot caches. Privacy
+requests receive neither grants nor reusable cache state. SPEC-037 §10 owns
+revocation, retention and format details; no billing computation changes.
+
 **Provider-side caching remains guarded.** Prompt-result cache, arbitrary provider-side request state retention, or any cache not explicitly covered by this section remains OUT OF SCOPE. SPEC-006 permits SPEC-004 coordinator-internal sticky affinity, using a gateway-derived `routing_internal.conversation_key` in the reserved `conv:` namespace. **(Narrowed, v0.9.8 — SPEC-024 prefix-cache carve-out:)** provider-*local* prefix caching **keyed on that derived `conv:` value** is now additionally permitted (SPEC-024 v0.2 §11–§12; SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). The guard below still applies to it: the derived key remains account-scoped and unforgeable, the provider never learns the raw tag/`account_id`, and the provider cache carries no account dimension of its own (SPEC-024 v0.2 §11). Sticky affinity is disabled by default (`routing.sticky_enabled: false`) and MUST NOT change buyer-visible behavior unless an operator explicitly enables it.
 
 The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the following remain true:
@@ -693,7 +705,7 @@ SPEC-006 is a Tier 1 cooperative inference product. The following properties hol
 9. **Buyer receipt and status surfaces expose pending, verified, quarantined, zero_settled, and relay_blind_settled labels without raw prompts or raw outputs.**
 10. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
 11. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-10 and 12.
-12. **Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL.**
+12. **Authenticated non-demo chat completions may let the serving Mac reuse an encrypted provider-local KV cache under an opaque HMAC conversation identifier. Reuse remains bounded by the conversation-cache TTL (15 minutes by default); encrypted files are cleanup-bounded by the configured retention (60 minutes by default) and cleanup does not extend reuse. The identifier does not pin routing or reveal your account id to the provider. DELETE /v1/sticky durably revokes registered cache scopes; its response remains pending while a disconnected provider or coordinator restart delays provider acknowledgement. GET /v1/sticky reports whether acknowledgements remain pending without starting another revocation.**
 
 These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in current Tier 1 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, properties 1-10 and 12 are always normative. Property 11 is conditional on `routing.sticky_enabled: true`.
 
@@ -1444,6 +1456,7 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
 - Route-snapshot durable-store availability: `route_snapshot_failed` — a pre-dispatch store write failure; a retry can succeed once storage recovers.
+- Conversation-cache purge authority availability: `fleet_cache_purge_unavailable` — the coordinator could not durably read or write account-scoped purge state; a retry can succeed once storage recovers.
 - Provider response-shape glitches where a re-attempt (possibly against a different provider) may not repeat the same defect: `malformed_tool_call_final_json`, `provider_stream_downgraded`, `malformed_json_response`, `json_schema_validation_failed`.
 
 **Permanent (`false`) — retrying the identical request cannot succeed:** validation errors (e.g. `invalid_request`, `invalid_json`, `invalid_tools`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, byte/schema-cap and stream-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, `stream_output_exceeded`, the `json_schema_*` cap/shape codes), Tier-2/config lookup failures (e.g. `autotune_feed_not_found`), and auth/admin/oauth-signup client errors. Any code not explicitly classified — on either service — defaults to `retryable: false`.
@@ -1658,7 +1671,7 @@ compatibility requirements MUST carry their own schema/version fields.
   },
   "prefix_cache": {
     "enabled": true,
-    "description": "Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL."
+    "description": "Authenticated non-demo chat completions may let the serving Mac reuse an encrypted provider-local KV cache under an opaque HMAC conversation identifier. Reuse remains bounded by the conversation-cache TTL (15 minutes by default); encrypted files are cleanup-bounded by the configured retention (60 minutes by default) and cleanup does not extend reuse. The identifier does not pin routing or reveal your account id to the provider. DELETE /v1/sticky durably revokes registered cache scopes; its response remains pending while a disconnected provider or coordinator restart delays provider acknowledgement. GET /v1/sticky reports whether acknowledgements remain pending without starting another revocation."
   }
 }
 ```

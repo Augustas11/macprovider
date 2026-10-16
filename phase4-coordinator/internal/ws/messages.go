@@ -31,6 +31,7 @@ type Hello struct {
 	Hostname               string                             `json:"hostname"`
 	ModelID                string                             `json:"model_id"`
 	RuntimeSource          string                             `json:"runtime_source,omitempty"`
+	FleetCacheProtocol     int                                `json:"fleet_cache_protocol,omitempty"`
 	ModelHash              string                             `json:"model_hash,omitempty"`
 	ModelHashAlgorithm     string                             `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256  string                             `json:"weights_manifest_sha256,omitempty"`
@@ -119,6 +120,7 @@ type AuthRequest struct {
 	Hostname                       string                             `json:"hostname,omitempty"`
 	ModelID                        string                             `json:"model_id,omitempty"`
 	RuntimeSource                  string                             `json:"runtime_source,omitempty"`
+	FleetCacheProtocol             int                                `json:"fleet_cache_protocol,omitempty"`
 	ModelHash                      string                             `json:"model_hash,omitempty"`
 	ModelHashAlgorithm             string                             `json:"model_hash_algorithm,omitempty"`
 	WeightsManifestSHA256          string                             `json:"weights_manifest_sha256,omitempty"`
@@ -441,6 +443,7 @@ type InferenceRequest struct {
 	MaxOutputTokens *int                       `json:"max_output_tokens,omitempty"`
 	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
 	ConversationKey string                     `json:"conversation_key,omitempty"`
+	FleetCache      *FleetCacheGrant           `json:"fleet_cache,omitempty"`
 	// ConversationCacheOnly marks ConversationKey as a cache-only SPEC-006-R012
 	// auto-prefix key (SPEC-004 FR-SR-2, SPEC-048-R009). Never sent without a key.
 	ConversationCacheOnly bool                       `json:"conversation_cache_only,omitempty"`
@@ -451,6 +454,11 @@ type InferenceRequest struct {
 	// rides only on a relay-blind dispatch that has a SPEC-022 R-14 route
 	// snapshot; under SPEC-008 it is inside the encrypted plaintext instead.
 	RelayBlindSettlement *RelayBlindSettlementMetadata `json:"relay_blind_settlement,omitempty"`
+}
+
+type FleetCacheGrant struct {
+	ConversationKey string `json:"conversation_key"`
+	Generation      int64  `json:"generation"`
 }
 
 // RelayBlindSettlementMetadata is the SPEC-001-R005 relay_blind_settlement
@@ -842,6 +850,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if field, err := parseOptionalRuntimeSource(raw, &h.RuntimeSource); err != nil {
 		return Hello{}, field, err
 	}
+	if field, err := parseFleetCacheProtocol(raw, &h.FleetCacheProtocol); err != nil {
+		return Hello{}, field, err
+	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &h.ModelHash); err != nil {
 			return Hello{}, "model_hash", err
@@ -1011,6 +1022,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		return AuthRequest{}, Spec010Presence{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if field, err := parseOptionalRuntimeSource(raw, &req.RuntimeSource); err != nil {
+		return AuthRequest{}, Spec010Presence{}, field, err
+	}
+	if field, err := parseFleetCacheProtocol(raw, &req.FleetCacheProtocol); err != nil {
 		return AuthRequest{}, Spec010Presence{}, field, err
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
@@ -1279,13 +1293,14 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 
 func (r AuthRequest) Hello() Hello {
 	return Hello{
-		Type:          "hello",
-		Version:       1,
-		Tier:          1,
-		ProviderID:    r.ProviderID,
-		Hostname:      r.Hostname,
-		ModelID:       r.ModelID,
-		RuntimeSource: r.RuntimeSource,
+		Type:               "hello",
+		Version:            1,
+		Tier:               1,
+		ProviderID:         r.ProviderID,
+		Hostname:           r.Hostname,
+		ModelID:            r.ModelID,
+		RuntimeSource:      r.RuntimeSource,
+		FleetCacheProtocol: r.FleetCacheProtocol,
 
 		ToolSelectionCapabilities: r.ToolSelectionCapabilities,
 		VisionRuntimeCapabilities: r.VisionRuntimeCapabilities,
@@ -1314,6 +1329,17 @@ func (r AuthRequest) Hello() Hello {
 		PrivacyKeyRecords:      append([]relayblind.PrivacyKeyRecord(nil), r.PrivacyKeyRecords...),
 		PrivacyEnrollment:      r.PrivacyEnrollment,
 	}
+}
+
+func parseFleetCacheProtocol(raw map[string]json.RawMessage, out *int) (string, error) {
+	v, ok := raw["fleet_cache_protocol"]
+	if !ok || string(v) == "null" {
+		return "", nil
+	}
+	if err := json.Unmarshal(v, out); err != nil || *out != 1 {
+		return "fleet_cache_protocol", fmt.Errorf("fleet_cache_protocol must be 1 when present")
+	}
+	return "", nil
 }
 
 // parseOptionalRuntimeSource parses the SPEC-047 v0.1.6 hello/auth `runtime_source`

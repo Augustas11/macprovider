@@ -38,6 +38,9 @@ public struct ChatCompletionRequest: Sendable {
     /// `conversationKey` as a cache-only SPEC-006-R012 auto-prefix key, not a
     /// sticky one. False whenever the key is absent.
     public let conversationCacheOnly: Bool
+    /// SPEC-037-R014 fleet eligibility minted only from an authenticated
+    /// coordinator relay envelope. Raw chat-completions JSON cannot populate it.
+    public let fleetCacheGrant: FleetConversationCacheGrant?
     public let requestID: String?
     public let topLevelKeys: Set<String>
     public let streamOptionKeys: Set<String>
@@ -181,6 +184,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: nil,
             conversationCacheOnly: false,
+            fleetCacheGrant: nil,
             requestID: nil,
             topLevelKeys: Set(dict.keys),
             streamOptionKeys: streamOptionKeys,
@@ -209,6 +213,38 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: validKey,
             conversationCacheOnly: validKey != nil && cacheOnly,
+            fleetCacheGrant: nil,
+            requestID: requestID,
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
+            ingestProvenance: ingestProvenance
+        )
+    }
+
+    /// Installs trusted fleet eligibility after the relay transport has
+    /// authenticated and authorized the coordinator grant. A revoked token is
+    /// refused without retaining a conversation key, preventing hot-only
+    /// downgrade of a rejected fleet request.
+    public func withFleetCacheGrant(_ grant: FleetConversationCacheGrant?) -> ChatCompletionRequest {
+        let accepted = grant?.isValid == true ? grant : nil
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            parallelToolCalls: parallelToolCalls,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: accepted?.conversationKey,
+            conversationCacheOnly: false,
+            fleetCacheGrant: accepted,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -234,6 +270,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: Self.validRequestID(id),
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -262,6 +299,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -289,6 +327,7 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             conversationCacheOnly: conversationCacheOnly,
+            fleetCacheGrant: fleetCacheGrant,
             requestID: requestID,
             topLevelKeys: topLevelKeys,
             streamOptionKeys: streamOptionKeys,
@@ -368,6 +407,7 @@ public struct ChatCompletionRequest: Sendable {
         promptSource: ChatCompletionPromptSource,
         conversationKey: String?,
         conversationCacheOnly: Bool = false,
+        fleetCacheGrant: FleetConversationCacheGrant?,
         requestID: String?,
         topLevelKeys: Set<String>,
         streamOptionKeys: Set<String>,
@@ -389,6 +429,7 @@ public struct ChatCompletionRequest: Sendable {
         self.promptSource = promptSource
         self.conversationKey = conversationKey
         self.conversationCacheOnly = conversationKey != nil && conversationCacheOnly
+        self.fleetCacheGrant = fleetCacheGrant
         self.requestID = requestID
         self.topLevelKeys = topLevelKeys
         self.streamOptionKeys = streamOptionKeys

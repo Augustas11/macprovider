@@ -122,6 +122,28 @@ final class KVConversationColdTierTests: XCTestCase {
 
     private static let config = ConversationCache.Config(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
 
+    func testColdPromotionAndSerialFallbackDoNotRenewReuseDeadline() async throws {
+        let fake = FakeColdTier()
+        var persisted = candidate(canonicalTokens: int32Range(0..<64), offset: 64)
+        persisted.createdAtMillis = 1_000_000
+        persisted.eligibleUntilMillis = 1_900_000
+        fake.promoteResult = persisted
+        let cache = ConversationCache(config: Self.config)
+        await cache.attachColdTier(fake)
+        let hit = await cache.begin(conversationKey: "conv:kvs-synth:ttl", incomingTokens: int32Range(0..<65),
+                                    modelID: "model-a", kvBits: nil,
+                                    now: Date(timeIntervalSince1970: 1899), cold: context(eligible: true))
+        XCTAssertEqual(hit?.cachedPromptTokens, 64)
+        let lease = try XCTUnwrap(hit)
+        await cache.abortForSerialFallback(lease, now: Date(timeIntervalSince1970: 1899))
+        fake.promoteResult = nil
+        let expired = await cache.begin(conversationKey: "conv:kvs-synth:ttl", incomingTokens: int32Range(0..<65),
+                                        modelID: "model-a", kvBits: nil,
+                                        now: Date(timeIntervalSince1970: 1901), cold: context(eligible: true))
+        XCTAssertEqual(expired?.cachedPromptTokens, 0)
+        if let expired { await cache.abort(expired) }
+    }
+
     // MARK: - AC-1: promotion feeds the unchanged predicate; accounting is identical
 
     func testPromotedHitAccountingMatchesHotHit() async {

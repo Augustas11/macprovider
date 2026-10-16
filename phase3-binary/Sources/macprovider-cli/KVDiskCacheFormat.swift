@@ -24,6 +24,7 @@ enum KVDiskCacheFormat {
     static let manifestSchemaID = "kvsurv-manifest-v1"
     /// Payload codec identifier (FR-KVP4(a)1).
     static let codecID = "kvsurv-codec-v1"
+    static let recurrentCodecID = "kvsurv-codec-v2"
     /// Chunk frame magic (§5a blob framing).
     static let chunkMagic = Data("KVS1".utf8)
 
@@ -33,6 +34,7 @@ enum KVDiskCacheFormat {
     static let maxNdim = 8
     static let maxDim: UInt64 = 1 << 32                     // each dim ≤ 2^32
     static let maxChunks = 4096
+    static let maxRecurrentCheckpoints = 8
     static let maxChunkCiphertextBytes = 64 * 1024 * 1024   // 64 MiB per chunk
     static let maxStringBytes = 1024                        // strings ≤ 1 KiB
     static let maxTokenCount = 200_000                      // hot-tier token cap
@@ -41,6 +43,8 @@ enum KVDiskCacheFormat {
 
     /// The v1 serialization allowlist: exactly the unquantized standard cache class.
     static let allowlistedCacheClasses: Set<String> = ["KVCacheSimple"]
+    static let recurrentCacheClass = "KVCacheMixedRecurrent"
+    static let supportedCodecIDs: Set<String> = [codecID, recurrentCodecID]
 }
 
 // MARK: - Codec dtype enum (§5a payload codec)
@@ -154,6 +158,24 @@ struct KVLayerRecord: Sendable, Equatable {
     let ndim: Int
     let dims: [Int]
     let dtype: KVCodecDType
+    var cacheOffset: Int? = nil
+}
+
+struct KVRecurrentSlotRecord: Sendable, Equatable {
+    let slotIndex: Int
+    let dims: [Int]
+    let dtype: KVCodecDType
+    let byteCount: Int
+}
+
+struct KVRecurrentLayerRecord: Sendable, Equatable {
+    let layerIndex: Int
+    let slots: [KVRecurrentSlotRecord]
+}
+
+struct KVRecurrentCheckpointRecord: Sendable, Equatable {
+    let tokenCount: Int
+    let layers: [KVRecurrentLayerRecord]
 }
 
 /// One `chunks[]` record. Closed key set `{ordinal, ct_length, nonce}` (§5a).
@@ -188,6 +210,7 @@ struct KVDiskManifest: Sendable, Equatable {
     let cacheClass: String
     let layerCount: Int
     let layers: [KVLayerRecord]
+    var recurrentCheckpoints: [KVRecurrentCheckpointRecord] = []
     /// Unquantized caches encode these four as JSON `null` (matching `kvBits == nil`).
     let kvBits: Int?
     let kvGroupSize: Int?
@@ -225,6 +248,8 @@ struct KVLayerGeometry: Sendable, Equatable {
 /// required field signals FR-KVP4 "live identity completeness" (→
 /// `disk_miss_identity_unavailable`).
 struct KVRuntimeIdentity: Sendable, Equatable {
+    var codecID: String = KVDiskCacheFormat.codecID
+    var recurrentLayerLayouts: [KVRecurrentLayerRecord] = []
     let namespaceID: String
     let keyEpoch: Int
     let indexHMAC: String
@@ -442,6 +467,48 @@ extension KVDiskCacheFormat {
         }
         return total
     }
+
+    /// Exact codec-v2 plaintext length. The manifest contains every variable-size
+    /// shape and byte count, so this check runs before reading or allocating MLX state.
+    static func decodedLengthV2(
+        tokenCount: Int, layers: [KVLayerRecord], checkpoints: [KVRecurrentCheckpointRecord]
+    ) -> Int? {
+        func add(_ total: inout Int, _ value: Int) -> Bool {
+            let (next, overflow) = total.addingReportingOverflow(value)
+            guard !overflow else { return false }
+            total = next
+            return true
+        }
+        guard tokenCount >= 0 else { return nil }
+        var total = 4 // KVC2
+        let (tokenBytes, tokenOverflow) = tokenCount.multipliedReportingOverflow(by: 4)
+        guard !tokenOverflow, add(&total, 4), add(&total, tokenBytes), add(&total, 4) else { return nil }
+        for layer in layers {
+            let classBytes = Data(layer.classID.utf8).count
+            guard add(&total, 4 + 1 + 2 + classBytes) else { return nil }
+            if layer.classID == "KVCacheSimple" {
+                guard let tensorBytes = try? KVPayloadCodec.expectedTensorBytes(dims: layer.dims, dtype: layer.dtype),
+                      add(&total, 1 + 8 * layer.ndim + 1 + 8 + 8),
+                      add(&total, tensorBytes), add(&total, 8), add(&total, tensorBytes) else { return nil }
+            } else if layer.classID != "MambaCache" && layer.classID != "ArraysCache" {
+                return nil
+            } else if layer.cacheOffset == nil || !add(&total, 8) {
+                return nil
+            }
+        }
+        guard add(&total, 4) else { return nil }
+        for checkpoint in checkpoints {
+            guard add(&total, 4 + 4) else { return nil }
+            for layer in checkpoint.layers {
+                guard add(&total, 4 + 2) else { return nil }
+                for slot in layer.slots {
+                    guard add(&total, 2 + 1 + 8 * slot.dims.count + 1 + 8),
+                          add(&total, slot.byteCount) else { return nil }
+                }
+            }
+        }
+        return total
+    }
 }
 
 // MARK: - JCS manifest encoding + AAD projection
@@ -457,20 +524,43 @@ extension KVDiskManifest {
         func optStrOrNull(_ v: String?) -> RFC8785JCS.Value { v.map { .string($0) } ?? .null }
 
         let layerValues: [RFC8785JCS.Value] = layers.map { layer in
-            .object([
+            var fields: [String: RFC8785JCS.Value] = [
                 "layer_index": .int(layer.layerIndex),
                 "class_id": .string(layer.classID),
                 "layout_version": .int(layer.layoutVersion),
                 "ndim": .int(layer.ndim),
                 "dims": .array(layer.dims.map { .int($0) }),
                 "dtype": .int(layer.dtype.rawValue),
-            ])
+            ]
+            if codecID == KVDiskCacheFormat.recurrentCodecID {
+                fields["cache_offset"] = layer.cacheOffset.map { .int($0) } ?? .null
+            }
+            return .object(fields)
         }
         let chunkValues: [RFC8785JCS.Value] = chunks.map { chunk in
             .object([
                 "ordinal": .int(chunk.ordinal),
                 "ct_length": .int(chunk.ctLength),
                 "nonce": .string(KVHex.encode(chunk.nonce)),
+            ])
+        }
+        let checkpointValues: [RFC8785JCS.Value] = recurrentCheckpoints.map { checkpoint in
+            .object([
+                "token_count": .int(checkpoint.tokenCount),
+                "layers": .array(checkpoint.layers.map { layer in
+                    .object([
+                        "layer_index": .int(layer.layerIndex),
+                        "slots": .array(layer.slots.map { slot in
+                            .object([
+                                "slot_index": .int(slot.slotIndex),
+                                "ndim": .int(slot.dims.count),
+                                "dims": .array(slot.dims.map { .int($0) }),
+                                "dtype": .int(slot.dtype.rawValue),
+                                "byte_count": .int(slot.byteCount),
+                            ])
+                        }),
+                    ])
+                }),
             ])
         }
 
@@ -510,6 +600,9 @@ extension KVDiskManifest {
         ]
         if !omitBlobSHA256 {
             fields["blob_sha256"] = strVal(blobSHA256)
+        }
+        if codecID == KVDiskCacheFormat.recurrentCodecID {
+            fields["recurrent_checkpoints"] = .array(checkpointValues)
         }
         return .object(fields)
     }
@@ -596,7 +689,7 @@ enum KVManifestCodec {
             throw KVManifestParseError.corrupt("manifest is not a JSON object")
         }
 
-        let required: Set<String> = [
+        var required: Set<String> = [
             "schema_id", "codec_id", "namespace_id", "key_epoch", "index_hmac",
             "generation", "commit_sequence", "purge_generation", "request_model",
             "served_model_id", "model_sha256", "catalog_revision", "tokenizer_id",
@@ -606,6 +699,10 @@ enum KVManifestCodec {
             "decode_path", "token_count", "created_at", "eligible_until",
             "decoded_length", "chunks", "blob_length", "blob_sha256",
         ]
+        let parsedCodecID = object["codec_id"] as? String
+        if parsedCodecID == KVDiskCacheFormat.recurrentCodecID {
+            required.insert("recurrent_checkpoints")
+        }
         let present = Set(object.keys)
         guard present == required else {
             let missing = required.subtracting(present)
@@ -682,7 +779,8 @@ enum KVManifestCodec {
             guard let layer = rawLayer as? [String: Any] else {
                 throw KVManifestParseError.corrupt("layer \(i) not an object")
             }
-            let layerKeys: Set<String> = ["layer_index", "class_id", "layout_version", "ndim", "dims", "dtype"]
+            var layerKeys: Set<String> = ["layer_index", "class_id", "layout_version", "ndim", "dims", "dtype"]
+            if parsedCodecID == KVDiskCacheFormat.recurrentCodecID { layerKeys.insert("cache_offset") }
             guard Set(layer.keys) == layerKeys else {
                 throw KVManifestParseError.corrupt("layer \(i) field set mismatch")
             }
@@ -721,9 +819,99 @@ enum KVManifestCodec {
                   let dtype = KVCodecDType(rawValue: dtypeRaw) else {
                 throw KVManifestParseError.corrupt("layer \(i) dtype invalid")
             }
+            let cacheOffset: Int?
+            if parsedCodecID == KVDiskCacheFormat.recurrentCodecID {
+                if layer["cache_offset"] is NSNull { cacheOffset = nil }
+                else if let number = layer["cache_offset"] as? NSNumber, isIntegral(number), number.intValue >= 0 {
+                    cacheOffset = number.intValue
+                } else { throw KVManifestParseError.corrupt("layer \(i) cache_offset invalid") }
+            } else { cacheOffset = nil }
             layers.append(KVLayerRecord(
                 layerIndex: li, classID: cls, layoutVersion: lv,
-                ndim: ndim, dims: dims, dtype: dtype))
+                ndim: ndim, dims: dims, dtype: dtype, cacheOffset: cacheOffset))
+        }
+
+        var recurrentCheckpoints: [KVRecurrentCheckpointRecord] = []
+        if parsedCodecID == KVDiskCacheFormat.recurrentCodecID {
+            guard layers.enumerated().allSatisfy({ offset, layer in
+                layer.layerIndex == offset
+                    && ["KVCacheSimple", "MambaCache", "ArraysCache"].contains(layer.classID)
+                    && (layer.classID == "KVCacheSimple" ? layer.cacheOffset == nil : layer.cacheOffset != nil)
+            }),
+            layers.contains(where: { $0.classID == "KVCacheSimple" }),
+            layers.contains(where: { $0.classID == "MambaCache" || $0.classID == "ArraysCache" }),
+            object["kv_bits"] is NSNull,
+            object["kv_group_size"] is NSNull,
+            object["kv_quant_mode"] is NSNull,
+            object["kv_quant_policy"] is NSNull else {
+                throw KVManifestParseError.corrupt("codec-v2 topology or quantization tuple invalid")
+            }
+            guard let rawCheckpoints = object["recurrent_checkpoints"] as? [Any],
+                  !rawCheckpoints.isEmpty,
+                  rawCheckpoints.count <= KVDiskCacheFormat.maxRecurrentCheckpoints else {
+                throw KVManifestParseError.corrupt("codec-v2 recurrent_checkpoints absent")
+            }
+            let recurrentIndices = layers.filter { $0.classID == "MambaCache" || $0.classID == "ArraysCache" }.map(\.layerIndex)
+            guard !recurrentIndices.isEmpty else { throw KVManifestParseError.corrupt("codec-v2 has no recurrent layers") }
+            var previousTokenCount = -1
+            for (checkpointIndex, rawCheckpoint) in rawCheckpoints.enumerated() {
+                guard let checkpoint = rawCheckpoint as? [String: Any], Set(checkpoint.keys) == ["token_count", "layers"],
+                      let tokenNumber = checkpoint["token_count"] as? NSNumber, isIntegral(tokenNumber) else {
+                    throw KVManifestParseError.corrupt("checkpoint \(checkpointIndex) invalid")
+                }
+                let checkpointTokenCount = tokenNumber.intValue
+                guard checkpointTokenCount > previousTokenCount, checkpointTokenCount <= tokenCount else {
+                    throw KVManifestParseError.corrupt("checkpoint token order invalid")
+                }
+                previousTokenCount = checkpointTokenCount
+                guard let rawRecurrentLayers = checkpoint["layers"] as? [Any], rawRecurrentLayers.count == recurrentIndices.count else {
+                    throw KVManifestParseError.corrupt("checkpoint recurrent coverage invalid")
+                }
+                var recurrentLayers: [KVRecurrentLayerRecord] = []
+                for (position, rawRecurrentLayer) in rawRecurrentLayers.enumerated() {
+                    guard let recurrentLayer = rawRecurrentLayer as? [String: Any], Set(recurrentLayer.keys) == ["layer_index", "slots"],
+                          let layerNumber = recurrentLayer["layer_index"] as? NSNumber, isIntegral(layerNumber),
+                          layerNumber.intValue == recurrentIndices[position],
+                          let rawSlots = recurrentLayer["slots"] as? [Any], rawSlots.count == PagedKVSharedForwardBackend.mambaCacheSlotCount else {
+                        throw KVManifestParseError.corrupt("checkpoint layer invalid")
+                    }
+                    var slots: [KVRecurrentSlotRecord] = []
+                    for (slotPosition, rawSlot) in rawSlots.enumerated() {
+                        guard let slot = rawSlot as? [String: Any],
+                              Set(slot.keys) == ["slot_index", "ndim", "dims", "dtype", "byte_count"],
+                              let slotNumber = slot["slot_index"] as? NSNumber, isIntegral(slotNumber), slotNumber.intValue == slotPosition,
+                              let ndimNumber = slot["ndim"] as? NSNumber, isIntegral(ndimNumber),
+                              ndimNumber.intValue >= 2, ndimNumber.intValue <= KVDiskCacheFormat.maxNdim,
+                              let rawDims = slot["dims"] as? [Any], rawDims.count == ndimNumber.intValue,
+                              let dtypeNumber = slot["dtype"] as? NSNumber, isIntegral(dtypeNumber),
+                              let dtype = KVCodecDType(rawValue: dtypeNumber.intValue), [.f16, .bf16, .f32].contains(dtype),
+                              let byteNumber = slot["byte_count"] as? NSNumber, isIntegral(byteNumber) else {
+                            throw KVManifestParseError.corrupt("checkpoint slot invalid")
+                        }
+                        let dims = try rawDims.map { raw -> Int in
+                            guard let number = raw as? NSNumber, isIntegral(number), number.intValue > 0,
+                                  UInt64(number.intValue) <= KVDiskCacheFormat.maxDim else {
+                                throw KVManifestParseError.corrupt("checkpoint slot dim invalid")
+                            }
+                            return number.intValue
+                        }
+                        guard dims.first == 1,
+                              let expectedBytes = try? KVPayloadCodec.expectedTensorBytes(dims: dims, dtype: dtype),
+                              byteNumber.intValue == expectedBytes else {
+                            throw KVManifestParseError.corrupt("checkpoint slot byte count invalid")
+                        }
+                        slots.append(.init(slotIndex: slotPosition, dims: dims, dtype: dtype, byteCount: expectedBytes))
+                    }
+                    recurrentLayers.append(.init(layerIndex: recurrentIndices[position], slots: slots))
+                }
+                let layouts = Dictionary(uniqueKeysWithValues: recurrentLayers.map { layer in
+                    (layer.layerIndex, layer.slots.map { RecurrentStateSlotLayout(shape: $0.dims, dtype: KVCacheSerialization.mlxDType($0.dtype)) })
+                })
+                guard PagedKVSharedForwardBackend.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrentIndices) else {
+                    throw KVManifestParseError.corrupt("checkpoint layout invalid")
+                }
+                recurrentCheckpoints.append(.init(tokenCount: checkpointTokenCount, layers: recurrentLayers))
+            }
         }
 
         // chunks[]
@@ -767,12 +955,20 @@ enum KVManifestCodec {
         let blobLength = try intVal("blob_length", max: max(0, maxBlobBytes))
 
         // decoded_length recomputation (FR-KVP4c): equals §5a equation from geometry.
-        let geometry = layers.map {
-            KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
-        }
-        guard let recomputed = KVDiskCacheFormat.decodedLength(tokenCount: tokenCount, layers: geometry),
-              recomputed == decodedLength else {
-            throw KVManifestParseError.corrupt("decoded_length does not recompute")
+        if parsedCodecID == KVDiskCacheFormat.codecID {
+            let geometry = layers.map {
+                KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+            }
+            guard let recomputed = KVDiskCacheFormat.decodedLength(tokenCount: tokenCount, layers: geometry), recomputed == decodedLength else {
+                throw KVManifestParseError.corrupt("decoded_length does not recompute")
+            }
+        } else if parsedCodecID == KVDiskCacheFormat.recurrentCodecID {
+            guard let recomputed = KVDiskCacheFormat.decodedLengthV2(
+                tokenCount: tokenCount, layers: layers, checkpoints: recurrentCheckpoints), recomputed == decodedLength else {
+                throw KVManifestParseError.corrupt("codec-v2 decoded_length does not recompute")
+            }
+        } else {
+            throw KVManifestParseError.corrupt("unknown codec_id")
         }
 
         // blob_length equals Σ frame sizes, AND Σ ct_length equals decoded_length
@@ -823,6 +1019,7 @@ enum KVManifestCodec {
             cacheClass: try str("cache_class"),
             layerCount: layerCount,
             layers: layers,
+            recurrentCheckpoints: recurrentCheckpoints,
             kvBits: try optInt("kv_bits"),
             kvGroupSize: try optInt("kv_group_size"),
             kvQuantMode: try optStr("kv_quant_mode"),
@@ -973,16 +1170,46 @@ enum KVEnvelopeValidator {
             return .miss(.diskMissIdentityUnavailable, .identityUnavailable)
         }
 
-        // Integrity: sequence axis of each layer must equal token_count (row 13).
+        // Integrity: only attention tensors have a sequence dimension that must
+        // equal token_count (row 13). Recurrent layer state lives exclusively in
+        // complete checkpoints; its layer record is the authenticated ndim=0
+        // sentinel and therefore has no dimension at sequenceAxis.
         for geometry in runtime.layers {
             guard let record = manifest.layers.first(where: { $0.layerIndex == geometry.layerIndex }) else {
                 return .miss(.diskMissEnvelope)   // layer set mismatch (row 6)
             }
-            guard geometry.sequenceAxis >= 0, geometry.sequenceAxis < record.dims.count else {
-                return .miss(.diskMissCorrupt)
+            if record.classID == "KVCacheSimple" {
+                guard geometry.sequenceAxis >= 0, geometry.sequenceAxis < record.dims.count,
+                      record.dims[geometry.sequenceAxis] == manifest.tokenCount else {
+                    return .miss(.diskMissCorrupt)
+                }
+            } else if record.classID == "MambaCache" || record.classID == "ArraysCache" {
+                guard manifest.codecID == KVDiskCacheFormat.recurrentCodecID,
+                      record.ndim == 0, record.dims.isEmpty, record.cacheOffset != nil else {
+                    return .miss(.diskMissCorrupt)
+                }
+                guard geometry.ndim == 0, geometry.dims.isEmpty, geometry.sequenceAxis == 0 else {
+                    return .miss(.diskMissEnvelope)
+                }
+            } else {
+                return .miss(.diskMissEnvelope)
             }
-            guard record.dims[geometry.sequenceAxis] == manifest.tokenCount else {
-                return .miss(.diskMissCorrupt)
+        }
+        if manifest.codecID == KVDiskCacheFormat.recurrentCodecID {
+            guard !manifest.recurrentCheckpoints.isEmpty,
+                  !runtime.recurrentLayerLayouts.isEmpty,
+                  manifest.recurrentCheckpoints.allSatisfy({ checkpoint in
+                      checkpoint.layers.map { layer in
+                          KVRecurrentLayerRecord(
+                              layerIndex: layer.layerIndex,
+                              slots: layer.slots.map {
+                                  KVRecurrentSlotRecord(
+                                      slotIndex: $0.slotIndex, dims: $0.dims,
+                                      dtype: $0.dtype, byteCount: $0.byteCount)
+                              })
+                      } == runtime.recurrentLayerLayouts
+                  }) else {
+                return .miss(.diskMissEnvelope)
             }
         }
 
@@ -994,7 +1221,8 @@ enum KVEnvelopeValidator {
         // (a) exact-match identity fields ------------------------------------------
         // 1: schema/codec IDs known (row 9)
         guard manifest.schemaID == KVDiskCacheFormat.manifestSchemaID,
-              manifest.codecID == KVDiskCacheFormat.codecID else {
+              manifest.codecID == runtime.codecID,
+              KVDiskCacheFormat.supportedCodecIDs.contains(manifest.codecID) else {
             return .miss(.diskMissEnvelope)
         }
         // 2: namespace + key epoch (row 10)
@@ -1030,7 +1258,10 @@ enum KVEnvelopeValidator {
             return .miss(.diskMissEnvelope)
         }
         // 7: cache class allowlist + class + layer count + per-layer geometry (rows 6,7)
-        guard KVDiskCacheFormat.allowlistedCacheClasses.contains(manifest.cacheClass),
+        let classAllowed = manifest.codecID == KVDiskCacheFormat.codecID
+            ? KVDiskCacheFormat.allowlistedCacheClasses.contains(manifest.cacheClass)
+            : manifest.cacheClass == KVDiskCacheFormat.recurrentCacheClass
+        guard classAllowed,
               manifest.cacheClass == runtime.cacheClass,
               manifest.layerCount == runtime.layerCount,
               manifest.layers.count == runtime.layers.count else {

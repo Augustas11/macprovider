@@ -44,7 +44,7 @@ type prefixCacheDisclosure struct {
 // string byte-identical across disclosure.go, pages.go, docs.md, the
 // front-door console, and SPEC-006 — TestTier1DisclosureMatchesSpecSection16
 // greps it.
-const prefixCacheDisclosureText = "Authenticated non-demo chat completions send the serving Mac an opaque HMAC conversation identifier derived from the prompt prefix through the first user message. That identifier lets the Mac reuse KV cache across tool turns. It does not pin routing to one provider. The provider cannot recover your account id from it. DELETE /v1/sticky does not clear that Mac-local cache; it expires on the provider's own TTL."
+const prefixCacheDisclosureText = "Authenticated non-demo chat completions may let the serving Mac reuse an encrypted provider-local KV cache under an opaque HMAC conversation identifier. Reuse remains bounded by the conversation-cache TTL (15 minutes by default); encrypted files are cleanup-bounded by the configured retention (60 minutes by default) and cleanup does not extend reuse. The identifier does not pin routing or reveal your account id to the provider. DELETE /v1/sticky durably revokes registered cache scopes; its response remains pending while a disconnected provider or coordinator restart delays provider acknowledgement. GET /v1/sticky reports whether acknowledgements remain pending without starting another revocation."
 
 type relayBlindRequestEncryptionDisclosure struct {
 	Version          string                                  `json:"version"`

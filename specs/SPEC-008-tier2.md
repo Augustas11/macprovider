@@ -1,6 +1,6 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.7.1 (2026-10-10, catalog `expires_at` structural only)
+**Version:** 0.7.2 (2026-10-16, authenticated fleet cache grant envelope)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
 
@@ -4325,3 +4325,18 @@ inherited from SPEC-006.
 5. Confirm that the operator-supplied trust-on-config model for
    `catalog_public_key` is acceptable, or specify a distribution/CA-backed
    alternative.
+
+
+## Authenticated fleet cache amendment
+
+SPEC-037 §10 adds optional `fleet_cache` to `inference_request_plaintext` for
+providers advertising `fleet_cache_protocol: 1`. It is the closed object
+`{conversation_key, generation}`: the opaque provider-local key must equal the
+request conversation key and generation is a positive integer. This object is
+inside the existing authenticated ciphertext, never AAD or caller chat JSON.
+It exposes no raw account identifier. Missing authority denies persistence;
+malformed, mismatched or revoked grants cannot fall back to reusable hot state.
+Privacy envelopes must omit it. Authenticated coordinator control frames
+`conversation_cache_purge` and provider `conversation_cache_purge_ack` use the
+existing authenticated provider connection and the exact fields/semantics in
+SPEC-037 §10. They do not change receipt, billing or trust-tier semantics.

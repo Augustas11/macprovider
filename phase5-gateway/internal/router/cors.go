@@ -1,22 +1,37 @@
 package router
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+)
 
 const corsMaxAge = "3600"
 
 var corsAllowedHeaders = "Accept, Anthropic-Beta, Anthropic-Version, Authorization, Content-Type, Idempotency-Key, X-Api-Key, X-Demo-Token, X-MacProvider-Pool-Select, X-MacProvider-Privacy-Mode, X-MacProvider-Session-Signature, X-MacProvider-Session-Timestamp, X-Request-ID"
 
 func (s *Server) withCORS(method string, next http.Handler) http.Handler {
+	return s.withCORSMethods([]string{method}, next)
+}
+
+func (s *Server) withCORSMethods(methods []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		allowed := s.corsOriginAllowed(origin)
 		if r.Method == http.MethodOptions {
-			if !allowed || r.Header.Get("Access-Control-Request-Method") != method {
+			requestedMethod := r.Header.Get("Access-Control-Request-Method")
+			methodAllowed := false
+			for _, method := range methods {
+				if requestedMethod == method {
+					methodAllowed = true
+					break
+				}
+			}
+			if !allowed || !methodAllowed {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 			setCORSHeaders(w.Header(), origin)
-			w.Header().Set("Access-Control-Allow-Methods", method)
+			w.Header().Set("Access-Control-Allow-Methods", strings.Join(methods, ", "))
 			w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
 			w.Header().Set("Access-Control-Max-Age", corsMaxAge)
 			w.WriteHeader(http.StatusNoContent)

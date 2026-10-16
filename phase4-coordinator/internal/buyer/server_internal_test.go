@@ -892,7 +892,7 @@ func TestRetryableByCodeClassification(t *testing.T) {
 		"idempotency_unavailable", "rate_limited",
 		// Round-3 sweep addition: pre-dispatch route-snapshot store
 		// failure — a retry can succeed once storage recovers.
-		"route_snapshot_failed",
+		"route_snapshot_failed", "fleet_cache_purge_unavailable",
 	}
 	for _, code := range retryable {
 		if !spec018Retryable(code) {
@@ -978,6 +978,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"invalid_tool_choice", "unsupported_tool_choice", "unsupported_tool_schema", "tool_selection_validation_failed",
 	// SPEC-043 creator promise/status surface.
 	"pool_policy_not_found", "pool_policy_unavailable", "pool_status_not_found", "pool_status_unavailable",
+	"fleet_cache_purge_unavailable",
 }
 
 // TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every

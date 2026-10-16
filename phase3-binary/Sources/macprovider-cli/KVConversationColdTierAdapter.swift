@@ -9,6 +9,7 @@ import MLXLMCommon
 /// cache invalidation on upgrade is accepted, this tier is an optimization).
 enum KVBuildIdentity {
     static let abiEpoch = 1
+    static let recurrentABIEpoch = 2
     /// The REAL pinned mlx-swift-lm git revision (HIGH-8). Bump on any dependency
     /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
     /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
@@ -87,15 +88,32 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     /// ceiling-sized snapshot concurrently.
     private let writeLiveLock = NSLock()
     private var writeLiveBytes = 0
+    /// Process-local bounded write-volume admission. A one-minute fixed window caps
+    /// deep-copied plaintext admitted to the writer at 1 GiB, preventing a stream of
+    /// individually-valid commits from turning the cold tier into sustained disk I/O.
+    /// Charging occurs before the copy and is intentionally not refunded on later
+    /// displacement/failure: attempted churn still consumed the bounded work budget.
+    private static let writeVolumeWindowSeconds: TimeInterval = 60
+    private static let writeVolumeWindowBytes = 1024 * 1024 * 1024
+    private var writeVolumeWindowStartedAt = Date()
+    private var writeVolumeBytes = 0
 
     /// Item 3: atomically reserve `estimate` bytes against the aggregate write-live
     /// budget. Returns false (reject) when the running total plus `estimate` would
     /// exceed `writeStagingMaxBytes`. A successful reservation MUST be released exactly
     /// once via `releaseWriteLive`.
-    func reserveWriteLive(_ estimate: Int) -> Bool {
+    func reserveWriteLive(_ estimate: Int, volumeBytes: Int? = nil) -> Bool {
         writeLiveLock.lock(); defer { writeLiveLock.unlock() }
         guard writeLiveBytes + estimate <= writeStagingMaxBytes else { return false }
+        let volume = volumeBytes ?? estimate
+        let now = Date()
+        if now.timeIntervalSince(writeVolumeWindowStartedAt) >= Self.writeVolumeWindowSeconds {
+            writeVolumeWindowStartedAt = now
+            writeVolumeBytes = 0
+        }
+        guard volume <= Self.writeVolumeWindowBytes - writeVolumeBytes else { return false }
         writeLiveBytes += estimate
+        writeVolumeBytes += volume
         return true
     }
 
@@ -122,6 +140,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     /// `promoteCandidate` can both touch it without an actor hop.
     private let templateLock = NSLock()
     private var geometryTemplates: [String: [KVLayerGeometry]] = [:]
+    private var recurrentGeometryTemplates: [String: [KVRecurrentLayerRecord]] = [:]
 
     /// CRITICAL-2 — the current key epoch, cached synchronously so `captureSnapshot`
     /// can stamp the epoch at commit time (NOT at persist time). Seeded + refreshed
@@ -215,6 +234,37 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         templateLock.unlock()
     }
 
+    /// Seed the codec-v2 envelope from the actual warmed model caches. This reads
+    /// only shapes/dtypes and retains no MLX arrays. Returns false when the topology
+    /// is unsupported or recurrent state has not been populated by warmup.
+    @discardableResult
+    func seedTemplate(servedModelID: String, layers: [KVCache]) -> Bool {
+        let recurrentIndices = layers.indices.filter { layers[$0] is ArraysCache }
+        guard !recurrentIndices.isEmpty else { return false }
+        let checkpoint = RecurrentStateCheckpoint(
+            tokenCount: 1,
+            states: Dictionary(uniqueKeysWithValues: recurrentIndices.compactMap { index in
+                let state = layers[index].state
+                return state.isEmpty ? nil : (index, state)
+            }))
+        guard let geometry = KVRecurrentCacheSerialization.geometry(
+            layers: layers, checkpoints: [checkpoint]) else { return false }
+        let template = geometry.layers.map { record in
+            KVLayerGeometry(
+                layerIndex: record.layerIndex, classID: record.classID,
+                layoutVersion: record.layoutVersion, ndim: record.ndim,
+                dims: record.dims, dtype: record.dtype,
+                sequenceAxis: record.classID == "KVCacheSimple" ? max(0, record.ndim - 2) : 0)
+        }
+        templateLock.lock()
+        if geometryTemplates[servedModelID] == nil {
+            geometryTemplates[servedModelID] = template
+            recurrentGeometryTemplates[servedModelID] = geometry.recurrent
+        }
+        templateLock.unlock()
+        return true
+    }
+
     /// Test-only: whether a live-model geometry template is present for the served model.
     func hasGeometryTemplateForTest(servedModelID: String) -> Bool {
         templateLock.lock(); defer { templateLock.unlock() }
@@ -249,8 +299,14 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     /// so the load-time-seeding mechanism can be validated headlessly against
     /// `store.read` (whose hit returns raw `KVLayerPayload` bytes), without the
     /// `MLXArray` restore below that needs a Metal runtime.
-    func promotionRuntime(identity: KVIdentityCore, template: [KVLayerGeometry], epoch: Int) -> KVRuntimeIdentity {
-        KVRuntimeIdentity(
+    func promotionRuntime(
+        identity: KVIdentityCore, template: [KVLayerGeometry], epoch: Int,
+        recurrentLayouts: [KVRecurrentLayerRecord] = []
+    ) -> KVRuntimeIdentity {
+        let recurrent = !recurrentLayouts.isEmpty
+        return KVRuntimeIdentity(
+            codecID: recurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID,
+            recurrentLayerLayouts: recurrentLayouts,
             namespaceID: namespaceID,
             keyEpoch: epoch,
             indexHMAC: "",                 // recomputed inside read()
@@ -261,10 +317,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             tokenizerID: identity.tokenizerID,
             tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
             chatTemplateSHA256: identity.chatTemplateSHA256,
-            abiEpoch: KVBuildIdentity.abiEpoch,
+            abiEpoch: recurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch,
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxVersion: KVBuildIdentity.mlxVersion,
-            cacheClass: KVDiskCacheFormat.allowlistedCacheClasses.first ?? "KVCacheSimple",
+            cacheClass: recurrent ? KVDiskCacheFormat.recurrentCacheClass : (KVDiskCacheFormat.allowlistedCacheClasses.first ?? "KVCacheSimple"),
             layerCount: template.count,
             layers: template,
             kvBits: identity.kvBits,
@@ -283,19 +339,30 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
 
     func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async -> ColdPromotionCandidate? {
         guard identity.modelSHA256 != nil else { return nil }   // identity_unavailable
+        guard identity.kvBits == nil, identity.kvGroupSize == nil,
+              identity.kvQuantMode == nil, identity.kvQuantPolicy == nil else { return nil }
         templateLock.lock()
         let template = geometryTemplates[identity.servedModelID]
+        let recurrentLayouts = recurrentGeometryTemplates[identity.servedModelID] ?? []
         templateLock.unlock()
         guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
         let epoch = await store.currentEpoch
-        let runtime = promotionRuntime(identity: identity, template: template, epoch: epoch)
+        let runtime = promotionRuntime(
+            identity: identity, template: template, epoch: epoch,
+            recurrentLayouts: recurrentLayouts)
         let result = try? await store.read(
             rawKey: conversationKey, runtime: runtime, nowMillis: Self.nowMillis(), emitHitEvent: false)
         guard let result, case let .hit(hit) = result else { return nil }
-        let caches = KVCacheSerialization.restore(hit.layers)
+        let restored: ConversationCacheLayers
+        if let decodedV2 = hit.decodedV2 {
+            guard let recurrent = KVRecurrentCacheSerialization.restore(decodedV2) else { return nil }
+            restored = recurrent
+        } else {
+            restored = ConversationCacheLayers(KVCacheSerialization.restore(hit.layers))
+        }
         let prefix = (try? await store.currentIndex(rawKey: conversationKey)).flatMap { $0 }.map { String($0.prefix(8)) } ?? ""
         return ColdPromotionCandidate(
-            layers: ConversationCacheLayers(caches),
+            layers: restored,
             canonicalTokens: hit.tokens,
             keyHashPrefix: prefix,
             bytesRead: hit.bytesRead,
@@ -303,7 +370,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             peakStagingBytes: hit.peakStagingBytes,
             modelSHA256: identity.modelSHA256 ?? "",
             catalogRevision: identity.catalogRevision,
-            kvBits: identity.kvBits)
+            kvBits: identity.kvBits,
+            codecID: hit.decodedV2 == nil ? KVDiskCacheFormat.codecID : KVDiskCacheFormat.recurrentCodecID,
+            createdAtMillis: hit.createdAtMillis,
+            eligibleUntilMillis: hit.eligibleUntilMillis)
     }
 
     func finishPromotion(_ candidate: ColdPromotionCandidate, accepted: Bool, rejectionReason: String?) async {
@@ -312,7 +382,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
                 prefixHash: candidate.keyHashPrefix, bytesRead: candidate.bytesRead,
                 decryptMillis: candidate.decryptMillis, peakStagingBytes: candidate.peakStagingBytes,
                 modelSHA256: candidate.modelSHA256, catalogRevision: candidate.catalogRevision,
-                kvBits: candidate.kvBits)
+                kvBits: candidate.kvBits, codecID: candidate.codecID)
         } else {
             await store.notePromoteRejected(prefixHash: candidate.keyHashPrefix, reason: rejectionReason ?? "unknown")
         }
@@ -329,6 +399,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         nowMillis: Int
     ) -> ConversationColdSnapshot? {
         guard identity.modelSHA256 != nil else { return nil }         // identity_unavailable
+        guard identity.kvBits == nil, identity.kvGroupSize == nil,
+              identity.kvQuantMode == nil, identity.kvQuantPolicy == nil else { return nil }
         // Only the v1-allowlisted unquantized class is serializable; any other
         // cache class skips persistence (byte-identical hot behavior for it).
         // MEDIUM-A/LOW/INFO: make that skip OBSERVABLE instead of a silent no-op. A
@@ -338,7 +410,9 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // relay/tier2 request, or mid-generation `kvBits` quantization. Emit a
         // `disk_write_skipped(unsupported_cache_class)` carrying the runtime class
         // name, then still fail safe to miss (return nil) as before.
-        guard let caches = layers.layers as? [KVCacheSimple] else {
+        let hasRecurrent = ConversationCacheLayers.hasRecurrentLayers(layers.layers)
+        let caches = layers.layers as? [KVCacheSimple]
+        guard caches != nil || hasRecurrent else {
             // Report the FIRST layer that is NOT KVCacheSimple: for a heterogeneous
             // array whose layer 0 IS KVCacheSimple but a later layer fails the cast,
             // reporting layer 0's class would be misleadingly "KVCacheSimple". Fall
@@ -352,8 +426,13 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
         // only to be rejected by the store.
-        guard let estimatedDecoded = KVCacheSerialization.estimatedDecodedLength(caches, tokenCount: fullTokens.count) else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=estimate_unavailable token_count=\(fullTokens.count) layers=\(caches.count)\n".utf8))
+        let estimatedDecoded = hasRecurrent
+            ? KVRecurrentCacheSerialization.estimatedDecodedLength(
+                layers: layers.layers, checkpoints: layers.recurrentCheckpoints,
+                tokenCount: fullTokens.count)
+            : caches.flatMap { KVCacheSerialization.estimatedDecodedLength($0, tokenCount: fullTokens.count) }
+        guard let estimatedDecoded else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=estimate_unavailable token_count=\(fullTokens.count) layers=\(layers.layers.count)\n".utf8))
             return nil
         }
         guard estimatedDecoded <= maxEntryBytes else {
@@ -364,7 +443,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // FR-KVP9 / write-side budget: an entry that could never be promoted MUST
         // NOT be written. Skip BEFORE the deep copy (SPEC-037 §3). The silent
         // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
-        guard estimatedDecoded <= stagingMaxBytes else {
+        let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent ? 2 : 1)
+        guard !promotionOverflow, promotionEstimate <= stagingMaxBytes else {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) cap=\(stagingMaxBytes)\n".utf8))
             Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
             return nil
@@ -383,7 +463,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // snapshot as a single-release token and released once by the persist Task
         // (completion, cancellation, or displacement). Multiple indices therefore cannot
         // each retain a ceiling-sized snapshot concurrently.
-        guard reserveWriteLive(writeFootprint) else {
+        guard reserveWriteLive(writeFootprint, volumeBytes: estimatedDecoded) else {
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -392,12 +472,43 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         var reservationHandedOff = false
         defer { if !reservationHandedOff { releaseWriteLive(writeFootprint) } }
 
-        guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+        let payloads: [KVLayerPayload]
+        let payloadsV2: [KVCacheLayerPayload]
+        let checkpointPayloads: [KVRecurrentCheckpointPayload]
+        if hasRecurrent {
+            guard let recurrent = KVRecurrentCacheSerialization.snapshot(
+                layers: layers.layers, checkpoints: layers.recurrentCheckpoints) else { return nil }
+            payloads = []
+            payloadsV2 = recurrent.layers
+            checkpointPayloads = recurrent.checkpoints
+        } else {
+            guard let caches, let serialized = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+            payloads = serialized
+            payloadsV2 = []
+            checkpointPayloads = []
+        }
 
         // Learn/refresh the live-model geometry template for future promotions.
-        let template = Self.liveGeometryTemplate(fromPayloads: payloads, tokenCount: fullTokens.count)
+        let template: [KVLayerGeometry]
+        let recurrentTemplate: [KVRecurrentLayerRecord]
+        if hasRecurrent,
+           let geometry = KVRecurrentCacheSerialization.geometry(
+               layers: layers.layers, checkpoints: layers.recurrentCheckpoints) {
+            template = geometry.layers.map { record in
+                KVLayerGeometry(
+                    layerIndex: record.layerIndex, classID: record.classID,
+                    layoutVersion: record.layoutVersion, ndim: record.ndim,
+                    dims: record.dims, dtype: record.dtype,
+                    sequenceAxis: record.classID == "KVCacheSimple" ? max(0, record.ndim - 2) : 0)
+            }
+            recurrentTemplate = geometry.recurrent
+        } else {
+            template = Self.liveGeometryTemplate(fromPayloads: payloads, tokenCount: fullTokens.count)
+            recurrentTemplate = []
+        }
         templateLock.lock()
         geometryTemplates[identity.servedModelID] = template
+        recurrentGeometryTemplates[identity.servedModelID] = recurrentTemplate
         templateLock.unlock()
 
         // CRITICAL-2 — capture the key epoch AND allocate the commit sequence
@@ -412,6 +523,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         seqLock.unlock()
 
         let writeIdentity = KVWriteIdentity(
+            codecID: hasRecurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID,
             requestModel: identity.requestModel,
             servedModelID: identity.servedModelID,
             modelSHA256: identity.modelSHA256 ?? "",
@@ -419,11 +531,11 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             tokenizerID: identity.tokenizerID,
             tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
             chatTemplateSHA256: identity.chatTemplateSHA256,
-            abiEpoch: KVBuildIdentity.abiEpoch,
+            abiEpoch: hasRecurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch,
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxVersion: KVBuildIdentity.mlxVersion,
-            cacheClass: payloads.first?.classID ?? "KVCacheSimple",
-            layerCount: payloads.count,
+            cacheClass: hasRecurrent ? KVDiskCacheFormat.recurrentCacheClass : (payloads.first?.classID ?? "KVCacheSimple"),
+            layerCount: hasRecurrent ? payloadsV2.count : payloads.count,
             kvBits: identity.kvBits,
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
@@ -441,6 +553,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             rawKey: conversationKey,
             tokens: fullTokens,
             layers: payloads,
+            layersV2: payloadsV2,
+            recurrentCheckpoints: checkpointPayloads,
             identity: writeIdentity,
             sampledPurgeGeneration: sampledPurgeGeneration,
             commitSequence: seq,
@@ -495,6 +609,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // and the commit sequence was allocated under the hot lease (CRITICAL-2).
         _ = try? await store.writeColdSnapshot(
             rawKey: snapshot.rawKey, tokens: snapshot.tokens, layers: snapshot.layers,
+            layersV2: snapshot.layersV2, recurrentCheckpoints: snapshot.recurrentCheckpoints,
             identity: snapshot.identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
             commitSequence: snapshot.commitSequence,
             createdAtMillis: snapshot.createdAtMillis, eligibleUntilMillis: snapshot.eligibleUntilMillis,

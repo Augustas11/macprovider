@@ -124,6 +124,7 @@ final class KVPromoteDecodeGate: @unchecked Sendable {
 
 /// Envelope identity a snapshot carries immutably from hot-tier commit (FR-KVP3).
 struct KVWriteIdentity: Sendable, Equatable {
+    var codecID: String = KVDiskCacheFormat.codecID
     let requestModel: String
     let servedModelID: String
     let modelSHA256: String
@@ -155,6 +156,8 @@ struct KVWriteSnapshot: Sendable {
     let indexHMAC: String
     let tokens: [Int32]
     let layers: [KVLayerPayload]
+    var layersV2: [KVCacheLayerPayload] = []
+    var recurrentCheckpoints: [KVRecurrentCheckpointPayload] = []
     let identity: KVWriteIdentity
     /// High-watermark sampled at hot-lease acquisition (FR-KVP8 stamping rule).
     let sampledPurgeGeneration: Int
@@ -170,6 +173,9 @@ struct KVWriteSnapshot: Sendable {
 struct KVReadHit: Sendable {
     let tokens: [Int32]
     let layers: [KVLayerPayload]
+    var decodedV2: KVDecodedPayloadV2? = nil
+    var createdAtMillis: Int? = nil
+    var eligibleUntilMillis: Int? = nil
     let bytesRead: Int
     let decryptMillis: Int
     let peakStagingBytes: Int
@@ -843,19 +849,43 @@ actor KVDiskCacheStore {
         guard snapshot.identity.keyEpoch == metadata.keyEpoch else { return skip(.fenceLost, snapshot) }
 
         // Allowlist check.
-        guard KVDiskCacheFormat.allowlistedCacheClasses.contains(snapshot.identity.cacheClass) else {
+        let classAllowed = snapshot.identity.codecID == KVDiskCacheFormat.codecID
+            ? KVDiskCacheFormat.allowlistedCacheClasses.contains(snapshot.identity.cacheClass)
+            : snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID
+                && snapshot.identity.cacheClass == KVDiskCacheFormat.recurrentCacheClass
+        guard classAllowed else {
             return skip(.allowlistRemoved, snapshot)
         }
 
         // Geometry pre-check: the §5a decoded_length equation (same as read-side).
-        let geometry = snapshot.layers.map {
-            KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+        let decodedLength: Int?
+        if snapshot.identity.codecID == KVDiskCacheFormat.codecID {
+            let geometry = snapshot.layers.map {
+                KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+            }
+            decodedLength = KVDiskCacheFormat.decodedLength(tokenCount: snapshot.tokens.count, layers: geometry)
+        } else {
+            decodedLength = KVDiskCacheFormat.decodedLengthV2(
+                tokenCount: snapshot.tokens.count, layers: v2LayerRecords(snapshot.layersV2),
+                checkpoints: v2CheckpointRecords(snapshot.recurrentCheckpoints))
         }
-        guard let decodedLength = KVDiskCacheFormat.decodedLength(tokenCount: snapshot.tokens.count, layers: geometry) else {
+        guard let decodedLength else {
             return skip(.geometryUnvalidated, snapshot)
         }
+        if snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID {
+            guard let segments = try? KVPayloadCodecV2.encodeSegments(
+                tokens: snapshot.tokens, layers: snapshot.layersV2,
+                checkpoints: snapshot.recurrentCheckpoints),
+                segments.reduce(0, { $0 + $1.count }) == decodedLength else {
+                return skip(.geometryUnvalidated, snapshot)
+            }
+        }
         // An entry that could never be promoted MUST NOT be written.
-        guard decodedLength <= config.stagingMaxBytes, decodedLength <= KVDiskCacheStoreConfig.promotionCeilingHardMax else {
+        let promotionMultiplier = snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID ? 2 : 1
+        let (promotionBytes, promotionOverflow) = decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
+        guard !promotionOverflow,
+              promotionBytes <= config.stagingMaxBytes,
+              promotionBytes <= KVDiskCacheStoreConfig.promotionCeilingHardMax else {
             return skip(.exceedsPromotionCeiling, snapshot)
         }
         // Write-live budget (RAM-DoS bound).
@@ -979,8 +1009,12 @@ actor KVDiskCacheStore {
             // buffers before the next chunk. Peak live memory beyond the snapshot is one
             // chunk plaintext + one frame — not the whole plaintext AND the whole blob.
             let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
-            var cursor = KVSegmentCursor(try KVPayloadCodec.encodeSegments(
-                tokens: snapshot.tokens, layers: snapshot.layers))
+            let segments = snapshot.identity.codecID == KVDiskCacheFormat.codecID
+                ? try KVPayloadCodec.encodeSegments(tokens: snapshot.tokens, layers: snapshot.layers)
+                : try KVPayloadCodecV2.encodeSegments(
+                    tokens: snapshot.tokens, layers: snapshot.layersV2,
+                    checkpoints: snapshot.recurrentCheckpoints)
+            var cursor = KVSegmentCursor(segments)
             var blobHasher = SHA256()
             var writtenBlobBytes = 0
             let blobFD = try openExclusiveForWrite(blobURL)
@@ -1103,7 +1137,7 @@ actor KVDiskCacheStore {
             ]
             for (k, v) in identityFields(
                 modelSHA256: snapshot.identity.modelSHA256, catalogRevision: snapshot.identity.catalogRevision,
-                kvBits: snapshot.identity.kvBits) { writeFields[k] = v }
+                kvBits: snapshot.identity.kvBits, codecID: snapshot.identity.codecID) { writeFields[k] = v }
             emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: writeFields)
             return .committed(generation: generation, commitSequence: snapshot.commitSequence)
         } catch let crash as KVInjectedCrash {
@@ -1135,13 +1169,15 @@ actor KVDiskCacheStore {
     private func buildManifest(snapshot: KVWriteSnapshot, generation: Int, decodedLength: Int,
                                chunks: [KVChunkRecord], blobLength: Int, blobSHA256: String) -> KVDiskManifest {
         let id = snapshot.identity
-        let layerRecords = snapshot.layers.map {
-            KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID, layoutVersion: layoutVersion(for: $0),
-                          ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
-        }
+        let layerRecords = snapshot.identity.codecID == KVDiskCacheFormat.codecID
+            ? snapshot.layers.map {
+                KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID, layoutVersion: layoutVersion(for: $0),
+                              ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+            }
+            : v2LayerRecords(snapshot.layersV2)
         return KVDiskManifest(
             schemaID: KVDiskCacheFormat.manifestSchemaID,
-            codecID: KVDiskCacheFormat.codecID,
+            codecID: id.codecID,
             namespaceID: config.namespaceID,
             keyEpoch: metadata.keyEpoch,
             indexHMAC: snapshot.indexHMAC,
@@ -1161,6 +1197,7 @@ actor KVDiskCacheStore {
             cacheClass: id.cacheClass,
             layerCount: id.layerCount,
             layers: layerRecords,
+            recurrentCheckpoints: v2CheckpointRecords(snapshot.recurrentCheckpoints),
             kvBits: id.kvBits,
             kvGroupSize: id.kvGroupSize,
             kvQuantMode: id.kvQuantMode,
@@ -1173,6 +1210,39 @@ actor KVDiskCacheStore {
             chunks: chunks,
             blobLength: blobLength,
             blobSHA256: blobSHA256)
+    }
+
+    private func v2LayerRecords(_ layers: [KVCacheLayerPayload]) -> [KVLayerRecord] {
+        layers.map { layer in
+            switch layer {
+            case .attention(let payload):
+                return KVLayerRecord(
+                    layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 2,
+                    ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype)
+            case .recurrent(let layerIndex, let classID, let cacheOffset):
+                return KVLayerRecord(
+                    layerIndex: layerIndex, classID: classID, layoutVersion: 2,
+                    ndim: 0, dims: [], dtype: .f16, cacheOffset: cacheOffset)
+            }
+        }
+    }
+
+    private func v2CheckpointRecords(
+        _ checkpoints: [KVRecurrentCheckpointPayload]
+    ) -> [KVRecurrentCheckpointRecord] {
+        checkpoints.map { checkpoint in
+            KVRecurrentCheckpointRecord(
+                tokenCount: checkpoint.tokenCount,
+                layers: checkpoint.layers.map { layer in
+                    KVRecurrentLayerRecord(
+                        layerIndex: layer.layerIndex,
+                        slots: layer.slots.map { slot in
+                            KVRecurrentSlotRecord(
+                                slotIndex: slot.slotIndex, dims: slot.dims,
+                                dtype: slot.dtype, byteCount: slot.bytes.count)
+                        })
+                })
+        }
     }
 
     /// Per-layer layout version. v1 fixes it to 1 for the allowlisted class; the
@@ -1191,6 +1261,7 @@ actor KVDiskCacheStore {
     /// back from a detached decode task to the actor.
     private enum KVPromoteDecode: Sendable {
         case ok(tokens: [Int32], layers: [KVLayerPayload], blobSize: Int, peakStaging: Int)
+        case okV2(KVDecodedPayloadV2, blobSize: Int, peakStaging: Int)
         case corrupt
         case ioError
         case deadline
@@ -1238,8 +1309,10 @@ actor KVDiskCacheStore {
         // Pass 2: stream one frame at a time — read exact bytes, AEAD-open, feed the
         // incremental decoder that materializes each layer and releases consumed bytes.
         let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
-        let decoder = KVStreamingPayloadDecoder(
-            expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
+        let decoder = manifest.codecID == KVDiskCacheFormat.codecID
+            ? KVStreamingPayloadDecoder(expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
+            : nil
+        var v2Plaintext = Data()
         var peakStaging = 0
         enum StreamMiss: Error { case corrupt, deadline, budget }
         do {
@@ -1261,12 +1334,16 @@ actor KVDiskCacheStore {
                     opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
                                                     tag: frame.tag, dek: dek, aad: aad)
                 } catch { throw StreamMiss.corrupt }
-                let liveBeforeDecode = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
+                let liveBeforeDecode = frameData.count + opened.count
+                    + (decoder.map { $0.residualBytes + $0.decodedBytes } ?? v2Plaintext.count)
                 peakStaging = max(peakStaging, liveBeforeDecode)
                 guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
-                do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
+                do {
+                    if let decoder { try decoder.feed(opened) }
+                    else { v2Plaintext.append(opened) }
+                } catch { throw StreamMiss.corrupt }
                 // Item 4: enforce AFTER materialization of each layer on the true peak.
-                let liveAfterDecode = frameData.count + decoder.peakBytes
+                let liveAfterDecode = frameData.count + (decoder?.peakBytes ?? v2Plaintext.count)
                 peakStaging = max(peakStaging, liveAfterDecode)
                 guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
             }
@@ -1279,12 +1356,25 @@ actor KVDiskCacheStore {
             return .ioError
         } catch { return .corrupt }
 
-        let decoded: KVDecodedPayload
-        do { decoded = try decoder.finish() } catch { return .corrupt }
+        if let decoder {
+            let decoded: KVDecodedPayload
+            do { decoded = try decoder.finish() } catch { return .corrupt }
+            guard decoded.tokens.count == manifest.tokenCount else { return .corrupt }
+            peakStaging = max(peakStaging, decoder.peakBytes)
+            return .ok(tokens: decoded.tokens, layers: decoded.layers, blobSize: blobSize, peakStaging: peakStaging)
+        }
+        let decoded: KVDecodedPayloadV2
+        do {
+            decoded = try KVPayloadCodecV2.decode(
+                v2Plaintext, expectedDecodedLength: manifest.decodedLength,
+                expectedLayers: manifest.layers, expectedCheckpoints: manifest.recurrentCheckpoints)
+        } catch { return .corrupt }
         guard decoded.tokens.count == manifest.tokenCount else { return .corrupt }
-        // Item 4: report the true internal high-water (source ⋂ tensor co-residency).
-        peakStaging = max(peakStaging, decoder.peakBytes)
-        return .ok(tokens: decoded.tokens, layers: decoded.layers, blobSize: blobSize, peakStaging: peakStaging)
+        let (materializedPeak, overflow) = v2Plaintext.count.addingReportingOverflow(decoded.tensorBytes)
+        guard !overflow else { return .budget }
+        peakStaging = max(peakStaging, materializedPeak)
+        guard peakStaging <= stagingMaxBytes else { return .budget }
+        return .okV2(decoded, blobSize: blobSize, peakStaging: peakStaging)
     }
 
     /// Attempt a cold hit for `rawKey` against the live runtime identity. Returns the
@@ -1359,6 +1449,8 @@ actor KVDiskCacheStore {
 
         // Four-category envelope validation completes before any payload byte.
         let runtimeForFence = KVRuntimeIdentity(
+            codecID: runtime.codecID,
+            recurrentLayerLayouts: runtime.recurrentLayerLayouts,
             namespaceID: runtime.namespaceID, keyEpoch: runtime.keyEpoch, indexHMAC: index,
             requestModel: runtime.requestModel, servedModelID: runtime.servedModelID, modelSHA256: runtime.modelSHA256,
             catalogRevision: runtime.catalogRevision, tokenizerID: runtime.tokenizerID,
@@ -1483,12 +1575,32 @@ actor KVDiskCacheStore {
                 ]
                 for (k, v) in identityFields(
                     modelSHA256: manifest.modelSHA256, catalogRevision: manifest.catalogRevision,
-                    kvBits: manifest.kvBits) { hitFields[k] = v }
+                    kvBits: manifest.kvBits, codecID: manifest.codecID) { hitFields[k] = v }
                 emit(.diskHit, indexHashPrefix: prefix, fields: hitFields)
             }
             return .hit(KVReadHit(tokens: tokens, layers: layers,
+                                  createdAtMillis: manifest.createdAtMillis,
+                                  eligibleUntilMillis: manifest.eligibleUntilMillis,
                                   bytesRead: blobSize, decryptMillis: elapsedMillis,
                                   peakStagingBytes: peakStaging))
+        case let .okV2(decoded, blobSize, peakStaging):
+            if var entry = liveEntries[index] {
+                entry.lastUsedMillis = nowMillis
+                liveEntries[index] = entry
+                appendUsageRecord(index: index, millis: nowMillis)
+            }
+            let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
+            if emitHitEvent {
+                emit(.diskHit, indexHashPrefix: prefix, fields: [
+                    "restore_bytes": "\(blobSize)", "decrypt_ms": "\(elapsedMillis)",
+                    "peak_staging_bytes": "\(peakStaging)", "codec_id": manifest.codecID,
+                ])
+            }
+            return .hit(KVReadHit(
+                tokens: decoded.tokens, layers: [], decodedV2: decoded,
+                createdAtMillis: manifest.createdAtMillis,
+                eligibleUntilMillis: manifest.eligibleUntilMillis,
+                bytesRead: blobSize, decryptMillis: elapsedMillis, peakStagingBytes: peakStaging))
         }
     }
 
@@ -1498,7 +1610,9 @@ actor KVDiskCacheStore {
     /// for one key cannot collide on a sequence. The synchronous deep copy of
     /// tensor bytes already happened at hot-tier commit (`captureSnapshot`).
     func writeColdSnapshot(
-        rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
+        rawKey: String, tokens: [Int32], layers: [KVLayerPayload],
+        layersV2: [KVCacheLayerPayload] = [], recurrentCheckpoints: [KVRecurrentCheckpointPayload] = [],
+        identity: KVWriteIdentity,
         sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
         incarnation: String, nowMillis: Int
     ) throws -> KVWriteResult {
@@ -1518,7 +1632,8 @@ actor KVDiskCacheStore {
         // `write()` as `snapshot_displaced`, so two commits publish in commit order
         // regardless of persist-Task scheduling.
         let snapshot = KVWriteSnapshot(
-            rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers, identity: identity,
+            rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers,
+            layersV2: layersV2, recurrentCheckpoints: recurrentCheckpoints, identity: identity,
             sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: commitSequence,
             createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
         return try write(snapshot, nowMillis: nowMillis)
@@ -1528,12 +1643,15 @@ actor KVDiskCacheStore {
     /// disk_write_committed structured events, correlated by the index-hash prefix, so
     /// the KVS-01a harness records every §6 evidence field. `kv_bits=null` denotes the
     /// v1 unquantized `KVCacheSimple` class (a legitimate value, not a missing field).
-    private func identityFields(modelSHA256: String, catalogRevision: String, kvBits: Int?) -> [String: String] {
+    private func identityFields(
+        modelSHA256: String, catalogRevision: String, kvBits: Int?,
+        codecID: String = KVDiskCacheFormat.codecID
+    ) -> [String: String] {
         [
             "model_sha256": modelSHA256,
             "catalog_revision": catalogRevision,
             "schema_id": KVDiskCacheFormat.manifestSchemaID,
-            "codec_id": KVDiskCacheFormat.codecID,
+            "codec_id": codecID,
             "kv_bits": kvBits.map(String.init) ?? "null",
         ]
     }
@@ -1542,13 +1660,16 @@ actor KVDiskCacheStore {
     /// separate from `read` so the terminal code is emitted once, after the hot
     /// tier confirms reuse. Carries the §6 identity/build/format fields (Item 9).
     func notePromotedHit(prefixHash: String, bytesRead: Int, decryptMillis: Int, peakStagingBytes: Int,
-                         modelSHA256: String, catalogRevision: String, kvBits: Int?) {
+                         modelSHA256: String, catalogRevision: String, kvBits: Int?,
+                         codecID: String = KVDiskCacheFormat.codecID) {
         var fields: [String: String] = [
             "restore_bytes": "\(bytesRead)",
             "decrypt_ms": "\(decryptMillis)",
             "peak_staging_bytes": "\(peakStagingBytes)",
         ]
-        for (k, v) in identityFields(modelSHA256: modelSHA256, catalogRevision: catalogRevision, kvBits: kvBits) {
+        for (k, v) in identityFields(
+            modelSHA256: modelSHA256, catalogRevision: catalogRevision,
+            kvBits: kvBits, codecID: codecID) {
             fields[k] = v
         }
         emit(.diskHit, indexHashPrefix: prefixHash, fields: fields)

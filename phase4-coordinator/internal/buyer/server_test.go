@@ -27,6 +27,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/fleetcache"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -4748,6 +4749,7 @@ func TestChatCompletionsRejectsSpoofedInternalRoutingHeaders(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("authorized status=%d body=%s", rr.Code, rr.Body.String())
 	}
+
 }
 
 func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
@@ -4774,6 +4776,65 @@ func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
 	server.InternalHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("authorized status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/internal/sticky?account_id=acct_1", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr = httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status without durable store=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInternalStickyStatusReadsPendingWithoutRevokingAgain(t *testing.T) {
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "fleet-cache.sqlite")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	cacheStore, err := fleetcache.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := cacheStore.Grant(context.Background(), "acct_1", "conv:gateway", "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	purge, err := cacheStore.PurgeAccount(context.Background(), "acct_1")
+	if err != nil || len(purge.Pending) != 1 {
+		t.Fatalf("purge=%+v err=%v", purge, err)
+	}
+
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("operator-key"),
+		buyer.WithFleetCache(cacheStore, nil),
+	)
+	status := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/internal/sticky?account_id=acct_1", nil)
+		req.Header.Set("Authorization", "Bearer operator-key")
+		rr := httptest.NewRecorder()
+		server.InternalHandler().ServeHTTP(rr, req)
+		return rr
+	}
+	rr := status()
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"pending_acknowledgements":1`) {
+		t.Fatalf("pending status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	pending, err := cacheStore.PendingForAccount(context.Background(), "acct_1")
+	if err != nil || len(pending) != 1 || pending[0].Generation != grant.Generation {
+		t.Fatalf("status changed purge: pending=%+v err=%v", pending, err)
+	}
+	if matched, err := cacheStore.Ack(context.Background(), "provider-1", pending[0], true); err != nil || !matched {
+		t.Fatalf("ack matched=%v err=%v", matched, err)
+	}
+	rr = status()
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"pending":false`) || !strings.Contains(rr.Body.String(), `"purged":true`) {
+		t.Fatalf("complete status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
