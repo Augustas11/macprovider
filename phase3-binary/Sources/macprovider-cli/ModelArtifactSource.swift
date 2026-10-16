@@ -192,15 +192,16 @@ extension ModelArtifactVerifier {
         defer { try? handle.close() }
         var hasher = SHA256()
         var size: UInt64 = 0
-        while true {
+        // One autorelease pool per chunk keeps the read buffers from
+        // accumulating to the file size (see `ModelRuntime.sha256Hex(ofFileAt:)`).
+        while try autoreleasepool(invoking: {
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
-            if chunk.isEmpty {
-                break
-            }
+            guard !chunk.isEmpty else { return false }
             hasher.update(data: chunk)
             size += UInt64(chunk.count)
-        }
+            return true
+        }) {}
         return (size, ContentAddressedManifest.hex(hasher.finalize()))
     }
 }
