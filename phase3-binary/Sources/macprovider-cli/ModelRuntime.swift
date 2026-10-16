@@ -10430,10 +10430,14 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return reject(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
             }
-            let artifactObservation = try NativeMTPArtifactObserver.observePair(
-                targetDirectory: capturedArtifacts.targetURL,
-                mtpDirectory: drafterDirectory
-            )
+            // SPEC-048-R002: an embedded (`checkpoint_mtp`) next-N layer is
+            // observed once, inside the target artifact.
+            let artifactObservation = try admissionCapability.sourceLayout == "checkpoint_mtp"
+                ? NativeMTPArtifactObserver.observeEmbedded(targetDirectory: capturedArtifacts.targetURL)
+                : NativeMTPArtifactObserver.observePair(
+                    targetDirectory: capturedArtifacts.targetURL,
+                    mtpDirectory: drafterDirectory
+                )
             guard nativeMTPArtifactObservationMatchesAdmission(
                 artifactObservation,
                 admissionCapability: admissionCapability

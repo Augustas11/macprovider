@@ -3498,7 +3498,12 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeBindsSignedPromptBoundIntoCapabilityAndTupleIdentity",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testGoldenSidecarTupleIdentityMatchesPythonGenerator",
-        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionSidecarTests"
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionSidecarTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsUpTo1024QuantizationExceptions",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testAffineRepresentationAdmitsUpTo1024Exceptions",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testOverrideWidthsOtherThanFourFiveSixEightFailClosed",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionMultiEntryTests",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPProjectionManifestTests"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -3508,7 +3513,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
+        "rationale": "SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar; v0.22.25 admits per-module affine override widths 4, 5, 6, or 8 and up to 1024 exceptions per array (GLM-5.3-Flash carries 554), and the generator builds multi-entry sidecars and the v2 multi-model projection manifest. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
       }
     },
     {
@@ -11078,13 +11083,18 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:struct NativeMTPCapability",
-        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver"
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:enum NativeMTPArtifactObserver",
+        "phase3-binary/Sources/macprovider-cli/NativeMTPAdmissionSidecar.swift:static func sourceLayout"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPCapabilityRejectsSignedFieldMismatches",
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testNativeMTPArtifactObservationMustMatchSignedCapability",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationAcceptsAPostSanitizeCheckpointWithFiveSixEightBitOverrides",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsNamesTheLoaderWouldRewriteOrDrop",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"

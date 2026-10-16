@@ -1348,7 +1348,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let cases: [([String: Any], NativeMTPAdmissionSidecarError)] = [
             (affine { $0["per_layer_exceptions"] = ["target/z", "mtp/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
             (affine { $0["per_layer_exceptions"] = ["target/a", "target/a"] }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
-            (affine { $0["per_layer_exceptions"] = (0...256).map { String(format: "target/module.%03d", $0) } }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
+            // SPEC-023 v0.22.25: at most 1024 entries.
+            (affine { $0["per_layer_exceptions"] = (0...1024).map { String(format: "target/module.%04d", $0) } }, .invalidValue("$.entries[0].quantization.per_layer_exceptions")),
             (affine { $0["unquantized_exceptions"] = ["model.layers.0.mlp.down_proj"] }, .invalidValue("$.entries[0].quantization.unquantized_exceptions")),
             (affine { $0["packed_data_dtype"] = "uint8" }, .invalidValue("$.entries[0].quantization")),
             (affine { $0["packed_layout"] = "none" }, .invalidValue("$.entries[0].quantization")),
@@ -1420,6 +1421,229 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: fixture.base.root) }
             XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), expected)
         }
+    }
+
+    /// SPEC-023 v0.22.25: an exceptions array of up to 1024 entries parses
+    /// (the GLM-5.3-Flash artifact records 554 per-module overrides).
+    func testReleaseEnvelopeAcceptsUpTo1024QuantizationExceptions() throws {
+        let names = (0..<1024).map { String(format: "target/language_model.model.layers.%04d.mlp.down_proj", $0) }
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["quantization"] = [
+                "kind": "mlx_affine",
+                "packed_data_dtype": "uint32",
+                "packed_layout": "mlx_array_native_v1",
+                "scale_dtype": "bfloat16",
+                "scale_layout": "per_block",
+                "block_size_elements": 64,
+                "alignment_bytes": NSNull(),
+                "padding_rule": "none",
+                "unquantized_exceptions": [],
+                "per_layer_exceptions": names,
+                "representation_manifest_sha256": String(repeating: "a", count: 64),
+            ]
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        )
+        XCTAssertEqual(capability.quantization.perLayerExceptions.count, 1024)
+    }
+
+    func testReleaseEntrySourceLayoutIsDerivedFromTheAdapter() {
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "glm5_next_mtp_v1"), "checkpoint_mtp")
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "qwen3_5_mtp_v1"), "separate_artifact")
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "qwen3_mtp_v1"), "separate_artifact")
+    }
+
+    /// SPEC-048-R002 `checkpoint_mtp`: the MTP member is the target directory
+    /// itself, its manifest is the target's config.json, and capture copies the
+    /// directory once.
+    func testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority,
+            captureArtifacts: true
+        )
+        XCTAssertEqual(capability.sourceLayout, "checkpoint_mtp")
+        XCTAssertEqual(capability.mtpArtifactSHA256, capability.targetArtifactSHA256)
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertEqual(captured.mtpURL, captured.targetURL)
+        XCTAssertEqual(captured.manifestURL, captured.targetURL.appendingPathComponent("config.json"))
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, fixture.authority.hash)
+    }
+
+    func testReleaseEnvelopeRejectsEmbeddedAdapterWithASeparateMTPMember() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        XCTAssertEqual(try rejectedReleaseEnvelopeError(fixture), .invalidValue("$.artifacts.mtp"))
+
+        let wrongManifest = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            mutateProjectionArtifacts: { artifacts in
+                artifacts["manifest"] = artifacts["tokenizer"]
+            },
+            entryEdit: { $0["mtp_family_adapter"] = "glm5_next_mtp_v1" }
+        )
+        defer { try? FileManager.default.removeItem(at: wrongManifest.base.root) }
+        XCTAssertThrowsError(try NativeMTPAdmissionSidecar.load(
+            sidecarData: wrongManifest.sidecarData,
+            signatureData: wrongManifest.signatureData,
+            snapshotRoot: wrongManifest.base.snapshot,
+            context: wrongManifest.context,
+            trustedKeyring: wrongManifest.base.trustedKeyring,
+            resolvedArtifactAuthority: wrongManifest.authority
+        ))
+    }
+
+    /// SPEC-048-R002 (0.1.33): a sidecar naming two models carries the v2
+    /// projection keyed by model_key; the v1 form serves only one model.
+    func testMultiModelSidecarReadsTheV2ProjectionByModelKey() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let snapshot = fixture.base.snapshot
+        let digests = fixture.base.digests
+        let layout = ReleaseLayout(
+            targetPath: "target.safetensors",
+            targetSHA256: digests["target.safetensors"]!,
+            mtpPath: "mtp.safetensors",
+            mtpSHA256: digests["mtp.safetensors"]!,
+            tokenizerPath: "tokenizer.json",
+            tokenizerSHA256: digests["tokenizer.json"]!,
+            manifestPath: "mtp-manifest.json",
+            manifestSHA256: digests["mtp-manifest.json"]!
+        )
+        let artifacts: [String: Any] = [
+            "target": ["path": layout.targetPath, "sha256": layout.targetSHA256],
+            "mtp": ["path": layout.mtpPath, "sha256": layout.mtpSHA256],
+            "tokenizer": ["path": layout.tokenizerPath, "sha256": layout.tokenizerSHA256],
+            "manifest": ["path": layout.manifestPath, "sha256": layout.manifestSHA256],
+        ]
+        let otherKey = "zai-org/glm-5.3-flash"
+        func load(projection: [String: Any]) throws -> NativeMTPAdmissionCapability {
+            let projectionData = try Self.jsonData(projection)
+            try projectionData.write(to: snapshot.appendingPathComponent("native-mtp-artifact-manifest.json"))
+            var first = Self.releaseEntry(
+                layout: layout,
+                artifactManifestSHA256: Self.sha256Hex(projectionData),
+                challengeBankSHA256: fixture.base.selfTestBankSHA256
+            )
+            first["max_native_active_rows"] = 8
+            var second = first
+            second["model_key"] = otherKey
+            second["artifact_hash"] = String(repeating: "9", count: 64)
+            var baseline = second["ordinary_baseline"] as! [String: Any]
+            baseline["artifact_hash"] = String(repeating: "9", count: 64)
+            second["ordinary_baseline"] = baseline
+            let keyID = fixture.base.trustedKeyring.requiredKeyID
+            let sidecarData = try Self.jsonData([
+                "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
+                "release_id": Self.releaseID,
+                "issued_at": Self.iso8601Seconds(Date().addingTimeInterval(-3600)),
+                "expires_at": Self.iso8601Seconds(Date().addingTimeInterval(3600)),
+                "signer_key_id": keyID,
+                "challenge_bank_signer_key_id": fixture.base.selfTestSignerKeyID,
+                "revocation_signer_key_id": keyID,
+                "entries": [first, second],
+            ])
+            return try NativeMTPAdmissionSidecar.load(
+                sidecarData: sidecarData,
+                signatureData: fixture.base.signature(for: sidecarData),
+                snapshotRoot: snapshot,
+                context: fixture.context,
+                trustedKeyring: fixture.base.trustedKeyring,
+                resolvedArtifactAuthority: fixture.authority
+            )
+        }
+        let v2: [String: Any] = [
+            "schema_version": NativeMTPAdmissionSidecar.artifactProjectionSchemaV2,
+            "models": [fixture.authority.modelKey: artifacts, otherKey: artifacts],
+        ]
+        let capability = try load(projection: v2)
+        XCTAssertEqual(capability.modelID, fixture.authority.modelKey)
+        XCTAssertEqual(capability.targetArtifactSHA256, layout.targetSHA256)
+
+        let v1: [String: Any] = [
+            "schema_version": NativeMTPAdmissionSidecar.artifactProjectionSchemaV1,
+            "artifacts": artifacts,
+        ]
+        XCTAssertThrowsError(try load(projection: v1)) { error in
+            XCTAssertEqual(error as? NativeMTPAdmissionSidecarError, .invalidValue("$.artifact_manifest.schema_version"))
+        }
+        let missingModel: [String: Any] = [
+            "schema_version": NativeMTPAdmissionSidecar.artifactProjectionSchemaV2,
+            "models": [fixture.authority.modelKey: artifacts],
+        ]
+        XCTAssertThrowsError(try load(projection: missingModel)) { error in
+            XCTAssertEqual(error as? NativeMTPAdmissionSidecarError, .invalidValue("$.artifact_manifest.models"))
+        }
+        let extraKey: [String: Any] = [
+            "schema_version": NativeMTPAdmissionSidecar.artifactProjectionSchemaV2,
+            "models": [fixture.authority.modelKey: artifacts, otherKey: artifacts],
+            "artifacts": artifacts,
+        ]
+        XCTAssertThrowsError(try load(projection: extraKey))
+    }
+
+    /// A single-model sidecar keeps reading the v1 projection unchanged.
+    func testSingleModelSidecarStillReadsTheV1Projection() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        ))
+    }
+
+    private static func embeddedLayout(_ base: Fixture) throws -> ReleaseLayout {
+        let targetDirectory = base.snapshot.appendingPathComponent("target", isDirectory: true)
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(
+            at: base.snapshot.appendingPathComponent("target.safetensors"),
+            to: targetDirectory.appendingPathComponent("model-00001-of-00002.safetensors")
+        )
+        try FileManager.default.moveItem(
+            at: base.snapshot.appendingPathComponent("mtp.safetensors"),
+            to: targetDirectory.appendingPathComponent("model-00002-of-00002.safetensors")
+        )
+        try FileManager.default.moveItem(
+            at: base.snapshot.appendingPathComponent("tokenizer.json"),
+            to: targetDirectory.appendingPathComponent("tokenizer.json")
+        )
+        try FileManager.default.moveItem(
+            at: base.snapshot.appendingPathComponent("mtp-manifest.json"),
+            to: targetDirectory.appendingPathComponent("config.json")
+        )
+        let targetDigest = try MLXSnapshotIdentity.compute(directory: targetDirectory).digest
+        return ReleaseLayout(
+            targetPath: "target",
+            targetSHA256: targetDigest,
+            mtpPath: "target",
+            mtpSHA256: targetDigest,
+            tokenizerPath: "target/tokenizer.json",
+            tokenizerSHA256: base.digests["tokenizer.json"]!,
+            manifestPath: "target/config.json",
+            manifestSHA256: base.digests["mtp-manifest.json"]!
+        )
     }
 
     func testReleaseEnvelopeBindsSignedTokenizerDigestToProjection() throws {

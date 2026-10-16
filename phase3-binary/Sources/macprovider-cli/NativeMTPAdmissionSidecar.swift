@@ -504,6 +504,21 @@ enum NativeMTPAdmissionSidecar {
     private static let defaultChallengeBankPath = "native-mtp-selftest-bank.json"
     private static let defaultChallengeBankSignaturePath = "native-mtp-selftest-bank.json.sig"
     private static let defaultArtifactProjectionManifestPath = "native-mtp-artifact-manifest.json"
+    static let artifactProjectionSchemaV1 = "macprovider.native-mtp-artifact-projection.v1"
+    static let artifactProjectionSchemaV2 = "macprovider.native-mtp-artifact-projection.v2"
+    /// A v2 projection names up to 256 models (one per sidecar entry).
+    static let maxArtifactProjectionManifestBytes = 256 * 1024
+    /// SPEC-023-R024 (v0.22.25): each quantization exceptions array holds at
+    /// most 1024 entries.
+    static let maxQuantizationExceptions = 1024
+    static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
+
+    /// SPEC-048-R002 (0.1.33/0.1.34): the release entry carries no layout, so
+    /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
+    /// other adapter keeps the separate-artifact layout.
+    static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
+        familyAdapter == embeddedMTPFamilyAdapter ? "checkpoint_mtp" : "separate_artifact"
+    }
     nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
     nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?
 
@@ -699,7 +714,7 @@ enum NativeMTPAdmissionSidecar {
             ]
         }
 
-        var sourceLayout: String { "separate_artifact" }
+        var sourceLayout: String { NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: familyAdapter) }
 
         /// SPEC-048-R013 (v0.1.32): admission is model-keyed. Hardware, RAM,
         /// slot count and runtime revision only prefer the entry measured
@@ -1240,6 +1255,7 @@ enum NativeMTPAdmissionSidecar {
         }
 
         var lastSortKey: [String]?
+        var entryModelKeys: Set<String> = []
         var selected: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
         var modelKeyed: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
         for (index, rawEntry) in rawEntries.enumerated() {
@@ -1252,6 +1268,7 @@ enum NativeMTPAdmissionSidecar {
                 throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
             }
             lastSortKey = sortKey
+            entryModelKeys.insert(entry.modelKey)
             if entry.matches(context: context) {
                 guard selected == nil else {
                     throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
@@ -1283,8 +1300,13 @@ enum NativeMTPAdmissionSidecar {
             snapshotRoot: snapshotRoot,
             artifactRoot: artifactRoot,
             expectedSHA256: selected.entry.artifactManifestSHA256,
-            authority: resolvedArtifactAuthority
+            authority: resolvedArtifactAuthority,
+            modelKey: selected.entry.modelKey,
+            entryModelKeys: entryModelKeys
         )
+        if selected.entry.sourceLayout == "checkpoint_mtp" {
+            try validateEmbeddedArtifactLayout(artifacts)
+        }
         // The signed entry's tokenizer digest is the authority; the projection
         // only locates the bytes. A disagreement means the loader would use a
         // tokenizer the admission never named.
@@ -1636,18 +1658,38 @@ enum NativeMTPAdmissionSidecar {
         _ = try requireInt(object, "aggregate_tps_milli", path: path, range: 1...Int.max)
     }
 
+    /// SPEC-048-R002 `checkpoint_mtp`: the MTP member is the target directory
+    /// itself, and the manifest and tokenizer are its own `config.json` and
+    /// `tokenizer.json`.
+    private static func validateEmbeddedArtifactLayout(_ artifacts: [String: Artifact]) throws {
+        guard let target = artifacts["target"], let mtp = artifacts["mtp"] else {
+            throw NativeMTPAdmissionSidecarError.artifactNotManifested("mtp")
+        }
+        guard mtp == target else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.artifacts.mtp")
+        }
+        guard artifacts["manifest"]?.path == target.path + "/config.json" else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.artifacts.manifest")
+        }
+        guard artifacts["tokenizer"]?.path == target.path + "/tokenizer.json" else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.artifacts.tokenizer")
+        }
+    }
+
     private static func parseArtifactProjectionManifest(
         snapshotRoot: URL,
         artifactRoot: URL,
         expectedSHA256: String,
-        authority: NativeMTPResolvedArtifactAuthority
+        authority: NativeMTPResolvedArtifactAuthority,
+        modelKey: String,
+        entryModelKeys: Set<String>
     ) throws -> [String: Artifact] {
         let root = snapshotRoot.standardizedFileURL
         let url = root.appendingPathComponent(defaultArtifactProjectionManifestPath, isDirectory: false).standardizedFileURL
         guard BYOMArtifactPathPolicy.isContained(url, in: root) else {
             throw NativeMTPAdmissionSidecarError.pathRejected(defaultArtifactProjectionManifestPath)
         }
-        let data = try readBoundedRegularFile(url, maxBytes: maxSignatureBytes, tooLargeName: defaultArtifactProjectionManifestPath)
+        let data = try readBoundedRegularFile(url, maxBytes: maxArtifactProjectionManifestBytes, tooLargeName: defaultArtifactProjectionManifestPath)
         guard sha256Hex(data) == expectedSHA256 else {
             throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.entries.artifact_manifest_sha256")
         }
@@ -1663,9 +1705,7 @@ enum NativeMTPAdmissionSidecar {
         guard case .object(let object) = value else {
             throw NativeMTPAdmissionSidecarError.wrongType("$.artifact_manifest")
         }
-        try rejectUnknown(object, allowed: ["schema_version", "artifacts"], path: "$.artifact_manifest")
-        try requireString(object, "schema_version", path: "$.artifact_manifest", equals: "macprovider.native-mtp-artifact-projection.v1")
-        let artifacts = try parseArtifacts(try requireObject(object, "artifacts", path: "$.artifact_manifest"))
+        let artifacts = try selectProjectedArtifacts(object, modelKey: modelKey, entryModelKeys: entryModelKeys)
         guard let target = artifacts["target"] else {
             throw NativeMTPAdmissionSidecarError.artifactNotManifested("target")
         }
@@ -1692,6 +1732,39 @@ enum NativeMTPAdmissionSidecar {
             throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.artifact_authority.target_sha256")
         }
         return artifacts
+    }
+
+    /// SPEC-048-R002 (0.1.33): v1 is one `artifacts` object for a sidecar
+    /// whose entries all name one model; v2 keys one artifacts object per
+    /// `model_key` and must name exactly the sidecar's model keys.
+    private static func selectProjectedArtifacts(
+        _ object: [String: NativeMTPSidecarJSON],
+        modelKey: String,
+        entryModelKeys: Set<String>
+    ) throws -> [String: Artifact] {
+        guard entryModelKeys.contains(modelKey) else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_manifest")
+        }
+        guard case .string(let schema)? = object["schema_version"] else {
+            throw NativeMTPAdmissionSidecarError.missingField("$.artifact_manifest.schema_version")
+        }
+        switch schema {
+        case artifactProjectionSchemaV1:
+            try rejectUnknown(object, allowed: ["schema_version", "artifacts"], path: "$.artifact_manifest")
+            guard entryModelKeys.count == 1 else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.artifact_manifest.schema_version")
+            }
+            return try parseArtifacts(try requireObject(object, "artifacts", path: "$.artifact_manifest"))
+        case artifactProjectionSchemaV2:
+            try rejectUnknown(object, allowed: ["schema_version", "models"], path: "$.artifact_manifest")
+            let models = try requireObject(object, "models", path: "$.artifact_manifest")
+            guard Set(models.keys) == entryModelKeys else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.artifact_manifest.models")
+            }
+            return try parseArtifacts(try requireObject(models, modelKey, path: "$.artifact_manifest.models"))
+        default:
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.artifact_manifest.schema_version")
+        }
     }
 
     private static func parseArtifacts(_ object: [String: NativeMTPSidecarJSON]) throws -> [String: Artifact] {
@@ -1902,16 +1975,28 @@ enum NativeMTPAdmissionSidecar {
         }
         var manifestedDirectories: Set<String> = []
         var validatedByName: [String: ValidatedArtifactHandle] = [:]
-        for (name, artifact) in artifacts {
+        var validatedByPath: [String: ValidatedArtifactHandle] = [:]
+        // Deterministic order so a shared path (an embedded `checkpoint_mtp`
+        // MTP member is the target directory) is digested once.
+        for name in artifacts.keys.sorted() {
+            let artifact = artifacts[name]!
             let url = root.appendingPathComponent(artifact.path, isDirectory: false)
             let standardized = url.standardizedFileURL
             guard BYOMArtifactPathPolicy.isContained(standardized, in: root) else {
                 throw NativeMTPAdmissionSidecarError.pathRejected(artifact.path)
             }
+            if let shared = validatedByPath[artifact.path] {
+                guard shared.sha256 == artifact.sha256 else {
+                    throw NativeMTPAdmissionSidecarError.artifactDigestMismatch(name)
+                }
+                validatedByName[name] = shared
+                continue
+            }
             let validated = try openAndDigestArtifactNoFollow(
                 relativePath: artifact.path,
                 rootFD: rootFD
             )
+            validatedByPath[artifact.path] = validated
             if validated.isDirectory {
                 manifestedDirectories.insert(artifact.path)
             }
@@ -2388,11 +2473,18 @@ enum NativeMTPAdmissionSidecar {
                 try hook("before_capture")
             }
             var stagedURLs: [String: URL] = [:]
+            var stagedByPath: [String: URL] = [:]
             var budget = CaptureBudget()
             for name in ["target", "mtp", "tokenizer", "manifest"] {
                 guard let artifact = artifacts[name],
                       let validated = validatedByName[name] else {
                     throw NativeMTPAdmissionSidecarError.artifactNotManifested(name)
+                }
+                // An embedded `checkpoint_mtp` MTP member is the target
+                // directory: it is captured once and shared.
+                if validated.isDirectory, let staged = stagedByPath[artifact.path] {
+                    stagedURLs[name] = staged
+                    continue
                 }
                 let destination = stagingRoot.appendingPathComponent(artifact.path, isDirectory: validated.isDirectory)
                 try fileManager.createDirectory(
@@ -2439,6 +2531,7 @@ enum NativeMTPAdmissionSidecar {
                     }
                 }
                 stagedURLs[name] = destination
+                stagedByPath[artifact.path] = destination
             }
             try chmodCapturedRoot(stagingRoot, fileManager: fileManager)
             guard let targetURL = stagedURLs["target"],
@@ -3073,7 +3166,7 @@ enum NativeMTPAdmissionSidecar {
         _ key: String,
         path: String
     ) throws -> [String] {
-        let values = try requireStringArray(object, key, path: path, range: 0...256)
+        let values = try requireStringArray(object, key, path: path, range: 0...maxQuantizationExceptions)
         guard values == values.sorted(), Set(values).count == values.count else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
         }
