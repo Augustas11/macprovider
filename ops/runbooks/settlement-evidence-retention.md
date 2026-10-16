@@ -205,7 +205,29 @@ lap cursor and writes nothing.
    an absolute `archive_dir` and reload with SIGHUP.
 2. Optional: install an off-host verify command, test it by hand on a scratch
    file, set `offhost_verify_command`, and reload with SIGHUP.
-3. Wait for the nightly run, or start one now:
+3. Wait for the nightly run, or start one now. On Pearl, start it only
+   through the ops entry point. Expected downtime: none, no restart.
+
+   ```bash
+   PEARL_RUNTIME_TASK=retention-run scripts/ops/pearl-runtime.sh status
+   MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=retention-run \
+     scripts/ops/pearl-runtime.sh next --run
+   ```
+
+   It holds the live-ops lock and calls the run route on Pearl's loopback
+   admin listener. The operator key is read on Pearl from the running
+   coordinator and never printed. It refuses in the ten minutes before the
+   03:00 UTC nightly run, and when the route answers `retention_busy`: the
+   nightly retention or ledger rollup is running. It waits for this run's
+   report, then prints `status`, `deleted_requests`, `backlog_drained`,
+   `last_lap_overdue_requests` and `stop_reason`, and records them for the
+   section 4 drain gate. The route runs retention only; the ledger rollup
+   runs after the nightly retention. A lap the on-demand run completes
+   updates the same state as a nightly lap, so it opens the drain gate the
+   same way.
+
+   On a lab or test coordinator (never Pearl, which would bypass the
+   live-ops lock and the nightly-window guard), call the route directly:
 
    ```bash
    curl -fsS -X POST -H "Authorization: Bearer $OPERATOR_KEY" \

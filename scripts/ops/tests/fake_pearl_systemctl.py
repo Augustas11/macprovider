@@ -5,6 +5,7 @@ Env FAKE_PEARL=<dir> holds: svc/ (fake_services state), proc/ (a fake /proc),
 pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   show -p InvocationID --value U   fixed invocation id (svc/invocation_seq: one per call)
   show -p MainPID --value U        current fake main pid
+  show --timestamp=unix -p ExecMainStartTimestamp --value U   @<unix second of the last start>
   restart U                        new pid and /proc entry, boot.txt digests of
                                    the files now on disk, /healthz recommending
                                    the config's latest_binary_version; the
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 
 root = os.environ["FAKE_PEARL"]
 svc, proc, pearl = (os.path.join(root, d) for d in ("svc", "proc", "pearl"))
@@ -38,10 +40,42 @@ def mkproc(p):
     open(os.path.join(d, "status"), "w").write("Uid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\n"
                                                % ((os.getuid(),) * 4 + (os.getgid(),) * 4))
     open(os.path.join(svc, "mainpid"), "w").write(str(p))
+    open(os.path.join(svc, "started_at"), "w").write(str(int(time.time())))
 
 
 def digest(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def compute_scoring_events():
+    """What cmd/coordinator/compute_scoring.go logs at start for the
+    compute_integrity.scoring of the files on disk (overlay over base).
+    svc/ci_corpus_invalid makes the corpus unusable."""
+    import yaml
+
+    def scoring(path):
+        try:
+            doc = yaml.safe_load(open(path)) if os.path.exists(path) else None
+            return ((doc or {}).get("compute_integrity") or {}).get("scoring") or {}
+        except (yaml.YAMLError, AttributeError):
+            return {}
+
+    s = dict(scoring(cfg), **scoring(ov))
+    if s.get("enabled", True) is False:
+        return [{"event": "compute_integrity_scoring_started", "enabled": False}]
+    if not s.get("corpus_path"):
+        return [{"event": "compute_integrity_private_corpus_missing"},
+                {"event": "compute_integrity_scoring_started", "enabled": False}]
+    try:
+        if os.path.exists(os.path.join(svc, "ci_corpus_invalid")):
+            raise ValueError
+        corpus = json.load(open(s["corpus_path"]))
+        loaded = {"event": "compute_integrity_corpus_loaded", "prompts": len(corpus["prompts"]),
+                  "version": corpus["version"]}
+    except (OSError, ValueError, KeyError):
+        return [{"event": "compute_integrity_corpus_invalid"},
+                {"event": "compute_integrity_scoring_started", "enabled": False}]
+    return [loaded, {"event": "compute_integrity_scoring_started", "enabled": True}]
 
 
 args = sys.argv[1:]
@@ -55,6 +89,8 @@ elif args[:1] == ["show"] and "InvocationID" in args:
         print(values[0])
     else:
         print("0123456789abcdef0123456789abcdef")
+elif args[:1] == ["show"] and "ExecMainStartTimestamp" in args:
+    print("@" + open(os.path.join(svc, "started_at")).read().strip())
 elif args[:1] == ["show"] and "MainPID" in args:
     print(pid())
 elif args[:1] == ["restart"]:
@@ -66,7 +102,7 @@ elif args[:1] == ["restart"]:
     open(n, "w").write(str(count))
     open(os.path.join(svc, "boot.txt"), "w").write(json.dumps({
         "config_sha256": digest(cfg), "overlay_sha256": digest(ov), "source": "boot",
-        "event": "coordinator_config_applied"}) + "\n")
+        "event": "coordinator_config_applied"}) + "\n" + "".join(json.dumps(e) + "\n" for e in compute_scoring_events()))
     open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
     m = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
     h = os.path.join(svc, "healthz.json")
